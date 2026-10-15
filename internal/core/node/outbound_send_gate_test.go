@@ -62,7 +62,7 @@ func TestEnqueueSessionSendItemRefusesADisconnectedSession(t *testing.T) {
 	peer := domain.PeerIdentityFromWire(datagramTestDstHex)
 	svc := newDatagramLayerService(t, true)
 	addresses := installDatagramPeer(t, svc, peer, datagramPeerConn{
-		version:     27,
+		version:     datagramTestPeerVersion,
 		connectedAt: time.Now().UTC().Add(-time.Hour),
 	})
 
@@ -104,8 +104,8 @@ func TestEmitToWalksOnWhenTheSelectedSessionDisconnects(t *testing.T) {
 	requireDatagramPlane(t, svc)
 	now := time.Now().UTC()
 	installDatagramPeer(t, svc, peer,
-		datagramPeerConn{version: 27, connectedAt: now.Add(-2 * time.Hour)},
-		datagramPeerConn{version: 27, connectedAt: now.Add(-time.Hour)},
+		datagramPeerConn{version: datagramTestPeerVersion, connectedAt: now.Add(-2 * time.Hour)},
+		datagramPeerConn{version: datagramTestPeerVersion, connectedAt: now.Add(-time.Hour)},
 	)
 
 	frame := newNodeDatagram(t, nil)

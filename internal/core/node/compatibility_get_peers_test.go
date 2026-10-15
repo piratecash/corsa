@@ -2,7 +2,6 @@ package node
 
 import (
 	"bufio"
-	"context"
 	"encoding/json"
 	"net"
 	"testing"
@@ -22,19 +21,24 @@ import (
 // shape MUST stay identical to what previous versions of the protocol
 // produce and accept.
 //
-// The four guarantees being defended here are:
+// The guarantees being defended here are:
 //
 //   1. The inbound get_peers handler still returns a protocol-conformant
 //      peers frame (type + count + peers array).
-//   2. A new-policy initiator (shouldRequestPeers=true) still interoperates
-//      with a legacy responder (welcome without capabilities).
-//   3. A legacy initiator (hello without capabilities) still interoperates
+//   2. A legacy initiator (hello without capabilities) still interoperates
 //      with a new responder — covered by TestMixedVersionLegacyPeerExchange
 //      in service_test.go; this file adds an explicit step-7 cross-reference
 //      test that complements it by focusing on the peers response shape.
-//   4. The "known_only" semantics of the local/RPC get_peers — i.e. that
+//   3. The "known_only" semantics of the local/RPC get_peers — i.e. that
 //      candidates from PeerProvider continue to surface even when no live
 //      active connection is present — remain intact.
+//
+// The initiator side of get_peers (the syncPeer recovery dial importing a
+// responder's peers) is pinned by TestSyncPeer_RequestPeersTrue_SendsGetPeers
+// against a responder that authenticates like every node at or above
+// MinimumProtocolVersion; a responder that does not — the "legacy responder"
+// this suite once simulated — is refused at the welcome
+// (service_dial_welcome_gate_test.go).
 
 // TestCompatibility_InboundGetPeersFrameShape is the step-7 regression test
 // for the inbound get_peers wire contract. It authenticates against a running
@@ -105,89 +109,6 @@ func TestCompatibility_InboundGetPeersFrameShape(t *testing.T) {
 	}
 }
 
-// legacyResponderMock starts a TCP listener and answers as a legacy responder
-// would: welcome WITHOUT a capabilities field, then a peers frame for
-// get_peers and an empty contacts frame for fetch_contacts. It is the mirror
-// image of the "legacy initiator" that TestMixedVersionLegacyPeerExchange
-// already covers in service_test.go.
-func legacyResponderMock(
-	t *testing.T,
-	ln net.Listener,
-	respondPeers []string,
-) []string {
-	t.Helper()
-
-	// Reuse the initiator-mock from sync_peer_test.go. That helper already
-	// sends welcome without capabilities (it only sets Type: "welcome"),
-	// which is exactly the legacy responder behaviour we want to simulate
-	// for step 7.
-	return syncPeerMockServer(t, ln, respondPeers)
-}
-
-// TestCompatibility_NewInitiatorAgainstLegacyResponder verifies the
-// forward-direction of the mixed-version matrix: a node running the new
-// conditional-get-peers policy, whose shouldRequestPeers() returns true
-// (aggregate status offline), still produces a wire-compatible get_peers
-// exchange when talking to a legacy responder that does not advertise any
-// capabilities.
-//
-// This is the counterpart to TestMixedVersionLegacyPeerExchange
-// (service_test.go:7717) which covers the reverse direction (legacy
-// initiator → new responder). Together they cover both halves of
-// the "mixed-version network old ↔ new" scenario from Step 7 of the design document.
-func TestCompatibility_NewInitiatorAgainstLegacyResponder(t *testing.T) {
-	t.Parallel()
-
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("failed to start listener: %v", err)
-	}
-	defer func() { _ = ln.Close() }()
-
-	// Offline aggregate status forces shouldRequestPeers() == true, so the
-	// initiator is guaranteed to exercise the get_peers branch of the new
-	// policy. The caller passes requestPeers=true explicitly for the same
-	// reason — matching the bootstrap/recovery contract from Appendix C of
-	// the design document.
-	svc := newSyncPeerTestService(domain.NetworkStatusOffline)
-	peerAddr := domain.PeerAddress(ln.Addr().String())
-
-	advertised := []string{"198.51.100.7:9000", "198.51.100.8:9000"}
-	receivedCh := make(chan []string, 1)
-	go func() {
-		receivedCh <- legacyResponderMock(t, ln, advertised)
-	}()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	svc.syncPeer(ctx, peerAddr, true)
-	received := <-receivedCh
-
-	// The wire sequence must be exactly the same as before the policy
-	// change: hello → get_peers → fetch_contacts.
-	want := []string{"hello", "get_peers", "fetch_contacts"}
-	if len(received) != len(want) {
-		t.Fatalf("unexpected frame sequence against legacy responder: got %v, want %v", received, want)
-	}
-	for i, w := range want {
-		if received[i] != w {
-			t.Fatalf("frame[%d] = %q, want %q (full sequence: %v)", i, received[i], w, received)
-		}
-	}
-
-	// The new initiator must have imported the addresses that the legacy
-	// responder returned. This proves that the response path (which Step 7
-	// must not change) still feeds addPeerAddress().
-	svc.peerMu.RLock()
-	peerCount := len(svc.peers)
-	svc.peerMu.RUnlock()
-	if peerCount != len(advertised) {
-		t.Fatalf("new initiator failed to import peers from legacy responder: got %d, want %d",
-			peerCount, len(advertised))
-	}
-}
-
 // TestCompatibility_LegacyInitiatorRespondedPeersShape is a narrow
 // regression test focused on what a legacy initiator sees on the wire when
 // it talks to a new node. TestMixedVersionLegacyPeerExchange covers the
@@ -230,7 +151,6 @@ func TestCompatibility_LegacyInitiatorRespondedPeersShape(t *testing.T) {
 		PubKey:                 identity.PublicKeyBase64(legacyID.PublicKey),
 		BoxKey:                 identity.BoxPublicKeyBase64(legacyID.BoxPublicKey),
 		BoxSig:                 identity.SignBoxKeyBinding(legacyID),
-		Listen:                 "10.0.0.11:12345",
 	})
 	reader := bufio.NewReader(conn)
 	welcome := readJSONTestFrame(t, reader)

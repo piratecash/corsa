@@ -1607,3 +1607,88 @@ func containsReason(reasons []domain.ExcludeReason, target domain.ExcludeReason)
 	}
 	return false
 }
+
+// --- IsDialBanned: the candidate filter's ban checks for a dial made
+// outside the connection manager ---
+
+func isDialBannedProvider(t *testing.T, mutate func(*PeerProviderConfig)) *PeerProvider {
+	t.Helper()
+	cfg := testProviderConfig()
+	mutate(&cfg)
+	return NewPeerProvider(cfg)
+}
+
+func TestIsDialBanned_RemoteBanOfTheAddress(t *testing.T) {
+	t.Parallel()
+	target := mustAddr("203.0.113.30:64646")
+	pp := isDialBannedProvider(t, func(cfg *PeerProviderConfig) {
+		cfg.RemoteBannedFn = func(address domain.PeerAddress) bool { return address == target }
+	})
+	if !pp.IsDialBanned(target) {
+		t.Fatal("an address that told us it bans us is dialable (candidate filter step 6c.2)")
+	}
+	if pp.IsDialBanned(mustAddr("203.0.113.31:64646")) {
+		t.Fatal("a remote ban leaked to an unrelated address")
+	}
+}
+
+func TestIsDialBanned_SetupFailureCooldownOfTheAddress(t *testing.T) {
+	t.Parallel()
+	target := mustAddr("203.0.113.32:64646")
+	pp := isDialBannedProvider(t, func(cfg *PeerProviderConfig) {
+		cfg.SetupFailureBannedFn = func(address domain.PeerAddress) bool { return address == target }
+	})
+	if !pp.IsDialBanned(target) {
+		t.Fatal("an address in setup-failure cooldown is dialable (candidate filter step 6c.3)")
+	}
+}
+
+// Source (b) of the IP-wide ban: a running ban of another KNOWN port of the
+// host covers the host, without any bannedIPSet entry — except the
+// address-scoped self-identity cooldown.
+func TestIsDialBanned_KnownSiblingPortBanCoversTheHost(t *testing.T) {
+	t.Parallel()
+	sibling := mustAddr("203.0.113.33:1")
+	target := mustAddr("203.0.113.33:64646")
+	for _, tc := range []struct {
+		name       string
+		errorCode  string
+		wantBanned bool
+	}{
+		{name: "incompatible version widens", errorCode: protocol.ErrCodeIncompatibleProtocol, wantBanned: true},
+		{name: "self-identity stays on its address", errorCode: protocol.ErrCodeSelfIdentity, wantBanned: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			pp := isDialBannedProvider(t, func(cfg *PeerProviderConfig) {
+				bannedUntil := cfg.NowFn().Add(time.Hour)
+				cfg.HealthFn = func(address domain.PeerAddress) *PeerHealthView {
+					if address != sibling {
+						return nil
+					}
+					return &PeerHealthView{BannedUntil: bannedUntil, LastErrorCode: tc.errorCode}
+				}
+			})
+			pp.Add(sibling, domain.PeerSourceAnnounce)
+			if got := pp.IsDialBanned(target); got != tc.wantBanned {
+				t.Fatalf("IsDialBanned(%s) = %v, want %v", target, got, tc.wantBanned)
+			}
+		})
+	}
+}
+
+func TestIsDialBanned_BannedIPSetEntryCoversTheHost(t *testing.T) {
+	t.Parallel()
+	pp := isDialBannedProvider(t, func(cfg *PeerProviderConfig) {
+		bannedUntil := cfg.NowFn().Add(time.Hour)
+		cfg.BannedIPsFn = func() map[string]domain.BannedIPEntry {
+			return map[string]domain.BannedIPEntry{"203.0.113.34": {IP: "203.0.113.34", BannedUntil: bannedUntil}}
+		}
+	})
+	if !pp.IsDialBanned(mustAddr("203.0.113.34:64646")) {
+		t.Fatal("a host with a running bannedIPSet entry is dialable")
+	}
+	if pp.IsDialBanned(mustAddr("203.0.113.35:64646")) {
+		t.Fatal("an IP-wide ban leaked to another host")
+	}
+}

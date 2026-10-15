@@ -3,7 +3,6 @@ package node
 import (
 	"errors"
 	"fmt"
-	"strings"
 
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/protocol"
@@ -46,23 +45,15 @@ type selfIdentityError struct {
 	// collision surfaced. Populated on outbound paths; empty on the
 	// inbound path because the remote opened the socket.
 	Address domain.PeerAddress
-	// PeerListen is the listen field the remote advertised in its
-	// welcome. Diagnostic only — the address we punish is Address.
-	// Typed as domain.PeerAddress (not raw string) so compile-time
-	// checks catch accidental cross-assignments with unrelated string
-	// fields (welcome.ObservedAddress, health keys, etc.). The wire
-	// form is a plain string; the boundary conversion lives in
-	// newSelfIdentityError.
-	PeerListen domain.PeerAddress
 	// LocalIdentity is the local node identity the remote matched.
 	// Kept on the error so logs on the fail path can render the full
-	// triple without re-reading Service state.
+	// record without re-reading Service state.
 	LocalIdentity domain.PeerIdentity
 }
 
 func (e *selfIdentityError) Error() string {
-	return fmt.Sprintf("self-identity detected: address=%q listen=%q local_identity=%q",
-		e.Address, e.PeerListen, e.LocalIdentity)
+	return fmt.Sprintf("self-identity detected: address=%q local_identity=%q",
+		e.Address, e.LocalIdentity)
 }
 
 func (e *selfIdentityError) Unwrap() error { return errSelfIdentity }
@@ -73,20 +64,15 @@ func (e *selfIdentityError) Unwrap() error { return errSelfIdentity }
 // call site emits a fully populated record regardless of whether the
 // caller had the value in scope.
 //
-// peerListen arrives as a raw wire string (welcome.Listen). The
-// TrimSpace + domain.PeerAddress conversion is the single boundary
-// point — downstream consumers work with the domain-typed field.
-//
 // Returns the concrete *selfIdentityError so call sites can pass the
 // record straight into applySelfIdentityCooldown (which needs the
 // structured fields) without an errors.As dance. The concrete return
 // still satisfies the error interface through implicit conversion at
 // return sites that surface it as `error` (openPeerSession /
 // openPeerSessionForCM bubble it up the handshake stack).
-func (s *Service) newSelfIdentityError(address domain.PeerAddress, peerListen string) *selfIdentityError {
+func (s *Service) newSelfIdentityError(address domain.PeerAddress) *selfIdentityError {
 	return &selfIdentityError{
 		Address:       address,
-		PeerListen:    domain.PeerAddress(strings.TrimSpace(peerListen)),
 		LocalIdentity: domain.PeerIdentityFromWire(s.identity.Address),
 	}
 }
@@ -123,7 +109,7 @@ func (s *Service) isSelfIdentity(id domain.PeerIdentity) bool {
 //   - (*selfIdentityError) — the structured record produced locally on
 //     the outbound side when openPeerSession / openPeerSessionForCM /
 //     syncPeer / sendNoticeToPeer parses a welcome carrying our own
-//     Ed25519 address. Carries Address, PeerListen, LocalIdentity.
+//     Ed25519 address. Carries Address and LocalIdentity.
 //   - protocol.ErrSelfIdentity (bare sentinel) — the wire shape that
 //     peerSessionRequest / syncPeer connection_notice branches resolve
 //     via NoticeErrorFromFrame when the remote detected the self-loopback
@@ -143,10 +129,7 @@ func (s *Service) tryApplySelfIdentityCooldown(address domain.PeerAddress, err e
 		return true
 	}
 	if errors.Is(err, protocol.ErrSelfIdentity) {
-		s.applySelfIdentityCooldown(address, &selfIdentityError{
-			Address:       address,
-			LocalIdentity: domain.PeerIdentityFromWire(s.identity.Address),
-		})
+		s.applySelfIdentityCooldown(address, s.newSelfIdentityError(address))
 		return true
 	}
 	return false

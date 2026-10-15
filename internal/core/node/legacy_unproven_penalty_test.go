@@ -64,26 +64,27 @@ func newLegacyPenaltyService(t *testing.T) *Service {
 	return svc
 }
 
-// legacyBaselineFrame is a one-route announce_routes baseline for a target
-// identity distinct per call site, so a test can tell WHOSE baseline landed.
-func legacyBaselineFrame(target domain.PeerIdentity) protocol.Frame {
+// legacyBaselineFrame is a one-route announce_routes baseline from sender
+// for a target identity distinct per call site, so a test can tell WHOSE
+// baseline landed. Origin is the sender, as every sender writes it.
+func legacyBaselineFrame(sender, target domain.PeerIdentity) protocol.Frame {
 	return protocol.Frame{
 		Type: "announce_routes",
 		AnnounceRoutes: []protocol.AnnounceRouteFrame{{
 			Identity: target.String(),
-			Origin:   target.String(),
+			Origin:   sender.String(),
 			Hops:     1,
 			SeqNo:    1,
 		}},
 	}
 }
 
-func legacyDeltaFrame(seq int) protocol.Frame {
+func legacyDeltaFrame(sender domain.PeerIdentity, seq int) protocol.Frame {
 	return protocol.Frame{
 		Type: "routes_update",
 		AnnounceRoutes: []protocol.AnnounceRouteFrame{{
 			Identity: fmt.Sprintf("dd%038x", seq+1),
-			Origin:   fmt.Sprintf("cc%038x", seq+1),
+			Origin:   sender.String(),
 			Hops:     1,
 			SeqNo:    uint64(seq + 1),
 		}},
@@ -108,10 +109,10 @@ func TestLegacyUnprovenChattyFloodDoesNotQuarantineNamedIdentity(t *testing.T) {
 	victim := legacyOutboundSession(legacyVictimAddress, idPeerB)
 
 	for i := 0; i <= chattyAnnounceThreshold; i++ {
-		svc.dispatchPeerSessionFrame(attacker.address, attacker, legacyDeltaFrame(i))
+		svc.dispatchPeerSessionFrame(attacker.address, attacker, legacyDeltaFrame(attacker.peerIdentity, i))
 	}
 
-	svc.dispatchPeerSessionFrame(victim.address, victim, legacyBaselineFrame(idTargetX))
+	svc.dispatchPeerSessionFrame(victim.address, victim, legacyBaselineFrame(victim.peerIdentity, idTargetX))
 	if !routeLearnedVia(svc, idTargetX, idPeerB) {
 		t.Fatal("the victim's own baseline was dropped: a legacy session that named it armed chatty_routes against its identity")
 	}
@@ -119,7 +120,7 @@ func TestLegacyUnprovenChattyFloodDoesNotQuarantineNamedIdentity(t *testing.T) {
 		t.Fatal("an identity no session proved must not be quarantined")
 	}
 
-	svc.dispatchPeerSessionFrame(attacker.address, attacker, legacyBaselineFrame(idTargetY))
+	svc.dispatchPeerSessionFrame(attacker.address, attacker, legacyBaselineFrame(attacker.peerIdentity, idTargetY))
 	if routeLearnedVia(svc, idTargetY, idPeerB) {
 		t.Fatal("the flooding session itself must stay muted: its baseline was applied")
 	}
@@ -128,12 +129,13 @@ func TestLegacyUnprovenChattyFloodDoesNotQuarantineNamedIdentity(t *testing.T) {
 // legacyFullBaselineFrame is a baseline at the receive-side frame cap whose
 // routes all lead to identities beginning with prefix. At that size the frame
 // costs more than the bucket refills during a test, so "was it applied" reads
-// the bucket rather than the clock.
-func legacyFullBaselineFrame(prefix string) protocol.Frame {
+// the bucket rather than the clock. Origin is the sender, as every sender
+// writes it.
+func legacyFullBaselineFrame(sender domain.PeerIdentity, prefix string) protocol.Frame {
 	routes := make([]protocol.AnnounceRouteFrame, maxRoutesPerAnnounceFrame)
 	for i := range routes {
 		target := fmt.Sprintf("%s%038x", prefix, i+1)
-		routes[i] = protocol.AnnounceRouteFrame{Identity: target, Origin: target, Hops: 1, SeqNo: 1}
+		routes[i] = protocol.AnnounceRouteFrame{Identity: target, Origin: sender.String(), Hops: 1, SeqNo: 1}
 	}
 	return protocol.Frame{Type: "announce_routes", AnnounceRoutes: routes}
 }
@@ -146,15 +148,15 @@ func TestLegacyUnprovenAnnounceFloodDoesNotSpendNamedIdentityBudget(t *testing.T
 	victim := legacyOutboundSession(legacyVictimAddress, idPeerB)
 
 	for spent := 0; spent < announceBurstRoutesPerPeer; spent += maxRoutesPerAnnounceFrame {
-		svc.dispatchPeerSessionFrame(attacker.address, attacker, legacyFullBaselineFrame("dd"))
+		svc.dispatchPeerSessionFrame(attacker.address, attacker, legacyFullBaselineFrame(attacker.peerIdentity, "dd"))
 	}
 
-	svc.dispatchPeerSessionFrame(victim.address, victim, legacyFullBaselineFrame("ee"))
+	svc.dispatchPeerSessionFrame(victim.address, victim, legacyFullBaselineFrame(victim.peerIdentity, "ee"))
 	if !routeLearnedVia(svc, domain.PeerIdentityFromWire(fmt.Sprintf("ee%038x", 1)), idPeerB) {
 		t.Fatal("the victim's own baseline was throttled: a legacy session that named it spent its announce budget")
 	}
 
-	svc.dispatchPeerSessionFrame(attacker.address, attacker, legacyFullBaselineFrame("ef"))
+	svc.dispatchPeerSessionFrame(attacker.address, attacker, legacyFullBaselineFrame(attacker.peerIdentity, "ef"))
 	if routeLearnedVia(svc, domain.PeerIdentityFromWire(fmt.Sprintf("ef%038x", 1)), idPeerB) {
 		t.Fatal("the flooding session itself must stay throttled: its baseline was applied")
 	}
@@ -240,13 +242,13 @@ func TestLegacyUnprovenDisconnectStormDoesNotQuarantineNamedIdentity(t *testing.
 		t.Fatal("transit through the victim is refused: accepted legacy connections that named it armed disconnect_storm against its identity")
 	}
 	victim := legacyOutboundSession(legacyVictimAddress, idPeerB)
-	svc.dispatchPeerSessionFrame(victim.address, victim, legacyBaselineFrame(idTargetX))
+	svc.dispatchPeerSessionFrame(victim.address, victim, legacyBaselineFrame(victim.peerIdentity, idTargetX))
 	if !routeLearnedVia(svc, idTargetX, idPeerB) {
 		t.Fatal("the victim's own baseline was dropped: accepted legacy connections that named it armed disconnect_storm against its identity")
 	}
 
 	again := legacyInboundConn(t, svc, netcore.ConnID(200), &net.TCPAddr{IP: attackerIP, Port: 41000}, idPeerB)
-	dispatchInboundLegacyFrame(t, svc, again, legacyBaselineFrame(idTargetY))
+	dispatchInboundLegacyFrame(t, svc, again, legacyBaselineFrame(idPeerB, idTargetY))
 	if routeLearnedVia(svc, idTargetY, idPeerB) {
 		t.Fatal("the flapping host itself must stay quarantined: its baseline was applied")
 	}
@@ -346,7 +348,7 @@ func TestLegacyUnprovenInboundFixtureAppliesBaselines(t *testing.T) {
 	svc.eventBus = newStormBus(t)
 	connID := legacyInboundConn(t, svc, netcore.ConnID(300), &net.TCPAddr{IP: net.ParseIP("10.0.0.66"), Port: 42000}, idPeerB)
 
-	dispatchInboundLegacyFrame(t, svc, connID, legacyBaselineFrame(idTargetY))
+	dispatchInboundLegacyFrame(t, svc, connID, legacyBaselineFrame(idPeerB, idTargetY))
 	if !routeLearnedVia(svc, idTargetY, idPeerB) {
 		t.Fatal("a legacy inbound baseline must reach the table when nothing is quarantined")
 	}
@@ -369,7 +371,7 @@ func TestLegacyUnprovenLoopbackStormDoesNotMuteOtherLoopbackPeers(t *testing.T) 
 	}
 
 	other := legacyInboundConn(t, svc, netcore.ConnID(500), &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 44000}, idPeerB)
-	dispatchInboundLegacyFrame(t, svc, other, legacyBaselineFrame(idTargetY))
+	dispatchInboundLegacyFrame(t, svc, other, legacyBaselineFrame(idPeerB, idTargetY))
 	if !routeLearnedVia(svc, idTargetY, idPeerB) {
 		t.Fatal("another onion peer was muted by a flapping one: loopback must not be one subject")
 	}
@@ -402,9 +404,9 @@ func TestProvenIdentityKeepsIdentityKeyedProtection(t *testing.T) {
 		elsewhere := provenOutboundSession(legacyVictimAddress, peer)
 
 		for i := 0; i <= chattyAnnounceThreshold; i++ {
-			svc.dispatchPeerSessionFrame(flooding.address, flooding, legacyDeltaFrame(i))
+			svc.dispatchPeerSessionFrame(flooding.address, flooding, legacyDeltaFrame(flooding.peerIdentity, i))
 		}
-		svc.dispatchPeerSessionFrame(elsewhere.address, elsewhere, legacyBaselineFrame(idTargetX))
+		svc.dispatchPeerSessionFrame(elsewhere.address, elsewhere, legacyBaselineFrame(elsewhere.peerIdentity, idTargetX))
 		if routeLearnedVia(svc, idTargetX, peer.Identity) {
 			t.Fatal("a proven identity's quarantine must follow it to its other connections")
 		}

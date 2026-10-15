@@ -64,14 +64,6 @@ func TestRouteEntryIsExpired(t *testing.T) {
 	}
 }
 
-func TestDedupKey(t *testing.T) {
-	r := RouteEntry{Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("charlie")}
-	key := r.DedupKey()
-	if key.Identity != domaintest.ID("alice") || key.Origin != domaintest.ID("bob") || key.NextHop != domaintest.ID("charlie") {
-		t.Fatalf("unexpected dedup key: %+v", key)
-	}
-}
-
 func TestSnapshotBestRoute(t *testing.T) {
 	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 

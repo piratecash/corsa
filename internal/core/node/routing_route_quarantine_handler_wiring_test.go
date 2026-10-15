@@ -57,7 +57,7 @@ func TestChattyWiring_OnlyDeltaFramesArmQuarantine(t *testing.T) {
 
 		svc.handleAnnounceRoutes(provenRoutingSender(peer), protocol.Frame{
 			Type:           "announce_routes",
-			AnnounceRoutes: buildAnnounceRouteFrames(1),
+			AnnounceRoutes: buildAnnounceRouteFrames(peer, 1),
 		})
 
 		if svc.isSubjectInRouteQuarantine(provenIdentitySubject(peer)) {
@@ -95,7 +95,7 @@ func TestChattyWiring_OnlyDeltaFramesArmQuarantine(t *testing.T) {
 
 		svc.handleRoutesUpdate(provenRoutingSender(peer), domain.PeerAddress("addr-peerB"), protocol.Frame{
 			Type:           "routes_update",
-			AnnounceRoutes: buildAnnounceRouteFrames(1),
+			AnnounceRoutes: buildAnnounceRouteFrames(peer, 1),
 		})
 
 		if !svc.isSubjectInRouteQuarantine(provenIdentitySubject(peer)) {

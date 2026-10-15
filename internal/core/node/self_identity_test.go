@@ -58,7 +58,7 @@ func TestInboundHello_SelfIdentity_EmitsPeerBannedNotice(t *testing.T) {
 	// pre-check would make it unreachable in production.
 	//
 	// Listener="1" is critical: the guard is gated on the listener flag
-	// (the v12 wire shape — host is no longer carried in Listen). Local
+	// (the hello carries no host). Local
 	// subscribers (RPC clients using the node identity for
 	// self-subscription) never set Listener=1, and the guard must not
 	// break that flow. Every genuine self-loopback path surfaces
@@ -137,7 +137,6 @@ func TestLearnIdentityFromWelcome_SelfIdentity_SkipsIngest(t *testing.T) {
 		Version:  config.ProtocolVersion,
 		Client:   "node",
 		Address:  selfAddr,
-		Listen:   "198.51.100.7:64646",
 		Listener: "1",
 		PubKey:   "filler-pubkey",
 		BoxKey:   "filler-boxkey",
@@ -151,7 +150,7 @@ func TestLearnIdentityFromWelcome_SelfIdentity_SkipsIngest(t *testing.T) {
 	// entries with the filler values from the foreign welcome frame".
 	// Snapshot the pre-state and verify equality after the call. Any
 	// ingest would either overwrite a field with "filler-*" or insert
-	// a new listen binding, both caught by the comparison.
+	// a new entry, both caught by the comparison.
 	// s.known, s.boxKeys, s.pubKeys, s.boxSigs all live under s.knowledgeMu.
 	svc.knowledgeMu.RLock()
 	knownHad := svc.known.Has(selfAddr)
@@ -229,7 +228,6 @@ func TestOnCMDialFailed_SelfIdentityError_AppliesCooldown(t *testing.T) {
 	addr := domain.PeerAddress("198.51.100.7:64646")
 	selfErr := &selfIdentityError{
 		Address:       addr,
-		PeerListen:    addr,
 		LocalIdentity: domain.PeerIdentityFromWire(svc.identity.Address),
 	}
 
@@ -392,22 +390,17 @@ func TestSyncPeer_SelfIdentityWelcome_AppliesCooldown(t *testing.T) {
 	}
 	defer func() { _ = ln.Close() }()
 
-	svc := newSyncPeerTestService(domain.NetworkStatusHealthy)
-	// newSyncPeerTestService seeds a non-hex placeholder address. Under
-	// byte-identity semantics the self-identity guard parses welcome.Address
-	// via PeerIdentityFromWire, which only round-trips a canonical 40-char
-	// hex fingerprint — a non-hex address would decode to the zero identity
-	// and never match. Pin a valid hex local identity so the NAT-reflection
-	// self-match (and thus the cooldown branch) is actually exercised.
-	svc.identity.Address = domaintest.ID("self-node-aaa").String()
+	// newSyncPeerTestService carries a generated identity, whose canonical
+	// hex fingerprint round-trips through PeerIdentityFromWire, so the
+	// NAT-reflection self-match (and thus the cooldown branch) is exercised.
+	svc := newSyncPeerTestService(t, domain.NetworkStatusHealthy)
 	peerAddr := domain.PeerAddress(ln.Addr().String())
 
 	// Mock peer: read hello, answer with a welcome whose Address matches
-	// the local identity. The Listen field is populated so the log line
-	// renders the full diagnostic triple — the guard triggers on the
-	// identity equality, not on Listen presence (syncPeer is always a
-	// P2P dial, never a subscriber probe, so the Listen gate that lives
-	// on the inbound hello path does not apply here).
+	// the local identity. The guard triggers on the identity equality
+	// alone (syncPeer is always a P2P dial, never a subscriber probe, so
+	// the listener-flag gate that lives on the inbound hello path does
+	// not apply here).
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -422,9 +415,10 @@ func TestSyncPeer_SelfIdentityWelcome_AppliesCooldown(t *testing.T) {
 			return
 		}
 		welcome, _ := protocol.MarshalFrameLine(protocol.Frame{
-			Type:    "welcome",
-			Address: svc.identity.Address,
-			Listen:  string(peerAddr),
+			Type:                   "welcome",
+			Version:                config.ProtocolVersion,
+			MinimumProtocolVersion: config.MinimumProtocolVersion,
+			Address:                svc.identity.Address,
 		})
 		_, _ = conn.Write([]byte(welcome))
 	}()
@@ -478,7 +472,6 @@ func TestTryApplySelfIdentityCooldown_StructuredError_Hit(t *testing.T) {
 	addr := domain.PeerAddress("198.51.100.11:64646")
 	selfErr := &selfIdentityError{
 		Address:       addr,
-		PeerListen:    addr,
 		LocalIdentity: domain.PeerIdentityFromWire(svc.identity.Address),
 	}
 	// Wrap with fmt.Errorf("%w: ...") to prove the helper uses errors.As
@@ -648,9 +641,7 @@ func TestRunPeerSession_SelfIdentity_AppliesCooldownAndExits(t *testing.T) {
 	// Mock peer: accept connections, read hello, answer with a welcome
 	// whose Address matches the local identity. A retry loop would try
 	// to accept a second connection; the acceptCount assertion pins
-	// that path closed. Listen is populated so the structured log
-	// emits the full diagnostic triple — the guard triggers on
-	// identity equality, not on Listen presence.
+	// that path closed. The guard triggers on identity equality alone.
 	//
 	// acceptCount is observed AFTER runPeerSession returns; using
 	// atomic.Int32 (not a channel) avoids the close-while-producer-
@@ -679,7 +670,6 @@ func TestRunPeerSession_SelfIdentity_AppliesCooldownAndExits(t *testing.T) {
 					Type:    "welcome",
 					Version: config.ProtocolVersion,
 					Address: svc.identity.Address,
-					Listen:  string(peerAddr),
 				})
 				if err != nil {
 					return
@@ -776,7 +766,6 @@ func TestApplySelfIdentityCooldown_NoAccumulation_WithinBanWindow(t *testing.T) 
 	addr := domain.PeerAddress("198.51.100.31:64646")
 	selfErr := &selfIdentityError{
 		Address:       addr,
-		PeerListen:    addr,
 		LocalIdentity: domain.PeerIdentityFromWire(svc.identity.Address),
 	}
 
@@ -854,7 +843,6 @@ func TestApplySelfIdentityCooldown_ReAppliesAfterBanExpired(t *testing.T) {
 	addr := domain.PeerAddress("203.0.113.47:64646")
 	selfErr := &selfIdentityError{
 		Address:       addr,
-		PeerListen:    addr,
 		LocalIdentity: domain.PeerIdentityFromWire(svc.identity.Address),
 	}
 

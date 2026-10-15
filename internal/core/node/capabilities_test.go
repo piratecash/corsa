@@ -307,7 +307,6 @@ func TestRememberConnPeerAddrStoresCapabilities(t *testing.T) {
 
 	hello := protocol.Frame{
 		Type:         "hello",
-		Listen:       "10.0.0.1:64646",
 		Capabilities: []string{"mesh_relay_v1", "mesh_routing_v1"},
 	}
 	id, _ := svc.connIDFor(serverConn)

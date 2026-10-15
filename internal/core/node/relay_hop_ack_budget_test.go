@@ -366,7 +366,7 @@ func TestFailoverRetry_RecordTransitionsAllFieldsAtomically(t *testing.T) {
 		MessageID:            "msg-fail",
 		ForwardedTo:          domain.PeerAddress("peer-a"),
 		Recipient:            domaintest.ID("id-target"),
-		RouteOrigin:          domaintest.ID("origin-x"),
+		NextHopSelection:     relayNextHopRoutingTable,
 		RemainingTTL:         60,
 		HopAckRemainingTicks: defaultHopAckBudgetSeconds,
 		HopAckObserved:       true, // simulate timeout-already-fired
@@ -395,8 +395,8 @@ func TestFailoverRetry_RecordTransitionsAllFieldsAtomically(t *testing.T) {
 	if st.HopAckObserved {
 		t.Fatal("HopAckObserved must be false after retry (fresh window)")
 	}
-	if !st.RouteOrigin.IsZero() {
-		t.Fatalf("RouteOrigin = %q, want empty (failover does not carry origin)", st.RouteOrigin.String())
+	if st.NextHopSelection != relayNextHopFailover {
+		t.Fatalf("NextHopSelection = %s, want %s (a failover retry is not the table-picked attempt)", st.NextHopSelection, relayNextHopFailover)
 	}
 	// FrameLine must survive — the same payload is being retried.
 	if st.FrameLine == "" {

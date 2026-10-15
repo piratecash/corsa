@@ -371,7 +371,7 @@ the wire (the schema uses `omitempty`).
 - Responses are ingested into the receiver's routing table as
   `RouteSourceAnnouncement` claims — the same trust class as a
   regular `announce_routes` frame. Standard admission rules
-  (per-Origin high-water, SeqNo monotonicity, cap eviction,
+  (SeqNo monotonicity per `(Identity, Uplink)` slot, cap eviction,
   fast invalidation) apply unchanged. There is no privileged
   query-response ingestion path.
 - Defensive ingest guards: `found=true` with `best_hops=0` is
@@ -783,8 +783,8 @@ Nil-health safe: когда health-state ещё не записан для па�
   `route_query_v1` другим peer'ам.
 - Responses ingest'ятся в receiver'а как `RouteSourceAnnouncement` —
   тот же trust class что обычный `announce_routes`. Стандартные
-  admission rules (per-Origin high-water, SeqNo monotonicity, cap
-  eviction, fast invalidation) применяются unchanged. Нет
+  admission rules (SeqNo monotonicity в слоте `(Identity, Uplink)`,
+  cap eviction, fast invalidation) применяются unchanged. Нет
   privileged query-response ingestion path'а.
 - Defensive ingest guards: `found=true` с `best_hops=0` invalid
   (hops=0 — direct route, не transit-query answer) → drop.

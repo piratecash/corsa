@@ -170,7 +170,7 @@ func TestCompactExpiredEvictsHealthOfRemovedClaims(t *testing.T) {
 
 // CompactExpired shrinks the bucket slice in place; the vacated tail
 // must be zeroed so the backing array stops pinning the removed
-// claims' Extra / signature / SeenOriginSeqs allocations.
+// claims' Extra / signature allocations.
 func TestCompactExpiredClearsVacatedTail(t *testing.T) {
 	t.Parallel()
 	now := time.Unix(1_700_000_000, 0)
@@ -179,7 +179,7 @@ func TestCompactExpiredClearsVacatedTail(t *testing.T) {
 	live := UplinkClaim{Uplink: domaintest.ID("uplink-live"), Hops: 2, SeqNo: 1, ExpiresAt: now.Add(time.Hour), Source: RouteSourceAnnouncement}
 	expired := UplinkClaim{
 		Uplink: domaintest.ID("uplink-old"), Hops: 2, SeqNo: 1, ExpiresAt: now.Add(-time.Second), Source: RouteSourceAnnouncement,
-		SeenOriginSeqs: map[domain.PeerIdentity]uint64{target: 1},
+		AttestedSig: []byte{0x01, 0x02},
 	}
 	s.buckets[target] = []UplinkClaim{live, expired}
 
@@ -191,7 +191,7 @@ func TestCompactExpiredClearsVacatedTail(t *testing.T) {
 		t.Fatalf("bucket = %+v, want only the live claim", bucket)
 	}
 	tail := bucket[:cap(bucket)][1]
-	if tail.SeenOriginSeqs != nil || !tail.Uplink.IsZero() {
+	if tail.AttestedSig != nil || !tail.Uplink.IsZero() {
 		t.Fatalf("vacated tail slot still holds the removed claim: %+v", tail)
 	}
 }

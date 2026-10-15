@@ -1340,11 +1340,40 @@ func readSyncReply(ctx context.Context, reader *bufio.Reader, wantType string, b
 	}
 }
 
+// syncPeerWelcome is the welcome of a sync dial: the proven listener's intro
+// on v2; on v1 the answer to our hello, whatever it is — the caller passes it
+// through admitServiceDialWelcome before anything else is sent.
+func (s *Service) syncPeerWelcome(pc *netcore.NetCore, reader *bufio.Reader, address domain.PeerAddress, transport *dialledTransport) (protocol.Frame, bool) {
+	if transport.proven != nil {
+		return transport.proven.Intro, true
+	}
+	if st := pc.SendRawSyncBlocking([]byte(s.nodeHelloJSONLine())); st != netcore.SendOK {
+		log.Warn().Str("peer", string(address)).Str("status", st.String()).Msg(serviceDialSyncPeer.event("hello_write_failed"))
+		return protocol.Frame{}, false
+	}
+	welcomeLine, err := readFrameLine(reader, maxResponseLineBytes)
+	if err != nil {
+		log.Warn().Err(err).Str("peer", string(address)).Msg(serviceDialSyncPeer.event("welcome_read_failed"))
+		return protocol.Frame{}, false
+	}
+	welcome, err := protocol.ParseFrameLine(strings.TrimSpace(welcomeLine))
+	if err != nil {
+		log.Warn().Err(err).Str("peer", string(address)).Msg(serviceDialSyncPeer.event("welcome_parse_failed"))
+		return protocol.Frame{}, false
+	}
+	return welcome, true
+}
+
 // syncPeer opens a fresh TCP connection to the given address, performs
-// a full handshake (hello → welcome → auth if required), optionally
-// requests the peer list (when requestPeers is true), fetches contacts,
-// and imports any verified contacts into local state. Returns the number
-// of contacts successfully imported.
+// a full handshake (v2, or v1 hello → welcome → auth_session → auth_ok),
+// optionally requests the peer list (when requestPeers is true), fetches
+// contacts, and imports any verified contacts into local state. Returns the
+// number of contacts successfully imported.
+//
+// The welcome is gated like a session's (service_dial_welcome.go): a
+// responder below MinimumProtocolVersion is refused and penalised, and a v1
+// welcome without a challenge ends the dial — nothing but the hello is ever
+// written to a responder that did not authenticate us.
 //
 // The requestPeers parameter is passed by the caller rather than derived
 // internally from shouldRequestPeers(): forced-refresh paths (sender-key
@@ -1365,36 +1394,6 @@ func readSyncReply(ctx context.Context, reader *bufio.Reader, wantType string, b
 // get_identity datagram lookup, kept as the epidemic bridge for peers
 // without the layer. TODO(fetch-contacts-floor): remove the leg when
 // nothing is left to bridge — see docs/protocol/identity-lookup.md.
-// syncPeerWelcome is the welcome of a sync dial: the proven listener's intro
-// on v2; on v1 the reply to our hello — refused when it names an identity
-// that proved v2, before anything is signed for it.
-func (s *Service) syncPeerWelcome(pc *netcore.NetCore, reader *bufio.Reader, address domain.PeerAddress, transport *dialledTransport) (protocol.Frame, bool) {
-	if transport.proven != nil {
-		return transport.proven.Intro, true
-	}
-	if st := pc.SendRawSyncBlocking([]byte(s.nodeHelloJSONLine())); st != netcore.SendOK {
-		log.Warn().Str("peer", string(address)).Str("status", st.String()).Msg("sync_peer_hello_write_failed")
-		return protocol.Frame{}, false
-	}
-	welcomeLine, err := readFrameLine(reader, maxResponseLineBytes)
-	if err != nil {
-		log.Warn().Err(err).Str("peer", string(address)).Msg("sync_peer_welcome_read_failed")
-		return protocol.Frame{}, false
-	}
-	welcome, err := protocol.ParseFrameLine(strings.TrimSpace(welcomeLine))
-	if err != nil {
-		log.Warn().Err(err).Str("peer", string(address)).Msg("sync_peer_welcome_parse_failed")
-		return protocol.Frame{}, false
-	}
-	if welcome.Type != protocol.FrameTypeConnectionNotice {
-		if err := s.refuseLegacyIdentity(welcome.Address); err != nil {
-			log.Warn().Err(err).Str("peer", string(address)).Msg("sync_peer_v1_refused_identity_pinned_to_v2")
-			return protocol.Frame{}, false
-		}
-	}
-	return welcome, true
-}
-
 func (s *Service) syncPeer(ctx context.Context, address domain.PeerAddress, requestPeers bool) int {
 	// Budgeted: this is a real outbound socket and counts against the shared
 	// ceiling like any other. A refusal here means the sync does not happen —
@@ -1413,7 +1412,7 @@ func (s *Service) syncPeer(ctx context.Context, address domain.PeerAddress, requ
 		return s.dialPeerWithBudget(ctx, address, syncHandshakeTimeout)
 	})
 	if err != nil {
-		log.Warn().Err(err).Str("peer", string(address)).Msg("sync_peer_dial_failed")
+		log.Warn().Err(err).Str("peer", string(address)).Msg(serviceDialSyncPeer.event("dial_failed"))
 		return 0
 	}
 	conn := transport.wire
@@ -1429,13 +1428,7 @@ func (s *Service) syncPeer(ctx context.Context, address domain.PeerAddress, requ
 	// a cancelled/expired ctx and keep the socket alive for up to the
 	// drain cap, violating the ctx-first cancellation contract. Total
 	// wall time is bounded by syncReplyDrainCap inside readSyncReply.
-	refreshSyncDeadline := func() {
-		deadline := time.Now().Add(syncHandshakeTimeout)
-		if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
-			deadline = ctxDeadline
-		}
-		_ = conn.SetDeadline(deadline)
-	}
+	refreshSyncDeadline := serviceDialDeadline(ctx, conn)
 
 	// Wrap the one-shot conn in a bootstrap NetCore so every write on this
 	// handshake path goes through the managed writer — no raw io.WriteString
@@ -1458,115 +1451,42 @@ func (s *Service) syncPeer(ctx context.Context, address domain.PeerAddress, requ
 	// frames and avoids dropping under a raised PendingRingSize. The
 	// durable fix is responder-side — stop treating a one-shot recovery
 	// dial as a routable node connection (do not install the node-route
-	// subscriber / flush pending for it) — which needs both ends
-	// updated and rides the ProtocolVersion 27 floor raise.
+	// subscriber / flush pending for it). The dialler would have to
+	// announce the one-shot dial and the responder honour it, so it is a
+	// both-ends change that needs a protocol version of its own; no
+	// version implements it yet.
 	welcome, ok := s.syncPeerWelcome(pc, reader, address, transport)
 	if !ok {
 		return 0
 	}
-	// Advertise convergence: peer closed the dial with a connection_notice
-	// instead of welcoming us. Record the observed IP hint (when present
-	// and routable) and abort this sync pass — the corrected advertise
-	// will be emitted on the next hello.
-	if welcome.Type == protocol.FrameTypeConnectionNotice {
-		s.handleConnectionNotice(address, welcome)
-		log.Info().Str("peer", string(address)).Str("code", welcome.Code).Msg("sync_peer_connection_notice")
-		// Remote-first self-loopback discovery: when our dial lands on
-		// ourselves via NAT hairpin / peer-exchange mirror / fallback
-		// alias, the responder (which IS us) detects the collision at
-		// the inbound hello handler and sends back
-		// connection_notice{code=peer-banned, reason=self-identity}.
-		// NoticeErrorFromFrame resolves this to ErrSelfIdentity, which
-		// tells syncPeer to apply the same 24h local cooldown the
-		// managed outbound paths produce. Without this branch,
-		// handlePeerBannedNotice would only write the per-peer remote
-		// ban record in persistedMeta using the notice's (potentially
-		// empty) `until` — health.BannedUntil would stay zero and
-		// LastErrorCode would not surface the self-identity signal to
-		// the monitor/UI, leaving the fresh-dial recovery callers
-		// (syncSenderKeys, unknown-sender recovery) free to re-enter
-		// the churn loop on the next tick.
-		if errors.Is(protocol.NoticeErrorFromFrame(welcome), protocol.ErrSelfIdentity) {
-			s.applySelfIdentityCooldown(address, s.newSelfIdentityError(address, welcome.Listen))
-		}
+	// One gate for both session kinds, before auth_session is signed and
+	// before learnIdentityFromWelcome runs: notice, non-welcome, v2 pin, floor,
+	// self identity (admitServiceDialWelcome); the v1 challenge is checked by
+	// authenticateServiceDial before it signs. `defer pc.Close()` above tears
+	// the dial down through the NetCore wrapper.
+	if err := s.admitServiceDialWelcome(serviceDialSyncPeer, address, welcome, transport.proven != nil); err != nil {
 		return 0
 	}
-	// Self-loopback guard on the sender-key / forced-refresh dial path.
-	// Abort the sync before auth_session is signed with our own key and
-	// learnIdentityFromWelcome runs; `defer pc.Close()` above tears down
-	// through the NetCore wrapper, so no raw socket operation is needed.
+	writeLine := func(line string) error {
+		if st := pc.SendRawSyncBlocking([]byte(line)); st != netcore.SendOK {
+			return fmt.Errorf("send: %s", st)
+		}
+		return nil
+	}
+	if transport.proven == nil && !s.authenticateServiceDial(ctx, serviceDialSyncPeer, address, welcome, writeLine, reader, refreshSyncDeadline) {
+		return 0
+	}
+	// Outbound convergence success hook: proven by session_proof on v2, by
+	// auth_ok on v1. syncPeer completes the same exchange as the managed-
+	// session and raw/bootstrap paths; without this call, peers reached only
+	// through syncPeer would never get announce_state=announceable or a
+	// trusted advertise triple, so convergence state would depend on which
+	// outbound path happened to reach the peer.
 	//
-	// The managed outbound paths (openPeerSession, openPeerSessionForCM)
-	// surface the collision as *selfIdentityError which onCMDialFailed
-	// converts into a 24h cooldown via applySelfIdentityCooldown. syncPeer
-	// is a standalone one-shot dial — its callers (syncSenderKeys, the
-	// unknown-sender recovery in handleInboundPushMessage) do not run
-	// through the connection-manager failure hook, so returning 0 without
-	// persisting a cooldown would let the next sender-key refresh hammer
-	// the same self-looping address on the very next tick. Route through
-	// applySelfIdentityCooldown directly to converge on the same wall-
-	// clock ban window the CM paths produce.
-	if s.isSelfIdentity(domain.PeerIdentityFromWire(welcome.Address)) {
-		log.Warn().
-			Str("peer", string(address)).
-			Str("local_identity", s.identity.Address).
-			Str("welcome_listen", welcome.Listen).
-			Msg("sync_peer_self_identity_rejected")
-		s.applySelfIdentityCooldown(address, s.newSelfIdentityError(address, welcome.Listen))
-		return 0
-	}
-	if transport.proven != nil {
-		// Proven by session_proof: no auth_session round on v2.
-		s.recordOutboundAuthSuccess(address, pc.RemoteAddr())
-	} else if strings.TrimSpace(welcome.Challenge) != "" {
-		authLine, err := protocol.MarshalFrameLine(protocol.Frame{
-			Type:      "auth_session",
-			Address:   s.identity.Address,
-			Signature: identity.SignPayload(s.identity, protocol.SessionAuthPayload(welcome.Challenge, s.identity.Address)),
-		})
-		if err != nil {
-			log.Warn().Err(err).Str("peer", string(address)).Msg("sync_peer_auth_marshal_failed")
-			return 0
-		}
-		if st := pc.SendRawSyncBlocking([]byte(authLine)); st != netcore.SendOK {
-			log.Warn().Str("peer", string(address)).Str("status", st.String()).Msg("sync_peer_auth_write_failed")
-			return 0
-		}
-		// After auth_session the remote may interleave non-auth frames
-		// BEFORE the auth_ok reply: handleAuthSession runs
-		// trackInboundConnect (which can flush up to a full pending ring
-		// of fire-and-forget frames — default maxPendingFramesPerPeer,
-		// operator-raisable) plus route-sync/announce output before the
-		// caller even enqueues auth_ok. The historical "skip up to 5"
-		// loop broke the recovery dial exactly when it mattered — a
-		// loaded responder with a backlog for us — so the auth wait uses
-		// the same drain-tolerant filtered reader as the contacts/peers
-		// replies (budget syncReplySkipBudget, wall cap
-		// syncReplyDrainCap, ctx-clamped sliding idle deadline).
-		frame, err := readSyncReply(ctx, reader, "auth_ok", skipBudget, refreshSyncDeadline)
-		if err != nil {
-			log.Warn().Err(err).Str("peer", string(address)).Msg("sync_peer_auth_read_failed")
-			return 0
-		}
-		if frame.Type != "auth_ok" {
-			log.Warn().Str("peer", string(address)).Str("type", frame.Type).Str("code", frame.Code).Msg("sync_peer_auth_rejected")
-			return 0
-		}
-		// Outbound convergence success hook: syncPeer is a legacy fresh-
-		// dial path (sender-key recovery, forced refresh) that completes
-		// the same hello → welcome → auth_ok exchange as the managed-
-		// session and raw/bootstrap paths. Without this call, peers
-		// reached only through syncPeer would never get
-		// announce_state=announceable or a trusted advertise triple,
-		// so convergence state would depend on which outbound path
-		// happened to reach the peer.
-		//
-		// pc is the bootstrap *netcore.NetCore wrapper created above; its
-		// RemoteAddr() is the same "host:port" form that the managed-
-		// session path feeds in, so both paths project onto persistedMeta
-		// through one writer.
-		s.recordOutboundAuthSuccess(address, pc.RemoteAddr())
-	}
+	// pc is the bootstrap *netcore.NetCore wrapper created above; its
+	// RemoteAddr() is the same "host:port" form that the managed-session path
+	// feeds in, so both paths project onto persistedMeta through one writer.
+	s.recordOutboundAuthSuccess(address, pc.RemoteAddr())
 	s.learnIdentityFromWelcome(welcome, address)
 	s.peerMu.RLock()
 	syncHealthKey := s.resolveHealthAddress(address)
@@ -1851,14 +1771,11 @@ func scorePeerTargetLocked(health *peerHealth) int64 {
 
 func (s *Service) learnPeerFromFrame(observedAddr string, frame protocol.Frame) {
 	if listenerEnabledFromFrame(frame) {
-		// v12 wire contract: the only authoritative port is
-		// frame.AdvertisePort; hello.Listen carries no truth (host or
-		// port) and must not leak through, even when a legacy / mixed-
-		// network fixture still echoes it. Synthesising from observed
-		// TCP host + AdvertisePort unconditionally guarantees that a
-		// peer behind a NAT port-forward (where the listen port and
-		// advertise port differ) is gossipped under the dialable
-		// advertise_port, never under the legacy listen port. An empty
+		// The only authoritative port is frame.AdvertisePort and the
+		// only authoritative host is the observed TCP host. Synthesising
+		// from the two guarantees that a peer behind a NAT port-forward
+		// (where its bind port and advertise port differ) is gossipped
+		// under the dialable advertise_port. An empty
 		// synthesis result means the observed address is not a
 		// parseable host:port (non-IP transport, malformed wrapper
 		// output) — in that case we skip the announce-learning side-
@@ -1881,30 +1798,33 @@ func (s *Service) learnPeerFromFrame(observedAddr string, frame protocol.Frame) 
 }
 
 // learnWireIdentityKeys is the single validated ingest point for key
-// material carried by handshake frames (hello / welcome). Nothing is
-// cached unless it self-certifies:
+// material carried by handshake frames (hello / welcome). The three keys
+// are learned together, as one self-certifying set, or not at all:
 //
-//   - the signing key must be present, within the length cap, and
-//     fingerprint-match the address (identity.VerifyPublicKeyFingerprint)
-//     — without this gate a hostile (and, on the welcome path,
-//     still-unauthenticated) frame could both store multi-megabyte
-//     strings under arbitrary addresses AND poison a legitimate
-//     sender's cached pubkey with garbage, wedging that sender's DM
-//     verification;
-//   - the box pair is cached only complete AND binding-valid
-//     (VerifyBoxKeyBinding also enforces the 32-byte X25519 size); a
-//     partial or unverifiable pair is dropped, never stored half-way.
+//   - all three fields must be present and within the length cap — every
+//     node at or above MinimumProtocolVersion sends all four identity
+//     fields (session auth requires them), so a frame without the box pair
+//     is not a peer this node learns from;
+//   - the signing key must fingerprint-match the address
+//     (identity.VerifyPublicKeyFingerprint) — without this gate a hostile
+//     (and, on the welcome path, still-unauthenticated) frame could poison
+//     a legitimate sender's cached pubkey with garbage, wedging that
+//     sender's DM verification;
+//   - the box pair must be binding-valid (identity.VerifyBoxKeyBinding,
+//     which also enforces the 32-byte X25519 size). A failed binding takes
+//     the signing key down with it: half a set is never stored.
 //
-// The historical "store whatever fields arrived when the triple is
-// incomplete" behaviour is gone deliberately: every deployed peer sends
-// all four identity fields (session auth requires them), so partial
-// frames are either ancient or hostile — and neither may write to the
-// contact plane. Poisoning an EXISTING entry is impossible through
-// here: a fingerprint-matching pubkey is byte-identical to the cached
-// one, and a binding-valid box pair requires the sender's private
-// signing key.
+// A hello or welcome without identity fields (an RPC / prober hello)
+// carries no address and is a no-op here. Poisoning an EXISTING entry is
+// impossible through this path: a fingerprint-matching pubkey is
+// byte-identical to the cached one, and a binding-valid box pair requires
+// the sender's private signing key.
 func (s *Service) learnWireIdentityKeys(address, pubKey, boxKey, boxSig string) {
-	if address == "" || pubKey == "" {
+	if address == "" {
+		return
+	}
+	if pubKey == "" || boxKey == "" || boxSig == "" {
+		log.Debug().Str("address", address).Msg("wire_identity_keys_incomplete_dropped")
 		return
 	}
 	if len(pubKey) > maxAttachedKeyFieldLen ||
@@ -1917,38 +1837,20 @@ func (s *Service) learnWireIdentityKeys(address, pubKey, boxKey, boxSig string) 
 		log.Warn().Err(err).Str("address", address).Msg("wire_identity_pubkey_rejected")
 		return
 	}
+	if err := identity.VerifyBoxKeyBinding(address, pubKey, boxKey, boxSig); err != nil {
+		log.Warn().Err(err).Str("address", address).Msg("wire_identity_box_binding_rejected")
+		return
+	}
 	s.addKnownPubKey(address, pubKey)
-	if boxKey != "" && boxSig != "" &&
-		identity.VerifyBoxKeyBinding(address, pubKey, boxKey, boxSig) == nil {
-		s.addKnownBoxKey(address, boxKey)
-		s.addKnownBoxSig(address, boxSig)
-	}
+	s.addKnownBoxKey(address, boxKey)
+	s.addKnownBoxSig(address, boxSig)
 	s.notifyIdentityKeysImported(address)
-}
-
-// peerListenAddress extracts the legacy advertised listen address from a
-// hello frame. Returns empty string if the peer does not accept inbound
-// connections OR if the peer is following the v12 wire contract that
-// removes Listen from the wire entirely.
-//
-// NOTE: kept as a test helper for parsing legacy frames (mixed-network
-// fixtures, regression tests for the pre-v12 wire shape). Production
-// code does NOT use this — the announce / gossip path goes through
-// observedAnnounceAddressFromHello, which trusts only the observed TCP
-// host plus the self-reported advertise_port.
-func peerListenAddress(hello protocol.Frame) string {
-	if !listenerEnabledFromFrame(hello) {
-		return ""
-	}
-	return strings.TrimSpace(hello.Listen)
 }
 
 // observedAnnounceAddressFromHello returns the peer address we should gossip
 // to neighbours via announce_peer: observed TCP source host combined with
-// the self-reported advertise_port. Under the v12 wire contract this is
-// the ONLY truth source — hello.Listen carries no authoritative
-// information, neither host nor port, even when a legacy / mixed-network
-// fixture still echoes it.
+// the self-reported advertise_port. These are the ONLY truth sources: the
+// hello carries no host at all.
 //
 // Trust model:
 //   - host — taken from the observed TCP remote address, because it is the
@@ -1957,10 +1859,8 @@ func peerListenAddress(hello protocol.Frame) string {
 //   - port — taken from hello.advertise_port (collapsed to
 //     config.DefaultPeerPort on absent / invalid wire value). The TCP
 //     source port is an ephemeral NAT mapping that no neighbour could
-//     dial into, so it is never used. The legacy hello.Listen port is
-//     intentionally ignored: if a peer behind a NAT port-forward sets
-//     listen=":<bind-port>" but advertise_port=":<external-port>", the
-//     announce path must gossip the externally dialable port, never the
+//     dial into, so it is never used. A peer behind a NAT port-forward
+//     sets advertise_port to its externally dialable port, never its
 //     internal bind port.
 //
 // Returns ("", false) when:
@@ -1988,8 +1888,7 @@ func (s *Service) observedAnnounceAddressFromHello(observedAddr string, hello pr
 }
 
 // synthesiseAdvertisedFromObserved builds a host:port form for the
-// peer's advertised endpoint when hello.Listen is empty (the v12 wire
-// shape). Host is taken from the verified TCP remote so it survives
+// peer's advertised endpoint. Host is taken from the verified TCP remote so it survives
 // even an attacker that lies on the wire; port is the self-reported
 // advertise_port collapsed to DefaultPeerPort on absent/invalid wire
 // value, matching extractAdvertisePort's contract. Returns an empty
@@ -3624,9 +3523,9 @@ const maxConcurrentSenderKeySyncPasses = 3
 // outbound session at all) has no recovery wire in this design —
 // deployed peers do not serve fetch_contacts on their outbound-session
 // dispatcher, so a request sent back over the inbound connection would
-// go unanswered. Such recipients rely on the v27 attached keys or the
-// fan-out; serving fetch_contacts on the peer-session dispatcher is a
-// both-ends protocol addition deferred to the floor-raise era.
+// go unanswered. Such recipients rely on the attached sender keys or the
+// fan-out. Serving fetch_contacts on the peer-session dispatcher would be
+// a both-ends protocol addition; no protocol version implements it yet.
 func (s *Service) triggerSenderKeySyncAsync(prevHop domain.PeerAddress, sender string, ownedSession *peerSession) {
 	// Canonical-format gate on the wire-supplied sender string BEFORE it
 	// can become a map key: a keyless DM frame carries an arbitrary
@@ -3776,7 +3675,7 @@ func (s *Service) runSenderKeySyncPass(prevHop domain.PeerAddress, sender string
 				return
 			}
 			// Already recovered (by an earlier candidate, a parallel
-			// handshake, or a v27 frame that arrived meanwhile)?
+			// handshake, or a DM frame with attached sender keys that arrived meanwhile)?
 			if sender != "" && s.hasSenderPubKey(sender) {
 				log.Info().Str("sender", sender).Msg("sender_key_sync_async_satisfied")
 				return
@@ -4081,15 +3980,17 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *
 
 		stored, _, errCode := s.storeIncomingMessage(msg, true)
 		if !stored && errCode == protocol.ErrCodeUnknownSenderKey {
-			// Legacy keyless frame — schedule a BACKGROUND single-flight
-			// contact sync and reject this attempt. Running the recovery
-			// inline here blocked the session event loop for the whole
-			// dial (up to syncRecoveryTimeout with the drain-tolerant
-			// reader) while the socket reader kept filling the bounded
-			// inboxCh — overflow there is fatal and tore down a healthy
-			// session precisely on the legacy/keyless route. No
-			// ack_delete goes out for this store result, so the sender's
-			// retry redelivers the message once the keys are imported.
+			// Keyless frame for an unknown sender (see
+			// attachKnownSenderKeys for why one still arrives) — schedule
+			// a BACKGROUND single-flight contact sync and reject this
+			// attempt. Running the recovery inline here blocked the
+			// session event loop for the whole dial (up to
+			// syncRecoveryTimeout with the drain-tolerant reader) while
+			// the socket reader kept filling the bounded inboxCh —
+			// overflow there is fatal and tore down a healthy session
+			// precisely on the keyless route. No ack_delete goes out for
+			// this store result, so the sender's retry redelivers the
+			// message once the keys are imported.
 			log.Info().
 				Str("peer", string(address)).
 				Str("id", string(msg.ID)).
@@ -4696,27 +4597,37 @@ func (s *Service) hasOutboundSessionForInbound(address domain.PeerAddress) bool 
 // penalizeOldProtocolPeer applies a score penalty and accumulates ban score
 // for a peer whose protocol version is below MinimumProtocolVersion. The
 // penalty increments towards the ban threshold — on the 4th incompatible
-// attempt the peer gets banned for peerBanIncompatible (24 h).
+// attempt the peer gets banned for peerBanIncompatible (24 h). While that ban
+// runs, further observations update the diagnostics only: the window is fixed
+// once armed (incompatibleBanActiveLocked).
 //
 // peerVersion and peerMinimum carry the remote peer's version evidence
 // when available (from the wire error frame or welcome); pass 0 when unknown.
-func (s *Service) penalizeOldProtocolPeer(address domain.PeerAddress, peerVersion, peerMinimum domain.ProtocolVersion) {
+// clientVersion is the client version the refused frame announced; a blank
+// one is "not announced" and never overwrites a known version (as in
+// addPeerVersion). It is stored in peerVersions in the same peerMu section and
+// under the same resolved health key the persisted lockout and the health
+// delta read: on a refused handshake nothing else records it.
+func (s *Service) penalizeOldProtocolPeer(address domain.PeerAddress, peerVersion, peerMinimum domain.ProtocolVersion, clientVersion domain.ClientVersion) {
 	log.Trace().Str("site", "penalizeOldProtocolPeer").Str("phase", "lock_wait").Str("address", string(address)).Msg("peer_mu_writer")
 	s.peerMu.Lock()
 	log.Trace().Str("site", "penalizeOldProtocolPeer").Str("phase", "lock_held").Str("address", string(address)).Msg("peer_mu_writer")
 	address = s.resolveHealthAddress(address)
 	health := s.ensurePeerHealthLocked(address)
+	if trimmed := strings.TrimSpace(string(clientVersion)); trimmed != "" {
+		s.peerVersions[address] = trimmed
+	}
 
 	// Machine-readable error codes. A pre-handshake incompatible reject
 	// supersedes any prior post-handshake disconnect code — keeping an old
 	// LastDisconnectCode (e.g. "frame-too-large") alongside the new
 	// LastErrorCode ("incompatible-protocol-version") creates a mixed
 	// diagnostic snapshot that misrepresents the peer's current state.
+	now := time.Now().UTC()
 	health.LastErrorCode = protocol.ErrCodeIncompatibleProtocol
 	health.LastError = "protocol version too old"
 	health.LastDisconnectCode = ""
-	health.IncompatibleVersionAttempts++
-	health.LastIncompatibleVersionAt = time.Now().UTC()
+	health.LastIncompatibleVersionAt = now
 
 	// Store observed version evidence for diagnostics.
 	if peerVersion > 0 {
@@ -4726,57 +4637,14 @@ func (s *Service) penalizeOldProtocolPeer(address domain.PeerAddress, peerVersio
 		health.ObservedPeerMinimumVersion = peerMinimum
 	}
 
-	// Accumulating overlay-level penalty: each incompatible attempt
-	// adds peerScoreOldProtocol to the peer quality score.
-	health.Score = clampScore(health.Score + peerScoreOldProtocol)
-	health.ConsecutiveFailures++
-
-	// Accumulating ban: peerBanIncrementIncompatible per attempt,
-	// ban activates when cumulative penalty reaches the overlay ban threshold.
-	overlayPenalty := int(health.IncompatibleVersionAttempts) * peerBanIncrementIncompatible
-	if overlayPenalty >= peerBanThresholdIncompatible {
-		bannedUntil := time.Now().UTC().Add(peerBanIncompatible)
-		health.BannedUntil = bannedUntil
-
-		// Propagate ban to the IP level so that other ports on the same
-		// host are also excluded from dial candidates.
-		//
-		// bannedIPSet lives in the IP/advertise domain; nest s.ipStateMu
-		// inside the already-held s.peerMu per the canonical peerMu →
-		// ipStateMu order documented in docs/locking.md.  s.peers is
-		// peer-domain so the sibling enumeration stays outside the
-		// ipStateMu window — the map write is the only ipState
-		// mutation here.
-		if ip, _, ok := splitHostPort(string(address)); ok {
-			var affected []domain.PeerAddress
-			for _, p := range s.peers {
-				if pIP, _, ok2 := splitHostPort(string(p.Address)); ok2 && pIP == ip {
-					affected = append(affected, p.Address)
-				}
-			}
-			s.ipStateMu.Lock()
-			s.bannedIPSet[ip] = domain.BannedIPEntry{
-				IP:            ip,
-				BannedUntil:   bannedUntil,
-				BanOrigin:     address,
-				BanReason:     "incompatible_protocol",
-				AffectedPeers: affected,
-			}
-			s.ipStateMu.Unlock()
-		}
-
-		log.Info().
+	if incompatibleBanActiveLocked(health, now) {
+		log.Debug().
 			Str("peer", string(address)).
-			Time("banned_until", bannedUntil).
-			Int("attempts", int(health.IncompatibleVersionAttempts)).
-			Msg("peer_banned_incompatible_protocol")
+			Time("incompatible_ban_until", health.IncompatibleBanUntil).
+			Time("banned_until", health.BannedUntil).
+			Msg("peer_incompatible_version_inside_ban")
 	} else {
-		log.Info().
-			Str("peer", string(address)).
-			Int("attempts", int(health.IncompatibleVersionAttempts)).
-			Int("overlay_penalty", overlayPenalty).
-			Int("threshold", peerBanThresholdIncompatible).
-			Msg("peer_incompatible_version_penalty_accumulated")
+		s.accumulateIncompatiblePenaltyLocked(address, health, now)
 	}
 
 	// Record observation for node-owned update policy and set persisted
@@ -4791,7 +4659,6 @@ func (s *Service) penalizeOldProtocolPeer(address domain.PeerAddress, peerVersio
 	//                the observation must NOT feed the reporter set —
 	//                otherwise old peers connecting to us would incorrectly
 	//                trigger the "you need to upgrade" signal.
-	now := time.Now().UTC()
 	if peerMinimum > domain.ProtocolVersion(config.ProtocolVersion) {
 		peerID := s.peerIDs[address]
 		// statusMu guards s.versionPolicy for both
@@ -4822,6 +4689,108 @@ func (s *Service) penalizeOldProtocolPeer(address domain.PeerAddress, peerVersio
 	s.deliveryMu.RUnlock()
 	s.peerMu.Unlock()
 	log.Trace().Str("site", "penalizeOldProtocolPeer").Str("phase", "lock_released").Str("address", string(address)).Msg("peer_mu_writer")
+}
+
+// incompatibleBanActiveLocked reports whether the ban penalizeOldProtocolPeer
+// armed for this peer is still running. health is peer-domain state: the
+// caller holds s.peerMu (penalizeOldProtocolPeer holds it for write). Inside it a further observation carries no
+// new evidence — the peer is the same old peer — and callers can meet it
+// again: an inbound hello the IP blacklist has not caught yet, a recovery
+// dial. (The notice dial skips a banned address or host, but the rule does
+// not rely on any caller's gate.)
+// Accumulating each one would slide the 24 h window, and the IP-wide ban with
+// it, forward for as long as the old peer stays reachable. The accumulators
+// follow the first-observation rule of applySelfIdentityCooldown, and here
+// the window itself is fixed once armed as well.
+//
+// The window is the one recorded when the ban was armed
+// (IncompatibleBanUntil), not BannedUntil: the self-identity cooldown writes
+// BannedUntil too, and a cooldown that lands after the incompatible-version
+// ban ran out must not silence the next incompatible observation.
+func incompatibleBanActiveLocked(health *peerHealth, now time.Time) bool {
+	return now.Before(health.IncompatibleBanUntil)
+}
+
+// restoredIncompatibleBanUntil derives IncompatibleBanUntil for a health
+// record loaded from disk, where only the evidence is persisted: a running
+// BannedUntil whose last error is the incompatible version and whose attempt
+// count reached the ban threshold is that ban. The window is deliberately not
+// persisted, and the derivation is inexact in both directions, each bounded
+// to one window:
+//   - underestimate: a self-identity cooldown overwrote the last error during
+//     the ban, so the record restores with no running incompatible-version
+//     ban and the next incompatible observation re-arms it once (one slide);
+//   - overestimate: a self-identity cooldown extended BannedUntil from T1 to
+//     T2 > T1 and a later incompatible observation put the last error back,
+//     so the window restores as T2 — the IP-wide entry still expires at T1,
+//     and observations up to T2 are not counted.
+func restoredIncompatibleBanUntil(health *peerHealth) time.Time {
+	armed := int(health.IncompatibleVersionAttempts)*peerBanIncrementIncompatible >= peerBanThresholdIncompatible
+	if !armed || health.LastErrorCode != protocol.ErrCodeIncompatibleProtocol {
+		return time.Time{}
+	}
+	return health.BannedUntil
+}
+
+// accumulateIncompatiblePenaltyLocked counts one incompatible observation
+// outside a running ban: score, failure streak and the overlay penalty, and
+// once the penalty reaches the threshold a peerBanIncompatible ban of the
+// address and of its IP.
+//
+// Caller holds s.peerMu (write); s.ipStateMu is taken nested inside it, in
+// the canonical peerMu → ipStateMu order.
+func (s *Service) accumulateIncompatiblePenaltyLocked(address domain.PeerAddress, health *peerHealth, now time.Time) {
+	health.IncompatibleVersionAttempts++
+
+	// Accumulating overlay-level penalty: each incompatible attempt
+	// adds peerScoreOldProtocol to the peer quality score.
+	health.Score = clampScore(health.Score + peerScoreOldProtocol)
+	health.ConsecutiveFailures++
+
+	// Accumulating ban: peerBanIncrementIncompatible per attempt,
+	// ban activates when cumulative penalty reaches the overlay ban threshold.
+	overlayPenalty := int(health.IncompatibleVersionAttempts) * peerBanIncrementIncompatible
+	if overlayPenalty < peerBanThresholdIncompatible {
+		log.Info().
+			Str("peer", string(address)).
+			Int("attempts", int(health.IncompatibleVersionAttempts)).
+			Int("overlay_penalty", overlayPenalty).
+			Int("threshold", peerBanThresholdIncompatible).
+			Msg("peer_incompatible_version_penalty_accumulated")
+		return
+	}
+	bannedUntil := now.Add(peerBanIncompatible)
+	health.BannedUntil = bannedUntil
+	health.IncompatibleBanUntil = bannedUntil
+
+	// Propagate ban to the IP level so that other ports on the same
+	// host are also excluded from dial candidates.
+	//
+	// s.peers is peer-domain so the sibling enumeration stays outside the
+	// ipStateMu window — the map write is the only ipState mutation here.
+	if ip, _, ok := splitHostPort(string(address)); ok {
+		var affected []domain.PeerAddress
+		for _, p := range s.peers {
+			if pIP, _, ok2 := splitHostPort(string(p.Address)); ok2 && pIP == ip {
+				affected = append(affected, p.Address)
+			}
+		}
+		s.ipStateMu.Lock()
+		s.bannedIPSet[ip] = domain.BannedIPEntry{
+			IP:            ip,
+			BannedUntil:   bannedUntil,
+			BanOrigin:     address,
+			BanReason:     "incompatible_protocol",
+			AffectedPeers: affected,
+		}
+		s.ipStateMu.Unlock()
+	}
+
+	log.Info().
+		Str("peer", string(address)).
+		Time("banned_until", bannedUntil).
+		Int("attempts", int(health.IncompatibleVersionAttempts)).
+		Msg("peer_banned_incompatible_protocol")
 }
 
 // markPeerStateInterval is the minimum interval between full state
@@ -5077,6 +5046,8 @@ func (s *Service) ensurePeerHealthLocked(address domain.PeerAddress) *peerHealth
 //   - ObservedPeerVersion, ObservedPeerMinimumVersion — stale version evidence
 //   - ConsecutiveFailures, LastDisconnectedAt — exponential cooldown inputs
 //   - BannedUntil — address-level ban
+//   - IncompatibleBanUntil — the incompatible-version ban window, so a
+//     recovered peer's next incompatible observation counts again
 //   - Score floor to 0 — neutralises stale peerScoreOldProtocol penalties
 //     without inflating peers that already have positive scores
 //
@@ -5093,6 +5064,7 @@ func resetPeerHealthForRecoveryLocked(h *peerHealth) {
 	h.ConsecutiveFailures = 0
 	h.LastDisconnectedAt = time.Time{}
 	h.BannedUntil = time.Time{}
+	h.IncompatibleBanUntil = time.Time{}
 	if h.Score < 0 {
 		h.Score = 0
 	}
@@ -6605,16 +6577,6 @@ func isNonRoutableIP(ip net.IP) bool {
 // guard applies only to the auto-learning / announce path.
 func isForbiddenAdvertisedIP(ip net.IP) bool {
 	return isNonRoutableIP(ip)
-}
-
-// isUnspecifiedIPHost reports whether the host string parses as the
-// IPv4/IPv6 wildcard bind (0.0.0.0 or ::). Text-based companion to
-// net.IP.IsUnspecified for call sites (advertise convergence) that
-// work on host strings and must stay off the `net` import so the
-// §2.9 Gate 12 whitelist does not grow.
-func isUnspecifiedIPHost(host string) bool {
-	ip := net.ParseIP(strings.TrimSpace(host))
-	return ip != nil && ip.IsUnspecified()
 }
 
 // isNonRoutableIPHost parses host as an IP and reports whether it is

@@ -99,7 +99,7 @@ func (t *Table) MarkHopAck(identity, uplink PeerIdentity, rtt time.Duration) {
 //     Source to RouteSourceHopAck if it was below that tier.
 //
 // PR 11.12 P2#1.2 (atomicity fix): the prior split design called
-// Table.InspectTriple → Table.MarkHopAck → Table.UpdateRoute as
+// Table.InspectUplinkClaim → Table.MarkHopAck → Table.UpdateRoute as
 // three independent Lock acquisitions. Between the first and the
 // second, another writer could withdraw / TickTTL-expire / cap-
 // evict the storage claim, but MarkHopAck would still proceed and
@@ -140,7 +140,7 @@ func (t *Table) ConfirmHopAck(identity, uplink PeerIdentity, rtt time.Duration) 
 	// Raw storage lookup — unfiltered, sees withdrawn/expired
 	// entries explicitly. The store-level method is *Locked-like
 	// (no internal mutex), safe to call inside t.mu.
-	entry := t.store.InspectTriple(RouteTriple{Identity: identity, NextHop: uplink})
+	entry := t.store.InspectUplinkClaim(identity, uplink)
 	if entry == nil {
 		return RouteRejected, false
 	}
@@ -271,7 +271,7 @@ func (t *Table) MarkProbeAck(identity, uplink PeerIdentity, reachable bool, rtt 
 		// reachable=true bullet above for the verify-before-trust
 		// bypass that would otherwise occur on a late ack after
 		// TickTTL / cap-eviction.
-		entry := t.store.InspectTriple(RouteTriple{Identity: identity, NextHop: uplink})
+		entry := t.store.InspectUplinkClaim(identity, uplink)
 		if entry == nil || entry.IsWithdrawn() || entry.IsExpired(now) {
 			return
 		}
@@ -385,13 +385,13 @@ func (t *Table) MarkHopFailure(identity, uplink PeerIdentity) {
 	defer t.mu.Unlock()
 
 	// Storage check: absent / withdrawn / expired claim → no-op.
-	// The raw InspectTriple call mirrors ConfirmHopAck's anti-
+	// The raw InspectUplinkClaim call mirrors ConfirmHopAck's anti-
 	// orphan pattern (PR 11.12 P2#1.2): we inspect storage
 	// explicitly so a timeout fired against a route that has
 	// already been withdrawn or aged out does not register a
 	// failure against a peer who is no longer carrying the route
 	// for us.
-	entry := t.store.InspectTriple(RouteTriple{Identity: identity, NextHop: uplink})
+	entry := t.store.InspectUplinkClaim(identity, uplink)
 	if entry == nil {
 		return
 	}

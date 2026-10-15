@@ -42,14 +42,17 @@ func TestFrameCapabilitiesDeserialization(t *testing.T) {
 	}
 }
 
+// The hello carries no version on purpose: whether capabilities decode as
+// absent does not depend on it, and a hard-coded number would only drift
+// below the floor.
 func TestFrameWithoutCapabilitiesFieldDeserializes(t *testing.T) {
-	raw := `{"type":"hello","version":3}`
+	raw := `{"type":"hello"}`
 	var frame Frame
 	if err := json.Unmarshal([]byte(raw), &frame); err != nil {
 		t.Fatal(err)
 	}
 	if frame.Capabilities != nil {
-		t.Fatalf("expected nil capabilities for legacy frame, got %v", frame.Capabilities)
+		t.Fatalf("expected nil capabilities for a hello without the field, got %v", frame.Capabilities)
 	}
 }
 

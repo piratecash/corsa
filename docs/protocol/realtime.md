@@ -2,7 +2,7 @@
 
 ## Overview
 
-The realtime delivery system enables low-latency message and receipt delivery between peers in the Corsa network. The inbox subscription is folded into authentication: the responder registers the authenticated peer's inbox route and replays its backlog at `auth_ok` (`registerHelloRoute` + `pushBacklogToSubscriber`). There is no explicit subscription command on the wire — the legacy `subscribe_inbox`/`subscribed`/`request_inbox` exchange was removed when `MinimumProtocolVersion` reached 20.
+The realtime delivery system enables low-latency message and receipt delivery between peers in the Corsa network. The inbox subscription is folded into authentication: the responder registers the authenticated peer's inbox route and replays its backlog at `auth_ok` (`registerHelloRoute` + `pushBacklogToSubscriber`). There is no explicit subscription command on the wire.
 
 ## Core Concepts
 
@@ -21,12 +21,6 @@ sessions; gossip guarantees mesh-wide propagation regardless.
 - Backlog replay is ordered strictly after `auth_ok` on the same connection
 - Backlog replay is serialized per connection to ensure ordering
 - Acknowledgements (ack_delete) remove items from backlog after delivery
-
-History note: before ProtocolVersion 20 the subscription was an explicit
-symmetric `subscribe_inbox`/`subscribed` exchange (with a `request_inbox`
-pull-only predecessor). Those commands were removed from the wire protocol
-entirely once `MinimumProtocolVersion` reached 20; peers below the floor are
-rejected at handshake.
 
 ### Topics
 
@@ -103,7 +97,7 @@ sequenceDiagram
 - `item.sender` - Fingerprint of message sender
 - `item.recipient` - Fingerprint of message recipient
 - `item.body` - End-to-end encrypted message content (base64url encoded)
-- `pubkey` / `boxkey` / `boxsig` - Optional (ProtocolVersion 27): the origin sender's self-certifying PUBLIC key triple, attached to DM-class pushes (live push, backlog replay, mesh gossip fan-out) so a first-contact receiver can verify the envelope without a contact sync round-trip. Validation and trust model are documented in [relay.md](relay.md) ("Self-certifying sender keys"); the fields are ignored by pre-v27 receivers.
+- `pubkey` / `boxkey` / `boxsig` - Optional (ProtocolVersion 27): the origin sender's self-certifying PUBLIC key triple, attached to DM-class pushes (live push, backlog replay, mesh gossip fan-out) so a first-contact receiver can verify the envelope without a contact sync round-trip. Validation and trust model are documented in [relay.md](relay.md) ("Self-certifying sender keys"). Attachment is best-effort: a node attaches only the keys its bounded knowledge maps still hold, so a replayed or fanned-out push can arrive keyless, and the receiver then schedules the background key sync.
 
 **Sending triggers:**
 - New message arrives at the serving node for a subscribed recipient
@@ -385,7 +379,7 @@ sequenceDiagram
 
 ## Обзор
 
-Система доставки в реальном времени обеспечивает низколатентную доставку сообщений и подтверждений между узлами сети Corsa. Подписка на inbox свёрнута в аутентификацию: отвечающая сторона регистрирует inbox-маршрут аутентифицированного пира и реплеит его историю на `auth_ok` (`registerHelloRoute` + `pushBacklogToSubscriber`). Явной команды подписки на проводе нет — легаси-обмен `subscribe_inbox`/`subscribed`/`request_inbox` удалён, когда `MinimumProtocolVersion` достиг 20.
+Система доставки в реальном времени обеспечивает низколатентную доставку сообщений и подтверждений между узлами сети Corsa. Подписка на inbox свёрнута в аутентификацию: отвечающая сторона регистрирует inbox-маршрут аутентифицированного пира и реплеит его историю на `auth_ok` (`registerHelloRoute` + `pushBacklogToSubscriber`). Явной команды подписки на проводе нет.
 
 ## Основные концепции
 
@@ -405,11 +399,6 @@ sequenceDiagram
 - Replay истории упорядочен строго после `auth_ok` на том же соединении
 - Replay истории сериализуется на каждое соединение для обеспечения порядка
 - Подтверждения (ack_delete) удаляют элементы из истории после доставки
-
-Историческая справка: до ProtocolVersion 20 подписка была явным симметричным
-обменом `subscribe_inbox`/`subscribed` (с pull-предшественником
-`request_inbox`). Эти команды полностью удалены из wire-протокола, когда
-`MinimumProtocolVersion` достиг 20; пиры ниже порога отклоняются на handshake.
 
 ### Топики
 
@@ -487,7 +476,7 @@ sequenceDiagram
 - `item.sender` - Отпечаток отправителя сообщения
 - `item.recipient` - Отпечаток получателя сообщения
 - `item.body` - Зашифрованное сквозным шифрованием содержимое сообщения (base64url кодирование)
-- `pubkey` / `boxkey` / `boxsig` - Необязательные (ProtocolVersion 27): самоцертифицируемая ПУБЛИЧНАЯ ключевая тройка исходного отправителя, вкладывается в DM-пуши (живой push, replay истории, gossip-рассылка), чтобы получатель-первоконтакт мог проверить конверт без сетевого запроса контактов. Модель проверки и доверия описана в [relay.md](relay.md) («Самоцертифицируемые ключи отправителя»); pre-v27-получатели игнорируют эти поля.
+- `pubkey` / `boxkey` / `boxsig` - Необязательные (ProtocolVersion 27): самоцертифицируемая ПУБЛИЧНАЯ ключевая тройка исходного отправителя, вкладывается в DM-пуши (живой push, replay истории, gossip-рассылка), чтобы получатель-первоконтакт мог проверить конверт без сетевого запроса контактов. Модель проверки и доверия описана в [relay.md](relay.md) («Самоцертифицируемые ключи отправителя»). Вложение best-effort: узел вкладывает только те ключи, что ещё лежат в его ограниченных knowledge-картах, поэтому push из replay или gossip-рассылки может прийти без ключей — тогда получатель планирует фоновую синхронизацию ключей.
 
 **Триггеры отправки:**
 - Новое сообщение прибывает на обслуживающий узел для подписанного получателя

@@ -92,7 +92,11 @@ Each entry:
   self-attestation entry stream of Identity == localIdentity, per-
   emitter SeqNo, anchor metadata in `Extra`), the intersection
   becomes non-empty against any peer that also advertises the cap
-  and the verifier engages without further wiring. Until then the
+  and the verifier engages without further wiring. The
+  self-attestation stream itself needs receive wiring: on its first
+  hop the entry's `Identity` is its sender, which receivers refuse
+  (`announce_rejected_self_announcement`) because the only slot it
+  could land in is their own Direct claim `(sender, sender)`. Until then the
   only way to exercise the verifier path is the synthetic unit-test
   fixtures in `routing_announce_v3_attest_test.go` that wire the cap
   directly onto a test session. See "Capability negotiation" below
@@ -121,8 +125,11 @@ Implementation: `handleRouteAnnounceV3` in
 `internal/core/node/routing_announce.go`. The handler synthesises
 `Origin = senderIdentity` for every entry and feeds the result through
 the existing `applyAnnounceEntries` pipeline (own-origin forgery guard,
-transit-withdrawal authority, UpdateRoute / WithdrawRoute dispatch,
-drain trigger), so trust classification and per-entry validation reuse
+foreign-Origin refusal — which the synthesised Origin passes by
+construction — and transit-withdrawal authority, self-announcement
+refusal for an entry whose `identity` is the sender itself
+(`announce_rejected_self_announcement`, live or withdrawal),
+UpdateRoute / WithdrawRoute dispatch, drain trigger), so trust classification and per-entry validation reuse
 the legacy receive path exactly.
 
 #### Epoch handling
@@ -320,7 +327,12 @@ sender) SeqNo-монотонность — overview §4.3).
   entry stream Identity == localIdentity, per-emitter SeqNo, anchor
   metadata в `Extra`), пересечение стало непустым против любого
   peer'а, тоже advertise'ящего cap, и verifier engaged без
-  дополнительной wiring. До тех пор единственный способ exercise
+  дополнительной wiring. Самому self-attestation потоку wiring на
+  приёме всё же нужен: на первом hop'е `Identity` записи — её
+  отправитель, а такую запись получатели отвергают
+  (`announce_rejected_self_announcement`), потому что единственный
+  слот, куда она могла бы попасть, — их собственный Direct claim
+  `(sender, sender)`. До тех пор единственный способ exercise
   verifier-пути — synthetic unit-test фикстуры в
   `routing_announce_v3_attest_test.go`, которые wires cap напрямую
   на test session. См. «Negotiation capability» ниже про trust
@@ -348,8 +360,11 @@ negotiated (зеркало v2-правила): v1 гейтит legacy-fallback, 
 `internal/core/node/routing_announce.go`. Handler синтезирует
 `Origin = senderIdentity` для каждого entry и прогоняет результат
 через существующий `applyAnnounceEntries` (own-origin forgery guard,
-transit-withdrawal authority, UpdateRoute/WithdrawRoute dispatch,
-drain trigger), переиспользуя legacy-receive-путь как есть.
+отказ foreign-Origin — синтезированный Origin проходит его по
+построению — и transit-withdrawal authority, отказ self-announcement
+для entry, чья `identity` — сам отправитель
+(`announce_rejected_self_announcement`, live или withdrawal),
+UpdateRoute/WithdrawRoute dispatch, drain trigger), переиспользуя legacy-receive-путь как есть.
 
 #### Обработка epoch
 

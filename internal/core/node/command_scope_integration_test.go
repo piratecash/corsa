@@ -43,7 +43,6 @@ func authenticatedConn(t *testing.T, svc *Service) (net.Conn, *bufio.Reader, *id
 		PubKey:                 identity.PublicKeyBase64(id.PublicKey),
 		BoxKey:                 identity.BoxPublicKeyBase64(id.BoxPublicKey),
 		BoxSig:                 identity.SignBoxKeyBinding(id),
-		Listen:                 "10.0.0.99:64646",
 	})
 	welcome := readJSONTestFrame(t, reader)
 	if welcome.Type != "welcome" || welcome.Challenge == "" {
@@ -526,7 +525,6 @@ func TestGAP0_MobileClientCannotBypassAuth(t *testing.T) {
 		Client:                 "mobile",
 		ClientVersion:          "1.0",
 		Address:                "fake-attacker-address",
-		Listen:                 "10.0.0.99:64646",
 		Capabilities:           []string{"mesh_relay_v1"},
 	})
 	welcome := readJSONTestFrame(t, reader)

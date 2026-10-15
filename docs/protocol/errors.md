@@ -46,9 +46,10 @@ socket goes away. It mirrors the error frame shape but adds `status` and
 The initiator should treat `connection_notice` as informational: record
 the `details`, then expect the socket to close. Status codes surfaced
 through `connection_notice` are listed under "Connection Notice Codes"
-below. The historical `observed-address-mismatch` notice was removed in
-the v12 cleanup phase; current builds emit only `peer-banned` notices
-on this transport-control frame type.
+below. Current builds emit only `peer-banned` notices on this
+transport-control frame type; a notice with any other code (for example
+the `observed-address-mismatch` that no supported version sends) is
+ignored by the receiver.
 
 ## Error Code Reference
 
@@ -191,10 +192,10 @@ Action: Synchronize system clock (NTP) and retry
 
 **Scenario 3: Old client version**
 ```
-Client sends hello with version=1
-Server minimum_protocol_version=2
-Server returns: incompatible-protocol-version (version=1, minimum_protocol_version=2)
-Action: Upgrade client software to protocol version 2 or newer
+Client sends hello with version=27
+Server minimum_protocol_version=28
+Server returns: incompatible-protocol-version (the frame carries the server's own range: version=31, minimum_protocol_version=28)
+Action: Upgrade client software to protocol version 28 or newer
 ```
 
 **Scenario 4: Excessive requests from IP**
@@ -321,9 +322,10 @@ graph TB
 Инициатор должен рассматривать `connection_notice` как информационный:
 записать `details`, затем ожидать закрытия сокета. Коды статусов,
 передаваемые через `connection_notice`, перечислены ниже в секции
-«Коды connection_notice». Исторический `observed-address-mismatch`
-notice удалён в фазе v12 cleanup; текущие сборки эмитят на этом
-transport-control фрейме только `peer-banned`.
+«Коды connection_notice». Текущие сборки эмитят на этом
+transport-control фрейме только `peer-banned`; notice с любым другим
+кодом (например, `observed-address-mismatch`, который не шлёт ни одна
+поддерживаемая версия) получатель игнорирует.
 
 ## Справочник кодов ошибок
 
@@ -466,10 +468,10 @@ transport-control фрейме только `peer-banned`.
 
 **Сценарий 3: Старая версия клиента**
 ```
-Клиент отправляет hello с version=1
-minimum_protocol_version сервера=2
-Сервер возвращает: incompatible-protocol-version (version=1, minimum_protocol_version=2)
-Действие: Обновите программное обеспечение клиента до протокола версии 2 или новее
+Клиент отправляет hello с version=27
+minimum_protocol_version сервера=28
+Сервер возвращает: incompatible-protocol-version (фрейм несёт собственный диапазон сервера: version=31, minimum_protocol_version=28)
+Действие: Обновите программное обеспечение клиента до протокола версии 28 или новее
 ```
 
 **Сценарий 4: Чрезмерные запросы с IP**

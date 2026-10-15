@@ -86,6 +86,28 @@ func TestBadHopsHysteresis_ArmsAndDropsAfterBudget(t *testing.T) {
 	}
 }
 
+// The hold-down trigger names the uplink whose claim armed it — the
+// direct peer an operator can act on — not the frame's wire Origin,
+// which storage does not keep.
+func TestBadHopsHysteresis_TriggerNamesUplink(t *testing.T) {
+	tbl, _ := hysteresisFixture()
+	dest, uplink := domaintest.ID("dest"), domaintest.ID("u-1")
+
+	for seq := uint64(1); seq <= 4; seq++ {
+		ingestBadHops(t, tbl, dest, uplink, seq)
+	}
+	if tbl.CapStats().BadHopsHoldowns != 1 {
+		t.Fatal("setup: hold-down must be armed")
+	}
+
+	tbl.mu.Lock()
+	trigger := tbl.flap.badHops[dest].trigger
+	tbl.mu.Unlock()
+	if trigger != uplink {
+		t.Fatalf("hold-down trigger = %s, want the uplink %s", trigger, uplink)
+	}
+}
+
 // TestBadHopsHysteresis_SaneRecoveryPassesDuringHoldDown pins the
 // safety property that makes the hysteresis safe to enable by
 // default: hold-down suppresses only Hops > MaxSaneHops claims. A

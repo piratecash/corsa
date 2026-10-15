@@ -156,7 +156,7 @@ type routeStore struct {
 	// kept its TTL refreshed (28 510 health entries against 3 585
 	// claims on a five-day relay, Sep 2026).
 	//
-	// Tombstoning (WithdrawTriple, InvalidateAllVia,
+	// Tombstoning (WithdrawUplinkClaim, InvalidateAllVia,
 	// InvalidateTransitVia) is NOT a drop: the withdrawn claim still
 	// occupies its slot, and the hook fires when TTL compacts it.
 	// The tombstone-promotion detach/re-append in ApplyUpdate is
@@ -173,7 +173,7 @@ type routeStore struct {
 
 	// defaultTTL is the route lifetime applied to learned entries
 	// whose caller did not set ExpiresAt, and to tombstones created
-	// by WithdrawTriple / InvalidateAllVia / InvalidateTransitVia.
+	// by WithdrawUplinkClaim / InvalidateAllVia / InvalidateTransitVia.
 	// Mirrored from Table.defaultTTL by the WithDefaultTTL option.
 	defaultTTL time.Duration
 
@@ -570,11 +570,8 @@ func (s *routeStore) forgetReceiverLocked(peer PeerIdentity) {
 // from the caller (which lives in the same file as the storage
 // type).
 //
-// Phase A dedup key: (Identity, Uplink) — Origin was dropped
-// when the per-uplink storage shape replaced the RouteTriple.
-// Boundary callers that come in with RouteTriple (WithdrawRoute /
-// InspectTriple) project to (Identity, NextHop) and pass NextHop
-// as uplink here.
+// Dedup key: (Identity, Uplink). Boundary callers pass the
+// claim's NextHop as uplink here.
 //
 // Package-private and used only inside route_store_*.go. Caller
 // must hold t.mu (reader OK for lookup; writer if the caller
@@ -679,9 +676,8 @@ func (s *routeStore) CountActive(now time.Time) int {
 // localOrigin (with fallback to Identity when localOrigin is
 // empty — test fixtures without WithLocalOrigin). This matches
 // the wire-emit contract used by AnnounceProjectionFor /
-// InvalidateAllVia and keeps pre-A1 receivers' withdrawal anti-
-// spoof working through the mixed rollout. See uplink_claim.go
-// for the migration contract rationale.
+// InvalidateAllVia (Origin == sender, which receivers require of
+// a withdrawal). See uplink_claim.go.
 //
 // Caller must hold t.mu (reader OK).
 func (s *routeStore) SnapshotRoutes(now time.Time) (routes map[PeerIdentity][]RouteEntry, total int, active int) {

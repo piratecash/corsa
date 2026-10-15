@@ -68,7 +68,7 @@ type persistedTransferEntry struct {
 	// restart so that the epoch counter remains strictly monotonic across
 	// process lifetimes — otherwise a post-restart re-download could
 	// collide with a still-live stale file_downloaded from a prior run.
-	// Omitted when zero (legacy / never served).
+	// Omitted when zero (no run recorded).
 	ServingEpoch uint64 `json:"serving_epoch,omitempty"`
 }
 

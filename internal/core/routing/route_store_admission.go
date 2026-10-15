@@ -36,7 +36,7 @@ import "time"
 //     (Identity, Uplink) pair) and live alongside the K-live
 //     slots until TickTTL reclaims them; they neither compete
 //     with live claims for cap slots nor get displaced to make
-//     room for live admissions. See WithdrawTriple idx<0 and the
+//     room for live admissions. See WithdrawUplinkClaim idx<0 and the
 //     convergence section in docs/routing.md.
 //  2. If the Identity bucket has fewer than maxNextHopsPerOrigin
 //     LIVE (non-withdrawn) claims, append unconditionally →

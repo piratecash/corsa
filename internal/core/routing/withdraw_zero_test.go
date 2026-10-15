@@ -16,7 +16,7 @@ func TestWithdrawRouteRejectsZeroIdentity(t *testing.T) {
 	tbl := NewTable(WithLocalOrigin(domaintest.ID("self")))
 
 	var zero PeerIdentity
-	if tbl.WithdrawRoute(zero, domaintest.ID("origin"), domaintest.ID("uplink"), 5) {
+	if tbl.WithdrawRoute(zero, domaintest.ID("uplink"), 5) {
 		t.Fatal("WithdrawRoute(zeroIdentity) must return false (no mutation)")
 	}
 

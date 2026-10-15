@@ -1,13 +1,18 @@
 package filetransfer
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/domain/domaintest"
@@ -77,6 +82,10 @@ func TestSenderStateAnnouncedToServingToCompleted(t *testing.T) {
 	if sentPayloads[0].Command != domain.FileActionChunkResp {
 		t.Errorf("expected chunk_response command, got %s", sentPayloads[0].Command)
 	}
+	var served domain.ChunkResponsePayload
+	if err := json.Unmarshal(sentPayloads[0].Data, &served); err != nil {
+		t.Fatalf("unmarshal chunk_response: %v", err)
+	}
 
 	// Completed mapping holds a ref — set it to match what Acquire produces.
 	store.mu.Lock()
@@ -85,8 +94,9 @@ func TestSenderStateAnnouncedToServingToCompleted(t *testing.T) {
 
 	// 2. HandleFileDownloaded → transitions to Completed and sends ack.
 	// The ref is NOT released — the blob stays on disk for re-downloads.
+	// The receiver echoes the epoch its chunk_response carried.
 	sentPayloads = nil
-	m.HandleFileDownloaded(receiver, domain.FileDownloadedPayload{FileID: fileID})
+	m.HandleFileDownloaded(receiver, domain.FileDownloadedPayload{FileID: fileID, Epoch: served.Epoch})
 
 	if m.senderMaps[fileID].State != senderCompleted {
 		t.Fatalf("after file_downloaded: state = %s, want completed", m.senderMaps[fileID].State)
@@ -310,13 +320,14 @@ func TestSenderIdempotentFileDownloaded(t *testing.T) {
 	completedAt := time.Now().Add(-time.Hour)
 
 	m.senderMaps[fileID] = &senderFileMapping{
-		FileID:      fileID,
-		FileHash:    "hash-x",
-		FileName:    "file.bin",
-		FileSize:    100,
-		Recipient:   receiver,
-		State:       senderCompleted,
-		CompletedAt: completedAt,
+		FileID:       fileID,
+		FileHash:     "hash-x",
+		FileName:     "file.bin",
+		FileSize:     100,
+		Recipient:    receiver,
+		State:        senderCompleted,
+		CompletedAt:  completedAt,
+		ServingEpoch: 3,
 	}
 
 	var acksSent int
@@ -325,8 +336,8 @@ func TestSenderIdempotentFileDownloaded(t *testing.T) {
 		return nil
 	}
 
-	// Send duplicate file_downloaded.
-	m.HandleFileDownloaded(receiver, domain.FileDownloadedPayload{FileID: fileID})
+	// Send duplicate file_downloaded of the completed run.
+	m.HandleFileDownloaded(receiver, domain.FileDownloadedPayload{FileID: fileID, Epoch: 3})
 
 	// Should re-send ack.
 	if acksSent != 1 {
@@ -483,16 +494,17 @@ func TestReceiverFileDownloadedAckTransitionsToCompleted(t *testing.T) {
 	fileID := domain.FileID("waiting-ack-file")
 
 	m.receiverMaps[fileID] = &receiverFileMapping{
-		FileID:    fileID,
-		FileHash:  "hash-wait",
-		FileName:  "doc.pdf",
-		FileSize:  50000,
-		Sender:    sender,
-		State:     receiverWaitingAck,
-		CreatedAt: time.Now(),
+		FileID:       fileID,
+		FileHash:     "hash-wait",
+		FileName:     "doc.pdf",
+		FileSize:     50000,
+		Sender:       sender,
+		State:        receiverWaitingAck,
+		ServingEpoch: 2,
+		CreatedAt:    time.Now(),
 	}
 
-	m.HandleFileDownloadedAck(sender, domain.FileDownloadedAckPayload{FileID: fileID})
+	m.HandleFileDownloadedAck(sender, domain.FileDownloadedAckPayload{FileID: fileID, Epoch: 2})
 
 	mapping := m.receiverMaps[fileID]
 	if mapping.State != receiverCompleted {
@@ -2676,49 +2688,440 @@ func TestSenderHandleFileDownloadedRejectsStaleEpochReplay(t *testing.T) {
 	}
 }
 
-// TestSenderHandleFileDownloadedLegacyZeroEpochAccepted verifies the
-// backwards-compatibility path: a pre-upgrade receiver that cannot stamp
-// an epoch (Epoch=0 on wire) is still accepted, preserving rolling-upgrade
-// wire compatibility.
-func TestSenderHandleFileDownloadedLegacyZeroEpochAccepted(t *testing.T) {
-	var acksSent int
-	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
-		sendCommand: func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error {
-			if payload.Command == domain.FileActionDownloadedAck {
-				acksSent++
+// captureFileTransferLog redirects the package logger into a buffer for the
+// rest of the test. Tests that use it must not call t.Parallel: the logger is
+// process-global, and a parallel test would read it while it is swapped.
+func captureFileTransferLog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var captured bytes.Buffer
+	restore := log.Logger
+	log.Logger = zerolog.New(&captured).Level(zerolog.InfoLevel)
+	t.Cleanup(func() { log.Logger = restore })
+	return &captured
+}
+
+// loggedLineWithMessage decodes the single captured log line whose message
+// contains fragment. A rejection that is not logged, or logged twice, fails.
+func loggedLineWithMessage(t *testing.T, captured *bytes.Buffer, fragment string) map[string]any {
+	t.Helper()
+	var found []map[string]any
+	for _, raw := range strings.Split(strings.TrimSpace(captured.String()), "\n") {
+		if raw == "" {
+			continue
+		}
+		var line map[string]any
+		if err := json.Unmarshal([]byte(raw), &line); err != nil {
+			t.Fatalf("captured log line is not JSON: %v\n%s", err, raw)
+		}
+		if message, _ := line["message"].(string); strings.Contains(message, fragment) {
+			found = append(found, line)
+		}
+	}
+	if len(found) != 1 {
+		t.Fatalf("want exactly one log line containing %q, got %d:\n%s", fragment, len(found), captured.String())
+	}
+	return found[0]
+}
+
+// assertEpochMismatchLogged checks that a dropped completion-edge frame was
+// reported at warn level with the transfer, the peer and both epochs, so the
+// rejection can be traced back to the run it did not belong to.
+func assertEpochMismatchLogged(
+	t *testing.T,
+	captured *bytes.Buffer,
+	fragment string,
+	peerField string,
+	fileID domain.FileID,
+	peer domain.PeerIdentity,
+	receivedEpoch, currentEpoch uint64,
+) {
+	t.Helper()
+	line := loggedLineWithMessage(t, captured, fragment)
+	if line["level"] != "warn" {
+		t.Errorf("level = %v, want warn", line["level"])
+	}
+	if line["file_id"] != logID(string(fileID)) {
+		t.Errorf("file_id = %v, want %s", line["file_id"], logID(string(fileID)))
+	}
+	if line[peerField] != peer.String() {
+		t.Errorf("%s = %v, want %s", peerField, line[peerField], peer.String())
+	}
+	if line["received_epoch"] != float64(receivedEpoch) {
+		t.Errorf("received_epoch = %v, want %d", line["received_epoch"], receivedEpoch)
+	}
+	if line["current_epoch"] != float64(currentEpoch) {
+		t.Errorf("current_epoch = %v, want %d", line["current_epoch"], currentEpoch)
+	}
+}
+
+// TestSenderHandleFileDownloadedRejectsEpochOfAnotherRun pins the rule that
+// file_downloaded completes a serving run only when it names that run. Every
+// build that can reach this node stamps the epoch it learned from
+// chunk_response, so a frame without one (0 on the wire) is not "an older
+// peer" but a frame that does not belong to the run the sender is in — the
+// same as any other mismatching epoch. Before this rule a missing epoch
+// bypassed the check and let a stale frame finish an active re-download.
+func TestSenderHandleFileDownloadedRejectsEpochOfAnotherRun(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		state        senderState
+		servingEpoch uint64
+		wireEpoch    uint64
+	}{
+		{"serving run 3, frame without epoch", senderServing, 3, 0},
+		{"completed run 3, frame without epoch", senderCompleted, 3, 0},
+		{"serving run 3, frame of run 2", senderServing, 3, 2},
+		{"serving run 3, frame of a future run", senderServing, 3, 4},
+		{"no run recorded, frame of run 5", senderCompleted, 0, 5},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			captured := captureFileTransferLog(t)
+			var acksSent int
+			m := &Manager{
+				senderMaps:   make(map[domain.FileID]*senderFileMapping),
+				receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+				sendCommand: func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error {
+					if payload.Command == domain.FileActionDownloadedAck {
+						acksSent++
+					}
+					return nil
+				},
+				stopCh: make(chan struct{}),
 			}
-			return nil
-		},
-		stopCh: make(chan struct{}),
+
+			receiver := domaintest.ID("receiver-identity-epoch-run-01")
+			fileID := domain.FileID("epoch-of-another-run-file")
+			completedAt := time.Now().Add(-time.Hour)
+			m.senderMaps[fileID] = &senderFileMapping{
+				FileID:        fileID,
+				FileHash:      "cafebabe",
+				FileName:      "doc.bin",
+				FileSize:      100,
+				Recipient:     receiver,
+				State:         tc.state,
+				PreServeState: preServeStateFor(tc.state),
+				ServingEpoch:  tc.servingEpoch,
+				CreatedAt:     time.Now().Add(-2 * time.Hour),
+				CompletedAt:   completedAt,
+				LastServedAt:  time.Now(),
+			}
+
+			m.HandleFileDownloaded(receiver, domain.FileDownloadedPayload{FileID: fileID, Epoch: tc.wireEpoch})
+
+			sm := m.senderMaps[fileID]
+			if sm.State != tc.state {
+				t.Errorf("state = %s, want %s (a frame of another run must not move the mapping)", sm.State, tc.state)
+			}
+			if sm.PreServeState != preServeStateFor(tc.state) {
+				t.Errorf("PreServeState = %q, want %q", sm.PreServeState, preServeStateFor(tc.state))
+			}
+			if !sm.CompletedAt.Equal(completedAt) {
+				t.Errorf("CompletedAt = %v, want %v (unchanged)", sm.CompletedAt, completedAt)
+			}
+			if sm.ServingEpoch != tc.servingEpoch {
+				t.Errorf("ServingEpoch = %d, want %d (unchanged)", sm.ServingEpoch, tc.servingEpoch)
+			}
+			if acksSent != 0 {
+				t.Errorf("a frame of another run must not be acked, got %d acks", acksSent)
+			}
+			assertEpochMismatchLogged(t, captured, "file_downloaded epoch mismatch", "recipient",
+				fileID, receiver, tc.wireEpoch, tc.servingEpoch)
+		})
+	}
+}
+
+// preServeStateFor is the PreServeState a mapping in state carries: only a
+// serving run remembers where it came from.
+func preServeStateFor(state senderState) senderState {
+	if state == senderServing {
+		return senderCompleted
+	}
+	return ""
+}
+
+// TestSenderHandleFileDownloadedAcceptsEpochOfTheRun is the other half of the
+// rule: the frame that names the sender's run completes it (or is re-acked
+// when the run already completed), and the ack carries that same epoch back.
+// A mapping with no recorded run (persisted before epochs existed) still pairs
+// with a receiver that recorded none either — both sides hold 0.
+func TestSenderHandleFileDownloadedAcceptsEpochOfTheRun(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		state        senderState
+		servingEpoch uint64
+	}{
+		{"serving run 3 completes", senderServing, 3},
+		{"completed run 3 is re-acked", senderCompleted, 3},
+		{"no run recorded on either side", senderCompleted, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var acks []domain.FileDownloadedAckPayload
+			m := &Manager{
+				senderMaps:   make(map[domain.FileID]*senderFileMapping),
+				receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+				sendCommand: func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error {
+					var ack domain.FileDownloadedAckPayload
+					if err := json.Unmarshal(payload.Data, &ack); err != nil {
+						t.Fatalf("unmarshal file_downloaded_ack: %v", err)
+					}
+					acks = append(acks, ack)
+					return nil
+				},
+				stopCh: make(chan struct{}),
+			}
+
+			receiver := domaintest.ID("receiver-identity-epoch-run-02")
+			fileID := domain.FileID("epoch-of-the-run-file")
+			m.senderMaps[fileID] = &senderFileMapping{
+				FileID:        fileID,
+				FileHash:      "cafebabe",
+				FileName:      "doc.bin",
+				FileSize:      100,
+				Recipient:     receiver,
+				State:         tc.state,
+				PreServeState: preServeStateFor(tc.state),
+				ServingEpoch:  tc.servingEpoch,
+				CreatedAt:     time.Now().Add(-time.Hour),
+				LastServedAt:  time.Now(),
+			}
+
+			m.HandleFileDownloaded(receiver, domain.FileDownloadedPayload{FileID: fileID, Epoch: tc.servingEpoch})
+
+			if got := m.senderMaps[fileID].State; got != senderCompleted {
+				t.Errorf("state = %s, want %s", got, senderCompleted)
+			}
+			if len(acks) != 1 {
+				t.Fatalf("want 1 file_downloaded_ack, got %d", len(acks))
+			}
+			if acks[0].Epoch != tc.servingEpoch {
+				t.Errorf("ack epoch = %d, want %d (the run it completes)", acks[0].Epoch, tc.servingEpoch)
+			}
+		})
+	}
+}
+
+// TestReceiverHandleFileDownloadedAckRejectsEpochOfAnotherRun is the
+// receiver-side mirror: an ack completes the waiting_ack run only when it
+// echoes the epoch that run sent in file_downloaded. The sender echoes it
+// verbatim, so an ack without one cannot be the answer to the current run.
+func TestReceiverHandleFileDownloadedAckRejectsEpochOfAnotherRun(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		servingEpoch uint64
+		wireEpoch    uint64
+	}{
+		{"run 9, ack without epoch", 9, 0},
+		{"run 9, ack of run 8", 9, 8},
+		{"no run recorded, ack of run 8", 0, 8},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			captured := captureFileTransferLog(t)
+			m := &Manager{
+				senderMaps:   make(map[domain.FileID]*senderFileMapping),
+				receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+				sendCommand:  func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error { return nil },
+				stopCh:       make(chan struct{}),
+			}
+
+			sender := domaintest.ID("sender-identity-ack-run-0001")
+			fileID := domain.FileID("ack-of-another-run-file")
+			m.receiverMaps[fileID] = &receiverFileMapping{
+				FileID:       fileID,
+				FileHash:     "deadbeef",
+				FileName:     "doc.bin",
+				FileSize:     100,
+				Sender:       sender,
+				State:        receiverWaitingAck,
+				ServingEpoch: tc.servingEpoch,
+				CreatedAt:    time.Now(),
+			}
+
+			m.HandleFileDownloadedAck(sender, domain.FileDownloadedAckPayload{FileID: fileID, Epoch: tc.wireEpoch})
+
+			rm := m.receiverMaps[fileID]
+			if rm.State != receiverWaitingAck {
+				t.Errorf("state = %s, want %s", rm.State, receiverWaitingAck)
+			}
+			if !rm.CompletedAt.IsZero() {
+				t.Errorf("CompletedAt = %v, want zero", rm.CompletedAt)
+			}
+			assertEpochMismatchLogged(t, captured, "file_downloaded_ack epoch mismatch", "sender",
+				fileID, sender, tc.wireEpoch, tc.servingEpoch)
+		})
+	}
+}
+
+// epochWireFrame is one file command in flight between the two managers of
+// TestEveryCompletionFrameCarriesTheServingRunEpoch.
+type epochWireFrame struct {
+	from    domain.PeerIdentity
+	to      domain.PeerIdentity
+	payload domain.FileCommandPayload
+}
+
+// epochWire connects managers through a FIFO instead of direct calls, so no
+// handler runs inside another handler's send and every frame is observed in
+// the order it was emitted — including the ones the wire then loses.
+type epochWire struct {
+	t        *testing.T
+	peers    map[domain.PeerIdentity]*Manager
+	queue    []epochWireFrame
+	emitted  []domain.FileCommandPayload
+	loseNext map[domain.FileAction]bool
+}
+
+func (w *epochWire) sendCommandFrom(from domain.PeerIdentity) func(domain.PeerIdentity, domain.FileCommandPayload) error {
+	return func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error {
+		w.emitted = append(w.emitted, payload)
+		w.queue = append(w.queue, epochWireFrame{from: from, to: dst, payload: payload})
+		return nil
+	}
+}
+
+func (w *epochWire) deliverAll() {
+	w.t.Helper()
+	const maxFrames = 1000
+	for delivered := 0; len(w.queue) > 0; delivered++ {
+		if delivered == maxFrames {
+			w.t.Fatalf("wire did not drain after %d frames", maxFrames)
+		}
+		frame := w.queue[0]
+		w.queue = w.queue[1:]
+		if w.loseNext[frame.payload.Command] {
+			delete(w.loseNext, frame.payload.Command)
+			continue
+		}
+		w.peers[frame.to].HandleLocalFileCommand(frame.from, &frame.payload)
+	}
+}
+
+// takeEmitted returns the frames emitted since the last call and forgets them.
+func (w *epochWire) takeEmitted() []domain.FileCommandPayload {
+	emitted := w.emitted
+	w.emitted = nil
+	return emitted
+}
+
+// TestEveryCompletionFrameCarriesTheServingRunEpoch is the proof behind
+// rejecting frames without an epoch: two real managers run a multi-chunk
+// download, a re-download of the same FileID, a lost ack and the receiver's
+// retry of file_downloaded, and every chunk_response, file_downloaded and
+// file_downloaded_ack either of them emits carries the non-zero epoch of the
+// sender's current serving run. No path of this build sends 0 to a peer that
+// knows the run.
+func TestEveryCompletionFrameCarriesTheServingRunEpoch(t *testing.T) {
+	root := t.TempDir()
+	transmitDir := filepath.Join(root, "transmit")
+	downloadDir := filepath.Join(root, "downloads")
+	if err := os.MkdirAll(filepath.Join(downloadDir, "partial"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewFileStore(transmitDir)
+	if err != nil {
+		t.Fatalf("NewFileStore: %v", err)
 	}
 
-	receiver := domaintest.ID("receiver-identity-legacy-wire1")
-	fileID := domain.FileID("legacy-zero-epoch-file")
+	senderID := domaintest.ID("sender-identity-epoch-wire-01")
+	receiverID := domaintest.ID("receiver-identity-epoch-wire1")
+	fileID := domain.FileID("epoch-wire-file")
+	content := []byte("twenty-bytes-payload")
+	fileHash := sha256Hex(content)
 
-	m.senderMaps[fileID] = &senderFileMapping{
-		FileID:       fileID,
-		FileHash:     "cafebabe",
-		FileName:     "doc.bin",
-		FileSize:     100,
-		Recipient:    receiver,
-		State:        senderServing,
-		ServingEpoch: 3, // sender has epochs; wire value is 0 (legacy)
-		CreatedAt:    time.Now().Add(-time.Hour),
-		LastServedAt: time.Now(),
+	wire := &epochWire{t: t, peers: make(map[domain.PeerIdentity]*Manager), loseNext: make(map[domain.FileAction]bool)}
+	sender := NewFileTransferManager(Config{
+		Store:        store,
+		MappingsPath: filepath.Join(root, "sender-transfers.json"),
+		SendCommand:  wire.sendCommandFrom(senderID),
+	})
+	receiver := NewFileTransferManager(Config{
+		DownloadDir:  downloadDir,
+		MappingsPath: filepath.Join(root, "receiver-transfers.json"),
+		SendCommand:  wire.sendCommandFrom(receiverID),
+	})
+	wire.peers[senderID] = sender
+	wire.peers[receiverID] = receiver
+
+	if err := os.WriteFile(filepath.Join(transmitDir, fileHash+".bin"), content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store.mu.Lock()
+	store.refs[fileHash] = 1
+	store.mu.Unlock()
+	sender.senderMaps[fileID] = &senderFileMapping{
+		FileID:    fileID,
+		FileHash:  fileHash,
+		FileName:  "doc.bin",
+		FileSize:  uint64(len(content)),
+		Recipient: receiverID,
+		State:     senderAnnounced,
+		CreatedAt: time.Now(),
+	}
+	if err := receiver.RegisterFileReceive(fileID, fileHash, "doc.bin", "application/octet-stream", uint64(len(content)), senderID); err != nil {
+		t.Fatalf("RegisterFileReceive: %v", err)
+	}
+	// Small chunks so the run spans several chunk_responses.
+	receiver.receiverMaps[fileID].ChunkSize = 8
+
+	assertRunFramesCarry := func(run string, wantEpoch uint64) {
+		t.Helper()
+		if got := sender.senderMaps[fileID].ServingEpoch; got != wantEpoch {
+			t.Fatalf("%s: sender ServingEpoch = %d, want %d", run, got, wantEpoch)
+		}
+		seen := make(map[domain.FileAction]int)
+		for _, frame := range wire.takeEmitted() {
+			if frame.Command == domain.FileActionChunkReq {
+				continue
+			}
+			var stamped struct {
+				Epoch uint64 `json:"epoch"`
+			}
+			if err := json.Unmarshal(frame.Data, &stamped); err != nil {
+				t.Fatalf("%s: unmarshal %s: %v", run, frame.Command, err)
+			}
+			if stamped.Epoch != wantEpoch {
+				t.Errorf("%s: %s carries epoch %d, want %d", run, frame.Command, stamped.Epoch, wantEpoch)
+			}
+			seen[frame.Command]++
+		}
+		for _, command := range []domain.FileAction{domain.FileActionChunkResp, domain.FileActionDownloaded, domain.FileActionDownloadedAck} {
+			if seen[command] == 0 {
+				t.Errorf("%s: no %s was emitted, so its epoch was never checked", run, command)
+			}
+		}
 	}
 
-	// Legacy wire: Epoch field absent → 0 after unmarshal.
-	m.HandleFileDownloaded(receiver, domain.FileDownloadedPayload{FileID: fileID})
+	// Run 1: first download.
+	if err := receiver.StartDownload(fileID); err != nil {
+		t.Fatalf("StartDownload: %v", err)
+	}
+	wire.deliverAll()
+	if got := receiver.receiverMaps[fileID].State; got != receiverCompleted {
+		t.Fatalf("run 1: receiver state = %s, want %s", got, receiverCompleted)
+	}
+	assertRunFramesCarry("run 1", 1)
 
-	sm := m.senderMaps[fileID]
-	if sm.State != senderCompleted {
-		t.Errorf("legacy (Epoch=0) file_downloaded must complete: state = %s, want senderCompleted", sm.State)
+	// Run 2: re-download of the same FileID; the first ack is lost and the
+	// receiver's retry of file_downloaded is answered by the completed sender.
+	if err := receiver.DeleteLocalCopy(fileID); err != nil {
+		t.Fatalf("DeleteLocalCopy: %v", err)
 	}
-	if acksSent != 1 {
-		t.Errorf("legacy path must still ack, got %d acks", acksSent)
+	if err := receiver.StartDownload(fileID); err != nil {
+		t.Fatalf("StartDownload (re-download): %v", err)
 	}
+	wire.loseNext[domain.FileActionDownloadedAck] = true
+	wire.deliverAll()
+	if got := receiver.receiverMaps[fileID].State; got != receiverWaitingAck {
+		t.Fatalf("run 2 after lost ack: receiver state = %s, want %s", got, receiverWaitingAck)
+	}
+	receiver.sendFileDownloaded(fileID, senderID)
+	wire.deliverAll()
+	if got := receiver.receiverMaps[fileID].State; got != receiverCompleted {
+		t.Fatalf("run 2 after retry: receiver state = %s, want %s", got, receiverCompleted)
+	}
+	if got := sender.senderMaps[fileID].State; got != senderCompleted {
+		t.Fatalf("run 2: sender state = %s, want %s", got, senderCompleted)
+	}
+	assertRunFramesCarry("run 2", 2)
 }
 
 // TestReceiverChunkResponseStashesServingEpoch verifies that the receiver

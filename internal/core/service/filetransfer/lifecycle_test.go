@@ -130,6 +130,7 @@ func TestReceiverFullLifecycle(t *testing.T) {
 		FileID: fileID,
 		Offset: 0,
 		Data:   encoded,
+		Epoch:  1,
 	})
 
 	mapping = m.receiverMaps[fileID]
@@ -156,9 +157,11 @@ func TestReceiverFullLifecycle(t *testing.T) {
 		t.Error("partial file should have been moved after verification")
 	}
 
-	// Step 4: Receive file_downloaded_ack — state should transition to Completed.
+	// Step 4: Receive file_downloaded_ack echoing the run's epoch — state
+	// should transition to Completed.
 	m.HandleFileDownloadedAck(sender, domain.FileDownloadedAckPayload{
 		FileID: fileID,
+		Epoch:  1,
 	})
 
 	mapping = m.receiverMaps[fileID]

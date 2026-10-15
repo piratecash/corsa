@@ -18,12 +18,20 @@ import (
 
 // newSyncPeerTestService creates a minimal Service for testing syncPeer().
 // It populates all maps that syncPeer touches to avoid nil-pointer panics.
-func newSyncPeerTestService(aggregateStatus domain.NetworkStatus) *Service {
-	id := &identity.Identity{
-		Address: "test-node-address",
+//
+// The identity is real: a current responder challenges only a hello whose
+// identity fields bind (connauth.PrepareAuth), and syncPeer signs the
+// challenge with it.
+func newSyncPeerTestService(t *testing.T, aggregateStatus domain.NetworkStatus) *Service {
+	t.Helper()
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("identity.Generate: %v", err)
 	}
 	return &Service{
 		identity:      id,
+		selfBoxKey:    identity.BoxPublicKeyBase64(id.BoxPublicKey),
+		selfBoxSig:    identity.SignBoxKeyBinding(id),
 		cfg:           config.Node{AllowPrivatePeers: true},
 		runCtx:        context.Background(),
 		health:        make(map[domain.PeerAddress]*peerHealth),
@@ -47,9 +55,11 @@ func newSyncPeerTestService(aggregateStatus domain.NetworkStatus) *Service {
 	}
 }
 
-// syncPeerMockServer accepts a single TCP connection and simulates a minimal
-// peer that responds to the syncPeer() handshake. It sends a welcome frame
-// (no auth challenge), then responds to get_peers and fetch_contacts.
+// syncPeerMockServer accepts a single TCP connection and simulates a current
+// peer that responds to the syncPeer() handshake: hello, a challenging
+// welcome, auth_session verified before auth_ok (v1HandshakeResponder), then
+// get_peers and fetch_contacts. A request the responder could not
+// authenticate is answered auth-required, as on a real node.
 //
 // Returns the ordered list of frame types received from the client.
 func syncPeerMockServer(t *testing.T, ln net.Listener, respondPeers []string) []string {
@@ -63,26 +73,15 @@ func syncPeerMockServer(t *testing.T, ln net.Listener, respondPeers []string) []
 	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
 	reader := bufio.NewReader(conn)
 
-	var received []string
-
-	// Read hello from client.
-	helloLine, err := reader.ReadString('\n')
+	responder, err := newV1HandshakeResponder()
 	if err != nil {
-		t.Fatalf("mock server: failed to read hello: %v", err)
+		t.Fatalf("mock server: responder identity: %v", err)
 	}
-	helloFrame, err := protocol.ParseFrameLine(strings.TrimSpace(helloLine))
+	hello, err := responder.answerHello(conn, reader)
 	if err != nil {
-		t.Fatalf("mock server: failed to parse hello: %v", err)
+		t.Fatalf("mock server: hello: %v", err)
 	}
-	received = append(received, helloFrame.Type)
-
-	// Send welcome (no challenge — no auth required).
-	welcome, _ := protocol.MarshalFrameLine(protocol.Frame{
-		Type: "welcome",
-	})
-	if _, err := conn.Write([]byte(welcome)); err != nil {
-		t.Fatalf("mock server: failed to write welcome: %v", err)
-	}
+	received := []string{hello.Type}
 
 	// Read and respond to subsequent requests until client closes.
 	for {
@@ -101,20 +100,21 @@ func syncPeerMockServer(t *testing.T, ln net.Listener, respondPeers []string) []
 		}
 		received = append(received, frame.Type)
 
-		switch frame.Type {
-		case "get_peers":
-			resp, _ := protocol.MarshalFrameLine(protocol.Frame{
-				Type:  "peers",
-				Peers: respondPeers,
-			})
-			_, _ = conn.Write([]byte(resp))
-		case "fetch_contacts":
-			resp, _ := protocol.MarshalFrameLine(protocol.Frame{
-				Type:     "contacts",
-				Contacts: []protocol.ContactFrame{},
-			})
-			_, _ = conn.Write([]byte(resp))
+		var resp protocol.Frame
+		switch {
+		case frame.Type == "auth_session":
+			resp = responder.authReply(frame)
+		case !responder.authenticated():
+			resp = protocol.Frame{Type: "error", Code: protocol.ErrCodeAuthRequired}
+		case frame.Type == "get_peers":
+			resp = protocol.Frame{Type: "peers", Peers: respondPeers}
+		case frame.Type == "fetch_contacts":
+			resp = protocol.Frame{Type: "contacts", Contacts: []protocol.ContactFrame{}}
+		default:
+			continue
 		}
+		line, _ = protocol.MarshalFrameLine(resp)
+		_, _ = conn.Write([]byte(line))
 	}
 
 	return received
@@ -134,7 +134,7 @@ func TestSyncPeer_RequestPeersTrue_SendsGetPeers(t *testing.T) {
 	}
 	defer func() { _ = ln.Close() }()
 
-	svc := newSyncPeerTestService(domain.NetworkStatusOffline)
+	svc := newSyncPeerTestService(t, domain.NetworkStatusOffline)
 	peerAddr := domain.PeerAddress(ln.Addr().String())
 
 	discoveredPeers := []string{"10.0.0.100:9000", "10.0.0.101:9000"}
@@ -151,8 +151,8 @@ func TestSyncPeer_RequestPeersTrue_SendsGetPeers(t *testing.T) {
 
 	received := <-receivedCh
 
-	// Expect: hello, get_peers, fetch_contacts.
-	expectedTypes := []string{"hello", "get_peers", "fetch_contacts"}
+	// Expect: hello, auth_session, get_peers, fetch_contacts.
+	expectedTypes := []string{"hello", "auth_session", "get_peers", "fetch_contacts"}
 	if len(received) != len(expectedTypes) {
 		t.Fatalf("expected %d requests %v, got %d: %v",
 			len(expectedTypes), expectedTypes, len(received), received)
@@ -194,7 +194,7 @@ func TestSyncPeer_RequestPeersFalse_SkipsGetPeers(t *testing.T) {
 	// Aggregate status deliberately set to Offline to prove that the
 	// requestPeers=false override wins over the "not healthy" signal that
 	// shouldRequestPeers() would otherwise return.
-	svc := newSyncPeerTestService(domain.NetworkStatusOffline)
+	svc := newSyncPeerTestService(t, domain.NetworkStatusOffline)
 	peerAddr := domain.PeerAddress(ln.Addr().String())
 
 	receivedCh := make(chan []string, 1)
@@ -209,8 +209,8 @@ func TestSyncPeer_RequestPeersFalse_SkipsGetPeers(t *testing.T) {
 
 	received := <-receivedCh
 
-	// Expect: hello, fetch_contacts — NO get_peers.
-	expectedTypes := []string{"hello", "fetch_contacts"}
+	// Expect: hello, auth_session, fetch_contacts — NO get_peers.
+	expectedTypes := []string{"hello", "auth_session", "fetch_contacts"}
 	if len(received) != len(expectedTypes) {
 		t.Fatalf("expected %d requests %v, got %d: %v",
 			len(expectedTypes), expectedTypes, len(received), received)
@@ -250,7 +250,7 @@ func TestSyncPeer_SkipGetPeers_FetchContactsStillWorks(t *testing.T) {
 	}
 	defer func() { _ = ln.Close() }()
 
-	svc := newSyncPeerTestService(domain.NetworkStatusHealthy)
+	svc := newSyncPeerTestService(t, domain.NetworkStatusHealthy)
 	peerAddr := domain.PeerAddress(ln.Addr().String())
 
 	receivedCh := make(chan []string, 1)
@@ -295,7 +295,7 @@ func TestSyncPeer_SkipGetPeers_NoAddPeerAddress(t *testing.T) {
 	// Aggregate status set to Offline to prove the requestPeers=false
 	// override wins: even a "not healthy" node must not leak peer exchange
 	// out of a sender-key recovery dial.
-	svc := newSyncPeerTestService(domain.NetworkStatusOffline)
+	svc := newSyncPeerTestService(t, domain.NetworkStatusOffline)
 	peerAddr := domain.PeerAddress(ln.Addr().String())
 
 	receivedCh := make(chan []string, 1)
@@ -333,7 +333,7 @@ func TestSyncPeer_PolicyReturnCount(t *testing.T) {
 	}
 	defer func() { _ = ln.Close() }()
 
-	svc := newSyncPeerTestService(domain.NetworkStatusOffline)
+	svc := newSyncPeerTestService(t, domain.NetworkStatusOffline)
 	peerAddr := domain.PeerAddress(ln.Addr().String())
 
 	receivedCh := make(chan []string, 1)
@@ -375,7 +375,7 @@ func TestSyncSenderKeys_FreshDialFallback_SkipsGetPeers(t *testing.T) {
 
 	// Aggregate status = Offline proves that the narrow override wins over
 	// the shouldRequestPeers() signal that would otherwise say "yes".
-	svc := newSyncPeerTestService(domain.NetworkStatusOffline)
+	svc := newSyncPeerTestService(t, domain.NetworkStatusOffline)
 	peerAddr := domain.PeerAddress(ln.Addr().String())
 
 	receivedCh := make(chan []string, 1)
@@ -393,8 +393,8 @@ func TestSyncSenderKeys_FreshDialFallback_SkipsGetPeers(t *testing.T) {
 
 	received := <-receivedCh
 
-	// Expect: hello, fetch_contacts — NO get_peers.
-	expectedTypes := []string{"hello", "fetch_contacts"}
+	// Expect: hello, auth_session, fetch_contacts — NO get_peers.
+	expectedTypes := []string{"hello", "auth_session", "fetch_contacts"}
 	if len(received) != len(expectedTypes) {
 		t.Fatalf("expected %d requests %v, got %d: %v",
 			len(expectedTypes), expectedTypes, len(received), received)
@@ -430,7 +430,7 @@ func TestSyncSenderKeys_FreshDialFallback_RespectsCtxCancel(t *testing.T) {
 	}
 	defer func() { _ = ln.Close() }()
 
-	svc := newSyncPeerTestService(domain.NetworkStatusOffline)
+	svc := newSyncPeerTestService(t, domain.NetworkStatusOffline)
 	peerAddr := domain.PeerAddress(ln.Addr().String())
 
 	// Pre-cancelled ctx: dialPeer must observe cancellation and abort.
@@ -481,7 +481,7 @@ func TestSyncPeer_BootstrapNetCoreDoesNotLeakWriterGoroutine(t *testing.T) {
 			t.Fatalf("iter %d: failed to start listener: %v", i, err)
 		}
 
-		svc := newSyncPeerTestService(domain.NetworkStatusOffline)
+		svc := newSyncPeerTestService(t, domain.NetworkStatusOffline)
 		peerAddr := domain.PeerAddress(ln.Addr().String())
 
 		done := make(chan struct{})
@@ -538,9 +538,9 @@ func TestSyncPeer_RecordsOutboundSuccess(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = ln.Close() })
 
-	peerID, err := identity.Generate()
+	responder, err := newV1HandshakeResponder()
 	if err != nil {
-		t.Fatalf("identity.Generate: %v", err)
+		t.Fatalf("responder identity: %v", err)
 	}
 
 	peerDone := make(chan error, 1)
@@ -554,38 +554,14 @@ func TestSyncPeer_RecordsOutboundSuccess(t *testing.T) {
 		_ = c.SetDeadline(time.Now().Add(3 * time.Second))
 		reader := bufio.NewReader(c)
 
-		// hello.
-		if _, err := reader.ReadBytes('\n'); err != nil {
+		// hello → the challenging welcome of a current responder; auth_ok,
+		// only for a valid signature, is where the convergence hook must
+		// fire.
+		if _, err := responder.answerHello(c, reader); err != nil {
 			peerDone <- err
 			return
 		}
-		// welcome with challenge forces the auth_session branch — the
-		// branch where the convergence hook must fire.
-		welcomeLine, err := protocol.MarshalFrameLine(protocol.Frame{
-			Type:      "welcome",
-			Challenge: "sync-peer-challenge",
-			Address:   peerID.Address,
-		})
-		if err != nil {
-			peerDone <- err
-			return
-		}
-		if _, err := c.Write([]byte(welcomeLine)); err != nil {
-			peerDone <- err
-			return
-		}
-
-		// auth_session → auth_ok.
-		if _, err := reader.ReadBytes('\n'); err != nil {
-			peerDone <- err
-			return
-		}
-		authOK, err := protocol.MarshalFrameLine(protocol.Frame{Type: "auth_ok"})
-		if err != nil {
-			peerDone <- err
-			return
-		}
-		if _, err := c.Write([]byte(authOK)); err != nil {
+		if _, err := responder.answerAuth(c, reader); err != nil {
 			peerDone <- err
 			return
 		}
@@ -671,12 +647,11 @@ func TestSyncPeer_RecordsOutboundSuccess(t *testing.T) {
 // interleaved push_message frame was mistaken for the contacts reply,
 // imported stayed 0 (sync_peer_no_new_contacts), and sender-key recovery
 // for relayed DMs never succeeded.
-// authID, when non-nil, makes the mock issue an auth challenge in its
-// welcome (production shape: every deployed responder authenticates) and
-// interleave a burst BEFORE auth_ok too — reproducing the
+// The mock authenticates like every current responder (v1HandshakeResponder) and
+// interleaves a burst BEFORE auth_ok too — reproducing the
 // trackInboundConnect flood (pending-ring flush + route sync) that the
 // responder enqueues before the auth reply.
-func interleavedSyncPeerMockServer(t *testing.T, ln net.Listener, interleaveCount int, authID *identity.Identity, respondPeers []string, respondContacts []protocol.ContactFrame) {
+func interleavedSyncPeerMockServer(t *testing.T, ln net.Listener, interleaveCount int, respondPeers []string, respondContacts []protocol.ContactFrame) {
 	t.Helper()
 	conn, err := ln.Accept()
 	if err != nil {
@@ -688,19 +663,13 @@ func interleavedSyncPeerMockServer(t *testing.T, ln net.Listener, interleaveCoun
 	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
 	reader := bufio.NewReader(conn)
 
-	// Read hello, reply with a challenge-less welcome.
-	if _, err := reader.ReadString('\n'); err != nil {
-		t.Errorf("mock server: failed to read hello: %v", err)
+	responder, err := newV1HandshakeResponder()
+	if err != nil {
+		t.Errorf("mock server: responder identity: %v", err)
 		return
 	}
-	welcomeFrame := protocol.Frame{Type: "welcome"}
-	if authID != nil {
-		welcomeFrame.Challenge = "interleave-auth-challenge"
-		welcomeFrame.Address = authID.Address
-	}
-	welcome, _ := protocol.MarshalFrameLine(welcomeFrame)
-	if _, err := conn.Write([]byte(welcome)); err != nil {
-		t.Errorf("mock server: failed to write welcome: %v", err)
+	if _, err := responder.answerHello(conn, reader); err != nil {
+		t.Errorf("mock server: hello: %v", err)
 		return
 	}
 
@@ -750,9 +719,12 @@ func interleavedSyncPeerMockServer(t *testing.T, ln net.Listener, interleaveCoun
 			// Production ordering: the responder's auth-time side
 			// effects (pending-ring flush, route sync) hit the FIFO
 			// writer BEFORE the auth_ok reply.
-			writeInterleaved()
-			authOK, _ := protocol.MarshalFrameLine(protocol.Frame{Type: "auth_ok"})
-			_, _ = conn.Write([]byte(authOK))
+			reply := responder.authReply(frame)
+			if reply.Type == "auth_ok" {
+				writeInterleaved()
+			}
+			authReply, _ := protocol.MarshalFrameLine(reply)
+			_, _ = conn.Write([]byte(authReply))
 		case "get_peers":
 			writeInterleaved()
 			resp, _ := protocol.MarshalFrameLine(protocol.Frame{Type: "peers", Peers: respondPeers})
@@ -801,7 +773,7 @@ func TestSyncPeer_ContactsReply_SkipsInterleavedFrames(t *testing.T) {
 		BoxSig:  identity.SignBoxKeyBinding(senderID),
 	}
 
-	svc := newSyncPeerTestService(domain.NetworkStatusOffline)
+	svc := newSyncPeerTestService(t, domain.NetworkStatusOffline)
 	peerAddr := domain.PeerAddress(ln.Addr().String())
 
 	// Worst-case legitimate flood per reply: full receipt backlog +
@@ -811,7 +783,7 @@ func TestSyncPeer_ContactsReply_SkipsInterleavedFrames(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		interleavedSyncPeerMockServer(t, ln, interleaveCount, nil, []string{"10.0.0.77:9000"}, []protocol.ContactFrame{contact})
+		interleavedSyncPeerMockServer(t, ln, interleaveCount, []string{"10.0.0.77:9000"}, []protocol.ContactFrame{contact})
 	}()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -866,14 +838,10 @@ func TestSyncPeer_AuthReply_SkipsInterleavedFrames(t *testing.T) {
 	}
 	defer func() { _ = ln.Close() }()
 
-	// Real identities: the client must sign auth_session, the responder
-	// must present a non-self identity, and the served contact must pass
+	// Real identities: the client must sign auth_session (the mock's
+	// v1HandshakeResponder verifies it) and the served contact must pass
 	// VerifyBoxKeyBinding.
 	svc := newTestService(t, config.NodeTypeFull)
-	responderID, err := identity.Generate()
-	if err != nil {
-		t.Fatalf("identity.Generate (responder): %v", err)
-	}
 	senderID, err := identity.Generate()
 	if err != nil {
 		t.Fatalf("identity.Generate (sender): %v", err)
@@ -891,7 +859,7 @@ func TestSyncPeer_AuthReply_SkipsInterleavedFrames(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		interleavedSyncPeerMockServer(t, ln, interleaveCount, responderID, nil, []protocol.ContactFrame{contact})
+		interleavedSyncPeerMockServer(t, ln, interleaveCount, nil, []protocol.ContactFrame{contact})
 	}()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)

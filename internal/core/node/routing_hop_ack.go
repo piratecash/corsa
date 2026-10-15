@@ -25,22 +25,16 @@ import (
 // provably correct next-hop, even under gossip fan-out where multiple
 // peers received the relay_message but only one actually delivered it.
 //
-// routeOrigin is retained on the signature for caller-stability (the
-// relay-side plumbing still threads it through tableForwardResult /
-// sendTableDirectedRelay) but is IGNORED post-Phase-A: the routing
-// table no longer stores Origin (per-(Identity, Uplink) storage),
-// and the synthesised Origin on Lookup output is always localOrigin
-// (or Identity fallback), which carries no per-route disambiguation
-// signal. The (Identity, NextHop) pair is the post-A1 unique key —
-// the same uplink cannot have two distinct "lineages" to the same
-// destination, so the per-Origin scoping became degenerate.
+// The confirmed claim is the (recipient, ack sender) slot — the routing
+// table keys claims per (Identity, Uplink) and keeps no Origin, so
+// nothing else is needed to find it.
 //
 // If ackSenderAddress is empty, no route can be confirmed (message
 // was stored locally without forwarding).
 //
 // Cap-eviction edge case. When MaxNextHopsPerOrigin is active and the
 // (Identity, Uplink) claim was evicted from the routing table
-// between the relay send and the hop_ack arrival, InspectTriple
+// between the relay send and the hop_ack arrival, InspectUplinkClaim
 // returns nil and the function logs "route_hop_ack_no_matching_route"
 // without re-creating the entry. This is by design: the hop_ack
 // frame only carries the (recipient, next-hop) pair — neither
@@ -49,9 +43,7 @@ import (
 // paths (split-horizon, withdrawal authority) rely on. Subsequent
 // announcement traffic for the same (Identity, Uplink) re-populates
 // the bucket through the normal admission rules.
-func (s *Service) confirmRouteViaHopAck(recipientIdentity domain.PeerIdentity, ackSenderAddress domain.PeerAddress, routeOrigin domain.PeerIdentity) {
-	_ = routeOrigin // post-A1: per-Origin scoping is degenerate; see doc-comment above.
-
+func (s *Service) confirmRouteViaHopAck(recipientIdentity domain.PeerIdentity, ackSenderAddress domain.PeerAddress) {
 	if ackSenderAddress == "" {
 		return
 	}
@@ -65,13 +57,13 @@ func (s *Service) confirmRouteViaHopAck(recipientIdentity domain.PeerIdentity, a
 	}
 
 	// PR 11.12 P2#1 — atomic confirmation. Table.ConfirmHopAck
-	// folds three previously-separate steps (InspectTriple,
+	// folds three previously-separate steps (InspectUplinkClaim,
 	// MarkHopAck, UpdateRoute) into one t.mu.Lock critical
 	// section so a concurrent withdrawal / TickTTL-expiry /
 	// cap-eviction cannot interleave between the storage check
 	// and the health/source mutations and leave orphan health
 	// behind. The method also folds in the Dead-filter fix
-	// (raw InspectTriple inside, no Lookup-style Dead filter)
+	// (raw InspectUplinkClaim inside, no Lookup-style Dead filter)
 	// and the inactive-route guard (withdrawn/expired short-
 	// circuits before any health touch).
 	//

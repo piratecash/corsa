@@ -60,16 +60,15 @@ func TestSingleNodeJSONProtocolFlow(t *testing.T) {
 	if got := frames[0]; got.Type != "welcome" || got.Address != svc.Address() {
 		t.Fatalf("unexpected welcome: %#v", got)
 	}
-	// v12 wire contract: welcome.Listen is empty (host is no longer
-	// carried on the wire — neighbours synthesise the dialable peer
-	// address from the observed TCP source host plus AdvertisePort).
-	// The listener flag still signals "this peer accepts inbound"
-	// and AdvertisePort carries the listening port.
-	if got := frames[0]; got.Listener != "1" || got.Listen != "" {
+	// The host is not carried on the wire — neighbours synthesise the
+	// dialable peer address from the observed TCP source host plus
+	// AdvertisePort. The listener flag signals "this peer accepts
+	// inbound" and AdvertisePort carries the listening port.
+	if got := frames[0]; got.Listener != "1" {
 		t.Fatalf("unexpected welcome listener fields: %#v", got)
 	}
 	if got := frames[0]; !got.AdvertisePort.IsValid() {
-		t.Fatalf("welcome.advertise_port must be populated under the v12 contract, got %d", got.AdvertisePort)
+		t.Fatalf("welcome.advertise_port must be populated, got %d", got.AdvertisePort)
 	}
 
 	// Query local state via HandleLocalFrame (no peers expected initially).
@@ -283,15 +282,15 @@ func TestInboundIncompatibleProtocolEmitsPerPeerBannedNotice(t *testing.T) {
 	}
 }
 
-// TestInboundIncompatibleProtocolKeyedByAdvertisePort verifies the v12-correct
+// TestInboundIncompatibleProtocolKeyedByAdvertisePort verifies the
 // health-key shape on the incompatible-protocol inbound path: peer version
 // metadata MUST be stored under "<observed_TCP_IP>:<advertise_port>", not
 // under "<observed_TCP_IP>:<DefaultPeerPort>" or under the Ed25519 identity.
 //
-// Regression target: prior to the fix this branch built the key from
-// frame.Listen / frame.Address through sanitizeInboundAddress, so under the
-// v12 wire shape (Listen empty, Address = identity not host:port) every
-// peer collapsed onto "<observed_IP>:64646" — the per-peer version-gated
+// Regression target: prior to the fix this branch built the key from the
+// hello's self-reported address fields through sanitizeInboundAddress, and
+// since the wire carries no host (Address is the identity, not host:port)
+// every peer collapsed onto "<observed_IP>:64646" — the per-peer version-gated
 // ban would aim at the wrong peer record on any node running with a
 // non-default advertise_port.
 //
@@ -783,7 +782,8 @@ func TestNormalizePeerAddressRejectsLoopbackForWildcardBind(t *testing.T) {
 		Type:          domain.NodeTypeFull,
 	}, id, nil)
 
-	// Inbound from 127.0.0.1 with self-reported listen=127.0.0.1:57461.
+	// Inbound from 127.0.0.1; the advertised endpoint is synthesised from
+	// the observed loopback host plus the peer's advertise_port.
 	_, ok := svc.normalizePeerAddress("127.0.0.1:57491", "127.0.0.1:57461")
 	if ok {
 		t.Fatal("expected normalizePeerAddress to reject loopback for wildcard bind")
@@ -1360,7 +1360,7 @@ func TestKnownPeersIncludesNonListenerClients(t *testing.T) {
 		t.Fatalf("generate identity: %v", err)
 	}
 
-	// Connect as a non-listener node (Listener: "0", no Listen address).
+	// Connect as a non-listener node (Listener: "0").
 	conn, err := net.DialTimeout("tcp", svc.externalListenAddress(), 2*time.Second)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
@@ -4095,7 +4095,7 @@ func TestPromotePeerAddressDoesNotClearIPWideBanForAlternatePort(t *testing.T) {
 	svc.addPeerAddress(primary, "full", domaintest.ID("peer-99"))
 	// Simulate 4 incompatible-version attempts to trigger the timed ban.
 	for i := 0; i < 4; i++ {
-		svc.penalizeOldProtocolPeer(primary, 0, 0)
+		svc.penalizeOldProtocolPeer(primary, 0, 0, "")
 	}
 
 	svc.promotePeerAddress(alternate)
@@ -6512,7 +6512,6 @@ func TestProtocolTraceLogging(t *testing.T) {
 			PubKey:                 identity.PublicKeyBase64(id.PublicKey),
 			BoxKey:                 identity.BoxPublicKeyBase64(id.BoxPublicKey),
 			BoxSig:                 identity.SignBoxKeyBinding(id),
-			Listen:                 "10.0.0.88:64646",
 		}
 		writeJSONFrame(t, conn, helloFrame)
 		welcome := readJSONTestFrame(t, reader)
@@ -6895,18 +6894,6 @@ func TestAddPeerAddressWithoutNodeTypeKeepsTypeUnknown(t *testing.T) {
 func TestAnnouncePeerHelpers(t *testing.T) {
 	t.Parallel()
 
-	// peerListenAddress should return empty for non-listener peers.
-	noListener := protocol.Frame{Listener: "0", Listen: "some:64646"}
-	if addr := peerListenAddress(noListener); addr != "" {
-		t.Errorf("expected empty for non-listener, got %q", addr)
-	}
-
-	// peerListenAddress should return address for listener peers.
-	listener := protocol.Frame{Listener: "1", Listen: "83.172.44.178:64646"}
-	if addr := peerListenAddress(listener); addr != "83.172.44.178:64646" {
-		t.Errorf("expected 83.172.44.178:64646, got %q", addr)
-	}
-
 	// Verify local addresses are filtered by classifyAddress.
 	localAddrs := []string{"127.0.0.1:64646", "192.168.1.1:64646", "10.0.0.1:64646"}
 	for _, addr := range localAddrs {
@@ -6924,20 +6911,17 @@ func TestAnnouncePeerHelpers(t *testing.T) {
 }
 
 // TestObservedAnnounceAddressFromHelloUsesObservedHostWithAdvertisedPort pins
-// the gossip contract: when a peer's claimed hello.Listen host differs from
-// the observed TCP source host, the announce frame carries the observed host
-// (trusted truth from the TCP remote) combined with the advertised port
-// (because TCP source port is an ephemeral NAT mapping).
+// the gossip contract: the announce frame carries the observed TCP source
+// host (trusted truth from the TCP remote) combined with the advertised port,
+// never the TCP source port (an ephemeral NAT mapping).
 //
-// This is the production scenario: peer connects from 91.234.35.132:57677
-// but announces hello.Listen = 212.104.118.136:64646 (stale DDNS). We must
-// gossip 91.234.35.132:64646, not 212.104.118.136:64646.
+// Production scenario: a peer connects from 91.234.35.132:57677 without an
+// advertise_port. We must gossip 91.234.35.132:64646, not :57677.
 //
 // TestObservedAnnounceAddressFromHelloUsesObservedHostWithAdvertisedPort
-// закрепляет контракт госсипа: если заявленный в hello.Listen хост не
-// совпадает с наблюдаемым TCP source host, фрейм announce_peer несёт
-// наблюдаемый хост (доверенная истина из TCP remote) в сочетании с
-// объявленным портом (TCP source port — это эфемерный NAT mapping).
+// закрепляет контракт госсипа: фрейм announce_peer несёт наблюдаемый TCP
+// source host (доверенная истина из TCP remote) в сочетании с объявленным
+// портом, но никогда не TCP source port (это эфемерный NAT mapping).
 func TestObservedAnnounceAddressFromHelloUsesObservedHostWithAdvertisedPort(t *testing.T) {
 	t.Parallel()
 
@@ -6950,7 +6934,7 @@ func TestObservedAnnounceAddressFromHelloUsesObservedHostWithAdvertisedPort(t *t
 		Type:          domain.NodeTypeFull,
 	}, id, nil)
 
-	hello := protocol.Frame{Listener: "1", Listen: "212.104.118.136:64646"}
+	hello := protocol.Frame{Listener: "1"}
 	got, ok := svc.observedAnnounceAddressFromHello("91.234.35.132:57677", hello)
 	if !ok {
 		t.Fatalf("expected announce address to be produced")
@@ -6980,7 +6964,7 @@ func TestObservedAnnounceAddressFromHelloSkipsListenerDisabled(t *testing.T) {
 		Type:          domain.NodeTypeFull,
 	}, id, nil)
 
-	hello := protocol.Frame{Listener: "0", Listen: "212.104.118.136:64646"}
+	hello := protocol.Frame{Listener: "0"}
 	if got, ok := svc.observedAnnounceAddressFromHello("91.234.35.132:57677", hello); ok {
 		t.Fatalf("expected listener-disabled peer to be skipped, got %s", got)
 	}
@@ -6988,13 +6972,14 @@ func TestObservedAnnounceAddressFromHelloSkipsListenerDisabled(t *testing.T) {
 
 // TestObservedAnnounceAddressFromHelloSkipsEmptyObserved verifies that an
 // empty observed address — which happens when RemoteAddr() is queried for
-// an unregistered ConnID — does not fall through to the claimed hello.Listen
-// host. The whole point of the helper is to refuse to trust the claim.
+// an unregistered ConnID — produces no announce address: the observed host
+// is the only host the helper trusts, so without it there is nothing to
+// announce.
 //
 // TestObservedAnnounceAddressFromHelloSkipsEmptyObserved проверяет, что
 // пустой observed адрес (например, RemoteAddr() для незарегистрированного
-// ConnID) не откатывается на заявленный hello.Listen — весь смысл хелпера
-// в том, чтобы не доверять заявке.
+// ConnID) не порождает announce-адрес: наблюдаемый хост — единственный, которому
+// хелпер доверяет, и без него анонсировать нечего.
 func TestObservedAnnounceAddressFromHelloSkipsEmptyObserved(t *testing.T) {
 	t.Parallel()
 
@@ -7007,7 +6992,7 @@ func TestObservedAnnounceAddressFromHelloSkipsEmptyObserved(t *testing.T) {
 		Type:          domain.NodeTypeFull,
 	}, id, nil)
 
-	hello := protocol.Frame{Listener: "1", Listen: "212.104.118.136:64646"}
+	hello := protocol.Frame{Listener: "1"}
 	if got, ok := svc.observedAnnounceAddressFromHello("", hello); ok {
 		t.Fatalf("expected empty observed to be skipped, got %s", got)
 	}
@@ -7017,13 +7002,11 @@ func TestObservedAnnounceAddressFromHelloSkipsEmptyObserved(t *testing.T) {
 }
 
 // TestObservedAnnounceAddressFromHelloSynthesisesAdvertisedFromObserved
-// verifies the v12 wire contract: a hello with empty or whitespace-only
-// Listen still produces an announce address by pairing the observed
-// TCP source host with the self-reported advertise_port (or the
-// default port when AdvertisePort is absent / invalid). Pre-v12 the
-// helper required at least a host in Listen; under the v12 cleanup
-// the host is no longer wire truth and the helper synthesises it
-// from the observed TCP remote.
+// verifies the wire contract: a hello produces an announce address by
+// pairing the observed TCP source host with the self-reported
+// advertise_port (or the default port when AdvertisePort is absent /
+// invalid). The hello carries no host, so the helper takes it from the
+// observed TCP remote.
 func TestObservedAnnounceAddressFromHelloSynthesisesAdvertisedFromObserved(t *testing.T) {
 	t.Parallel()
 
@@ -7042,18 +7025,18 @@ func TestObservedAnnounceAddressFromHelloSynthesisesAdvertisedFromObserved(t *te
 		want  domain.PeerAddress
 	}{
 		{
-			name:  "empty_listen_default_port",
-			hello: protocol.Frame{Listener: "1", Listen: ""},
+			name:  "absent_advertise_port_uses_default_port",
+			hello: protocol.Frame{Listener: "1"},
 			want:  domain.PeerAddress(net.JoinHostPort("91.234.35.132", config.DefaultPeerPort)),
 		},
 		{
-			name:  "whitespace_listen_default_port",
-			hello: protocol.Frame{Listener: "1", Listen: "   "},
+			name:  "invalid_advertise_port_uses_default_port",
+			hello: protocol.Frame{Listener: "1", AdvertisePort: domain.PeerPort(70000)},
 			want:  domain.PeerAddress(net.JoinHostPort("91.234.35.132", config.DefaultPeerPort)),
 		},
 		{
-			name:  "empty_listen_with_advertise_port",
-			hello: protocol.Frame{Listener: "1", Listen: "", AdvertisePort: domain.PeerPort(40404)},
+			name:  "advertise_port_is_used",
+			hello: protocol.Frame{Listener: "1", AdvertisePort: domain.PeerPort(40404)},
 			want:  domain.PeerAddress(net.JoinHostPort("91.234.35.132", "40404")),
 		},
 	}
@@ -7072,58 +7055,15 @@ func TestObservedAnnounceAddressFromHelloSynthesisesAdvertisedFromObserved(t *te
 	}
 }
 
-// TestObservedAnnounceAddressFromHelloFallsBackToDefaultPortForHostOnlyHello
-// pins the second half of the trust contract: when hello.Listen carries a
-// bare host/IP without an explicit port (legacy client, simple config), the
-// helper still produces an announce address by pairing the observed TCP
-// source host with config.DefaultPeerPort. Without this fallback a
-// legitimate peer whose hello.Listen is just an IP string would never be
-// gossipped, and the NAT-asymmetry fix would regress "announce observed
-// IP" to "announce nothing at all".
-//
-// TestObservedAnnounceAddressFromHelloFallsBackToDefaultPortForHostOnlyHello
-// закрепляет вторую половину контракта доверия: когда hello.Listen несёт
-// голый host/IP без явного порта (legacy-клиент, простой конфиг), helper
-// всё равно порождает announce-адрес, склеивая наблюдаемый TCP source host
-// с config.DefaultPeerPort. Без этого фолбэка легитимный пир, у которого
-// hello.Listen — просто IP-строка, никогда не попал бы в госсип, и фикс
-// NAT-асимметрии деградировал бы из «анонсируем наблюдаемый IP» в
-// «не анонсируем вообще».
-func TestObservedAnnounceAddressFromHelloFallsBackToDefaultPortForHostOnlyHello(t *testing.T) {
-	t.Parallel()
-
-	id, err := identity.Generate()
-	if err != nil {
-		t.Fatalf("Generate identity failed: %v", err)
-	}
-	svc := NewService(config.Node{
-		ListenAddress: ":64646",
-		Type:          domain.NodeTypeFull,
-	}, id, nil)
-
-	// Bare IP without a port in hello.Listen — observed TCP source carries
-	// a public IP; expect the helper to pair it with DefaultPeerPort.
-	hello := protocol.Frame{Listener: "1", Listen: "212.104.118.136"}
-	got, ok := svc.observedAnnounceAddressFromHello("91.234.35.132:57677", hello)
-	if !ok {
-		t.Fatalf("expected announce address to be produced with default-port fallback")
-	}
-	wantPort := config.DefaultPeerPort
-	want := domain.PeerAddress(net.JoinHostPort("91.234.35.132", wantPort))
-	if got != want {
-		t.Fatalf("unexpected announce address: got %s, want %s", got, want)
-	}
-}
-
 // TestObservedAnnounceAddressFromHelloSkipsPrivateObserved verifies that
 // when the observed host is in a forbidden/private range, no announce
 // address is produced — we do not leak private-network topology into the
-// public gossip fabric even if hello.Listen looks public.
+// public gossip fabric.
 //
 // TestObservedAnnounceAddressFromHelloSkipsPrivateObserved проверяет, что
 // если observed host попадает в запрещённый/приватный диапазон, announce
 // адрес не создаётся — мы не раскрываем приватную топологию в публичный
-// госсип, даже если hello.Listen выглядит публичным.
+// госсип.
 func TestObservedAnnounceAddressFromHelloSkipsPrivateObserved(t *testing.T) {
 	t.Parallel()
 
@@ -7136,16 +7076,10 @@ func TestObservedAnnounceAddressFromHelloSkipsPrivateObserved(t *testing.T) {
 		Type:          domain.NodeTypeFull,
 	}, id, nil)
 
-	hello := protocol.Frame{Listener: "1", Listen: "198.51.100.5:64646"}
-	// observed is loopback — normalizePeerAddress returns empty for private
-	// observed host when advertised is public (no safe IP to announce).
-	if got, ok := svc.observedAnnounceAddressFromHello("127.0.0.1:50702", hello); ok {
-		// classifyAddress will filter loopback downstream, but the helper
-		// itself may legitimately return a value here; we only require
-		// that if it does, it is NOT the claimed public host verbatim —
-		// that would defeat the trust-observed-IP invariant.
-		if got == domain.PeerAddress(strings.TrimSpace(hello.Listen)) {
-			t.Fatalf("must not fall back to claimed hello.Listen for private observed, got %s", got)
+	hello := protocol.Frame{Listener: "1", AdvertisePort: domain.PeerPort(64646)}
+	for _, observed := range []string{"127.0.0.1:50702", "10.0.0.5:50702", "192.168.1.5:50702"} {
+		if got, ok := svc.observedAnnounceAddressFromHello(observed, hello); ok {
+			t.Fatalf("observed %s: private observed host must produce no announce address, got %s", observed, got)
 		}
 	}
 }
@@ -8882,7 +8816,6 @@ func TestMixedVersionLegacyPeerExchange(t *testing.T) {
 		PubKey:                 identity.PublicKeyBase64(legacyID.PublicKey),
 		BoxKey:                 identity.BoxPublicKeyBase64(legacyID.BoxPublicKey),
 		BoxSig:                 identity.SignBoxKeyBinding(legacyID),
-		Listen:                 "10.0.0.42:12345",
 		// Capabilities intentionally omitted — legacy node.
 	})
 	welcome := readJSONTestFrame(t, reader)
@@ -8964,7 +8897,6 @@ func TestUnauthenticatedPeerCannotSendRelayMessage(t *testing.T) {
 		Client:                 "mobile",
 		ClientVersion:          "1.0",
 		Address:                "fake-attacker-address",
-		Listen:                 "10.0.0.99:64646",
 		Capabilities:           []string{"mesh_relay_v1"},
 	})
 	welcome := readJSONTestFrame(t, reader)
@@ -9018,7 +8950,7 @@ func TestUnauthenticatedPeerCannotSendRelayMessage(t *testing.T) {
 
 // TestRelayDMSyncsUnknownSenderKeyFromPreviousHop verifies the LEGACY
 // keyless recovery contract: when a relay_message carrying a DM arrives
-// at the final recipient without the v27 attached sender keys and the
+// at the final recipient without attached sender keys and the
 // sender's public key is not yet known, the node SCHEDULES a background
 // single-flight key sync from the previous hop (triggerSenderKeySyncAsync)
 // and rejects the current attempt; the upstream retry then finds the
@@ -9406,8 +9338,8 @@ func TestPeerVersionStoredByHealthKey(t *testing.T) {
 		t.Errorf("peerBuilds[%q] = %d, want %d", primaryAddr, build2, 21)
 	}
 
-	// Case 3: inbound peer without listen field — version stored by
-	// inboundPeerAddress (hello.Address fallback).
+	// Case 3: inbound peer whose TCP address is not an IP — its version
+	// is keyed by rememberConnPeerAddr's hello.Address fallback.
 	inboundAddr := domain.PeerAddress("abcdef1234567890")
 	svc.addPeerVersion(inboundAddr, "0.20-gamma")
 	svc.addPeerBuild(inboundAddr, 20)
@@ -9547,7 +9479,6 @@ func TestDuplicateInboundConnectionAllowed(t *testing.T) {
 		Version:       config.ProtocolVersion,
 		Client:        "cli",
 		ClientVersion: "0.25-test",
-		Listen:        string(peerAddr),
 		Address:       string(peerAddr),
 	}
 	writeJSONFrame(t, conn, hello)

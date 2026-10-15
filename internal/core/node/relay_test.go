@@ -5,10 +5,14 @@ import (
 	"fmt"
 	"net"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 
 	"github.com/piratecash/corsa/internal/core/config"
 	"github.com/piratecash/corsa/internal/core/directmsg"
@@ -51,7 +55,7 @@ func TestRelayStateStoreBasic(t *testing.T) {
 	}
 }
 
-func TestRelayStateStoreIdempotentUpsertSameDestNewOrigin(t *testing.T) {
+func TestRelayStateStoreIdempotentUpsertSameDestNewSelection(t *testing.T) {
 	rs := newRelayStateStore()
 
 	state1 := &relayForwardState{
@@ -59,17 +63,19 @@ func TestRelayStateStoreIdempotentUpsertSameDestNewOrigin(t *testing.T) {
 		PreviousHop:      "peer-a",
 		ReceiptForwardTo: "peer-a",
 		ForwardedTo:      "peer-b",
-		RouteOrigin:      domaintest.ID("origin-1"),
+		NextHopSelection: relayNextHopRoutingTable,
 		RemainingTTL:     relayStateTTLSeconds,
 	}
-	// Same next-hop peer but different route origin (e.g. origin
-	// re-announced with new SeqNo). Both fields must be updated.
+	// Same next-hop peer reached through a different path (the table
+	// route went away and gossip fan-out picked the same peer). Both
+	// fields must be updated: the stale-ack guard judges the ack by the
+	// path of the attempt actually outstanding.
 	state2 := &relayForwardState{
 		MessageID:        "msg-1",
 		PreviousHop:      "peer-c",
 		ReceiptForwardTo: "peer-c",
 		ForwardedTo:      "peer-b", // same destination
-		RouteOrigin:      domaintest.ID("origin-2"),
+		NextHopSelection: relayNextHopGossipFanOut,
 		RemainingTTL:     relayStateTTLSeconds / 2,
 	}
 
@@ -92,9 +98,9 @@ func TestRelayStateStoreIdempotentUpsertSameDestNewOrigin(t *testing.T) {
 	rs.mu.Lock()
 	s := rs.states["msg-1"]
 	rs.mu.Unlock()
-	// RouteOrigin must be updated even if ForwardedTo is the same.
-	if s.RouteOrigin != domaintest.ID("origin-2") {
-		t.Fatalf("expected RouteOrigin='origin-2' (updated for same-hop reroute), got %q", s.RouteOrigin)
+	// NextHopSelection must be updated even if ForwardedTo is the same.
+	if s.NextHopSelection != relayNextHopGossipFanOut {
+		t.Fatalf("expected NextHopSelection=%s (updated for same-hop reroute), got %s", relayNextHopGossipFanOut, s.NextHopSelection)
 	}
 	if s.RemainingTTL != relayStateTTLSeconds/2 {
 		t.Fatalf("expected RemainingTTL=%d (refreshed), got %d", relayStateTTLSeconds/2, s.RemainingTTL)
@@ -109,16 +115,16 @@ func TestRelayStateStoreIdempotentUpsertReroute(t *testing.T) {
 		PreviousHop:      "peer-a",
 		ReceiptForwardTo: "peer-a",
 		ForwardedTo:      "peer-b",
-		RouteOrigin:      domaintest.ID("origin-1"),
+		NextHopSelection: relayNextHopRoutingTable,
 		RemainingTTL:     relayStateTTLSeconds,
 	}
-	// Route changed — ForwardedTo and RouteOrigin must both update.
+	// Route changed — ForwardedTo and NextHopSelection must both update.
 	state2 := &relayForwardState{
 		MessageID:        "msg-1",
 		PreviousHop:      "peer-c",
 		ReceiptForwardTo: "peer-c",
 		ForwardedTo:      "peer-d", // different destination
-		RouteOrigin:      domaintest.ID("origin-2"),
+		NextHopSelection: relayNextHopGossipFanOut,
 		RemainingTTL:     relayStateTTLSeconds / 2,
 	}
 
@@ -131,8 +137,8 @@ func TestRelayStateStoreIdempotentUpsertReroute(t *testing.T) {
 	if s.ForwardedTo != "peer-d" {
 		t.Fatalf("expected ForwardedTo='peer-d' (rerouted), got %q", s.ForwardedTo)
 	}
-	if s.RouteOrigin != domaintest.ID("origin-2") {
-		t.Fatalf("expected RouteOrigin='origin-2' (updated for new route), got %q", s.RouteOrigin)
+	if s.NextHopSelection != relayNextHopGossipFanOut {
+		t.Fatalf("expected NextHopSelection=%s (updated for new route), got %s", relayNextHopGossipFanOut, s.NextHopSelection)
 	}
 	// PreviousHop preserved from original.
 	if fwd := rs.lookupReceiptForwardTo("msg-1"); fwd != "peer-a" {
@@ -150,27 +156,27 @@ func TestRelayStateStoreAbandonedForwardedToAccumulates(t *testing.T) {
 
 	// First send: table-routed via peer-a.
 	rs.store(&relayForwardState{
-		MessageID:    "msg-1",
-		PreviousHop:  "upstream",
-		ForwardedTo:  "peer-a:1234",
-		RouteOrigin:  domaintest.ID("origin-x"),
-		RemainingTTL: relayStateTTLSeconds,
+		MessageID:        "msg-1",
+		PreviousHop:      "upstream",
+		ForwardedTo:      "peer-a:1234",
+		NextHopSelection: relayNextHopRoutingTable,
+		RemainingTTL:     relayStateTTLSeconds,
 	})
 
 	// Reroute 1: table via peer-b (peer-a abandoned).
 	rs.store(&relayForwardState{
-		MessageID:    "msg-1",
-		ForwardedTo:  "peer-b:5678",
-		RouteOrigin:  domaintest.ID("origin-y"),
-		RemainingTTL: relayStateTTLSeconds,
+		MessageID:        "msg-1",
+		ForwardedTo:      "peer-b:5678",
+		NextHopSelection: relayNextHopRoutingTable,
+		RemainingTTL:     relayStateTTLSeconds,
 	})
 
 	// Reroute 2: gossip via peer-c (peer-b abandoned).
 	rs.store(&relayForwardState{
-		MessageID:    "msg-1",
-		ForwardedTo:  "peer-c:9012",
-		RouteOrigin:  domain.PeerIdentity{},
-		RemainingTTL: relayStateTTLSeconds,
+		MessageID:        "msg-1",
+		ForwardedTo:      "peer-c:9012",
+		NextHopSelection: relayNextHopGossipFanOut,
+		RemainingTTL:     relayStateTTLSeconds,
 	})
 
 	abandoned := rs.lookupAbandonedForwardedTo("msg-1")
@@ -186,10 +192,10 @@ func TestRelayStateStoreAbandonedForwardedToAccumulates(t *testing.T) {
 
 	// Same ForwardedTo upsert should NOT append a duplicate.
 	rs.store(&relayForwardState{
-		MessageID:    "msg-1",
-		ForwardedTo:  "peer-c:9012",
-		RouteOrigin:  domain.PeerIdentity{},
-		RemainingTTL: relayStateTTLSeconds,
+		MessageID:        "msg-1",
+		ForwardedTo:      "peer-c:9012",
+		NextHopSelection: relayNextHopGossipFanOut,
+		RemainingTTL:     relayStateTTLSeconds,
 	})
 	abandoned = rs.lookupAbandonedForwardedTo("msg-1")
 	if len(abandoned) != 2 {
@@ -1145,27 +1151,49 @@ func TestUpdateStateOverwritesReservation(t *testing.T) {
 }
 
 // TestSendReceiptToPeerReturnsBool verifies that sendReceiptToPeer returns a
-// bool reflecting whether the receipt was actually enqueued or queued. Before
-// the fix, sendReceiptToPeer was void and handleRelayReceipt could not
-// distinguish success from silent drop.
+// bool reflecting whether the receipt was actually enqueued or queued, and
+// that every receipt status takes the same path: with no live session the
+// frame parks in the peer's pending queue for the reconnect drain. seen_ack
+// has no path of its own — a peer below the floor cannot connect, so there
+// is no older peer it could be withheld from.
 func TestSendReceiptToPeerReturnsBool(t *testing.T) {
 	t.Parallel()
-	svc := newTestService(t, config.NodeTypeFull)
-
-	receipt := protocol.DeliveryReceipt{
-		MessageID:   "receipt-bool-test-1",
-		Sender:      "original-sender",
-		Recipient:   svc.Address(),
-		Status:      protocol.ReceiptStatusDelivered,
-		DeliveredAt: time.Now().UTC(),
+	statuses := []string{
+		protocol.ReceiptStatusDelivered,
+		protocol.ReceiptStatusSeen,
+		protocol.ReceiptStatusSeenAck,
 	}
+	for _, status := range statuses {
+		t.Run(status, func(t *testing.T) {
+			t.Parallel()
+			svc := newTestService(t, config.NodeTypeFull)
+			const address = domain.PeerAddress("10.0.0.99:64646")
+			receipt := protocol.DeliveryReceipt{
+				MessageID:   "receipt-bool-test-1",
+				Sender:      "original-sender",
+				Recipient:   svc.Address(),
+				Status:      status,
+				DeliveredAt: time.Now().UTC(),
+			}
 
-	// With no active session, enqueuePeerFrame fails. queuePeerFrame
-	// succeeds (receipt frames always have a valid pending key).
-	// sendReceiptToPeer must return true because the receipt was queued.
-	result := svc.sendReceiptToPeer(domain.PeerAddress("10.0.0.99:64646"), receipt)
-	if !result {
-		t.Fatal("sendReceiptToPeer should return true when receipt is queued")
+			// With no active session, enqueuePeerFrame fails and
+			// queuePeerFrame parks the frame (receipt frames always have a
+			// valid pending key), so the receipt counts as handed over.
+			if !svc.sendReceiptToPeer(address, receipt) {
+				t.Fatal("sendReceiptToPeer should return true when receipt is queued")
+			}
+
+			svc.deliveryMu.RLock()
+			parked := append([]pendingFrame(nil), svc.pending[address]...)
+			svc.deliveryMu.RUnlock()
+			if len(parked) != 1 {
+				t.Fatalf("pending frames = %d, want the one receipt", len(parked))
+			}
+			frame := parked[0].Frame
+			if frame.Type != "relay_delivery_receipt" || frame.ID != string(receipt.MessageID) || frame.Status != status {
+				t.Fatalf("parked frame = %+v, want relay_delivery_receipt %s with status %s", frame, receipt.MessageID, status)
+			}
+		})
 	}
 }
 
@@ -2005,5 +2033,43 @@ func TestRelayStateStoreOriginBypassesPerPeerLimit(t *testing.T) {
 		if !rs.tryReserve(id, "") {
 			t.Fatalf("origin entry %d should succeed (no per-peer limit for empty hop)", i)
 		}
+	}
+}
+
+// The zero relayNextHopSelection names no path: a state built without the
+// field must not read as any business state, NotForwarded included.
+func TestRelayNextHopSelection_ZeroValueIsUnspecified(t *testing.T) {
+	var zero relayNextHopSelection
+	if zero.String() != "unspecified" {
+		t.Fatalf("zero selection = %q, want \"unspecified\"", zero.String())
+	}
+	if zero.pinsAckIdentity() {
+		t.Fatal("the zero selection pins the ack identity")
+	}
+}
+
+// A forwarded state whose selection was forgotten is stored (the forward
+// happened) but logged, so the omission is visible instead of silently
+// weakening the stale hop-ack guard.
+func TestRelayStateStore_ForwardedStateWithoutSelectionIsLogged(t *testing.T) {
+	// NOT parallel: it inspects the global zerolog output.
+	var buf syncWriter
+	origLogger := log.Logger
+	log.Logger = zerolog.New(&buf).With().Logger()
+	defer func() { log.Logger = origLogger }()
+
+	rs := newRelayStateStore()
+	rs.store(&relayForwardState{MessageID: "msg-no-selection", ForwardedTo: "peer-b", RemainingTTL: relayStateTTLSeconds})
+	rs.updateState(&relayForwardState{MessageID: "msg-no-selection-update", ForwardedTo: "peer-c", RemainingTTL: relayStateTTLSeconds})
+	rs.store(&relayForwardState{MessageID: "msg-local", NextHopSelection: relayNextHopNotForwarded, RemainingTTL: relayStateTTLSeconds})
+
+	logged := buf.String()
+	for _, id := range []string{"msg-no-selection", "msg-no-selection-update"} {
+		if !strings.Contains(logged, `"message":"relay_state_next_hop_selection_missing"`) || !strings.Contains(logged, `"id":"`+id+`"`) {
+			t.Fatalf("a forwarded state without a selection (%s) was stored silently; log: %s", id, logged)
+		}
+	}
+	if strings.Contains(logged, `"id":"msg-local"`) {
+		t.Fatalf("a state that forwarded nothing was reported: %s", logged)
 	}
 }

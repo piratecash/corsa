@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"strings"
@@ -275,7 +276,7 @@ func TestTransportTrafficCountsSyncPeerDial(t *testing.T) {
 	ln := &countingListener{Listener: raw}
 	t.Cleanup(func() { _ = raw.Close() })
 
-	svc := newSyncPeerTestService(domain.NetworkStatusOffline)
+	svc := newSyncPeerTestService(t, domain.NetworkStatusOffline)
 	serverDone := make(chan []string, 1)
 	go func() { serverDone <- syncPeerMockServer(t, ln, nil) }()
 
@@ -387,7 +388,7 @@ func TestTransportTrafficCountsNoticeFallbackDial(t *testing.T) {
 
 	svc := newTestService(t, config.NodeTypeFull)
 	peerDone := make(chan error, 1)
-	go func() { peerDone <- serveNoticeWithoutAuth(ln) }()
+	go func() { peerDone <- serveAuthenticatedNotice(ln) }()
 
 	markOldNode(svc, domain.PeerAddress(raw.Addr().String()))
 	svc.sendNoticeToPeer(domain.PeerAddress(raw.Addr().String()), time.Minute, "transport-ciphertext")
@@ -407,10 +408,11 @@ func TestTransportTrafficCountsNoticeFallbackDial(t *testing.T) {
 	}
 }
 
-// serveNoticeWithoutAuth answers one push_notice dial without a challenge and
-// then reads until the dialler closes, so every byte the dialler wrote has
-// been counted by the time it returns.
-func serveNoticeWithoutAuth(ln net.Listener) error {
+// serveAuthenticatedNotice answers one push_notice dial as a current responder
+// does — a challenging welcome, auth_ok for a valid auth_session
+// (v1HandshakeResponder) — and then reads until the dialler closes, so every byte
+// the dialler wrote has been counted by the time it returns.
+func serveAuthenticatedNotice(ln net.Listener) error {
 	conn, err := ln.Accept()
 	if err != nil {
 		return err
@@ -419,15 +421,19 @@ func serveNoticeWithoutAuth(ln net.Listener) error {
 	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
 	reader := bufio.NewReader(conn)
 
-	if _, err := reader.ReadBytes('\n'); err != nil {
-		return err
-	}
-	welcome, err := protocol.MarshalFrameLine(protocol.Frame{Type: "welcome"})
+	responder, err := newV1HandshakeResponder()
 	if err != nil {
 		return err
 	}
-	if _, err := io.WriteString(conn, welcome); err != nil {
+	if _, err := responder.answerHello(conn, reader); err != nil {
 		return err
+	}
+	authReply, err := responder.answerAuth(conn, reader)
+	if err != nil {
+		return err
+	}
+	if authReply.Type != "auth_ok" {
+		return fmt.Errorf("auth_session refused: %s", authReply.Code)
 	}
 	notice, err := reader.ReadBytes('\n')
 	if err != nil {

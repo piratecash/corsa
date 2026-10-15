@@ -26,7 +26,8 @@ func attachPushObserver(t *testing.T, svc *Service, recipient string, connID net
 }
 
 // attachPushObserverWithVersion is attachPushObserver with an explicit
-// advertised protocol version — used by the version-gate tests.
+// advertised protocol version, for tests that pin what a subscriber at a
+// particular version (the floor, a gate boundary) is sent.
 func attachPushObserverWithVersion(t *testing.T, svc *Service, recipient string, connID netcore.ConnID, version int) *bufio.Reader {
 	t.Helper()
 	serverConn, clientConn := net.Pipe()

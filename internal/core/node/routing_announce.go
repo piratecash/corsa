@@ -2349,7 +2349,8 @@ func (s *Service) acceptRequestResyncDebounced(subject penaltySubject, now time.
 // drops the Origin field: the receiver derives the uplink from the sending
 // session, so each entry is ingested under Origin == senderIdentity
 // (sender-originated semantic, identical to the Origin = localOrigin that
-// legacy v3 senders would otherwise put on the wire). Internal storage is
+// the same sender puts on the wire in v1/v2 frames), so it passes the
+// foreign-Origin guard by construction. Internal storage is
 // per-(Identity, Uplink) and Origin is not part of the dedup key, so this
 // reuses the exact entry-by-entry trust/withdrawal/UpdateRoute logic in
 // applyAnnounceEntries — only the Origin synthesis and the epoch/baseline
@@ -2718,10 +2719,95 @@ func (m announceReceiveMode) wireTypeLabel() string {
 	}
 }
 
+// foreignOriginRejectionMsg names the log event for an entry refused
+// because its Origin is not the sender. Withdrawals keep their
+// long-standing event name so existing log queries stay valid.
+func foreignOriginRejectionMsg(wireHops int) string {
+	if wireHops >= routing.HopsInfinity {
+		return "announce_rejected_transit_withdrawal"
+	}
+	return "announce_rejected_foreign_origin"
+}
+
+// announceEntryRefusals tallies, for one received frame, the entries refused
+// for reasons the sender controls entirely — a malformed address, a foreign
+// Origin, a transit withdrawal, a route to the sender itself, an entry the
+// table refuses as invalid. A hostile sender can fill every frame with
+// such entries and repeat it at will, so a Warn per entry would let it flood
+// the log: each entry is logged at Debug, and each reason gets ONE Warn per
+// frame with the count and the first refused entry as an example.
+type announceEntryRefusals struct {
+	from    domain.PeerIdentity
+	reasons []string // in order of first occurrence, so the summary is deterministic
+	counts  map[string]int
+	samples map[string]protocol.AnnounceRouteFrame
+}
+
+func newAnnounceEntryRefusals(from domain.PeerIdentity) *announceEntryRefusals {
+	return &announceEntryRefusals{
+		from:    from,
+		counts:  make(map[string]int),
+		samples: make(map[string]protocol.AnnounceRouteFrame),
+	}
+}
+
+// maxRefusedFieldLogBytes caps the sender-controlled Identity and Origin
+// strings a refusal log line carries: a malformed entry may hold a value of
+// any length, and the log must not become the sender's storage.
+const maxRefusedFieldLogBytes = 128
+
+// clipRefusedField cuts a sender-controlled wire string to
+// maxRefusedFieldLogBytes for logging.
+func clipRefusedField(value string) string {
+	if len(value) <= maxRefusedFieldLogBytes {
+		return value
+	}
+	return value[:maxRefusedFieldLogBytes]
+}
+
+// record counts one refused entry under reason (the summary's log event)
+// and logs the entry itself at Debug, with cause when the refusal has one
+// (the table's validation error); nil otherwise.
+func (r *announceEntryRefusals) record(reason string, entry protocol.AnnounceRouteFrame, cause error) {
+	if _, seen := r.counts[reason]; !seen {
+		r.reasons = append(r.reasons, reason)
+		r.samples[reason] = entry
+	}
+	r.counts[reason]++
+	event := log.Debug()
+	if cause != nil {
+		event = event.Err(cause)
+	}
+	event.
+		Str("reason", reason).
+		Str("identity", clipRefusedField(entry.Identity)).
+		Str("origin", clipRefusedField(entry.Origin)).
+		Str("from", r.from.String()).
+		Int("hops", entry.Hops).
+		Uint64("seq", entry.SeqNo).
+		Msg("announce_entry_refused")
+}
+
+// logSummaries writes one Warn per refusal reason seen in the frame.
+func (r *announceEntryRefusals) logSummaries(wireType string) {
+	for _, reason := range r.reasons {
+		sample := r.samples[reason]
+		log.Warn().
+			Str("from", r.from.String()).
+			Str("wire_type", wireType).
+			Int("count", r.counts[reason]).
+			Str("example_identity", clipRefusedField(sample.Identity)).
+			Str("example_origin", clipRefusedField(sample.Origin)).
+			Int("example_hops", sample.Hops).
+			Msg(reason)
+	}
+}
+
 // applyAnnounceEntries is the shared receive-side core for both the legacy
 // announce_routes and the v2 routes_update wire frames. The entry-by-entry
 // rules are identical — trust classification, own-origin forgery guard,
-// transit-withdrawal guard, Table.UpdateRoute / WithdrawRoute dispatch —
+// foreign-Origin guard (live and withdrawal), self-announcement guard
+// (live and withdrawal), Table.UpdateRoute / WithdrawRoute dispatch —
 // so the per-entry loop lives in one place to avoid the 3-copy duplication
 // CLAUDE.md forbids.
 //
@@ -2778,6 +2864,7 @@ func (s *Service) applyAnnounceEntries(sender routingSender, wireRoutes []protoc
 	unchanged := 0
 	rejected := 0
 	drainIdentities := make(map[domain.PeerIdentity]struct{})
+	refusals := newAnnounceEntryRefusals(senderIdentity)
 
 	for i, wireRoute := range wireRoutes {
 		if wireRoute.Identity == "" || wireRoute.Origin == "" {
@@ -2790,11 +2877,7 @@ func (s *Service) applyAnnounceEntries(sender routingSender, wireRoutes []protoc
 		// (SHA-256 of Ed25519 public key, truncated to 20 bytes).
 		if !identity.IsValidAddress(wireRoute.Identity) || !identity.IsValidAddress(wireRoute.Origin) {
 			rejected++
-			log.Warn().
-				Str("identity", wireRoute.Identity).
-				Str("origin", wireRoute.Origin).
-				Str("from", senderIdentity.String()).
-				Msg("announce_rejected_malformed_address")
+			refusals.record("announce_rejected_malformed_address", wireRoute, nil)
 			continue
 		}
 
@@ -2818,29 +2901,45 @@ func (s *Service) applyAnnounceEntries(sender routingSender, wireRoutes []protoc
 			continue
 		}
 
-		if wireRoute.Hops >= routing.HopsInfinity {
-			// Withdrawal: only the origin may emit a wire withdrawal.
-			// Transit nodes that lose upstream must invalidate locally and
-			// stop advertising — they must not forward hops=16 on the wire.
-			// Accepting a withdrawal from a non-origin sender would let an
-			// intermediate neighbor unilaterally kill a route it does not own.
-			if wireRoute.Origin != senderIdentity.String() {
-				rejected++
-				log.Warn().
-					Str("identity", wireRoute.Identity).
-					Str("origin", wireRoute.Origin).
-					Str("from", senderIdentity.String()).
-					Msg("announce_rejected_transit_withdrawal")
-				continue
-			}
+		// Every supported sender writes its own identity as the Origin of
+		// every entry it emits, live or withdrawal (v3 frames carry no
+		// Origin and get the sender substituted on decode). A foreign
+		// Origin therefore names a lineage the sender does not own:
+		//   - a withdrawal from a non-origin sender would let an
+		//     intermediate neighbour unilaterally kill a route it does not
+		//     own (transits that lose upstream invalidate locally and stop
+		//     advertising instead of forwarding hops=16);
+		//   - a live entry is stored per (Identity, sender) slot with the
+		//     Origin dropped, so accepting it would only let the frame
+		//     pretend to be someone else's claim.
+		// Both are refused the same way, without a penalty: the refusal
+		// alone neutralises the entry.
+		if wireRoute.Origin != senderIdentity.String() {
+			rejected++
+			refusals.record(foreignOriginRejectionMsg(wireRoute.Hops), wireRoute, nil)
+			continue
+		}
 
+		// A sender never announces a route to itself: its own identity
+		// has no bucket in its table, so no projection emits it. The
+		// slot such an entry would land in is (sender, sender) — our
+		// Direct claim bound to the live session. A live entry with a
+		// higher SeqNo would replace it with an Announcement that
+		// RemoveDirectPeer invalidates silently (no own wire withdrawal
+		// on disconnect), a withdrawal would tombstone it (re-emitted as
+		// our own withdrawal of a connected peer), and without a Direct
+		// claim it would create a route to the sender through the sender.
+		// Refused for both shapes, without a penalty like the foreign
+		// Origin above: the refusal alone neutralises the entry.
+		if wireRoute.Identity == senderIdentity.String() {
+			rejected++
+			refusals.record("announce_rejected_self_announcement", wireRoute, nil)
+			continue
+		}
+
+		if wireRoute.Hops >= routing.HopsInfinity {
 			withdrawnID := domain.PeerIdentityFromWire(wireRoute.Identity)
-			if s.routingTable.WithdrawRoute(
-				withdrawnID,
-				domain.PeerIdentityFromWire(wireRoute.Origin),
-				senderIdentity,
-				wireRoute.SeqNo,
-			) {
+			if s.routingTable.WithdrawRoute(withdrawnID, senderIdentity, wireRoute.SeqNo) {
 				accepted++
 				// After withdrawing the (Identity, Uplink) claim we
 				// just tombstoned, a less-preferred backup claim via
@@ -2902,13 +3001,11 @@ func (s *Service) applyAnnounceEntries(sender routingSender, wireRoutes []protoc
 
 		status, err := s.routingTable.UpdateRoute(entry)
 		if err != nil {
-			log.Warn().
-				Err(err).
-				Str("identity", wireRoute.Identity).
-				Str("origin", wireRoute.Origin).
-				Str("from", senderIdentity.String()).
-				Msg("route_update_rejected_invalid")
+			// The entry is invalid as the sender wrote it (negative hops and
+			// the like): refused like the other sender-controlled refusals,
+			// one Warn per frame, the error itself at Debug.
 			rejected++
+			refusals.record("route_update_rejected_invalid", wireRoute, err)
 			continue
 		}
 		switch status {
@@ -2920,7 +3017,7 @@ func (s *Service) applyAnnounceEntries(sender routingSender, wireRoutes []protoc
 			drainIdentities[domain.PeerIdentityFromWire(wireRoute.Identity)] = struct{}{}
 		case routing.RouteRejected:
 			rejected++
-			existing := s.routingTable.InspectTriple(entry.DedupKey())
+			existing := s.routingTable.InspectUplinkClaim(entry.Identity, entry.NextHop)
 			if existing != nil {
 				log.Debug().
 					Str("identity", wireRoute.Identity).
@@ -2941,12 +3038,13 @@ func (s *Service) applyAnnounceEntries(sender routingSender, wireRoutes []protoc
 					Str("from", senderIdentity.String()).
 					Int("incoming_hops", receivedHops).
 					Uint64("incoming_seq", wireRoute.SeqNo).
-					Msg("route_rejected_no_existing_triple")
+					Msg("route_rejected_no_existing_claim")
 			}
 		}
 	}
 
 	wireType := mode.wireTypeLabel()
+	refusals.logSummaries(wireType)
 	log.Debug().
 		Str("from", senderIdentity.String()).
 		Str("wire_type", wireType).

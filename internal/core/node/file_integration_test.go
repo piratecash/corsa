@@ -15,6 +15,16 @@ import (
 	"github.com/piratecash/corsa/internal/core/service/filerouter"
 )
 
+// Session versions in these fixtures come from the supported range. The file
+// plane ranks peers by relative version, so the fixtures name the floor and
+// the versions above it instead of literal numbers a floor raise would push
+// out of range.
+const (
+	fileTestVersion       = config.MinimumProtocolVersion
+	fileTestNewerVersion  = config.MinimumProtocolVersion + 1
+	fileTestNewestVersion = config.MinimumProtocolVersion + 2
+)
+
 // TestIsPeerReachable_DirectSessionWithCapability verifies that a peer with
 // a direct outbound session carrying file_transfer_v1 is reported reachable.
 func TestIsPeerReachable_DirectSessionWithCapability(t *testing.T) {
@@ -25,7 +35,7 @@ func TestIsPeerReachable_DirectSessionWithCapability(t *testing.T) {
 	svc.sessions[domain.PeerAddress("addr-B")] = &peerSession{
 		address:      domain.PeerAddress("addr-B"),
 		peerIdentity: idPeerB,
-		version:      14,
+		version:      fileTestNewestVersion,
 		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
 	}
 	svc.health[domain.PeerAddress("addr-B")] = &peerHealth{
@@ -85,7 +95,7 @@ func TestIsPeerReachable_RouteViaFileCapableNextHop(t *testing.T) {
 	svc.sessions[domain.PeerAddress("addr-B")] = &peerSession{
 		address:      domain.PeerAddress("addr-B"),
 		peerIdentity: idPeerB,
-		version:      12,
+		version:      fileTestVersion,
 		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
 	}
 	svc.health[domain.PeerAddress("addr-B")] = &peerHealth{
@@ -153,7 +163,7 @@ func TestIsPeerReachable_MultipleRoutesOneCapable(t *testing.T) {
 	svc.sessions[domain.PeerAddress("addr-C")] = &peerSession{
 		address:      domain.PeerAddress("addr-C"),
 		peerIdentity: idPeerC,
-		version:      12,
+		version:      fileTestVersion,
 		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
 	}
 	svc.health[domain.PeerAddress("addr-C")] = &peerHealth{
@@ -194,7 +204,7 @@ func TestIsPeerReachable_SelfRouteSkipped(t *testing.T) {
 	svc.sessions[domain.PeerAddress("addr-A")] = &peerSession{
 		address:      domain.PeerAddress("addr-A"),
 		peerIdentity: idNodeA,
-		version:      12,
+		version:      fileTestVersion,
 		capabilities: []domain.Capability{domain.CapFileTransferV1},
 	}
 	svc.health[domain.PeerAddress("addr-A")] = &peerHealth{
@@ -247,7 +257,7 @@ func TestIsPeerReachable_InboundConnectionWithCapability(t *testing.T) {
 		Address:         domain.PeerAddress("addr-B"),
 		Identity:        idPeerB,
 		Caps:            []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
-		ProtocolVersion: 12,
+		ProtocolVersion: fileTestVersion,
 	})
 	svc.setTestConnEntryLocked(pipeLocal, &connEntry{core: pc})
 	svc.health[domain.PeerAddress("addr-B")] = &peerHealth{
@@ -269,7 +279,7 @@ func TestIsPeerReachable_DirectSessionStalled(t *testing.T) {
 	svc.sessions[domain.PeerAddress("addr-B")] = &peerSession{
 		address:      domain.PeerAddress("addr-B"),
 		peerIdentity: idPeerB,
-		version:      12,
+		version:      fileTestVersion,
 		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
 	}
 	svc.health[domain.PeerAddress("addr-B")] = &peerHealth{
@@ -291,7 +301,7 @@ func TestIsPeerReachable_RouteViaStalledNextHop(t *testing.T) {
 	svc.sessions[domain.PeerAddress("addr-B")] = &peerSession{
 		address:      domain.PeerAddress("addr-B"),
 		peerIdentity: idPeerB,
-		version:      12,
+		version:      fileTestVersion,
 		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
 	}
 	svc.health[domain.PeerAddress("addr-B")] = &peerHealth{
@@ -324,7 +334,7 @@ func TestFileTransferPeerRouteMetaDescribesOneSession(t *testing.T) {
 	svc.sessions[domain.PeerAddress("addr-out")] = &peerSession{
 		address:      domain.PeerAddress("addr-out"),
 		peerIdentity: idPeerB,
-		version:      12,
+		version:      fileTestVersion,
 		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
 	}
 	svc.health[domain.PeerAddress("addr-out")] = &peerHealth{
@@ -340,8 +350,8 @@ func TestFileTransferPeerRouteMetaDescribesOneSession(t *testing.T) {
 	if !meta.ConnectedAt.Equal(now.Add(-10 * time.Minute)) {
 		t.Fatalf("connectedAt = %v, want session's own LastConnectedAt", meta.ConnectedAt)
 	}
-	if meta.ProtocolVersion != domain.ProtocolVersion(12) {
-		t.Fatalf("protocolVersion = %d, want 12 (the session's own negotiated version)", meta.ProtocolVersion)
+	if meta.ProtocolVersion != domain.ProtocolVersion(fileTestVersion) {
+		t.Fatalf("protocolVersion = %d, want %d (the session's own negotiated version)", meta.ProtocolVersion, fileTestVersion)
 	}
 }
 
@@ -354,7 +364,7 @@ func TestFileTransferPeerRouteMetaRejectsStalledPeer(t *testing.T) {
 	svc.sessions[domain.PeerAddress("addr-stalled")] = &peerSession{
 		address:      domain.PeerAddress("addr-stalled"),
 		peerIdentity: idPeerB,
-		version:      12,
+		version:      fileTestVersion,
 		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
 	}
 	svc.health[domain.PeerAddress("addr-stalled")] = &peerHealth{
@@ -375,7 +385,7 @@ func TestFileTransferPeerRouteMetaRejectsPeerWithoutHealth(t *testing.T) {
 	svc.sessions[domain.PeerAddress("addr-no-health")] = &peerSession{
 		address:      domain.PeerAddress("addr-no-health"),
 		peerIdentity: idPeerB,
-		version:      12,
+		version:      fileTestVersion,
 		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
 	}
 
@@ -437,13 +447,13 @@ func TestExplainFileRouteReturnsRankedJSON(t *testing.T) {
 	svc.sessions[domain.PeerAddress("addr-B")] = &peerSession{
 		address:      domain.PeerAddress("addr-B"),
 		peerIdentity: idPeerB,
-		version:      12,
+		version:      fileTestVersion,
 		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
 	}
 	svc.sessions[domain.PeerAddress("addr-C")] = &peerSession{
 		address:      domain.PeerAddress("addr-C"),
 		peerIdentity: idPeerC,
-		version:      12,
+		version:      fileTestVersion,
 		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
 	}
 	svc.health[domain.PeerAddress("addr-B")] = &peerHealth{
@@ -491,8 +501,8 @@ func TestExplainFileRouteReturnsRankedJSON(t *testing.T) {
 	if first["best"] != true {
 		t.Fatalf("expected first entry to be marked best=true, got %v", first["best"])
 	}
-	if v, _ := first["protocol_version"].(float64); int(v) != 12 {
-		t.Fatalf("expected best entry protocol_version=12, got %v", first["protocol_version"])
+	if v, _ := first["protocol_version"].(float64); int(v) != fileTestVersion {
+		t.Fatalf("expected best entry protocol_version=%d, got %v", fileTestVersion, first["protocol_version"])
 	}
 	if v, _ := first["hops"].(float64); int(v) != hopsViaB {
 		t.Fatalf("expected best entry hops=%d, got %v", hopsViaB, first["hops"])
@@ -862,7 +872,7 @@ func TestFileTransferPeerRouteMetaInboundConnContributesNegotiatedVersion(t *tes
 	defer func() { _ = inLocal.Close() }()
 	defer func() { _ = inRemote.Close() }()
 
-	const inboundVersion = domain.ProtocolVersion(12)
+	const inboundVersion = domain.ProtocolVersion(fileTestVersion)
 	pc := newTestNetCore(t, netcore.ConnID(42), inLocal, netcore.Inbound, netcore.Options{
 		Address:         domain.PeerAddress("addr-inbound"),
 		Identity:        idPeerB,
@@ -910,13 +920,13 @@ func TestFileTransferPeerRouteMetaDeterministicAcrossMapIteration(t *testing.T) 
 	svc.sessions[domain.PeerAddress("addr-old")] = &peerSession{
 		address:      domain.PeerAddress("addr-old"),
 		peerIdentity: idPeerB,
-		version:      12,
+		version:      fileTestVersion,
 		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
 	}
 	svc.sessions[domain.PeerAddress("addr-new")] = &peerSession{
 		address:      domain.PeerAddress("addr-new"),
 		peerIdentity: idPeerB,
-		version:      13,
+		version:      fileTestNewerVersion,
 		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
 	}
 	svc.health[domain.PeerAddress("addr-old")] = &peerHealth{
@@ -942,10 +952,10 @@ func TestFileTransferPeerRouteMetaDeterministicAcrossMapIteration(t *testing.T) 
 		if !meta.ConnectedAt.Equal(now.Add(-30 * time.Minute)) {
 			t.Fatalf("iter %d: expected ConnectedAt=oldest, got %v", i, meta.ConnectedAt)
 		}
-		// version 12 belongs to addr-old (the oldest), so meta MUST
-		// report it — not version 13 from the newer session.
-		if meta.ProtocolVersion != domain.ProtocolVersion(12) {
-			t.Fatalf("iter %d: expected ProtocolVersion=12 (addr-old's own), got %d", i, meta.ProtocolVersion)
+		// fileTestVersion belongs to addr-old (the oldest), so meta MUST
+		// report it — not fileTestNewerVersion from the newer session.
+		if meta.ProtocolVersion != domain.ProtocolVersion(fileTestVersion) {
+			t.Fatalf("iter %d: expected ProtocolVersion=%d (addr-old's own), got %d", i, fileTestVersion, meta.ProtocolVersion)
 		}
 	}
 }
@@ -965,13 +975,13 @@ func TestPeerSendableConnectionsDeterministicAcrossMapIteration(t *testing.T) {
 	svc.sessions[domain.PeerAddress("addr-bb")] = &peerSession{
 		address:      domain.PeerAddress("addr-bb"),
 		peerIdentity: idPeerB,
-		version:      12,
+		version:      fileTestVersion,
 		capabilities: []domain.Capability{domain.CapFileTransferV1},
 	}
 	svc.sessions[domain.PeerAddress("addr-aa")] = &peerSession{
 		address:      domain.PeerAddress("addr-aa"),
 		peerIdentity: idPeerB,
-		version:      12,
+		version:      fileTestVersion,
 		capabilities: []domain.Capability{domain.CapFileTransferV1},
 	}
 	commonHealth := func() *peerHealth {
@@ -994,7 +1004,7 @@ func TestPeerSendableConnectionsDeterministicAcrossMapIteration(t *testing.T) {
 			Address:         domain.PeerAddress(addr),
 			Identity:        idPeerB,
 			Caps:            []domain.Capability{domain.CapFileTransferV1},
-			ProtocolVersion: 12,
+			ProtocolVersion: fileTestVersion,
 		})
 		svc.setTestConnEntryLocked(local, &connEntry{core: pc, tracked: true})
 		svc.health[domain.PeerAddress(addr)] = commonHealth()
@@ -1046,12 +1056,12 @@ func TestFileTransferPeerRouteMetaPrefersOutboundOverInbound(t *testing.T) {
 	svc := newTestServiceWithRoutingAndHealth(t, idNodeA)
 	now := time.Now().UTC()
 
-	// Outbound session with version 12 — this is the connection
+	// Outbound session at fileTestVersion — this is the connection
 	// sendFrameToIdentity tries first.
 	svc.sessions[domain.PeerAddress("addr-out")] = &peerSession{
 		address:      domain.PeerAddress("addr-out"),
 		peerIdentity: idPeerB,
-		version:      12,
+		version:      fileTestVersion,
 		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
 	}
 	svc.health[domain.PeerAddress("addr-out")] = &peerHealth{
@@ -1060,7 +1070,7 @@ func TestFileTransferPeerRouteMetaPrefersOutboundOverInbound(t *testing.T) {
 		LastUsefulReceiveAt: now,
 	}
 
-	// Inbound conn for the same identity with version 13 — only the
+	// Inbound conn for the same identity at fileTestNewerVersion — only the
 	// fall-back tier; meta must NOT pretend bytes will go through it.
 	inLocal, inRemote := net.Pipe()
 	defer func() { _ = inLocal.Close() }()
@@ -1070,7 +1080,7 @@ func TestFileTransferPeerRouteMetaPrefersOutboundOverInbound(t *testing.T) {
 		Address:         domain.PeerAddress("addr-inbound-mix"),
 		Identity:        idPeerB,
 		Caps:            []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
-		ProtocolVersion: 13,
+		ProtocolVersion: fileTestNewerVersion,
 	})
 	svc.setTestConnEntryLocked(inLocal, &connEntry{core: pc, tracked: true})
 	svc.health[domain.PeerAddress("addr-inbound-mix")] = &peerHealth{
@@ -1083,8 +1093,8 @@ func TestFileTransferPeerRouteMetaPrefersOutboundOverInbound(t *testing.T) {
 	if !ok {
 		t.Fatal("expected peer to be usable")
 	}
-	if meta.ProtocolVersion != 12 {
-		t.Fatalf("expected outbound version=12 (live send tries outbound first), got %d", meta.ProtocolVersion)
+	if meta.ProtocolVersion != fileTestVersion {
+		t.Fatalf("expected outbound version=%d (live send tries outbound first), got %d", fileTestVersion, meta.ProtocolVersion)
 	}
 	// connected_at must come from the SAME session as protocol_version,
 	// not stitched together from a different inbound conn.
@@ -1121,7 +1131,7 @@ func TestSendFrameToIdentityFallsBackToInboundWhenOutboundBufferFull(t *testing.
 	svc.sessions[domain.PeerAddress("addr-out")] = &peerSession{
 		address:      domain.PeerAddress("addr-out"),
 		peerIdentity: idPeerB,
-		version:      12,
+		version:      fileTestVersion,
 		conn:         outLocal,
 		sendCh:       outboundSendCh,
 		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
@@ -1140,7 +1150,7 @@ func TestSendFrameToIdentityFallsBackToInboundWhenOutboundBufferFull(t *testing.
 		Address:         domain.PeerAddress("addr-in"),
 		Identity:        idPeerB,
 		Caps:            []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
-		ProtocolVersion: 12,
+		ProtocolVersion: fileTestVersion,
 	})
 	svc.setTestConnEntryLocked(inLocal, &connEntry{core: pc})
 	svc.health[domain.PeerAddress("addr-in")] = &peerHealth{
@@ -1184,7 +1194,7 @@ func TestSendFrameToIdentityFallsBackToInboundWhenOutboundSendQueueClosed(t *tes
 	closedSession := &peerSession{
 		address:      domain.PeerAddress("addr-out-closed"),
 		peerIdentity: idPeerB,
-		version:      12,
+		version:      fileTestVersion,
 		conn:         outLocal,
 		sendCh:       make(chan peerSendItem, 1),
 		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
@@ -1205,7 +1215,7 @@ func TestSendFrameToIdentityFallsBackToInboundWhenOutboundSendQueueClosed(t *tes
 		Address:         domain.PeerAddress("addr-in-fallback"),
 		Identity:        idPeerB,
 		Caps:            []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
-		ProtocolVersion: 12,
+		ProtocolVersion: fileTestVersion,
 	})
 	svc.setTestConnEntryLocked(inLocal, &connEntry{core: pc})
 	svc.health[domain.PeerAddress("addr-in-fallback")] = &peerHealth{
@@ -1254,7 +1264,7 @@ func TestSendFrameToIdentityRejectsOutboundBeforeActivation(t *testing.T) {
 	svc.sessions[domain.PeerAddress("addr-out-preactivation")] = &peerSession{
 		address:      domain.PeerAddress("addr-out-preactivation"),
 		peerIdentity: idPeerB,
-		version:      12,
+		version:      fileTestVersion,
 		conn:         outLocal,
 		sendCh:       make(chan peerSendItem, 4),
 		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
@@ -1284,7 +1294,7 @@ func TestSendFrameToIdentityRejectsInboundBeforeActivation(t *testing.T) {
 		Address:         domain.PeerAddress("addr-in-preactivation"),
 		Identity:        idPeerB,
 		Caps:            []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
-		ProtocolVersion: 12,
+		ProtocolVersion: fileTestVersion,
 	})
 	svc.setTestConnEntryLocked(inLocal, &connEntry{core: pc})
 	// Intentionally no svc.health entry for addr-in-preactivation.

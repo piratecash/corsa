@@ -153,7 +153,7 @@ const (
 // because AnnounceProjectionFor only emits own-direct tombstones
 // (Source == RouteSourceDirect) and fast-invalidated transit claims
 // stay Source != Direct. The full contract — including the order
-// of checks against the cross-Origin admission rules — is
+// of checks against the SeqNo flap-cap ingest guard — is
 // documented inline in route_store_mutation.go's ApplyUpdate fast-
 // invalidation branch and in docs/routing.md under "RIB compaction".
 const MaxSaneHops = 8
@@ -348,27 +348,30 @@ const (
 // receiver knows the next-hop is the sender of the frame, so the
 // wire never serialises it).
 //
-// Storage shape is different again. Post-Phase-A the routing table
-// stores per-(Identity, Uplink) UplinkClaim values; Origin is
-// consumed by Table.UpdateRoute for the foreign-origin Direct anti-
-// spoof and then dropped, and Lookup output synthesises Origin =
-// localOrigin (or Identity fallback). The post-A1 dedup key inside
-// storage is (Identity, Uplink=NextHop); the legacy (Identity,
-// Origin, NextHop) triple is gone. Origin remains on RouteEntry
-// only as wire-frame metadata for pre-A1 receiver compat. See
-// uplink_claim.go and table_mutation.go::UpdateRoute for the
-// migration contract.
+// Storage shape is different again. The routing table stores
+// per-(Identity, Uplink) UplinkClaim values; Origin is consumed by
+// Table.UpdateRoute for the foreign-origin Direct anti-spoof and
+// then dropped, and Lookup output synthesises Origin = localOrigin
+// (or Identity fallback). The dedup key inside storage is
+// (Identity, Uplink=NextHop), and SeqNo inside one key is ordered
+// with no Origin in the comparison. Origin remains on RouteEntry as
+// wire-frame metadata: every sender emits Origin == itself, and
+// receivers refuse any entry (live or withdrawal) whose Origin is not
+// the sending peer. See
+// uplink_claim.go and table_mutation.go::UpdateRoute.
 type RouteEntry struct {
 	// Identity is the Ed25519 fingerprint of the destination node.
 	Identity PeerIdentity
 
-	// Origin is the peer identity that originally advertised this route
-	// on the wire. Pre-A1 it scoped SeqNo space and decided who was
-	// allowed to send a withdrawal (hops=16). Post-A1 it is wire-only
-	// metadata: ingest consumes it for the foreign-Origin Direct anti-
-	// spoof (Table.UpdateRoute), and emit always synthesises it to
-	// localOrigin (or Identity fallback). Storage does NOT key on
-	// Origin anymore — see the type-level doc-comment above.
+	// Origin is the wire-frame Origin: the sending peer itself for
+	// every supported sender. The receive path validates it (an
+	// entry, live or withdrawal, is accepted only when Origin is the
+	// sender; Origin == our own identity is rejected as forgery), ingest
+	// consumes it for the foreign-Origin Direct anti-spoof
+	// (Table.UpdateRoute), and emit always synthesises it to
+	// localOrigin (or Identity fallback). Storage does not keep it and
+	// it takes no part in SeqNo ordering — see the type-level
+	// doc-comment above.
 	Origin PeerIdentity
 
 	// NextHop is the peer identity from which we learned this route.
@@ -380,8 +383,7 @@ type RouteEntry struct {
 	// HopsInfinity (16) means withdrawn.
 	Hops int
 
-	// SeqNo is a monotonically increasing sequence number. Pre-A1 it was
-	// scoped per Origin (only the origin could advance it). Post-A1 the
+	// SeqNo is a monotonically increasing sequence number. The
 	// wire SeqNo is synthesised per (Identity, sender) by
 	// routeStore.nextOutboundSeqLockedPerPeer /
 	// nextOutboundSeqLockedBroadcast — see route_store.go's outboundContent
@@ -476,28 +478,6 @@ func (e RouteEntry) IsWithdrawn() bool {
 // This keeps ttl_seconds=0 and expired=true consistent in RPC output.
 func (e RouteEntry) IsExpired(now time.Time) bool {
 	return !e.ExpiresAt.IsZero() && !now.Before(e.ExpiresAt)
-}
-
-// DedupKey returns the legacy (Identity, Origin, NextHop) triple
-// shape of the entry. Post-Phase-A storage keys on (Identity,
-// Uplink) per uplink_claim.go; this helper is retained only for
-// diagnostic / RPC outputs that still serialise the triple form
-// for backward compatibility with pre-A1 tooling. New callers
-// should not use it as a storage key — see UplinkClaim and
-// routeStore.findByUplinkLocked.
-func (e RouteEntry) DedupKey() RouteTriple {
-	return RouteTriple{
-		Identity: e.Identity,
-		Origin:   e.Origin,
-		NextHop:  e.NextHop,
-	}
-}
-
-// RouteTriple is the deduplication key for route entries.
-type RouteTriple struct {
-	Identity PeerIdentity
-	Origin   PeerIdentity
-	NextHop  PeerIdentity
 }
 
 // Snapshot is an immutable point-in-time view of the routing table.

@@ -70,7 +70,7 @@ func newRoutingTwins(t *testing.T) routingTwins {
 	svc.sessions[impostor.address] = impostor
 	svc.peerMu.Unlock()
 
-	svc.dispatchPeerSessionFrame(genuine.address, genuine, legacyBaselineFrame(idTargetX))
+	svc.dispatchPeerSessionFrame(genuine.address, genuine, legacyBaselineFrame(genuine.peerIdentity, idTargetX))
 	tw := routingTwins{svc: svc, x: x, genuine: genuine, impostor: impostor}
 	baseline, ok := tw.routeVia(idTargetX)
 	if !ok {
@@ -106,7 +106,7 @@ func TestUnprovenClaimCannotRewriteRoutesOfAV2Identity(t *testing.T) {
 	tw.svc.dispatchPeerSessionFrame(tw.impostor.address, tw.impostor, protocol.Frame{
 		Type: "routes_update",
 		AnnounceRoutes: []protocol.AnnounceRouteFrame{
-			{Identity: idTargetX.String(), Origin: idTargetX.String(), Hops: 7, SeqNo: 1 << 40},
+			{Identity: idTargetX.String(), Origin: tw.x.String(), Hops: 7, SeqNo: 1 << 40},
 		},
 	})
 
@@ -117,7 +117,7 @@ func TestUnprovenClaimCannotRewriteRoutesOfAV2Identity(t *testing.T) {
 	tw.svc.dispatchPeerSessionFrame(tw.genuine.address, tw.genuine, protocol.Frame{
 		Type: "announce_routes",
 		AnnounceRoutes: []protocol.AnnounceRouteFrame{
-			{Identity: idTargetY.String(), Origin: idTargetY.String(), Hops: 1, SeqNo: 1},
+			{Identity: idTargetY.String(), Origin: tw.x.String(), Hops: 1, SeqNo: 1},
 		},
 	})
 	if !routeLearnedVia(tw.svc, idTargetY, tw.x) {
@@ -212,7 +212,7 @@ func TestUnprovenClaimQueryResponseCannotRewriteRoutesOfAV2Identity(t *testing.T
 func TestUnprovenClaimOfAnUnpinnedIdentityKeepsItsRoutingRights(t *testing.T) {
 	svc := newLegacyPenaltyService(t)
 	legacy := legacyOutboundSession(legacyAttackerAddress, idPeerB)
-	svc.dispatchPeerSessionFrame(legacy.address, legacy, legacyBaselineFrame(idTargetX))
+	svc.dispatchPeerSessionFrame(legacy.address, legacy, legacyBaselineFrame(legacy.peerIdentity, idTargetX))
 	if !routeLearnedVia(svc, idTargetX, idPeerB) {
 		t.Fatal("a legacy session of an identity that never proved v2 lost its routing rights")
 	}
@@ -395,7 +395,7 @@ func TestAV2ProofForgetsWhatALegacyClaimWroteBeforeIt(t *testing.T) {
 	svc.peerMu.Unlock()
 
 	// Before the proof X is nobody's to protect: the impostor's frames apply.
-	svc.dispatchPeerSessionFrame(impostor.address, impostor, legacyBaselineFrame(idTargetX))
+	svc.dispatchPeerSessionFrame(impostor.address, impostor, legacyBaselineFrame(impostor.peerIdentity, idTargetX))
 	svc.dispatchPeerSessionFrame(impostor.address, impostor, protocol.Frame{
 		Type: "announce_routes",
 		AnnounceRoutes: []protocol.AnnounceRouteFrame{
@@ -435,8 +435,8 @@ func TestAV2ProofForgetsWhatALegacyClaimWroteBeforeIt(t *testing.T) {
 	svc.dispatchPeerSessionFrame(genuine.address, genuine, protocol.Frame{
 		Type: "announce_routes",
 		AnnounceRoutes: []protocol.AnnounceRouteFrame{
-			{Identity: idTargetX.String(), Origin: idTargetX.String(), Hops: 1, SeqNo: 1},
-			{Identity: idTargetY.String(), Origin: idTargetY.String(), Hops: 1, SeqNo: 1},
+			{Identity: idTargetX.String(), Origin: x.String(), Hops: 1, SeqNo: 1},
+			{Identity: idTargetY.String(), Origin: x.String(), Hops: 1, SeqNo: 1},
 		},
 	})
 	if !routeLearnedVia(svc, idTargetX, x) {

@@ -70,14 +70,14 @@ func TestEveryInboundWriteGoesThroughTheDeliveryGate(t *testing.T) {
 		// transport contract of its own that the shared helper would break.
 		//
 		// writeFrameToInboundConnErr is the SYNC flush the relay path needs
-		// for fail-fast inbound delivery; sendRelayToAddress gates before
+		// for fail-fast inbound delivery; sendTableRoutedRelayToAddress gates before
 		// it and classifies its error after (that error, and not a bool, is
 		// why the Err variant exists).
 		//
 		// writePushFrame is the subscriber push; pushToSubscriberSnapshot
 		// gates the whole fan-out once via noteOwnEnvelopeEmitted, and the
 		// frame's fate comes back as (sent, provenNotWritten).
-		"writeFrameToInboundConnErr": "relay sync flush — gated and classified by sendRelayToAddress",
+		"writeFrameToInboundConnErr": "relay sync flush — gated and classified by sendTableRoutedRelayToAddress",
 		"writePushFrame":             "subscriber push — gated by pushToSubscriberSnapshot",
 		// The announce plane, end to end. sendAnnouncePlaneFrame is its
 		// only remaining door into writeFrameToInbound, and every frame it

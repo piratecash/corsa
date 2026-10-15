@@ -17,8 +17,8 @@ import (
 // config.MinimumProtocolVersion reaches 30. From then on every node carries
 // an old DM unchanged and an envelope can travel with the date its author
 // actually wrote it at. The single call to legacyTransitRestampNeeded() is
-// what makes the whole file dead code at that moment, and the test
-// TestTransitAgeRestampIsStillNeeded fails to say so.
+// what makes the whole file dead code at that moment, and the config test
+// TestFeatureVersionGatesAreAboveTheFloor fails to say so.
 //
 // Why it exists: a node below v30 refuses to forward a DM older than its own
 // 24-hour ceiling and, by contract, answers NOTHING (no hop-ack). The sender

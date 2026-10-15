@@ -14,9 +14,9 @@ package node
 //     (see the duplicate paths in storeIncomingMessage).
 //   - awaitingSeenAck — every locally-sent "seen" receipt stays here until
 //     the original message sender confirms it with a "seen_ack" receipt
-//     (ReceiptStatusSeenAck, additive in ProtocolVersion 23). The original
-//     sender answers seen and seen-duplicates with seen_ack symmetrically
-//     to the message/delivered pair.
+//     (ReceiptStatusSeenAck). The original sender answers seen and
+//     seen-duplicates with seen_ack symmetrically to the message/delivered
+//     pair.
 //
 // Both maps are delivery-domain state under s.deliveryMu (docs/locking.md).
 // The tick runs from bootstrapLoop: due entries are snapshotted (and their
@@ -3174,35 +3174,6 @@ func (s *Service) kickDeliveryRetriesForReachable(identities map[domain.PeerIden
 	s.deliveryMu.Unlock()
 }
 
-// peerSupportsProtocol reports whether the peer behind the address
-// advertises a negotiated wire protocol version >= min. Checks the outbound
-// session first, then the inbound conn registry. Unknown peers (no live
-// session/conn) report false — for additive features the caller's retry
-// re-attempts once the peer is back with a known version.
-func (s *Service) peerSupportsProtocol(address domain.PeerAddress, min int) bool {
-	s.peerMu.RLock()
-	defer s.peerMu.RUnlock()
-	if session := s.resolveSessionLocked(address); session != nil && session.version >= min {
-		return true
-	}
-	for _, entry := range s.conns {
-		if entry == nil || entry.core == nil {
-			continue
-		}
-		if entry.core.Address() == address && int(entry.core.ProtocolVersion()) >= min {
-			return true
-		}
-	}
-	return false
-}
-
-// connSupportsProtocol reports whether the connection advertises a
-// negotiated wire protocol version >= min.
-func (s *Service) connSupportsProtocol(connID domain.ConnID, min int) bool {
-	core := s.netCoreForID(connID)
-	return core != nil && int(core.ProtocolVersion()) >= min
-}
-
 // failDelivery finalises a locally-sent DM that outlived its own TTL —
 // the only way the engine gives up on one: outbound goes terminal — the
 // same "expired"/"failed" statuses the pending-ring paths use, visible through
@@ -3365,7 +3336,7 @@ func (s *Service) dispatchEnvelopeRetry(envelope protocol.Envelope, dispatchedAt
 
 	relayed := relaySendRefused
 	if decision.RelayNextHop != nil {
-		relayed = s.sendTableDirectedRelay(s.runCtx, envelope, *decision.RelayNextHop, decision.RelayNextHopAddress, decision.RelayRouteOrigin, decision.RelayNextHopHops, dispatchedAt)
+		relayed = s.sendTableDirectedRelay(s.runCtx, envelope, *decision.RelayNextHop, decision.RelayNextHopAddress, decision.RelayNextHopHops, dispatchedAt)
 	} else {
 		relayed = s.tryRelayToCapableFullNodes(envelope, gossipTargets, dispatchedAt)
 	}

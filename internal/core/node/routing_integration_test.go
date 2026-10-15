@@ -503,7 +503,7 @@ func TestConfirmRouteViaHopAck(t *testing.T) {
 	}
 
 	// Confirm with the actual NextHop identity that carried the message.
-	svc.confirmRouteViaHopAck(idTargetX, domain.PeerAddress(idPeerB.String()), domain.PeerIdentity{})
+	svc.confirmRouteViaHopAck(idTargetX, domain.PeerAddress(idPeerB.String()))
 
 	routes := svc.routingTable.Lookup(idTargetX)
 	if len(routes) == 0 {
@@ -536,7 +536,7 @@ func TestConfirmRouteViaHopAck_PreservesExtra(t *testing.T) {
 		t.Fatal("UpdateRoute should succeed")
 	}
 
-	svc.confirmRouteViaHopAck(idTargetX, domain.PeerAddress(idPeerB.String()), domain.PeerIdentity{})
+	svc.confirmRouteViaHopAck(idTargetX, domain.PeerAddress(idPeerB.String()))
 
 	routes := svc.routingTable.Lookup(idTargetX)
 	if len(routes) == 0 {
@@ -574,7 +574,7 @@ func TestConfirmRouteViaHopAck_WrongNextHopNotConfirmed(t *testing.T) {
 
 	// hop_ack came for a message forwarded to peer-C (different route).
 	// Should NOT promote the peer-B route.
-	svc.confirmRouteViaHopAck(idTargetX, domain.PeerAddress(idPeerC.String()), domain.PeerIdentity{})
+	svc.confirmRouteViaHopAck(idTargetX, domain.PeerAddress(idPeerC.String()))
 
 	routes := svc.routingTable.Lookup(idTargetX)
 	if len(routes) == 0 {
@@ -602,7 +602,7 @@ func TestConfirmRouteViaHopAck_AlreadyHopAck(t *testing.T) {
 		t.Fatal("UpdateRoute should succeed")
 	}
 
-	svc.confirmRouteViaHopAck(idTargetX, domain.PeerAddress(idPeerB.String()), domain.PeerIdentity{})
+	svc.confirmRouteViaHopAck(idTargetX, domain.PeerAddress(idPeerB.String()))
 
 	routes := svc.routingTable.Lookup(idTargetX)
 	if routes[0].Source != routing.RouteSourceHopAck {
@@ -616,7 +616,7 @@ func TestConfirmRouteViaHopAck_DirectNotDemoted(t *testing.T) {
 	// Direct route should not be touched by hop_ack confirmation.
 	svc.onPeerSessionEstablished(idTargetX, []domain.Capability{domain.CapMeshRelayV1})
 
-	svc.confirmRouteViaHopAck(idTargetX, domain.PeerAddress(idTargetX.String()), domain.PeerIdentity{})
+	svc.confirmRouteViaHopAck(idTargetX, domain.PeerAddress(idTargetX.String()))
 
 	routes := svc.routingTable.Lookup(idTargetX)
 	if len(routes) == 0 {
@@ -653,7 +653,7 @@ func TestConfirmRouteViaHopAck_ResolvesTransportAddress(t *testing.T) {
 
 	// hop_ack arrives from transport address — should resolve to peer-B
 	// and confirm the route.
-	svc.confirmRouteViaHopAck(idTargetX, domain.PeerAddress("tcp://1.2.3.4:9000"), domain.PeerIdentity{})
+	svc.confirmRouteViaHopAck(idTargetX, domain.PeerAddress("tcp://1.2.3.4:9000"))
 
 	routes := svc.routingTable.Lookup(idTargetX)
 	if len(routes) == 0 {
@@ -682,7 +682,7 @@ func TestConfirmRouteViaHopAck_EmptyForwardedToSkips(t *testing.T) {
 	}
 
 	// Empty forwardedTo (stored locally, not forwarded) — should not confirm.
-	svc.confirmRouteViaHopAck(idTargetX, domain.PeerAddress(""), domain.PeerIdentity{})
+	svc.confirmRouteViaHopAck(idTargetX, domain.PeerAddress(""))
 
 	routes := svc.routingTable.Lookup(idTargetX)
 	if routes[0].Source != routing.RouteSourceAnnouncement {
@@ -925,63 +925,8 @@ func TestRouteSessionBinding_MixedDirectAndTransit(t *testing.T) {
 }
 
 // --- hop_ack scoping tests ---
-// confirmRouteViaHopAck must only promote the specific (identity, origin, nextHop)
-// entry that matches. Different origin or different identity must not be affected.
-
-// TestHopAckScoping_IgnoresRouteOriginPostPhaseA pins the post-Phase-A
-// behaviour of confirmRouteViaHopAck: the routeOrigin parameter is
-// preserved on the signature for caller-stability but is ignored
-// (per-(Identity, Origin, NextHop) triple scoping became degenerate
-// when storage dropped Origin in favour of per-(Identity, Uplink)
-// claims). The hop_ack promotes the claim matching (recipient,
-// ackSender) regardless of whatever routeOrigin value the relay
-// path passed through.
-//
-// The pre-Phase-A tests TestHopAckScoping_DifferentOriginNotPromoted
-// and TestHopAckScoping_GossipPathPromotesFirstMatchingNextHop set up
-// two routes to the same Identity via the SAME NextHop but DIFFERENT
-// Origins, then asserted per-Origin scoping; those scenarios cannot
-// exist in post-A1 storage at all (the second UpdateRoute collapses
-// onto the same (Identity, Uplink) claim as a same-SeqNo / worse-Hops
-// reconfirmation). Per-NextHop scoping — the relevant invariant —
-// continues to be covered by
-// TestHopAckScoping_SameIdentityDifferentNextHopNotPromoted below.
-func TestHopAckScoping_IgnoresRouteOriginPostPhaseA(t *testing.T) {
-	svc := newTestServiceWithRouting(t, idNodeA)
-
-	// Single route to target-X via peer-B.
-	status, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
-		Identity:  idTargetX,
-		Origin:    idOriginC,
-		NextHop:   idPeerB,
-		Hops:      2,
-		SeqNo:     1,
-		Source:    routing.RouteSourceAnnouncement,
-		ExpiresAt: time.Now().Add(routing.DefaultTTL),
-	})
-	if err != nil || status != routing.RouteAccepted {
-		t.Fatal("route should be accepted")
-	}
-
-	// hop_ack with a routeOrigin value that does NOT match any
-	// stored claim's Origin (pre-Phase-A this would have rejected
-	// the promotion as a triple-mismatch; post-Phase-A the value is
-	// ignored and the (Identity=target-X, NextHop=peer-B) claim is
-	// promoted regardless).
-	svc.confirmRouteViaHopAck(
-		idTargetX,
-		domain.PeerAddress(idPeerB.String()),
-		domaintest.ID("origin-mismatch-that-would-have-blocked-pre-A1"),
-	)
-
-	routes := svc.routingTable.Lookup(idTargetX)
-	if len(routes) != 1 {
-		t.Fatalf("expected 1 route, got %d", len(routes))
-	}
-	if routes[0].Source != routing.RouteSourceHopAck {
-		t.Fatalf("route should be promoted to hop_ack regardless of routeOrigin parameter, got %s", routes[0].Source)
-	}
-}
+// confirmRouteViaHopAck must only promote the (identity, uplink) claim the
+// ack names. A different identity or a different uplink must not be affected.
 
 func TestHopAckScoping_DifferentIdentityNotPromoted(t *testing.T) {
 	svc := newTestServiceWithRouting(t, idNodeA)
@@ -1015,7 +960,7 @@ func TestHopAckScoping_DifferentIdentityNotPromoted(t *testing.T) {
 	}
 
 	// hop_ack for target-X only.
-	svc.confirmRouteViaHopAck(idTargetX, domain.PeerAddress(idPeerB.String()), domain.PeerIdentity{})
+	svc.confirmRouteViaHopAck(idTargetX, domain.PeerAddress(idPeerB.String()))
 
 	// target-X should be promoted.
 	routesX := svc.routingTable.Lookup(idTargetX)
@@ -1067,7 +1012,7 @@ func TestHopAckScoping_SameIdentityDifferentNextHopNotPromoted(t *testing.T) {
 	}
 
 	// hop_ack from peer-D should only promote the peer-D route.
-	svc.confirmRouteViaHopAck(idTargetX, domain.PeerAddress(idPeerD.String()), domain.PeerIdentity{})
+	svc.confirmRouteViaHopAck(idTargetX, domain.PeerAddress(idPeerD.String()))
 
 	routes := svc.routingTable.Lookup(idTargetX)
 	if len(routes) < 2 {
@@ -1303,11 +1248,12 @@ func TestHandleAnnounceRoutesRejectsForgedOwnOriginWithdrawal(t *testing.T) {
 func TestHandleAnnounceRoutesRejectsTransitWithdrawal(t *testing.T) {
 	svc := newTestServiceWithRouting(t, idNodeA)
 
-	// Add a route originated by origin-C, learned via peer-B.
+	// peer-B announces a route to target-X under its own Origin, as
+	// every sender does.
 	frame := protocol.Frame{
 		Type: "announce_routes",
 		AnnounceRoutes: []protocol.AnnounceRouteFrame{
-			{Identity: idTargetX.String(), Origin: idOriginC.String(), Hops: 2, SeqNo: 1},
+			{Identity: idTargetX.String(), Origin: idPeerB.String(), Hops: 2, SeqNo: 1},
 		},
 	}
 	svc.handleAnnounceRoutes(provenRoutingSender(idPeerB), frame)
@@ -1317,9 +1263,9 @@ func TestHandleAnnounceRoutesRejectsTransitWithdrawal(t *testing.T) {
 		t.Fatalf("expected 1 route, got %d", len(routes))
 	}
 
-	// peer-B (transit node, NOT origin-C) tries to withdraw this route.
-	// The model says only the origin may emit a wire withdrawal. Transit
-	// nodes must invalidate locally and stop advertising.
+	// peer-B relays a withdrawal under origin-C's name. Only the origin
+	// may emit a wire withdrawal; transit nodes must invalidate locally
+	// and stop advertising.
 	withdrawal := protocol.Frame{
 		Type: "announce_routes",
 		AnnounceRoutes: []protocol.AnnounceRouteFrame{
@@ -1328,7 +1274,7 @@ func TestHandleAnnounceRoutesRejectsTransitWithdrawal(t *testing.T) {
 	}
 	svc.handleAnnounceRoutes(provenRoutingSender(idPeerB), withdrawal)
 
-	// Route must survive — only origin-C may withdraw it.
+	// Route must survive — the withdrawal does not name its sender.
 	routes = svc.routingTable.Lookup(idTargetX)
 	if len(routes) == 0 {
 		t.Fatal("transit withdrawal must be rejected — route should survive")
@@ -2054,26 +2000,16 @@ func TestTableRouterPopulatesRelayNextHopHops(t *testing.T) {
 	}
 }
 
-// --- Intermediate hop RouteOrigin propagation ---
+// --- Intermediate hop next-hop selection ---
 
-// TestTryForwardViaRoutingTablePlumbsRouteOrigin verifies that
-// tryForwardViaRoutingTable plumbs the selected route's Origin field
-// into tableForwardResult.RouteOrigin. Post-Phase-A the Origin field
-// is no longer the wire-derived transit-Origin (storage dropped it);
-// Lookup synthesises Origin = localOrigin per the migration contract
-// (see uplink_claim.go's toRouteEntry doc-comment). The RouteOrigin
-// plumbing is retained for source compatibility with the relay-path
-// signature, but the value carries no routing-disambiguation signal
-// — confirmRouteViaHopAck ignores it (see
-// TestHopAckScoping_IgnoresRouteOriginPostPhaseA). This test pins
-// the new contract so future readers see exactly what value flows
-// through.
-func TestTryForwardViaRoutingTablePlumbsRouteOrigin(t *testing.T) {
+// TestForwardRelayDownstreamMarksTableRoutedAttempt verifies that when no
+// direct session to the recipient exists and the routing table names a next
+// hop, the intermediate forward goes to that next hop and is reported as a
+// routing-table selection. The selection is what the stale hop_ack guard
+// (isStaleHopAckSender) later uses to accept an ack only from that next hop.
+func TestForwardRelayDownstreamMarksTableRoutedAttempt(t *testing.T) {
 	svc := newTestServiceWithRoutingAndHealth(t, idNodeB)
 
-	// Add a route to target-X via peer-C. The on-the-wire Origin
-	// here (idOriginD) is consumed by UpdateRoute for anti-spoof
-	// and then dropped by the storage layer.
 	if _, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
 		Identity: idTargetX, Origin: idOriginD, NextHop: idPeerC,
 		Hops: 2, SeqNo: 1, Source: routing.RouteSourceAnnouncement,
@@ -2094,25 +2030,65 @@ func TestTryForwardViaRoutingTablePlumbsRouteOrigin(t *testing.T) {
 	svc.health["addr-C"] = &peerHealth{Address: "addr-C", Connected: true}
 	svc.peerMu.Unlock()
 
-	// Build a relay frame to forward.
 	frame := protocol.Frame{
 		Type:      "relay_message",
 		ID:        "msg-1",
 		Recipient: idTargetX.String(),
 	}
 
-	result := svc.tryForwardViaRoutingTable(context.Background(), idTargetX, frame, idPeerA)
+	downstream := svc.forwardRelayDownstream(idTargetX, frame, idPeerA, domain.PeerAddress("addr-A"))
 
-	if result.Address == "" {
-		t.Fatal("expected table-directed forward to succeed")
+	if downstream.Address != domain.PeerAddress("addr-C") {
+		t.Fatalf("expected the table next hop addr-C, got %q", downstream.Address)
 	}
-	// Post-Phase-A: RouteOrigin reflects the synthesised Origin
-	// from Lookup, which is localOrigin (idNodeB in this fixture)
-	// — NOT the wire-time Origin (idOriginD) that was dropped by
-	// storage. Pre-A1 this test pinned idOriginD; the assertion
-	// is intentionally flipped to document the post-A1 contract.
-	if result.RouteOrigin != idNodeB {
-		t.Fatalf("expected RouteOrigin=localOrigin (idNodeB=%q), got %q", idNodeB, result.RouteOrigin)
+	if downstream.Selection != relayNextHopRoutingTable {
+		t.Fatalf("expected selection %s, got %s", relayNextHopRoutingTable, downstream.Selection)
+	}
+}
+
+// TestForwardRelayDownstreamPrefersDirectSession verifies that a direct
+// session to the recipient wins over a routing-table next hop and is
+// reported as such, so the stale hop_ack guard does not treat it as an
+// attempt the routing table pinned.
+func TestForwardRelayDownstreamPrefersDirectSession(t *testing.T) {
+	svc := newTestServiceWithRoutingAndHealth(t, idNodeB)
+
+	if _, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
+		Identity: idTargetX, Origin: idOriginD, NextHop: idPeerC,
+		Hops: 2, SeqNo: 1, Source: routing.RouteSourceAnnouncement,
+	}); err != nil {
+		t.Fatalf("UpdateRoute failed: %v", err)
+	}
+	svc.sessions[domain.PeerAddress("addr-C")] = &peerSession{
+		address:      domain.PeerAddress("addr-C"),
+		peerIdentity: idPeerC,
+		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapMeshRoutingV1},
+		sendCh:       make(chan peerSendItem, 10),
+	}
+	svc.sessions[domain.PeerAddress("addr-X")] = &peerSession{
+		address:      domain.PeerAddress("addr-X"),
+		peerIdentity: idTargetX,
+		capabilities: []domain.Capability{domain.CapMeshRelayV1},
+		sendCh:       make(chan peerSendItem, 10),
+	}
+	svc.peerMu.Lock()
+	svc.health["addr-C"] = &peerHealth{Address: "addr-C", Connected: true}
+	svc.health["addr-X"] = &peerHealth{Address: "addr-X", Connected: true}
+	svc.peerMu.Unlock()
+
+	frame := protocol.Frame{
+		Type:      "relay_message",
+		ID:        "msg-direct",
+		Recipient: idTargetX.String(),
+	}
+
+	downstream := svc.forwardRelayDownstream(idTargetX, frame, idPeerA, domain.PeerAddress("addr-A"))
+
+	if downstream.Address != domain.PeerAddress("addr-X") {
+		t.Fatalf("expected the direct session addr-X, got %q", downstream.Address)
+	}
+	if downstream.Selection != relayNextHopDirectSession {
+		t.Fatalf("expected selection %s, got %s", relayNextHopDirectSession, downstream.Selection)
 	}
 }
 
@@ -2160,9 +2136,6 @@ func TestTryForwardViaRoutingTableNoRoute(t *testing.T) {
 
 	if result.Address != "" {
 		t.Fatalf("expected empty address for unknown recipient, got %s", result.Address)
-	}
-	if !result.RouteOrigin.IsZero() {
-		t.Fatalf("expected empty RouteOrigin, got %s", result.RouteOrigin)
 	}
 }
 
@@ -2838,7 +2811,7 @@ func TestDrainPendingForIdentities_SendFailureReturnsFrame(t *testing.T) {
 
 	// Override sessionChecker to return an inbound-style address.
 	// This makes Route() succeed with RelayNextHop populated, but
-	// sendRelayToAddress enters the inbound path where writeFrameToInbound
+	// sendTableRoutedRelayToAddress enters the inbound path where writeFrameToInbound
 	// fails because no tracked connection exists for this address.
 	fakeInboundAddr := domain.PeerAddress("inbound:10.0.0.99:9999")
 	svc.router.(*TableRouter).sessionChecker = func(id domain.PeerIdentity, hops int) domain.PeerAddress {
@@ -2867,7 +2840,7 @@ func TestDrainPendingForIdentities_SendFailureReturnsFrame(t *testing.T) {
 	svc.deliveryMu.Unlock()
 
 	// Drain: Route() returns RelayNextHop (peer-B via fake inbound address),
-	// but sendRelayToAddress → writeFrameToInbound fails (no tracked conn).
+	// but sendTableRoutedRelayToAddress → writeFrameToInbound fails (no tracked conn).
 	// Frame must be returned to pending queue.
 	svc.drainPendingForIdentities(map[domain.PeerIdentity]struct{}{idTargetX: {}})
 
@@ -3015,7 +2988,7 @@ func TestDrainPendingForIdentities_PartialDeliveryPreservesOrder(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Use an inbound address so sendRelayToAddress fails (no tracked conn).
+	// Use an inbound address so sendTableRoutedRelayToAddress fails (no tracked conn).
 	fakeInboundAddr := domain.PeerAddress("inbound:10.0.0.99:9999")
 	svc.router.(*TableRouter).sessionChecker = func(id domain.PeerIdentity, hops int) domain.PeerAddress {
 		if id == idPeerB {
@@ -3982,9 +3955,9 @@ func TestSendNoticeToPeer_BootstrapRecordsOutboundSuccess(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = ln.Close() })
 
-	peerID, err := identity.Generate()
+	responder, err := newV1HandshakeResponder()
 	if err != nil {
-		t.Fatalf("identity.Generate: %v", err)
+		t.Fatalf("responder identity: %v", err)
 	}
 
 	peerDone := make(chan error, 1)
@@ -3998,37 +3971,14 @@ func TestSendNoticeToPeer_BootstrapRecordsOutboundSuccess(t *testing.T) {
 		_ = c.SetDeadline(time.Now().Add(3 * time.Second))
 		reader := bufio.NewReader(c)
 
-		// hello.
-		if _, err := reader.ReadBytes('\n'); err != nil {
-			peerDone <- fmt.Errorf("read hello: %w", err)
+		// hello → the challenging welcome of a current responder, then
+		// auth_ok only for a valid auth_session.
+		if _, err := responder.answerHello(c, reader); err != nil {
+			peerDone <- fmt.Errorf("hello: %w", err)
 			return
 		}
-		welcomeLine, err := protocol.MarshalFrameLine(protocol.Frame{
-			Type:      "welcome",
-			Challenge: "bootstrap-challenge",
-			Address:   peerID.Address,
-		})
-		if err != nil {
-			peerDone <- fmt.Errorf("marshal welcome: %w", err)
-			return
-		}
-		if _, err := io.WriteString(c, welcomeLine); err != nil {
-			peerDone <- fmt.Errorf("write welcome: %w", err)
-			return
-		}
-
-		// auth_session.
-		if _, err := reader.ReadBytes('\n'); err != nil {
-			peerDone <- fmt.Errorf("read auth_session: %w", err)
-			return
-		}
-		authOKLine, err := protocol.MarshalFrameLine(protocol.Frame{Type: "auth_ok"})
-		if err != nil {
-			peerDone <- fmt.Errorf("marshal auth_ok: %w", err)
-			return
-		}
-		if _, err := io.WriteString(c, authOKLine); err != nil {
-			peerDone <- fmt.Errorf("write auth_ok: %w", err)
+		if _, err := responder.answerAuth(c, reader); err != nil {
+			peerDone <- fmt.Errorf("auth_session: %w", err)
 			return
 		}
 
@@ -4231,13 +4181,15 @@ func TestSendNoticeToPeer_SelfIdentityWelcome_AppliesCooldown(t *testing.T) {
 			peerDone <- fmt.Errorf("read hello: %w", err)
 			return
 		}
-		// Non-notice welcome carrying our own identity. No challenge
-		// so the caller does not even attempt auth_session — the guard
-		// must short-circuit right after parsing the welcome.
+		// Non-notice welcome carrying our own identity, otherwise as a
+		// current responder sends it — the guard must short-circuit
+		// before auth_session is signed for it.
 		welcomeLine, err := protocol.MarshalFrameLine(protocol.Frame{
-			Type:    "welcome",
-			Address: svc.identity.Address,
-			Listen:  ln.Addr().String(),
+			Type:                   "welcome",
+			Version:                config.ProtocolVersion,
+			MinimumProtocolVersion: config.MinimumProtocolVersion,
+			Address:                svc.identity.Address,
+			Challenge:              "self-welcome-challenge",
 		})
 		if err != nil {
 			peerDone <- fmt.Errorf("marshal welcome: %w", err)

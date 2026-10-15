@@ -150,7 +150,7 @@ func TestUpdateRouteRejectedDoesNotMarkDirty(t *testing.T) {
 	t.Run("tombstone_protection", func(t *testing.T) {
 		tbl := NewTable()
 		// Seed a withdrawal tombstone via WithdrawRoute.
-		if !tbl.WithdrawRoute(domaintest.ID("alice"), domaintest.ID("bob"), domaintest.ID("charlie"), 5) {
+		if !tbl.WithdrawRoute(domaintest.ID("alice"), domaintest.ID("charlie"), 5) {
 			t.Fatal("WithdrawRoute returned false on first withdraw")
 		}
 		tbl.ConsumeDirty()
@@ -389,7 +389,7 @@ func TestRemoveDirectPeerMarksDirty(t *testing.T) {
 func TestWithdrawRouteSuccessMarksDirty(t *testing.T) {
 	t.Run("tombstone_creation", func(t *testing.T) {
 		tbl := NewTable()
-		if !tbl.WithdrawRoute(domaintest.ID("alice"), domaintest.ID("bob"), domaintest.ID("charlie"), 1) {
+		if !tbl.WithdrawRoute(domaintest.ID("alice"), domaintest.ID("charlie"), 1) {
 			t.Fatal("WithdrawRoute returned false on tombstone creation")
 		}
 		if !tbl.ConsumeDirty() {
@@ -405,7 +405,7 @@ func TestWithdrawRouteSuccessMarksDirty(t *testing.T) {
 		})
 		tbl.ConsumeDirty()
 
-		if !tbl.WithdrawRoute(domaintest.ID("alice"), domaintest.ID("bob"), domaintest.ID("charlie"), 2) {
+		if !tbl.WithdrawRoute(domaintest.ID("alice"), domaintest.ID("charlie"), 2) {
 			t.Fatal("WithdrawRoute returned false on active→withdrawn")
 		}
 		if !tbl.ConsumeDirty() {
@@ -415,12 +415,12 @@ func TestWithdrawRouteSuccessMarksDirty(t *testing.T) {
 
 	t.Run("stale_seq_keeps_clean", func(t *testing.T) {
 		tbl := NewTable()
-		if !tbl.WithdrawRoute(domaintest.ID("alice"), domaintest.ID("bob"), domaintest.ID("charlie"), 5) {
+		if !tbl.WithdrawRoute(domaintest.ID("alice"), domaintest.ID("charlie"), 5) {
 			t.Fatal("WithdrawRoute returned false on tombstone creation")
 		}
 		tbl.ConsumeDirty()
 
-		if tbl.WithdrawRoute(domaintest.ID("alice"), domaintest.ID("bob"), domaintest.ID("charlie"), 3) {
+		if tbl.WithdrawRoute(domaintest.ID("alice"), domaintest.ID("charlie"), 3) {
 			t.Fatal("WithdrawRoute should reject lower SeqNo")
 		}
 		if tbl.IsDirty() {
@@ -803,7 +803,7 @@ func TestSnapshotDoesNotMarkDirty(t *testing.T) {
 	_ = tbl.Size()
 	_ = tbl.ActiveSize()
 	_ = tbl.FlapSnapshot()
-	_ = tbl.InspectTriple(RouteTriple{Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("charlie")})
+	_ = tbl.InspectUplinkClaim(domaintest.ID("alice"), domaintest.ID("charlie"))
 
 	if tbl.IsDirty() {
 		t.Fatal("read-only path marked dirty")

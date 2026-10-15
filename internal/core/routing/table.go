@@ -13,8 +13,8 @@ const (
 	// RouteAccepted means the route was new or improved (inserted/updated).
 	RouteAccepted RouteUpdateStatus = iota
 	// RouteUnchanged means an existing alive (non-withdrawn, non-expired)
-	// route with this triple was found but the incoming entry did not improve
-	// it (same or worse SeqNo/trust/hops). The route is usable through
+	// claim for this (Identity, Uplink) slot was found but the incoming entry
+	// did not improve it (same or worse SeqNo/trust/hops). The route is usable through
 	// this next-hop — callers can treat this as a reconfirmation.
 	RouteUnchanged
 	// RouteRejected means the route was rejected: tombstone protection
@@ -78,11 +78,11 @@ const (
 //     (AdmitNew, AdmitDirect, isEvictable / isLive* / isWorse* /
 //     isStrictlyBetter*).
 //   - route_store_mutation.go: write-side storage operations
-//     (ApplyUpdate, WithdrawTriple, AdmitDirectPeer, InvalidateAllVia,
+//     (ApplyUpdate, WithdrawUplinkClaim, AdmitDirectPeer, InvalidateAllVia,
 //     InvalidateTransitVia, CompactExpired, syncSeqCounterLocked,
 //     nextSeqLocked).
 //   - route_store_lookup.go: read-side storage projections
-//     (LookupActive, InspectTriple, AnnounceableFor,
+//     (LookupActive, InspectUplinkClaim, AnnounceableFor,
 //     AnnounceProjectionFor).
 //   - flap.go: FlapDetector type — per-peer flap state machine
 //     (isInHoldDownLocked, recordWithdrawalLocked, clearStableLocked,
@@ -90,7 +90,7 @@ const (
 //   - table_flap.go: thin Table wrappers (RecordSuccessfulRouteAdd,
 //     FlapSnapshot) that acquire t.mu before delegating to flap.
 //   - table_lookup.go: thin Table wrappers for read-side public API
-//     (Announceable, AnnounceTo, Lookup, InspectTriple, Snapshot).
+//     (Announceable, AnnounceTo, Lookup, InspectUplinkClaim, Snapshot).
 //     Acquire t.mu, delegate to routeStore / flap, layer the
 //     synthetic local-route injection on top.
 //   - table_mutation.go: thin Table wrappers for write-side public
@@ -105,12 +105,10 @@ const (
 // check in Table.UpdateRoute. Wire format and the public Table
 // API remain unchanged — synthesised RouteEntry values returned
 // by Lookup/Snapshot/Announceable carry Origin = localOrigin
-// (with fallback to Identity for tables without WithLocalOrigin).
-// This shape keeps pre-A1 receivers' withdrawal anti-spoof
-// (Origin == sender) working by making live and withdrawal emit
-// share the same (Identity, Origin=sender, NextHop=sender)
-// triple on the receiver side. See uplink_claim.go for the
-// conversion helpers and the migration contract rationale.
+// (with fallback to Identity for tables without WithLocalOrigin),
+// so live and withdrawal emits both name the sender as Origin —
+// receivers accept an entry only when its Origin is the sending
+// peer. See uplink_claim.go for the conversion helpers.
 type Table struct {
 	mu sync.RWMutex
 
@@ -291,7 +289,7 @@ func WithEpoch(epoch uint64) TableOption {
 // WithDefaultTTL overrides the default route TTL. The value lives
 // on routeStore — every learned entry whose caller did not set
 // ExpiresAt picks it up at ApplyUpdate time, and tombstones created
-// by WithdrawTriple / InvalidateAllVia / InvalidateTransitVia use
+// by WithdrawUplinkClaim / InvalidateAllVia / InvalidateTransitVia use
 // it for the resurrection-guard window.
 func WithDefaultTTL(d time.Duration) TableOption {
 	return func(t *Table) {

@@ -63,11 +63,11 @@ func TestFastInvalidation_NewClaimAcceptedAsTombstone(t *testing.T) {
 		t.Fatalf("Lookup must skip fast-invalidated tombstone, got %+v", routes)
 	}
 
-	// InspectTriple must still see the row as a withdrawn entry —
+	// InspectUplinkClaim must still see the row as a withdrawn entry —
 	// the SeqNo-resurrection guard depends on it being present.
-	entry := tbl.InspectTriple(RouteTriple{Identity: dest, Origin: domaintest.ID("src-x"), NextHop: uplink})
+	entry := tbl.InspectUplinkClaim(dest, uplink)
 	if entry == nil {
-		t.Fatalf("InspectTriple must return the tombstone")
+		t.Fatalf("InspectUplinkClaim must return the tombstone")
 	}
 	if !entry.IsWithdrawn() {
 		t.Fatalf("invalidated claim must be marked withdrawn, got Hops=%d", entry.Hops)
@@ -164,6 +164,55 @@ func TestFastInvalidation_StaleBadHopsClaimRejected(t *testing.T) {
 	routes := tbl.Lookup(dest)
 	if len(routes) != 1 || routes[0].Hops != 3 || routes[0].SeqNo != 20 {
 		t.Fatalf("Lookup after stale bad-hops must keep stored live row, got %+v", routes)
+	}
+}
+
+// A bad-hops claim at a SeqNo not above the stored one is a stale
+// sample even when its wire Origin differs from every Origin seen on
+// the slot: the Origin takes no part in SeqNo ordering, so neither a
+// lower-SeqNo claim from yet another Origin before it nor the bad-hops
+// claim itself may move the slot. The counter stays put because no
+// invalidation was accepted.
+func TestFastInvalidation_StaleBadHopsWithDifferentOriginRejected(t *testing.T) {
+	now := time.Date(2026, 5, 22, 12, 0, 0, 0, time.UTC)
+	clock := func() time.Time { return now }
+
+	var (
+		dest   = domaintest.ID("dest")
+		uplink = domaintest.ID("u-1")
+	)
+
+	tbl := NewTable(
+		WithClock(clock),
+		WithLocalOrigin(domaintest.ID("node-A")),
+		WithMaxSaneHops(8),
+	)
+
+	mustUpdate(t, tbl, RouteEntry{
+		Identity: dest, Origin: uplink, NextHop: uplink,
+		Hops: 3, SeqNo: 10, Source: RouteSourceAnnouncement,
+	})
+	if status := mustUpdate(t, tbl, RouteEntry{
+		Identity: dest, Origin: domaintest.ID("origin-B"), NextHop: uplink,
+		Hops: 2, SeqNo: 5, Source: RouteSourceAnnouncement,
+	}); status != RouteRejected {
+		t.Fatalf("lower-SeqNo claim from another Origin must be rejected, got %v", status)
+	}
+
+	status := mustUpdate(t, tbl, RouteEntry{
+		Identity: dest, Origin: domaintest.ID("origin-C"), NextHop: uplink,
+		Hops: 12, SeqNo: 7, Source: RouteSourceAnnouncement,
+	})
+	if status != RouteRejected {
+		t.Fatalf("bad-hops claim at SeqNo=7 <= stored 10 must be rejected as stale, got %v", status)
+	}
+	if got := tbl.CapStats().FastInvalidations; got != 0 {
+		t.Fatalf("FastInvalidations=%d after a stale bad-hops claim, want 0", got)
+	}
+
+	routes := tbl.Lookup(dest)
+	if len(routes) != 1 || routes[0].Hops != 3 || routes[0].SeqNo != 10 {
+		t.Fatalf("stored live claim must stay at SeqNo=10 Hops=3, got %+v", routes)
 	}
 }
 
@@ -309,98 +358,15 @@ func TestFastInvalidation_WireHopsBoundaryClampedToHopsInfinity(t *testing.T) {
 
 	// Stored claim must be the tombstone at the observed SeqNo for
 	// the SeqNo-resurrection guard.
-	entry := tbl.InspectTriple(RouteTriple{Identity: dest, Origin: domaintest.ID("src-x"), NextHop: uplink})
+	entry := tbl.InspectUplinkClaim(dest, uplink)
 	if entry == nil {
-		t.Fatalf("InspectTriple must return the tombstone")
+		t.Fatalf("InspectUplinkClaim must return the tombstone")
 	}
 	if !entry.IsWithdrawn() {
 		t.Fatalf("invalidated claim must be marked withdrawn, got Hops=%d", entry.Hops)
 	}
 	if entry.SeqNo != 5 {
 		t.Fatalf("tombstone must preserve incoming SeqNo (NO bump) so legit recovery must exceed the observed bad SeqNo, got %d want 5", entry.SeqNo)
-	}
-}
-
-// TestFastInvalidation_CrossOriginStaleReplayRejected pins the
-// regression caught in review: when a stale bad-hops claim arrives
-// from a previously-observed Origin lineage that has a recorded
-// high-water EXCEEDING the incoming SeqNo, the P3 fast-invalidation
-// branch MUST honour the per-Origin stale-replay guard (the same
-// guard the standard branches at the bottom of ApplyUpdate apply).
-// Without the guard duplicated inside P3, the scenario
-//
-//	A10  →  B5  →  A9 with Hops > MaxSaneHops
-//
-// would slip past the standard guard (P3 returns early before
-// reaching it) and tombstone the legitimate B lineage purely on the
-// `entry.SeqNo > old.SeqNo` check (9 > 5), even though A's
-// previously observed high-water of 10 explicitly marks A9 as a
-// stale replay on A's own timeline.
-//
-// Reference: the per-Origin high-water guard in
-// route_store_mutation.go ApplyUpdate (the SeenOriginSeqs[origin]
-// pre-check at the top of the idx>=0 path), duplicated inside the
-// P3 fast-invalidation branch for the same reason.
-func TestFastInvalidation_CrossOriginStaleReplayRejected(t *testing.T) {
-	now := time.Date(2026, 5, 22, 12, 0, 0, 0, time.UTC)
-	clock := func() time.Time { return now }
-
-	var (
-		localID = domaintest.ID("node-A")
-		dest    = domaintest.ID("dest")
-		uplink  = domaintest.ID("u-1")
-		originA = domaintest.ID("origin-A")
-		originB = domaintest.ID("origin-B")
-	)
-
-	tbl := NewTable(
-		WithClock(clock),
-		WithLocalOrigin(localID),
-		WithMaxSaneHops(8),
-		WithMaxNextHopsPerOrigin(4),
-	)
-
-	// A10: live claim from Origin A at SeqNo=10.
-	mustUpdate(t, tbl, RouteEntry{
-		Identity: dest, Origin: originA, NextHop: uplink,
-		Hops: 3, SeqNo: 10, Source: RouteSourceAnnouncement,
-	})
-
-	// B5: cross-Origin lineage shift from B at strictly better hops.
-	// Lower SeqNo (5) is admitted by the cross-Origin lineage branch
-	// in the stale-SeqNo path because hops improve. Records B's
-	// observation (SeenOriginSeqs[B]=5) and shifts LastIngressOrigin
-	// to B.
-	mustUpdate(t, tbl, RouteEntry{
-		Identity: dest, Origin: originB, NextHop: uplink,
-		Hops: 2, SeqNo: 5, Source: RouteSourceAnnouncement,
-	})
-
-	// A9 with bad hops: a stale replay from A. The per-Origin
-	// high-water guard MUST reject this — A's recorded high-water
-	// is 10, and 9 <= 10. Without the guard inside P3,
-	// fast-invalidation would tombstone the legitimate B lineage
-	// because `entry.SeqNo (9) > old.SeqNo (5)`.
-	status, err := tbl.UpdateRoute(RouteEntry{
-		Identity: dest, Origin: originA, NextHop: uplink,
-		Hops: 12, SeqNo: 9, Source: RouteSourceAnnouncement,
-	})
-	if err != nil {
-		t.Fatalf("UpdateRoute err: %v", err)
-	}
-	if status != RouteRejected {
-		t.Fatalf("cross-Origin stale-replay bad-hops claim must be rejected by per-Origin high-water guard inside P3, got status=%v", status)
-	}
-	if got := tbl.CapStats().FastInvalidations; got != 0 {
-		t.Fatalf("rejected cross-Origin stale replay must NOT bump FastInvalidations, got %d", got)
-	}
-
-	// The legitimate B lineage must still be in place — Lookup
-	// returns the B-shaped route (Hops=2), proving the bad A9
-	// claim did not poison storage.
-	routes := tbl.Lookup(dest)
-	if len(routes) != 1 || routes[0].Hops != 2 || routes[0].SeqNo != 5 {
-		t.Fatalf("B lineage must survive the rejected A9 fast-invalidation, got routes=%+v", routes)
 	}
 }
 

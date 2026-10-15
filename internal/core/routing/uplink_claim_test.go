@@ -23,7 +23,7 @@ func TestUplinkClaim_IsWithdrawn(t *testing.T) {
 		{"withdrawn with HopsInfinity", UplinkClaim{Hops: HopsInfinity, Withdrawn: true}, true},
 		// Hops=HopsInfinity alone is NOT enough — Withdrawn flag is
 		// canonical inside storage. This documents the invariant: the
-		// caller (ApplyUpdate / WithdrawTriple) is responsible for
+		// caller (ApplyUpdate / WithdrawUplinkClaim) is responsible for
 		// setting Withdrawn correctly when ingesting a wire withdrawal.
 		{"HopsInfinity without flag is structurally invalid but IsWithdrawn returns false", UplinkClaim{Hops: HopsInfinity, Withdrawn: false}, false},
 	}
@@ -181,7 +181,7 @@ func TestToUplinkClaim_DerivesWithdrawnFromHopsInfinity(t *testing.T) {
 	// Wire withdrawals arrive as RouteEntry{Hops: HopsInfinity}.
 	// toUplinkClaim translates the sentinel into the dedicated
 	// Withdrawn flag (Hops on storage keeps the sentinel value as
-	// observed; ApplyUpdate / WithdrawTriple are the callers that
+	// observed; ApplyUpdate / WithdrawUplinkClaim are the callers that
 	// must set Withdrawn correctly via this helper).
 	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 	entry := RouteEntry{
@@ -232,12 +232,10 @@ func TestToUplinkClaim_DirectRouteHops1(t *testing.T) {
 // --- toRouteEntry ---
 
 func TestToRouteEntry_OriginEqualsLocalOriginWhenSet(t *testing.T) {
-	// Phase A migration contract: every wire-emit (live + withdrawal)
-	// uses Origin = localOrigin so that pre-A1 receivers' withdrawal
-	// anti-spoof (Origin == sender) accepts our frames and live +
-	// withdrawal land in the SAME (Identity, Origin, NextHop) slot
-	// on the legacy receiver. toRouteEntry mirrors that contract on
-	// the boundary so internal RouteEntry consumers see consistent
+	// Every wire-emit (live + withdrawal) uses Origin = localOrigin
+	// because receivers accept a withdrawal only when its Origin is
+	// the sending peer. toRouteEntry mirrors that contract on the
+	// boundary so internal RouteEntry consumers see consistent
 	// Origin values across Lookup / Snapshot / Announce paths.
 	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 	claim := UplinkClaim{
@@ -428,10 +426,10 @@ func TestUplinkClaim_RoundTripPreservesRoutingFieldsAndExtra(t *testing.T) {
 					string(back.Extra), string(tc.entry.Extra))
 			}
 
-			// Origin documentation: post-swap Origin is always
-			// localOrigin, regardless of what came in. This is the
-			// migration contract for pre-A1 receivers' withdrawal
-			// anti-spoof; see route_store_lookup.go for the wire-
+			// Origin is always localOrigin on the way out,
+			// regardless of what came in: storage does not keep the
+			// ingest Origin, and the emit side names this node as
+			// the sender; see route_store_lookup.go for the wire-
 			// emit contract.
 			if back.Origin != localOrigin {
 				t.Errorf("Origin should be set to localOrigin on round-trip: got %q, want %q (was %q on input)",

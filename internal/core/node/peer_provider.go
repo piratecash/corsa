@@ -60,6 +60,24 @@ type PeerHealthView struct {
 	LastErrorCode string
 }
 
+// banRunning reports whether the health record carries a ban that has not
+// expired at now.
+func (v *PeerHealthView) banRunning(now time.Time) bool {
+	return !v.BannedUntil.IsZero() && now.Before(v.BannedUntil)
+}
+
+// banWidensToIP reports whether the record's running ban covers every port
+// of its host. Every reason does except the self-identity cooldown, which
+// names one alias of this node — see buildBannedIPsSet for the rationale.
+func (v *PeerHealthView) banWidensToIP(now time.Time) bool {
+	return v.banRunning(now) && v.LastErrorCode != protocol.ErrCodeSelfIdentity
+}
+
+// ipBanRunning reports whether an IP-wide ban entry has not expired at now.
+func ipBanRunning(entry domain.BannedIPEntry, now time.Time) bool {
+	return now.Before(entry.BannedUntil)
+}
+
 // PeerProviderConfig holds all callback functions that PeerProvider uses
 // to read external state. All fields are required.
 //
@@ -453,17 +471,14 @@ func (pp *PeerProvider) Candidates() []domain.CandidatePeer {
 		// cascades and churn the ebus. The window is sourced from the
 		// remote and recorded verbatim — a peer that asks for a long
 		// ban gets exactly that.
-		if cfg.RemoteBannedFn != nil && cfg.RemoteBannedFn(kp.Address) {
-			continue
-		}
-
+		//
 		// 6c.3: skip peers locally muted by the setup-failure cooldown.
 		// Sibling gate to 6c.2 but driven from our side: after N
 		// consecutive cm_session_setup_failed events against the same
 		// address we suppress dial attempts for setupFailureCooldown so
 		// the storm against full-routing-table bootstraps subsides
 		// even when the remote never sends a peer-banned notice.
-		if cfg.SetupFailureBannedFn != nil && cfg.SetupFailureBannedFn(kp.Address) {
+		if pp.addressRefusesDials(kp.Address) {
 			continue
 		}
 
@@ -495,7 +510,7 @@ func (pp *PeerProvider) Candidates() []domain.CandidatePeer {
 				// this check is redundant with 6c but not incorrect — the
 				// address would have been filtered by the IP-wide ban one
 				// step earlier.
-				if !h.BannedUntil.IsZero() && now.Before(h.BannedUntil) {
+				if h.banRunning(now) {
 					continue
 				}
 
@@ -617,6 +632,89 @@ func (pp *PeerProvider) Candidates() []domain.CandidatePeer {
 	}
 
 	return result
+}
+
+// IsDialBanned reports whether Candidates would drop address for a ban, so
+// a dial made outside the connection manager skips what the manager skips.
+// It runs the candidate filter's ban checks, through the same predicates:
+//
+//   - 6c — an IP-wide ban of the address's host: a running entry of
+//     Service.bannedIPSet for the host, or a running ban of any known port
+//     on the host that widens to the IP (every reason but the self-identity
+//     cooldown; buildBannedIPsSet documents the carve-out);
+//   - 6c.2 — the address told us it refuses our connections (remote ban);
+//   - 6c.3 — the address is in the local setup-failure cooldown;
+//   - 6f — the address carries a running ban of its own, the address-scoped
+//     self-identity cooldown included.
+//
+// 6c.1 (version lockout) is deliberately not among them: a lockout is not a
+// ban of the peer but evidence that THIS build is too old for it, lifted by
+// upgrading, and it stays a gate of the connection manager's session
+// dialling. The address need not be a known peer. Only the address's own
+// host is examined — the known ports on it, not the whole table.
+//
+// Takes pp.mu and, through HealthFn, BannedIPsFn, RemoteBannedFn and
+// SetupFailureBannedFn, s.peerMu and s.ipStateMu: the caller holds none of
+// them.
+func (pp *PeerProvider) IsDialBanned(address domain.PeerAddress) bool {
+	pp.mu.RLock()
+	defer pp.mu.RUnlock()
+
+	now := pp.config.NowFn()
+	if host, _, ok := splitHostPort(string(address)); ok && pp.hostBannedLocked(host, now) {
+		return true
+	}
+	if pp.addressRefusesDials(address) {
+		return true
+	}
+	return pp.addressBanRunning(address, now)
+}
+
+// hostBannedLocked reports whether host is under an IP-wide ban: a running
+// bannedIPSet entry, or a running ban of a known port on host that widens to
+// the IP. It is buildBannedIPsSet answered for one host. Caller holds pp.mu
+// (read).
+func (pp *PeerProvider) hostBannedLocked(host string, now time.Time) bool {
+	cfg := pp.config
+	if cfg.BannedIPsFn != nil {
+		if entry, ok := cfg.BannedIPsFn()[host]; ok && ipBanRunning(entry, now) {
+			return true
+		}
+	}
+	if cfg.HealthFn == nil {
+		return false
+	}
+	for _, kp := range pp.known {
+		if kp.IP != host {
+			continue
+		}
+		if h := cfg.HealthFn(kp.Address); h != nil && h.banWidensToIP(now) {
+			return true
+		}
+	}
+	return false
+}
+
+// addressRefusesDials reports the two per-address refusals of the candidate
+// filter that are not health bans: the peer told us it refuses our
+// connections (step 6c.2, RemoteBannedFn), or the local setup-failure
+// cooldown mutes it (step 6c.3, SetupFailureBannedFn).
+func (pp *PeerProvider) addressRefusesDials(address domain.PeerAddress) bool {
+	cfg := pp.config
+	if cfg.RemoteBannedFn != nil && cfg.RemoteBannedFn(address) {
+		return true
+	}
+	return cfg.SetupFailureBannedFn != nil && cfg.SetupFailureBannedFn(address)
+}
+
+// addressBanRunning reports whether address's own health record carries a
+// running ban (step 6f).
+func (pp *PeerProvider) addressBanRunning(address domain.PeerAddress, now time.Time) bool {
+	if pp.config.HealthFn == nil {
+		return false
+	}
+	h := pp.config.HealthFn(address)
+	return h != nil && h.banRunning(now)
 }
 
 // occupiedSubnetGroups builds the initial set of subnet-diversity group
@@ -1022,7 +1120,7 @@ func (pp *PeerProvider) buildBannedIPsSet(now time.Time) map[string]domain.Banne
 	// Source (a): IP-wide bans from Service.bannedIPSet.
 	if cfg.BannedIPsFn != nil {
 		for ip, entry := range cfg.BannedIPsFn() {
-			if now.Before(entry.BannedUntil) {
+			if ipBanRunning(entry, now) {
 				banned[ip] = entry
 			}
 		}
@@ -1039,12 +1137,9 @@ func (pp *PeerProvider) buildBannedIPsSet(now time.Time) map[string]domain.Banne
 			if h == nil {
 				continue
 			}
-			if h.BannedUntil.IsZero() || !now.Before(h.BannedUntil) {
-				continue
-			}
-			// Address-scoped ban reason — do not widen to the IP.
-			// See the function docstring for the full rationale.
-			if h.LastErrorCode == protocol.ErrCodeSelfIdentity {
+			// banWidensToIP skips an address-scoped ban reason
+			// (self-identity); see the function docstring.
+			if !h.banWidensToIP(now) {
 				continue
 			}
 			existing, exists := banned[kp.IP]

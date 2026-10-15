@@ -11,59 +11,56 @@ import (
 // RouteCapStats.FastInvalidations' doc-comment and in docs/routing.md
 // "RIB compaction" → "fast invalidation": Identity, Uplink, observed
 // hops, accepted-vs-rejected outcome. The log fires on EVERY P3
-// decision (accepted invalidation AND rejected stale-SeqNo /
-// cross-Origin-replay sample), but the FastInvalidations counter bumps
-// ONLY on accepted invalidations — the counter measures successful
+// decision (accepted invalidation AND rejected stale-SeqNo sample),
+// but the FastInvalidations counter bumps ONLY on accepted
+// invalidations — the counter measures successful
 // tombstone admissions, not total bad-hops traffic.
 //
 // Level split: `accepted=true` is steady-state mesh convergence churn —
 // during a route storm it fires many times per minute on every node,
 // and per-event warn logging (JSON encode + runtime.Caller + log I/O)
 // was itself a measurable CPU cost, so the accepted path logs at
-// debug. `accepted=false` stays at warn: rejected samples (stale /
-// cross-Origin replay) are the anomaly an operator must see.
+// debug. `accepted=false` stays at warn: rejected stale samples are
+// the anomaly an operator must see.
 // Dashboard guidance:
 //
 //   - FastInvalidations counter bumps are paired 1:1 with
 //     `accepted=true` debug lines — at the default (warn) log level
 //     the counter is the engage signal, not the log.
-//   - `accepted=false` warn lines have NO counter equivalent — the
-//     rejection_reason field is the only operator-visible record
-//     of stale / cross-Origin samples reaching the P3 branch. If
+//   - `accepted=false` warn lines have NO counter equivalent — they
+//     are the only operator-visible record of stale samples
+//     reaching the P3 branch. If
 //     dashboards need a counter for these, that's deferred work
 //     (the current monotonic FastInvalidations was designed as
 //     the "successful guard fired" metric, not "bad samples seen").
 //
-// `accepted=false` carries the `reason` ("cross_origin_stale_replay"
-// or "stale_seqno") for diagnostic granularity; the accepted path
-// keeps reason="" because the operator only needs the outcome to
-// be visible.
+// `accepted=false` also carries rejection_reason="stale_seqno": a
+// stale SeqNo is the only way the P3 branch rejects a sample once it
+// has logged (hold-down drops are silent), and the field is kept so
+// existing log queries on it stay valid.
 //
 // Lives in route_store_mutation.go (not flap.go) because the
 // fast-invalidation decision is part of ApplyUpdate's storage
 // pipeline; the symmetric SeqNo-flap-cap engage log lives in
 // flap.go::recordSeqAdvanceLocked where the decision is made.
-func logFastInvalidation(entry RouteEntry, accepted bool, reason string) {
+func logFastInvalidation(entry RouteEntry, accepted bool) {
 	event := log.Debug()
 	if !accepted {
-		event = log.Warn()
+		event = log.Warn().Str("rejection_reason", "stale_seqno")
 	}
-	event = event.
+	event.
 		Str("identity", entry.Identity.String()).
 		Str("uplink", entry.NextHop.String()).
 		Str("origin", entry.Origin.String()).
 		Int("observed_hops", entry.Hops).
 		Uint64("incoming_seqno", entry.SeqNo).
-		Bool("accepted", accepted)
-	if reason != "" {
-		event = event.Str("rejection_reason", reason)
-	}
-	event.Msg("routing_fast_invalidation")
+		Bool("accepted", accepted).
+		Msg("routing_fast_invalidation")
 }
 
 // This file hosts the write-side storage operations: claim
 // admission (ApplyUpdate orchestrating AdmitNew + dedup),
-// tombstone-based withdrawal (WithdrawTriple), direct-peer
+// tombstone-based withdrawal (WithdrawUplinkClaim), direct-peer
 // registration (AdmitDirectPeer), transit/direct invalidation
 // through a disconnected uplink (InvalidateAllVia /
 // InvalidateTransitVia), expired-claim compaction
@@ -71,15 +68,15 @@ func logFastInvalidation(entry RouteEntry, accepted bool, reason string) {
 // (nextSeqLocked / syncSeqCounterLocked) used by every
 // own-origin path.
 //
-// Phase 1 P0 Phase A changed the dedup key from
-// (Identity, Origin, NextHop) to (Identity, Uplink): Origin is
-// consumed by Table.UpdateRoute for anti-spoof and then dropped,
-// and storage is per-(Identity, Uplink) UplinkClaim values. Wire
-// frames on the boundary still use the legacy AnnounceEntry
-// shape (the caller in Table.* / node.routing_announce.go parses
-// Origin off the wire and re-emits Origin = localOrigin so that
-// pre-A1 receivers' withdrawal anti-spoof keeps accepting our
-// frames — see uplink_claim.go for the migration contract).
+// The dedup key is (Identity, Uplink): Origin is consumed by
+// Table.UpdateRoute for anti-spoof and then dropped, and storage is
+// per-(Identity, Uplink) UplinkClaim values whose SeqNo is ordered
+// strictly with no Origin in the comparison. Wire frames on the
+// boundary still use the AnnounceEntry shape (the caller in Table.* /
+// node.routing_announce.go parses Origin off the wire, and emit
+// synthesises Origin = localOrigin because receivers accept an
+// entry only when its Origin is the sending peer — see
+// uplink_claim.go).
 
 // ApplyUpdate ingests entry (already structurally validated by
 // RouteEntry.Validate and anti-spoofed by the caller for
@@ -91,9 +88,15 @@ func logFastInvalidation(entry RouteEntry, accepted bool, reason string) {
 // local-source guard is upstream on Table.UpdateRoute. Caller
 // must hold t.mu (writer).
 //
-// Dedup key is (Identity, Uplink=entry.NextHop). If an existing
-// claim shares the same pair:
+// Dedup key is (Identity, Uplink=entry.NextHop) and entry.Origin
+// takes no part in admission; its only reader is
+// syncSeqCounterLocked, which advances the own-origin SeqNo counter
+// only for an accepted Direct entry with Origin == localOrigin. If
+// an existing claim shares the same pair:
 //
+//   - If it is a Direct claim (live or tombstone) and the incoming
+//     source is not Direct: reject, whatever the SeqNo — the slot
+//     belongs to the session lifecycle.
 //   - If incoming SeqNo > existing SeqNo: replace unconditionally
 //     (with a cap admission re-evaluation when the existing claim
 //     was a tombstone, see the SeqNo>old block below).
@@ -113,7 +116,7 @@ func logFastInvalidation(entry RouteEntry, accepted bool, reason string) {
 // signal that drives the cursor-mode change journal, so TTL refreshes and
 // rejections do not fan out unchanged routes across the mesh:
 //   - RouteAccepted → wireChanged=true (admission / SeqNo bump / hops improve /
-//     lineage replace all change the emitted entry).
+//     trust uplift all change the emitted entry).
 //   - RouteRejected → wireChanged=false ALWAYS: the incoming was not accepted, so
 //     the stored winner/tombstone is preserved and the projection is unchanged,
 //     even when buckets were reshaped or counters moved (mutated=true).
@@ -133,8 +136,9 @@ func (s *routeStore) ApplyUpdate(entry RouteEntry, now time.Time) (RouteUpdateSt
 	// Validate() already enforces Hops=1 for RouteSourceDirect, so
 	// this branch never sees a withdrawn-direct (Hops=HopsInfinity)
 	// tombstone — withdrawal of direct routes goes through
-	// InvalidateAllVia / WithdrawTriple, which write ExpiresAt
-	// directly without going through ApplyUpdate.
+	// InvalidateAllVia alone (WithdrawUplinkClaim refuses Direct
+	// claims), which writes ExpiresAt directly without going through
+	// ApplyUpdate.
 	if entry.Source == RouteSourceDirect {
 		entry.ExpiresAt = time.Time{}
 	} else if entry.ExpiresAt.IsZero() {
@@ -148,6 +152,21 @@ func (s *routeStore) ApplyUpdate(entry RouteEntry, now time.Time) (RouteUpdateSt
 	incoming := toUplinkClaim(entry, now)
 
 	bucket, idx := s.findByUplinkLocked(entry.Identity, entry.NextHop)
+
+	// A Direct claim — live or the tombstone RemoveDirectPeer left — is
+	// written only by the session lifecycle (AdmitDirectPeer /
+	// InvalidateAllVia) and by Direct-sourced updates. Its slot is
+	// (peer, peer), so a non-Direct claim aimed at it can only come from
+	// the peer describing a route to itself, which no honest peer emits.
+	// Letting it through any branch below would either replace the claim
+	// with one InvalidateAllVia invalidates silently (no own wire
+	// withdrawal on disconnect, TTL ageing while the session is up) or
+	// tombstone it (re-emitted as our own withdrawal of a connected peer).
+	// Checked first so neither the SeqNo branches nor the bad-hops
+	// fast invalidation can reach the slot.
+	if idx >= 0 && bucket[idx].Source == RouteSourceDirect && entry.Source != RouteSourceDirect {
+		return RouteRejected, false, false
+	}
 
 	// Phase 1 P2 — outbound-projected SeqNo ingest guard during
 	// hold-down. MUST run BEFORE the P3 fast-invalidation branch:
@@ -166,10 +185,10 @@ func (s *routeStore) ApplyUpdate(entry RouteEntry, now time.Time) (RouteUpdateSt
 	// bookkeeping without advancing outbound), so the guard fires
 	// only on entries that would genuinely move the outbound
 	// timeline. Hop_ack / direct-source paths are exempt: a
-	// hop_ack does not advance the outbound counter (lineage
-	// override clears entry.Origin and the same-SeqNo trust uplift
-	// never bumps SeqNo); a direct source is own-origin and lives
-	// outside the upstream-driven advance flow.
+	// hop_ack does not advance the outbound counter (it is a
+	// same-SeqNo trust uplift that never bumps SeqNo); a direct
+	// source is own-origin and lives outside the upstream-driven
+	// advance flow.
 	//
 	// `incoming.Withdrawn` is INCLUDED in the guard (unlike the
 	// earlier draft of this branch): the same argument the P3
@@ -192,19 +211,13 @@ func (s *routeStore) ApplyUpdate(entry RouteEntry, now time.Time) (RouteUpdateSt
 
 	// Phase 1 P3 — fast invalidation on hops > MaxSaneHops.
 	//
-	// Detected synchronously BEFORE the cross-Origin admission rules
-	// and the standard SeqNo branches because those branches operate
-	// on the assumption that the incoming claim is at least
-	// loop-free. A claim approaching HopsInfinity (16) is almost
-	// always a count-to-infinity loop or a pre-convergence stage;
-	// admitting it just steers send_message / relay traffic onto a
-	// known-doomed uplink for up to 120s of TTL, and a naive fall-
-	// through into the stale-SeqNo branch would silently DROP the
-	// invalidation when the bad-hops claim arrives with
-	// `incoming.SeqNo < old.SeqNo` from a different Origin lineage
-	// (the cross-Origin lineage admission rule rejects "not strictly
-	// better" replacements, and a tombstone is neither lower-hops
-	// nor higher-trust).
+	// Detected synchronously BEFORE the standard SeqNo branches
+	// because those branches operate on the assumption that the
+	// incoming claim is at least loop-free. A claim approaching
+	// HopsInfinity (16) is almost always a count-to-infinity loop or
+	// a pre-convergence stage; admitting it just steers
+	// send_message / relay traffic onto a known-doomed uplink for up
+	// to 120s of TTL.
 	//
 	// Action: stamp a tombstone at the observed bad SeqNo (NO bump
 	// — recovery requires the upstream's next legit advance to
@@ -212,7 +225,7 @@ func (s *routeStore) ApplyUpdate(entry RouteEntry, now time.Time) (RouteUpdateSt
 	// (Identity, Uplink) slot:
 	//
 	//   - idx<0 → append the tombstone unconditionally (mirrors the
-	//     WithdrawTriple idx<0 path; tombstones live OUTSIDE the
+	//     WithdrawUplinkClaim idx<0 path; tombstones live OUTSIDE the
 	//     K-counted live slots per AdmitNew rule 1, so the bad
 	//     claim never displaces a legitimate row).
 	//   - idx>=0 → replace bucket[idx] only when entry.SeqNo strictly
@@ -221,13 +234,6 @@ func (s *routeStore) ApplyUpdate(entry RouteEntry, now time.Time) (RouteUpdateSt
 	//     was already validated at a higher SeqNo, and the
 	//     upstream's recovery path (a fresh legit advance) is the
 	//     only legitimate way to undo a live → tombstone transition.
-	//
-	// Lineage tracking: LastIngressOrigin / SeenOriginSeqs from the
-	// stored claim are preserved across the invalidation. We are
-	// not the origin of this route and have no authority to forget
-	// the upstream's earlier observations on its behalf; cross-
-	// Origin lineage tracking continues to operate on subsequent
-	// ingest paths.
 	//
 	// Wire emit suppression is automatic — AnnounceProjectionFor's
 	// own-direct tombstone passthrough rule only emits when
@@ -255,8 +261,7 @@ func (s *routeStore) ApplyUpdate(entry RouteEntry, now time.Time) (RouteUpdateSt
 	// the operator-facing observability complete; the downstream
 	// action (overwrite incoming as withdrawn tombstone at the
 	// observed SeqNo) is identical either way, so the change is
-	// pure observability and lineage-tracking — no new storage
-	// state shape.
+	// pure observability — no new storage state shape.
 	if s.maxSaneHops > 0 && int(incoming.Hops) > s.maxSaneHops {
 		// Bad-hops hysteresis gate (see types.go constant block): an
 		// Identity whose accepted fast-invalidations exceeded the
@@ -277,121 +282,33 @@ func (s *routeStore) ApplyUpdate(entry RouteEntry, now time.Time) (RouteUpdateSt
 		incoming.ExpiresAt = now.Add(s.defaultTTL)
 
 		if idx < 0 {
-			incoming.SeenOriginSeqs = mergeOriginObservation(nil, entry.Origin, entry.SeqNo)
 			s.buckets[entry.Identity] = append(bucket, incoming)
 			s.capStats.fastInvalidations.Add(1)
-			logFastInvalidation(entry, true, "")
-			s.flap.recordBadHopsInvalidationLocked(entry.Identity, entry.Origin, now, &s.capStats.badHopsHoldowns)
+			logFastInvalidation(entry, true)
+			s.flap.recordBadHopsInvalidationLocked(entry.Identity, entry.NextHop, now, &s.capStats.badHopsHoldowns)
 			return RouteAccepted, true, true
 		}
 
-		old := &bucket[idx]
-		// Cross-Origin stale-replay guard MUST run inside the P3
-		// branch as well: without it the scenario A10 → B5 → A9
-		// (with A9.Hops > MaxSaneHops) would slip past the guard
-		// in the standard branches (P3 returns early on line ~140
-		// and never reaches them). The bad-hops claim would land
-		// on top of the legitimate B lineage purely because
-		// `entry.SeqNo > old.SeqNo` (9 > 5), even though A's
-		// previous high-water was 10 and 9 is a stale replay on
-		// A's own observed timeline. The mixed-version stale-
-		// replay invariant requires the guard to apply EVERYWHERE
-		// we admit a state mutation against `bucket[idx]`, not
-		// just on the standard SeqNo branches. See § 3.1.5.c.
-		if !entry.Origin.IsZero() && !old.LastIngressOrigin.IsZero() && entry.Origin != old.LastIngressOrigin {
-			if prevHigh, ok := old.SeenOriginSeqs[entry.Origin]; ok && entry.SeqNo <= prevHigh {
-				logFastInvalidation(entry, false, "cross_origin_stale_replay")
-				return RouteRejected, false, false
-			}
-		}
-		if entry.SeqNo > old.SeqNo {
-			// Preserve the active-lineage marker. The incoming
-			// LastIngressOrigin is also kept on the tombstone — both
-			// it and the merged high-water map are downstream cross-
-			// Origin lineage inputs that survive the invalidation.
-			incoming.LastIngressOrigin = entry.Origin
-			incoming.SeenOriginSeqs = mergeOriginObservation(old.SeenOriginSeqs, entry.Origin, entry.SeqNo)
+		if entry.SeqNo > bucket[idx].SeqNo {
 			bucket[idx] = incoming
 			s.capStats.fastInvalidations.Add(1)
-			logFastInvalidation(entry, true, "")
-			s.flap.recordBadHopsInvalidationLocked(entry.Identity, entry.Origin, now, &s.capStats.badHopsHoldowns)
+			logFastInvalidation(entry, true)
+			s.flap.recordBadHopsInvalidationLocked(entry.Identity, entry.NextHop, now, &s.capStats.badHopsHoldowns)
 			return RouteAccepted, true, true
 		}
 		// Stale bad-hops replay: the stored claim is already at a
 		// higher SeqNo and presumably loop-free. Drop without
 		// bumping the counter — the counter measures successful
 		// invalidations, not stale samples.
-		logFastInvalidation(entry, false, "stale_seqno")
+		logFastInvalidation(entry, false)
 		return RouteRejected, false, false
-	}
-
-	// HopAck promotion lineage override. confirmRouteViaHopAck
-	// (internal/core/node/routing_hop_ack.go) constructs the
-	// RouteEntry argument by reading the existing route via
-	// Table.Lookup, whose toRouteEntry contract synthesises
-	// Origin = localOrigin (storage dropped per-Origin keying — see
-	// uplink_claim.go). The resulting entry.Origin = localOrigin is
-	// NOT a fresh wire-frame observation; it is a sentinel produced
-	// by the synthesiser to satisfy the boundary RouteEntry shape.
-	//
-	// Without this override, the standard lineage-tracking paths
-	// interpret the synthetic localOrigin as a wire-frame
-	// observation:
-	//
-	//   - the same-SeqNo observation block advances LastIngressOrigin
-	//     onto localOrigin and merges SeenOriginSeqs[localOrigin]=
-	//     SeqNo;
-	//   - the same-SeqNo trust-uplift replace wholesale-replaces
-	//     bucket[idx] with `incoming`, locking the synthetic
-	//     lineage into storage.
-	//
-	// After that corruption, the next genuine forced-full-sync
-	// re-announce from the actual upstream Origin (e.g. peer B
-	// re-emits at the same SeqNo for the per-peer-delta-empty TTL
-	// refresh path) is classified cross-Origin (real Origin !=
-	// stored localOrigin) AND its Origin's recorded high-water is
-	// at this SeqNo from the initial announce — so the per-Origin
-	// stale-replay guard rejects it before reaching the
-	// reconfirmation refresh path. Confirmed routes age out by TTL
-	// despite being actively re-announced.
-	//
-	// Override the lineage-tracking inputs so all downstream
-	// branches treat the HopAck entry as a "no wire-frame
-	// observation" trust uplift:
-	//
-	//   - preserve `incoming.LastIngressOrigin` / `incoming.SeenOrigin
-	//     Seqs` from the stored claim so every `bucket[idx] =
-	//     incoming` replace site lands with the real wire-observed
-	//     lineage intact;
-	//   - clear entry.Origin to "" so the pre-check guard, the
-	//     cross-Origin live-vs-tombstone branch, the observation
-	//     block's mergeOriginObservation, and the cross-Origin
-	//     lineage branch in the stale-SeqNo path all skip cleanly
-	//     (each gates on entry.Origin != "" or relies on the
-	//     LastIngressOrigin comparison).
-	//
-	// confirmRouteViaHopAck always calls UpdateRoute after a
-	// successful Lookup, so idx >= 0 holds in practice. The
-	// defensive idx < 0 branch zeroes the synthetic localOrigin so
-	// any future caller that constructs a HopAck entry against an
-	// empty bucket cannot poison a fresh admission's lineage with
-	// the synthesiser sentinel.
-	if entry.Source == RouteSourceHopAck {
-		if idx >= 0 {
-			incoming.LastIngressOrigin = bucket[idx].LastIngressOrigin
-			incoming.SeenOriginSeqs = bucket[idx].SeenOriginSeqs
-		} else {
-			incoming.LastIngressOrigin = PeerIdentity{}
-			incoming.SeenOriginSeqs = nil
-		}
-		entry.Origin = PeerIdentity{}
 	}
 
 	if idx < 0 {
 		// Tombstone short-circuit: a withdrawn claim is a SeqNo
 		// resurrection-guard marker, not a routing slot, and the
 		// cap model puts it OUTSIDE the K-counted live entries
-		// (see AdmitNew rule 1 and WithdrawTriple idx<0). Routing
+		// (see AdmitNew rule 1 and WithdrawUplinkClaim idx<0). Routing
 		// it through AdmitNew would treat the tombstone as a
 		// "dead candidate" that loses to any live row on the
 		// liveness pre-tier and gets rejected on a saturated live
@@ -401,15 +318,10 @@ func (s *routeStore) ApplyUpdate(entry RouteEntry, now time.Time) (RouteUpdateSt
 		// allows UpdateRoute(Hops=HopsInfinity) for callers that
 		// synthesise tombstones directly (it is also covered by
 		// table_test.go's RouteEntry.Validate suite), so we
-		// mirror WithdrawTriple idx<0 here: append the tombstone
+		// mirror WithdrawUplinkClaim idx<0 here: append the tombstone
 		// unconditionally and let TickTTL reclaim it on its own
 		// schedule.
 		if incoming.IsWithdrawn() {
-			// Record the wire-frame Origin's first observation so
-			// later cross-Origin updates on the same (Identity,
-			// Uplink) claim can consult the high-water map. See
-			// UplinkClaim.SeenOriginSeqs doc-comment.
-			incoming.SeenOriginSeqs = mergeOriginObservation(nil, entry.Origin, entry.SeqNo)
 			s.buckets[entry.Identity] = append(bucket, incoming)
 			s.syncSeqCounterLocked(entry)
 			return RouteAccepted, true, true
@@ -426,16 +338,6 @@ func (s *routeStore) ApplyUpdate(entry RouteEntry, now time.Time) (RouteUpdateSt
 		// as "drop and move on" need no new handling. Operators
 		// distinguishing the two cases observe the cap-admission
 		// metrics.
-		//
-		// SeenOriginSeqs is populated here even though AdmitNew
-		// may reject: the map allocation is owned by the local
-		// `incoming` variable, so rejection just garbage-collects
-		// it. We avoid the alternative — looking up the new slot
-		// post-AdmitNew to populate seen — because AdmitNew's
-		// eviction path can place the claim at an arbitrary
-		// index and the lookup would require duplicating its
-		// internal selection logic.
-		incoming.SeenOriginSeqs = mergeOriginObservation(nil, entry.Origin, entry.SeqNo)
 		decision := s.AdmitNew(entry.Identity, incoming, now)
 		switch decision {
 		case AdmissionAccepted, AdmissionAcceptedReplaced:
@@ -481,50 +383,16 @@ func (s *routeStore) ApplyUpdate(entry RouteEntry, now time.Time) (RouteUpdateSt
 	// cross-uplink poisoning is impossible (a third-party peer's
 	// claim about Identity X lands in a SEPARATE bucket slot from
 	// our direct or hop_ack-confirmed claim through a different
-	// uplink), and same-uplink "downgrade" from HopAck/Direct →
+	// uplink), and same-uplink "downgrade" from HopAck →
 	// Announcement is the legitimate forced-full-sync TTL-refresh
 	// path (see weaker_source_refreshes_ttl_marks_dirty in
-	// table_dirty_test.go and TestUpdateRoute_HopAckPromotionPreservesWireLineage
-	// in table_test.go). No additional admission gate is required
-	// here — the (Identity, Uplink) keying + the
+	// table_dirty_test.go and TestUpdateRoute_HopAckPromotionThenReannounceIsReconfirmation
+	// in table_test.go). The one same-uplink slot that needs a gate
+	// is the Direct one, and it is gated at the top of this function.
+	// Beyond that the (Identity, Uplink) keying + the
 	// HopAck-promotion-sticky reconfirmation already provide the
 	// poisoning resistance the phase doc targeted. See the Phase 4
 	// doc entry for §3.6 for the full finding.
-
-	// Cross-Origin stale-replay guard. Independent of the SeqNo
-	// comparison against the active lineage below, because pre-A1
-	// senders use per-Origin SeqNo counters and the active lineage
-	// may have shifted to a different Origin since we last saw
-	// entry.Origin. Without this guard, the scenario A10 → B5 → A9
-	// (genuine winner shift A→B accepted at lower SeqNo via the
-	// cross-Origin lineage branch, followed by a delayed in-flight
-	// A9 from BEFORE the shift) would land in the SeqNo > old.SeqNo
-	// branch (9 > 5) and admit stale A state on top of the
-	// legitimate B lineage. The per-Origin high-water map records
-	// A's previous high-water of 10, so the guard rejects A9 as a
-	// stale replay on A's own observed timeline.
-	//
-	// The guard fires only on cross-Origin updates: same-Origin
-	// stale replays are already handled by the standard
-	// incoming.SeqNo < old.SeqNo branch below (which rejects them
-	// outright), and same-Origin reconfirmations are handled by
-	// the incoming.SeqNo == old.SeqNo branch.
-	//
-	// Gating: both Origins must be non-empty (defence-in-depth
-	// against synthetic test fixtures and malformed wire frames).
-	// Comparison is `entry.SeqNo <= prevHigh`: an exact match at
-	// the recorded high-water IS a stale observation in the
-	// cross-Origin context — the active lineage has shifted to a
-	// different Origin since this SeqNo was last seen, so a fresh
-	// shift back to the old Origin requires a strictly greater
-	// SeqNo. Same-Origin reconfirmations at the same SeqNo are
-	// unaffected because the cross-Origin gating above already
-	// requires entry.Origin != old.LastIngressOrigin.
-	if !entry.Origin.IsZero() && !old.LastIngressOrigin.IsZero() && entry.Origin != old.LastIngressOrigin {
-		if prevHigh, ok := old.SeenOriginSeqs[entry.Origin]; ok && entry.SeqNo <= prevHigh {
-			return RouteRejected, false, false
-		}
-	}
 
 	if incoming.SeqNo > old.SeqNo {
 		// Tombstone → live promotion needs the cap admission
@@ -543,23 +411,10 @@ func (s *routeStore) ApplyUpdate(entry RouteEntry, now time.Time) (RouteUpdateSt
 		// restore the tombstone on rejection so the SeqNo
 		// resurrection guard for THIS specific (Identity, Uplink)
 		// pair stays in place — dropping the tombstone here would
-		// expose the lineage to further stale-SeqNo announcements.
+		// expose the slot to further stale-SeqNo announcements.
 		if old.IsWithdrawn() && !incoming.IsWithdrawn() && s.maxNextHopsPerOrigin > 0 {
 			savedTombstone := bucket[idx]
 			s.buckets[entry.Identity] = append(bucket[:idx], bucket[idx+1:]...)
-			// Use the copy variant so the saved tombstone's
-			// SeenOriginSeqs map is NOT mutated in place. The
-			// in-place variant would aliasing-mutate the savedTombstone's
-			// map; on AdmitNew rejection the restored tombstone
-			// would then remember the rejected Origin/SeqNo
-			// observation, and a subsequent legit retry at the
-			// same SeqNo would trip the per-Origin high-water
-			// guard at the top of ApplyUpdate and reject
-			// incorrectly. mergeOriginObservationCopy returns an
-			// independent map for the promoted claim while
-			// leaving the saved tombstone's history intact for
-			// the restore-on-reject path.
-			incoming.SeenOriginSeqs = mergeOriginObservationCopy(savedTombstone.SeenOriginSeqs, entry.Origin, entry.SeqNo)
 			decision := s.AdmitNew(entry.Identity, incoming, now)
 			switch decision {
 			case AdmissionAccepted, AdmissionAcceptedReplaced:
@@ -576,132 +431,27 @@ func (s *routeStore) ApplyUpdate(entry RouteEntry, now time.Time) (RouteUpdateSt
 			}
 		}
 
-		incoming.SeenOriginSeqs = mergeOriginObservation(old.SeenOriginSeqs, entry.Origin, entry.SeqNo)
 		bucket[idx] = incoming
 		s.syncSeqCounterLocked(entry)
 		return RouteAccepted, true, true
 	}
 
 	if incoming.SeqNo == old.SeqNo {
-		// Cross-Origin live-vs-tombstone promotion at equal SeqNo.
-		// Pre-A1 senders can shift their per-Identity winner from
-		// a now-withdrawn Origin (A) to a different LIVE Origin (B)
-		// while B's own per-Origin SeqNo counter happens to be at
-		// the same numeric value A reached at its withdrawal. The
-		// other two SeqNo branches handle the cross-Origin live-vs-
-		// tombstone shape symmetrically:
-		//
-		//   - stale-SeqNo branch admits cross-Origin live against a
-		//     tombstone unconditionally (old.IsWithdrawn → improves);
-		//   - newer-SeqNo branch promotes the tombstone through
-		//     AdmitNew detach + readmit.
-		//
-		// Equal-SeqNo would, without this branch, fall into the
-		// same-SeqNo tombstone-resurrection guard below and reject —
-		// even though that guard exists for SAME-Origin lineages
-		// (delayed hop_ack at the withdrawal's SeqNo must not undo
-		// it), not for cross-Origin shifts. The cross-Origin stale-
-		// replay guard ABOVE this branch already rejects equal-SeqNo
-		// arrivals where the incoming Origin's recorded high-water
-		// equals or exceeds entry.SeqNo (the `<=` comparison), so
-		// reaching here means entry.Origin is fresh relative to its
-		// own per-Origin timeline — admit it as the new active
-		// lineage.
-		//
-		// We mirror the SeqNo > old tombstone-promotion path's cap-
-		// aware shape exactly: detach the tombstone slot before
-		// AdmitNew so the K-live invariant is evaluated against the
-		// post-promotion bucket, and re-append the saved tombstone
-		// on cap rejection so this (Identity, Uplink) keeps its
-		// SeqNo-resurrection guard for any future same-Origin replay
-		// against the original lineage.
-		if old.IsWithdrawn() && !incoming.IsWithdrawn() &&
-			!entry.Origin.IsZero() && !old.LastIngressOrigin.IsZero() &&
-			entry.Origin != old.LastIngressOrigin {
-			if s.maxNextHopsPerOrigin > 0 {
-				savedTombstone := bucket[idx]
-				s.buckets[entry.Identity] = append(bucket[:idx], bucket[idx+1:]...)
-				// Copy variant — see the newer-SeqNo tombstone-
-				// promotion branch above for the rationale.
-				// Without the copy, the saved tombstone's
-				// SeenOriginSeqs map is mutated in place by the
-				// merge, and a subsequent legit retry after an
-				// AdmitNew reject would be misclassified as a
-				// stale replay by the per-Origin high-water guard.
-				incoming.SeenOriginSeqs = mergeOriginObservationCopy(savedTombstone.SeenOriginSeqs, entry.Origin, entry.SeqNo)
-				decision := s.AdmitNew(entry.Identity, incoming, now)
-				switch decision {
-				case AdmissionAccepted, AdmissionAcceptedReplaced:
-					s.syncSeqCounterLocked(entry)
-					return RouteAccepted, true, true
-				default:
-					s.buckets[entry.Identity] = append(s.buckets[entry.Identity], savedTombstone)
-					return RouteRejected, true, false
-				}
-			}
-			incoming.SeenOriginSeqs = mergeOriginObservation(old.SeenOriginSeqs, entry.Origin, entry.SeqNo)
-			bucket[idx] = incoming
-			s.syncSeqCounterLocked(entry)
-			return RouteAccepted, true, true
-		}
-
-		// Observation tracking: record entry.Origin's high-water on
-		// this (Identity, Uplink) claim, and — on cross-Origin
-		// arrivals — advance the active-lineage marker. These two
-		// pieces of bookkeeping run on EVERY same-SeqNo branch
-		// (reject, replace, reconfirmation, no-op), because what
-		// we observed is independent of whether the observation
-		// triggers a storage state change.
-		//
-		// SeenOriginSeqs records the high-water so a later stale
-		// replay from this same Origin (after a hypothetical
-		// winner shift to a different active lineage) is rejected
-		// by the cross-Origin stale-replay guard above. Without
-		// the same-SeqNo update, the first cross-Origin observation
-		// would silently set up a window where a delayed in-flight
-		// frame from the new Origin at a lower SeqNo could be
-		// misclassified as a fresh lineage.
-		//
-		// LastIngressOrigin advance keeps the "currently active
-		// lineage" semantic accurate for cross-Origin detection in
-		// the stale-SeqNo branch below.
-		//
-		// Neither bookkeeping write flips mutated=true: both fields
-		// are internal to UplinkClaim and never surface in the
-		// published snapshot (toRouteEntry drops them), so consumers
-		// see no observable change and snapshot rebuild is
-		// unnecessary. The replace branches below overwrite
-		// bucket[idx] wholesale; they preserve+merge SeenOriginSeqs
-		// explicitly below so the early-write here is overridden
-		// rather than lost.
-		bucket[idx].SeenOriginSeqs = mergeOriginObservation(bucket[idx].SeenOriginSeqs, entry.Origin, entry.SeqNo)
-		if !incoming.LastIngressOrigin.IsZero() && incoming.LastIngressOrigin != old.LastIngressOrigin {
-			bucket[idx].LastIngressOrigin = incoming.LastIngressOrigin
-		}
-
-		// Same-Origin tombstone-resurrection guard. A withdrawn
-		// claim must not be replaced by a same-SeqNo update from
-		// the SAME lineage, even if the update has higher trust or
-		// fewer hops. Only a strictly newer SeqNo from the origin
-		// (or a cross-Origin shift — handled by the explicit
-		// branch above) may supersede a withdrawal. Without this
-		// guard, a delayed hop_ack (higher trust rank) at the
-		// withdrawal's SeqNo could resurrect the just-withdrawn
-		// lineage. The cross-Origin live-vs-tombstone case is NOT
-		// caught here: it was promoted unconditionally above
-		// (subject only to the per-Origin high-water guard at the
-		// top of ApplyUpdate).
+		// Tombstone-resurrection guard. A withdrawn claim must not
+		// be replaced by a same-SeqNo update, even if the update has
+		// higher trust or fewer hops. Only a strictly newer SeqNo
+		// may supersede a withdrawal. Without this guard, a delayed
+		// hop_ack (higher trust rank) at the withdrawal's SeqNo
+		// could resurrect the just-withdrawn route.
 		if old.IsWithdrawn() {
 			return RouteRejected, false, false
 		}
 		if incoming.Source.TrustRank() > old.Source.TrustRank() {
-			incoming.SeenOriginSeqs = mergeOriginObservation(old.SeenOriginSeqs, entry.Origin, entry.SeqNo)
 			bucket[idx] = incoming
 			s.syncSeqCounterLocked(entry)
 			return RouteAccepted, true, true
 		}
 		if incoming.Source == old.Source && incoming.Hops < old.Hops {
-			incoming.SeenOriginSeqs = mergeOriginObservation(old.SeenOriginSeqs, entry.Origin, entry.SeqNo)
 			bucket[idx] = incoming
 			s.syncSeqCounterLocked(entry)
 			return RouteAccepted, true, true
@@ -873,133 +623,39 @@ func (s *routeStore) ApplyUpdate(entry RouteEntry, now time.Time) (RouteUpdateSt
 		// refreshes until TickTTL removes the stale entry,
 		// creating a non-deterministic window where routes are
 		// lost despite the origin still advertising them.
-		incoming.SeenOriginSeqs = mergeOriginObservation(old.SeenOriginSeqs, entry.Origin, entry.SeqNo)
 		bucket[idx] = incoming
 		s.syncSeqCounterLocked(entry)
 		return RouteAccepted, true, true
 	}
 
-	// Stale SeqNo (incoming.SeqNo < old.SeqNo).
-	//
-	// Mixed-version edge case: pre-A1 senders may legitimately
-	// emit a numerically lower SeqNo across cycles when their
-	// per-Identity winner switches between Origin lineages. Pre-A1
-	// SeqNos were per-Origin (independent counters per lineage),
-	// and pre-A1 BuildAnnounceSnapshot's Stage 4 picks one winner
-	// per cycle — so the wire frame for cycle N can carry
-	// `(Identity=X, Origin=A, SeqNo=10, Hops=3)` and cycle N+1 can
-	// carry `(Identity=X, Origin=B, SeqNo=5, Hops=2)` if the
-	// underlying winner shifted. Post-A1 storage compares SeqNo
-	// per-(Identity, Uplink) and would naively reject the second
-	// frame as stale, even though it carries a strictly better
-	// route from the same uplink under a different lineage.
-	//
-	// LastIngressOrigin lets us detect the lineage shift: when the
-	// incoming wire-frame Origin differs from the Origin we last
-	// saw on this (Identity, Uplink), this is a cross-Origin
-	// lineage update, NOT a stale replay. Accept it as a fresh
-	// admission when it is strictly better than the stored claim
-	// (or unconditionally when the stored claim is a tombstone — a
-	// live route from a different lineage is always preferable to
-	// keeping the lineage that withdrew). This resets the per-
-	// uplink SeqNo namespace to the new lineage; subsequent
-	// same-Origin updates on this uplink are SeqNo-ordered against
-	// the new claim normally.
-	//
-	// Post-A1 senders always emit Origin = localOrigin (constant
-	// across cycles) so this branch never fires for A1-to-A1
-	// traffic. It only activates during the mixed-version rollout
-	// window when pre-A1 transits are still in the mesh.
-	//
-	// Gating: both Origins must be non-empty. Empty incoming.Origin
-	// is a malformed wire frame (RouteEntry.Validate rejects empty
-	// Origin upstream, so this is defence-in-depth). Empty
-	// old.LastIngressOrigin only happens on synthetic test fixtures
-	// that construct UplinkClaim without going through
-	// toUplinkClaim / AdmitDirectPeer; we treat it as "no prior
-	// lineage observed" and stick with the standard reject.
-	if !entry.Origin.IsZero() && !old.LastIngressOrigin.IsZero() && entry.Origin != old.LastIngressOrigin {
-		// Strictness rule: cross-Origin replace requires either
-		// strictly better hops, higher trust rank, or a withdrawn
-		// stored claim. Same-hops / same-trust cross-Origin
-		// arrivals are rejected to prevent flapping when a pre-A1
-		// sender oscillates between equivalent lineages across
-		// cycles — keeping the existing claim is safer than
-		// continually resetting the SeqNo namespace and burning
-		// outbound wire SeqNo space.
-		improves := old.IsWithdrawn() ||
-			incoming.Hops < old.Hops ||
-			incoming.Source.TrustRank() > old.Source.TrustRank()
-		if improves {
-			// Tombstone → live promotion needs the cap admission
-			// policy applied here for the same reason as the
-			// newer-SeqNo and equal-SeqNo branches above:
-			// withdrawn claims live OUTSIDE the K-counted live
-			// slots (AdmitNew rule 1), so a bare
-			// `bucket[idx] = incoming` would silently flip a
-			// non-counted slot into a counted live slot and the
-			// bucket would balloon from up-to-K live to up-to-K+1
-			// live. Route the cross-Origin stale-SeqNo
-			// resurrection through the same detach + AdmitNew +
-			// restore-on-reject shape so the K-live invariant
-			// holds for every tombstone-promotion path.
-			//
-			// `bucket[idx] = incoming` when old is LIVE (the
-			// other `improves` paths — better hops, higher
-			// trust) is still a live→live replacement and does
-			// not change the live count, so cap admission is
-			// unnecessary there.
-			if old.IsWithdrawn() && s.maxNextHopsPerOrigin > 0 {
-				savedTombstone := bucket[idx]
-				s.buckets[entry.Identity] = append(bucket[:idx], bucket[idx+1:]...)
-				// Copy variant — see the newer-SeqNo tombstone-
-				// promotion branch for the rationale. Restoring
-				// the tombstone on AdmitNew reject must leave
-				// its SeenOriginSeqs map untouched, so a future
-				// legit retry at the same SeqNo can still pass
-				// the per-Origin high-water guard.
-				incoming.SeenOriginSeqs = mergeOriginObservationCopy(savedTombstone.SeenOriginSeqs, entry.Origin, entry.SeqNo)
-				decision := s.AdmitNew(entry.Identity, incoming, now)
-				switch decision {
-				case AdmissionAccepted, AdmissionAcceptedReplaced:
-					s.syncSeqCounterLocked(entry)
-					return RouteAccepted, true, true
-				default:
-					s.buckets[entry.Identity] = append(s.buckets[entry.Identity], savedTombstone)
-					return RouteRejected, true, false
-				}
-			}
-			incoming.SeenOriginSeqs = mergeOriginObservation(old.SeenOriginSeqs, entry.Origin, entry.SeqNo)
-			bucket[idx] = incoming
-			s.syncSeqCounterLocked(entry)
-			return RouteAccepted, true, true
-		}
-	}
+	// Stale SeqNo (incoming.SeqNo < old.SeqNo): the stored claim is
+	// newer on this slot's timeline, whatever Origin the frame names.
 	return RouteRejected, false, false
 }
 
-// WithdrawTriple marks (identity, uplink=key.NextHop) as
-// withdrawn at seqNo. The key.Origin component is preserved on
-// the public API for backward compatibility with
-// Table.WithdrawRoute callers but is ignored internally — after
-// Phase A the dedup key is per-(Identity, Uplink) and Origin
-// carries no routing information.
+// WithdrawUplinkClaim marks the (identity, uplink) claim as
+// withdrawn at seqNo. Origin is not an input: both callers act on
+// the uplink's own authority — a wire withdrawal whose Origin the
+// receive path checked to be the sender (Table.WithdrawRoute), or a
+// route_poison_v1 from the uplink (Table.InvalidateUplinkClaim).
 //
 // If no claim matches the pair, a tombstone is appended (the
 // SeqNo resurrection guard, expiring after defaultTTL). If a
 // matching claim exists, the claim's Hops/SeqNo/ExpiresAt/
 // UpdatedAt/Withdrawn fields are rewritten in place — only when
-// seqNo is strictly newer than the existing SeqNo.
+// seqNo is strictly newer than the existing SeqNo and the claim is
+// not a Direct one (live or tombstone), which only the session
+// lifecycle withdraws.
 //
 // Returns whether the withdrawal applied. Caller must hold t.mu
 // (writer).
-func (s *routeStore) WithdrawTriple(key RouteTriple, seqNo uint64, now time.Time) bool {
-	bucket, idx := s.findByUplinkLocked(key.Identity, key.NextHop)
+func (s *routeStore) WithdrawUplinkClaim(identity, uplink PeerIdentity, seqNo uint64, now time.Time) bool {
+	bucket, idx := s.findByUplinkLocked(identity, uplink)
 
 	if idx < 0 {
 		// No active claim for this (Identity, Uplink) pair — store
 		// a tombstone so that a delayed older announcement with a
-		// lower SeqNo cannot resurrect the withdrawn lineage. The
+		// lower SeqNo cannot resurrect the withdrawn route. The
 		// tombstone expires via normal TTL.
 		//
 		// Tombstones are appended unconditionally and bypass the
@@ -1010,33 +666,26 @@ func (s *routeStore) WithdrawTriple(key RouteTriple, seqNo uint64, now time.Time
 		// This is what keeps the SeqNo resurrection guard intact
 		// under cap pressure.
 		tombstone := UplinkClaim{
-			Uplink:    key.NextHop,
+			Uplink:    uplink,
 			Hops:      HopsInfinity,
 			SeqNo:     seqNo,
 			Source:    RouteSourceAnnouncement,
 			UpdatedAt: now,
 			ExpiresAt: now.Add(s.defaultTTL),
 			Withdrawn: true,
-			// key.Origin is the wire-frame Origin of the withdrawal
-			// (the caller plumbs it through from Table.WithdrawRoute,
-			// which receives it from the receive-path frame). Storing
-			// it as LastIngressOrigin lets a follow-up live update
-			// from a different Origin on the same uplink take the
-			// cross-Origin lineage branch in ApplyUpdate.
-			LastIngressOrigin: key.Origin,
-			// Initialise the per-Origin high-water map with this
-			// withdrawal's observation. A subsequent ApplyUpdate
-			// from a different Origin then has a baseline to
-			// consult; a delayed lower-SeqNo replay from key.Origin
-			// itself is rejected by the standard same-Origin SeqNo
-			// comparison in ApplyUpdate.
-			SeenOriginSeqs: mergeOriginObservation(nil, key.Origin, seqNo),
 		}
-		s.buckets[key.Identity] = append(bucket, tombstone)
+		s.buckets[identity] = append(bucket, tombstone)
 		return true
 	}
 
 	old := &bucket[idx]
+	// A Direct claim leaves only through RemoveDirectPeer (see the
+	// matching guard in ApplyUpdate): a tombstone here would make a
+	// connected peer look withdrawn, and AnnounceProjectionFor would
+	// re-emit it to every other neighbour as our own withdrawal.
+	if old.Source == RouteSourceDirect {
+		return false
+	}
 	if seqNo <= old.SeqNo {
 		return false
 	}
@@ -1046,16 +695,6 @@ func (s *routeStore) WithdrawTriple(key RouteTriple, seqNo uint64, now time.Time
 	bucket[idx].ExpiresAt = now.Add(s.defaultTTL)
 	bucket[idx].UpdatedAt = now
 	bucket[idx].Withdrawn = true
-	// Track the withdrawal-frame Origin as the latest wire-frame
-	// Origin we observed for this (Identity, Uplink). A pre-A1
-	// follow-up update with yet another Origin then takes the
-	// cross-Origin lineage branch in ApplyUpdate cleanly.
-	bucket[idx].LastIngressOrigin = key.Origin
-	// Merge the withdrawal observation into the per-Origin
-	// high-water map so the cross-Origin stale-replay guard in
-	// ApplyUpdate can see this Origin's progression. Preserves
-	// prior observations from earlier ingest paths.
-	bucket[idx].SeenOriginSeqs = mergeOriginObservation(bucket[idx].SeenOriginSeqs, key.Origin, seqNo)
 	return true
 }
 
@@ -1088,8 +727,9 @@ func (s *routeStore) AdmitDirectPeer(peerIdentity PeerIdentity, now time.Time) (
 	// claim with Uplink == peerIdentity could in principle occupy
 	// the slot if peerIdentity ever announced itself to us via
 	// the routing protocol (degenerate; the protocol does not
-	// generate such announces, but a misbehaving peer or a
-	// synthetic test fixture could). Falling through to the
+	// generate such announces and the node's receive path refuses
+	// them, but a direct UpdateRoute caller such as a synthetic
+	// test fixture can still land one). Falling through to the
 	// detach-and-readmit path below replaces the foreign claim
 	// with our own-origin Direct one — the live socket is the
 	// authoritative truth.
@@ -1113,15 +753,6 @@ func (s *routeStore) AdmitDirectPeer(peerIdentity PeerIdentity, now time.Time) (
 		SeqNo:     seq,
 		Source:    RouteSourceDirect,
 		UpdatedAt: now,
-		// LastIngressOrigin = localOrigin for own-direct claims:
-		// matches the wire-frame Origin that this node would emit
-		// on AnnounceProjectionFor's sender-originated synthesis,
-		// so that any later ApplyUpdate arriving with a foreign
-		// Origin (e.g. a pre-A1 transit relay using its own
-		// localOrigin as the wire-frame Origin) cleanly trips the
-		// cross-Origin lineage branch in ApplyUpdate's stale-SeqNo
-		// path. See UplinkClaim.LastIngressOrigin doc-comment.
-		LastIngressOrigin: s.localOrigin,
 	}
 
 	// Both the new-direct (idx<0) and tombstone-reactivation
@@ -1144,29 +775,16 @@ func (s *routeStore) AdmitDirectPeer(peerIdentity PeerIdentity, now time.Time) (
 	// cannot refuse) — so this is AdmitDirect, not AdmitNew. The
 	// helper evicts the worst evictable row when the bucket is
 	// saturated and never rejects.
-	if idx < 0 {
-		// Fresh direct admission — initialise the per-Origin
-		// high-water map with the own-origin observation. Future
-		// ApplyUpdate calls for this Identity with a foreign
-		// wire-frame Origin will consult this map when the
-		// foreign Origin is itself revisited at a stale SeqNo.
-		claim.SeenOriginSeqs = mergeOriginObservation(nil, s.localOrigin, seq)
-		s.AdmitDirect(peerIdentity, claim, now)
-	} else {
+	if idx >= 0 {
 		// Reactivation from tombstone (or a foreign-Origin live
 		// claim — see the idempotent fast-path doc above for why
 		// non-Direct rows can occupy this slot). Detach the prior
 		// slot so AdmitDirect sees a tombstone-free bucket and
 		// the K-live invariant is evaluated against the post-
-		// promotion shape, not pre. Preserve and merge the prior
-		// claim's SeenOriginSeqs so the per-Origin high-water
-		// history survives the reactivation; subsequent foreign-
-		// Origin ingest can still take the cross-Origin stale-
-		// replay guard against pre-disconnect observations.
-		claim.SeenOriginSeqs = mergeOriginObservation(bucket[idx].SeenOriginSeqs, s.localOrigin, seq)
+		// promotion shape, not pre.
 		s.buckets[peerIdentity] = append(bucket[:idx], bucket[idx+1:]...)
-		s.AdmitDirect(peerIdentity, claim, now)
 	}
+	s.AdmitDirect(peerIdentity, claim, now)
 
 	return toRouteEntry(peerIdentity, s.localOrigin, claim), true
 }
@@ -1212,18 +830,12 @@ func (s *routeStore) InvalidateAllVia(uplink PeerIdentity, now time.Time) ([]Ann
 				c.UpdatedAt = now
 				c.Withdrawn = true
 
-				// Wire withdrawal uses Origin == localOrigin
-				// ("sender originated route" legacy semantic).
-				// This must match the live-emit Origin in
-				// AnnounceProjectionFor so that pre-A1 receivers
-				// — which key storage per-(Identity, Origin,
-				// NextHop) — find the same triple for both live
-				// and withdrawal frames. Otherwise the
-				// withdrawal lands in a different triple slot
-				// from the live entry and the route stays alive
-				// on the legacy receiver until TTL. Post-A1
-				// receivers drop Origin on ingest, so the value
-				// is opaque to them.
+				// Wire withdrawal uses Origin == localOrigin, the
+				// same value as the live emit in
+				// AnnounceProjectionFor: receivers accept a
+				// hops=16 entry only when its Origin is the
+				// sending peer, so any other value would leave
+				// the route alive on them until TTL.
 				//
 				// Empty-localOrigin fallback to identity matches
 				// AnnounceProjectionFor / toRouteEntry so test
@@ -1270,7 +882,7 @@ func (s *routeStore) InvalidateAllVia(uplink PeerIdentity, now time.Time) ([]Ann
 				// Table.dirty, so a hold-down arming inside this
 				// broadcast cannot lag inside the published Snapshot
 				// the way an AnnounceTo cycle's arming would.
-				wireSeqNo, _ := s.nextOutboundSeqLockedBroadcast(identity, sig, seq, s.localOrigin, now)
+				wireSeqNo, _ := s.nextOutboundSeqLockedBroadcast(identity, sig, seq, c.Uplink, now)
 				withdrawals = append(withdrawals, AnnounceEntry{
 					Identity: identity,
 					Origin:   origin,
@@ -1429,7 +1041,7 @@ func (s *routeStore) ForgetVia(uplink PeerIdentity) (int, []PeerIdentity) {
 // identities whose bucket fully drains are dropped from the store.
 //
 // Only ExpiresAt is checked — withdrawn claims are kept until their ExpiresAt
-// elapses. This preserves tombstones created by WithdrawTriple that guard against
+// elapses. This preserves tombstones created by WithdrawUplinkClaim that guard against
 // resurrection from delayed lower-SeqNo announcements. InvalidateAllVia and
 // InvalidateTransitVia set a short ExpiresAt on withdrawn claims so they are
 // cleaned up promptly without breaking tombstone semantics.
@@ -1473,7 +1085,7 @@ func (s *routeStore) CompactExpired(now time.Time) (int, []PeerIdentity, []PeerI
 		}
 		// The survivors were compacted to the front; the vacated tail
 		// still holds copies of the removed claims, and through them
-		// their Extra / signature / SeenOriginSeqs allocations. The
+		// their Extra / signature allocations. The
 		// shrunken slice keeps the backing array alive, so the tail
 		// must be zeroed or the removed claims stay reachable until
 		// the bucket is next reallocated.
@@ -1667,9 +1279,9 @@ func (s *routeStore) nextSeqLocked(identity PeerIdentity) uint64 {
 // peer, any sig). `nativeSeqNo` lets foreign-fresh SeqNos pull
 // the outbound timeline forward instead of just bumping by 1 —
 // when foreign SeqNo=K with K > prev.SeqNo, the outbound SeqNo
-// jumps directly to K, matching what a legacy receiver would
-// have observed pre-A1 when transits relayed the foreign
-// Origin's SeqNo unchanged. On the FIRST emit for an Identity
+// jumps directly to K, so the receiver's timeline follows the
+// upstream's progress instead of lagging behind it. On the FIRST
+// emit for an Identity
 // (outboundMax=0) the `+1=1` clamp is at most as restrictive as
 // nativeSeqNo>=1, so the first emit lands on nativeSeqNo
 // verbatim — matching receivers' expectation that a fresh
@@ -1822,9 +1434,10 @@ func (s *routeStore) nextOutboundSeqLockedBroadcast(identity PeerIdentity, sig o
 // entries can reach syncSeqCounterLocked with entry.Origin ==
 // localOrigin too (e.g., confirmRouteViaHopAck promotion paths
 // re-submit the synthesised RouteEntry to UpdateRoute). Without
-// the Source == Direct restriction the counter would be poisoned
-// by foreign SeqNo values, and the next own-direct withdrawal
-// would emit a stale seq that legacy receivers reject.
+// the Source == Direct restriction the counter would be dragged
+// forward by foreign SeqNo values, and the own-direct timeline —
+// which must advance only on this node's own changes — would jump
+// by amounts unrelated to them.
 //
 // RouteSourceDirect + Origin == localOrigin is the only own-origin
 // shape that survives Table.UpdateRoute's pre-mu anti-spoof

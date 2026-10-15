@@ -22,7 +22,7 @@ The handshake commands establish peer connections, negotiate protocol version co
 ```json
 {
   "type": "hello",
-  "version": 14,
+  "version": 31,
   "client": "desktop",
   "client_version": "<corsa-version>",
   "client_build": 43
@@ -34,7 +34,7 @@ The handshake commands establish peer connections, negotiate protocol version co
 ```json
 {
   "type": "hello",
-  "version": 14,
+  "version": 31,
   "client": "node",
   "listener": "1",
   "advertise_port": 64646,
@@ -56,18 +56,17 @@ The handshake commands establish peer connections, negotiate protocol version co
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `type` | string | yes | Always `"hello"` |
-| `version` | integer | yes | Sender's protocol version (e.g., 14). Responder rejects if `version < responder.minimum_protocol_version` |
+| `version` | integer | yes | Sender's protocol version (e.g., 31). Responder rejects if `version < responder.minimum_protocol_version` |
 | `minimum_protocol_version` | integer | no | Minimum protocol version sender accepts. Informational; nodes do not currently send or check this field in incoming `hello` frames |
 | `client` | string | yes | Type: `"desktop"` (UI/CLI) or `"node"` (relay peer) |
-| `listener` | string | required for `client="node"` peer hello; omitted by `client="desktop"`, local RPC subscribers, and probe `hello` frames | `"1"` if accepting inbound peers; `"0"` if not. Under the v12 wire contract this is the only signal that distinguishes a peer from a local subscriber: receivers gate the self-loopback identity guard on `Listener=="1"`. Local clients (desktop UI / RPC subscriber / `LocalRPCClient` probes) deliberately omit the field so an absent value does NOT trigger that guard. `listenerEnabledFromFrame` treats absent/empty as "not a listener" and only `"1"` flips the gate |
-| `listen` | string | absent | Removed from the wire in the v12 cleanup. Receivers ignore the field if a legacy peer still echoes it; emitters do not produce it |
+| `listener` | string | required for `client="node"` peer hello; omitted by `client="desktop"`, local RPC subscribers, and probe `hello` frames | `"1"` if accepting inbound peers; `"0"` if not. This is the only signal that distinguishes a peer from a local subscriber: receivers gate the self-loopback identity guard on `Listener=="1"`. Local clients (desktop UI / RPC subscriber / `LocalRPCClient` probes) deliberately omit the field so an absent value does NOT trigger that guard. `listenerEnabledFromFrame` treats absent/empty as "not a listener" and only `"1"` flips the gate |
 | `advertise_port` | integer | optional | Self-reported listening port. JSON integer in the inclusive range `1..65535`. On the receive side this is the only authoritative source of the peer's listening port; absent / out-of-range / non-integer wire values collapse to `config.DefaultPeerPort` (`64646`). The inbound TCP source port MUST NEVER be reused as a listening port |
 | `node_type` | string | optional | `"full"` (relays mesh traffic) or `"client"` (no relay). Only for `client="node"` |
 | `client_version` | string | optional | Version string (e.g., `"0.1.0"` or `"1.2.3"`) for logging and diagnostics. Single source of truth — no separate "wire" form |
 | `client_build` | integer | optional | Monotonic build number for version tracking. Incremented on each release |
 | `services` | array | optional | Capability list: `["identity", "contacts", "messages", "gazeta", "relay", ...]`. `"messages"` is advertised only by nodes that accept direct messages addressed to their own identity; a relay-only node (headless `corsa-node` without `CORSA_ACCEPT_DM=1`) omits it |
-| `networks` | array | optional | Reachable networks: `["ipv4", "ipv6", "torv3", "torv2", "i2p", "cjdns", "local"]`. Validated against the peer's overlay address as observed by the receiver (`pc.Address()` — built from the verified TCP IP plus `advertise_port`) since `hello.listen` no longer carries an authoritative host under v12 |
-| `capabilities` | array | optional | Extended capability tokens for feature negotiation (e.g., `["mesh_relay_v1", "mesh_routing_v1", "mesh_routing_v2", "mesh_routing_v3", "file_transfer_v1"]` — `mesh_routing_v3` is advertised by default). Both peers advertise capabilities during handshake; the session uses the intersection. Nodes without this field are treated as having an empty capability set. See [Capability Negotiation](#capability-negotiation) |
+| `networks` | array | optional | Reachable networks: `["ipv4", "ipv6", "torv3", "torv2", "i2p", "cjdns", "local"]`. Validated against the peer's overlay address as observed by the receiver (`pc.Address()` — built from the verified TCP IP plus `advertise_port`); the hello carries no host of its own |
+| `capabilities` | array | optional | Extended capability tokens for feature negotiation (e.g., `["mesh_relay_v1", "mesh_routing_v1", "mesh_routing_v2", "mesh_routing_v3", "file_transfer_v1"]` — `mesh_routing_v3` is advertised by default). Both peers advertise capabilities during handshake; the session uses the intersection. A hello without this field (a client session that declares none) is treated as having an empty capability set. See [Capability Negotiation](#capability-negotiation) |
 | `address` | string | optional | Peer fingerprint (identity public key hash in hex). Required for mutual authentication on v2+ |
 | `pubkey` | string | optional | Ed25519 public key in base64. Used for message signature verification |
 | `boxkey` | string | optional | X25519 public key in base64. Used for message encryption. Node-to-node hellos always include it even on a relay-only node (headless `corsa-node` without `CORSA_ACCEPT_DM=1`): responders issue the session-auth challenge only when all four identity fields (`address`, `pubkey`, `boxkey`, `boxsig`) are present. A relay-only node limits the key to this handshake plane — it never redistributes it via `fetch_contacts` — and drops any DM addressed to itself (see `docs/protocol/messaging.md` "DM Opt-Out") |
@@ -79,8 +78,8 @@ The handshake commands establish peer connections, negotiate protocol version co
 ```json
 {
   "type": "welcome",
-  "version": 14,
-  "minimum_protocol_version": 14,
+  "version": 31,
+  "minimum_protocol_version": 28,
   "node": "corsa",
   "network": "gazeta-devnet",
   "challenge": "<random-string>",
@@ -108,9 +107,8 @@ The handshake commands establish peer connections, negotiate protocol version co
 | `minimum_protocol_version` | integer | Minimum version responder accepts |
 | `node` | string | Server implementation name (e.g., `"corsa"`, `"gossip"`) |
 | `network` | string | Logical network identifier (e.g., `"gazeta-devnet"`, `"mainnet"`) |
-| `challenge` | string | Random opaque string for authentication. **Included when the initiator's `client` is `"node"` or `"desktop"`** (i.e. always for peer and desktop connections) |
+| `challenge` | string | Random opaque string for authentication. **Included whenever the `hello` carries all four identity fields** (`address`, `pubkey`, `boxkey`, `boxsig`) and they verify — every node-to-node `hello` does. A dialling node therefore treats a `welcome` without a `challenge` as a refusal: see [Authentication](#authentication-node-and-desktop-connections) |
 | `listener` | string | Same as in `hello` |
-| `listen` | string | Same as in `hello` — removed from the v12 wire. Receivers tolerate a legacy peer echoing it but never treat it as truth |
 | `advertise_port` | integer | Same as in `hello`. The responder's self-reported listening port; receivers fall back to `config.DefaultPeerPort` on absent / out-of-range / non-integer values |
 | `node_type` | string | Same as in `hello` |
 | `client_version` | string | Same as in `hello` |
@@ -122,11 +120,11 @@ The handshake commands establish peer connections, negotiate protocol version co
 | `boxkey` | string | Responder's X25519 public key. Always included, same as in `hello` — required for the four-field identity check on session auth; a relay-only responder still sends it but never redistributes it via `fetch_contacts` |
 | `boxsig` | string | Signature of responder's boxkey binding |
 | `dtypes` | array | Same as in `hello` — the responder's datagram type set, with the identical closed contract |
-| `observed_address` | string | Initiator's IP address (no port) as seen by responder. Used by the dialer's `recordObservedAddress` as **NAT-detection telemetry only**: votes per peer identity feed a single "NAT detected" warning when the consensus IP disagrees with the local bind host (`cfg.ListenAddress`). It is NOT consumed for peer discovery, address learning, or any authoritative self-advertise decision under the v12 cleanup baseline |
+| `observed_address` | string | Initiator's IP address (no port) as seen by responder. Used by the dialer's `recordObservedAddress` as **NAT-detection telemetry only**: votes per peer identity feed a single "NAT detected" warning when the consensus IP disagrees with the local bind host (`cfg.ListenAddress`). It is NOT consumed for peer discovery, address learning, or any authoritative self-advertise decision |
 
 ### auth_session (initiator → responder)
 
-Sent only when responder included a `challenge` in `welcome`.
+Sent only when responder included a `challenge` in `welcome`. A dialling node never continues without one: a `welcome` that carries no `challenge` ends its dial before anything else is written.
 
 ```json
 {
@@ -218,7 +216,7 @@ sequenceDiagram
     Note over C,S: Initiator sends protocol version,<br/>optional keys, and peer info
 
     S->>C: welcome (version, challenge)
-    Note over C,S: Responder checks version compatibility.<br/>If client is "node" or "desktop",<br/>includes challenge for auth.
+    Note over C,S: Responder checks version compatibility.<br/>If the hello carries identity fields,<br/>includes challenge for auth.<br/>A node initiator refuses a welcome below its<br/>minimum version or without a challenge.
 
     C->>S: auth_session (signature over challenge)
     Note over C: Signs: corsa-session-auth-v1|<challenge>|<address>
@@ -244,16 +242,20 @@ sequenceDiagram
 
 - **Initiator sends** `version` in `hello`
 - **Responder checks**: if `initiator.version < responder.minimum_protocol_version`, respond with `error` (code: `incompatible-protocol-version`) and close
+- **Initiator checks**: if `welcome.version < initiator.minimum_protocol_version`, the dial ends before `auth_session` and before any other command, and the responder's health record takes the incompatible-version penalty (`penalizeOldProtocolPeer`: score, accumulating ban, version evidence; inside a running ban only the evidence is updated, so repeated dials cannot slide it — see [network_security.md](network_security.md) §14). Every outbound dial of a node applies this check — the peer sessions and the one-shot service dials that never become sessions (the `syncPeer` recovery dial and the `push_notice` fallback in `sendNoticeToPeer`). The v2 `welcome` intro is checked the same way: the v2 handshake proves who the listener is, not that its version is served
 - **Connection succeeds** if `responder.version >= initiator.minimum_protocol_version`
 
 ### Authentication (node and desktop connections)
 
-When initiator's `client` is `"node"` or `"desktop"`:
+When the initiator's `hello` carries all four identity fields (every node and desktop `hello` does):
 - Responder includes `challenge` (random string, ~16–32 bytes, base64-encoded)
 - Initiator responds with `auth_session` containing signature: `Ed25519(initiator_private_key, "corsa-session-auth-v1|<challenge>|<address>")`
 - Responder verifies signature against initiator's `pubkey` from `hello`
 - **On failure**: +100 ban points; **1000+ points** = 24-hour blacklist
 - **On success**: respond with `auth_ok` and enable protocol commands
+- **Until then** the responder serves only handshake commands (`hello`, `ping`, `pong`, `auth_session`); any other peer command is answered `auth-required`
+
+On the initiator side a node requires the `challenge`. Every responder at or above `MinimumProtocolVersion` issues one to a node `hello`, so a `welcome` without it names a responder that would serve nothing past the handshake. The dial ends there with `auth-required` (`protocol.ErrAuthRequired`) and nothing but the `hello` has been written. This holds for the peer sessions and for the one-shot service dials alike: `syncPeer` sends no `get_peers` / `fetch_contacts` and imports nothing, and `sendNoticeToPeer` writes no `push_notice`. An `error` frame in place of the `welcome` ends the dial the same way.
 
 ### Key Verification
 
@@ -283,29 +285,26 @@ A signing key is accepted only if it is 32 bytes, its `y` coordinate is canonica
 ### Advertise Convergence
 
 The truth model for a peer's advertise endpoint is passive learning
-from the inbound TCP `RemoteAddr`. `hello.listen.host` is not an
-authoritative input. After a peer sends `hello`, the responder derives
-the decision once from: (a) the observed TCP IP, (b) the `listener`
+from the inbound TCP `RemoteAddr`; the hello carries no host. After a
+peer sends `hello`, the responder derives the decision once from: (a) the observed TCP IP, (b) the `listener`
 flag, and (c) the `advertise_port` field. The possible outcomes are:
 
 - `non_listener` — peer explicitly declared `listener="0"`. Accepted as
   direct-only: known to this session, never announced to other peers.
-- `legacy_direct` — `listener` is missing, empty, or anything other than
-  exactly `"1"`. The `listen` field is intentionally NOT part of this
-  condition: under the v12 wire contract the `listener` flag is the
-  single source of truth for the "is this peer reachable?" gate, so a
-  frame that omits it (or echoes it as `"0"`, the empty string, or any
-  forward-compatible value the responder does not recognise) is treated
-  as direct-only regardless of what host:port a legacy `listen` string
-  carries.
+- `undeclared_listener` — `listener` is missing, empty, or anything
+  other than `"0"` or `"1"`. The `listener` flag is the single source of
+  truth for the "is this peer reachable?" gate, so a frame that omits it
+  (or carries a forward-compatible value the responder does not
+  recognise) is treated as direct-only. Peer hellos always declare the
+  flag; the `client="desktop"` hello that `LocalRPCClient.OpenSessionAt`
+  sends when `DMCrypto.SyncDirectMessagesFromPeers` dials a peer omits
+  it, so this is a live outcome for current builds, not a legacy one.
 - `match` — observed IP is a world-routable IPv4/IPv6 address. Accepted
   as announceable. The persisted candidate is
   `<observed_ip>:<advertise_port>`, where `advertise_port` is the
   self-reported value from the hello frame if it falls inside the
   inclusive `1..65535` range, otherwise `config.DefaultPeerPort`
-  (`64646`). The `listen.host` value is intentionally discarded —
-  disagreement between `hello.listen.host` and the observed IP is NOT a
-  reject trigger and NOT a mismatch event.
+  (`64646`).
 - `local_exception` — observed IP is non-routable
   (loopback/private/link-local/CGNAT/ULA) or cannot be parsed as IPv4 /
   IPv6. Accepted as direct-only; no announce candidate is written, ever.
@@ -315,14 +314,14 @@ The responder NEVER rejects on advertise-learning grounds and never
 emits any mismatch wire signal. The inbound source port on the TCP
 connection MUST NEVER be reused as a listening port — candidates
 always pair the observed IP with `advertise_port` (or the default
-fallback). The legacy v10/v11 reject-and-correct path
-(`connection_notice{code="observed-address-mismatch"}`, the
-`trustedSelfAdvertiseIP` runtime override, the misadvertise
-repay/forgiveness bookkeeping) was removed in the v12 cleanup phase.
+fallback). There is no correction path either: no supported version
+tells a peer that its advertised address is wrong.
 
-Outbound hello and welcome no longer carry the local advertise host.
-Both frames omit `listen` entirely; `listener` carries the binary "is
-a listener" signal and `advertise_port` carries the listening port.
+Outbound hello and welcome carry no local advertise host, and the frame
+has no field for one: a `listen` key sent by anyone is dropped when the
+frame is decoded and cannot influence any decision. `listener` carries
+the binary "is a listener" signal and `advertise_port` carries the
+listening port.
 `hello.advertise_port` and `welcome.advertise_port` are populated from
 `CORSA_ADVERTISE_PORT` if it parses as a valid PeerPort (`1..65535`),
 otherwise `config.DefaultPeerPort` (`64646`). The real local bind
@@ -335,16 +334,15 @@ inbound TCP `RemoteAddr`, the dialer's `recordObservedAddress` collects
 votes per peer identity, and a `NAT detected` log fires once
 `observedAddrConsensusThreshold` distinct peers agree on the same
 world-routable IP that disagrees with the host part of the local
-`cfg.ListenAddress`. Under the v12 baseline this is the field's only
-consumer — the helper that used to project this consensus into outbound
-`hello.listen` (`selfAdvertiseEndpoint`) was removed together with the
-wire-host emit. Operators who need to surface the externally-visible
-host to end users do so through that diagnostic log.
+`cfg.ListenAddress`. This is the field's only consumer — the node never
+publishes a host of its own on the wire. Operators who need to surface
+the externally-visible host to end users do so through that diagnostic
+log.
 
 Sticky-state rule: a peer that was once recorded as `announceable`
 stays announceable until an explicit `local_exception` downgrade
 arrives (observed IP turns non-routable on a later session). A
-follow-up `legacy_direct` or `non_listener` does not silently erase
+follow-up `undeclared_listener` or `non_listener` does not silently erase
 prior trust.
 
 Peer exchange gate: only peers whose persisted `announce_state` is
@@ -382,8 +380,9 @@ Raw/bootstrap path convergence parity: outbound connections that do
 not go through the managed-session state machine — the `push_notice`
 TCP fallback used for bootstrap delivery in `sendNoticeToPeer`, and
 the legacy fresh-dial path in `syncPeer` used for sender-key recovery
-and forced refresh — share the same post-`auth_ok` convergence writer
-as the managed path. All three call sites funnel through
+and forced refresh — pass the same welcome gate as a session (minimum
+protocol version, then a mandatory `challenge`) and share the same
+post-`auth_ok` convergence writer as the managed path. All three call sites funnel through
 `recordOutboundAuthSuccess(peerAddress, remoteAddr)`, which takes the
 wrapper-form `host:port` string, derives the canonical dialed IP and
 port, and then calls `recordOutboundConfirmed`. Keeping the signature
@@ -414,7 +413,7 @@ Valid values for `networks` array:
 - `local` — private/loopback only
 - `unknown` — address type not recognized
 
-The `networks` array is validated against the peer's overlay address as the receiver observes it (`pc.Address()` — built from the verified TCP IP plus the self-reported `advertise_port`). For example, if the receiver observes `192.168.1.100:64646`, only `ipv4` and `local` are valid declarations. The legacy `hello.listen` host is not consulted under the v12 wire contract.
+The `networks` array is validated against the peer's overlay address as the receiver observes it (`pc.Address()` — built from the verified TCP IP plus the self-reported `advertise_port`). For example, if the receiver observes `192.168.1.100:64646`, only `ipv4` and `local` are valid declarations.
 
 ---
 
@@ -422,7 +421,7 @@ The `networks` array is validated against the peer's overlay address as the rece
 
 The `capabilities` field enables additive feature negotiation without incrementing `ProtocolVersion`. Each capability is a string token (e.g., `"mesh_relay_v1"`, `"mesh_routing_v1"`). Both peers advertise their supported capabilities during the handshake. The session uses only the intersection of both sets.
 
-Capability tokens gate new frame types and behaviors. A peer must not send a capability-gated frame type unless the session has that capability in its negotiated set. This allows mixed-version networks: legacy nodes without the `capabilities` field are treated as having an empty set — they never receive unknown frame types.
+Capability tokens gate new frame types and behaviors. A peer must not send a capability-gated frame type unless the session has that capability in its negotiated set. A hello without the `capabilities` field — a client session such as the desktop's local RPC client or the node prober, which sends none — is treated as having an empty set and never receives a capability-gated frame type.
 
 **The negotiated set belongs to a connection, not to a peer address.** A set is fixed by the handshake of one session and never changes inside it, but a reconnect registers a replacement session under the SAME dial address while the previous session's reader is still delivering frames. A receive-side gate must therefore be answered by the connection the frame ARRIVED on — resolving the address instead judges an arriving frame by a set it was never sent under, which either accepts a frame behind a capability the peer never declared on that connection or drops a legitimate one. In the node this is enforced by the parameter type: `sessionHasCapability` takes the session, and the address-keyed `sendTargetHasCapability` answers the different, send-side question of "is the socket a frame would leave over right now capable" (`internal/core/node/capabilities.go`). The same rule holds on the inbound direction, where the connection id is the key and is never reused.
 
@@ -485,7 +484,9 @@ On version mismatch:
 {
   "type": "error",
   "code": "incompatible-protocol-version",
-  "message": "peer version 1 below minimum 2"
+  "error": "protocol version 27 is too old; supported 28..31",
+  "version": 31,
+  "minimum_protocol_version": 28
 }
 ```
 
@@ -535,6 +536,8 @@ stateDiagram-v2
     HelloReceived --> WelcomeSent: Responder sends welcome
 
     WelcomeReceived --> AuthSessionSent: Challenge received
+    WelcomeReceived --> Refused: Below minimum version, no challenge, or error
+    Refused --> [*]: Closed, nothing sent after hello
 
     AuthSessionSent --> AuthOkReceived: Responder accepts
     AuthOkReceived --> Ready: Auth passed
@@ -579,7 +582,7 @@ stateDiagram-v2
 ```json
 {
   "type": "hello",
-  "version": 14,
+  "version": 31,
   "client": "desktop",
   "client_version": "<corsa-version>",
   "client_build": 43
@@ -591,7 +594,7 @@ stateDiagram-v2
 ```json
 {
   "type": "hello",
-  "version": 14,
+  "version": 31,
   "client": "node",
   "listener": "1",
   "advertise_port": 64646,
@@ -613,18 +616,17 @@ stateDiagram-v2
 | Поле | Тип | Обязательное | Описание |
 |------|-----|-------------|----------|
 | `type` | string | да | Всегда `"hello"` |
-| `version` | integer | да | Версия протокола отправителя (например, 14). Ответчик отклоняет, если `version < responder.minimum_protocol_version` |
+| `version` | integer | да | Версия протокола отправителя (например, 31). Ответчик отклоняет, если `version < responder.minimum_protocol_version` |
 | `minimum_protocol_version` | integer | нет | Минимальная версия протокола, которую отправитель принимает. Информационное; ноды не отправляют и не проверяют это поле во входящих `hello` фреймах |
 | `client` | string | да | Тип: `"desktop"` (UI/CLI) или `"node"` (relay-пир) |
-| `listener` | string | обязательно для node-to-node peer hello (`client="node"`); опускается desktop-клиентами, local RPC subscribers и probe-фреймами от `LocalRPCClient` | `"1"` если принимает входящие пиры; `"0"` если нет. Под v12-контрактом это единственный сигнал, отличающий пира от локального subscriber'а: receiver'ы гейтят self-loopback identity guard на `Listener=="1"`. Локальные клиенты (desktop UI / RPC subscriber / `LocalRPCClient` probes) намеренно опускают поле, чтобы absent-значение НЕ триггерило этот guard. `listenerEnabledFromFrame` трактует absent/пустое как "не listener", и только `"1"` переключает гейт |
-| `listen` | string | отсутствует | Удалено из wire в фазе v12 cleanup. Receiver'ы игнорируют поле, если legacy-пир его всё ещё эхо-передаёт; emitter'ы его не производят |
+| `listener` | string | обязательно для node-to-node peer hello (`client="node"`); опускается desktop-клиентами, local RPC subscribers и probe-фреймами от `LocalRPCClient` | `"1"` если принимает входящие пиры; `"0"` если нет. Это единственный сигнал, отличающий пира от локального subscriber'а: receiver'ы гейтят self-loopback identity guard на `Listener=="1"`. Локальные клиенты (desktop UI / RPC subscriber / `LocalRPCClient` probes) намеренно опускают поле, чтобы absent-значение НЕ триггерило этот guard. `listenerEnabledFromFrame` трактует absent/пустое как "не listener", и только `"1"` переключает гейт |
 | `advertise_port` | integer | опционально | Self-reported слушающий порт. JSON-integer в диапазоне `1..65535` включительно. На приёмной стороне это единственный авторитетный источник listening-порта пира; отсутствующие / вне диапазона / нецелочисленные значения на проводе коллапсируются к `config.DefaultPeerPort` (`64646`). Входящий TCP source port НИКОГДА не должен переиспользоваться как listening-порт |
 | `node_type` | string | опционально | `"full"` (релирует трафик) или `"client"` (без relay). Только для `client="node"` |
 | `client_version` | string | опционально | Строка версии (например, `"0.1.0"` или `"1.2.3"`) для логирования и диагностики. Единственный источник истины — отдельной "wire"-формы нет |
 | `client_build` | integer | опционально | Монотонный номер сборки для отслеживания версий. Увеличивается при каждом релизе |
 | `services` | array | опционально | Список возможностей: `["identity", "contacts", "messages", "gazeta", "relay", ...]`. `"messages"` анонсируется только нодами, принимающими личные сообщения на свою identity; relay-only нода (headless `corsa-node` без `CORSA_ACCEPT_DM=1`) его опускает |
-| `networks` | array | опционально | Доступные сети: `["ipv4", "ipv6", "torv3", "torv2", "i2p", "cjdns", "local"]`. Валидируется против overlay-адреса пира, как его видит receiver (`pc.Address()` — собран из верифицированного TCP IP плюс `advertise_port`); под v12 `hello.listen` уже не несёт авторитетного host'а |
-| `capabilities` | array | опционально | Расширенные capability-токены для согласования функций (например, `["mesh_relay_v1", "mesh_routing_v1", "mesh_routing_v2", "mesh_routing_v3", "file_transfer_v1"]` — `mesh_routing_v3` анонсируется по умолчанию). Оба пира объявляют capabilities при handshake; сессия использует пересечение. Ноды без этого поля считаются с пустым набором. См. [Согласование capabilities](#согласование-capabilities) |
+| `networks` | array | опционально | Доступные сети: `["ipv4", "ipv6", "torv3", "torv2", "i2p", "cjdns", "local"]`. Валидируется против overlay-адреса пира, как его видит receiver (`pc.Address()` — собран из верифицированного TCP IP плюс `advertise_port`); собственного host'а hello не несёт |
+| `capabilities` | array | опционально | Расширенные capability-токены для согласования функций (например, `["mesh_relay_v1", "mesh_routing_v1", "mesh_routing_v2", "mesh_routing_v3", "file_transfer_v1"]` — `mesh_routing_v3` анонсируется по умолчанию). Оба пира объявляют capabilities при handshake; сессия использует пересечение. Hello без этого поля (клиентская сессия, которая ничего не объявляет) считается с пустым набором. См. [Согласование capabilities](#согласование-capabilities) |
 | `address` | string | опционально | Fingerprint пира (хеш публичного ключа identity в hex). Требуется для взаимной аутентификации на v2+ |
 | `pubkey` | string | опционально | Ed25519 публичный ключ в base64. Используется для проверки подписей сообщений |
 | `boxkey` | string | опционально | X25519 публичный ключ в base64. Используется для шифрования сообщений. Node-to-node hello всегда включает его, даже на relay-only ноде (headless `corsa-node` без `CORSA_ACCEPT_DM=1`): ответчик выдаёт session-auth challenge только при наличии всех четырёх identity-полей (`address`, `pubkey`, `boxkey`, `boxsig`). Relay-only нода ограничивает ключ handshake-плоскостью — никогда не раздаёт его через `fetch_contacts` — и дропает любой DM, адресованный ей самой (см. `docs/protocol/messaging.md`, «Отказ от приёма DM») |
@@ -636,8 +638,8 @@ stateDiagram-v2
 ```json
 {
   "type": "welcome",
-  "version": 14,
-  "minimum_protocol_version": 14,
+  "version": 31,
+  "minimum_protocol_version": 28,
   "node": "corsa",
   "network": "gazeta-devnet",
   "challenge": "<random-string>",
@@ -665,9 +667,8 @@ stateDiagram-v2
 | `minimum_protocol_version` | integer | Минимальная версия, которую ответчик принимает |
 | `node` | string | Имя реализации сервера (например, `"corsa"`, `"gossip"`) |
 | `network` | string | Идентификатор логической сети (например, `"gazeta-devnet"`, `"mainnet"`) |
-| `challenge` | string | Случайная непрозрачная строка для аутентификации. **Включается когда `client` инициатора равен `"node"` или `"desktop"`** (т.е. всегда для peer- и desktop-соединений) |
+| `challenge` | string | Случайная непрозрачная строка для аутентификации. **Включается всегда, когда `hello` несёт все четыре поля identity** (`address`, `pubkey`, `boxkey`, `boxsig`) и они проходят проверку — так делает каждый node-to-node `hello`. Поэтому дозванивающийся узел считает `welcome` без `challenge` отказом: см. [Аутентификация](#аутентификация-node-и-desktop-соединения) |
 | `listener` | string | Аналогично полю в `hello` |
-| `listen` | string | Аналогично полю в `hello` — удалено из v12-wire. Receiver'ы терпят legacy-пира, эхо-передающего поле, но никогда не считают его truth |
 | `advertise_port` | integer | Аналогично полю в `hello`. Self-reported слушающий порт ответчика; получатели фолбэчат к `config.DefaultPeerPort` при отсутствии / значении вне диапазона / нецелочисленном значении |
 | `node_type` | string | Аналогично полю в `hello` |
 | `client_version` | string | Аналогично полю в `hello` |
@@ -679,11 +680,11 @@ stateDiagram-v2
 | `boxkey` | string | X25519 публичный ключ ответчика. Всегда включён, как и в `hello` — нужен для четырёхполевой identity-проверки при session auth; relay-only ответчик его шлёт, но никогда не раздаёт через `fetch_contacts` |
 | `boxsig` | string | Подпись связи boxkey ответчика |
 | `dtypes` | array | То же, что в `hello` — набор типов датаграмм ответчика, с тем же закрытым контрактом |
-| `observed_address` | string | IP-адрес инициатора (без порта) как видит ответчик. Используется дайлером в `recordObservedAddress` **только как NAT-detection telemetry**: голоса per peer identity порождают единственное предупреждение «NAT detected», когда консенсусный IP расходится с host-частью локального `cfg.ListenAddress`. Под v12-baseline поле НЕ потребляется ни для peer discovery, ни для address learning, ни для каких-либо authoritative self-advertise решений |
+| `observed_address` | string | IP-адрес инициатора (без порта) как видит ответчик. Используется дайлером в `recordObservedAddress` **только как NAT-detection telemetry**: голоса per peer identity порождают единственное предупреждение «NAT detected», когда консенсусный IP расходится с host-частью локального `cfg.ListenAddress`. Поле НЕ потребляется ни для peer discovery, ни для address learning, ни для каких-либо authoritative self-advertise решений |
 
 ### auth_session (инициатор → ответчик)
 
-Отправляется только когда ответчик включил `challenge` в `welcome`.
+Отправляется только когда ответчик включил `challenge` в `welcome`. Дозванивающийся узел без него не продолжает: `welcome` без `challenge` завершает дозвон раньше, чем записано что-либо ещё.
 
 ```json
 {
@@ -775,7 +776,7 @@ sequenceDiagram
     Note over C,S: Инициатор отправляет версию протокола,<br/>опциональные ключи и информацию о пире
 
     S->>C: welcome (версия, challenge)
-    Note over C,S: Ответчик проверяет совместимость версий.<br/>Если client = "node" или "desktop",<br/>включает challenge для auth.
+    Note over C,S: Ответчик проверяет совместимость версий.<br/>Если hello несёт поля identity,<br/>включает challenge для auth.<br/>Инициатор-узел отвергает welcome ниже своей<br/>минимальной версии или без challenge.
 
     C->>S: auth_session (подпись над challenge)
     Note over C: Подписывает: corsa-session-auth-v1|<challenge>|<address>
@@ -801,16 +802,20 @@ sequenceDiagram
 
 - **Инициатор отправляет** `version` в `hello`
 - **Ответчик проверяет**: если `initiator.version < responder.minimum_protocol_version`, отвечает `error` (код: `incompatible-protocol-version`) и закрывает соединение
+- **Инициатор проверяет**: если `welcome.version < initiator.minimum_protocol_version`, дозвон завершается до `auth_session` и до любой другой команды, а запись здоровья ответчика получает штраф за несовместимую версию (`penalizeOldProtocolPeer`: score, накопительный бан, свидетельство версии; внутри действующего бана обновляется только свидетельство, поэтому повторные дозвоны не сдвигают его — см. [network_security.md](network_security.md) §14). Эту проверку применяет каждый исходящий дозвон узла — peer-сессии и одноразовые служебные дозвоны, которые сессией не становятся (дозвон восстановления `syncPeer` и запасной путь `push_notice` в `sendNoticeToPeer`). Интро `welcome` сессии v2 проверяется так же: рукопожатие v2 доказывает, кто слушатель, но не то, что его версия обслуживается
 - **Соединение успешно** если `responder.version >= initiator.minimum_protocol_version`
 
 ### Аутентификация (node и desktop соединения)
 
-Когда `client` инициатора равен `"node"` или `"desktop"`:
+Когда `hello` инициатора несёт все четыре поля identity (их несёт каждый `hello` узла и desktop):
 - Ответчик включает `challenge` (случайная строка, ~16–32 байта, base64-закодирована)
 - Инициатор отвечает `auth_session` с подписью: `Ed25519(initiator_private_key, "corsa-session-auth-v1|<challenge>|<address>")`
 - Ответчик проверяет подпись против `pubkey` инициатора из `hello`
 - **При неудаче**: +100 ban points; **1000+ points** = 24-часовой blacklist
 - **При успехе**: отвечает `auth_ok` и включает команды протокола
+- **До этого** ответчик обслуживает только handshake-команды (`hello`, `ping`, `pong`, `auth_session`); на любую другую peer-команду отвечает `auth-required`
+
+На стороне инициатора узел требует `challenge`. Каждый ответчик версии `MinimumProtocolVersion` и выше выдаёт его на `hello` узла, поэтому `welcome` без него означает ответчика, который ничего дальше рукопожатия не обслужит. Дозвон завершается на этом с `auth-required` (`protocol.ErrAuthRequired`), и записан к этому моменту только `hello`. Это верно и для peer-сессий, и для одноразовых служебных дозвонов: `syncPeer` не отправляет `get_peers` / `fetch_contacts` и ничего не импортирует, а `sendNoticeToPeer` не пишет `push_notice`. Фрейм `error` вместо `welcome` завершает дозвон так же.
 
 ### Верификация ключей
 
@@ -840,29 +845,26 @@ sequenceDiagram
 ### Согласование advertise-адреса
 
 Модель истины для advertise-endpoint пира — пассивное обучение из
-входящего TCP `RemoteAddr`. `hello.listen.host` НЕ является
-авторитетным входом. После получения `hello` ответчик выводит решение
-один раз из: (a) наблюдаемого TCP IP, (b) флага `listener` и (c) поля
+входящего TCP `RemoteAddr`; host'а hello не несёт. После получения
+`hello` ответчик выводит решение один раз из: (a) наблюдаемого TCP IP, (b) флага `listener` и (c) поля
 `advertise_port`. Возможные исходы:
 
 - `non_listener` — пир явно объявил `listener="0"`. Принимается как
   direct-only: используется в рамках сессии, не анонсируется другим пирам.
-- `legacy_direct` — `listener` отсутствует, пуст или несёт что угодно
-  кроме строго `"1"`. Поле `listen` целенаправленно НЕ участвует в этом
-  условии: на v12-baseline флаг `listener` — единственный источник
+- `undeclared_listener` — `listener` отсутствует, пуст или несёт что
+  угодно кроме `"0"` и `"1"`. Флаг `listener` — единственный источник
   истины для гейта «достижимость пира», поэтому фрейм, в котором флаг
-  опущен (или несёт `"0"`, пустую строку, либо какое-то forward-
-  совместимое значение, которого ответчик не знает), трактуется как
-  direct-only независимо от того, какой host:port мог нести legacy-
-  `listen`.
+  опущен (или несёт forward-совместимое значение, которого ответчик не
+  знает), трактуется как direct-only. Peer hello всегда объявляет флаг;
+  hello с `client="desktop"`, который `LocalRPCClient.OpenSessionAt`
+  отправляет, когда `DMCrypto.SyncDirectMessagesFromPeers` дозванивается
+  до пира, его опускает, так что это живой исход для текущих сборок, а
+  не legacy.
 - `match` — наблюдаемый IP является world-routable IPv4/IPv6 адресом.
   Принимается как announceable. Персистируемый кандидат —
   `<observed_ip>:<advertise_port>`, где `advertise_port` — self-reported
   значение из hello-фрейма, если оно попадает в диапазон `1..65535`
-  включительно, иначе `config.DefaultPeerPort` (`64646`). Значение
-  `listen.host` целенаправленно отбрасывается — расхождение между
-  `hello.listen.host` и observed IP НЕ является триггером отклонения и
-  НЕ является mismatch-событием.
+  включительно, иначе `config.DefaultPeerPort` (`64646`).
 - `local_exception` — наблюдаемый IP non-routable
   (loopback/приватный/link-local/CGNAT/ULA) либо не парсится как IPv4 /
   IPv6. Принимается как direct-only; announce-кандидат не пишется
@@ -872,14 +874,14 @@ sequenceDiagram
 и не отправляет никакого mismatch-сигнала на проводе. Входящий
 source-порт TCP-соединения НИКОГДА не переиспользуется как
 listening-порт — кандидаты всегда пара observed IP + `advertise_port`
-(либо default fallback). Legacy-путь reject-and-correct из v10/v11
-(`connection_notice{code="observed-address-mismatch"}`, runtime-override
-`trustedSelfAdvertiseIP`, бухгалтерия misadvertise repay/forgiveness)
-удалён в фазе v12 cleanup.
+(либо default fallback). Пути коррекции тоже нет: ни одна
+поддерживаемая версия не сообщает пиру, что его advertised-адрес неверен.
 
-Исходящий hello и welcome больше не несут локальный advertise-host.
-Оба фрейма опускают `listen` целиком; `listener` несёт бинарный
-сигнал «есть листенер», а `advertise_port` — слушающий порт.
+Исходящий hello и welcome не несут локальный advertise-host, и поля для
+него во фрейме нет: ключ `listen`, присланный кем угодно, отбрасывается
+при декодировании фрейма и ни на какое решение не влияет. `listener`
+несёт бинарный сигнал «есть листенер», а `advertise_port` — слушающий
+порт.
 `hello.advertise_port` и `welcome.advertise_port` заполняются из
 `CORSA_ADVERTISE_PORT`, если это валидный PeerPort (`1..65535`),
 иначе `config.DefaultPeerPort` (`64646`). Реальный локальный bind-порт
@@ -892,17 +894,15 @@ telemetry**: ответчик кладёт туда IP-часть входяще
 и лог-запись `NAT detected` срабатывает, как только
 `observedAddrConsensusThreshold` различных пиров сходятся на одном
 world-routable IP, отличающемся от host-части локального
-`cfg.ListenAddress`. На v12-baseline это единственный потребитель поля
-— helper, раньше проецировавший этот consensus в исходящий
-`hello.listen` (`selfAdvertiseEndpoint`), удалён вместе с emit'ом
-host'а на проводе. Операторы, которым нужно показать
+`cfg.ListenAddress`. Это единственный потребитель поля — нода никогда не
+публикует собственный host на проводе. Операторы, которым нужно показать
 externally-visible host пользователю, делают это через тот
 диагностический лог.
 
 Sticky-state правило: пир однажды записанный как `announceable` остаётся
 announceable до явного события downgrade (приход `local_exception` после
 предыдущего `match`, когда observed IP в более поздней сессии стал
-non-routable). Последующий `legacy_direct` или `non_listener` не стирает
+non-routable). Последующий `undeclared_listener` или `non_listener` не стирает
 прошлое доверие молча.
 
 Фильтр peer exchange: в ответах `get_peers` релеятся только пиры, у
@@ -939,8 +939,10 @@ advertise-convergence, а не учит плохое доверие по час�
 которые не проходят через managed-session state machine — TCP
 fallback для `push_notice`, используемый для доставки bootstrap в
 `sendNoticeToPeer`, и legacy fresh-dial в `syncPeer`, используемый
-для sender-key recovery и forced refresh, — используют тот же
-пост-`auth_ok` convergence writer, что и managed-путь. Все три
+для sender-key recovery и forced refresh, — проходят ту же проверку
+`welcome`, что и сессия (минимальная версия протокола, затем
+обязательный `challenge`), и используют тот же пост-`auth_ok`
+convergence writer, что и managed-путь. Все три
 call site сходятся в `recordOutboundAuthSuccess(peerAddress, remoteAddr)`,
 который принимает wrapper-форму `host:port`, берёт канонический
 dial-IP и порт и вызывает `recordOutboundConfirmed`. Строковая
@@ -971,7 +973,7 @@ triple, и их состояние разошлось бы с managed-путём
 - `local` — только приватный/loopback
 - `unknown` — тип адреса не распознан
 
-Массив `networks` валидируется против overlay-адреса пира, как его видит receiver (`pc.Address()` — собран из верифицированного TCP IP плюс self-reported `advertise_port`). Например, если receiver наблюдает `192.168.1.100:64646`, допустимы только `ipv4` и `local`. Legacy-`hello.listen` под v12-wire не используется.
+Массив `networks` валидируется против overlay-адреса пира, как его видит receiver (`pc.Address()` — собран из верифицированного TCP IP плюс self-reported `advertise_port`). Например, если receiver наблюдает `192.168.1.100:64646`, допустимы только `ipv4` и `local`.
 
 ---
 
@@ -979,7 +981,7 @@ triple, и их состояние разошлось бы с managed-путём
 
 Поле `capabilities` позволяет аддитивное согласование функций без повышения `ProtocolVersion`. Каждая capability — строковый токен (например, `"mesh_relay_v1"`, `"mesh_routing_v1"`, `"mesh_routing_v2"`, `"file_transfer_v1"`). Оба пира объявляют поддерживаемые capabilities при handshake. Сессия использует только пересечение обоих наборов.
 
-Capability-токены гейтят новые типы фреймов и поведения. Пир не должен отправлять capability-gated тип фрейма, если в согласованном наборе сессии нет соответствующей capability. Это позволяет работать сетям со смешанными версиями: legacy-ноды без поля `capabilities` считаются с пустым набором — они никогда не получат неизвестные типы фреймов.
+Capability-токены гейтят новые типы фреймов и поведения. Пир не должен отправлять capability-gated тип фрейма, если в согласованном наборе сессии нет соответствующей capability. Hello без поля `capabilities` — клиентская сессия вроде локального RPC-клиента десктопа или node prober, которые его не шлют, — считается с пустым набором и никогда не получает capability-gated типы фреймов.
 
 **Согласованный набор принадлежит соединению, а не адресу пира.** Набор фиксируется рукопожатием одной сессии и внутри неё не меняется, но переподключение регистрирует сессию-замену под ТЕМ ЖЕ адресом дозвона, пока читатель предыдущей сессии ещё доставляет кадры. Поэтому гейт на приёме обязан отвечать по тому соединению, по которому кадр ПРИШЁЛ: разрешение по адресу судит пришедший кадр по набору, под которым его не отправляли, и это либо пропускает кадр за возможностью, которую пир на этом соединении не объявлял, либо дропает законный. В коде это закреплено типом параметра: `sessionHasCapability` принимает сессию, а адресный `sendTargetHasCapability` отвечает на другой вопрос — вопрос отправки: «способен ли сокет, по которому кадр уйдёт прямо сейчас» (`internal/core/node/capabilities.go`). На входящем направлении правило то же, но ключом служит id соединения, который не переиспользуется.
 
@@ -1042,7 +1044,9 @@ Wire-контракт закрыт целиком:
 {
   "type": "error",
   "code": "incompatible-protocol-version",
-  "message": "peer version 1 below minimum 2"
+  "error": "protocol version 27 is too old; supported 28..31",
+  "version": 31,
+  "minimum_protocol_version": 28
 }
 ```
 
@@ -1092,6 +1096,8 @@ stateDiagram-v2
     HelloReceived --> WelcomeSent: Ответчик отправляет welcome
 
     WelcomeReceived --> AuthSessionSent: Challenge получен
+    WelcomeReceived --> Refused: Версия ниже минимальной, нет challenge или error
+    Refused --> [*]: Закрыто, после hello ничего не отправлено
 
     AuthSessionSent --> AuthOkReceived: Ответчик принимает
     AuthOkReceived --> Ready: Auth пройден

@@ -115,7 +115,6 @@ func (r *TableRouter) Route(msg protocol.Envelope) RoutingDecision {
 		}
 		decision.RelayNextHop = &route.NextHop
 		decision.RelayNextHopAddress = address
-		decision.RelayRouteOrigin = route.Origin
 		decision.RelayNextHopHops = route.Hops
 		log.Debug().
 			Str("recipient", msg.Recipient).

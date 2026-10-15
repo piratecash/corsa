@@ -191,8 +191,8 @@ func TestEmitToWalksOnWhenTheSelectedSessionIsRetiredInsideTheAdmissionWindow(t 
 	requireDatagramPlane(t, svc)
 	now := time.Now().UTC()
 	installDatagramPeer(t, svc, peer,
-		datagramPeerConn{version: 27, connectedAt: now.Add(-2 * time.Hour)},
-		datagramPeerConn{version: 27, connectedAt: now.Add(-time.Hour)},
+		datagramPeerConn{version: datagramTestPeerVersion, connectedAt: now.Add(-2 * time.Hour)},
+		datagramPeerConn{version: datagramTestPeerVersion, connectedAt: now.Add(-time.Hour)},
 	)
 
 	frame := newNodeDatagram(t, nil)
@@ -279,7 +279,7 @@ func installAdmissionInboundPeer(
 			Address:         address,
 			Identity:        peer,
 			Caps:            []domain.Capability{domain.CapMeshDatagramV1, domain.CapMeshDatagramTransitV1},
-			ProtocolVersion: 27,
+			ProtocolVersion: datagramTestPeerVersion,
 			Declarations:    &declarations,
 		})
 

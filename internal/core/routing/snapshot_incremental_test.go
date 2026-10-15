@@ -85,7 +85,7 @@ func TestSnapshotIncrementalMatchesFullUnderRandomMutations(t *testing.T) {
 			})
 		case 2:
 			// Withdraw a specific (identity, uplink) route from the wire.
-			tbl.WithdrawRoute(id, domaintest.ID("self"), up, seq)
+			tbl.WithdrawRoute(id, up, seq)
 		case 3:
 			// Poison-reverse style single-claim invalidation.
 			tbl.InvalidateUplinkClaim(id, up)

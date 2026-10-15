@@ -34,15 +34,6 @@ type RoutingDecision struct {
 	// session for a transit next-hop). Empty when RelayNextHop is nil.
 	RelayNextHopAddress domain.PeerAddress
 
-	// RelayRouteOrigin is the Origin field from the RouteEntry selected by
-	// the router. Retained on the struct for plumbing-stability across the
-	// relay → hop_ack path, but IGNORED for route promotion post-Phase-A:
-	// the routing table now keys on (Identity, Uplink), and
-	// confirmRouteViaHopAck matches on (Identity, NextHop) only. See
-	// internal/core/node/routing_hop_ack.go for the migration note.
-	// Empty when RelayNextHop is nil.
-	RelayRouteOrigin domain.PeerIdentity
-
 	// RelayNextHopHops is the hop count from the selected RouteEntry.
 	// Used by the retry path in sendTableDirectedRelay to re-resolve the
 	// next-hop address with the correct capability requirements: hops=1

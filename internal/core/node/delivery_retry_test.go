@@ -1,12 +1,12 @@
 package node
 
 import (
-	"bufio"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/config"
+	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/netcore"
 	"github.com/piratecash/corsa/internal/core/protocol"
@@ -413,13 +413,11 @@ type optOutOutbox struct{ *emissionOutbox }
 
 func (optOutOutbox) MarkDeliveryFailed(protocol.MessageID) error { return nil }
 
-// TestSeenAckNotPushedToPreV23Subscriber pins the version gate: seen_ack is
-// additive in ProtocolVersion 23, so it must not be pushed to a subscriber
-// whose connection advertises an older version — the old binary would only
-// reject it at parse time. delivered/seen receipts keep flowing to the same
-// subscriber. Remove together with the gate once MinimumProtocolVersion
-// reaches config.ProtocolVersionSeenAck.
-func TestSeenAckNotPushedToPreV23Subscriber(t *testing.T) {
+// TestSeenAckPushedToSubscriberAtMinimumProtocolVersion pins that seen_ack
+// reaches every subscriber the node serves: the oldest connection it accepts
+// advertises MinimumProtocolVersion, and that build already understands the
+// status, so there is no version below which the ack could be withheld.
+func TestSeenAckPushedToSubscriberAtMinimumProtocolVersion(t *testing.T) {
 	t.Parallel()
 	svc := newTestService(t, config.NodeTypeFull)
 
@@ -427,7 +425,7 @@ func TestSeenAckNotPushedToPreV23Subscriber(t *testing.T) {
 	if err != nil {
 		t.Fatalf("identity.Generate: %v", err)
 	}
-	reader := attachPushObserverWithVersion(t, svc, seenSenderID.Address, netcore.ConnID(7404), config.ProtocolVersionSeenAck-1)
+	reader := attachPushObserverWithVersion(t, svc, seenSenderID.Address, netcore.ConnID(7404), config.MinimumProtocolVersion)
 
 	svc.sentDMIDs.Add("seen-ack-3") // we sent this message; the seen receipt is solicited
 	svc.storeDeliveryReceipt(protocol.DeliveryReceipt{
@@ -437,41 +435,58 @@ func TestSeenAckNotPushedToPreV23Subscriber(t *testing.T) {
 		Status:      protocol.ReceiptStatusSeen,
 		DeliveredAt: time.Now().UTC(),
 	})
-	svc.WaitBackground()
 
-	// Drain the observer for a bounded window: no seen_ack may arrive.
-	frames := drainObserverFrames(t, reader, 700*time.Millisecond)
-	for _, frame := range frames {
-		if frame.Type == "push_delivery_receipt" && frame.Receipt != nil && frame.Receipt.Status == protocol.ReceiptStatusSeenAck {
-			t.Fatalf("seen_ack must not be pushed to a pre-v23 subscriber, got %#v", frame)
-		}
+	frame := readPushedFrame(t, reader, "push_delivery_receipt", 3*time.Second)
+	if frame.Receipt == nil || frame.Receipt.MessageID != "seen-ack-3" || frame.Receipt.Status != protocol.ReceiptStatusSeenAck {
+		t.Fatalf("expected seen_ack push to a v%d subscriber, got %#v", config.MinimumProtocolVersion, frame)
 	}
 }
 
-// drainObserverFrames reads every frame that arrives within the window.
-func drainObserverFrames(t *testing.T, reader *bufio.Reader, window time.Duration) []protocol.Frame {
-	t.Helper()
-	var mu sync.Mutex
-	var frames []protocol.Frame
-	go func() {
-		for {
-			line, err := reader.ReadString('\n')
-			if err != nil {
-				return
+// TestReceiptPushToSubscriberWithoutConnRemovesSubscriber pins that every
+// receipt status treats a subscriber whose connection is already gone the
+// same way: the write finds no conn and drops the subscription. seen_ack is
+// not special — skipping it would keep a dead subscription alive.
+//
+// Nothing is kept for a later replay. Removing the recipient's last
+// subscription drops its receipt backlog (dropReceiptBacklogForOfflineRecipients),
+// and a seen_ack never enters that backlog at all. Recovery is end-to-end
+// retry: the message sender re-sends until delivered/seen comes back, and
+// the seen-sender re-sends seen until its seen_ack comes back.
+func TestReceiptPushToSubscriberWithoutConnRemovesSubscriber(t *testing.T) {
+	t.Parallel()
+	statuses := []string{
+		protocol.ReceiptStatusDelivered,
+		protocol.ReceiptStatusSeen,
+		protocol.ReceiptStatusSeenAck,
+	}
+	for _, status := range statuses {
+		t.Run(status, func(t *testing.T) {
+			t.Parallel()
+			svc := newTestService(t, config.NodeTypeFull)
+			const recipient = "recipient-whose-conn-is-gone"
+
+			// No net core is registered under this ConnID: the conn was
+			// unregistered while the subscription still pointed at it.
+			svc.gossipMu.Lock()
+			svc.subs[recipient] = map[string]*subscriber{
+				"ghost": {id: "ghost", recipient: recipient, connID: domain.ConnID(7405)},
 			}
-			frame, err := protocol.ParseFrameLine(line[:len(line)-1])
-			if err != nil {
-				continue
+			svc.gossipMu.Unlock()
+
+			svc.pushReceiptToSubscribers(protocol.DeliveryReceipt{
+				MessageID:   "receipt-to-gone-conn",
+				Sender:      svc.Address(),
+				Recipient:   recipient,
+				Status:      status,
+				DeliveredAt: time.Now().UTC(),
+			})
+			svc.WaitBackground()
+
+			if svc.hasSubscriber(recipient) {
+				t.Fatalf("a %s push to a subscriber without a conn left the subscription in place", status)
 			}
-			mu.Lock()
-			frames = append(frames, frame)
-			mu.Unlock()
-		}
-	}()
-	time.Sleep(window)
-	mu.Lock()
-	defer mu.Unlock()
-	return append([]protocol.Frame(nil), frames...)
+		})
+	}
 }
 
 // TestRelayHopForReceiptDirection pins the status-aware relay hop choice:

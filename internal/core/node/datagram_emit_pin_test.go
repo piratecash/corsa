@@ -54,7 +54,7 @@ func newDatagramPinFixture(
 	svc := newDatagramLayerService(t, true)
 	now := time.Now().UTC()
 	addresses := installDatagramPeer(t, svc, peer, datagramPeerConn{
-		version:     27,
+		version:     datagramTestPeerVersion,
 		connectedAt: now.Add(-time.Hour),
 	})
 	requireDatagramPlane(t, svc)
@@ -204,7 +204,7 @@ func installDatagramInboundConn(
 		Address:         address,
 		Identity:        peer,
 		Caps:            []domain.Capability{domain.CapMeshDatagramV1, domain.CapMeshDatagramTransitV1},
-		ProtocolVersion: 27,
+		ProtocolVersion: datagramTestPeerVersion,
 		Declarations:    &declarations,
 	})
 

@@ -4,7 +4,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/piratecash/corsa/internal/core/config"
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
@@ -117,20 +116,6 @@ func TestLegacyTransitRestampSkipsBroadcast(t *testing.T) {
 	}
 	if got, _ := legacyTransitWireStamp("dm", "bob", raw, 0, now); got == raw {
 		t.Error("an addressed DM must be re-stamped on the wire-string path too")
-	}
-}
-
-// TestTransitAgeRestampIsStillNeeded is the reminder to delete all of this.
-// The measure exists only while the network floor is below the version that
-// stopped refusing old DMs; once MinimumProtocolVersion reaches it, this
-// test fails and points at what to remove.
-func TestTransitAgeRestampIsStillNeeded(t *testing.T) {
-	t.Parallel()
-	if config.MinimumProtocolVersion >= config.ProtocolVersionNoTransitAgeCeiling {
-		t.Fatalf("MinimumProtocolVersion is now %d: every node understands old dates, so delete "+
-			"legacyTransitRestamp, its threshold, its call site in dispatchEnvelopeRetry, "+
-			"config.ProtocolVersionNoTransitAgeCeiling and this file "+
-			"(TODO(transit-age-restamp-removal))", config.MinimumProtocolVersion)
 	}
 }
 

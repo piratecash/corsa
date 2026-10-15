@@ -270,7 +270,7 @@ func TestHandleRoutesUpdate_BeforeBaseline_EmitsRequestResync(t *testing.T) {
 	frame := protocol.Frame{
 		Type: "routes_update",
 		AnnounceRoutes: []protocol.AnnounceRouteFrame{
-			{Identity: idTargetX.String(), Origin: idOriginC.String(), Hops: 1, SeqNo: 1},
+			{Identity: idTargetX.String(), Origin: idPeerB.String(), Hops: 1, SeqNo: 1},
 		},
 	}
 
@@ -325,7 +325,7 @@ func TestHandleRoutesUpdate_AfterBaseline_AppliesEntries(t *testing.T) {
 	frame := protocol.Frame{
 		Type: "routes_update",
 		AnnounceRoutes: []protocol.AnnounceRouteFrame{
-			{Identity: idTargetX.String(), Origin: idOriginC.String(), Hops: 1, SeqNo: 1},
+			{Identity: idTargetX.String(), Origin: idPeerB.String(), Hops: 1, SeqNo: 1},
 		},
 	}
 
@@ -423,7 +423,7 @@ func TestHandleRoutesUpdate_QuarantinedSender_DropsSilentlyNoResync(t *testing.T
 	frame := protocol.Frame{
 		Type: "routes_update",
 		AnnounceRoutes: []protocol.AnnounceRouteFrame{
-			{Identity: idTargetX.String(), Origin: idOriginC.String(), Hops: 1, SeqNo: 1},
+			{Identity: idTargetX.String(), Origin: idPeerB.String(), Hops: 1, SeqNo: 1},
 		},
 	}
 
@@ -464,7 +464,7 @@ func TestHandleRoutesUpdate_BeforeBaseline_NoSenderAddress_DropsSilently(t *test
 	frame := protocol.Frame{
 		Type: "routes_update",
 		AnnounceRoutes: []protocol.AnnounceRouteFrame{
-			{Identity: idTargetX.String(), Origin: idOriginC.String(), Hops: 1, SeqNo: 1},
+			{Identity: idTargetX.String(), Origin: idPeerB.String(), Hops: 1, SeqNo: 1},
 		},
 	}
 

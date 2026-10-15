@@ -400,11 +400,7 @@ func TestHandleRoutePoison_RepeatedPoisonIsIdempotent(t *testing.T) {
 	// (seededSeqNo + 1, the strictly-newer SeqNo InvalidateUplinkClaim
 	// synthesises against the live claim).
 	svc.handleRoutePoison(provenRoutingSender(idPeerB), frame)
-	first := svc.routingTable.InspectTriple(routing.RouteTriple{
-		Identity: idTargetX,
-		Origin:   idPeerB,
-		NextHop:  idPeerB,
-	})
+	first := svc.routingTable.InspectUplinkClaim(idTargetX, idPeerB)
 	if first == nil {
 		t.Fatalf("first poison must leave a tombstone for inspection")
 	}
@@ -418,11 +414,7 @@ func TestHandleRoutePoison_RepeatedPoisonIsIdempotent(t *testing.T) {
 	// Second poison for the same (identity, sender): the live-claim
 	// gate makes this a clean no-op — tombstone SeqNo must NOT move.
 	svc.handleRoutePoison(provenRoutingSender(idPeerB), frame)
-	second := svc.routingTable.InspectTriple(routing.RouteTriple{
-		Identity: idTargetX,
-		Origin:   idPeerB,
-		NextHop:  idPeerB,
-	})
+	second := svc.routingTable.InspectUplinkClaim(idTargetX, idPeerB)
 	if second == nil {
 		t.Fatalf("second poison must not delete the tombstone")
 	}
@@ -432,11 +424,7 @@ func TestHandleRoutePoison_RepeatedPoisonIsIdempotent(t *testing.T) {
 
 	// Third poison drives the point home: still the same SeqNo.
 	svc.handleRoutePoison(provenRoutingSender(idPeerB), frame)
-	third := svc.routingTable.InspectTriple(routing.RouteTriple{
-		Identity: idTargetX,
-		Origin:   idPeerB,
-		NextHop:  idPeerB,
-	})
+	third := svc.routingTable.InspectUplinkClaim(idTargetX, idPeerB)
 	if third == nil || third.SeqNo != first.SeqNo {
 		t.Fatalf("third poison must remain a no-op; SeqNo: got %d want %d", third.SeqNo, first.SeqNo)
 	}

@@ -13,6 +13,7 @@ import (
 
 	"github.com/piratecash/corsa/internal/core/config"
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/netcore"
 	"github.com/piratecash/corsa/internal/core/netcore/netcoretest"
 	"github.com/piratecash/corsa/internal/core/protocol"
@@ -352,4 +353,89 @@ func TestSendHandshakeReply_UnknownConnReportsButDoesNotPanic(t *testing.T) {
 	}
 	// The exact sentinel is an implementation detail; the contract is
 	// "non-nil, and the helper survives".
+}
+
+// ---------------------------------------------------------------------------
+// learnWireIdentityKeys — key material from a handshake frame is learned as
+// one self-certifying set or not at all.
+// ---------------------------------------------------------------------------
+
+// welcomeKeysLearningService builds a Service and a foreign responder
+// identity whose welcome key fields the tests vary.
+func welcomeKeysLearningService(t *testing.T) (*Service, *identity.Identity) {
+	t.Helper()
+	backend := netcoretest.New()
+	t.Cleanup(backend.Shutdown)
+	svc := NewServiceWithNetwork(config.Node{
+		ListenAddress:  "127.0.0.1:0",
+		Type:           config.NodeTypeFull,
+		TrustStorePath: t.TempDir() + "/trust.json",
+	}, testIdentityForNetworkConsumerTest(t), backend)
+	t.Cleanup(svc.WaitBackground)
+	return svc, testIdentityForNetworkConsumerTest(t)
+}
+
+// learnedWireKeys reports which of the three key caches hold an entry for
+// address.
+func learnedWireKeys(svc *Service, address string) (pubKey, boxKey, boxSig bool) {
+	svc.knowledgeMu.RLock()
+	defer svc.knowledgeMu.RUnlock()
+	_, pubKey = svc.pubKeys[address]
+	_, boxKey = svc.boxKeys[address]
+	_, boxSig = svc.boxSigs[address]
+	return pubKey, boxKey, boxSig
+}
+
+func TestLearnIdentityFromWelcome_CompleteValidKeySet_IsLearned(t *testing.T) {
+	t.Parallel()
+	svc, responder := welcomeKeysLearningService(t)
+
+	svc.learnIdentityFromWelcome(protocol.Frame{
+		Type:    "welcome",
+		Address: responder.Address,
+		PubKey:  identity.PublicKeyBase64(responder.PublicKey),
+		BoxKey:  identity.BoxPublicKeyBase64(responder.BoxPublicKey),
+		BoxSig:  identity.SignBoxKeyBinding(responder),
+	}, "198.51.100.7:64646")
+
+	if pubKey, boxKey, boxSig := learnedWireKeys(svc, responder.Address); !pubKey || !boxKey || !boxSig {
+		t.Fatalf("a complete, binding-valid key set was not learned: pubkey=%v boxkey=%v boxsig=%v", pubKey, boxKey, boxSig)
+	}
+}
+
+// Every node at or above MinimumProtocolVersion sends all four identity
+// fields, so a signing key without its box pair is not a peer to learn from.
+func TestLearnIdentityFromWelcome_PubKeyWithoutBoxPair_LearnsNothing(t *testing.T) {
+	t.Parallel()
+	svc, responder := welcomeKeysLearningService(t)
+
+	svc.learnIdentityFromWelcome(protocol.Frame{
+		Type:    "welcome",
+		Address: responder.Address,
+		PubKey:  identity.PublicKeyBase64(responder.PublicKey),
+	}, "198.51.100.7:64646")
+
+	if pubKey, boxKey, boxSig := learnedWireKeys(svc, responder.Address); pubKey || boxKey || boxSig {
+		t.Fatalf("a key set without a box pair was learned: pubkey=%v boxkey=%v boxsig=%v", pubKey, boxKey, boxSig)
+	}
+}
+
+// A box pair whose binding does not verify takes the signing key down with
+// it: the set is learned whole or not at all.
+func TestLearnIdentityFromWelcome_BoxBindingInvalid_LearnsNothing(t *testing.T) {
+	t.Parallel()
+	svc, responder := welcomeKeysLearningService(t)
+	stranger := testIdentityForNetworkConsumerTest(t)
+
+	svc.learnIdentityFromWelcome(protocol.Frame{
+		Type:    "welcome",
+		Address: responder.Address,
+		PubKey:  identity.PublicKeyBase64(responder.PublicKey),
+		BoxKey:  identity.BoxPublicKeyBase64(responder.BoxPublicKey),
+		BoxSig:  identity.SignBoxKeyBinding(stranger),
+	}, "198.51.100.7:64646")
+
+	if pubKey, boxKey, boxSig := learnedWireKeys(svc, responder.Address); pubKey || boxKey || boxSig {
+		t.Fatalf("a key set with an invalid box binding was learned: pubkey=%v boxkey=%v boxsig=%v", pubKey, boxKey, boxSig)
+	}
 }

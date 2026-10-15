@@ -26,7 +26,7 @@ func TestForgetUplinkLeavesNoResidueAgainstTheRealUplink(t *testing.T) {
 	upsertClaim(t, tbl, target, x, 2, RouteSourceAnnouncement)
 	upsertClaim(t, tbl, target, other, 3, RouteSourceAnnouncement)
 	upsertClaim(t, tbl, withdrawn, x, 2, RouteSourceAnnouncement)
-	if !tbl.WithdrawRoute(withdrawn, x, x, 1<<40) {
+	if !tbl.WithdrawRoute(withdrawn, x, 1<<40) {
 		t.Fatal("precondition: the withdrawal tombstoned the claim")
 	}
 	for i := 0; i < BlackHoleThreshold; i++ {
@@ -36,7 +36,7 @@ func TestForgetUplinkLeavesNoResidueAgainstTheRealUplink(t *testing.T) {
 	if removed := tbl.ForgetUplink(x); removed != 2 {
 		t.Fatalf("ForgetUplink removed %d claims, want 2 (the transit claim and the tombstone)", removed)
 	}
-	if got := tbl.InspectTriple(RouteTriple{Identity: withdrawn, Origin: withdrawn, NextHop: x}); got != nil {
+	if got := tbl.InspectUplinkClaim(withdrawn, x); got != nil {
 		t.Fatalf("the tombstone survived: %+v", got)
 	}
 	routes := tbl.Lookup(target)

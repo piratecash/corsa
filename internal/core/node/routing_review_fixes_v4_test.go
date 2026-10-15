@@ -406,7 +406,7 @@ func TestReview_v4_P1_1_TryReserveInFlight_IsAtomic(t *testing.T) {
 // We force the pair to Dead via ForceHealthForTest, then issue a
 // hop_ack. After the fix the health snapshot shows Good (proof
 // MarkHopAck fired) and the route source is promoted to HopAck
-// (proof UpdateRoute also fired — the lookup path used InspectTriple
+// (proof UpdateRoute also fired — the lookup path used InspectUplinkClaim
 // which is unfiltered).
 func TestReview_v4_P2_2_ConfirmRouteViaHopAck_RevivesDeadRoute(t *testing.T) {
 	svc := newTestServiceWithRouting(t, idNodeA)
@@ -429,7 +429,7 @@ func TestReview_v4_P2_2_ConfirmRouteViaHopAck_RevivesDeadRoute(t *testing.T) {
 	// would not see it past this point.
 	svc.routingTable.ForceHealthForTest(idTargetX, idPeerB, routing.HealthDead)
 
-	svc.confirmRouteViaHopAck(idTargetX, domain.PeerAddress(idPeerB.String()), domain.PeerIdentity{})
+	svc.confirmRouteViaHopAck(idTargetX, domain.PeerAddress(idPeerB.String()))
 
 	snap := svc.routingTable.HealthSnapshot()
 	if len(snap) != 1 {
@@ -512,14 +512,14 @@ func TestReview_v4_P2_2_ConfirmRouteViaHopAck_NoOrphanHealthOnUnmatchedAck(t *te
 	// claim in storage. The pre-fix code would have called
 	// MarkHopAck(idTargetX, idPeerC, 0) before realising the loop
 	// has no match, leaving an orphan Good entry for that pair.
-	svc.confirmRouteViaHopAck(idTargetX, domain.PeerAddress(idPeerC.String()), domain.PeerIdentity{})
+	svc.confirmRouteViaHopAck(idTargetX, domain.PeerAddress(idPeerC.String()))
 
 	after := svc.routingTable.HealthSnapshot()
 	if len(after) != 1 {
 		t.Fatalf("unmatched ack changed HealthSnapshot len = %d, want 1 (orphan entry must not be created)", len(after))
 	}
 	if after[0].Uplink == idPeerC {
-		t.Fatalf("unmatched ack created orphan health for (idTargetX, idPeerC): %+v (MarkHopAck must run only after InspectTriple confirms a matching claim)", after[0])
+		t.Fatalf("unmatched ack created orphan health for (idTargetX, idPeerC): %+v (MarkHopAck must run only after InspectUplinkClaim confirms a matching claim)", after[0])
 	}
 	if after[0].Uplink != idPeerB {
 		t.Fatalf("post-ack entry Uplink = %q, want %q", after[0].Uplink, idPeerB)
@@ -573,7 +573,7 @@ func TestReview_v4_P2_2_ConfirmRouteViaHopAck_SkipsWithdrawnRoute(t *testing.T) 
 	}
 
 	// Withdraw it.
-	if ok := svc.routingTable.WithdrawRoute(idTargetX, idTargetX, idPeerB, 2); !ok {
+	if ok := svc.routingTable.WithdrawRoute(idTargetX, idPeerB, 2); !ok {
 		t.Fatal("setup: WithdrawRoute returned false")
 	}
 
@@ -590,14 +590,14 @@ func TestReview_v4_P2_2_ConfirmRouteViaHopAck_SkipsWithdrawnRoute(t *testing.T) 
 	}
 	baselineHealth := baseline[0].Health
 
-	svc.confirmRouteViaHopAck(idTargetX, domain.PeerAddress(idPeerB.String()), domain.PeerIdentity{})
+	svc.confirmRouteViaHopAck(idTargetX, domain.PeerAddress(idPeerB.String()))
 
 	after := svc.routingTable.HealthSnapshot()
 	if len(after) != 1 {
 		t.Fatalf("hop_ack on withdrawn route changed HealthSnapshot len = %d, want 1 (no new entry should appear)", len(after))
 	}
 	if after[0].Health == routing.HealthGood && baselineHealth != routing.HealthGood {
-		t.Fatalf("hop_ack on withdrawn route promoted health to Good (was %s) — MarkHopAck must not fire when InspectTriple shows IsWithdrawn=true", baselineHealth)
+		t.Fatalf("hop_ack on withdrawn route promoted health to Good (was %s) — MarkHopAck must not fire when InspectUplinkClaim shows IsWithdrawn=true", baselineHealth)
 	}
 	// The withdrawal must remain — UpdateRoute must NOT have
 	// resurrected the route at source=HopAck.
@@ -732,7 +732,7 @@ func TestReview_v4_P2_AtomicConfirmHopAck_NoLiveClaim(t *testing.T) {
 
 // TestReview_v4_P2_AtomicConfirmHopAck_WithdrawnClaim — withdrawn
 // claims must not be revived. ConfirmHopAck returns applied=false
-// when InspectTriple sees IsWithdrawn=true and does not touch
+// when InspectUplinkClaim sees IsWithdrawn=true and does not touch
 // health.
 func TestReview_v4_P2_AtomicConfirmHopAck_WithdrawnClaim(t *testing.T) {
 	tbl := routing.NewTable(routing.WithLocalOrigin(idNodeA))
@@ -750,7 +750,7 @@ func TestReview_v4_P2_AtomicConfirmHopAck_WithdrawnClaim(t *testing.T) {
 	if err != nil || status != routing.RouteAccepted {
 		t.Fatalf("setup: UpdateRoute status=%v err=%v", status, err)
 	}
-	if ok := tbl.WithdrawRoute(idTargetX, idTargetX, idPeerB, 2); !ok {
+	if ok := tbl.WithdrawRoute(idTargetX, idPeerB, 2); !ok {
 		t.Fatal("setup: WithdrawRoute returned false")
 	}
 

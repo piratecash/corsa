@@ -514,32 +514,24 @@ const (
 	// ProtocolVersion is the wire version this build emits in hello/welcome.
 	// MinimumProtocolVersion is the floor below which inbound peers are
 	// rejected. Both are bumped only by an explicit wire/runtime contract
-	// change documented in docs/protocol/handshake.md. The current floor
-	// is well above v12, so this build does not carry any v10..v13
-	// compatibility paths.
+	// change documented in docs/protocol/handshake.md. A feature that older
+	// peers cannot take is gated on its own ProtocolVersion<Feature>
+	// constant below; once the floor reaches that constant, the gate and
+	// the constant are deleted (TestFeatureVersionGatesAreAboveTheFloor
+	// fails until they are). ProtocolVersionSecureSession is the one
+	// exception: it is not a gate but the anchor of the session mode, so a
+	// floor that reaches it is not deleted — it switches sessionv2.ModeFor
+	// to ModeV2Only.
 	//
-	// v20 raised the floor past the subscribe_inbox era: a v20+ responder
-	// auto-registers the peer's inbox subscription AND replays the backlog at
-	// auth time (see handleAuthSession → registerHelloRoute), so the explicit
-	// subscribe_inbox/subscribed round-trip became redundant. With the floor
-	// at 20 the legacy commands (subscribe_inbox, subscribed, request_inbox)
-	// and the pre-v20 initiator round-trip have been removed entirely.
-	// v23: ReceiptStatusSeenAck — the end-to-end acknowledgement the
-	// original message sender returns for a received "seen" receipt, riding
-	// the existing receipt frames (push_delivery_receipt /
-	// relay_delivery_receipt). Additive: pre-v23 binaries reject the unknown
-	// status at parse time and drop the frame; the seen-sender's bounded
-	// retry absorbs that until both ends are v23+.
 	// v27: self-certifying sender keys on DM transport frames —
 	// relay_message / push_message carry the origin sender's PUBLIC key
 	// triple (pubkey/boxkey/boxsig, reusing the existing hello-frame
 	// fields), letting a first-contact recipient verify the envelope
 	// without an on-demand contact sync to hops that may not know the
-	// sender. Additive both ways: pre-v27 receivers ignore the extra
-	// fields, pre-v27 relays strip them in transit (their forward-frame
-	// builder does not copy the fields) and the receiver falls back to
-	// the legacy sync path. No emission gate is needed — unlike
-	// seen_ack, unknown JSON fields are silently ignored, not rejected.
+	// sender. The triple is best-effort, so the on-demand sync stays: a
+	// hop that rebuilds a frame from a stored envelope attaches only the
+	// keys its bounded key maps still hold, a transit hop drops oversized
+	// fields, and a hostile hop can strip them.
 	// v30: a relay no longer refuses a transit DM for being old. The 24-hour
 	// ceiling could not distinguish an envelope circulating on its own from
 	// a live sender re-sending an old message, and it refused both — with no
@@ -575,24 +567,6 @@ const (
 	// every node on the network understands old dates and the envelope can
 	// travel with the date its author actually wrote it at.
 	ProtocolVersionNoTransitAgeCeiling = 30
-	// ProtocolVersionSeenAck is the version that introduced
-	// ReceiptStatusSeenAck. Receipt senders gate seen_ack emission on the
-	// peer advertising >= this version (a pre-v23 binary only rejects the
-	// unknown status at parse time, so sending it is pure waste).
-	// TODO(seen-ack-gate-removal): delete this constant and the gates in
-	// internal/core/node (sendReceiptToPeer, pushReceiptToSubscribers) once
-	// MinimumProtocolVersion reaches ProtocolVersionSeenAck.
-	ProtocolVersionSeenAck = 23
-	// ProtocolVersionDMSenderKeys is the version that introduced the
-	// attached sender-key triple on DM transport frames. Not used as an
-	// emission gate (the fields are additive); it exists so the floor
-	// raise that eventually assumes "keys always attached, transit never
-	// strips them" — enabling removal of the on-demand sender-key sync
-	// fallback (syncSenderKeys) — has a documented anchor.
-	// TODO(dm-sender-keys-floor): once MinimumProtocolVersion reaches
-	// this value, the fallback sync in deliverRelayedMessage /
-	// handleInboundPushMessage becomes dead code for DM topics.
-	ProtocolVersionDMSenderKeys = 27
 	// ProtocolVersionReceiptSenderAck is the version that added
 	// Frame.ReceiptSender to ack_delete, making an ack name WHICH receipt
 	// it holds rather than a recipient+id+status triple that two receipts

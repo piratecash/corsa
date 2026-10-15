@@ -157,7 +157,7 @@ func TestMarkHopFailure_ArmsCooldownOn5thConsecutiveFailure(t *testing.T) {
 // TestMarkHopFailure_OnAbsentPairIsNoop — storage-side guard: a
 // timeout fired against a (Identity, Uplink) pair the routing
 // table has never observed (no UpdateRoute admission, no
-// AddDirectPeer) must not create any state. InspectTriple returns
+// AddDirectPeer) must not create any state. InspectUplinkClaim returns
 // nil and MarkHopFailure short-circuits before touching health.
 func TestMarkHopFailure_OnAbsentPairIsNoop(t *testing.T) {
 	tbl := NewTable(WithLocalOrigin(domaintest.ID("self")))
@@ -216,7 +216,7 @@ func TestMarkHopFailure_OnWithdrawnClaimIsNoop(t *testing.T) {
 	// "withdrawn ⇒ no-op" branch, not the "absent ⇒ no-op" branch.
 	tbl.MarkHopAck(domaintest.ID("id-target"), domaintest.ID("id-uplink"), 0)
 	// upsertClaim seeds SeqNo=1; withdraw needs strictly newer SeqNo.
-	if !tbl.WithdrawRoute(domaintest.ID("id-target"), domaintest.ID("id-target"), domaintest.ID("id-uplink"), 2) {
+	if !tbl.WithdrawRoute(domaintest.ID("id-target"), domaintest.ID("id-uplink"), 2) {
 		t.Fatal("WithdrawRoute returned false")
 	}
 

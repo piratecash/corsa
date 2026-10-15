@@ -135,7 +135,7 @@ func TestSyncDigestFor_IgnoresWithdrawnAndExpired(t *testing.T) {
 	// One live claim, one withdrawn.
 	upsertClaim(t, tbl, domaintest.ID("id-live"), domaintest.ID("id-peer"), 2, RouteSourceAnnouncement)
 	upsertClaim(t, tbl, domaintest.ID("id-dead"), domaintest.ID("id-peer"), 2, RouteSourceAnnouncement)
-	if !tbl.WithdrawRoute(domaintest.ID("id-dead"), domaintest.ID("id-dead"), domaintest.ID("id-peer"), 2) {
+	if !tbl.WithdrawRoute(domaintest.ID("id-dead"), domaintest.ID("id-peer"), 2) {
 		t.Fatal("WithdrawRoute returned false")
 	}
 

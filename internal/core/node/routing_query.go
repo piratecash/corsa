@@ -86,10 +86,9 @@ func (s *Service) handleRouteQuery(connID domain.ConnID, senderIdentity domain.P
 	// (nextOutboundSeqLockedPerPeer) rather than the raw claim's
 	// SeqNo. Without this, a route_query response can carry a
 	// SeqNo unrelated to what subsequent normal announces would
-	// emit, causing receivers to either reject later legitimate
+	// emit, causing receivers to reject later legitimate
 	// announces as stale (if response.SeqNo > outbound counter
-	// state) or trip the cross-Origin lineage guard via a
-	// mismatched LastIngressOrigin. Table.AnnounceTargetFor
+	// state). Table.AnnounceTargetFor
 	// projects the single (target, requester) entry through the
 	// same path AnnounceProjectionFor uses for periodic announces,
 	// keeping the two timelines aligned.
@@ -142,17 +141,12 @@ func (s *Service) handleRouteQuery(connID domain.ConnID, senderIdentity domain.P
 //   - Hops = response.BestHops + 1: receive-side adds one for the
 //     hop from us to the responder.
 //   - Origin = senderIdentity: matches the wire-Origin a normal
-//     announce_routes from the same peer would carry (post-Phase-A
-//     sender-originated synthesis, see route_store_lookup.go's
-//     emitOrigin = localOrigin contract in AnnounceProjectionFor).
-//     The previous synthesis used target_identity, which made the
-//     ingested entry land with a different LastIngressOrigin than
-//     a normal announce from the same peer, tripping the cross-
-//     Origin lineage guard on the next real announce (PR 11.32
-//     P2). Post-Phase-A the storage dedup key is (Identity,
-//     Uplink) and Origin is wire-only metadata; using
-//     senderIdentity keeps both ingest paths funnelling into the
-//     same LastIngressOrigin.
+//     announce_routes from the same peer carries (sender-originated
+//     synthesis, see route_store_lookup.go's emitOrigin =
+//     localOrigin contract in AnnounceProjectionFor). Storage keys
+//     on (Identity, Uplink) and drops Origin, so the value only
+//     has to pass ingest validation like any announce from this
+//     peer.
 //   - SeqNo = response.BestSeqNo: the responder's wire SeqNo for
 //     the chosen claim. Standard SeqNo monotonicity guards in
 //     UpdateRoute decide whether to accept.
@@ -262,15 +256,11 @@ func (s *Service) handleRouteQueryResponse(sender routingSender, resp protocol.R
 	}
 
 	// PR 11.32 P2/P3: Origin = senderIdentity matches what a
-	// normal announce_routes from this peer would carry — wire
+	// normal announce_routes from this peer carries — wire
 	// AnnounceProjectionFor emits Origin=sender's localOrigin
-	// (sender-originated post-Phase-A, see route_store_lookup.go's
-	// emitOrigin synthesis). Setting Origin=TargetIdentity
-	// previously made route_query_response ingest land with a
-	// different LastIngressOrigin than a normal announce from the
-	// same peer, tripping the cross-Origin lineage guards on the
-	// next real announce. Using senderIdentity keeps both ingest
-	// paths funnelling into the same lineage.
+	// (see route_store_lookup.go's emitOrigin synthesis), so both
+	// ingest paths present the same frame shape for the same
+	// (Identity, Uplink) slot.
 	//
 	// ExpiresAt is left zero — Table.UpdateRoute applies the
 	// table's own defaultTTL and injected clock, matching the

@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/piratecash/corsa/internal/core/config"
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 	"github.com/piratecash/corsa/internal/core/identity"
@@ -16,13 +17,14 @@ import (
 )
 
 // testFixturePeerProtocolVersion is the placeholder protocol version
-// returned by default fixture PeerRouteMeta callbacks. It is pinned at
-// the current production ProtocolVersion / MinimumProtocolVersion (14)
-// so the default fixture describes a peer the live build would actually
-// admit; ranking-DESC tests stay deterministic. Tests exercising
-// specific ranking outcomes wire their own callback returning the
-// version they need.
-const testFixturePeerProtocolVersion = 14
+// returned by default fixture PeerRouteMeta callbacks. It follows this
+// build's config.ProtocolVersion so the default fixture describes a peer
+// running the same build — one the node would actually admit, which a
+// hard-coded number silently stops being once the floor rises above it;
+// ranking-DESC tests stay deterministic. Tests exercising specific
+// ranking outcomes wire their own callback returning the version they
+// need.
+const testFixturePeerProtocolVersion = config.ProtocolVersion
 
 // testNonceCache is a simple in-memory NonceCache for testing.
 type testNonceCache struct {
@@ -1154,32 +1156,32 @@ func TestRouteCandidateLessOrdering(t *testing.T) {
 	}{
 		{
 			name:      "higher protocol version beats lower hops",
-			a:         routeCandidate{nextHop: domaintest.ID("a"), hops: 5, protocolVersion: 7, connectedAt: base},
-			b:         routeCandidate{nextHop: domaintest.ID("b"), hops: 1, protocolVersion: 6, connectedAt: base.Add(-time.Hour)},
+			a:         routeCandidate{nextHop: domaintest.ID("a"), hops: 5, protocolVersion: testFixturePeerProtocolVersion, connectedAt: base},
+			b:         routeCandidate{nextHop: domaintest.ID("b"), hops: 1, protocolVersion: testFixturePeerProtocolVersion - 1, connectedAt: base.Add(-time.Hour)},
 			wantALess: true,
 		},
 		{
 			name:      "equal version: fewer hops wins",
-			a:         routeCandidate{nextHop: domaintest.ID("a"), hops: 1, protocolVersion: 6, connectedAt: base},
-			b:         routeCandidate{nextHop: domaintest.ID("b"), hops: 2, protocolVersion: 6, connectedAt: base.Add(-time.Hour)},
+			a:         routeCandidate{nextHop: domaintest.ID("a"), hops: 1, protocolVersion: testFixturePeerProtocolVersion - 1, connectedAt: base},
+			b:         routeCandidate{nextHop: domaintest.ID("b"), hops: 2, protocolVersion: testFixturePeerProtocolVersion - 1, connectedAt: base.Add(-time.Hour)},
 			wantALess: true,
 		},
 		{
 			name:      "equal version and hops: longer uptime (older connectedAt) wins",
-			a:         routeCandidate{nextHop: domaintest.ID("a"), hops: 2, protocolVersion: 6, connectedAt: base.Add(-time.Hour)},
-			b:         routeCandidate{nextHop: domaintest.ID("b"), hops: 2, protocolVersion: 6, connectedAt: base},
+			a:         routeCandidate{nextHop: domaintest.ID("a"), hops: 2, protocolVersion: testFixturePeerProtocolVersion - 1, connectedAt: base.Add(-time.Hour)},
+			b:         routeCandidate{nextHop: domaintest.ID("b"), hops: 2, protocolVersion: testFixturePeerProtocolVersion - 1, connectedAt: base},
 			wantALess: true,
 		},
 		{
 			name:      "equal everything: lexicographic nextHop wins",
-			a:         routeCandidate{nextHop: domaintest.ID("a"), hops: 2, protocolVersion: 6, connectedAt: base},
-			b:         routeCandidate{nextHop: domaintest.ID("b"), hops: 2, protocolVersion: 6, connectedAt: base},
+			a:         routeCandidate{nextHop: domaintest.ID("a"), hops: 2, protocolVersion: testFixturePeerProtocolVersion - 1, connectedAt: base},
+			b:         routeCandidate{nextHop: domaintest.ID("b"), hops: 2, protocolVersion: testFixturePeerProtocolVersion - 1, connectedAt: base},
 			wantALess: true,
 		},
 		{
 			name:      "known connectedAt beats zero connectedAt under equal version and hops",
-			a:         routeCandidate{nextHop: domaintest.ID("a"), hops: 2, protocolVersion: 6, connectedAt: base},
-			b:         routeCandidate{nextHop: domaintest.ID("b"), hops: 2, protocolVersion: 6, connectedAt: time.Time{}},
+			a:         routeCandidate{nextHop: domaintest.ID("a"), hops: 2, protocolVersion: testFixturePeerProtocolVersion - 1, connectedAt: base},
+			b:         routeCandidate{nextHop: domaintest.ID("b"), hops: 2, protocolVersion: testFixturePeerProtocolVersion - 1, connectedAt: time.Time{}},
 			wantALess: true,
 		},
 	}
@@ -1222,10 +1224,9 @@ func TestRouteCandidateLessOrdering(t *testing.T) {
 // internal/core/node/file_integration_test.go's
 // TestFileTransferPeerRouteMetaCapsInflatedVersionAtLocal for the
 // node-layer regression that pins the cap behaviour where
-// trustedFileRouteVersion lives — that test reads
-// config.ProtocolVersion at runtime, the present test pins a
-// fixture-local stand-in because the filerouter package has no
-// access to that constant.
+// trustedFileRouteVersion lives. The cap itself is not applied in
+// this package, so the present test feeds the already-capped values
+// and models the local version as this build's config.ProtocolVersion.
 func TestFileRouterPrefersLegitOverInflatedVersion(t *testing.T) {
 	t.Parallel()
 
@@ -1252,13 +1253,11 @@ func TestFileRouterPrefersLegitOverInflatedVersion(t *testing.T) {
 	}
 
 	keys := map[domain.PeerIdentity]ed25519.PublicKey{senderID: pub}
-	// fixtureLocal is the local-version stand-in for this fixture
-	// (filerouter has no access to config.ProtocolVersion, so we pin
-	// a value here and treat it as the cap ceiling; production
-	// config.ProtocolVersion may differ — what matters for the
-	// comparator is only that both candidates' ProtocolVersion values
-	// are equal so the primary key ties).
-	const fixtureLocal = domain.ProtocolVersion(12)
+	// fixtureLocal is the cap ceiling this fixture models: this build's
+	// own version, so both peers describe versions the node would admit.
+	// What the comparator depends on is only that both candidates'
+	// ProtocolVersion values are equal so the primary key ties.
+	const fixtureLocal = domain.ProtocolVersion(config.ProtocolVersion)
 	meta := map[domain.PeerIdentity]PeerRouteMeta{
 		// Legit: ProtocolVersion mirrors RawProtocolVersion at fixtureLocal.
 		relayClose: {ConnectedAt: now.Add(-time.Hour), ProtocolVersion: fixtureLocal, RawProtocolVersion: fixtureLocal},
@@ -1330,8 +1329,8 @@ func TestFileRouterEqualVersionFallsBackToHopsThenUptime(t *testing.T) {
 
 	keys := map[domain.PeerIdentity]ed25519.PublicKey{senderID: pub}
 	meta := map[domain.PeerIdentity]PeerRouteMeta{
-		relayClose: {ConnectedAt: now.Add(-time.Minute), ProtocolVersion: 12, RawProtocolVersion: 12},
-		relayFar:   {ConnectedAt: now.Add(-time.Hour), ProtocolVersion: 12, RawProtocolVersion: 12},
+		relayClose: {ConnectedAt: now.Add(-time.Minute), ProtocolVersion: testFixturePeerProtocolVersion, RawProtocolVersion: testFixturePeerProtocolVersion},
+		relayFar:   {ConnectedAt: now.Add(-time.Hour), ProtocolVersion: testFixturePeerProtocolVersion, RawProtocolVersion: testFixturePeerProtocolVersion},
 	}
 
 	tr := &testFileRouter{sentFrames: make(map[domain.PeerIdentity][]json.RawMessage)}
@@ -1395,16 +1394,13 @@ func TestRouterExplainRouteReturnsRankedPlan(t *testing.T) {
 		},
 	}
 
-	// fixtureLocal is the ranking ceiling this test models. The
-	// filerouter package has no access to config.ProtocolVersion (the
-	// node layer is where the cap is applied); we hard-code a single
-	// value here and treat it as "the local version" for the
-	// purposes of this fixture. The actual config.ProtocolVersion in
-	// the production build can be higher than 12 — what matters for
-	// the comparator is only that both candidates' ProtocolVersion
-	// values are equal so the primary key ties. RawProtocolVersion
-	// is then free to differ on the inflated side.
-	const fixtureLocal = domain.ProtocolVersion(12)
+	// fixtureLocal is the ranking ceiling this test models: this
+	// build's config.ProtocolVersion (the cap itself is applied in the
+	// node layer, so the fixture feeds already-capped values). What the
+	// comparator depends on is only that both candidates'
+	// ProtocolVersion values are equal so the primary key ties.
+	// RawProtocolVersion is then free to differ on the inflated side.
+	const fixtureLocal = domain.ProtocolVersion(config.ProtocolVersion)
 	meta := map[domain.PeerIdentity]PeerRouteMeta{
 		// relayClose is a healthy peer at fixtureLocal
 		// (Raw == PV == fixtureLocal). relayFar represents an
@@ -1575,8 +1571,8 @@ func TestRouterExplainRouteDeduplicatesDirectAndRoutingTable(t *testing.T) {
 	}
 
 	meta := map[domain.PeerIdentity]PeerRouteMeta{
-		dst:   {ConnectedAt: now.Add(-time.Hour), ProtocolVersion: 12, RawProtocolVersion: 12},
-		relay: {ConnectedAt: now.Add(-time.Minute), ProtocolVersion: 12, RawProtocolVersion: 12},
+		dst:   {ConnectedAt: now.Add(-time.Hour), ProtocolVersion: testFixturePeerProtocolVersion, RawProtocolVersion: testFixturePeerProtocolVersion},
+		relay: {ConnectedAt: now.Add(-time.Minute), ProtocolVersion: testFixturePeerProtocolVersion, RawProtocolVersion: testFixturePeerProtocolVersion},
 	}
 
 	router := NewRouter(RouterConfig{
@@ -1639,8 +1635,8 @@ func TestSendFileCommandSkipsRoutingTableDirectAfterFailedDirectAttempt(t *testi
 	}
 
 	meta := map[domain.PeerIdentity]PeerRouteMeta{
-		dst:   {ConnectedAt: now.Add(-time.Hour), ProtocolVersion: 12, RawProtocolVersion: 12},
-		relay: {ConnectedAt: now.Add(-time.Minute), ProtocolVersion: 12, RawProtocolVersion: 12},
+		dst:   {ConnectedAt: now.Add(-time.Hour), ProtocolVersion: testFixturePeerProtocolVersion, RawProtocolVersion: testFixturePeerProtocolVersion},
+		relay: {ConnectedAt: now.Add(-time.Minute), ProtocolVersion: testFixturePeerProtocolVersion, RawProtocolVersion: testFixturePeerProtocolVersion},
 	}
 
 	_, priv, _ := ed25519.GenerateKey(nil)

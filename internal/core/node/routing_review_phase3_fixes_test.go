@@ -28,7 +28,7 @@ import (
 //     resolveRouteNextHopAddress and friends; otherwise
 //     onRelayHopAckTimeout records failure against a bogus
 //     identity equal to the inbound key string.
-//   - P1.3b — sendRelayToAddress on the inbound branch must
+//   - P1.3b — sendTableRoutedRelayToAddress on the inbound branch must
 //     stamp HopAckRemainingTicks AND FrameLine on the persisted
 //     relayForwardState; otherwise inbound-directed origin
 //     relays never enter Phase 3 timeout/failover at all.
@@ -313,7 +313,7 @@ func TestResolvePeerIdentity_HandlesInboundPrefixedKey(t *testing.T) {
 	}
 }
 
-// --- P1.3b: sendRelayToAddress inbound branch stamps Phase 3 fields ---
+// --- P1.3b: sendTableRoutedRelayToAddress inbound branch stamps Phase 3 fields ---
 
 // TestSendRelayToAddress_InboundOriginStampsHopAckBudgetAndFrameLine
 // pins the contract: an origin relay forwarded via an inbound
@@ -342,7 +342,7 @@ func TestSendRelayToAddress_InboundOriginStampsHopAckBudgetAndFrameLine(t *testi
 	// writeFrameToInbound depends on the production
 	// net-write path. We bypass the actual write by directly
 	// stashing the state through relayStates.store — mirroring
-	// what sendRelayToAddress does AFTER the write. The fix
+	// what sendTableRoutedRelayToAddress does AFTER the write. The fix
 	// itself is observable on the relayForwardState fields.
 	msg := protocol.Envelope{
 		ID:        protocol.MessageID("msg-inbound-origin"),
@@ -351,7 +351,7 @@ func TestSendRelayToAddress_InboundOriginStampsHopAckBudgetAndFrameLine(t *testi
 		Topic:     "dm",
 		Payload:   []byte("hello"),
 	}
-	// Re-build the same frame sendRelayToAddress would build
+	// Re-build the same frame sendTableRoutedRelayToAddress would build
 	// for the inbound branch.
 	frame := protocol.Frame{
 		Type:        "relay_message",

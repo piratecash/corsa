@@ -15,7 +15,7 @@ package routing
 //     and Hops must refresh TTL (RouteUnchanged + dirty),
 //     otherwise hop_ack-promoted routes age out by TTL despite
 //     being actively re-announced.
-//   - TestUpdateRoute_HopAckPromotionPreservesWireLineage
+//   - TestUpdateRoute_HopAckPromotionThenReannounceIsReconfirmation
 //     (table_test.go) — the forced-full-sync re-announce after a
 //     hop_ack promotion is a legitimate refresh; rejecting it
 //     breaks the "promotion sticks" semantic.
@@ -31,6 +31,14 @@ package routing
 // legitimate same-upstream re-announce / TTL refresh path, not a
 // poisoning attack. See the Phase 4 doc entry for §3.6 for the
 // final finding.
+//
+// One exception did surface later: the Direct slot (peer, peer).
+// Its only possible same-uplink writer is the peer describing a route
+// to itself, which no honest peer emits, so there is no refresh path
+// to protect there. ApplyUpdate refuses any non-Direct source into a
+// Direct slot and WithdrawUplinkClaim leaves it untouched — see
+// direct_claim_guard_test.go. The HopAck / Announcement refresh paths
+// above are unaffected.
 //
 // If a future threat model surfaces a poisoning vector that the
 // per-uplink storage does NOT cover (e.g. authenticated peer

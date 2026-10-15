@@ -36,12 +36,8 @@ var (
 	reconfirmUplink = domaintest.ID("charlie")
 )
 
-func reconfirmKey() RouteTriple {
-	return RouteTriple{
-		Identity: reconfirmIdent,
-		Origin:   reconfirmOrigin,
-		NextHop:  reconfirmUplink,
-	}
+func inspectReconfirmClaim(tbl *Table) *RouteEntry {
+	return tbl.InspectUplinkClaim(reconfirmIdent, reconfirmUplink)
 }
 
 // TestReconfirmation_VerifiedIncomingUpgradesUnsignedStored is the
@@ -55,7 +51,7 @@ func TestReconfirmation_VerifiedIncomingUpgradesUnsignedStored(t *testing.T) {
 		Identity: reconfirmIdent, Origin: reconfirmOrigin, NextHop: reconfirmUplink,
 		Hops: 3, SeqNo: 5, Source: RouteSourceAnnouncement,
 	})
-	pre := tbl.InspectTriple(reconfirmKey())
+	pre := inspectReconfirmClaim(tbl)
 	if pre == nil {
 		t.Fatalf("precondition: stored claim must exist after initial admission")
 	}
@@ -82,7 +78,7 @@ func TestReconfirmation_VerifiedIncomingUpgradesUnsignedStored(t *testing.T) {
 		t.Fatalf("status: got %v want RouteUnchanged (same SeqNo + same Hops reconfirmation)", status)
 	}
 
-	post := tbl.InspectTriple(reconfirmKey())
+	post := inspectReconfirmClaim(tbl)
 	if post == nil {
 		t.Fatalf("post: stored claim must still exist")
 	}
@@ -108,7 +104,7 @@ func TestReconfirmation_UnsignedIncomingDoesNotDowngradeVerified(t *testing.T) {
 		AttestedSig:         sigBytes,
 		AttestedSigVerified: true,
 	})
-	pre := tbl.InspectTriple(reconfirmKey())
+	pre := inspectReconfirmClaim(tbl)
 	if pre == nil || !pre.AttestedSigVerified {
 		t.Fatalf("precondition: stored claim must start verified")
 	}
@@ -127,7 +123,7 @@ func TestReconfirmation_UnsignedIncomingDoesNotDowngradeVerified(t *testing.T) {
 		t.Fatalf("status: got %v want RouteUnchanged", status)
 	}
 
-	post := tbl.InspectTriple(reconfirmKey())
+	post := inspectReconfirmClaim(tbl)
 	if post == nil {
 		t.Fatalf("post: stored claim must still exist")
 	}
@@ -153,7 +149,7 @@ func TestReconfirmation_UnverifiedIncomingForwardsBytesToUnverifiedStored(t *tes
 		Identity: reconfirmIdent, Origin: reconfirmOrigin, NextHop: reconfirmUplink,
 		Hops: 3, SeqNo: 5, Source: RouteSourceAnnouncement,
 	})
-	pre := tbl.InspectTriple(reconfirmKey())
+	pre := inspectReconfirmClaim(tbl)
 	if pre == nil || pre.AttestedSigVerified || len(pre.AttestedSig) != 0 {
 		t.Fatalf("precondition: stored claim must be unsigned + unverified")
 	}
@@ -174,7 +170,7 @@ func TestReconfirmation_UnverifiedIncomingForwardsBytesToUnverifiedStored(t *tes
 		t.Fatalf("status: got %v want RouteUnchanged", status)
 	}
 
-	post := tbl.InspectTriple(reconfirmKey())
+	post := inspectReconfirmClaim(tbl)
 	if post == nil {
 		t.Fatalf("post: stored claim must still exist")
 	}
@@ -204,7 +200,7 @@ func TestReconfirmation_VerifiedUpgradeCopiesIncomingExtra(t *testing.T) {
 		Hops: 3, SeqNo: 5, Source: RouteSourceAnnouncement,
 		Extra: oldExtra,
 	})
-	pre := tbl.InspectTriple(reconfirmKey())
+	pre := inspectReconfirmClaim(tbl)
 	if pre == nil || string(pre.Extra) != string(oldExtra) {
 		t.Fatalf("precondition: stored Extra must equal initial; got %q", pre.Extra)
 	}
@@ -231,7 +227,7 @@ func TestReconfirmation_VerifiedUpgradeCopiesIncomingExtra(t *testing.T) {
 		t.Fatalf("UpdateRoute: %v", err)
 	}
 
-	post := tbl.InspectTriple(reconfirmKey())
+	post := inspectReconfirmClaim(tbl)
 	if post == nil {
 		t.Fatalf("post: stored claim must still exist")
 	}
@@ -276,7 +272,7 @@ func TestReconfirmation_ForwardThroughBytesCopyIncomingExtra(t *testing.T) {
 		t.Fatalf("UpdateRoute: %v", err)
 	}
 
-	post := tbl.InspectTriple(reconfirmKey())
+	post := inspectReconfirmClaim(tbl)
 	if post == nil {
 		t.Fatalf("post: stored claim must still exist")
 	}
@@ -322,7 +318,7 @@ func TestReconfirmation_UnsignedDoesNotChangeExtra(t *testing.T) {
 		t.Fatalf("UpdateRoute: %v", err)
 	}
 
-	post := tbl.InspectTriple(reconfirmKey())
+	post := inspectReconfirmClaim(tbl)
 	if post == nil {
 		t.Fatalf("post: stored claim must still exist")
 	}
@@ -364,7 +360,7 @@ func TestReconfirmation_UnsignedDowngradeAttemptKeepsStoredExtra(t *testing.T) {
 		t.Fatalf("UpdateRoute: %v", err)
 	}
 
-	post := tbl.InspectTriple(reconfirmKey())
+	post := inspectReconfirmClaim(tbl)
 	if post == nil {
 		t.Fatalf("post: stored claim must still exist")
 	}
@@ -408,7 +404,7 @@ func TestReconfirmation_UnverifiedRotationIsIgnored(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("UpdateRoute first observation: %v", err)
 	}
-	after1 := tbl.InspectTriple(reconfirmKey())
+	after1 := inspectReconfirmClaim(tbl)
 	if after1 == nil || string(after1.AttestedSig) != string(firstBytes) {
 		t.Fatalf("first observation must store unverified bytes; got %q", after1.AttestedSig)
 	}
@@ -424,7 +420,7 @@ func TestReconfirmation_UnverifiedRotationIsIgnored(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("UpdateRoute rotation attempt: %v", err)
 	}
-	after2 := tbl.InspectTriple(reconfirmKey())
+	after2 := inspectReconfirmClaim(tbl)
 	if after2 == nil {
 		t.Fatalf("post: stored claim must still exist")
 	}
@@ -463,7 +459,7 @@ func TestReconfirmation_VerifiedStillUpgradesOverStoredUnverified(t *testing.T) 
 	}); err != nil {
 		t.Fatalf("UpdateRoute verified upgrade: %v", err)
 	}
-	post := tbl.InspectTriple(reconfirmKey())
+	post := inspectReconfirmClaim(tbl)
 	if post == nil {
 		t.Fatalf("post: stored claim must still exist")
 	}

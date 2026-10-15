@@ -244,8 +244,9 @@ const (
 	// CapMeshDatagramV1: an endpoint-only client must be able to receive
 	// what is addressed to it without ever claiming to relay, and a
 	// transit candidate must prove it really forwards. The distinction
-	// outlives any future MinimumProtocolVersion bump — once v28 is the
-	// floor the endpoint check becomes trivial, but "endpoint versus
+	// outlives any MinimumProtocolVersion bump: neither capability follows
+	// from a peer's version — a node advertises the endpoint side only when
+	// CORSA_ENABLE_DATAGRAM_V1 turns the layer on — and "endpoint versus
 	// transit" stays a real difference between node roles.
 	CapMeshDatagramTransitV1 Capability = "mesh_datagram_transit_v1"
 )

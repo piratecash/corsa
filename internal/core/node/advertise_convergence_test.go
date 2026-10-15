@@ -47,12 +47,12 @@ func mustPeerIP(t *testing.T, s string) domain.PeerIP {
 	return ip
 }
 
-// TestValidateAdvertisedAddress covers every accept branch of the v12
+// TestValidateAdvertisedAddress covers every accept branch of the
 // advertise convergence decision matrix. The helper is a pure function:
 // no Service state, no network side effects — so each row of the matrix
-// maps directly to one test case. The v12 contract says the helper
-// never rejects on advertise-learning grounds, so the case shape no
-// longer carries notice / reject expectations.
+// maps directly to one test case. The helper never rejects on
+// advertise-learning grounds, so the case shape carries no notice /
+// reject expectations.
 func TestValidateAdvertisedAddress(t *testing.T) {
 	cases := []struct {
 		name              string
@@ -60,7 +60,6 @@ func TestValidateAdvertisedAddress(t *testing.T) {
 		frame             protocol.Frame
 		wantDecision      advertiseDecision
 		wantAnnounceState announceState
-		wantWriteMode     persistWriteMode
 	}{
 		{
 			name:        "non_listener_explicit",
@@ -68,52 +67,25 @@ func TestValidateAdvertisedAddress(t *testing.T) {
 			frame: protocol.Frame{
 				Type:     "hello",
 				Listener: "0",
-				Listen:   "",
 			},
 			wantDecision:      advertiseDecisionNonListener,
 			wantAnnounceState: announceStateDirectOnly,
-			wantWriteMode:     persistWriteModeCreateOrUpdate,
 		},
 		{
-			// Legacy frame with no explicit listener flag AND no usable
-			// listen string: falls to legacy_direct (accept, direct_only)
-			// because we cannot claim the peer is a listener without an
-			// explicit Listener="1" flag and without a usable listen
-			// endpoint. An explicit Listener="1" with the same
-			// world-routable observed IP would instead produce `match` —
-			// that path is covered by match_after_canonicalisation /
-			// world_routable_observed_overrides_listen_host below. This
-			// branch is reachable today only via desktop / local RPC
-			// frames that legitimately omit listener; v12 peer hellos
-			// always set listener explicitly.
-			name:        "legacy_direct_no_listen",
+			// A hello without a listener flag falls to undeclared_listener
+			// (accept, direct_only): we cannot claim the peer is a listener
+			// without an explicit Listener="1". The same world-routable
+			// observed IP with Listener="1" produces `match` instead — see
+			// match_after_canonicalisation. Desktop and local RPC hellos
+			// omit the flag; peer hellos always set it.
+			name:        "undeclared_listener",
 			observedTCP: "203.0.113.11:45123",
 			frame: protocol.Frame{
 				Type:     "hello",
 				Listener: "",
-				Listen:   "",
 			},
-			wantDecision:      advertiseDecisionLegacyDirect,
+			wantDecision:      advertiseDecisionUndeclaredListener,
 			wantAnnounceState: announceStateDirectOnly,
-			wantWriteMode:     persistWriteModeCreateOrUpdate,
-		},
-		{
-			// Legacy frame with wildcard bind in hello.listen and no
-			// explicit listener flag. usableListen rejects 0.0.0.0 as a
-			// dial target, and without Listener="1" we cannot promote
-			// the peer to announceable — the branch falls to legacy_direct.
-			// Reachable in the v12 baseline only through legacy / mixed
-			// fixtures that still echo listen on the wire.
-			name:        "legacy_direct_wildcard_bind",
-			observedTCP: "203.0.113.12:45123",
-			frame: protocol.Frame{
-				Type:     "hello",
-				Listener: "",
-				Listen:   "0.0.0.0:64646",
-			},
-			wantDecision:      advertiseDecisionLegacyDirect,
-			wantAnnounceState: announceStateDirectOnly,
-			wantWriteMode:     persistWriteModeCreateOrUpdate,
 		},
 		{
 			name:        "match_after_canonicalisation",
@@ -121,64 +93,23 @@ func TestValidateAdvertisedAddress(t *testing.T) {
 			frame: protocol.Frame{
 				Type:     "hello",
 				Listener: "1",
-				Listen:   "203.0.113.13:64646",
 			},
 			wantDecision:      advertiseDecisionMatch,
 			wantAnnounceState: announceStateAnnounceable,
-			wantWriteMode:     persistWriteModeCreateOrUpdate,
 		},
 		{
-			name:        "local_exception_private_observed_public_advertise",
+			name:        "local_exception_private_observed",
 			observedTCP: "192.168.1.20:45123",
 			frame: protocol.Frame{
 				Type:     "hello",
 				Listener: "1",
-				Listen:   "203.0.113.14:64646",
 			},
 			wantDecision:      advertiseDecisionLocalException,
 			wantAnnounceState: announceStateDirectOnly,
-			wantWriteMode:     persistWriteModeCreateOrUpdate,
 		},
 		{
-			// v12 baseline: hello.listen is not a truth input (and
-			// emitters omit it entirely; this fixture echoes it as a
-			// legacy/mixed-network shape). The observed IP is
-			// world-routable, so the decision is match and the runtime
-			// NEVER rejects on the disagreement nor emits any mismatch
-			// wire signal. The pre-v11 matrix classified this case as
-			// world_mismatch; the test name is preserved for git history
-			// while the assertion pins the v12 accept-only outcome.
-			name:        "world_routable_observed_overrides_listen_host",
-			observedTCP: "203.0.113.15:45123",
-			frame: protocol.Frame{
-				Type:     "hello",
-				Listener: "1",
-				Listen:   "198.51.100.99:64646",
-			},
-			wantDecision:      advertiseDecisionMatch,
-			wantAnnounceState: announceStateAnnounceable,
-			wantWriteMode:     persistWriteModeCreateOrUpdate,
-		},
-		{
-			// v12 baseline: peer claiming a private range in hello.listen
-			// while coming in on a world-routable observed IP is
-			// still announceable — the observed IP wins. The pre-v11
-			// path rejected on "world mismatch"; the runtime no longer
-			// uses hello.listen as truth, so no reject / no notice.
-			name:        "world_routable_observed_with_private_listen_is_match",
-			observedTCP: "203.0.113.16:45123",
-			frame: protocol.Frame{
-				Type:     "hello",
-				Listener: "1",
-				Listen:   "10.0.0.7:64646",
-			},
-			wantDecision:      advertiseDecisionMatch,
-			wantAnnounceState: announceStateAnnounceable,
-			wantWriteMode:     persistWriteModeCreateOrUpdate,
-		},
-		{
-			// v12 baseline: an unparseable observed TCP address falls
-			// to local_exception rather than invalid-reject. We accept
+			// An unparseable observed TCP address falls to
+			// local_exception rather than a reject. We accept
 			// the handshake but never learn a candidate — the non-IP
 			// transport case stays compatible with the advertise-
 			// learning contract (no observed-IP rewrite for non-IP
@@ -188,11 +119,9 @@ func TestValidateAdvertisedAddress(t *testing.T) {
 			frame: protocol.Frame{
 				Type:     "hello",
 				Listener: "1",
-				Listen:   "203.0.113.17:64646",
 			},
 			wantDecision:      advertiseDecisionLocalException,
 			wantAnnounceState: announceStateDirectOnly,
-			wantWriteMode:     persistWriteModeCreateOrUpdate,
 		},
 	}
 
@@ -206,10 +135,52 @@ func TestValidateAdvertisedAddress(t *testing.T) {
 			if result.PersistAnnounceState != tc.wantAnnounceState {
 				t.Fatalf("announce_state mismatch: got %q want %q", result.PersistAnnounceState, tc.wantAnnounceState)
 			}
-			if result.PersistWriteMode != tc.wantWriteMode {
-				t.Fatalf("write_mode mismatch: got %q want %q", result.PersistWriteMode, tc.wantWriteMode)
-			}
 		})
+	}
+}
+
+// TestValidateAdvertisedAddress_WireListenFieldHasNoEffect pins that a
+// "listen" key on an inbound hello is inert. No emitter in the supported
+// version range sends it, so a frame that still carries one is foreign or
+// crafted; the advertise decision is derived from the observed TCP address,
+// the listener flag and advertise_port alone. The fixtures are decoded from
+// JSON rather than built as protocol.Frame literals so the test exercises
+// the wire as a peer would write it, including the case where the frame
+// type has no field for the key at all.
+func TestValidateAdvertisedAddress_WireListenFieldHasNoEffect(t *testing.T) {
+	t.Parallel()
+
+	observedAddrs := []string{
+		"203.0.113.21:45123", // world-routable → match
+		"10.0.0.21:45123",    // private → local_exception
+		"not-a-host:port",    // unparseable → local_exception
+	}
+	listenerFlags := []string{`"listener":"1",`, `"listener":"0",`, ``}
+
+	decodeHello := func(t *testing.T, raw string) protocol.Frame {
+		t.Helper()
+		var frame protocol.Frame
+		if err := json.Unmarshal([]byte(raw), &frame); err != nil {
+			t.Fatalf("decode %s: %v", raw, err)
+		}
+		return frame
+	}
+
+	for _, observed := range observedAddrs {
+		for _, listener := range listenerFlags {
+			observed, listener := observed, listener
+			t.Run(observed+"/"+listener, func(t *testing.T) {
+				t.Parallel()
+				without := decodeHello(t, `{"type":"hello",`+listener+`"advertise_port":40404}`)
+				with := decodeHello(t, `{"type":"hello",`+listener+`"listen":"198.51.100.9:64646","advertise_port":40404}`)
+
+				want := validateAdvertisedAddress(observed, without)
+				got := validateAdvertisedAddress(observed, with)
+				if got != want {
+					t.Fatalf("a wire \"listen\" key changed the advertise decision:\n with:    %+v\n without: %+v", got, want)
+				}
+			})
+		}
 	}
 }
 
@@ -263,17 +234,17 @@ func newAdvertiseTestService() *Service {
 
 // TestApplyAdvertiseValidationResult_StickyState asserts that a peer
 // already marked announceable is NOT downgraded by a subsequent
-// non_listener or legacy_direct decision. Those two decisions describe
-// the current session only — they must not clobber the trust learned
-// from an earlier match. Only local_exception is an explicit downgrade
-// trigger after the v12 cleanup removed the world_mismatch decision.
+// non_listener or undeclared_listener decision. Those two decisions
+// describe the current session only — they must not clobber the trust
+// learned from an earlier match. Only local_exception is an explicit
+// downgrade trigger.
 func TestApplyAdvertiseValidationResult_StickyState(t *testing.T) {
 	cases := []struct {
 		name     string
 		decision advertiseDecision
 	}{
 		{name: "non_listener_must_not_downgrade", decision: advertiseDecisionNonListener},
-		{name: "legacy_direct_must_not_downgrade", decision: advertiseDecisionLegacyDirect},
+		{name: "undeclared_listener_must_not_downgrade", decision: advertiseDecisionUndeclaredListener},
 	}
 	for _, tc := range cases {
 		tc := tc
@@ -290,7 +261,6 @@ func TestApplyAdvertiseValidationResult_StickyState(t *testing.T) {
 			svc.applyAdvertiseValidationResult(peerAddr, advertiseValidationResult{
 				Decision:             tc.decision,
 				PersistAnnounceState: announceStateDirectOnly,
-				PersistWriteMode:     persistWriteModeCreateOrUpdate,
 			})
 			pm := svc.persistedMeta[peerAddr]
 			if pm == nil {
@@ -306,30 +276,6 @@ func TestApplyAdvertiseValidationResult_StickyState(t *testing.T) {
 				t.Fatalf("trusted_advertise_source mutated: got %q", pm.TrustedAdvertiseSource)
 			}
 		})
-	}
-}
-
-// TestApplyAdvertiseValidationResult_UpdateExistingSkipsCreate verifies
-// that a downgrade-only persist write does NOT create a new persistedMeta
-// row when the peer was previously unknown. Downgrade-only write mode
-// must not inject rows for unknown peers — that would inflate the top-500
-// persistence budget with hostile data.
-func TestApplyAdvertiseValidationResult_UpdateExistingSkipsCreate(t *testing.T) {
-	svc := newAdvertiseTestService()
-	const peerAddr domain.PeerAddress = "203.0.113.42:64646"
-	svc.applyAdvertiseValidationResult(peerAddr, advertiseValidationResult{
-		Decision:             advertiseDecisionLocalException,
-		ObservedIPHint:       mustPeerIP(t, "198.51.100.42"),
-		PersistAnnounceState: announceStateDirectOnly,
-		PersistWriteMode:     persistWriteModeUpdateExisting,
-	})
-	if _, ok := svc.persistedMeta[peerAddr]; ok {
-		t.Fatalf("unexpected persistedMeta row created for unknown peer under update-existing-only mode")
-	}
-	// Runtime observation hint should still be recorded so the
-	// outbound convergence loop can use it during the same session.
-	if history := svc.observedIPHistoryForPeer(peerAddr); len(history) != 1 {
-		t.Fatalf("observed IP history not updated: %v", history)
 	}
 }
 
@@ -350,7 +296,6 @@ func TestApplyAdvertiseValidationResult_LocalExceptionDowngrades(t *testing.T) {
 		Decision:             advertiseDecisionLocalException,
 		ObservedIPHint:       mustPeerIP(t, "192.168.0.17"),
 		PersistAnnounceState: announceStateDirectOnly,
-		PersistWriteMode:     persistWriteModeCreateOrUpdate,
 	})
 	pm := svc.persistedMeta[peerAddr]
 	if pm.AnnounceState != announceStateDirectOnly {
@@ -360,13 +305,12 @@ func TestApplyAdvertiseValidationResult_LocalExceptionDowngrades(t *testing.T) {
 
 // TestValidateAdvertisedAddress_IPv6Mapped verifies that an
 // IPv4-mapped IPv6 observed address (::ffff:1.2.3.4) is canonicalised
-// to its bare IPv4 form so the compare against an IPv4-advertised
-// address does not produce a spurious mismatch.
+// to its bare IPv4 form, so the persisted trusted IP and the announce
+// candidate use the same key as a plain IPv4 observation of that peer.
 func TestValidateAdvertisedAddress_IPv6Mapped(t *testing.T) {
 	result := validateAdvertisedAddress("[::ffff:203.0.113.50]:45123", protocol.Frame{
 		Type:     "hello",
 		Listener: "1",
-		Listen:   "203.0.113.50:64646",
 	})
 	if result.Decision != advertiseDecisionMatch {
 		t.Fatalf("expected match on IPv4-mapped IPv6, got %q", result.Decision)
@@ -379,48 +323,12 @@ func TestValidateAdvertisedAddress_IPv6Mapped(t *testing.T) {
 	}
 }
 
-// TestValidateAdvertisedAddress_ForbiddenAdvertiseListenIgnored pins the
-// contract for the "peer claims a private range in hello.listen" case.
-// Under the v12 cleanup baseline hello.listen is not a truth input at
-// all: the announce candidate is derived from the observed TCP IP
-// exclusively, so a malicious / buggy hello.listen cannot poison the
-// candidate. The runtime path accepts the handshake, records
-// announceable against the OBSERVED IP, and never emits any reject
-// signal. NormalizedAdvertisedIP mirrors the observed IP — not the
-// forbidden one claimed in hello.listen — which is what keeps the
-// trusted advertise triple clean.
-func TestValidateAdvertisedAddress_ForbiddenAdvertiseListenIgnored(t *testing.T) {
-	result := validateAdvertisedAddress("203.0.113.60:45123", protocol.Frame{
-		Type:          "hello",
-		Listener:      "1",
-		Listen:        "10.0.0.7:64646",
-		AdvertisePort: domain.PeerPort(64646),
-	})
-	if result.Decision != advertiseDecisionMatch {
-		t.Fatalf("expected match (hello.listen is ignored as truth), got %q", result.Decision)
-	}
-	if result.NormalizedAdvertisedIP.String() != "203.0.113.60" {
-		t.Fatalf("NormalizedAdvertisedIP: got %q want %q (must mirror observed IP, never the forbidden listen host)",
-			result.NormalizedAdvertisedIP.String(), "203.0.113.60")
-	}
-	if result.ObservedIPHint.String() != "203.0.113.60" {
-		t.Fatalf("ObservedIPHint: got %q want %q", result.ObservedIPHint.String(), "203.0.113.60")
-	}
-	if !result.AllowAnnounce {
-		t.Fatalf("AllowAnnounce must be true for world-routable observed IP, got false")
-	}
-	if result.AdvertisePort != domain.PeerPort(64646) {
-		t.Fatalf("AdvertisePort: got %d want 64646 (the contract takes the self-reported advertise_port)", result.AdvertisePort)
-	}
-}
-
 // TestHandleConnectionNotice_IgnoresUnknownCode asserts that the
 // connection_notice dispatcher silently drops any frame whose Code is
-// not a recognised dispatch target. After the v12 cleanup the only
-// recognised code is ErrCodePeerBanned; everything else (including
-// the historical observed-address-mismatch which is no longer
-// produced by the wire) must fall through without touching shared
-// state.
+// not a recognised dispatch target. The only recognised code is
+// ErrCodePeerBanned; everything else (observed-address-mismatch
+// included, which no supported version sends) must fall through
+// without touching shared state.
 func TestHandleConnectionNotice_IgnoresUnknownCode(t *testing.T) {
 	const peerAddr domain.PeerAddress = "198.51.100.10:64646"
 	svc := newAdvertiseTestService()

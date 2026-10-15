@@ -87,6 +87,12 @@ func datagramEmitterOf(svc *Service) datagramFrameEmitter {
 	return datagramFrameEmitter{service: svc}
 }
 
+// datagramTestPeerVersion is the version a fixture connection claims when
+// the test does not care which: the datagram plane is gated by declared roles
+// and capabilities, not by version, but the fixture still names a version the
+// node supports.
+const datagramTestPeerVersion = domain.ProtocolVersion(config.ProtocolVersion)
+
 // installDatagramPeer wires one peer with the connections the test describes
 // and returns its identity. Outbound sessions and inbound connections are
 // registered exactly where the production send path looks for them, so the
@@ -383,10 +389,14 @@ func TestDatagramPeerMetadataDescribesTheConnectionTheSendUses(t *testing.T) {
 
 	peer := domain.PeerIdentityFromWire(datagramTestDstHex)
 	outboundConnectedAt := time.Now().UTC().Add(-time.Hour)
+	const (
+		outboundVersion = domain.ProtocolVersion(config.MinimumProtocolVersion)
+		inboundVersion  = domain.ProtocolVersion(config.ProtocolVersion)
+	)
 	installDatagramPeer(t, svc,
 		peer,
-		datagramPeerConn{version: 20, connectedAt: outboundConnectedAt},
-		datagramPeerConn{version: 27, connectedAt: time.Now().UTC().Add(-time.Minute), inbound: true},
+		datagramPeerConn{version: outboundVersion, connectedAt: outboundConnectedAt},
+		datagramPeerConn{version: inboundVersion, connectedAt: time.Now().UTC().Add(-time.Minute), inbound: true},
 	)
 
 	frame := newNodeDatagram(t, func(frame *protocol.DatagramFrame) { frame.Dst = peer })
@@ -394,9 +404,9 @@ func TestDatagramPeerMetadataDescribesTheConnectionTheSendUses(t *testing.T) {
 	if !ok {
 		t.Fatal("SendableConnection reported no usable connection for a live peer")
 	}
-	if conn.ReportedProtocolVersion != 20 {
-		t.Fatalf("ReportedProtocolVersion = %d, want 20 (the OUTBOUND session the send would use), not the inbound 27",
-			conn.ReportedProtocolVersion)
+	if conn.ReportedProtocolVersion != outboundVersion {
+		t.Fatalf("ReportedProtocolVersion = %d, want %d (the OUTBOUND session the send would use), not the inbound %d",
+			conn.ReportedProtocolVersion, outboundVersion, inboundVersion)
 	}
 	if !conn.ConnectedAt.Equal(outboundConnectedAt) {
 		t.Fatalf("ConnectedAt = %s, want the outbound session's %s", conn.ConnectedAt, outboundConnectedAt)
@@ -424,7 +434,7 @@ func TestDatagramPeerMetadataRejectsStalledPeer(t *testing.T) {
 	svc := newDatagramLayerService(t, true)
 
 	peer := domain.PeerIdentityFromWire(datagramTestDstHex)
-	addresses := installDatagramPeer(t, svc, peer, datagramPeerConn{version: 27, connectedAt: time.Now().UTC()})
+	addresses := installDatagramPeer(t, svc, peer, datagramPeerConn{version: datagramTestPeerVersion, connectedAt: time.Now().UTC()})
 
 	svc.peerMu.Lock()
 	svc.health[addresses[false]].LastUsefulReceiveAt = time.Now().UTC().Add(-24 * time.Hour)
@@ -493,7 +503,7 @@ func TestDatagramProbeAgreesWithSendOnUnchangedTable(t *testing.T) {
 
 	// A live direct session that passes the role gate: now both must agree
 	// the other way.
-	installDatagramPeer(t, svc, peer, datagramPeerConn{version: 27, connectedAt: time.Now().UTC().Add(-time.Hour)})
+	installDatagramPeer(t, svc, peer, datagramPeerConn{version: datagramTestPeerVersion, connectedAt: time.Now().UTC().Add(-time.Hour)})
 	if !probe() {
 		t.Fatal("the probe reported a directly connected, datagram-capable destination unreachable")
 	}
@@ -561,7 +571,7 @@ func TestDatagramEmitterWritesTheLayersLine(t *testing.T) {
 	t.Parallel()
 	svc := newDatagramLayerService(t, true)
 	peer := domain.PeerIdentityFromWire(datagramTestDstHex)
-	addresses := installDatagramPeer(t, svc, peer, datagramPeerConn{version: 27, connectedAt: time.Now().UTC()})
+	addresses := installDatagramPeer(t, svc, peer, datagramPeerConn{version: datagramTestPeerVersion, connectedAt: time.Now().UTC()})
 
 	frame := newNodeDatagram(t, nil)
 	line := mustDatagramLine(t, frame)

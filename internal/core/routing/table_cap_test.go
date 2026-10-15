@@ -506,10 +506,10 @@ func TestRIBCap_ExpiredAndWithdrawnAcceptLiveAnnouncement(t *testing.T) {
 		Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("ack-b"),
 		Hops: 4, SeqNo: 1, Source: RouteSourceHopAck,
 	})
-	if !tbl2.WithdrawRoute(domaintest.ID("alice"), domaintest.ID("bob"), domaintest.ID("ack-a"), 2) {
+	if !tbl2.WithdrawRoute(domaintest.ID("alice"), domaintest.ID("ack-a"), 2) {
 		t.Fatal("WithdrawRoute(ack-a) returned false")
 	}
-	if !tbl2.WithdrawRoute(domaintest.ID("alice"), domaintest.ID("bob"), domaintest.ID("ack-b"), 2) {
+	if !tbl2.WithdrawRoute(domaintest.ID("alice"), domaintest.ID("ack-b"), 2) {
 		t.Fatal("WithdrawRoute(ack-b) returned false")
 	}
 	if got := len(tbl2.Lookup(domaintest.ID("alice"))); got != 0 {
@@ -577,7 +577,7 @@ func TestRIBCap_WithdrawalTombstonesBypassCap(t *testing.T) {
 		// Wire withdrawal arrives for a NextHop the bucket has never
 		// seen. The tombstone bypasses the cap and lands as an
 		// extra row alongside the two live entries.
-		applied := tbl.WithdrawRoute(domaintest.ID("alice"), domaintest.ID("bob"), domaintest.ID("hop-c"), 5)
+		applied := tbl.WithdrawRoute(domaintest.ID("alice"), domaintest.ID("hop-c"), 5)
 		if !applied {
 			t.Fatal("WithdrawRoute should return true — tombstones bypass the cap and always land")
 		}
@@ -618,10 +618,10 @@ func TestRIBCap_WithdrawalTombstonesBypassCap(t *testing.T) {
 			Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
 		})
 		// Two tombstones via WithdrawRoute idx<0.
-		if !tbl.WithdrawRoute(domaintest.ID("alice"), domaintest.ID("bob"), domaintest.ID("hop-x"), 1) {
+		if !tbl.WithdrawRoute(domaintest.ID("alice"), domaintest.ID("hop-x"), 1) {
 			t.Fatal("setup: tombstone hop-x not appended")
 		}
-		if !tbl.WithdrawRoute(domaintest.ID("alice"), domaintest.ID("bob"), domaintest.ID("hop-y"), 1) {
+		if !tbl.WithdrawRoute(domaintest.ID("alice"), domaintest.ID("hop-y"), 1) {
 			t.Fatal("setup: tombstone hop-y not appended")
 		}
 
@@ -766,9 +766,10 @@ func TestRIBCap_UpdateRouteWithdrawalBypassesCapForNewTriple(t *testing.T) {
 			t.Fatalf("setup: tombstone should be accepted via UpdateRoute idx<0 short-circuit, got %v", status)
 		}
 
-		// Delayed live announcement for the same triple at LOWER
-		// SeqNo. UpdateRoute now finds the tombstone via idx>=0
-		// (DedupKey match), and the stale-SeqNo branch rejects it.
+		// Delayed live announcement for the same (Identity, Uplink)
+		// slot at LOWER SeqNo. UpdateRoute now finds the tombstone via
+		// idx>=0 (the slot's claim), and the stale-SeqNo branch rejects
+		// it.
 		status := mustUpdate(t, tbl, RouteEntry{
 			Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("hop-c"),
 			Hops: 2, SeqNo: 4, Source: RouteSourceAnnouncement,
@@ -826,7 +827,7 @@ func TestRIBCap_TombstoneToLivePromotionRespectsKLiveCap(t *testing.T) {
 			Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("hop-a"),
 			Hops: 3, SeqNo: 5, Source: RouteSourceAnnouncement,
 		})
-		if !tbl.WithdrawRoute(domaintest.ID("alice"), domaintest.ID("bob"), domaintest.ID("hop-c"), 5) {
+		if !tbl.WithdrawRoute(domaintest.ID("alice"), domaintest.ID("hop-c"), 5) {
 			t.Fatal("setup: tombstone hop-c not appended")
 		}
 
@@ -874,7 +875,7 @@ func TestRIBCap_TombstoneToLivePromotionRespectsKLiveCap(t *testing.T) {
 			Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("hop-b"),
 			Hops: 3, SeqNo: 5, Source: RouteSourceAnnouncement,
 		})
-		if !tbl.WithdrawRoute(domaintest.ID("alice"), domaintest.ID("bob"), domaintest.ID("hop-c"), 5) {
+		if !tbl.WithdrawRoute(domaintest.ID("alice"), domaintest.ID("hop-c"), 5) {
 			t.Fatal("setup: tombstone hop-c not appended")
 		}
 
@@ -932,7 +933,7 @@ func TestRIBCap_TombstoneToLivePromotionRespectsKLiveCap(t *testing.T) {
 			Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("hop-b"),
 			Hops: 6, SeqNo: 5, Source: RouteSourceAnnouncement,
 		})
-		if !tbl.WithdrawRoute(domaintest.ID("alice"), domaintest.ID("bob"), domaintest.ID("hop-c"), 5) {
+		if !tbl.WithdrawRoute(domaintest.ID("alice"), domaintest.ID("hop-c"), 5) {
 			t.Fatal("setup: tombstone hop-c not appended")
 		}
 
@@ -1009,7 +1010,7 @@ func TestRIBCap_TombstoneSurvivesCapPressure_BlocksResurrection(t *testing.T) {
 	// Origin issues a withdrawal for a NextHop the bucket has
 	// never seen. Tombstone bypasses the cap and lands as a third
 	// row in the slice. SeqNo=10 — this is the guard.
-	if !tbl.WithdrawRoute(domaintest.ID("alice"), domaintest.ID("bob"), domaintest.ID("hop-c"), 10) {
+	if !tbl.WithdrawRoute(domaintest.ID("alice"), domaintest.ID("hop-c"), 10) {
 		t.Fatal("setup: WithdrawRoute(hop-c, seq=10) returned false")
 	}
 
@@ -1195,7 +1196,7 @@ func TestRIBCap_AnnounceWireSchemaUnchanged_ContentReflectsBestK(t *testing.T) {
 
 	// Post-A1 round-4 contract: AnnounceTo itself returns the
 	// per-Identity-collapsed wire projection (live winner +
-	// own-direct tombstones). Pre-A1 / pre-round-4 it dumped one
+	// own-direct tombstones). Before round 4 it dumped one
 	// row per stored RouteEntry and BuildAnnounceSnapshot did
 	// the collapse downstream; the collapse moved to
 	// AnnounceProjectionFor when outbound SeqNo synthesis was

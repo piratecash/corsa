@@ -14,9 +14,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rs/zerolog"
-	"github.com/rs/zerolog/log"
-
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 )
@@ -2097,10 +2094,7 @@ func TestStuckIntentBacksOff(t *testing.T) {
 func TestErasingAnAttachmentWritesNothingToTheLog(t *testing.T) {
 	m, transmitDir, downloadDir := newCleanupIntentManager(t)
 
-	var captured bytes.Buffer
-	restore := log.Logger
-	log.Logger = zerolog.New(&captured).Level(zerolog.InfoLevel)
-	t.Cleanup(func() { log.Logger = restore })
+	captured := captureFileTransferLog(t)
 
 	const (
 		fileID = domain.FileID("33333333-3333-4333-8333-333333333333")

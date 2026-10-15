@@ -35,7 +35,7 @@ Response:
 ```json
 {
   "client_version": "0.0.43",
-  "protocol_version": 14,
+  "protocol_version": 31,
   "node_address": "a1b2c3d4..."
 }
 ```
@@ -60,8 +60,8 @@ Response:
   "address": "a1b2c3d4...",
   "public_key": "Q...=",
   "box_public_key": "B...=",
-  "protocol_version": 14,
-  "minimum_protocol_version": 14,
+  "protocol_version": 31,
+  "minimum_protocol_version": 28,
   "client_version": "0.0.43",
   "client_build": 43,
   "connected_peers": 4,
@@ -399,7 +399,7 @@ was charting it should drop the series rather than see it flat-line.
 ```json
 {
   "client_version": "0.0.43",
-  "protocol_version": 14,
+  "protocol_version": 31,
   "node_address": "a1b2c3d4..."
 }
 ```
@@ -425,8 +425,8 @@ challenge-и.
   "address": "a1b2c3d4...",
   "public_key": "Q...=",
   "box_public_key": "B...=",
-  "protocol_version": 14,
-  "minimum_protocol_version": 14,
+  "protocol_version": 31,
+  "minimum_protocol_version": 28,
   "client_version": "0.0.43",
   "client_build": 43,
   "connected_peers": 4,

@@ -1,5 +1,5 @@
 // routing_relay.go hosts the relay forwarding and gossip dispatch paths:
-// tryForwardViaRoutingTable / sendTableDirectedRelay / sendRelayToAddress
+// tryForwardViaRoutingTable / sendTableDirectedRelay / sendTableRoutedRelayToAddress
 // for table-directed relay forwarding; sendFrameToAddressVia as the unified
 // inbound/outbound send dispatch; executeGossipTargets / routingTargets*
 // for gossip fanout target selection; sendGossipFrameToPeer / gossipNotice /
@@ -24,7 +24,6 @@ package node
 import (
 	"bufio"
 	"context"
-	"errors"
 	"io"
 	"net"
 	"sort"
@@ -35,7 +34,6 @@ import (
 
 	"github.com/piratecash/corsa/internal/core/crashlog"
 	"github.com/piratecash/corsa/internal/core/domain"
-	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/protocol"
 	"github.com/piratecash/corsa/internal/core/routing"
 )
@@ -63,13 +61,6 @@ type tableForwardResult struct {
 	// Address is the transport address the frame was sent to. Empty if no
 	// table route could be used.
 	Address domain.PeerAddress
-
-	// RouteOrigin is the Origin field from the RouteEntry that was selected.
-	// Retained for plumbing-stability across the relay → hop_ack path, but
-	// IGNORED by route promotion post-Phase-A: confirmRouteViaHopAck matches
-	// on (Identity, NextHop) only because the routing table no longer keys
-	// on Origin. See routing_hop_ack.go for the migration note.
-	RouteOrigin domain.PeerIdentity
 
 	// Via is the connection the frame was handed to (see
 	// relayForwardState.ForwardedVia).
@@ -527,7 +518,7 @@ func (s *Service) tryForwardViaRoutingTable(ctx context.Context, recipient domai
 			if health, tracked := s.routingTable.HealthFor(recipient, route.NextHop); tracked && health == routing.HealthBad {
 				s.triggerRouteQueryAsync(recipient)
 			}
-			return tableForwardResult{Address: address, RouteOrigin: route.Origin, Via: via}
+			return tableForwardResult{Address: address, Via: via}
 		}
 	}
 
@@ -597,14 +588,6 @@ func (s *Service) sendFrameToAddressVia(ctx context.Context, address domain.Peer
 // both caps for transit). Using it directly avoids re-resolution, which
 // could pick a different session for the same identity with weaker capabilities.
 //
-// routeOrigin is the Origin field from the selected RouteEntry. It is
-// retained on the call signature for caller-stability — relayForwardState
-// still stores it and the hop_ack confirmation path still receives it —
-// but it is IGNORED for route promotion post-Phase-A. The routing table
-// no longer keys on Origin (per-(Identity, Uplink) storage), so
-// confirmRouteViaHopAck matches on (Identity, NextHop) only. See
-// routing_hop_ack.go for the migration note.
-//
 // nextHopHops is the hop count from the selected RouteEntry. Used by the
 // retry path to re-resolve with correct capability requirements: hops=1
 // (destination) needs only relay cap; hops>1 (transit) needs both caps.
@@ -615,12 +598,12 @@ func (s *Service) sendFrameToAddressVia(ctx context.Context, address domain.Peer
 // Handles both outbound sessions and inbound connections ("inbound:" prefix).
 //
 // ctx is the caller's request/cycle context and is propagated to
-// sendRelayToAddress so the inbound sync-flush wait honours cancellation.
+// sendTableRoutedRelayToAddress so the inbound sync-flush wait honours cancellation.
 // Returns whether a next hop ACCEPTED the frame. The value is what lets a
 // sender-owned delivery tell "handed over" from "attempted": the function
 // already knew, and threw it away, so a route that had gone stale still
 // counted as a send.
-func (s *Service) sendTableDirectedRelay(ctx context.Context, msg protocol.Envelope, nextHopIdentity domain.PeerIdentity, validatedAddress domain.PeerAddress, routeOrigin domain.PeerIdentity, nextHopHops int, dispatchedAt time.Time) relaySendOutcome {
+func (s *Service) sendTableDirectedRelay(ctx context.Context, msg protocol.Envelope, nextHopIdentity domain.PeerIdentity, validatedAddress domain.PeerAddress, nextHopHops int, dispatchedAt time.Time) relaySendOutcome {
 	address := validatedAddress
 	if address == "" {
 		// Retry path or caller without cached address — re-resolve with
@@ -661,7 +644,7 @@ func (s *Service) sendTableDirectedRelay(ctx context.Context, msg protocol.Envel
 		return s.tryRelayToCapableFullNodes(msg, targets, dispatchedAt)
 	}
 
-	relayed := s.sendRelayToAddress(ctx, address, msg, routeOrigin, dispatchedAt)
+	relayed := s.sendTableRoutedRelayToAddress(ctx, address, msg, dispatchedAt)
 	if !relayed.handled() {
 		// Send failed — gossip fallback (same gates as above). An
 		// unresolved directed send is carried INTO the fallback's result:
@@ -697,23 +680,20 @@ func (s *Service) sendTableDirectedRelay(ctx context.Context, msg protocol.Envel
 	return relayed
 }
 
-// sendRelayToAddress sends a relay_message to the given address, handling
-// both outbound sessions and inbound connections. For outbound sessions it
-// delegates to sendRelayMessage (which persists relayForwardState internally).
-// For inbound connections it builds the frame, writes via writeFrameToInbound,
-// and persists relayForwardState explicitly so that hop_ack and receipt
-// routing work identically regardless of connection direction.
-//
-// routeOrigin is the Origin field from the routing decision. Stored in
-// relayForwardState for plumbing-stability; IGNORED by post-Phase-A
-// hop_ack promotion, which matches on (Identity, NextHop) only. See
-// routing_hop_ack.go for the migration note.
+// sendTableRoutedRelayToAddress sends a relay_message to the next hop a
+// routing-table decision picked, handling both outbound sessions and
+// inbound connections. For outbound sessions it delegates to
+// sendTableRoutedRelayMessage (which persists relayForwardState
+// internally). For inbound connections it builds the frame, writes via
+// writeFrameToInbound, and persists relayForwardState explicitly so that
+// hop_ack and receipt routing work identically regardless of connection
+// direction. Both mark the attempt relayNextHopRoutingTable.
 //
 // ctx is the caller's request/cycle context and is propagated into
 // writeFrameToInbound so the inbound sync-flush wait honours cancellation.
 // Outbound enqueue is non-blocking and does not observe ctx beyond the
 // pre-entry check inside the network bridge.
-func (s *Service) sendRelayToAddress(ctx context.Context, address domain.PeerAddress, msg protocol.Envelope, routeOrigin domain.PeerIdentity, dispatchedAt time.Time) relaySendOutcome {
+func (s *Service) sendTableRoutedRelayToAddress(ctx context.Context, address domain.PeerAddress, msg protocol.Envelope, dispatchedAt time.Time) relaySendOutcome {
 	if strings.HasPrefix(string(address), "inbound:") {
 		frame := protocol.Frame{
 			Type:        "relay_message",
@@ -729,8 +709,8 @@ func (s *Service) sendRelayToAddress(ctx context.Context, address domain.PeerAdd
 			MaxHops:     defaultMaxHops,
 			PreviousHop: s.identity.Address,
 		}
-		// v27 sender-key attachment — symmetric with the outbound
-		// sendRelayMessage{,WithOrigin} builders.
+		// Sender-key attachment — symmetric with the outbound
+		// sendRelayMessage / sendTableRoutedRelayMessage builders.
 		s.attachKnownSenderKeys(&frame, msg.Topic, msg.Sender)
 		// Same pre-wire gate the session writer takes: freeze/withdrawal
 		// first, then the durable claim, then the frame.
@@ -760,7 +740,7 @@ func (s *Service) sendRelayToAddress(ctx context.Context, address domain.PeerAdd
 			return relaySendFateUnknown
 		}
 		// Phase 3 PR 12.2 / PR 12.3 (review fix) — symmetric with
-		// sendRelayMessage{,WithOrigin} on the outbound side: arm
+		// sendRelayMessage / sendTableRoutedRelayMessage on the outbound side: arm
 		// the hop-ack budget AND stash the wire bytes so
 		// onRelayHopAckTimeout's reputation + failover path treats
 		// inbound-directed origin relays the same as their outbound
@@ -788,7 +768,7 @@ func (s *Service) sendRelayToAddress(ctx context.Context, address domain.PeerAdd
 			ForwardedTo:          address,
 			ForwardedVia:         s.inboundRoutingSender(connID),
 			Recipient:            domain.PeerIdentityFromWire(msg.Recipient),
-			RouteOrigin:          routeOrigin,
+			NextHopSelection:     relayNextHopRoutingTable,
 			HopCount:             1,
 			RemainingTTL:         relayStateTTLSeconds,
 			HopAckRemainingTicks: defaultHopAckBudgetSeconds,
@@ -814,7 +794,7 @@ func (s *Service) sendRelayToAddress(ctx context.Context, address domain.PeerAdd
 		// writer, so reaching here means the frame left this node.
 		return relaySendHandedToPeer
 	}
-	return s.sendRelayMessageWithOrigin(address, msg, routeOrigin, dispatchedAt)
+	return s.sendTableRoutedRelayMessage(address, msg, dispatchedAt)
 }
 
 // resolveRouteNextHopAddress finds a transport address for a route's
@@ -860,7 +840,7 @@ func (s *Service) executeGossipTargets(msg protocol.Envelope, targets []domain.P
 	// call, so only the *MessageFrame is shared, and it is never mutated on any
 	// send path (session marshal, queue store, inbound write are all reads).
 	frame := gossipPushFrame(msg)
-	// v27 sender-key attachment (DM-class topics only — the helper
+	// Sender-key attachment (DM-class topics only — the helper
 	// no-ops for broadcast gossip). Done once here, before the fan-out
 	// shares the frame read-only across the send goroutines.
 	s.attachKnownSenderKeys(&frame, msg.Topic, msg.Sender)
@@ -1198,6 +1178,21 @@ func (s *Service) sendNoticeToPeer(address domain.PeerAddress, ttl time.Duration
 		_ = s.sendFrameViaNetwork(s.runCtx, inboundID, frame)
 		return
 	}
+	// The dial below is the only path here that opens a socket, so the
+	// connection manager's ban checks are applied here, where the socket
+	// would be paid for: routingTargets' bootstrap phase does not consult
+	// bans. PeerProvider.IsDialBanned runs the candidate filter's own ban
+	// checks: an IP-wide ban of the host (a bannedIPSet entry, or a ban of
+	// any known port on it, which widens to the host except the
+	// self-identity cooldown), a remote ban of this address, its
+	// setup-failure cooldown, and a ban of the address itself. Whatever
+	// earned the ban would end this dial at the welcome again. Called with
+	// no domain mutex held: the provider takes pp.mu, then s.peerMu and
+	// s.ipStateMu.
+	if s.peerProvider.IsDialBanned(address) {
+		log.Debug().Str("peer", string(address)).Msg(serviceDialNotice.event("skipped_banned"))
+		return
+	}
 
 	// Budgeted: the notice fallback opens a real socket when no connection
 	// exists, so it draws on the same ceiling. Refused means the notice is
@@ -1216,6 +1211,7 @@ func (s *Service) sendNoticeToPeer(address domain.PeerAddress, ttl time.Duration
 		return s.dialAddressWithBudget(address, syncHandshakeTimeout)
 	})
 	if err != nil {
+		serviceDialNotice.ioFailure().Err(err).Str("peer", string(address)).Msg(serviceDialNotice.event("dial_failed"))
 		return
 	}
 	conn := transport.wire
@@ -1224,149 +1220,80 @@ func (s *Service) sendNoticeToPeer(address domain.PeerAddress, ttl time.Duration
 	_ = conn.SetDeadline(time.Now().Add(syncHandshakeTimeout))
 	reader := bufio.NewReader(conn)
 
-	var welcome protocol.Frame
-	if transport.proven != nil {
-		// Proven by session_proof: no hello, welcome or auth_session round.
-		welcome = transport.proven.Intro
-		s.recordOutboundAuthSuccess(address, remoteAddrString(conn.RemoteAddr()))
-	} else if welcome, err = s.noticeLegacyHandshake(conn, reader, address); err != nil {
+	welcome, ok := s.noticeDialWelcome(conn, reader, address, transport)
+	if !ok {
 		return
 	}
-
-	if welcome.Type == "error" {
+	// One gate for both session kinds, before auth_session is signed and
+	// before anything is recorded as an outbound success: notice,
+	// non-welcome, v2 pin, floor, self identity (admitServiceDialWelcome);
+	// the v1 challenge is checked by authenticateServiceDial before it signs.
+	if err := s.admitServiceDialWelcome(serviceDialNotice, address, welcome, transport.proven != nil); err != nil {
 		return
 	}
+	// v2 proved the listener by session_proof; v1 needs auth_session.
+	writeLine := func(line string) error {
+		// netcore-migration: §4.4 bootstrap exception (see the note in noticeDialWelcome).
+		_, err := io.WriteString(conn, line)
+		return err
+	}
+	if transport.proven == nil && !s.authenticateServiceDial(ctx, serviceDialNotice, address, welcome, writeLine, reader, serviceDialDeadline(ctx, conn)) {
+		return
+	}
+	// Outbound convergence success hook: a proven or authenticated notice
+	// dial is the same evidence of a reachable dialable peer as on the
+	// managed-session path. Without this call, peers reached only through
+	// push_notice fan-out would never get an announceable persistedMeta row
+	// or a trusted advertise triple, so their state would diverge from the
+	// managed path and the hostname / observed-IP sweep invariants would not
+	// apply here.
+	//
+	// The helper takes the wrapper-form "host:port" string. This §4.4 raw
+	// path has no NetCore wrapper, so we read conn.RemoteAddr() inline —
+	// routing_relay.go is already in the §2.9 net-import whitelist for
+	// exactly these bootstrap edges. The defensive empty-string fallthrough
+	// keeps the contract with the helper.
+	s.recordOutboundAuthSuccess(address, remoteAddrString(conn.RemoteAddr()))
 
 	line, err := protocol.MarshalFrameLine(frame)
 	if err != nil {
 		return
 	}
-	// netcore-migration: §4.4 bootstrap exception (see sentinel above).
+	// netcore-migration: §4.4 bootstrap exception (see the note in noticeDialWelcome).
 	_, _ = io.WriteString(conn, line)
 	_, _ = readFrameLine(reader, maxResponseLineBytes)
 }
 
-// errNoticeDialEnded is a v1 notice dial that ended on purpose: a notice in
-// place of a welcome, our own identity, or a refused auth.
-var errNoticeDialEnded = errors.New("notice dial ended before auth_ok")
-
-// noticeLegacyHandshake is the v1 handshake of the notice dial: hello,
-// welcome, auth_session, auth_ok. It returns the welcome once auth_ok came,
-// or an error once the dial is over.
-func (s *Service) noticeLegacyHandshake(conn noticeConn, reader *bufio.Reader, address domain.PeerAddress) (protocol.Frame, error) {
+// noticeDialWelcome is the welcome of a notice dial: the proven listener's
+// intro on v2; on v1 the answer to our hello, whatever it is — the caller
+// passes it through admitServiceDialWelcome before anything else is sent.
+func (s *Service) noticeDialWelcome(conn io.Writer, reader *bufio.Reader, address domain.PeerAddress, transport *dialledTransport) (protocol.Frame, bool) {
+	if transport.proven != nil {
+		return transport.proven.Intro, true
+	}
 	// netcore-migration: §4.4 bootstrap exception. This raw write pre-dates
 	// the NetCore managed-write path and is pending architectural review of
-	// the inbound-absent dial fallback itself. A repository-wide forbidden-
-	// list grep gate whitelists this write by explicit line number using
-	// the exact prefix `netcore-migration: §4.4 bootstrap exception` as the
-	// whitelist token — removing the sentinel without removing the raw
-	// write triggers the gate. Same applies to the two writes below in
-	// this function body.
+	// the inbound-absent dial fallback itself. The notice dial has exactly
+	// three raw socket writes — this hello, the auth_session line and the
+	// push_notice, all in sendNoticeToPeer's dial — and
+	// scripts/enforce-netcore-boundary.sh pins their number for this file
+	// (gate 1), so a fourth fails the gate. The sentinel itself is a marker
+	// for readers, not something the script checks.
 	if _, err := io.WriteString(conn, s.nodeHelloJSONLine()); err != nil {
-		return protocol.Frame{}, err
+		serviceDialNotice.ioFailure().Err(err).Str("peer", string(address)).Msg(serviceDialNotice.event("hello_write_failed"))
+		return protocol.Frame{}, false
 	}
 	welcomeLine, err := readFrameLine(reader, maxResponseLineBytes)
 	if err != nil {
-		return protocol.Frame{}, err
+		serviceDialNotice.ioFailure().Err(err).Str("peer", string(address)).Msg(serviceDialNotice.event("welcome_read_failed"))
+		return protocol.Frame{}, false
 	}
 	welcome, err := protocol.ParseFrameLine(strings.TrimSpace(welcomeLine))
 	if err != nil {
-		return protocol.Frame{}, err
+		serviceDialNotice.ioFailure().Err(err).Str("peer", string(address)).Msg(serviceDialNotice.event("welcome_parse_failed"))
+		return protocol.Frame{}, false
 	}
-	// Bootstrap fan-out path: the inbound side may respond with a
-	// connection_notice (currently only peer-banned) instead of welcome,
-	// meaning it is about to close. Forward to handleConnectionNotice so
-	// the dialler records the responder-supplied ban window, then abort
-	// this bootstrap write.
-	if welcome.Type == protocol.FrameTypeConnectionNotice {
-		s.handleConnectionNotice(address, welcome)
-		// Remote-first self-loopback discovery on the raw push_notice
-		// fan-out path. routingTargets() can route onto an alternate
-		// alias (alternate listen port, onion/clearnet mirror) that
-		// slips past the isSelfAddress() gate in gossipNotice, landing
-		// on our own inbound hello handler which answers with
-		// connection_notice{code=peer-banned, reason=self-identity}.
-		// Without this branch handleConnectionNotice would only record
-		// the (possibly empty) remote ban-until in persistedMeta,
-		// leaving health.BannedUntil and LastErrorCode unset. The next
-		// gossipNotice tick would then redial the same self-looping
-		// alias because the dial-gate consults health, not persistedMeta
-		// alone. Route through the same applySelfIdentityCooldown the
-		// managed session path and syncPeer use so the 24h window lands
-		// in health and blocks further churn.
-		if errors.Is(protocol.NoticeErrorFromFrame(welcome), protocol.ErrSelfIdentity) {
-			s.applySelfIdentityCooldown(address, s.newSelfIdentityError(address, welcome.Listen))
-		}
-		return protocol.Frame{}, errNoticeDialEnded
-	}
-	// An identity that proved v2 is never answered over v1: this welcome may
-	// come from a man in the middle who stripped TLS to collect a relayable
-	// v1 proof, so nothing is signed for it.
-	if err := s.refuseLegacyIdentity(welcome.Address); err != nil {
-		log.Warn().Err(err).Str("peer", string(address)).Msg("send_notice_v1_refused_identity_pinned_to_v2")
-		return protocol.Frame{}, err
-	}
-	// Local self-loopback guard on the same dial: an alternate alias
-	// may reach a responder that does not emit the peer-banned notice
-	// (older version, different role) but still welcomes us with our
-	// own Ed25519 address. Signing auth_session with our own key and
-	// sending push_notice is wasted work at best and a defence-in-depth
-	// hole at worst — we would ingest our own welcome into the peer
-	// caches via the auth_ok → recordOutboundAuthSuccess path. Abort
-	// with the same cooldown the notice branch above applies so both
-	// arrival shapes converge on one health record.
-	if s.isSelfIdentity(domain.PeerIdentityFromWire(welcome.Address)) {
-		log.Warn().
-			Str("peer", string(address)).
-			Str("local_identity", s.identity.Address).
-			Str("welcome_listen", welcome.Listen).
-			Msg("send_notice_self_identity_rejected")
-		s.applySelfIdentityCooldown(address, s.newSelfIdentityError(address, welcome.Listen))
-		return protocol.Frame{}, errNoticeDialEnded
-	}
-	if strings.TrimSpace(welcome.Challenge) != "" {
-		authLine, err := protocol.MarshalFrameLine(protocol.Frame{
-			Type:      "auth_session",
-			Address:   s.identity.Address,
-			Signature: identity.SignPayload(s.identity, protocol.SessionAuthPayload(welcome.Challenge, s.identity.Address)),
-		})
-		if err != nil {
-			return protocol.Frame{}, err
-		}
-		// netcore-migration: §4.4 bootstrap exception (see sentinel above).
-		if _, err := io.WriteString(conn, authLine); err != nil {
-			return protocol.Frame{}, err
-		}
-		reply, err := readFrameLine(reader, maxResponseLineBytes)
-		if err != nil {
-			return protocol.Frame{}, err
-		}
-		authReply, err := protocol.ParseFrameLine(strings.TrimSpace(reply))
-		if err != nil || authReply.Type != "auth_ok" {
-			return protocol.Frame{}, errNoticeDialEnded
-		}
-		// Outbound convergence success hook: auth_ok on this raw/
-		// bootstrap path is the same evidence of a reachable dialable
-		// peer as on the managed-session path. Without this call, peers
-		// reached only through push_notice fan-out would never get an
-		// announceable persistedMeta row or a trusted advertise triple,
-		// so their state would diverge from the managed path and the
-		// hostname / observed-IP sweep invariants would not apply here.
-		//
-		// The helper takes the wrapper-form "host:port" string. This
-		// §4.4 raw path has no NetCore wrapper, so we read conn.RemoteAddr()
-		// inline — routing_relay.go is already in the §2.9 net-import
-		// whitelist for exactly these bootstrap edges. The defensive empty-
-		// string fallthrough keeps the contract with the helper.
-		s.recordOutboundAuthSuccess(address, remoteAddrString(conn.RemoteAddr()))
-	}
-	return welcome, nil
-}
-
-// noticeConn is what the notice dial's v1 handshake needs of its socket.
-type noticeConn interface {
-	io.Writer
-	RemoteAddr() net.Addr
+	return welcome, true
 }
 
 // remoteAddrString is the host:port form of addr, or "" when there is none.

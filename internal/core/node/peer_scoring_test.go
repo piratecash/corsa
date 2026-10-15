@@ -659,8 +659,8 @@ func TestTrackedInboundPeerAddressIsPerConnection(t *testing.T) {
 	// Simulate hello on both connections (populates NetCore state).
 	authID, _ := svc.connIDFor(authConn)
 	spoofID, _ := svc.connIDFor(spoofConn)
-	svc.rememberConnPeerAddr(authID, protocol.Frame{Address: string(peerAddr), Listen: string(peerAddr)}, "10.0.0.1:55001")
-	svc.rememberConnPeerAddr(spoofID, protocol.Frame{Address: string(peerAddr), Listen: string(peerAddr)}, "10.0.0.1:55002")
+	svc.rememberConnPeerAddr(authID, protocol.Frame{Address: string(peerAddr)}, "10.0.0.1:55001")
+	svc.rememberConnPeerAddr(spoofID, protocol.Frame{Address: string(peerAddr)}, "10.0.0.1:55002")
 
 	// Only the first connection completes auth and is promoted.
 	svc.trackInboundConnect(authID, peerAddr, domaintest.ID("test-identity"))

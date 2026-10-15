@@ -206,7 +206,7 @@ func TestAnnounceProjection_SameVerifiedFallsBackToUplinkLex(t *testing.T) {
 	// AnnounceEntry doesn't carry the per-claim uplink directly
 	// (the projection collapses to one entry per Identity), but the
 	// stable Uplink-lex deterministic winner is exercised via
-	// InspectTriple — uplinkA must have been the projected winner,
+	// InspectUplinkClaim — uplinkA must have been the projected winner,
 	// not uplinkZ. We assert this indirectly by checking that the
 	// AnnounceEntry has no sig and (since both candidates are
 	// unsigned the assertion holds either way) the SeqNo lineage

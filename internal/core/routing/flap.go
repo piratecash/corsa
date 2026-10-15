@@ -155,9 +155,9 @@ type badHopsState struct {
 	// the Identity without touching storage while now < holdUntil.
 	holdUntil time.Time
 
-	// trigger is the wire-frame Origin observed when hold-down was
-	// most recently armed — surfaced in the engage/release logs so
-	// operators can locate the looping segment.
+	// trigger is the uplink whose bad-hops claim most recently armed
+	// hold-down — surfaced in the engage/release logs as
+	// trigger_uplink so operators can locate the looping segment.
 	trigger PeerIdentity
 
 	// strikes counts consecutive arms within the recidivism window;
@@ -188,10 +188,11 @@ type seqVelocity struct {
 	// announces that would advance outbound past observed+1.
 	holdUntil time.Time
 
-	// holdTrigger names the wire-frame Origin most recently
-	// observed at the moment hold-down was armed. Surfaced in the
-	// engage warn-log so operators can identify the upstream
-	// lineage driving the storm. Cleared together with holdUntil
+	// holdTrigger names the uplink of the claim whose emit armed
+	// hold-down — for an own-direct broadcast withdrawal that is the
+	// disconnected direct peer itself. Surfaced in the engage/release
+	// warn-logs as trigger_uplink so operators can identify the
+	// direct peer driving the storm. Cleared together with holdUntil
 	// on hold-down expiry.
 	holdTrigger PeerIdentity
 }
@@ -444,12 +445,12 @@ func (f *FlapDetector) tickLocked(now time.Time) (seqHoldReleased []PeerIdentity
 // emits would inflate the velocity counter and engage hold-down
 // against stable content.
 //
-// trigger names the wire-frame Origin most recently observed for
-// the Identity (or the local origin for own-direct broadcasts);
-// surfaced through holdTrigger when hold-down arms so the engage
-// warn-log can identify the lineage driving the storm. Empty
-// trigger is acceptable for synthetic test fixtures and degrades
-// the log entry's diagnostic value but is otherwise harmless.
+// trigger names the uplink of the claim being emitted (for an
+// own-direct broadcast withdrawal, the disconnected peer); surfaced through
+// holdTrigger when hold-down arms so the engage warn-log can
+// identify the direct peer driving the storm. Empty trigger is
+// acceptable for synthetic test fixtures and degrades the log
+// entry's diagnostic value but is otherwise harmless.
 //
 // When the velocity ring (entries within seqAdvanceWindow trailing
 // `now`) crosses maxSeqAdvancePerWindow, hold-down is armed:
@@ -519,7 +520,7 @@ func (f *FlapDetector) recordSeqAdvanceLocked(identity, trigger PeerIdentity, no
 		// active hold-down) so the burst rate matches the counter.
 		log.Warn().
 			Str("identity", identity.String()).
-			Str("trigger_origin", trigger.String()).
+			Str("trigger_uplink", trigger.String()).
 			Int("window_advances", len(sv.advances)).
 			Int("max_per_window", f.maxSeqAdvancePerWindow).
 			Dur("window", f.seqAdvanceWindow).
@@ -590,7 +591,7 @@ func (f *FlapDetector) clearExpiredSeqHoldDownsLocked(now time.Time) (released [
 			// operator-facing observability contract.
 			log.Warn().
 				Str("identity", id.String()).
-				Str("trigger_origin", sv.holdTrigger.String()).
+				Str("trigger_uplink", sv.holdTrigger.String()).
 				Int("retained_advances", len(sv.advances)).
 				Msg("routing_seqno_flap_hold_down_released")
 			sv.holdUntil = time.Time{}
@@ -673,7 +674,7 @@ func (f *FlapDetector) recordBadHopsInvalidationLocked(identity, trigger PeerIde
 		}
 		log.Warn().
 			Str("identity", identity.String()).
-			Str("trigger_origin", trigger.String()).
+			Str("trigger_uplink", trigger.String()).
 			Int("window_events", len(bs.events)).
 			Int("max_per_window", f.maxBadHopsPerWindow).
 			Dur("window", f.badHopsWindow).
@@ -719,7 +720,7 @@ func (f *FlapDetector) clearExpiredBadHopsHoldDownsLocked(now time.Time) bool {
 		if !bs.holdUntil.IsZero() && !now.Before(bs.holdUntil) {
 			log.Warn().
 				Str("identity", id.String()).
-				Str("trigger_origin", bs.trigger.String()).
+				Str("trigger_uplink", bs.trigger.String()).
 				Int("strikes", bs.strikes).
 				Msg("routing_bad_hops_hold_down_released")
 			bs.holdUntil = time.Time{}

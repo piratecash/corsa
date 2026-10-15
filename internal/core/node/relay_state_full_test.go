@@ -29,6 +29,74 @@ import (
 func TestFullRelayStateStoreDoesNotUnsendAFrame(t *testing.T) {
 	t.Parallel()
 
+	svc, peerAddr, frames := newInboundRelayFixture(t)
+
+	// The relay-state table is full: every store from here is refused.
+	svc.relayStates = newRelayStateStore()
+	for i := range maxRelayStates {
+		svc.relayStates.store(&relayForwardState{
+			MessageID:    fmt.Sprintf("filler-%d", i),
+			RemainingTTL: relayStateTTLSeconds,
+		})
+	}
+
+	envelope := newInboundRelayEnvelope(t, svc, "relay-with-full-state")
+
+	outcome := svc.sendTableRoutedRelayToAddress(context.Background(),
+		domain.PeerAddress("inbound:"+peerAddr), envelope, time.Now().UTC())
+
+	if outcome != relaySendHandedToPeer {
+		t.Errorf("outcome = %v, want handed-to-peer: the frame was written before the state store was asked", outcome)
+	}
+	select {
+	case frame := <-frames:
+		if frame.ID != string(envelope.ID) {
+			t.Errorf("the peer received %q, want %q", frame.ID, envelope.ID)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("nothing reached the peer, so this test proves nothing about what the outcome should say")
+	}
+	svc.WaitBackground()
+}
+
+// TestTableRoutedInboundRelayMarksRoutingTableSelection: a table-directed
+// send through an inbound connection records the attempt as picked by the
+// routing table, exactly like the outbound branch, so the stale hop_ack
+// guard accepts an ack only from that next hop whichever direction the
+// connection has.
+func TestTableRoutedInboundRelayMarksRoutingTableSelection(t *testing.T) {
+	t.Parallel()
+
+	svc, peerAddr, frames := newInboundRelayFixture(t)
+	svc.relayStates = newRelayStateStore()
+	envelope := newInboundRelayEnvelope(t, svc, "relay-table-routed-inbound")
+
+	outcome := svc.sendTableRoutedRelayToAddress(context.Background(),
+		domain.PeerAddress("inbound:"+peerAddr), envelope, time.Now().UTC())
+	if outcome != relaySendHandedToPeer {
+		t.Fatalf("outcome = %v, want handed-to-peer", outcome)
+	}
+	select {
+	case <-frames:
+	case <-time.After(3 * time.Second):
+		t.Fatal("nothing reached the peer")
+	}
+
+	_, selection := svc.relayStates.lookupForwardAttempt(string(envelope.ID))
+	if selection != relayNextHopRoutingTable {
+		t.Fatalf("NextHopSelection = %s, want %s", selection, relayNextHopRoutingTable)
+	}
+	svc.WaitBackground()
+}
+
+// newInboundRelayFixture builds a Service with one live inbound
+// connection the relay can write to. It returns the connection's remote
+// address (the relay resolves an "inbound:" address against it, which for
+// a pipe is not the overlay one) and a channel of the frames the peer
+// side read.
+func newInboundRelayFixture(t *testing.T) (*Service, string, <-chan protocol.Frame) {
+	t.Helper()
+
 	id, err := identity.Generate()
 	if err != nil {
 		t.Fatalf("identity.Generate: %v", err)
@@ -37,16 +105,12 @@ func TestFullRelayStateStoreDoesNotUnsendAFrame(t *testing.T) {
 	svc.initMaps()
 	svc.identity = id
 
-	// A live inbound connection the relay can write to, with a reader so
-	// the write completes.
 	local, remote := net.Pipe()
 	t.Cleanup(func() { _ = local.Close(); _ = remote.Close() })
 	core := newTestNetCore(t, netcore.ConnID(1), local, netcore.Inbound, netcore.Options{
 		Address: domain.PeerAddress("10.0.0.1:64646"),
 		Caps:    []domain.Capability{domain.CapMeshRelayV1},
 	})
-	// The relay resolves an "inbound:" address against the connection's
-	// REMOTE address, which for a pipe is not the overlay one.
 	peerAddr := core.RemoteAddr()
 	svc.peerMu.Lock()
 	svc.setTestConnEntryLocked(local, &connEntry{core: core, tracked: true})
@@ -63,40 +127,20 @@ func TestFullRelayStateStoreDoesNotUnsendAFrame(t *testing.T) {
 			}
 		}
 	}()
+	return svc, peerAddr, frames
+}
 
-	// The relay-state table is full: every store from here is refused.
-	svc.relayStates = newRelayStateStore()
-	for i := range maxRelayStates {
-		svc.relayStates.store(&relayForwardState{
-			MessageID:    fmt.Sprintf("filler-%d", i),
-			RemainingTTL: relayStateTTLSeconds,
-		})
-	}
-
+// newInboundRelayEnvelope builds a DM envelope from svc to a fresh
+// recipient identity.
+func newInboundRelayEnvelope(t *testing.T, svc *Service, id protocol.MessageID) protocol.Envelope {
+	t.Helper()
 	recipientID, err := identity.Generate()
 	if err != nil {
 		t.Fatalf("identity.Generate: %v", err)
 	}
-	envelope := protocol.Envelope{
-		ID: "relay-with-full-state", Topic: "dm",
+	return protocol.Envelope{
+		ID: id, Topic: "dm",
 		Sender: svc.Address(), Recipient: recipientID.Address,
 		Payload: []byte("sealed"), CreatedAt: time.Now().UTC(),
 	}
-
-	outcome := svc.sendRelayToAddress(context.Background(),
-		domain.PeerAddress("inbound:"+peerAddr), envelope,
-		domain.PeerIdentityFromWire(recipientID.Address), time.Now().UTC())
-
-	if outcome != relaySendHandedToPeer {
-		t.Errorf("outcome = %v, want handed-to-peer: the frame was written before the state store was asked", outcome)
-	}
-	select {
-	case frame := <-frames:
-		if frame.ID != string(envelope.ID) {
-			t.Errorf("the peer received %q, want %q", frame.ID, envelope.ID)
-		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("nothing reached the peer, so this test proves nothing about what the outcome should say")
-	}
-	svc.WaitBackground()
 }

@@ -29,8 +29,8 @@ func TestBuildAnnounceSnapshot_DeduplicatesNextHopVariants(t *testing.T) {
 }
 
 func TestBuildAnnounceSnapshot_HigherSeqWinsOnHopsTie(t *testing.T) {
-	// Pre-A1 this test pinned Stage 3's "max SeqNo within (Identity,
-	// Origin)" invariant. Stage 3 was removed in A1 round 3 (it
+	// An earlier version of this test pinned Stage 3's "max SeqNo
+	// within (Identity, Origin)" invariant. Stage 3 was removed (it
 	// collapsed live + tombstone for the same Identity under
 	// Origin = localOrigin constant — see announce_builder.go
 	// AnnounceSnapshot doc-comment). The per-Identity stage now
@@ -39,11 +39,11 @@ func TestBuildAnnounceSnapshot_HigherSeqWinsOnHopsTie(t *testing.T) {
 	//
 	// The Hops-different version of this test was misleading: it
 	// suggested SeqNo dominates Hops. That was never the routing
-	// invariant — pre-A1 it just happened to read as max-SeqNo
-	// because Stage 3 ran BEFORE Stage 4's Hops comparison, and
-	// inputs in this test had different SeqNos so Stage 3's max-SeqNo
-	// rule picked one before Stage 4 saw Hops. Post-A1 we collapse
-	// in one step and Hops wins outright.
+	// invariant — it only read as max-SeqNo while Stage 3 ran
+	// BEFORE Stage 4's Hops comparison, and inputs in this test had
+	// different SeqNos so Stage 3's max-SeqNo rule picked one before
+	// Stage 4 saw Hops. Now we collapse in one step and Hops wins
+	// outright.
 	//
 	// Fixture redesigned to actually exercise the SeqNo tie-break:
 	// inputs share Hops, so the higher SeqNo wins the per-Identity
@@ -67,12 +67,11 @@ func TestBuildAnnounceSnapshot_MinHopsBeatsHigherSeq(t *testing.T) {
 	// pins the contract that Hops dominates SeqNo in the per-Identity
 	// stage. Lower Hops wins even though the loser has the higher
 	// SeqNo. This is the classical DV "shorter path is better"
-	// invariant — never broken by Stage 3 pre-A1 either (Stage 3
+	// invariant — never broken by the removed Stage 3 either (it
 	// only ran when SeqNo differed AND Hops differed for the same
 	// (Identity, Origin); the resulting single survivor then went
-	// through Stage 4's Hops comparison anyway). Post-A1 the
-	// Hops-first decision is just visible without the Stage 3
-	// intermediate.
+	// through Stage 4's Hops comparison anyway). Without Stage 3
+	// the Hops-first decision is visible directly.
 	raw := []AnnounceEntry{
 		{Identity: domaintest.ID("dest1"), Origin: domaintest.ID("origin1"), SeqNo: 3, Hops: 2},
 		{Identity: domaintest.ID("dest1"), Origin: domaintest.ID("origin1"), SeqNo: 7, Hops: 4},
@@ -249,9 +248,9 @@ func TestAnnounceSnapshot_NilVsNonNilNotEqual(t *testing.T) {
 // cached old entry under the same (dest1, withdrawn=false) slot.
 //
 // The Origin field changes in this fixture too (`originA →
-// originB`) — that mirrors a real pre-A1 transit shifting its
-// per-Identity winner across Origin lineages — but it is NOT what
-// the delta path triggers on. For the Origin-only invariant pin
+// originB`; a real sender never does that, every emit carries
+// Origin = localOrigin) — but it is NOT what the delta path
+// triggers on. For the Origin-only invariant pin
 // see TestComputeDelta_OriginOnlyDiffNoEmit below.
 func TestComputeDelta_FieldChangeSameIdentityEmits(t *testing.T) {
 	old := &AnnounceSnapshot{
@@ -280,12 +279,12 @@ func TestComputeDelta_FieldChangeSameIdentityEmits(t *testing.T) {
 // key shift: a snapshot delta whose ONLY difference vs. the cached
 // previous snapshot is the Origin field — with SeqNo / Hops /
 // Withdrawn / Extra all identical — MUST NOT produce a delta
-// entry. Pre-A1 this was an "emit" case (the old (Identity, Origin)
-// key would have classified the new Origin as a fresh tracking
-// slot); post-A1 the tracking key drops Origin and the field-
-// equality check below the key match treats Origin-only diffs as
-// noise (Origin = localOrigin on every post-A1 wire emit, so it
-// shouldn't move when storage stays the same).
+// entry. Under the former (Identity, Origin) key this was an
+// "emit" case (the new Origin was classified as a fresh tracking
+// slot); the tracking key now drops Origin and the field-equality
+// check below the key match treats Origin-only diffs as noise
+// (Origin = localOrigin on every wire emit, so it shouldn't move
+// when storage stays the same).
 func TestComputeDelta_OriginOnlyDiffNoEmit(t *testing.T) {
 	old := &AnnounceSnapshot{
 		Entries: []AnnounceEntry{
@@ -394,12 +393,12 @@ func TestComputeDelta_NoChangeMultiEntrySameIdentity(t *testing.T) {
 	// collapse live + tombstone for the same Identity into a single
 	// slot — only the last-iterated old entry would survive, and
 	// the new snapshot's other entry would be flagged as "not found
-	// in oldIdx" and emitted as a fresh delta entry. Pre-A1 we
-	// keyed on (Identity, Origin) — that worked because the live
-	// winner and own-origin tombstone naturally carried different
-	// Origin values. After A1 every emit carries Origin = localOrigin
-	// (see uplink_claim.go migration contract), so (Identity, Origin)
-	// would collapse and the key shifted to (Identity, IsWithdrawn).
+	// in oldIdx" and emitted as a fresh delta entry. ComputeDelta
+	// used to key on (Identity, Origin) — that worked while the live
+	// winner and own-origin tombstone carried different Origin
+	// values. Every emit now carries Origin = localOrigin (see
+	// uplink_claim.go), so (Identity, Origin) would collapse and the
+	// key shifted to (Identity, IsWithdrawn).
 	old := &AnnounceSnapshot{
 		Entries: []AnnounceEntry{
 			// Live winner via somePeer.
@@ -897,10 +896,10 @@ func TestBuildAnnounceSnapshot_FieldDataInflationCollapse(t *testing.T) {
 	//   - Stage 1 dedups exact duplicates.
 	//   - Stage 2 collapses to one entry per (Identity, Origin, SeqNo,
 	//     Withdrawn) — defensive dedup for synthetic test-fixture
-	//     inputs that bypass AnnounceProjectionFor. The pre-A1
+	//     inputs that bypass AnnounceProjectionFor. The former
 	//     per-(Identity, Origin) max-SeqNo stage (Stage 3) was
-	//     removed in Phase 1 because `Origin = localOrigin` is now
-	//     constant across all post-A1 emits.
+	//     removed because `Origin = localOrigin` is constant
+	//     across all emits.
 	//   - The per-Identity collapse runs directly on Stage 2 output
 	//     and collapses to one entry per Identity → 113.
 	//

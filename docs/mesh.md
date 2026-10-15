@@ -138,7 +138,8 @@ peer's reputation to prevent cooldown bypass.
 
 1. `runPeerSession()` dials with 1.5 s timeout.
 2. Client sends `hello` (identity, services, node type, reachable network
-   groups, advertised listen address).
+   groups, the `listener` flag and `advertise_port`; no host — the server
+   takes it from the TCP connection).
 3. Server responds with `welcome` (protocol version, challenge nonce,
    observed address, server identity).
 4. Client signs the challenge with `ed25519` and sends `auth_session`.
@@ -161,11 +162,11 @@ peer's reputation to prevent cooldown bypass.
 
 The health-tracking address for inbound connections is **sanitised**: the IP
 is taken from the real TCP `RemoteAddr` (verified by the kernel, cannot be
-spoofed) and the port from the self-reported `Listen` field. This follows the
+spoofed) and the port from the self-reported `advertise_port` (falling back to
+`config.DefaultPeerPort` on an absent or invalid value). This follows the
 principle "trust no one" — a malicious peer cannot inject a health entry under
-an arbitrary address. The self-reported address is only used for peer
-gossip/relay (address exchange with other nodes). If the declared IP differs
-from the TCP IP, a warning is logged and the TCP IP is used.
+an arbitrary address. The hello carries no IP of its own, so there is no
+declared host to reconcile with the TCP one.
 
 **Private/loopback address isolation:**
 
@@ -288,8 +289,7 @@ sequenceDiagram
 > (`registerHelloRoute`) and replays the backlog (`pushBacklogToSubscriber`)
 > at auth. Every node receives its own inbox over ITS OWN outbound sessions
 > (where it is the authenticating initiator), and gossip guarantees mesh-wide
-> propagation. The legacy `subscribe_inbox` / `subscribed` / `request_inbox`
-> commands were removed when `MinimumProtocolVersion` reached 20.
+> propagation. There is no separate subscription command on the wire.
 
 ### Health monitoring
 
@@ -308,18 +308,16 @@ sequenceDiagram
   connection, its dialable address is announced to all active outbound
   sessions via `announce_peer`. **Trust contract:** the address we
   gossip is the **observed TCP source host** combined with the
-  **self-reported `advertise_port`** — never the claimed `hello.Listen`
-  host verbatim, and never the inbound TCP source port. A peer can lie
-  about its listen IP (stale DDNS, misconfig, or deliberately), but it
-  cannot forge the IP the packets actually arrive from; the TCP source
+  **self-reported `advertise_port`** — never the inbound TCP source
+  port. The hello carries no host: a peer cannot forge the IP the
+  packets actually arrive from, so that is the IP we vouch for; the TCP source
   port, however, is an ephemeral NAT mapping and is unusable for
   dial-back, so the port is taken from `hello.advertise_port` (with
   fallback to `config.DefaultPeerPort` on absent or out-of-range
   values). Both halves are passed through `normalizePeerAddress` so
   the announce path shares the exact same trust rules as the learn
-  path (`learnPeerFromFrame`). Under the v12 wire contract `hello.Listen`
-  is empty, and `observedAnnounceAddressFromHello` synthesises the
-  advertised endpoint from the observed host plus `advertise_port`
+  path (`learnPeerFromFrame`). `observedAnnounceAddressFromHello`
+  synthesises the advertised endpoint from the observed host plus `advertise_port`
   before handing it to `normalizePeerAddress`. When the helper returns
   `false` (listener disabled, empty observed, malformed advertised,
   or any forbidden range) no announcement is emitted. The frame
@@ -926,7 +924,8 @@ sequenceDiagram
 
 1. `runPeerSession()` подключается с таймаутом 1.5 с.
 2. Клиент отправляет `hello` (identity, сервисы, тип ноды, доступные
-   сетевые группы, объявленный listen-адрес).
+   сетевые группы, флаг `listener` и `advertise_port`; host не передаётся —
+   сервер берёт его из TCP-соединения).
 3. Сервер отвечает `welcome` (версия протокола, challenge-nonce, наблюдаемый
    адрес, identity сервера).
 4. Клиент подписывает challenge через `ed25519` и отправляет `auth_session`.
@@ -950,11 +949,11 @@ sequenceDiagram
 
 Адрес для health-трекинга inbound-соединений **санитизируется**: IP берётся
 из реального TCP `RemoteAddr` (верифицирован ядром ОС, не может быть
-подделан), а порт — из заявленного поля `Listen`. Это следует принципу
-«не доверяй никому» — вредоносный пир не может создать health-запись под
-произвольным адресом. Заявленный адрес используется только для gossip/relay
-(обмен адресами с другими нодами). Если заявленный IP отличается от TCP IP,
-пишется warning и используется TCP IP.
+подделан), а порт — из заявленного `advertise_port` (с фолбэком на
+`config.DefaultPeerPort` при отсутствующем или невалидном значении). Это
+следует принципу «не доверяй никому» — вредоносный пир не может создать
+health-запись под произвольным адресом. Собственного IP hello не несёт, так
+что согласовывать с TCP IP нечего.
 
 **Изоляция приватных/loopback адресов:**
 
@@ -1076,8 +1075,7 @@ sequenceDiagram
 > (`registerHelloRoute`) и реплеит backlog (`pushBacklogToSubscriber`).
 > Каждый узел получает свой inbox через СОБСТВЕННЫЕ исходящие сессии (где он
 > — аутентифицирующийся инициатор), а gossip гарантирует распространение по
-> mesh. Легаси-команды `subscribe_inbox` / `subscribed` / `request_inbox`
-> удалены, когда `MinimumProtocolVersion` достиг 20.
+> mesh. Отдельной команды подписки на проводе нет.
 
 ### Мониторинг здоровья
 
@@ -1097,18 +1095,16 @@ sequenceDiagram
   соединение, его дозваниваемый адрес анонсируется всем активным
   исходящим сессиям через `announce_peer`. **Контракт доверия:**
   анонсируем **наблюдаемый TCP source host** в паре с **самозаявленным
-  `advertise_port`** — никогда не заявленный в `hello.Listen` хост
-  дословно и никогда не входящий TCP source port. Пир может соврать
-  про свой listen IP (устаревший DDNS, ошибка конфига или умышленно),
-  но не может подделать IP, с которого реально приходят пакеты; TCP
+  `advertise_port`** — никогда не входящий TCP source port. Хоста
+  hello не несёт: пир не может подделать IP, с которого реально
+  приходят пакеты, поэтому за этот IP мы и ручаемся; TCP
   source port, напротив, эфемерное NAT-mapping и для dial-back
   непригодно, поэтому порт берём из `hello.advertise_port` (с
   фолбэком на `config.DefaultPeerPort` при отсутствии или невалидном
   значении на проводе). Обе половины проходят через
   `normalizePeerAddress`, поэтому announce-путь использует ровно те
-  же правила доверия, что и learn-путь (`learnPeerFromFrame`). Под
-  v12-wire `hello.Listen` пуст, и `observedAnnounceAddressFromHello`
-  синтезирует advertised-эндпоинт из observed host + `advertise_port`
+  же правила доверия, что и learn-путь (`learnPeerFromFrame`).
+  `observedAnnounceAddressFromHello` синтезирует advertised-эндпоинт из observed host + `advertise_port`
   до того, как передать его в `normalizePeerAddress`. Если хелпер
   возвращает `false` (listener отключён, пустой observed, некорректный
   advertised или запрещённый диапазон) — анонс не отправляется.

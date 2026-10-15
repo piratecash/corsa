@@ -672,7 +672,7 @@ func (s *Service) sessionSupportsIdentityDiscovery(session *peerSession) bool {
 // authenticated session peer: routed mode, ttl = 1, mandatory auth.
 //
 // A peer that does not carry the plane or the type is skipped silently —
-// v27 peers never see the datagram, their only path to fresh keys is a new
+// it never sees the datagram, so its only path to fresh keys is a new
 // hello/welcome. For a capable peer the push's reliability IS the session:
 // there is no ack and no timer, so a failed enqueue closes the session and
 // the reconnect handshake redistributes the record.

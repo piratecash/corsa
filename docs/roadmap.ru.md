@@ -160,7 +160,7 @@ Health, RTT и targeted route query отгружены под своим кон�
 <a id="iter-1"></a>
 ### Таблица маршрутов (distance vector с withdrawal)
 
-**Статус: базовая реализация завершена.** Distance-vector routing с per-origin SeqNo, withdrawal'ами, triggered update'ами, split horizon, flap detection, hop_ack confirmation и RPC observability полностью реализованы и протестированы. Полная документация: [`routing.md`](routing.md), [`rpc/routing.md`](rpc/routing.md), [`protocol/relay.md`](protocol/relay.md).
+**Статус: базовая реализация завершена.** Distance-vector routing с упорядочиванием SeqNo per `(identity, uplink)`, withdrawal'ами, triggered update'ами, split horizon, flap detection, hop_ack confirmation и RPC observability полностью реализованы и протестированы. Полная документация: [`routing.md`](routing.md), [`rpc/routing.md`](rpc/routing.md), [`protocol/relay.md`](protocol/relay.md).
 
 Оставшиеся задачи в рамках этой итерации:
 
@@ -3239,7 +3239,7 @@ Round-trip time оценивается из существующей TCP-сес�
 
 1. **Тайминг `hop_ack`** — когда получен `relay_hop_ack`, RTT равен
    времени между отправкой relay-сообщения и получением ack.
-   Это уже отслеживается per `(identity, origin, nextHop)` triple
+   Это уже отслеживается per claim `(identity, uplink)`
    (см. Итерацию 1.5).
 2. **`tcp_info` из `getsockopt`** — на Linux ядро предоставляет
    сглаженные оценки RTT для TCP-соединений. Это доступно «бесплатно»
@@ -3527,10 +3527,10 @@ graph LR
 | Priority bypass для real-time медиа-пакетов | Без priority bypass передача файлов или sync burst может «голодить» голосовые пакеты. Real-time трафик никогда не должен ждать в bulk-очереди. |
 | NAT traversal как опциональный overlay, relay как гарантированный fallback | Hole punching улучшает задержку, но не гарантирован (symmetric NAT). Протокол должен работать без прямых соединений — relay всегда доступен. |
 | Resume передачи файлов через FileID (DM MessageID), целостность через FileHash (SHA-256) | FileID (UUID DM-анонса) идентифицирует событие передачи для resume. FileHash (SHA-256 контента файла) верифицирует целостность после сборки. Намеренно разделены: один файл отправленный дважды = два FileID, один FileHash. |
-| `hop_ack` scoped к (identity, origin, nextHop) triple, а не per-next_hop глобально | Wire-level `relay_hop_ack` несёт только `message_id`; origin разрешается локально из routing decision, которым отправлялось сообщение. Hop_ack для `(X, origin=C, via B)` не продвигает `(X, origin=D, via B)` или `(Y, origin=C, via B)`. Per-triple scoping предотвращает раздувание доверия к не связанным route entries. |
-| Per-origin SeqNo с ключом дедупликации `(identity, origin, nextHop)` | Только origin может продвигать SeqNo. Промежуточные ноды форвардят (origin, seq) без изменений. Ключ дедупликации включает origin, чтобы разные lineage'и для одного identity сосуществовали — смена origin через одного соседа — это новый lineage, не устаревшее обновление. |
+| `hop_ack` scoped к claim'у (identity, uplink), а не per-next_hop глобально | Wire-level `relay_hop_ack` несёт только `message_id`; recipient разрешается локально из relay-состояния этого сообщения, а uplink — peer, от которого пришёл ack. Hop_ack для `(X, via B)` не продвигает `(X, via C)` или `(Y, via B)`. Per-claim scoping предотвращает раздувание доверия к не связанным route entries. |
+| Ключ дедупликации `(identity, uplink)`, SeqNo строго упорядочен внутри слота, на проводе `Origin == sender` | Каждый отправитель анонсирует под своей identity как Origin — и live-записи, и withdrawal'ы, — а получатели отвергают любую запись, чей Origin — не отправляющий peer. Поэтому внутри слота `(identity, uplink)` Origin не несёт ничего сверх ключа, storage его не хранит, а SeqNo сравнивается строго: меньший SeqNo устарел, равный никогда не поднимает tombstone. Прежний дизайн ключевал storage по `(identity, origin, nextHop)` с per-origin SeqNo; на реальных mesh он раздувал таблицу примерно в 12 раз и был заменён. |
 | При закрытии сессии: wire withdrawal только для own-origin маршрутов, local-only инвалидация для transit | Промежуточная нода не может отправлять withdrawal для transit маршрута, который она не owns (потребовала бы фабрикации origin's SeqNo). Вместо этого она локально дропает маршрут и прекращает его анонсировать; downstream ноды сходятся через TTL expiry или собственный withdrawal origin'а. |
-| Явные состояния здоровья (Good/Questionable/Bad/Dead) per (identity, origin, nextHop) тройка, а не per-next_hop | Бинарное здоровье на уровне next-hop не видит нюансов. Per-triple трекинг означает, что маршрут (F, origin=C, via B) имеет независимое здоровье от (F, origin=D, via B) — совпадая с ключом дедупликации таблицы. Четыре состояния позволяют градуированный ответ. |
+| Явные состояния здоровья (Good/Questionable/Bad/Dead) per claim (identity, uplink), а не per-next_hop | Бинарное здоровье на уровне next-hop не видит нюансов. Per-claim трекинг означает, что маршрут (F, via B) имеет независимое здоровье от (G, via B) — совпадая с ключом дедупликации таблицы. Четыре состояния позволяют градуированный ответ. |
 | Dead = локальная инвалидация + прекращение анонса, а не wire withdrawal для всех маршрутов | Тот же принцип, что и при закрытии сессии: только origin может отправить wire withdrawal (требуется валидный SeqNo). Transit Dead маршруты тихо удаляются; downstream сходится через TTL expiry или собственный withdrawal origin'а. |
 | Композитный score маршрута (hops + RTT + здоровье + доверие), а не только hop-count | Чистый hop-count выбирает 2-хоповый трансконтинентальный relay вместо 3-хопового локального mesh. Добавление RTT и здоровья даёт решения, отражающие реальное качество сети. |
 | Отдельные capabilities `mesh_route_probe_v1` / `mesh_route_query_v1` для фреймов итерации 1.5 | `route_probe` и `route_query` — это новые wire-level типы фреймов. Нода итерации 1, объявляющая `mesh_routing_v1`, их не знает. Переиспользование того же capability сломает mixed-version peer'ов в одном capability bucket'е. |

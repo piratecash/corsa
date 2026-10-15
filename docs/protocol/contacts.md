@@ -55,7 +55,7 @@ Retrieves all contacts known to the local node, including untrusted entries.
 3. **TOFU Pinning**: First occurrence of a new address is pinned; subsequent different keys for the same address are rejected as conflicting
 4. **Conflicting Keys**: If a contact with the same address presents a different pubkey/boxkey/boxsig, the new entry is ignored and an error is logged
 5. **Store Only Trusted**: Only contacts that pass all validations are stored via `import_contacts`
-6. **Backward Compatibility (Hello Frames)**: Key material learned from peer `hello` frames is stored even when partial — if `boxkey` or `boxsig` is absent (older nodes), the available fields (address, pubkey) are still accepted. Boxsig verification is only applied when all four fields are present
+6. **Handshake Frames Are Learned Whole**: Key material carried by a peer's `hello` or `welcome` is stored only as a complete, self-certifying set — `address`, `pubkey`, `boxkey` and `boxsig` all present, the `pubkey` fingerprint-matching the `address` and the `boxsig` a valid binding. Every node at or above `MinimumProtocolVersion` sends all four fields, so a frame missing the box pair, or one whose binding does not verify, teaches nothing — not even the `pubkey`. A `hello` without identity fields (a local RPC client or the node prober) carries no address and is not a key source at all
 
 ### fetch_trusted_contacts
 
@@ -380,7 +380,7 @@ sequenceDiagram
 3. **Привязка TOFU**: Первое появление нового адреса закреплено; последующие разные ключи для того же адреса отклоняются как конфликтующие
 4. **Конфликтующие ключи**: Если контакт с тем же адресом представляет другой pubkey/boxkey/boxsig, новая запись игнорируется и логируется ошибка
 5. **Сохранение только доверенных**: Только контакты, прошедшие все проверки, сохраняются через `import_contacts`
-6. **Обратная совместимость (Hello-кадры)**: Ключевой материал, полученный из `hello`-кадров пиров, сохраняется даже при неполных данных — если `boxkey` или `boxsig` отсутствуют (старые ноды), доступные поля (address, pubkey) всё равно принимаются. Верификация boxsig применяется только когда все четыре поля присутствуют
+6. **Кадры рукопожатия учатся целиком**: Ключевой материал из `hello` или `welcome` пира сохраняется только полным самоудостоверяющим набором — присутствуют `address`, `pubkey`, `boxkey` и `boxsig`, отпечаток `pubkey` совпадает с `address`, а `boxsig` — действительная подпись привязки. Каждый узел не ниже `MinimumProtocolVersion` шлёт все четыре поля, поэтому кадр без пары box-ключей или с непроверяемой привязкой ничему не учит — даже `pubkey`. `hello` без полей идентичности (локальный RPC-клиент или node prober) не несёт адреса и источником ключей не является вовсе
 
 ### fetch_trusted_contacts
 

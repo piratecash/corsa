@@ -245,9 +245,10 @@ Sent by receiver after successful SHA-256 verification of the complete file.
 `epoch` echoes the most recent sender `ServingEpoch` observed in a
 `chunk_response` so the sender can reject stale replays from a prior
 serving run of the same `file_id` (see **Serving epoch replay defense**
-below). `epoch` is omitted when zero and then represents a legacy
-pre-epoch receiver; the sender falls back to an un-gated accept path for
-rolling-upgrade compatibility.
+below). `epoch` is omitted when zero, and a frame without it gets no
+exemption: the sender accepts it only while its own mapping has no
+recorded run either, and drops it like any other mismatch against a run
+it knows.
 
 ```json
 {
@@ -264,7 +265,8 @@ rolling-upgrade compatibility.
 Sender's acknowledgement, allowing receiver to stop resending. The sender
 echoes the same `epoch` value it received, so the receiver can likewise
 ignore a late ack from a prior run of the same `file_id` (e.g. a cancel
-+ restart cycle that bound a new epoch).
++ restart cycle that bound a new epoch). The receiver requires the echoed
+`epoch` to equal the one its `file_downloaded` carried, zero included.
 
 ```json
 {
@@ -334,17 +336,17 @@ type ChunkResponsePayload struct {
     FileID MessageID `json:"file_id"`
     Offset uint64    `json:"offset"`
     Data   string    `json:"data"`
-    Epoch  uint64    `json:"epoch,omitempty"` // sender ServingEpoch; 0 = legacy/unset
+    Epoch  uint64    `json:"epoch,omitempty"` // sender ServingEpoch; 0 = no recorded run
 }
 
 type FileDownloadedPayload struct {
     FileID MessageID `json:"file_id"`
-    Epoch  uint64    `json:"epoch,omitempty"` // echoed sender ServingEpoch; 0 = legacy/unset
+    Epoch  uint64    `json:"epoch,omitempty"` // echoed sender ServingEpoch; 0 = none observed
 }
 
 type FileDownloadedAckPayload struct {
     FileID MessageID `json:"file_id"`
-    Epoch  uint64    `json:"epoch,omitempty"` // echoed sender ServingEpoch; 0 = legacy/unset
+    Epoch  uint64    `json:"epoch,omitempty"` // epoch of the file_downloaded it answers
 }
 
 type FileCommandPayload struct {
@@ -1194,7 +1196,8 @@ Bump:        validateChunkRequest, only when prevState != senderServing
 Gate:        HandleFileDownloaded   → reject if wire epoch != ServingEpoch
              HandleFileDownloadedAck → reject if wire epoch != receiver's
                                         stashed ServingEpoch
-Legacy:      wire epoch == 0 skips the gate (rolling-upgrade compatibility)
+Zero:        no exemption — wire epoch 0 matches only a mapping whose
+             ServingEpoch is 0 (no recorded run)
 ```
 
 A re-download reuses the original `FileID`: the same sender mapping
@@ -1232,17 +1235,29 @@ mapping to `receiverCompleted`.
 and receiver mappings so the counter remains strictly monotonic across
 process restarts. Without persistence a post-restart re-download would
 restart the counter at 0 and collide with stale `file_downloaded`
-messages cached at the peer. On the receiver side `CancelDownload`
-resets the stashed epoch so the next download learns a fresh value from
+messages cached at the peer. On the receiver side every reset to
+available (`CancelDownload`, `RestartDownload`, `DeleteLocalCopy`)
+clears the stashed epoch so the next download learns a fresh value from
 its first `chunk_response`.
 
-**Backwards compatibility.** Both wire fields are `omitempty` and a
-wire value of 0 is treated as "pre-epoch (legacy) client" on both
-sides: the gate is skipped and the message is accepted as before.
-Fully-upgraded deployments stamp non-zero epochs everywhere and gain
-full replay protection. During a rolling upgrade a legacy receiver
-still interoperates with an upgraded sender (it sends Epoch=0 and is
-accepted) and vice versa.
+**Zero epoch.** The wire fields are `omitempty`, so 0 is what a frame
+without the field decodes to, and it gets no exemption: both gates are
+plain equality. A genuine transition into serving bumps the epoch to at
+least 1 and every `chunk_response` stamps it; the receiver reaches
+`receiverWaitingAck` only after at least one `chunk_response` of the
+current run, because an announced file is never empty and a reset to
+available also rewinds the offset to 0; and the sender echoes the epoch
+into the ack verbatim. A frame without an epoch while the other side
+knows the run is therefore not a variant of the protocol but a frame of
+no run: it is dropped and logged at warn with `file_id`, the peer
+(`recipient` / `sender`), `received_epoch` and `current_epoch`, exactly
+like a stale one. A local `ServingEpoch` of 0 means no run is recorded —
+which happens only for a mapping persisted before the epoch existed and
+not served since — and is matched only by a frame that carries 0 too.
+Such a pair keeps working; a receiver persisted that way whose sender has
+since recorded a run gets no ack, exhausts its `file_downloaded`
+retries and completes locally, while the sender's serving slot is
+reclaimed by the stall timer.
 
 ```mermaid
 sequenceDiagram
@@ -2188,9 +2203,10 @@ fallback, pending queue. Единственное отличие — струк�
 `chunk_response`, и позволяет отправителю отличать легитимное завершение
 от отложенного replay предыдущего serving-run с тем же `file_id` (см.
 **Защита от replay по serving epoch** ниже). При `epoch == 0` поле
-опускается и трактуется как legacy получатель до появления эпох —
-отправитель откатывается к не-защищённому пути для совместимости с
-rolling-upgrade.
+опускается, и кадр без него никаких исключений не получает: отправитель
+принимает его, только пока у его собственного маппинга тоже нет
+записанного run, и отбрасывает как любое несовпадение, если run ему
+известен.
 
 ```json
 {
@@ -2207,7 +2223,8 @@ file_downloaded (позволяет получателю прекратить п
 `file_downloaded_ack` эхо-повторяет то же значение `epoch`, которое он
 получил, поэтому получатель тоже может отклонять устаревшие подтверждения
 от предыдущих serving-runs (например, после cancel + restart, связавшего
-новую эпоху):
+новую эпоху). Получатель требует, чтобы эхо-эпоха совпадала с той, что
+нёс его `file_downloaded`, включая ноль:
 
 ```json
 {
@@ -2854,7 +2871,8 @@ Bump:     validateChunkRequest при переходе в senderServing (НЕ п
 Gate:     HandleFileDownloaded    → отклонить, если wire epoch != ServingEpoch
           HandleFileDownloadedAck → отклонить, если wire epoch != сохранённому
                                      получателем ServingEpoch
-Legacy:   wire epoch == 0 пропускает gate (совместимость rolling-upgrade)
+Ноль:     исключений нет — wire epoch 0 совпадает только с маппингом,
+          у которого ServingEpoch = 0 (run не записан)
 ```
 
 Протокол переиспользует `FileID` повторных загрузок — повторное скачивание
@@ -2888,16 +2906,27 @@ ack от предыдущего цикла отправителя (наприм�
 `ServingEpoch` сохраняется в JSON-файле трансферов и для sender, и для
 receiver маппингов — без персистентности перезапуск ноды сбросил бы
 счётчик на 0 и столкнулся бы с закэшированным у пира устаревшим
-`file_downloaded`. `CancelDownload` получателя обнуляет сохранённую
-эпоху, чтобы следующая загрузка училась свежему значению с первого
-`chunk_response`.
+`file_downloaded`. Каждый сброс получателя в available (`CancelDownload`,
+`RestartDownload`, `DeleteLocalCopy`) обнуляет сохранённую эпоху, чтобы
+следующая загрузка училась свежему значению с первого `chunk_response`.
 
-Обратная совместимость: wire-значение 0 трактуется как «pre-epoch
-(legacy) клиент» на обоих gate-ах, поэтому нода, обновившаяся раньше
-своих пиров, продолжает принимать старый проводной формат без эпохи.
-Полностью обновлённые развёртывания штампуют ненулевые эпохи везде и
-получают полную защиту от replay без каких-либо ручных миграционных
-шагов.
+**Нулевая эпоха.** Wire-поля помечены `omitempty`, поэтому 0 — это то, во
+что декодируется кадр без поля, и никаких исключений он не получает: оба
+gate-а — простое равенство. Настоящий переход в serving поднимает эпоху
+минимум до 1, и каждый `chunk_response` её штампует; получатель попадает
+в `receiverWaitingAck` только после хотя бы одного `chunk_response`
+текущего run, потому что анонсированный файл никогда не пуст, а сброс в
+available возвращает смещение в 0; отправитель эхо-повторяет эпоху в ack
+дословно. Значит, кадр без эпохи, когда другой стороне run известен, — не
+вариант протокола, а кадр ничьего run: он отбрасывается и логируется на
+уровне warn с `file_id`, пиром (`recipient` / `sender`), `received_epoch`
+и `current_epoch` — ровно как устаревший. Локальный `ServingEpoch`,
+равный 0, означает, что run не записан, — так бывает только у маппинга,
+сохранённого до появления эпохи и с тех пор не обслуживавшегося, — и
+совпадает только с кадром, который тоже несёт 0. Такая пара продолжает
+работать; получатель, сохранённый так, чей отправитель с тех пор записал
+run, не получит ack, исчерпает повторы `file_downloaded` и завершится
+локально, а serving-слот отправителя освободит stall-таймер.
 
 ```mermaid
 sequenceDiagram

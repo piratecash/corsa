@@ -298,7 +298,7 @@ func (s *Service) drainPendingForIdentities(identities map[domain.PeerIdentity]s
 			// drainPendingForIdentities is a fire-and-forget goroutine
 			// (s.goBackground); its natural lifetime is the service itself,
 			// so s.runCtx is the right context to bound the inbound
-			// sync-flush wait inside sendRelayToAddress.
+			// sync-flush wait inside sendTableRoutedRelayToAddress.
 			delivered, attempted = s.drainSendMessage(s.runCtx, m.item.Frame, m.peerAddr)
 		}
 		if !delivered {
@@ -526,7 +526,7 @@ returnFrames:
 }
 
 // drainSendMessage attempts to deliver a single send_message frame via the
-// routing table. Uses sendRelayToAddress directly (not sendTableDirectedRelay)
+// routing table. Uses sendTableRoutedRelayToAddress directly (not sendTableDirectedRelay)
 // to get a definitive success/failure signal.
 //
 // Returns two booleans:
@@ -541,7 +541,7 @@ returnFrames:
 // persists during the drain cycle.
 //
 // ctx is the drain cycle's context (caller passes s.runCtx or a scoped
-// drain timeout). Propagated into sendRelayToAddress so that an inbound
+// drain timeout). Propagated into sendTableRoutedRelayToAddress so that an inbound
 // next-hop with a stuck sync-flush wait does not pin the whole drain.
 func (s *Service) drainSendMessage(ctx context.Context, frame protocol.Frame, originalPeer domain.PeerAddress) (delivered, attempted bool) {
 	createdAt, err := time.Parse(time.RFC3339, strings.TrimSpace(frame.CreatedAt))
@@ -578,11 +578,11 @@ func (s *Service) drainSendMessage(ctx context.Context, frame protocol.Frame, or
 		return false, false
 	}
 
-	// sendRelayToAddress returns true only when the frame is durably
+	// sendTableRoutedRelayToAddress returns true only when the frame is durably
 	// enqueued in a session or persistent peer queue, with relayForwardState
 	// stored. No silent gossip fallback — if this fails, the frame goes
 	// back to pending for the normal retry loop.
-	if !s.sendRelayToAddress(ctx, address, envelope, decision.RelayRouteOrigin, time.Now().UTC()).handled() {
+	if !s.sendTableRoutedRelayToAddress(ctx, address, envelope, time.Now().UTC()).handled() {
 		// Real send attempt failed — this is a genuine delivery failure.
 		return false, true
 	}

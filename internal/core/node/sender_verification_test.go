@@ -524,10 +524,11 @@ func TestInboundPushMessage_DM_UnknownSenderRecovery_SkipsGetPeers(t *testing.T)
 		t.Fatal("recovery dial did not reach mock server within 5s")
 	}
 
-	// Contract: the recovery must send hello + fetch_contacts only.
-	// Any get_peers in this sequence is a regression — a future refactor
-	// re-broadening the inbound forced-refresh path.
-	expectedTypes := []string{"hello", "fetch_contacts"}
+	// Contract: the recovery must send the handshake (hello, auth_session)
+	// and fetch_contacts only. Any get_peers in this sequence is a
+	// regression — a future refactor re-broadening the inbound
+	// forced-refresh path.
+	expectedTypes := []string{"hello", "auth_session", "fetch_contacts"}
 	if len(received) != len(expectedTypes) {
 		t.Fatalf("expected frames %v, got %v", expectedTypes, received)
 	}

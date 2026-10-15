@@ -231,6 +231,106 @@ func TestSeqNoFlap_AnnounceTargetFor_SuppressesArmingEmit(t *testing.T) {
 	}
 }
 
+// The hold-down trigger names the uplink of the live winner whose
+// advance armed it — the direct peer an operator can act on — not the
+// frame's wire Origin, which storage does not keep. Both per-peer
+// emit paths (AnnounceTo and AnnounceTargetFor) record it the same way.
+func TestSeqNoFlap_HoldDownTriggerNamesWinnerUplink(t *testing.T) {
+	armingEmits := map[string]func(tbl *Table, victim, viewer PeerIdentity){
+		"AnnounceTo": func(tbl *Table, _, viewer PeerIdentity) {
+			_ = tbl.AnnounceTo(viewer)
+		},
+		"AnnounceTargetFor": func(tbl *Table, victim, viewer PeerIdentity) {
+			_, _, _ = tbl.AnnounceTargetFor(victim, viewer)
+		},
+	}
+	for name, armingEmit := range armingEmits {
+		t.Run(name, func(t *testing.T) {
+			now := time.Date(2026, 5, 22, 12, 0, 0, 0, time.UTC)
+			var (
+				victim  = domaintest.ID("victim")
+				viewer  = domaintest.ID("peer-Z")
+				uplinks = []PeerIdentity{domaintest.ID("u1"), domaintest.ID("u2"), domaintest.ID("u3"), domaintest.ID("u4")}
+			)
+			tbl := NewTable(
+				WithClock(func() time.Time { return now }),
+				WithLocalOrigin(domaintest.ID("node-A")),
+				WithMaxSeqAdvancePerWindow(3),
+				WithSeqAdvanceWindow(1*time.Minute),
+				WithSeqHoldDownDuration(2*time.Minute),
+			)
+
+			// Equal hops with a growing SeqNo move the AnnounceTo winner
+			// to the newest uplink every cycle, so each emit is a fresh
+			// advance. The last claim is strictly shorter, so it is the
+			// winner of both selection paths, and its emit crosses
+			// threshold=3.
+			for i, up := range uplinks {
+				hops := 2
+				if i == len(uplinks)-1 {
+					hops = 1
+				}
+				mustUpdate(t, tbl, RouteEntry{
+					Identity: victim, Origin: domaintest.ID("src-v"), NextHop: up,
+					Hops: hops, SeqNo: uint64(10 + i), Source: RouteSourceAnnouncement,
+				})
+				if i == len(uplinks)-1 {
+					armingEmit(tbl, victim, viewer)
+					break
+				}
+				_ = tbl.AnnounceTo(viewer)
+				now = now.Add(time.Second)
+			}
+			if tbl.CapStats().SeqNoFlapHoldowns != 1 {
+				t.Fatalf("setup: SeqNoFlapHoldowns=%d, want 1", tbl.CapStats().SeqNoFlapHoldowns)
+			}
+
+			tbl.mu.Lock()
+			trigger := tbl.flap.seqVelocities[victim].holdTrigger
+			tbl.mu.Unlock()
+			if want := uplinks[len(uplinks)-1]; trigger != want {
+				t.Fatalf("hold-down trigger = %s, want the winner uplink %s", trigger, want)
+			}
+		})
+	}
+}
+
+// The broadcast path (RemoveDirectPeer → InvalidateAllVia) names the
+// uplink of the withdrawn own-direct claim — the disconnected peer —
+// as the hold-down trigger, like the per-peer paths do.
+func TestSeqNoFlap_BroadcastHoldDownTriggerNamesUplink(t *testing.T) {
+	now := time.Date(2026, 5, 22, 12, 0, 0, 0, time.UTC)
+	peer := domaintest.ID("peer-P")
+	tbl := NewTable(
+		WithClock(func() time.Time { return now }),
+		WithLocalOrigin(domaintest.ID("node-A")),
+		WithMaxSeqAdvancePerWindow(1),
+		WithSeqAdvanceWindow(1*time.Minute),
+		WithSeqHoldDownDuration(2*time.Minute),
+	)
+
+	if _, err := tbl.AddDirectPeer(peer); err != nil {
+		t.Fatalf("AddDirectPeer: %v", err)
+	}
+	// First advance: the live direct route emitted to a viewer.
+	_ = tbl.AnnounceTo(domaintest.ID("peer-Z"))
+	now = now.Add(time.Second)
+	// Second advance: the broadcast withdrawal crosses threshold=1.
+	if _, err := tbl.RemoveDirectPeer(peer); err != nil {
+		t.Fatalf("RemoveDirectPeer: %v", err)
+	}
+	if tbl.CapStats().SeqNoFlapHoldowns != 1 {
+		t.Fatalf("setup: SeqNoFlapHoldowns=%d, want 1", tbl.CapStats().SeqNoFlapHoldowns)
+	}
+
+	tbl.mu.Lock()
+	trigger := tbl.flap.seqVelocities[peer].holdTrigger
+	tbl.mu.Unlock()
+	if trigger != peer {
+		t.Fatalf("hold-down trigger = %s, want the disconnected uplink %s", trigger, peer)
+	}
+}
+
 // TestSeqNoFlap_HoldDownReleasesAfterDuration walks the clock past
 // hold-down and verifies the suppression lifts: the next cycle
 // resumes wire emit for the previously-held Identity, and

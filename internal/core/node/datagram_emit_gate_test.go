@@ -69,8 +69,8 @@ func datagramEmitFixture(
 	svc := newDatagramLayerService(t, true)
 	now := time.Now().UTC()
 	addresses := installDatagramPeer(t, svc, peer,
-		datagramPeerConn{version: 27, connectedAt: now.Add(-time.Hour)},
-		datagramPeerConn{version: 27, connectedAt: now.Add(-time.Minute), inbound: true, declared: fallback},
+		datagramPeerConn{version: datagramTestPeerVersion, connectedAt: now.Add(-time.Hour)},
+		datagramPeerConn{version: datagramTestPeerVersion, connectedAt: now.Add(-time.Minute), inbound: true, declared: fallback},
 	)
 	requireDatagramPlane(t, svc)
 
@@ -177,7 +177,7 @@ func TestEmitToAppliesTheGateToTheFirstConnectionToo(t *testing.T) {
 
 	svc := newDatagramLayerService(t, true)
 	installDatagramPeer(t, svc, peer, datagramPeerConn{
-		version:     27,
+		version:     datagramTestPeerVersion,
 		connectedAt: time.Now().UTC(),
 		declared:    declarationsWithout(datagram.CapabilityDatagramV1),
 	})
@@ -210,7 +210,7 @@ func TestEmitToLeavesTheResponsePlaneUngated(t *testing.T) {
 
 	svc := newDatagramLayerService(t, true)
 	installDatagramPeer(t, svc, upstream, datagramPeerConn{
-		version:     27,
+		version:     datagramTestPeerVersion,
 		connectedAt: time.Now().UTC(),
 		declared:    declarationsWithout(datagram.CapabilityDatagramTransitV1),
 	})

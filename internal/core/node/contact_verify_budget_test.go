@@ -29,19 +29,15 @@ import (
 // ---------------------------------------------------------------------------
 
 // serveContactsPerConnection answers every connection the listener accepts with
-// the minimal syncPeer handshake (welcome without a challenge) and replies to
-// each fetch_contacts with the same contact array, until the listener closes.
+// the syncPeer handshake of a current responder (v1HandshakeResponder: a challenging
+// welcome, auth_ok for a valid auth_session) and replies to each
+// fetch_contacts with the same contact array, until the listener closes.
 //
 // One connection per dial is the point: this is the attacker's shape, where the
 // connection is the thing that is cheap to replace.
 func serveContactsPerConnection(t *testing.T, ln net.Listener, contacts []protocol.ContactFrame) {
 	t.Helper()
 
-	welcome, err := protocol.MarshalFrameLine(protocol.Frame{Type: "welcome"})
-	if err != nil {
-		t.Errorf("marshal welcome: %v", err)
-		return
-	}
 	reply, err := protocol.MarshalFrameLine(protocol.Frame{
 		Type:     "contacts",
 		Count:    len(contacts),
@@ -57,34 +53,49 @@ func serveContactsPerConnection(t *testing.T, ln net.Listener, contacts []protoc
 		if err != nil {
 			return
 		}
-		serveOneContactsDial(conn, welcome, reply)
+		if err := serveOneContactsDial(conn, reply); err != nil {
+			t.Errorf("contacts dial: %v", err)
+			return
+		}
 	}
 }
 
-func serveOneContactsDial(conn net.Conn, welcome, reply string) {
+// serveOneContactsDial serves one dial and reports a handshake the responder
+// could not complete; a dialler that closes early is not an error.
+func serveOneContactsDial(conn net.Conn, reply string) error {
 	defer func() { _ = conn.Close() }()
 
 	_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
 	reader := bufio.NewReader(conn)
-	if _, err := reader.ReadString('\n'); err != nil {
-		return
+	responder, err := newV1HandshakeResponder()
+	if err != nil {
+		return err
 	}
-	if _, err := conn.Write([]byte(welcome)); err != nil {
-		return
+	if _, err := responder.answerHello(conn, reader); err != nil {
+		return err
 	}
 	for {
 		line, err := reader.ReadString('\n')
 		if err != nil {
-			return
+			return nil
 		}
 		frame, err := protocol.ParseFrameLine(strings.TrimSpace(line))
 		if err != nil {
 			continue
 		}
-		if frame.Type == "fetch_contacts" {
-			if _, err := conn.Write([]byte(reply)); err != nil {
-				return
+		answer := ""
+		switch frame.Type {
+		case "auth_session":
+			if answer, err = protocol.MarshalFrameLine(responder.authReply(frame)); err != nil {
+				return err
 			}
+		case "fetch_contacts":
+			answer = reply
+		default:
+			continue
+		}
+		if _, err := conn.Write([]byte(answer)); err != nil {
+			return nil
 		}
 	}
 }
@@ -118,7 +129,7 @@ func TestSequentialFreshDialsShareOneContactVerifyBudget(t *testing.T) {
 	contacts := validContactFrames(t, contactsPerDial)
 	go serveContactsPerConnection(t, ln, contacts)
 
-	svc := newSyncPeerTestService(domain.NetworkStatusOffline)
+	svc := newSyncPeerTestService(t, domain.NetworkStatusOffline)
 	peerAddr := domain.PeerAddress(ln.Addr().String())
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)

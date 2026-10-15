@@ -129,9 +129,9 @@ import (
 // never enter the outbound SeqNo accounting and burn cache space —
 // see route_store_lookup.go's AnnounceProjectionFor doc-comment).
 // Wire emits carry Origin = localOrigin (sender-originated
-// semantic, kept consistent across live and withdrawal frames for
-// pre-A1 receiver compat — see uplink_claim.go for the migration
-// contract). The Stage 3 per-(Identity, Origin) collapse turned
+// semantic, the same for live and withdrawal frames because
+// receivers accept an entry only when its Origin is the sending
+// peer — see uplink_claim.go). The Stage 3 per-(Identity, Origin) collapse turned
 // destructive in this regime: Origin is constant across all
 // entries we feed it, so Stage 3 would merge live and tombstone
 // for the same Identity into one slot and lose whichever lost the
@@ -166,7 +166,7 @@ func (s *AnnounceSnapshot) Equal(other *AnnounceSnapshot) bool {
 // relative to oldSnap.
 //
 // Key for delta tracking is (Identity, IsWithdrawn) — post-Phase-A
-// every wire emit carries Origin = localOrigin, so the pre-A1
+// every wire emit carries Origin = localOrigin, so an
 // (Identity, Origin) key would collapse the live winner and the
 // own-origin tombstone for the same Identity into a single slot in
 // oldIdx and lose whichever was inserted first. The IsWithdrawn axis

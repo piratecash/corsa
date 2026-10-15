@@ -1120,7 +1120,7 @@ func TestVersionLockout_NoEvidenceNoLockout_ZeroMinimum(t *testing.T) {
 	}
 
 	// Call with peerMinimum=0 (no evidence from wire).
-	svc.penalizeOldProtocolPeer(addr, 0, 0)
+	svc.penalizeOldProtocolPeer(addr, 0, 0, "")
 
 	svc.peerMu.RLock()
 	lockoutActive := svc.isPeerVersionLockedOutLocked(addr)
@@ -1153,7 +1153,7 @@ func TestVersionLockout_NoEvidenceNoLockout_MinimumBelowLocal(t *testing.T) {
 	// peerMinimum <= config.ProtocolVersion — evidence does not confirm
 	// that we are incompatible.
 	localProto := domain.ProtocolVersion(config.ProtocolVersion)
-	svc.penalizeOldProtocolPeer(addr, localProto, localProto)
+	svc.penalizeOldProtocolPeer(addr, localProto, localProto, "")
 
 	svc.peerMu.RLock()
 	lockoutActive := svc.isPeerVersionLockedOutLocked(addr)
@@ -1185,7 +1185,7 @@ func TestVersionLockout_EvidenceConfirmed_LockoutSet(t *testing.T) {
 	}
 
 	higherMinimum := domain.ProtocolVersion(config.ProtocolVersion + 1)
-	svc.penalizeOldProtocolPeer(addr, higherMinimum, higherMinimum)
+	svc.penalizeOldProtocolPeer(addr, higherMinimum, higherMinimum, "")
 
 	svc.peerMu.RLock()
 	lockoutActive := svc.isPeerVersionLockedOutLocked(addr)
@@ -1237,7 +1237,7 @@ func TestInboundOldPeer_DoesNotFeedReporterSet(t *testing.T) {
 		svc.persistedMeta[addr] = &peerEntry{Address: addr}
 		svc.peerIDs[addr] = identity
 		// Old peer: version=1, minimum=1 (well below our local version).
-		svc.penalizeOldProtocolPeer(addr, 1, 1)
+		svc.penalizeOldProtocolPeer(addr, 1, 1, "")
 	}
 
 	snap := svc.VersionPolicySnapshot()
@@ -1270,7 +1270,7 @@ func TestInboundOldPeer_DoesNotFeedReporterSet(t *testing.T) {
 	addr := domain.PeerAddress("10.0.0.99:100")
 	svc.persistedMeta[addr] = &peerEntry{Address: addr}
 	svc.peerIDs[addr] = domaintest.ID("newer-peer")
-	svc.penalizeOldProtocolPeer(addr, localProto+2, localProto+1)
+	svc.penalizeOldProtocolPeer(addr, localProto+2, localProto+1, "")
 
 	snap = svc.VersionPolicySnapshot()
 	if snap.IncompatibleVersionReporters != 1 {
@@ -1301,7 +1301,7 @@ func TestInboundOldPeer_ZeroMinimum_NoReporter(t *testing.T) {
 	}
 
 	// peerMinimum=0 means no version evidence — cannot confirm direction.
-	svc.penalizeOldProtocolPeer(addr, 0, 0)
+	svc.penalizeOldProtocolPeer(addr, 0, 0, "")
 
 	snap := svc.VersionPolicySnapshot()
 	if snap.IncompatibleVersionReporters != 0 {
@@ -1342,7 +1342,7 @@ func TestCompatibleObservation_ClearsReporterAndLockout(t *testing.T) {
 	}
 
 	// Step 1: Record an incompatible observation (they think we're old).
-	svc.penalizeOldProtocolPeer(addr, higherMin, higherMin)
+	svc.penalizeOldProtocolPeer(addr, higherMin, higherMin, "")
 
 	snap := svc.VersionPolicySnapshot()
 	if snap.IncompatibleVersionReporters != 1 {
@@ -1426,7 +1426,7 @@ func TestCompatibleObservation_OnlyAffectsConnectingPeer(t *testing.T) {
 		identity := domaintest.ID(fmt.Sprintf("peer-%d", i))
 		svc.persistedMeta[addr] = &peerEntry{Address: addr}
 		svc.peerIDs[addr] = identity
-		svc.penalizeOldProtocolPeer(addr, higherMin, higherMin)
+		svc.penalizeOldProtocolPeer(addr, higherMin, higherMin, "")
 	}
 
 	snap := svc.VersionPolicySnapshot()
@@ -1487,7 +1487,7 @@ func TestVersionLockout_PropagatedByIdentity(t *testing.T) {
 
 	// Penalize only addr1. Lockout should propagate to addr2 (same identity)
 	// but NOT to addr3 (different identity).
-	svc.penalizeOldProtocolPeer(addr1, higherMin, higherMin)
+	svc.penalizeOldProtocolPeer(addr1, higherMin, higherMin, "")
 
 	svc.peerMu.RLock()
 	lockout1 := svc.isPeerVersionLockedOutLocked(addr1)
@@ -1540,7 +1540,7 @@ func TestVersionLockout_NoIdentity_NoPropagation(t *testing.T) {
 		bannedIPSet:  make(map[string]domain.BannedIPEntry),
 	}
 
-	svc.penalizeOldProtocolPeer(addr1, higherMin, higherMin)
+	svc.penalizeOldProtocolPeer(addr1, higherMin, higherMin, "")
 
 	svc.peerMu.RLock()
 	lockout1 := svc.isPeerVersionLockedOutLocked(addr1)
@@ -1822,9 +1822,9 @@ func TestCompatibleObservation_ClearsLockoutAcrossIdentity(t *testing.T) {
 	}
 
 	// Penalize all three addresses → lockouts are set.
-	svc.penalizeOldProtocolPeer(addr1, higherMin, higherMin)
-	svc.penalizeOldProtocolPeer(addr2, higherMin, higherMin)
-	svc.penalizeOldProtocolPeer(addr3, higherMin, higherMin)
+	svc.penalizeOldProtocolPeer(addr1, higherMin, higherMin, "")
+	svc.penalizeOldProtocolPeer(addr2, higherMin, higherMin, "")
+	svc.penalizeOldProtocolPeer(addr3, higherMin, higherMin, "")
 
 	// Verify lockouts are active.
 	svc.peerMu.RLock()
@@ -1880,7 +1880,7 @@ func TestPenalize_SnapshotIncludesLockoutSignal(t *testing.T) {
 	}
 
 	// Single penalize call with confirmed evidence.
-	svc.penalizeOldProtocolPeer(addr, higherMin, higherMin)
+	svc.penalizeOldProtocolPeer(addr, higherMin, higherMin, "")
 
 	// The snapshot must immediately reflect the lockout signal.
 	// Before the fix, the snapshot was recomputed before the lockout was
@@ -2049,8 +2049,8 @@ func TestAddPeer_ClearsLockoutAcrossIdentity(t *testing.T) {
 	}
 
 	// Penalize all three → lockouts set.
-	svc.penalizeOldProtocolPeer(addr1, higherMin, higherMin)
-	svc.penalizeOldProtocolPeer(addr3, higherMin, higherMin)
+	svc.penalizeOldProtocolPeer(addr1, higherMin, higherMin, "")
+	svc.penalizeOldProtocolPeer(addr3, higherMin, higherMin, "")
 
 	// Verify all lockouts active.
 	svc.peerMu.RLock()
@@ -2127,8 +2127,8 @@ func TestAddPeer_ClearsReporterForIdentity(t *testing.T) {
 	}
 
 	// Two reporters → below threshold of 3.
-	svc.penalizeOldProtocolPeer(addr1, higherMin, higherMin)
-	svc.penalizeOldProtocolPeer(addr2, higherMin, higherMin)
+	svc.penalizeOldProtocolPeer(addr1, higherMin, higherMin, "")
+	svc.penalizeOldProtocolPeer(addr2, higherMin, higherMin, "")
 
 	svc.peerMu.RLock()
 	reportersBefore := svc.versionPolicy.snapshot.IncompatibleVersionReporters
@@ -2185,7 +2185,7 @@ func TestVersionLockout_SiblingRefreshedWithStrongerEvidence(t *testing.T) {
 	}
 
 	// First penalize on addr1 with initial evidence → propagates to addr2.
-	svc.penalizeOldProtocolPeer(addr1, initialMin, initialMin)
+	svc.penalizeOldProtocolPeer(addr1, initialMin, initialMin, "")
 
 	svc.peerMu.RLock()
 	siblingMin1 := svc.persistedMeta[addr2].VersionLockout.ObservedMinimumProtocolVersion
@@ -2195,7 +2195,7 @@ func TestVersionLockout_SiblingRefreshedWithStrongerEvidence(t *testing.T) {
 	}
 
 	// Second penalize on addr1 with stronger evidence → must refresh addr2.
-	svc.penalizeOldProtocolPeer(addr1, strongerMin, strongerMin)
+	svc.penalizeOldProtocolPeer(addr1, strongerMin, strongerMin, "")
 
 	svc.peerMu.RLock()
 	siblingMin2 := svc.persistedMeta[addr2].VersionLockout.ObservedMinimumProtocolVersion
@@ -2234,7 +2234,7 @@ func TestVersionLockout_SiblingRefreshedWithFresherTimestamp(t *testing.T) {
 	}
 
 	// First penalize with client version "corsa/1.0.0".
-	svc.penalizeOldProtocolPeer(addr1, higherMin, higherMin)
+	svc.penalizeOldProtocolPeer(addr1, higherMin, higherMin, "")
 
 	svc.peerMu.RLock()
 	cv1 := string(svc.persistedMeta[addr2].VersionLockout.ObservedClientVersion)
@@ -2249,7 +2249,7 @@ func TestVersionLockout_SiblingRefreshedWithFresherTimestamp(t *testing.T) {
 	svc.peerVersions[addr1] = "corsa/2.0.0"
 	svc.peerMu.Unlock()
 
-	svc.penalizeOldProtocolPeer(addr1, higherMin, higherMin)
+	svc.penalizeOldProtocolPeer(addr1, higherMin, higherMin, "")
 
 	svc.peerMu.RLock()
 	cv2 := string(svc.persistedMeta[addr2].VersionLockout.ObservedClientVersion)
@@ -2293,9 +2293,9 @@ func TestCompatibleObservation_ClearsSiblingHealthDiagnostics(t *testing.T) {
 	}
 
 	// Penalize all three addresses to accumulate health diagnostics.
-	svc.penalizeOldProtocolPeer(addr1, higherMin, higherMin)
-	svc.penalizeOldProtocolPeer(addr2, higherMin, higherMin)
-	svc.penalizeOldProtocolPeer(addr3, higherMin, higherMin)
+	svc.penalizeOldProtocolPeer(addr1, higherMin, higherMin, "")
+	svc.penalizeOldProtocolPeer(addr2, higherMin, higherMin, "")
+	svc.penalizeOldProtocolPeer(addr3, higherMin, higherMin, "")
 
 	// Simulate a prior post-handshake disconnect on sibling to populate
 	// LastDisconnectCode — penalizeOldProtocolPeer only sets LastErrorCode.
@@ -2417,9 +2417,9 @@ func TestAddPeerFrame_ClearsLockoutAcrossIdentity(t *testing.T) {
 	}
 
 	// Penalize all three — creates lockouts and reporters.
-	svc.penalizeOldProtocolPeer(addr1, higherMin, higherMin)
-	svc.penalizeOldProtocolPeer(addr2, higherMin, higherMin)
-	svc.penalizeOldProtocolPeer(addr3, higherMin, higherMin)
+	svc.penalizeOldProtocolPeer(addr1, higherMin, higherMin, "")
+	svc.penalizeOldProtocolPeer(addr2, higherMin, higherMin, "")
+	svc.penalizeOldProtocolPeer(addr3, higherMin, higherMin, "")
 
 	// Verify pre-conditions.
 	svc.peerMu.RLock()
@@ -2512,7 +2512,7 @@ func TestCompatibleObservation_ClearsSiblingBansAndCooldowns(t *testing.T) {
 	// (4 * peerBanIncrementIncompatible = 4 * 250 = 1000 >= threshold).
 	for _, addr := range []domain.PeerAddress{addr1, addr2, addr3, addr4} {
 		for i := 0; i < 4; i++ {
-			svc.penalizeOldProtocolPeer(addr, higherMin, higherMin)
+			svc.penalizeOldProtocolPeer(addr, higherMin, higherMin, "")
 		}
 	}
 
@@ -2641,7 +2641,7 @@ func TestAddPeerFrame_ClearsSiblingBansAndCooldowns(t *testing.T) {
 	// Penalize 4 times each to trigger BannedUntil.
 	for _, addr := range []domain.PeerAddress{addr1, addr2, addr3, addr4} {
 		for i := 0; i < 4; i++ {
-			svc.penalizeOldProtocolPeer(addr, higherMin, higherMin)
+			svc.penalizeOldProtocolPeer(addr, higherMin, higherMin, "")
 		}
 	}
 
@@ -2767,7 +2767,7 @@ func TestCompatibleObservation_RepairsStaleScorePenalties(t *testing.T) {
 	// Penalize 4 times each — score deeply negative from peerScoreOldProtocol.
 	for _, addr := range []domain.PeerAddress{addr1, addr2, addr3} {
 		for i := 0; i < 4; i++ {
-			svc.penalizeOldProtocolPeer(addr, higherMin, higherMin)
+			svc.penalizeOldProtocolPeer(addr, higherMin, higherMin, "")
 		}
 	}
 
@@ -2845,7 +2845,7 @@ func TestAddPeerFrame_RepairsStaleScorePenalties(t *testing.T) {
 	// Penalize 4 times each — score deeply negative.
 	for _, addr := range []domain.PeerAddress{addr1, addr2, addr3} {
 		for i := 0; i < 4; i++ {
-			svc.penalizeOldProtocolPeer(addr, higherMin, higherMin)
+			svc.penalizeOldProtocolPeer(addr, higherMin, higherMin, "")
 		}
 	}
 
@@ -2929,7 +2929,7 @@ func TestPenalizeOldProtocol_ClearsStaleLastDisconnectCode(t *testing.T) {
 	svc.peerMu.RUnlock()
 
 	// penalizeOldProtocolPeer records a pre-handshake incompatible reject.
-	svc.penalizeOldProtocolPeer(addr, higherMin, higherMin)
+	svc.penalizeOldProtocolPeer(addr, higherMin, higherMin, "")
 
 	// Post: LastDisconnectCode must be cleared — the newest event is a
 	// pre-handshake rejection, not a post-handshake teardown.
@@ -3220,7 +3220,7 @@ func TestVersionDiagnostics_BuildAndRestoreRoundTrip(t *testing.T) {
 
 	// Penalize 4 times to trigger ban + accumulate diagnostics.
 	for i := 0; i < 4; i++ {
-		svc.penalizeOldProtocolPeer(addr, higherMin, higherMin)
+		svc.penalizeOldProtocolPeer(addr, higherMin, higherMin, "")
 	}
 
 	// Snapshot the health state before flush.
@@ -3343,8 +3343,8 @@ func TestClientVersion_SurvivesRestartViaLockout(t *testing.T) {
 		peers:        []transport.Peer{{Address: addr, Source: domain.PeerSourcePersisted}},
 	}
 
-	// Simulate an outbound incompatible reject through the CM path,
-	// which pre-populates peerVersions with the client version.
+	// Simulate an outbound incompatible reject through the CM path, which
+	// hands the client version to penalizeOldProtocolPeer.
 	cmErr := &incompatibleProtocolError{
 		PeerVersion:   higherMin,
 		PeerMinimum:   higherMin,
@@ -3538,15 +3538,11 @@ func TestVersionDiagnostics_DiskRestartRoundTrip(t *testing.T) {
 	// Register the peer so it appears in the peer list and persistedMeta.
 	svc1.addPeerAddress(peerAddr, "full", peerID)
 
-	// Pre-populate ClientVersion in peerVersions so that
-	// setVersionLockoutLocked captures it into VersionLockout.
-	svc1.peerMu.Lock()
-	svc1.peerVersions[peerAddr] = clientVer
-	svc1.peerMu.Unlock()
-
-	// Penalize 4 times to trigger ban and accumulate full diagnostics.
+	// Penalize 4 times to trigger ban and accumulate full diagnostics; the
+	// client version travels with the observation, as on every reject path,
+	// so setVersionLockoutLocked captures it into VersionLockout.
 	for i := 0; i < 4; i++ {
-		svc1.penalizeOldProtocolPeer(peerAddr, higherMin, higherMin)
+		svc1.penalizeOldProtocolPeer(peerAddr, higherMin, higherMin, domain.ClientVersion(clientVer))
 	}
 
 	// Snapshot the expected values before flush.

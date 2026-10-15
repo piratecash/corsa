@@ -1632,6 +1632,16 @@ type peerHealth struct {
 	LastIncompatibleVersionAt   time.Time              // timestamp of the last incompatible event
 	ObservedPeerVersion         domain.ProtocolVersion // last observed remote protocol version
 	ObservedPeerMinimumVersion  domain.ProtocolVersion // last observed remote minimum version
+
+	// IncompatibleBanUntil is the end of the incompatible-version ban that
+	// accumulateIncompatiblePenaltyLocked armed; zero when none was armed or
+	// a recovery reset cleared it. It is recorded apart from BannedUntil
+	// because BannedUntil is shared — the self-identity cooldown writes and
+	// extends it too — and "an incompatible-version ban is running" must not
+	// be inferred from a window another reason set. Not persisted:
+	// restoredIncompatibleBanUntil derives it from the persisted evidence on
+	// load.
+	IncompatibleBanUntil time.Time
 }
 
 type pendingFrame struct {
@@ -1986,6 +1996,7 @@ func newService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus, netw
 		if entry.BannedUntil != nil && time.Now().UTC().Before(*entry.BannedUntil) {
 			h.BannedUntil = *entry.BannedUntil
 		}
+		h.IncompatibleBanUntil = restoredIncompatibleBanUntil(h)
 		if entry.LastIncompatibleVersionAt != nil {
 			h.LastIncompatibleVersionAt = *entry.LastIncompatibleVersionAt
 		}
@@ -3768,29 +3779,20 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, wire string) bool {
 			peerMin := domain.ProtocolVersion(frame.MinimumProtocolVersion)
 			// Build the health key from the verified TCP IP and the
 			// self-reported advertise_port — the same shape the accepted
-			// inbound path uses (rememberConnPeerAddr). Under the v12 wire
-			// contract hello.Listen carries no truth and frame.Address is
-			// just the Ed25519 identity, not a host:port — using either as
-			// a health key would silently consolidate every peer behind
-			// the same observed IP under "<ip>:64646" and break version-
-			// gated bans for peers running on a non-default advertise_port.
+			// inbound path uses (rememberConnPeerAddr). The hello carries
+			// no host, and frame.Address is just the Ed25519 identity, not
+			// a host:port — using it as a health key would silently
+			// consolidate every peer behind the same observed IP under
+			// "<ip>:64646" and break version-gated bans for peers running
+			// on a non-default advertise_port.
 			// peerAddressFromInbound returns "" when the TCP host is not
 			// parseable as an IP, in which case there is no usable health
 			// key to penalise — the per-peer notice + IP-level addBanScore
 			// above remain the operative signals on that degenerate edge.
 			if peerAddr := peerAddressFromInbound(addr, extractAdvertisePort(frame)); peerAddr != "" {
-				// Pre-populate client version so the lockout has complete
-				// diagnostics. On the inbound rejection path the hello
-				// frame is the only source of this metadata.
-				if frame.ClientVersion != "" {
-					log.Trace().Str("site", "helloRejectStoreVersion").Str("phase", "lock_wait").Str("address", peerAddr).Msg("peer_mu_writer")
-					s.peerMu.Lock()
-					log.Trace().Str("site", "helloRejectStoreVersion").Str("phase", "lock_held").Str("address", peerAddr).Msg("peer_mu_writer")
-					s.peerVersions[domain.PeerAddress(peerAddr)] = frame.ClientVersion
-					s.peerMu.Unlock()
-					log.Trace().Str("site", "helloRejectStoreVersion").Str("phase", "lock_released").Str("address", peerAddr).Msg("peer_mu_writer")
-				}
-				s.penalizeOldProtocolPeer(domain.PeerAddress(peerAddr), peerVer, peerMin)
+				// On the inbound rejection path the hello frame is the only
+				// source of the client version the lockout records.
+				s.penalizeOldProtocolPeer(domain.PeerAddress(peerAddr), peerVer, peerMin, domain.ClientVersion(frame.ClientVersion))
 			}
 			return true
 		}
@@ -3833,12 +3835,9 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, wire string) bool {
 			// guard would break legitimate self-subscription on the
 			// same host. Every real self-loopback path surfaces
 			// Listener=1 because it reaches us through OUR outbound
-			// dialler code, which always sets it. Pre-v12 the gate
-			// keyed on frame.Listen != "" because the wire still
-			// carried the host:port form; the v12 cleanup makes Listen
-			// empty by contract, so the listener flag is the only
-			// remaining signal that distinguishes a peer from a local
-			// subscriber.
+			// dialler code, which always sets it. The listener flag is
+			// the only hello field that distinguishes a peer from a
+			// local subscriber.
 			if strings.TrimSpace(frame.Listener) == "1" && s.isSelfIdentity(domain.PeerIdentityFromWire(frame.Address)) {
 				accepted = false
 				log.Warn().
@@ -3870,7 +3869,7 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, wire string) bool {
 			// Advertise convergence persistence (accept branches).
 			s.applyAdvertiseOnInboundAccept(addr, advertiseResult)
 			if frame.Client == "node" || frame.Client == "desktop" {
-				log.Info().Str("client", frame.Client).Str("address", frame.Address).Str("listen", frame.Listen).Str("node_type", frame.NodeType).Str("version", frame.ClientVersion).Msg("hello")
+				log.Info().Str("client", frame.Client).Str("address", frame.Address).Str("listener", frame.Listener).Str("node_type", frame.NodeType).Str("version", frame.ClientVersion).Msg("hello")
 			}
 			// Diagnostic: warn when a localhost peer has a different identity
 			// than ours — indicates a separate local process (Task #69).
@@ -3880,7 +3879,7 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, wire string) bool {
 					Str("local_identity", s.identity.Address).
 					Str("remote_identity", frame.Address).
 					Str("remote_addr", addr).
-					Str("remote_listen", frame.Listen).
+					Str("remote_listener", frame.Listener).
 					Str("remote_client", frame.Client).
 					Msg("localhost_peer_foreign_identity")
 			}
@@ -5189,16 +5188,12 @@ func (s *Service) sendWelcomeFrame(connID domain.ConnID, challenge string, obser
 
 // welcomeFrame builds the welcome this node answers a hello with.
 func (s *Service) welcomeFrame(challenge string, observedAddr string) protocol.Frame {
-	// v12 cleanup: welcome no longer carries the local advertise host
-	// in Listen — host is no longer a wire concept. The Listener flag
-	// still signals "this peer accepts inbound" and AdvertisePort
-	// carries the listening port; together they replace the old
-	// host:port Listen contract. observed_address is still emitted as
-	// NAT-detection telemetry consumed by the dialer's
+	// The welcome carries no host: the dialer already knows where it
+	// reached us. The Listener flag says "this node accepts inbound" and
+	// AdvertisePort carries the listening port. observed_address is
+	// NAT-detection telemetry only, consumed by the dialer's
 	// recordObservedAddress (see handshake.md "Advertise Convergence");
-	// it is NOT projected back into outbound hello any more — the
-	// authoritative consumer (selfAdvertiseEndpoint) was removed
-	// together with the wire-host emit.
+	// nothing feeds it back into an outbound hello.
 	var advertisePort domain.PeerPort
 	if s.cfg.EffectiveListenerEnabled() {
 		advertisePort = s.cfg.EffectiveAdvertisePort()
@@ -5349,7 +5344,7 @@ func (s *Service) completeInboundAuth(id domain.ConnID, verified *connauth.State
 	// returns "" for an unregistered ConnID — learnPeerFromFrame tolerates
 	// that, and registerHelloRoute treats it as a silent no-op.
 	remoteAddr := s.Network().RemoteAddr(id)
-	log.Trace().Uint64("conn_id", uint64(id)).Str("remote_addr", remoteAddr).Str("hello_listen", verified.Hello.Listen).Str("peer_identity", verified.Hello.Address).Msg("handle_auth_session_verified")
+	log.Trace().Uint64("conn_id", uint64(id)).Str("remote_addr", remoteAddr).Str("hello_listener", verified.Hello.Listener).Str("peer_identity", verified.Hello.Address).Msg("handle_auth_session_verified")
 
 	s.learnPeerFromFrame(remoteAddr, verified.Hello)
 	log.Trace().Uint64("conn_id", uint64(id)).Msg("handle_auth_session_after_learn")
@@ -5373,15 +5368,13 @@ func (s *Service) completeInboundAuth(id domain.ConnID, verified *connauth.State
 	// addresses are excluded to avoid leaking private network topology.
 	//
 	// We gossip the observed TCP source host combined with the
-	// self-reported hello.advertise_port — never the claimed hello.Listen
-	// host or port. The peer can lie about its listen IP (stale DDNS,
-	// misconfig, or on purpose) but cannot forge the IP the packets
-	// actually arrive from. The listen port is also untrusted under the
-	// v12 wire contract: a NAT port-forward setup commonly exposes a
-	// different external port than the internal bind port, and only the
-	// self-reported advertise_port is the externally dialable value.
-	// The TCP source port is an ephemeral NAT mapping that no neighbour
-	// could dial into, so it is never used either.
+	// self-reported hello.advertise_port. The hello carries no host: the
+	// only IP we can attest to is the one the packets actually arrive
+	// from. A NAT port-forward setup commonly exposes a different
+	// external port than the internal bind port, and the self-reported
+	// advertise_port is the externally dialable value. The TCP source
+	// port is an ephemeral NAT mapping that no neighbour could dial
+	// into, so it is never used.
 	if announceAddr, ok := s.observedAnnounceAddressFromHello(remoteAddr, verified.Hello); ok && classifyAddress(announceAddr) != domain.NetGroupLocal {
 		nodeType := verified.Hello.NodeType
 		connID := id
@@ -5582,17 +5575,15 @@ func (s *Service) SetConnAuthState(conn net.Conn, state *connauth.State) {
 //
 // For inbound connections the address is built from the verified TCP
 // IP and the self-reported advertise_port (collapsed to the validated
-// PeerPort form by extractAdvertisePort). hello.Listen is intentionally
-// not consulted: under the v12 wire contract it does not carry an
-// authoritative host or port any more. Using the TCP IP as the host
-// component prevents a malicious peer from injecting a health entry
-// under an arbitrary address while still consolidating multiple
-// connections from the same peer under a single health key.
+// PeerPort form by extractAdvertisePort); the hello carries no host.
+// Using the TCP IP as the host component prevents a malicious peer
+// from injecting a health entry under an arbitrary address while still
+// consolidating multiple connections from the same peer under a single
+// health key.
 //
 // When the TCP IP is unparseable (non-IP transport, malformed wrapper
-// output) the helper falls back to hello.Address — the same legacy
-// fallback the pre-v12 path used — so health-tracking still gets a
-// stable key even on the degenerate edge.
+// output) the helper falls back to hello.Address so health-tracking
+// still gets a stable key even on the degenerate edge.
 //
 // The ProtocolVersion fold-in is the inbound counterpart of
 // applyWelcomeMetadata's outbound mirror — it is the value the file
@@ -5608,8 +5599,8 @@ func (s *Service) rememberConnPeerAddr(id domain.ConnID, hello protocol.Frame, t
 	if addr == "" {
 		// TCP host not parseable (non-IP transport, malformed wrapper
 		// output): fall back to the peer's identity so the NetCore
-		// still has a non-empty key. Mirrors the pre-v12 fallback
-		// shape — health tracking is best-effort on this branch.
+		// still has a non-empty key — health tracking is best-effort
+		// on this branch.
 		addr = strings.TrimSpace(hello.Address)
 	}
 	pc := s.netCoreForID(id)
@@ -5633,7 +5624,7 @@ func (s *Service) rememberConnPeerAddr(id domain.ConnID, hello protocol.Frame, t
 }
 
 // inboundPeerAddress returns the sanitised overlay address for health
-// tracking: verified TCP IP combined with the declared listen port.
+// tracking: verified TCP IP combined with the self-reported advertise_port.
 // Returns "" if the address is not yet known (pre-hello).
 // ConnID-first: callers that start from a net.Conn cross the boundary
 // once via connIDFor at the entry point and pass the resolved id here.
@@ -5983,11 +5974,9 @@ const observedAddrConsensusThreshold = 2
 // it differs from the bind host in cfg.ListenAddress, the node logs
 // a NAT detection event.
 //
-// Telemetry-only under the v12 baseline: there is no authoritative
-// consumer of the consensus IP. The legacy selfAdvertiseEndpoint
-// helper that used to publish this IP into outbound hello.Listen was
-// removed together with the wire-host emit, so observed_address is
-// kept on the wire purely as a diagnostic signal for operators.
+// Telemetry-only: there is no authoritative consumer of the consensus
+// IP. The node never publishes a host of its own on the wire, so
+// observed_address is kept purely as a diagnostic signal for operators.
 func (s *Service) recordObservedAddress(peerID domain.PeerIdentity, observedIP string) {
 	if peerID.IsZero() || observedIP == "" {
 		return
@@ -7665,7 +7654,7 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 		if (msg.Topic == "dm" || msg.Topic == protocol.TopicControlDM) && msg.Recipient != "" && msg.Recipient != "*" {
 			relayed := relaySendRefused
 			if decision.RelayNextHop != nil {
-				relayed = s.sendTableDirectedRelay(s.runCtx, wireEnvelope, *decision.RelayNextHop, decision.RelayNextHopAddress, decision.RelayRouteOrigin, decision.RelayNextHopHops, dispatchedAt)
+				relayed = s.sendTableDirectedRelay(s.runCtx, wireEnvelope, *decision.RelayNextHop, decision.RelayNextHopAddress, decision.RelayNextHopHops, dispatchedAt)
 			} else {
 				// No table route — fall back to blind gossip relay to
 				// capable full nodes (pre-Phase 1.2 behavior). Same
@@ -8260,8 +8249,7 @@ func (s *Service) finishReceipt(key string, receipt protocol.DeliveryReceipt, en
 	s.seenReceipts.Add(key)
 	// seen_ack is scheduler plumbing, not a deliverable artefact: dedupe it
 	// via seenReceipts but never store it in s.receipts, so it cannot leak
-	// through fetch_delivery_receipts or the auth-time backlog replay
-	// (neither surface has a v23 gate).
+	// through fetch_delivery_receipts or the auth-time backlog replay.
 	if receipt.Status != protocol.ReceiptStatusSeenAck {
 		list := append(s.receipts[receipt.Recipient], receipt)
 		// Hard-cap every recipient's backlog. Own-identity receipts are never
@@ -9322,15 +9310,6 @@ func (s *Service) pushReceiptToSubscribers(receipt protocol.DeliveryReceipt) {
 	}
 
 	for _, sub := range subs {
-		// seen_ack is additive in ProtocolVersion 23 — a pre-v23 subscriber
-		// would only reject the unknown status at parse time, so skip it.
-		// TODO(seen-ack-gate-removal): delete this gate (and the matching
-		// one in sendReceiptToPeer) once MinimumProtocolVersion reaches
-		// config.ProtocolVersionSeenAck.
-		if receipt.Status == protocol.ReceiptStatusSeenAck && !s.connSupportsProtocol(sub.connID, config.ProtocolVersionSeenAck) {
-			log.Debug().Str("message_id", string(receipt.MessageID)).Str("recipient", receipt.Recipient).Str("subscriber", sub.id).Msg("push_receipt_skipped_pre_v23_subscriber")
-			continue
-		}
 		s.goBackground(func() { s.writePushFrame(sub, frame) })
 	}
 }
@@ -9509,13 +9488,10 @@ func (s *Service) nodeHelloJSONLine() string {
 // nodeHelloFrame is the hello this node opens a session with: sent as a JSON
 // line on a v1 session, and as the intro inside TLS on a v2 one.
 func (s *Service) nodeHelloFrame() protocol.Frame {
-	// v12 cleanup: hello no longer carries the local advertise host in
-	// Listen — host is no longer a wire concept and is learned by the
-	// receiver from the inbound TCP RemoteAddr. The Listener flag still
-	// signals "this peer accepts inbound" and AdvertisePort carries the
-	// listening port; together they replace the old host:port Listen
-	// contract. AdvertisePort is the sole port truth source on the
-	// receive side and carries CORSA_ADVERTISE_PORT, with fallback to
+	// The hello carries no host: the receiver takes it from the inbound
+	// TCP RemoteAddr. The Listener flag says "this node accepts inbound"
+	// and AdvertisePort carries the listening port — the sole port truth
+	// source on the receive side: CORSA_ADVERTISE_PORT, with fallback to
 	// DefaultPeerPort resolved by EffectiveAdvertisePort.
 	var advertisePort domain.PeerPort
 	if s.cfg.EffectiveListenerEnabled() {
@@ -9545,14 +9521,9 @@ func (s *Service) nodeHelloFrame() protocol.Frame {
 }
 
 // listenerEnabledFromFrame returns true ONLY when the frame explicitly
-// sets Listener="1". Absent / empty / any other value (including a
-// non-empty hello.Listen on a frame whose Listener flag is missing)
-// counts as "not a listener" — the v12 wire contract makes the
-// listener flag the single source of truth for the "is this peer
-// reachable?" gate. Pre-v12 the fallback `Listen != "" → listener`
-// existed to recognise legacy peers that omitted the explicit flag,
-// but under the v14 floor those peers cannot complete a handshake
-// in the first place, so the fallback is dropped.
+// sets Listener="1". Absent / empty / any other value counts as "not a
+// listener": the listener flag is the single source of truth for the
+// "is this peer reachable?" gate.
 func listenerEnabledFromFrame(frame protocol.Frame) bool {
 	switch strings.TrimSpace(frame.Listener) {
 	case "1":
@@ -9579,20 +9550,17 @@ func (s *Service) learnIdentityFromWelcome(frame protocol.Frame, dialAddress dom
 	// independently; this guard is a defence-in-depth boundary.
 	if s.isSelfIdentity(domain.PeerIdentityFromWire(frame.Address)) {
 		log.Warn().
+			Str("peer", string(dialAddress)).
 			Str("local_identity", s.identity.Address).
-			Str("welcome_listen", frame.Listen).
 			Str("welcome_client", frame.Client).
 			Msg("welcome_self_identity_skipped")
 		return
 	}
 	if listenerEnabledFromFrame(frame) {
-		// v12 wire contract: welcome.Listen carries no truth, so we
-		// promote / version the peer UNCONDITIONALLY under the dial
-		// address — the host:port we successfully reached the peer
-		// at. Consulting welcome.Listen, even as a "prefer if
-		// non-empty" hint, would open a wedge for a hostile or buggy
-		// responder to redirect our local bookkeeping at an arbitrary
-		// host. The dial address is the only value we can attest to.
+		// The welcome carries no host, so we promote / version the
+		// peer UNCONDITIONALLY under the dial address — the host:port
+		// we successfully reached the peer at, and the only value we
+		// can attest to.
 		if normalizedAddr, ok := s.normalizePeerAddress(dialAddress, dialAddress); ok {
 			s.promotePeerAddress(normalizedAddr)
 			s.rememberPeerType(normalizedAddr, frame.NodeType)
@@ -9800,7 +9768,15 @@ func (s *Service) forgetKnownBoxKey(address string) {
 // Best-effort by design: fields are left empty when the sender's
 // signing key is unknown locally (a transit forwarder that stored the
 // envelope had the key at store time, but LRU eviction may have dropped
-// it since) — the receiver then falls back to the legacy sync path.
+// it since). That is one of the reasons a DM still reaches a recipient
+// without the triple even though every node on the network attaches it:
+// a hop that rebuilds the frame from a stored envelope (backlog replay,
+// gossip fan-out, relay retry) can only attach what its own bounded
+// key maps still hold; a transit hop drops fields longer than
+// maxAttachedKeyFieldLen instead of carrying them; and nothing stops a
+// hostile hop from stripping the fields, which no signature covers. The
+// receiver then falls back to the on-demand key sync
+// (triggerSenderKeySyncAsync), so that path stays live.
 // The box key pair is attached only when BOTH box fields are present:
 // an unmatched half cannot pass VerifyBoxKeyBinding on the receiver and
 // would only waste wire bytes. For this node's OWN identity under the
@@ -10240,15 +10216,16 @@ func (s *Service) handleInboundPushMessage(connID domain.ConnID, frame protocol.
 	stored, _, errCode := s.storeIncomingMessage(msg, true)
 	if !stored && errCode == protocol.ErrCodeUnknownSenderKey {
 		if peerAddr != "" {
-			// Legacy keyless frame — schedule a BACKGROUND single-flight
-			// contact sync (narrow recovery: contact/key sync only, no
-			// peer exchange — see docs/peer-discovery-conditional-get-
-			// peers.ru.md Step 5) and reject this attempt. Running the
-			// recovery inline blocked the inbound read loop for the
-			// whole dial while frames piled up behind it; the async
-			// trigger keeps the loop responsive. No ack_delete goes out
-			// for this result, so the pushing hop redelivers and
-			// succeeds once the keys are imported.
+			// Keyless frame for an unknown sender (see
+			// attachKnownSenderKeys for why one still arrives) — schedule
+			// a BACKGROUND single-flight contact sync (narrow recovery:
+			// contact/key sync only, no peer exchange — see
+			// docs/peer-discovery-conditional-get-peers.ru.md Step 5) and
+			// reject this attempt. Running the recovery inline blocked
+			// the inbound read loop for the whole dial while frames piled
+			// up behind it; the async trigger keeps the loop responsive.
+			// No ack_delete goes out for this result, so the pushing hop
+			// redelivers and succeeds once the keys are imported.
 			log.Info().
 				Str("peer", string(peerAddr)).
 				Str("id", string(msg.ID)).

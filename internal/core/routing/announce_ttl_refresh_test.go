@@ -196,17 +196,11 @@ func TestAnnounceLoop_ForcedFullSync_RefreshesLearnedRouteBeforeExpiry(t *testin
 		<-done
 	}()
 
-	target := routing.RouteTriple{
-		Identity: targetIdentity,
-		Origin:   hubIdentity,
-		NextHop:  hubIdentity,
-	}
-
 	// First trigger: forced full sync (no prior baseline).
 	loop.TriggerUpdate()
 	rec.waitForCallCount(t, 1, time.Second)
 
-	initial := receiverTable.InspectTriple(target)
+	initial := receiverTable.InspectUplinkClaim(targetIdentity, hubIdentity)
 	if initial == nil {
 		t.Fatalf("receiver did not learn the direct route after first sync")
 	}
@@ -237,7 +231,7 @@ func TestAnnounceLoop_ForcedFullSync_RefreshesLearnedRouteBeforeExpiry(t *testin
 		loop.TriggerUpdate()
 		rec.waitForCallCount(t, i+2, time.Second)
 
-		snap := receiverTable.InspectTriple(target)
+		snap := receiverTable.InspectUplinkClaim(targetIdentity, hubIdentity)
 		if snap == nil {
 			t.Fatalf("iteration %d: receiver lost the route entirely (now=%s)",
 				i, nowFn())

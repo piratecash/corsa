@@ -69,7 +69,7 @@ func TestAV2ProofWaitsForLegacyRoutingInputAlreadyAdmitted(t *testing.T) {
 	handlerDone := make(chan struct{})
 	go func() {
 		defer close(handlerDone)
-		svc.dispatchPeerSessionFrame(impostor.address, impostor, legacyBaselineFrame(idTargetX))
+		svc.dispatchPeerSessionFrame(impostor.address, impostor, legacyBaselineFrame(impostor.peerIdentity, idTargetX))
 	}()
 	<-admitted
 
@@ -116,7 +116,7 @@ func TestACancelledV2ProofStillPurgesAfterTheLegacyWriteItWaitedFor(t *testing.T
 	handlerDone := make(chan struct{})
 	go func() {
 		defer close(handlerDone)
-		svc.dispatchPeerSessionFrame(impostor.address, impostor, legacyBaselineFrame(idTargetX))
+		svc.dispatchPeerSessionFrame(impostor.address, impostor, legacyBaselineFrame(impostor.peerIdentity, idTargetX))
 	}()
 	<-admitted
 
@@ -213,7 +213,7 @@ func TestAnOwedPurgeIsRunByTheLastWriterBeforeWaitersWake(t *testing.T) {
 func TestAMarkIsNotLostToOtherWritersBeforeTheProof(t *testing.T) {
 	t.Run("marked before the store filled", func(t *testing.T) {
 		svc, peer, impostor := unpinnedRoutingNode(t)
-		svc.dispatchPeerSessionFrame(impostor.address, impostor, legacyBaselineFrame(idTargetX))
+		svc.dispatchPeerSessionFrame(impostor.address, impostor, legacyBaselineFrame(impostor.peerIdentity, idTargetX))
 		if !routeLearnedVia(svc, idTargetX, peer.Identity) {
 			t.Fatal("precondition: the legacy session wrote a route via X")
 		}
@@ -233,7 +233,7 @@ func TestAMarkIsNotLostToOtherWritersBeforeTheProof(t *testing.T) {
 		for i := 0; i < maxUnprovenRoutingMarks; i++ {
 			svc.unprovenRouting.note(domain.PeerIdentity{0xb1, byte(i), byte(i >> 8)}, now)
 		}
-		svc.dispatchPeerSessionFrame(impostor.address, impostor, legacyBaselineFrame(idTargetX))
+		svc.dispatchPeerSessionFrame(impostor.address, impostor, legacyBaselineFrame(impostor.peerIdentity, idTargetX))
 		if !routeLearnedVia(svc, idTargetX, peer.Identity) {
 			t.Fatal("precondition: the legacy session wrote a route via X")
 		}
@@ -442,7 +442,7 @@ func TestALegacySessionCloseObligesThePurgeAtTheProof(t *testing.T) {
 	svc.dispatchPeerSessionFrame(genuine.address, genuine, protocol.Frame{
 		Type: "announce_routes",
 		AnnounceRoutes: []protocol.AnnounceRouteFrame{
-			{Identity: idTargetX.String(), Origin: idTargetX.String(), Hops: 1, SeqNo: 1},
+			{Identity: idTargetX.String(), Origin: x.String(), Hops: 1, SeqNo: 1},
 		},
 	})
 	if !routeLearnedVia(svc, idTargetX, x) {

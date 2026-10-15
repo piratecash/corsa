@@ -18,10 +18,8 @@ import "time"
 // would echo what the peer just told us) and own-identity filtering
 // (Identity != excludeVia, which avoids sending the peer routes
 // claiming the peer itself as the destination — degenerate "you can
-// reach yourself via me" claims, and on pre-A1 receivers this also
-// avoids the own-origin anti-spoof trip when Identity happens to
-// equal that receiver's localOrigin). Withdrawn and expired routes
-// are also excluded.
+// reach yourself via me" claims). Withdrawn and expired routes are
+// also excluded.
 //
 // Post-Phase-A there is no per-Origin filter: storage no longer
 // keeps a transit Origin so there is nothing to compare against
@@ -267,9 +265,7 @@ func (t *Table) ReleaseAnnounceEntries(entries []AnnounceEntry) {
 // monotonically non-decreasing SeqNo timeline. Without this
 // alignment a raw `claim.SeqNo` on the wire would diverge from
 // the responder's outbound-counter namespace and the receiver
-// could reject later legitimate announces as stale, or trip the
-// cross-Origin lineage guard via a mismatched LastIngressOrigin
-// (PR 11.32 P2).
+// could reject later legitimate announces as stale (PR 11.32 P2).
 //
 // Returns (entry, uplink, true) on a live winner; (zero,
 // "", false) when no non-Dead non-withdrawn non-expired claim is
@@ -418,7 +414,7 @@ func (t *Table) AnnounceTargetFor(target, requester PeerIdentity) (AnnounceEntry
 		// live emit branch. See outboundEmitSig type doc.
 		AttestedSig: string(liveWinner.AttestedSig),
 	}
-	wireSeqNo, armed := t.store.nextOutboundSeqLockedPerPeer(target, requester, sig, liveWinner.SeqNo, liveWinner.LastIngressOrigin, now)
+	wireSeqNo, armed := t.store.nextOutboundSeqLockedPerPeer(target, requester, sig, liveWinner.SeqNo, liveWinner.Uplink, now)
 	if armed {
 		// PR 11.33 P2 — the advance we just recorded crossed the
 		// SeqNo flap-cap threshold and engaged hold-down INSIDE
@@ -756,18 +752,15 @@ func (t *Table) lookupHealthLocked(identity PeerIdentity, entry RouteEntry) *Rou
 	return t.health.getLocked(identity, entry.NextHop)
 }
 
-// InspectTriple returns the raw route entry for the given lookup key,
-// or nil if no claim matches. Post-Phase-A the dedup key is
-// (Identity, Uplink=NextHop) — the key.Origin component is retained
-// on the public API for backward compatibility but is IGNORED inside
-// routeStore.InspectTriple. Unlike Lookup, this does not filter by
-// withdrawn/expired status — callers see the entry exactly as stored.
-// Intended for diagnostics and debugging (e.g. explaining why
-// UpdateRoute rejected an incoming entry).
-func (t *Table) InspectTriple(key RouteTriple) *RouteEntry {
+// InspectUplinkClaim returns the raw route entry stored for the
+// (identity, uplink) slot, or nil if no claim matches. Unlike Lookup,
+// this does not filter by withdrawn/expired status — callers see the
+// entry exactly as stored. Intended for diagnostics and debugging
+// (e.g. explaining why UpdateRoute rejected an incoming entry).
+func (t *Table) InspectUplinkClaim(identity, uplink PeerIdentity) *RouteEntry {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
-	return t.store.InspectTriple(key)
+	return t.store.InspectUplinkClaim(identity, uplink)
 }
 
 // Snapshot returns an immutable point-in-time view of the entire table.

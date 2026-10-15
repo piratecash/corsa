@@ -444,13 +444,14 @@ func TestReconcileVerifying_CompletedFileExists(t *testing.T) {
 
 	fileID := domain.FileID("crash-after-rename")
 	m.receiverMaps[fileID] = &receiverFileMapping{
-		FileID:    fileID,
-		FileHash:  fileHash,
-		FileName:  fileName,
-		FileSize:  uint64(len(content)),
-		Sender:    domaintest.ID("sender-identity-1234567890abcd"),
-		State:     receiverVerifying,
-		CreatedAt: time.Now(),
+		FileID:       fileID,
+		FileHash:     fileHash,
+		FileName:     fileName,
+		FileSize:     uint64(len(content)),
+		Sender:       domaintest.ID("sender-identity-1234567890abcd"),
+		State:        receiverVerifying,
+		ServingEpoch: 7,
+		CreatedAt:    time.Now(),
 	}
 
 	m.reconcileVerifyingOnStartup()
@@ -461,6 +462,11 @@ func TestReconcileVerifying_CompletedFileExists(t *testing.T) {
 	}
 	if rm.CompletedPath == "" {
 		t.Fatal("CompletedPath should be set after reconciliation")
+	}
+	// The recovered waiting_ack re-sends file_downloaded, and the sender
+	// accepts it only if it still names the run the bytes came from.
+	if rm.ServingEpoch != 7 {
+		t.Errorf("ServingEpoch = %d, want 7 (kept across the recovery)", rm.ServingEpoch)
 	}
 }
 

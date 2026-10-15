@@ -3,7 +3,7 @@ package routing
 import "time"
 
 // This file hosts the read-side storage projections: targeted
-// (Identity, Origin, NextHop) inspection (InspectTriple), per-
+// (Identity, Uplink) inspection (InspectUplinkClaim), per-
 // identity active-route lookup (LookupActive), and the two
 // neighbor-facing projection helpers used by AnnounceLoop
 // (AnnounceableFor for the routing-domain shape,
@@ -11,15 +11,11 @@ import "time"
 //
 // All four operate on per-(Identity, Uplink) UplinkClaim
 // storage and synthesise the boundary RouteEntry / AnnounceEntry
-// shape on the fly. Per the Phase A migration contract every
-// synthesised value carries Origin = localOrigin (with fallback
-// to Identity when localOrigin is empty), matching the wire-
-// emit shape that pre-A1 receivers expect for own-direct
-// withdrawal anti-spoof. The phase-1 doc originally proposed
-// Origin = Identity here, but switching to localOrigin lets
-// live and withdrawal frames land on the same
-// (Identity, Origin=sender, NextHop=sender) triple on legacy
-// receivers — see uplink_claim.go for the full rationale.
+// shape on the fly. Every synthesised value carries
+// Origin = localOrigin (with fallback to Identity when
+// localOrigin is empty): live and withdrawal frames name the
+// sender as their Origin, which is what receivers check before
+// accepting a withdrawal — see uplink_claim.go.
 
 // announceDigestEntriesForLocked returns the (Identity, lastWireSeqNo)
 // pairs this store has announced to `peer` and would STILL announce —
@@ -122,29 +118,24 @@ func (s *routeStore) LookupActive(identity PeerIdentity, now time.Time) []RouteE
 	return result
 }
 
-// InspectTriple returns a value-copy of the claim matching the
-// (Identity, NextHop=Uplink) projection of key, synthesised as a
-// boundary RouteEntry, or nil when no claim exists. The
-// key.Origin component is preserved on the public API for
-// backward compatibility with Table.InspectTriple callers but is
-// ignored internally — after Phase A the dedup key is per-
-// (Identity, Uplink).
+// InspectUplinkClaim returns a value-copy of the (identity, uplink)
+// claim, synthesised as a boundary RouteEntry, or nil when no claim
+// exists.
 //
-// Unlike LookupActive, InspectTriple does NOT filter by
+// Unlike LookupActive, InspectUplinkClaim does NOT filter by
 // withdrawn/expired status — callers see the claim exactly as
 // stored. Intended for diagnostics (e.g. explaining why
 // ApplyUpdate rejected an incoming entry).
 //
 // Returns a copy rather than the alias so callers cannot
-// accidentally mutate storage via the pointer; same defensive
-// convention as the pre-routeStore Table.InspectTriple. Caller
-// must hold t.mu (reader OK).
-func (s *routeStore) InspectTriple(key RouteTriple) *RouteEntry {
-	bucket, idx := s.findByUplinkLocked(key.Identity, key.NextHop)
+// accidentally mutate storage via the pointer. Caller must hold
+// t.mu (reader OK).
+func (s *routeStore) InspectUplinkClaim(identity, uplink PeerIdentity) *RouteEntry {
+	bucket, idx := s.findByUplinkLocked(identity, uplink)
 	if idx < 0 {
 		return nil
 	}
-	dup := toRouteEntry(key.Identity, s.localOrigin, bucket[idx])
+	dup := toRouteEntry(identity, s.localOrigin, bucket[idx])
 	return &dup
 }
 
@@ -156,9 +147,7 @@ func (s *routeStore) InspectTriple(key RouteTriple) *RouteEntry {
 //   - own-identity filter: identity == excludeVia → skip (the
 //     peer would always reject a route announce naming themself
 //     as the destination — degenerate "you can reach yourself
-//     via me" claim — and on pre-A1 receivers this also avoids
-//     the own-origin anti-spoof trip when receiver.localOrigin
-//     happens to equal Identity).
+//     via me" claim).
 //
 // Withdrawn and expired claims are also excluded — Announceable
 // is the routing-domain projection, not the wire-shape; wire
@@ -252,7 +241,7 @@ func (s *routeStore) AnnounceableFor(excludeVia PeerIdentity, now time.Time, isD
 // SeqAdvanceWindow are skipped for DefaultSeqHoldDownDuration; see
 // flap.go::isInSeqHoldDownLocked).
 //
-// Per-Identity collapse: pre-A1 AnnounceProjectionFor emitted one
+// Per-Identity collapse: AnnounceProjectionFor used to emit one
 // entry per (Identity, Uplink) claim (post-Stage-3 / Stage-4 in
 // announce_builder.go did the per-Identity collapse downstream).
 // After A1's outbound SeqNo synthesis (route_store.go's
@@ -271,11 +260,9 @@ func (s *routeStore) AnnounceableFor(excludeVia PeerIdentity, now time.Time, isD
 // Live-vs-tombstone exclusivity: when a live winner is present
 // for an Identity, own-direct tombstones for the SAME Identity
 // are suppressed on the wire. The live winner already overrides
-// any prior wire state on the receiver (pre-A1 receivers key on
-// (Identity, Origin, NextHop) with our Origin=localOrigin and
-// NextHop=sender, so both live and tombstone for one Identity
-// collide on a single triple slot; post-A1 receivers key on
-// (Identity, Uplink) and resolve by SeqNo). Emitting BOTH would
+// any prior wire state on the receiver (receivers key on
+// (Identity, Uplink) and resolve by SeqNo, so live and tombstone
+// for one Identity collide on a single slot). Emitting BOTH would
 // produce a fatal ordering hazard: nextOutboundSeqLockedPerPeer
 // advances outboundPeerMax on the live emit, so the immediately
 // following tombstone emit assigns a STRICTLY GREATER SeqNo than
@@ -419,12 +406,12 @@ func (s *routeStore) projectIdentityLocked(identity PeerIdentity, bucket []Uplin
 		return result, false
 	}
 
-	// emitOrigin defaults to localOrigin (Phase A migration
-	// contract — sender-originated semantic, same for live
-	// and withdrawal so pre-A1 receivers track them under one
-	// (Identity, sender, sender) triple). Empty fallback to
-	// identity matches toRouteEntry, keeping test fixtures
-	// without WithLocalOrigin from emitting Origin == "".
+	// emitOrigin defaults to localOrigin — the same value for
+	// live and withdrawal frames, because receivers accept an
+	// entry only when its Origin is the sending peer. Empty
+	// fallback to identity matches toRouteEntry, keeping test
+	// fixtures without WithLocalOrigin from emitting
+	// Origin == "".
 	emitOrigin := origin
 	if emitOrigin.IsZero() {
 		emitOrigin = identity
@@ -500,7 +487,7 @@ func (s *routeStore) projectIdentityLocked(identity PeerIdentity, bucket []Uplin
 		// so a winner-switch A→B→A on the same peer's
 		// timeline forces a fresh SeqNo. See
 		// nextOutboundSeqLockedPerPeer's doc-comment.
-		wireSeqNo, armed := s.nextOutboundSeqLockedPerPeer(identity, excludeVia, sig, liveWinner.SeqNo, liveWinner.LastIngressOrigin, now)
+		wireSeqNo, armed := s.nextOutboundSeqLockedPerPeer(identity, excludeVia, sig, liveWinner.SeqNo, liveWinner.Uplink, now)
 		if armed {
 			// The advance we just recorded crossed the SeqNo
 			// flap-cap threshold and engaged hold-down INSIDE
@@ -576,7 +563,7 @@ func (s *routeStore) projectIdentityLocked(identity PeerIdentity, bucket []Uplin
 		// of the current state via a strictly newer SeqNo,
 		// and trailing a tombstone behind it would invert
 		// the receiver's view (see doc-comment).
-		wireSeqNo, armed := s.nextOutboundSeqLockedPerPeer(identity, excludeVia, sig, tomb.SeqNo, tomb.LastIngressOrigin, now)
+		wireSeqNo, armed := s.nextOutboundSeqLockedPerPeer(identity, excludeVia, sig, tomb.SeqNo, tomb.Uplink, now)
 		if armed {
 			// Same threshold-crossing suppression as the
 			// live-winner branch above: the peer whose emit

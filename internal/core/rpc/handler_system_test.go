@@ -53,13 +53,17 @@ func TestSystemVersionDefaultValues(t *testing.T) {
 // of these breaks the integration contract.
 func TestSystemGetNodeStatusReturnsAllPIP0001Fields(t *testing.T) {
 	node := newDefaultNodeProvider(t)
+	// The two protocol versions differ by construction, so a handler that
+	// swapped the two fields fails; they are not the config pair itself,
+	// which may be equal. Both are derived from the floor, so the fixture
+	// describes a version the node would serve whatever the floor is.
 	expected := domain.NodeStatus{
 		Identity:               "addr-fingerprint",
 		Address:                "addr-fingerprint",
 		PublicKey:              "pub-key-base64",
 		BoxPublicKey:           "box-key-base64",
-		ProtocolVersion:        17,
-		MinimumProtocolVersion: 12,
+		ProtocolVersion:        config.MinimumProtocolVersion + 3,
+		MinimumProtocolVersion: config.MinimumProtocolVersion,
 		ClientVersion:          "0.42-test",
 		ClientBuild:            777,
 		ConnectedPeers:         5,

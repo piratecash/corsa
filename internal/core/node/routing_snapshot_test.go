@@ -614,7 +614,7 @@ func TestRoutingSnapshotPersistsLastOnlineWhenFinalRouteDisappears(t *testing.T)
 
 	// Losing only one path must keep the contact online and leave the durable
 	// timestamp empty.
-	if !svc.routingTable.WithdrawRoute(peer, firstOrigin, firstHop, 2) {
+	if !svc.routingTable.WithdrawRoute(peer, firstHop, 2) {
 		t.Fatal("withdraw first route returned false")
 	}
 	svc.lastRoutingSnapAtNanos.Store(0)
@@ -625,7 +625,7 @@ func TestRoutingSnapshotPersistsLastOnlineWhenFinalRouteDisappears(t *testing.T)
 
 	want := time.Date(2026, time.August, 21, 18, 5, 0, 0, time.UTC)
 	svc.presenceClock = func() time.Time { return want }
-	if !svc.routingTable.WithdrawRoute(peer, secondOrigin, secondHop, 2) {
+	if !svc.routingTable.WithdrawRoute(peer, secondHop, 2) {
 		t.Fatal("withdraw final route returned false")
 	}
 	// A slow trust-store write must not hold up the routing refresher. Lock the
@@ -706,8 +706,8 @@ func TestRoutingSnapshotDoesNotAttributeTotalCollapseToContacts(t *testing.T) {
 	svc.rebuildRoutingSnapshot()
 	offlineChanges = nil
 
-	if !svc.routingTable.WithdrawRoute(first, firstOrigin, firstHop, 2) ||
-		!svc.routingTable.WithdrawRoute(second, secondOrigin, secondHop, 2) {
+	if !svc.routingTable.WithdrawRoute(first, firstHop, 2) ||
+		!svc.routingTable.WithdrawRoute(second, secondHop, 2) {
 		t.Fatal("failed to withdraw both routes for total-collapse setup")
 	}
 	svc.lastRoutingSnapAtNanos.Store(0)
@@ -901,7 +901,7 @@ func TestAmbiguousDirectThenTransitLossIsSnapshotGenerationIndependent(t *testin
 				svc.lastRoutingSnapAtNanos.Store(0)
 				svc.rebuildRoutingSnapshot()
 			}
-			if !svc.routingTable.WithdrawRoute(peer, backup, backup, 3) {
+			if !svc.routingTable.WithdrawRoute(peer, backup, 3) {
 				t.Fatal("withdraw transit fallback returned false")
 			}
 			svc.lastRoutingSnapAtNanos.Store(0)
@@ -1020,7 +1020,7 @@ func TestTransitLossAfterDirectFallbackUsesSnapshotPresence(t *testing.T) {
 
 	want := time.Date(2026, time.August, 21, 18, 30, 0, 0, time.UTC)
 	svc.presenceClock = func() time.Time { return want }
-	if !svc.routingTable.WithdrawRoute(peer, backup, backup, 3) {
+	if !svc.routingTable.WithdrawRoute(peer, backup, 3) {
 		t.Fatal("withdraw backup route returned false")
 	}
 	svc.lastRoutingSnapAtNanos.Store(0)

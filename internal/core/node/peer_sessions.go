@@ -40,7 +40,6 @@ import (
 	"github.com/piratecash/corsa/internal/core/crashlog"
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/ebus"
-	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/netcore"
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
@@ -51,15 +50,12 @@ import (
 // registry — helpers reading pc.Address()/Identity()/Capabilities()
 // observe the real peer values instead of an anonymous entry.
 //
-// Under the v12 wire contract welcome.Listen carries no truth, so
-// NetCore.Address is taken UNCONDITIONALLY from session.address — the
-// host:port we successfully dialed. This is the canonical overlay key
-// for the outbound side: pc.Address() callers see a host:port string,
-// never a bare Ed25519 identity, and a hostile or buggy responder
-// cannot influence the registry by stuffing arbitrary content into
-// welcome.listen. Pre-v12 the helper used welcome.Listen as the
-// primary source and fell back to welcome.Address; v12 drops that
-// chain entirely.
+// The welcome carries no host, so NetCore.Address is taken
+// UNCONDITIONALLY from session.address — the host:port we successfully
+// dialed. This is the canonical overlay key for the outbound side:
+// pc.Address() callers see a host:port string, never a bare Ed25519
+// identity, and nothing the responder writes into its welcome can move
+// the registry away from the dialable address.
 //
 // This helper is pure metadata assignment: it does not touch
 // learnIdentityFromWelcome, peerHealth maps or welcomeMeta — each
@@ -88,11 +84,7 @@ func applyWelcomeMetadata(session *peerSession, welcome protocol.Frame, enableV3
 		return
 	}
 	// session.address — the host:port we actually dialed — is the only
-	// trusted overlay key for the outbound side. welcome.Listen is
-	// intentionally ignored even when a peer still echoes it: under
-	// the v12 wire contract it carries no authoritative information,
-	// so consulting it would just open a wedge for a malicious or
-	// buggy responder to push us away from the dialable address.
+	// trusted overlay key for the outbound side.
 	advertised := session.address
 	if advertised == "" {
 		// Defensive fallback for unit-test fixtures that set up a
@@ -322,24 +314,9 @@ func (s *Service) openPeerSession(ctx context.Context, address domain.PeerAddres
 	if err != nil {
 		return false, err
 	}
-	if err := validateProtocolHandshake(welcome); err != nil {
+	if err := s.refuseIncompatibleWelcome(address, welcome); err != nil {
 		log.Warn().Err(err).Str("peer", string(address)).Int("version", welcome.Version).Msg("outbound_peer_protocol_too_old")
-		// Pre-populate the client version cache so that
-		// penalizeOldProtocolPeer → setVersionLockoutLocked writes the
-		// complete diagnostics. On the failure path, learnIdentityFromWelcome /
-		// addPeerVersion never run, so without this the lockout would store
-		// an empty ObservedClientVersion.
-		if welcome.ClientVersion != "" {
-			log.Trace().Str("site", "openPeerSession_preLockoutVersion").Str("phase", "lock_wait").Str("address", string(address)).Msg("peer_mu_writer")
-			s.peerMu.Lock()
-			log.Trace().Str("site", "openPeerSession_preLockoutVersion").Str("phase", "lock_held").Str("address", string(address)).Msg("peer_mu_writer")
-			healthKey := s.resolveHealthAddress(address)
-			s.peerVersions[healthKey] = welcome.ClientVersion
-			s.peerMu.Unlock()
-			log.Trace().Str("site", "openPeerSession_preLockoutVersion").Str("phase", "lock_released").Str("address", string(address)).Msg("peer_mu_writer")
-		}
-		s.penalizeOldProtocolPeer(address, domain.ProtocolVersion(welcome.Version), domain.ProtocolVersion(welcome.MinimumProtocolVersion))
-		return false, fmt.Errorf("%w: %v", errIncompatibleProtocol, err)
+		return false, err
 	}
 	// Self-loopback guard on the legacy outbound path. Deferred cleanup
 	// (session.Close via the defer block at the top of openPeerSession)
@@ -351,9 +328,8 @@ func (s *Service) openPeerSession(ctx context.Context, address domain.PeerAddres
 		log.Warn().
 			Str("peer", string(address)).
 			Str("local_identity", s.identity.Address).
-			Str("welcome_listen", welcome.Listen).
 			Msg("outbound_self_identity_rejected")
-		return false, s.newSelfIdentityError(address, welcome.Listen)
+		return false, s.newSelfIdentityError(address)
 	}
 	// peerMu around the metadata write, not just around the map insert below:
 	// readPeerSession is already running (it delivered the welcome that got us
@@ -369,9 +345,9 @@ func (s *Service) openPeerSession(ctx context.Context, address domain.PeerAddres
 	s.peerMu.Unlock()
 	s.learnIdentityFromWelcome(welcome, address)
 	// learnIdentityFromWelcome stores version/build keyed by the dial
-	// address (the only trusted host:port for the outbound side under
-	// the v12 wire contract). Mirror them under the health-tracking
-	// key resolveHealthAddress returns so peerHealthFrames can always
+	// address (the only trusted host:port for the outbound side).
+	// Mirror them under the health-tracking key resolveHealthAddress
+	// returns so peerHealthFrames can always
 	// find the version — even for fallback-port dial variants whose
 	// canonical health key differs from the dial target.
 	s.peerMu.RLock()
@@ -688,14 +664,11 @@ func (session *peerSession) logFireAndForgetDrop(frameType string) {
 }
 
 func (s *Service) authenticatePeerSession(session *peerSession, welcome protocol.Frame) error {
-	if strings.TrimSpace(welcome.Challenge) == "" {
-		return protocol.ErrAuthRequired
+	authSession, err := s.authSessionFor(welcome)
+	if err != nil {
+		return err
 	}
-	reply, err := s.peerSessionRequest(session, protocol.Frame{
-		Type:      "auth_session",
-		Address:   s.identity.Address,
-		Signature: identity.SignPayload(s.identity, protocol.SessionAuthPayload(welcome.Challenge, s.identity.Address)),
-	}, "auth_ok", false)
+	reply, err := s.peerSessionRequest(session, authSession, "auth_ok", false)
 	if err != nil {
 		return err
 	}
@@ -1195,9 +1168,8 @@ func (s *Service) openPeerSessionForCM(ctx context.Context, address domain.PeerA
 		log.Warn().
 			Str("peer", string(address)).
 			Str("local_identity", s.identity.Address).
-			Str("welcome_listen", welcome.Listen).
 			Msg("outbound_self_identity_rejected")
-		return nil, s.newSelfIdentityError(address, welcome.Listen)
+		return nil, s.newSelfIdentityError(address)
 	}
 	// peerMu around the metadata write, not just around the map insert below:
 	// readPeerSession is already running (it delivered the welcome that got us
@@ -1821,25 +1793,17 @@ func (s *Service) onCMDialFailed(address domain.PeerAddress, err error, incompat
 		// set and persisted lockout (direction guard requires non-zero
 		// peerMinimum > local protocol version).
 		var peerVersion, peerMinimum domain.ProtocolVersion
+		var clientVersion domain.ClientVersion
 		var ipe *incompatibleProtocolError
 		if errors.As(err, &ipe) {
 			peerVersion = ipe.PeerVersion
 			peerMinimum = ipe.PeerMinimum
-			// Pre-populate the peerVersions cache so that
-			// penalizeOldProtocolPeer → setVersionLockoutLocked can read the
-			// client version for persisted diagnostics. On the CM path the
-			// handshake failed before onCMSessionEstablished could populate
-			// these maps from the welcome frame.
-			if ipe.ClientVersion != "" {
-				log.Trace().Str("site", "onCMDialFailed_storeVersion").Str("phase", "lock_wait").Str("address", string(address)).Msg("peer_mu_writer")
-				s.peerMu.Lock()
-				log.Trace().Str("site", "onCMDialFailed_storeVersion").Str("phase", "lock_held").Str("address", string(address)).Msg("peer_mu_writer")
-				s.peerVersions[address] = ipe.ClientVersion
-				s.peerMu.Unlock()
-				log.Trace().Str("site", "onCMDialFailed_storeVersion").Str("phase", "lock_released").Str("address", string(address)).Msg("peer_mu_writer")
-			}
+			// On the CM path the handshake failed before
+			// onCMSessionEstablished could record the client version from
+			// the welcome, so the evidence carries it to the penalty.
+			clientVersion = domain.ClientVersion(ipe.ClientVersion)
 		}
-		s.penalizeOldProtocolPeer(address, peerVersion, peerMinimum)
+		s.penalizeOldProtocolPeer(address, peerVersion, peerMinimum, clientVersion)
 	} else {
 		s.markPeerDisconnected(address, err)
 	}
@@ -1905,7 +1869,6 @@ func (s *Service) applySelfIdentityCooldown(address domain.PeerAddress, selfErr 
 	log.Warn().
 		Str("peer", string(address)).
 		Str("local_identity", selfErr.LocalIdentity.String()).
-		Str("welcome_listen", string(selfErr.PeerListen)).
 		Time("banned_until", bannedUntil).
 		Bool("first_observation", firstObservation).
 		Msg("self_identity_cooldown_applied")

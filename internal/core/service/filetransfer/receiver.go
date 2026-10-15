@@ -102,10 +102,11 @@ type receiverFileMapping struct {
 	// chunk_response for this FileID. It is echoed back in file_downloaded
 	// so the sender can reject stale replays from a prior serving run of
 	// the same FileID (re-downloads reuse the FileID but bump the sender
-	// epoch). A zero value means no epoch has been observed yet (legacy
-	// sender, or no chunk_response has arrived since the mapping was
-	// registered / reset); in that case file_downloaded carries Epoch=0
-	// and the sender falls back to the legacy (un-gated) accept path.
+	// epoch). A zero value means no epoch has been observed yet: no
+	// chunk_response has arrived since the mapping was registered or reset.
+	// A mapping cannot reach waiting_ack in that state against a sender
+	// that records runs, because the file has at least one byte and every
+	// chunk_response carries the run's epoch.
 	ServingEpoch uint64
 
 	// writePartialMu serialises writers and the verifier against the
@@ -539,12 +540,12 @@ func (m *Manager) HandleChunkResponse(
 // HandleFileDownloadedAck processes a file_downloaded_ack from the sender.
 // Transitions from waiting_ack → completed.
 //
-// Epoch gating: if the mapping observed a non-zero ServingEpoch during the
-// current run, the incoming ack must echo the same value. This rejects a
-// stale ack left over from a prior serving run of the same FileID (e.g.
-// cancel + restart cycle that rebound a new epoch). Epoch==0 on either
-// side is the legacy path and accepted unconditionally for wire
-// compatibility during rolling upgrades.
+// Epoch gating: the incoming ack must echo the epoch this run sent in
+// file_downloaded, i.e. the mapping's ServingEpoch. This rejects a stale ack
+// left over from a prior serving run of the same FileID (e.g. cancel +
+// restart cycle that rebound a new epoch). The sender echoes the epoch
+// verbatim, so an ack without one is not the answer to the current run and
+// is dropped like any other mismatch.
 func (m *Manager) HandleFileDownloadedAck(
 	senderIdentity domain.PeerIdentity,
 	ack domain.FileDownloadedAckPayload,
@@ -566,7 +567,7 @@ func (m *Manager) HandleFileDownloadedAck(
 		return
 	}
 
-	if ack.Epoch != 0 && mapping.ServingEpoch != 0 && ack.Epoch != mapping.ServingEpoch {
+	if !frameBelongsToServingRun(ack.Epoch, mapping.ServingEpoch) {
 		currentEpoch := mapping.ServingEpoch
 		m.mu.Unlock()
 		log.Warn().
@@ -574,7 +575,7 @@ func (m *Manager) HandleFileDownloadedAck(
 			Str("sender", senderIdentity.String()).
 			Uint64("received_epoch", ack.Epoch).
 			Uint64("current_epoch", currentEpoch).
-			Msg("file_transfer: file_downloaded_ack epoch mismatch — dropping stale ack")
+			Msg("file_transfer: file_downloaded_ack epoch mismatch — not the current serving run, dropping")
 		return
 	}
 
@@ -1049,11 +1050,9 @@ func (m *Manager) validateChunkResponseLocked(
 	// chunk_response from an older serving run (lower epoch) must not
 	// overwrite a newer epoch already observed. Without this, the
 	// completion would echo the stale epoch and the sender would reject
-	// the legitimate file_downloaded as a replay.
-	//
-	// Zero is skipped entirely: a legacy sender (epoch=0) or a mid-upgrade
-	// sender regressing to zero must not erase a non-zero epoch that the
-	// receiver already learned from an earlier chunk in this run.
+	// the legitimate file_downloaded as a replay. The same comparison keeps
+	// a chunk_response without an epoch (served from a sender mapping
+	// persisted before the epoch existed) from erasing one already learned.
 	if resp.Epoch > mapping.ServingEpoch {
 		mapping.ServingEpoch = resp.Epoch
 	}
@@ -1807,8 +1806,9 @@ func (m *Manager) finalizeVerifiedDownload(
 // alone is a sufficient guard.
 //
 // If no mapping exists for fileID (cleanup race), the command is not sent.
-// Epoch=0 is legal and means the receiver never observed a non-zero epoch
-// — the sender treats it as legacy.
+// The epoch is 0 only when no chunk_response of this run carried one, which
+// happens only when the sender's mapping has no recorded run either; the
+// sender accepts the frame only while the epochs are equal.
 func (m *Manager) sendFileDownloaded(fileID domain.FileID, sender domain.PeerIdentity) {
 	m.mu.Lock()
 	mapping, ok := m.receiverMaps[fileID]

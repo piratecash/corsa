@@ -599,7 +599,7 @@ func (r *identityResolver) expireCooldownsLocked(now time.Time) {
 // and phase transitions, the routing gate, then at most one send.
 func (r *identityResolver) advanceResolution(ctx context.Context, target domain.PeerIdentity, now time.Time) {
 	// Recompute the usable axis first: several provisional sources (the
-	// fetch_contacts epidemic, attached v27 sender keys) fill the key maps
+	// fetch_contacts epidemic, sender keys attached to DM frames) fill the key maps
 	// without any ebus event, so the tick is their only observer.
 	usable := r.usableNow(target)
 	r.mu.Lock()

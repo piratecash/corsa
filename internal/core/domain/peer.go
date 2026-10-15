@@ -9,7 +9,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"net/netip"
-	"strconv"
 	"time"
 )
 
@@ -81,42 +80,26 @@ type PeerPort int
 // that both the TCP stack and the hello.advertise_port wire contract
 // require. Every other value — zero, negative, or >65535 — must be
 // treated by the receiver as "no valid advertise port" and collapsed
-// to config.DefaultPeerPort per docs/advertise-address-phase1-deprecation.md
-// §7.2.
+// to config.DefaultPeerPort (docs/protocol/handshake.md, hello field
+// reference, `advertise_port`).
 func (p PeerPort) IsValid() bool {
 	return p >= 1 && p <= 65535
 }
 
 // UnmarshalJSON decodes a JSON value into PeerPort with a lenient contract:
-// a JSON integer decodes as-is, a JSON string is accepted as a v10-style
-// compatibility shape (some implementations historically used a string
-// wire form for ports), and any other representation — null, float with
-// a fractional part, boolean, object, array, unparseable text — collapses
-// silently to zero. The zero value is the explicit "no valid port" sentinel
-// that callers combine with IsValid to trigger the config.DefaultPeerPort
-// fallback. This keeps a malformed advertise_port from failing the whole
-// Frame decode and guarantees the advertise-address phase 1 deprecation
-// contract: "any non-integer payload, missing field, or value outside
-// 1..65535 collapses to DefaultPeerPort".
+// a JSON integer decodes as-is, and any other representation — null,
+// string (even one spelling a decimal port), float with a fractional
+// part, boolean, object, array — collapses silently to zero. The zero
+// value is the explicit "no valid port" sentinel that callers combine
+// with IsValid to trigger the config.DefaultPeerPort fallback. Collapsing
+// instead of failing keeps a malformed advertise_port from failing the
+// whole Frame decode, and matches the wire contract: "any non-integer
+// payload, missing field, or value outside 1..65535 collapses to
+// DefaultPeerPort".
 func (p *PeerPort) UnmarshalJSON(data []byte) error {
 	trimmed := bytes.TrimSpace(data)
 	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
 		*p = 0
-		return nil
-	}
-	// JSON string: unwrap and try to parse as a decimal integer.
-	if trimmed[0] == '"' {
-		var raw string
-		if err := json.Unmarshal(trimmed, &raw); err != nil {
-			*p = 0
-			return nil
-		}
-		value, err := strconv.Atoi(raw)
-		if err != nil {
-			*p = 0
-			return nil
-		}
-		*p = PeerPort(value)
 		return nil
 	}
 	// JSON number: decode into int. json.Number handling is not needed

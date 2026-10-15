@@ -18,16 +18,17 @@ import (
 // on both ends, not just as a polite convention of our own chunker.
 
 // buildAnnounceRouteFrames materialises n distinct AnnounceRouteFrame
-// entries with the wire shape used by both announce_routes and
-// routes_update frames. Identities/origins vary across entries so a
+// entries from sender with the wire shape used by both announce_routes
+// and routes_update frames. Identities vary across entries so a
 // (silently) truncated apply path would still leave a detectable
-// post-condition on the routing table.
-func buildAnnounceRouteFrames(n int) []protocol.AnnounceRouteFrame {
+// post-condition on the routing table; Origin is the sender, as every
+// sender writes it.
+func buildAnnounceRouteFrames(sender domain.PeerIdentity, n int) []protocol.AnnounceRouteFrame {
 	out := make([]protocol.AnnounceRouteFrame, n)
 	for i := 0; i < n; i++ {
 		out[i] = protocol.AnnounceRouteFrame{
 			Identity: fmt.Sprintf("dd%038x", i+1),
-			Origin:   fmt.Sprintf("cc%038x", i+1),
+			Origin:   sender.String(),
 			Hops:     1,
 			SeqNo:    uint64(i + 1),
 		}
@@ -73,7 +74,7 @@ func TestHandleAnnounceRoutes_OverCapFrameDroppedWhole(t *testing.T) {
 
 	frame := protocol.Frame{
 		Type:           "announce_routes",
-		AnnounceRoutes: buildAnnounceRouteFrames(maxRoutesPerAnnounceFrame + 1),
+		AnnounceRoutes: buildAnnounceRouteFrames(idPeerB, maxRoutesPerAnnounceFrame+1),
 	}
 
 	svc.handleAnnounceRoutes(provenRoutingSender(idPeerB), frame)
@@ -104,7 +105,7 @@ func TestHandleAnnounceRoutes_AtCapFrameAccepted(t *testing.T) {
 	registry.MarkReconnected(idPeerB,
 		[]routing.PeerCapability{domain.CapMeshRoutingV1, domain.CapMeshRoutingV2})
 
-	entries := buildAnnounceRouteFrames(maxRoutesPerAnnounceFrame)
+	entries := buildAnnounceRouteFrames(idPeerB, maxRoutesPerAnnounceFrame)
 	frame := protocol.Frame{
 		Type:           "announce_routes",
 		AnnounceRoutes: entries,
@@ -152,7 +153,7 @@ func TestHandleRoutesUpdate_OverCapFrameDroppedWhole(t *testing.T) {
 
 	frame := protocol.Frame{
 		Type:           "routes_update",
-		AnnounceRoutes: buildAnnounceRouteFrames(maxRoutesPerAnnounceFrame + 50),
+		AnnounceRoutes: buildAnnounceRouteFrames(idPeerB, maxRoutesPerAnnounceFrame+50),
 	}
 
 	svc.handleRoutesUpdate(provenRoutingSender(idPeerB), senderAddr, frame)

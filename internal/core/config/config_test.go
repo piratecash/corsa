@@ -1,9 +1,14 @@
 package config
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -899,4 +904,164 @@ func TestMaxSaneHopsFromEnv(t *testing.T) {
 			}
 		})
 	}
+}
+
+// featureVersionGate is one ProtocolVersion<Feature> constant: the version
+// from which a feature is spoken, and what happens — or has to be done —
+// once MinimumProtocolVersion reaches it.
+type featureVersionGate struct {
+	name    string
+	version int
+	floor   featureGateFloorRule
+	atFloor string
+}
+
+// featureGateFloorRule says what a gate means once MinimumProtocolVersion
+// reaches it. Most gates protect an "older peer" branch and are dead from
+// then on; the session-mode anchor is not a branch but an input of
+// sessionv2.ModeFor, which turns a floor at the anchor into ModeV2Only by
+// design, so the constant keeps its meaning after the raise.
+type featureGateFloorRule int
+
+const (
+	gateDeadAtFloor featureGateFloorRule = iota + 1
+	gateDrivesModeAtFloor
+)
+
+// featureVersionGates lists every feature constant declared in package config.
+// TestFeatureVersionGatesAreListed keeps the list complete, so a new gate
+// cannot dodge TestFeatureVersionGatesAreAboveTheFloor by being forgotten
+// here.
+var featureVersionGates = []featureVersionGate{
+	{
+		name:    "ProtocolVersionSecureSession",
+		version: ProtocolVersionSecureSession,
+		floor:   gateDrivesModeAtFloor,
+		atFloor: "a floor at this version selects ModeV2Only through sessionv2.ModeFor; the node paths " +
+			"for that mode are checked by TestTheConfiguredSessionModeIsWired, not here",
+	},
+	{
+		name:    "ProtocolVersionNoTransitAgeCeiling",
+		version: ProtocolVersionNoTransitAgeCeiling,
+		floor:   gateDeadAtFloor,
+		atFloor: "every node understands old dates: delete legacyTransitRestamp, its threshold, its call " +
+			"site in dispatchEnvelopeRetry, internal/core/node/legacy_transit_restamp.go and its test, " +
+			"and ProtocolVersionNoTransitAgeCeiling (TODO(transit-age-restamp-removal))",
+	},
+	{
+		name:    "ProtocolVersionReceiptSenderAck",
+		version: ProtocolVersionReceiptSenderAck,
+		floor:   gateDeadAtFloor,
+		atFloor: "every peer names the receipt in ack_delete: delete the gates at the buildAckDeleteFrame " +
+			"call sites, the legacy ambiguity rule in deleteBacklogReceiptForRecipient and " +
+			"ProtocolVersionReceiptSenderAck (TODO(receipt-sender-ack-gate-removal))",
+	},
+}
+
+// TestFeatureVersionGatesAreAboveTheFloor fails as soon as a raise of
+// MinimumProtocolVersion turns a feature gate into dead code: a peer below
+// the gate can no longer connect, so the "older peer" branch it protects
+// never runs and only misleads the next reader. The fix is to delete the
+// gate and its constant, not to adjust this test. A dead-at-floor gate must
+// also be spoken by this build: gating on a version the build does not emit
+// itself means the feature is never used. The session-mode anchor is exempt
+// from that check, because ProtocolVersion below it is the legitimate
+// ModeLegacyOnly configuration of sessionv2.ModeFor.
+func TestFeatureVersionGatesAreAboveTheFloor(t *testing.T) {
+	t.Parallel()
+	for _, gate := range featureVersionGates {
+		switch gate.floor {
+		case gateDeadAtFloor, gateDrivesModeAtFloor:
+		default:
+			t.Errorf("%s has no floor rule: say whether its gate is dead once the floor reaches it", gate.name)
+		}
+		if gate.floor != gateDeadAtFloor {
+			continue
+		}
+		if gate.version <= MinimumProtocolVersion {
+			t.Errorf("%s = %d is not above MinimumProtocolVersion = %d, so its gate is dead code — %s",
+				gate.name, gate.version, MinimumProtocolVersion, gate.atFloor)
+		}
+		if gate.version > ProtocolVersion {
+			t.Errorf("%s = %d is above ProtocolVersion = %d: this build would gate on a version it does not "+
+				"speak itself — raise ProtocolVersion with the feature or lower the constant",
+				gate.name, gate.version, ProtocolVersion)
+		}
+	}
+}
+
+// TestFeatureVersionGatesAreListed reads every non-test source file of
+// package config and requires every ProtocolVersion<Feature> constant to
+// appear in featureVersionGates.
+func TestFeatureVersionGatesAreListed(t *testing.T) {
+	t.Parallel()
+	declared := declaredFeatureVersionConstants(t)
+	listed := make(map[string]bool, len(featureVersionGates))
+	for _, gate := range featureVersionGates {
+		listed[gate.name] = true
+	}
+	for _, name := range declared {
+		if !listed[name] {
+			t.Errorf("%s is declared in package config but missing from featureVersionGates: add it with "+
+				"what happens once MinimumProtocolVersion reaches it", name)
+		}
+	}
+	for name := range listed {
+		if !containsName(declared, name) {
+			t.Errorf("featureVersionGates lists %s, which package config no longer declares: drop the entry", name)
+		}
+	}
+}
+
+// declaredFeatureVersionConstants returns the names of the constants in
+// package config that start with "ProtocolVersion" and name a feature —
+// that is, everything except ProtocolVersion itself. Every non-test .go
+// file of the package directory is read, so a gate declared outside
+// config.go is found too.
+func declaredFeatureVersionConstants(t *testing.T) []string {
+	t.Helper()
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatalf("read package directory: %v", err)
+	}
+	fset := token.NewFileSet()
+	var names []string
+	for _, entry := range entries {
+		fileName := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(fileName, ".go") || strings.HasSuffix(fileName, "_test.go") {
+			continue
+		}
+		file, err := parser.ParseFile(fset, fileName, nil, parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatalf("parse %s: %v", fileName, err)
+		}
+		names = append(names, featureVersionConstantsIn(file)...)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// featureVersionConstantsIn returns the ProtocolVersion<Feature> constant
+// names declared at the top level of file.
+func featureVersionConstantsIn(file *ast.File) []string {
+	var names []string
+	for _, decl := range file.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.CONST {
+			continue
+		}
+		for _, spec := range gen.Specs {
+			for _, ident := range spec.(*ast.ValueSpec).Names {
+				if ident.Name != "ProtocolVersion" && strings.HasPrefix(ident.Name, "ProtocolVersion") {
+					names = append(names, ident.Name)
+				}
+			}
+		}
+	}
+	return names
+}
+
+func containsName(names []string, name string) bool {
+	i := sort.SearchStrings(names, name)
+	return i < len(names) && names[i] == name
 }

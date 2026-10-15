@@ -83,8 +83,10 @@ type senderFileMapping struct {
 	// epoch and HandleFileDownloaded rejects it — preventing the stale
 	// replay from flipping the active re-download back to senderCompleted,
 	// acking prematurely, and freeing the serving slot. A zero value means
-	// the mapping has never served (or was restored from pre-epoch
-	// persisted JSON) and is treated as "no gating" on ingress.
+	// no serving run has been recorded: the mapping has never served, or it
+	// was persisted before the epoch existed and has not served since. The
+	// gate is the same for it — the echoed epoch must equal this one — so
+	// such a mapping completes only with a frame that carries no epoch either.
 	ServingEpoch uint64
 }
 
@@ -713,6 +715,18 @@ func (m *Manager) HandleChunkRequest(
 	m.mu.Unlock()
 }
 
+// frameBelongsToServingRun reports whether a completion-edge frame
+// (file_downloaded or file_downloaded_ack) names the serving run the local
+// mapping is in. The epoch travels from the sender in chunk_response and
+// comes back verbatim in file_downloaded and then in its ack, so the frame
+// of the current run carries exactly that run's epoch. Zero gets no special
+// meaning on either side: a frame without an epoch belongs to no recorded
+// run, and a mapping without one (persisted before the epoch existed) is
+// matched only by a frame that has none either.
+func frameBelongsToServingRun(frameEpoch, runEpoch uint64) bool {
+	return frameEpoch == runEpoch
+}
+
 // HandleFileDownloaded processes a file_downloaded from the receiver.
 // Marks the mapping as completed and sends file_downloaded_ack.
 //
@@ -725,11 +739,9 @@ func (m *Manager) HandleChunkRequest(
 // ServingEpoch (bumped on every genuine transition into senderServing) and
 // the receiver echoes that epoch in file_downloaded. Here we require the
 // echoed epoch to match the sender's current ServingEpoch before acting.
-//
-// Legacy fallback: if the receiver sends Epoch=0 (pre-upgrade client) the
-// check is skipped — this preserves wire compatibility during rolling
-// upgrades. Fully-upgraded deployments have both ends stamping non-zero
-// epochs and gain full replay protection.
+// A frame without an epoch (0 on the wire) gets no exemption: every
+// receiver stamps the epoch its chunk_responses carried, so a missing one
+// does not name the current run and is dropped like any other mismatch.
 func (m *Manager) HandleFileDownloaded(
 	senderIdentity domain.PeerIdentity,
 	downloaded domain.FileDownloadedPayload,
@@ -763,13 +775,11 @@ func (m *Manager) HandleFileDownloaded(
 		return
 	}
 
-	// Epoch gating: reject stale replays from a prior serving run of the
-	// same FileID. Epoch==0 on the wire is the legacy path and is
-	// accepted unconditionally. A non-zero wire epoch must exactly match
-	// the current ServingEpoch; strictly-lesser values are the replay
-	// case this defense targets, strictly-greater values are defensively
-	// dropped (they indicate state corruption or a spoofed future epoch).
-	if downloaded.Epoch != 0 && mapping.ServingEpoch != 0 && downloaded.Epoch != mapping.ServingEpoch {
+	// Epoch gating: reject frames of any run other than the current one.
+	// Strictly-lesser epochs are the stale replay this defense targets,
+	// strictly-greater ones indicate state corruption or a spoofed future
+	// epoch, and a missing epoch names no run at all.
+	if !frameBelongsToServingRun(downloaded.Epoch, mapping.ServingEpoch) {
 		currentEpoch := mapping.ServingEpoch
 		currentState := mapping.State
 		m.mu.Unlock()
@@ -779,7 +789,7 @@ func (m *Manager) HandleFileDownloaded(
 			Uint64("received_epoch", downloaded.Epoch).
 			Uint64("current_epoch", currentEpoch).
 			Str("current_state", string(currentState)).
-			Msg("file_transfer: file_downloaded epoch mismatch — dropping stale replay")
+			Msg("file_transfer: file_downloaded epoch mismatch — not the current serving run, dropping")
 		return
 	}
 

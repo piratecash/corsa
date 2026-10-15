@@ -328,367 +328,159 @@ func TestOriginAwareSeqNoLowerRejected(t *testing.T) {
 	}
 }
 
-// TestUpdateRoute_CrossOriginLineageShiftBetterHops reproduces the
-// round-5k mixed-version ingest fix: a pre-A1 sender whose
-// per-Identity winner shifts between Origin lineages across cycles
-// may emit a wire frame with a numerically lower SeqNo (pre-A1
-// SeqNos were per-Origin) but strictly better hops. Post-A1
-// receiver compares SeqNo per-(Identity, Uplink) and would naively
-// reject as stale; LastIngressOrigin detects the lineage shift and
-// admits the new lineage when it strictly improves on the stored
-// claim.
-func TestUpdateRoute_CrossOriginLineageShiftBetterHops(t *testing.T) {
+// SeqNo inside one (Identity, Uplink) slot is strictly ordered and the
+// wire Origin takes no part in the comparison. Every supported sender
+// emits Origin == itself, so a frame on the same uplink carrying a
+// different Origin is not a new lineage of that sender — it is a stale
+// or forged claim and must not reset the slot's SeqNo.
+func TestUpdateRoute_LowerSeqNoWithDifferentOriginRejected(t *testing.T) {
 	tbl := NewTable()
+	alice, uplink := domaintest.ID("alice"), domaintest.ID("uplink-U")
 
-	// Cycle 1 (pre-A1 sender's winner via Origin=A, hops=3, seq=10).
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: domaintest.ID("alice"), Origin: domaintest.ID("origA"), NextHop: domaintest.ID("preA1-sender"),
+		Identity: alice, Origin: uplink, NextHop: uplink,
 		Hops: 3, SeqNo: 10, Source: RouteSourceAnnouncement,
 	})
 
-	// Cycle 2: sender's winner shifted to Origin=B's lineage which
-	// has better hops but a lower SeqNo in its own per-Origin
-	// counter. Without the cross-Origin rule this would be rejected
-	// as stale (SeqNo=5 < 10).
 	status := mustUpdate(t, tbl, RouteEntry{
-		Identity: domaintest.ID("alice"), Origin: domaintest.ID("origB"), NextHop: domaintest.ID("preA1-sender"),
+		Identity: alice, Origin: domaintest.ID("other-origin"), NextHop: uplink,
 		Hops: 2, SeqNo: 5, Source: RouteSourceAnnouncement,
 	})
-
-	if status != RouteAccepted {
-		t.Fatalf("cross-Origin lineage shift with better hops must be accepted, got status=%v", status)
+	if status != RouteRejected {
+		t.Fatalf("lower SeqNo on the same uplink must be rejected whatever its Origin, got %v", status)
 	}
 
-	routes := tbl.Lookup(domaintest.ID("alice"))
-	if len(routes) != 1 {
-		t.Fatalf("expected single stored claim post-replace, got %d", len(routes))
-	}
-	if routes[0].Hops != 2 {
-		t.Fatalf("expected the new better-hops claim (Hops=2) to win, got Hops=%d", routes[0].Hops)
-	}
-	if routes[0].SeqNo != 5 {
-		t.Fatalf("expected per-uplink SeqNo namespace to reset to the new lineage's value (5), got %d", routes[0].SeqNo)
+	routes := tbl.Lookup(alice)
+	if len(routes) != 1 || routes[0].SeqNo != 10 || routes[0].Hops != 3 {
+		t.Fatalf("stored claim must stay at SeqNo=10 Hops=3, got %+v", routes)
 	}
 }
 
-// TestUpdateRoute_CrossOriginLineageShiftSameHopsRejected pins the
-// flap-prevention side of the cross-Origin rule: when a pre-A1
-// sender emits a different-Origin update with the same hops and the
-// same trust rank, we reject to avoid SeqNo-namespace churn from
-// equivalent lineage oscillations.
-func TestUpdateRoute_CrossOriginLineageShiftSameHopsRejected(t *testing.T) {
+// A withdrawal tombstone is the SeqNo-resurrection guard of its slot; a
+// live claim with a lower SeqNo must not lift it, whatever Origin the
+// frame names.
+func TestUpdateRoute_LowerSeqNoWithDifferentOriginKeepsTombstone(t *testing.T) {
 	tbl := NewTable()
+	alice, uplink := domaintest.ID("alice"), domaintest.ID("uplink-U")
 
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: domaintest.ID("alice"), Origin: domaintest.ID("origA"), NextHop: domaintest.ID("preA1-sender"),
+		Identity: alice, Origin: uplink, NextHop: uplink,
 		Hops: 3, SeqNo: 10, Source: RouteSourceAnnouncement,
 	})
+	if !tbl.WithdrawRoute(alice, uplink, 11) {
+		t.Fatal("WithdrawRoute(SeqNo=11) must apply")
+	}
 
 	status := mustUpdate(t, tbl, RouteEntry{
-		Identity: domaintest.ID("alice"), Origin: domaintest.ID("origB"), NextHop: domaintest.ID("preA1-sender"),
-		Hops: 3, SeqNo: 5, Source: RouteSourceAnnouncement,
-	})
-
-	if status == RouteAccepted {
-		t.Fatal("cross-Origin with same hops + same trust should be rejected (anti-flap)")
-	}
-
-	routes := tbl.Lookup(domaintest.ID("alice"))
-	if len(routes) != 1 || routes[0].SeqNo != 10 {
-		t.Fatalf("original lineage should remain: %+v", routes)
-	}
-}
-
-// TestUpdateRoute_CrossOriginResurrectsAfterTombstone covers the
-// most damaging mixed-version scenario: pre-A1 sender first
-// withdraws Origin=A's lineage (creating a tombstone in our
-// per-uplink storage), then sends a live update for Origin=B (with
-// a lower SeqNo, since pre-A1 SeqNos are per-Origin). Without the
-// cross-Origin rule the new lineage would be rejected by the
-// tombstone-resurrection guard, and we would lose a working route
-// to peer-X until the tombstone's TTL elapsed.
-func TestUpdateRoute_CrossOriginResurrectsAfterTombstone(t *testing.T) {
-	tbl := NewTable()
-
-	// Live Origin=A claim.
-	mustUpdate(t, tbl, RouteEntry{
-		Identity: domaintest.ID("alice"), Origin: domaintest.ID("origA"), NextHop: domaintest.ID("preA1-sender"),
-		Hops: 3, SeqNo: 10, Source: RouteSourceAnnouncement,
-	})
-
-	// Pre-A1 sender withdraws Origin=A (SeqNo bump on same lineage).
-	if !tbl.WithdrawRoute(domaintest.ID("alice"), domaintest.ID("origA"), domaintest.ID("preA1-sender"), 11) {
-		t.Fatal("WithdrawRoute(Origin=A) should have applied")
-	}
-
-	// Live Origin=B claim from same uplink, lower SeqNo. Without
-	// the cross-Origin rule the tombstone (SeqNo=11) would reject
-	// this (incoming SeqNo=5 < 11).
-	status := mustUpdate(t, tbl, RouteEntry{
-		Identity: domaintest.ID("alice"), Origin: domaintest.ID("origB"), NextHop: domaintest.ID("preA1-sender"),
+		Identity: alice, Origin: domaintest.ID("other-origin"), NextHop: uplink,
 		Hops: 4, SeqNo: 5, Source: RouteSourceAnnouncement,
 	})
-
-	if status != RouteAccepted {
-		t.Fatalf("cross-Origin live update against tombstone must be accepted, got status=%v", status)
+	if status != RouteRejected {
+		t.Fatalf("lower-SeqNo live claim must not lift the tombstone, got %v", status)
 	}
 
-	routes := tbl.Lookup(domaintest.ID("alice"))
-	if len(routes) != 1 {
-		t.Fatalf("expected the live Origin=B claim to replace the tombstone, got %d routes", len(routes))
-	}
-	if routes[0].Hops != 4 {
-		t.Fatalf("expected the new claim's Hops=4, got %d", routes[0].Hops)
-	}
+	assertTombstoneAt(t, tbl, alice, uplink, 11)
 }
 
-// TestUpdateRoute_SameSeqNoCrossOriginAdvancesLineageMarker pins the
-// LastIngressOrigin advance in the same-SeqNo path: an arrival from
-// a new Origin at the SAME SeqNo (and same hops, so no replace
-// branch fires) must still update the sticky lineage marker.
-// Without the advance, a subsequent stale-SeqNo replay from that
-// new Origin would trip the cross-Origin lineage branch as if it
-// were a fresh lineage transition we had not yet observed and
-// could be admitted on the "improves" criterion (e.g. better hops),
-// destabilising the stored claim from what is in reality a stale
-// replay on the same Origin's timeline.
-func TestUpdateRoute_SameSeqNoCrossOriginAdvancesLineageMarker(t *testing.T) {
+// At equal SeqNo a tombstone wins over a live claim: only a strictly
+// newer SeqNo may supersede a withdrawal, and a different wire Origin
+// does not change that.
+func TestUpdateRoute_EqualSeqNoWithDifferentOriginKeepsTombstone(t *testing.T) {
 	tbl := NewTable()
+	alice, uplink := domaintest.ID("alice"), domaintest.ID("uplink-U")
 
-	// Cycle 1: pre-A1 sender's winner via Origin=A.
-	mustUpdate(t, tbl, RouteEntry{
-		Identity: domaintest.ID("alice"), Origin: domaintest.ID("origA"), NextHop: domaintest.ID("preA1-sender"),
-		Hops: 3, SeqNo: 10, Source: RouteSourceAnnouncement,
-	})
+	if !tbl.WithdrawRoute(alice, uplink, 10) {
+		t.Fatal("WithdrawRoute(SeqNo=10) must apply")
+	}
 
-	// Cycle 2: same uplink emits a frame with a different Origin
-	// at the same SeqNo + same hops. The replace branches do not
-	// fire (no trust uplift, no hops improvement), but the
-	// lineage marker must move to origB so the next stale-SeqNo
-	// replay from origB is not misclassified as a fresh cross-
-	// Origin shift.
 	status := mustUpdate(t, tbl, RouteEntry{
-		Identity: domaintest.ID("alice"), Origin: domaintest.ID("origB"), NextHop: domaintest.ID("preA1-sender"),
+		Identity: alice, Origin: domaintest.ID("other-origin"), NextHop: uplink,
 		Hops: 3, SeqNo: 10, Source: RouteSourceAnnouncement,
 	})
-	if status == RouteRejected {
-		t.Fatalf("same-SeqNo same-hops re-announce should be reconfirmation, got %v", status)
+	if status != RouteRejected {
+		t.Fatalf("equal-SeqNo live claim must not lift the tombstone, got %v", status)
 	}
 
-	// Cycle 3: stale-SeqNo replay from origB with better hops.
-	// Without the advance in cycle 2, this would trip the cross-
-	// Origin lineage branch (origB != stale LastIngressOrigin=origA)
-	// and admit Hops=1 / SeqNo=8 over the stored Hops=3 / SeqNo=10.
-	// With the advance, LastIngressOrigin=origB so cross-Origin
-	// does not fire and the stale frame is rejected.
-	status = mustUpdate(t, tbl, RouteEntry{
-		Identity: domaintest.ID("alice"), Origin: domaintest.ID("origB"), NextHop: domaintest.ID("preA1-sender"),
-		Hops: 1, SeqNo: 8, Source: RouteSourceAnnouncement,
-	})
-	if status == RouteAccepted {
-		t.Fatalf("stale-SeqNo replay from already-observed origB must be rejected, got %v", status)
-	}
-
-	routes := tbl.Lookup(domaintest.ID("alice"))
-	if len(routes) != 1 {
-		t.Fatalf("expected one stored claim, got %d", len(routes))
-	}
-	if routes[0].Hops != 3 || routes[0].SeqNo != 10 {
-		t.Fatalf("stored claim should be unchanged after stale replay: Hops=%d SeqNo=%d", routes[0].Hops, routes[0].SeqNo)
-	}
+	assertTombstoneAt(t, tbl, alice, uplink, 10)
 }
 
-// TestUpdateRoute_PerOriginHighWaterRejectsCrossOriginStaleReplay
-// is the reviewer-flagged regression for the per-Origin high-water
-// map (UplinkClaim.SeenOriginSeqs): A10 → B5 → A9. The genuine
-// winner shift A→B is accepted via the cross-Origin lineage
-// branch (B5 has strictly better hops), but the subsequent
-// delayed in-flight A9 must be rejected — A has already been
-// observed at SeqNo=10 on this uplink, so a SeqNo=9 frame from A
-// is a stale replay on A's own timeline regardless of the current
-// active lineage being B.
+// assertTombstoneAt fails the test unless the (identity, uplink) slot
+// holds a withdrawn claim at exactly seqNo and Lookup exposes no live
+// route for identity.
+func assertTombstoneAt(t *testing.T, tbl *Table, identity, uplink PeerIdentity, seqNo uint64) {
+	t.Helper()
+	if routes := tbl.Lookup(identity); len(routes) != 0 {
+		t.Fatalf("tombstone must not be resurrected: Lookup returned %+v", routes)
+	}
+	assertSlot(t, tbl, identity, uplink, seqNo, true)
+}
+
+// TestUpdateRoute_EqualSeqNoTombstoneStillRejected pins the
+// tombstone-resurrection guard at equal SeqNo: a live claim from the
+// same uplink at the withdrawal's SeqNo — e.g. a delayed re-announce
+// overtaken by the withdrawal — must not lift the tombstone. Only a
+// strictly newer SeqNo may.
+func TestUpdateRoute_EqualSeqNoTombstoneStillRejected(t *testing.T) {
+	tbl := NewTable()
+	alice, uplink := domaintest.ID("alice"), domaintest.ID("uplink-U")
+
+	if !tbl.WithdrawRoute(alice, uplink, 10) {
+		t.Fatal("WithdrawRoute(SeqNo=10) must apply")
+	}
+
+	status := mustUpdate(t, tbl, RouteEntry{
+		Identity: alice, Origin: uplink, NextHop: uplink,
+		Hops: 3, SeqNo: 10, Source: RouteSourceAnnouncement,
+	})
+	if status != RouteRejected {
+		t.Fatalf("live at equal-SeqNo against tombstone must be rejected, got %v", status)
+	}
+
+	assertTombstoneAt(t, tbl, alice, uplink, 10)
+}
+
+// TestUpdateRoute_HopAckPromotionThenReannounceIsReconfirmation pins
+// the confirmRouteViaHopAck flow end to end at the Table boundary:
 //
-// Without the per-Origin high-water map, A9 lands in the
-// `SeqNo > old.SeqNo` branch (9 > current B's 5) and overwrites
-// the legitimate B5 lineage with stale A state.
-func TestUpdateRoute_PerOriginHighWaterRejectsCrossOriginStaleReplay(t *testing.T) {
-	tbl := NewTable()
-
-	// Cycle 1: A's lineage at SeqNo=10, Hops=3.
-	mustUpdate(t, tbl, RouteEntry{
-		Identity: domaintest.ID("alice"), Origin: domaintest.ID("origA"), NextHop: domaintest.ID("preA1-sender"),
-		Hops: 3, SeqNo: 10, Source: RouteSourceAnnouncement,
-	})
-
-	// Cycle 2: B's lineage at SeqNo=5, Hops=2 — winner shift A→B
-	// accepted because of strictly better hops via cross-Origin
-	// lineage branch.
-	if status := mustUpdate(t, tbl, RouteEntry{
-		Identity: domaintest.ID("alice"), Origin: domaintest.ID("origB"), NextHop: domaintest.ID("preA1-sender"),
-		Hops: 2, SeqNo: 5, Source: RouteSourceAnnouncement,
-	}); status != RouteAccepted {
-		t.Fatalf("B5 cross-Origin lineage shift with better hops must be accepted, got %v", status)
-	}
-
-	// Cycle 3: delayed in-flight A9 from BEFORE the winner shift.
-	// A's high-water on this uplink is 10 (recorded in cycle 1);
-	// SeqNo=9 is stale on A's own timeline. Must be rejected.
-	status := mustUpdate(t, tbl, RouteEntry{
-		Identity: domaintest.ID("alice"), Origin: domaintest.ID("origA"), NextHop: domaintest.ID("preA1-sender"),
-		Hops: 1, SeqNo: 9, Source: RouteSourceAnnouncement,
-	})
-	if status == RouteAccepted {
-		t.Fatalf("A9 must be rejected as stale replay on A's high-water (10), got %v", status)
-	}
-
-	routes := tbl.Lookup(domaintest.ID("alice"))
-	if len(routes) != 1 {
-		t.Fatalf("expected one stored claim, got %d", len(routes))
-	}
-	if routes[0].Hops != 2 || routes[0].SeqNo != 5 {
-		t.Fatalf("stored claim must remain B5/Hops=2 after stale A9 replay: Hops=%d SeqNo=%d", routes[0].Hops, routes[0].SeqNo)
-	}
-}
-
-// TestUpdateRoute_CrossOriginLivePromotesTombstoneAtEqualSeqNo
-// pins the symmetric admission shape for the equal-SeqNo cross-
-// Origin live-vs-tombstone case. Pre-A1 senders can shift their
-// per-Identity winner from a now-withdrawn Origin (A) to a
-// different LIVE Origin (B) while B's per-Origin counter
-// coincidentally matches A's withdrawal SeqNo. The stale-SeqNo
-// and newer-SeqNo branches already promote cross-Origin live
-// against a tombstone (the round-5k cross-Origin lineage branch
-// with old.IsWithdrawn → improves; the SeqNo > old tombstone-
-// promotion path); equal-SeqNo must behave the same — the
-// receiver otherwise stays on the tombstone until TTL, despite
-// us having a perfectly good live alternative on the same
-// uplink. Same-Origin equal-SeqNo against a tombstone IS still
-// rejected (the hop_ack-resurrection guard) — only cross-Origin
-// is admitted by the new branch.
-func TestUpdateRoute_CrossOriginLivePromotesTombstoneAtEqualSeqNo(t *testing.T) {
-	tbl := NewTable()
-
-	// Withdraw Origin=A at SeqNo=10 to create a tombstone on
-	// (alice, preA1-sender).
-	if !tbl.WithdrawRoute(domaintest.ID("alice"), domaintest.ID("origA"), domaintest.ID("preA1-sender"), 10) {
-		t.Fatal("WithdrawRoute(Origin=A, SeqNo=10) must apply")
-	}
-
-	// Cross-Origin live update from Origin=B at the SAME SeqNo.
-	// Without the equal-SeqNo cross-Origin live-vs-tombstone
-	// promotion branch this would land in the same-SeqNo
-	// tombstone guard and reject.
-	status := mustUpdate(t, tbl, RouteEntry{
-		Identity: domaintest.ID("alice"), Origin: domaintest.ID("origB"), NextHop: domaintest.ID("preA1-sender"),
-		Hops: 3, SeqNo: 10, Source: RouteSourceAnnouncement,
-	})
-	if status != RouteAccepted {
-		t.Fatalf("cross-Origin live at equal-SeqNo against tombstone must be accepted, got %v", status)
-	}
-
-	routes := tbl.Lookup(domaintest.ID("alice"))
-	if len(routes) != 1 {
-		t.Fatalf("expected one live claim post-promotion, got %d", len(routes))
-	}
-	if routes[0].Hops != 3 || routes[0].SeqNo != 10 {
-		t.Fatalf("promoted claim must be the B/Hops=3/SeqNo=10 input, got Hops=%d SeqNo=%d", routes[0].Hops, routes[0].SeqNo)
-	}
-}
-
-// TestUpdateRoute_SameOriginEqualSeqNoTombstoneStillRejected pins
-// the asymmetry of the equal-SeqNo cross-Origin promotion: the
-// same-Origin tombstone-resurrection guard still protects against
-// hop_ack-style replays from the lineage we just withdrew. Only
-// cross-Origin equal-SeqNo arrivals are admitted by the new branch.
-func TestUpdateRoute_SameOriginEqualSeqNoTombstoneStillRejected(t *testing.T) {
-	tbl := NewTable()
-
-	if !tbl.WithdrawRoute(domaintest.ID("alice"), domaintest.ID("origA"), domaintest.ID("preA1-sender"), 10) {
-		t.Fatal("WithdrawRoute(Origin=A, SeqNo=10) must apply")
-	}
-
-	// Same Origin, same SeqNo, live shape — must be rejected by
-	// the tombstone-resurrection guard.
-	status := mustUpdate(t, tbl, RouteEntry{
-		Identity: domaintest.ID("alice"), Origin: domaintest.ID("origA"), NextHop: domaintest.ID("preA1-sender"),
-		Hops: 3, SeqNo: 10, Source: RouteSourceAnnouncement,
-	})
-	if status == RouteAccepted {
-		t.Fatalf("same-Origin live at equal-SeqNo against tombstone must be rejected, got %v", status)
-	}
-
-	routes := tbl.Lookup(domaintest.ID("alice"))
-	// The lookup filters withdrawn claims out — the tombstone is in
-	// the bucket but not visible via Lookup. Asserting the lookup
-	// shape (no live claims) verifies the tombstone has not been
-	// resurrected; an accepted promotion would have surfaced a live
-	// row here.
-	if len(routes) != 0 {
-		t.Fatalf("tombstone must not be resurrected by same-Origin equal-SeqNo replay: got %d live routes", len(routes))
-	}
-}
-
-// TestUpdateRoute_HopAckPromotionPreservesWireLineage pins the bug
-// fix for the lineage-corruption hazard in confirmRouteViaHopAck's
-// trust-uplift path. Without the fix, the synthetic Origin=
-// localOrigin coming back from Lookup → toRouteEntry would replace
-// the stored LastIngressOrigin and seed SeenOriginSeqs[localOrigin]
-// at the existing SeqNo. The next forced-full-sync re-announce
-// from the real upstream Origin would then trip the cross-Origin
-// per-Origin high-water guard (incoming Origin != stored
-// localOrigin; SeenOriginSeqs[real-origin] already at this SeqNo
-// from the original announce) and be rejected before reaching the
-// TTL-refresh path. Confirmed routes would age out by TTL despite
-// being actively re-announced.
+//   - peer-B announces alice with Origin = peer-B (every sender names
+//     itself as Origin), SeqNo=10;
+//   - confirmRouteViaHopAck re-submits the route read back through
+//     Lookup — whose Origin is the synthesised localOrigin — with
+//     Source=HopAck: a same-SeqNo trust uplift;
+//   - peer-B re-announces at the same SeqNo and hops (the
+//     forced-full-sync TTL refresh).
 //
-// Flow:
-//
-//   - peer-B announces alice via uplink=peer-B with Origin=foo,
-//     SeqNo=10 (the real wire-frame Origin).
-//   - confirmRouteViaHopAck promotes the route to Source=HopAck;
-//     internally the entry's Origin field is the synthetic
-//     localOrigin from Lookup, but the lineage-override at the top
-//     of ApplyUpdate preserves the wire-observed lineage on the
-//     stored claim.
-//   - peer-B re-announces alice at SeqNo=10 (forced-full-sync TTL
-//     refresh path; the per-peer delta is empty but the cadence
-//     forces a full snapshot).
-//   - Expectation: re-announce is NOT rejected by the cross-Origin
-//     guard; the same-SeqNo reconfirmation path refreshes TTL.
-func TestUpdateRoute_HopAckPromotionPreservesWireLineage(t *testing.T) {
+// The re-announce is a reconfirmation (RouteUnchanged) and the
+// promotion sticks (Source stays HopAck): neither the synthesised
+// Origin on the hop_ack entry nor the Origin on the re-announce plays
+// any part in the same-SeqNo decision.
+func TestUpdateRoute_HopAckPromotionThenReannounceIsReconfirmation(t *testing.T) {
 	tbl := NewTable(WithLocalOrigin(domaintest.ID("local-node")))
+	alice, peerB := domaintest.ID("alice"), domaintest.ID("peer-B")
 
-	// 1. Initial wire announce from peer-B claiming Origin=foo.
 	if status := mustUpdate(t, tbl, RouteEntry{
-		Identity: domaintest.ID("alice"), Origin: domaintest.ID("foo"), NextHop: domaintest.ID("peer-B"),
+		Identity: alice, Origin: peerB, NextHop: peerB,
 		Hops: 3, SeqNo: 10, Source: RouteSourceAnnouncement,
 	}); status != RouteAccepted {
 		t.Fatalf("initial announce: expected RouteAccepted, got %v", status)
 	}
 
-	// 2. Simulate confirmRouteViaHopAck's promotion: reads the
-	//    existing route via Lookup (which synthesises Origin=
-	//    localOrigin) and submits with Source=HopAck.
 	if status := mustUpdate(t, tbl, RouteEntry{
-		Identity: domaintest.ID("alice"), Origin: domaintest.ID("local-node"), NextHop: domaintest.ID("peer-B"),
+		Identity: alice, Origin: domaintest.ID("local-node"), NextHop: peerB,
 		Hops: 3, SeqNo: 10, Source: RouteSourceHopAck,
 	}); status != RouteAccepted {
 		t.Fatalf("hop_ack promotion: expected RouteAccepted, got %v", status)
 	}
 
-	// 3. peer-B re-announces same SeqNo (forced-full-sync TTL
-	//    refresh). Without the lineage-override fix this is
-	//    rejected by the cross-Origin high-water guard.
 	status := mustUpdate(t, tbl, RouteEntry{
-		Identity: domaintest.ID("alice"), Origin: domaintest.ID("foo"), NextHop: domaintest.ID("peer-B"),
+		Identity: alice, Origin: peerB, NextHop: peerB,
 		Hops: 3, SeqNo: 10, Source: RouteSourceAnnouncement,
 	})
-	if status == RouteRejected {
-		t.Fatalf("forced-full-sync re-announce after hop_ack must NOT be rejected by cross-Origin guard, got %v", status)
+	if status != RouteUnchanged {
+		t.Fatalf("same-SeqNo same-hops re-announce after hop_ack must be a reconfirmation, got %v", status)
 	}
 
-	// The route is still reachable and unchanged.
-	routes := tbl.Lookup(domaintest.ID("alice"))
+	routes := tbl.Lookup(alice)
 	if len(routes) != 1 {
 		t.Fatalf("expected one live claim post-cycle, got %d", len(routes))
 	}
@@ -721,7 +513,7 @@ func TestUpdateRoute_HopAckPromotedRouteRefreshesTTL(t *testing.T) {
 	)
 
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: domaintest.ID("alice"), Origin: domaintest.ID("foo"), NextHop: domaintest.ID("peer-B"),
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("peer-B"), NextHop: domaintest.ID("peer-B"),
 		Hops: 3, SeqNo: 10, Source: RouteSourceAnnouncement,
 	})
 
@@ -742,7 +534,7 @@ func TestUpdateRoute_HopAckPromotedRouteRefreshesTTL(t *testing.T) {
 	// reconfirmation cycle).
 	now = start.Add(60 * time.Second)
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: domaintest.ID("alice"), Origin: domaintest.ID("foo"), NextHop: domaintest.ID("peer-B"),
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("peer-B"), NextHop: domaintest.ID("peer-B"),
 		Hops: 3, SeqNo: 10, Source: RouteSourceAnnouncement,
 	})
 
@@ -757,43 +549,6 @@ func TestUpdateRoute_HopAckPromotedRouteRefreshesTTL(t *testing.T) {
 	expectedExpiresAt := now.Add(120 * time.Second)
 	if !postExpiresAt.Equal(expectedExpiresAt) {
 		t.Fatalf("ExpiresAt should equal now + defaultTTL: got %v expected %v", postExpiresAt, expectedExpiresAt)
-	}
-}
-
-// TestUpdateRoute_PerOriginHighWaterAllowsForwardShift complements
-// the stale-replay rejection test: a strictly newer SeqNo from a
-// previously-observed Origin IS admitted (it is a genuine winner
-// shift back to that Origin, not a replay). A10 → B5 → A11 should
-// accept A11 as the new active lineage.
-func TestUpdateRoute_PerOriginHighWaterAllowsForwardShift(t *testing.T) {
-	tbl := NewTable()
-
-	mustUpdate(t, tbl, RouteEntry{
-		Identity: domaintest.ID("alice"), Origin: domaintest.ID("origA"), NextHop: domaintest.ID("preA1-sender"),
-		Hops: 3, SeqNo: 10, Source: RouteSourceAnnouncement,
-	})
-	if status := mustUpdate(t, tbl, RouteEntry{
-		Identity: domaintest.ID("alice"), Origin: domaintest.ID("origB"), NextHop: domaintest.ID("preA1-sender"),
-		Hops: 2, SeqNo: 5, Source: RouteSourceAnnouncement,
-	}); status != RouteAccepted {
-		t.Fatalf("B5 setup: expected RouteAccepted, got %v", status)
-	}
-
-	// A11 strictly exceeds A's recorded high-water (10).
-	status := mustUpdate(t, tbl, RouteEntry{
-		Identity: domaintest.ID("alice"), Origin: domaintest.ID("origA"), NextHop: domaintest.ID("preA1-sender"),
-		Hops: 4, SeqNo: 11, Source: RouteSourceAnnouncement,
-	})
-	if status != RouteAccepted {
-		t.Fatalf("A11 forward-shift past A's high-water must be accepted, got %v", status)
-	}
-
-	routes := tbl.Lookup(domaintest.ID("alice"))
-	if len(routes) != 1 {
-		t.Fatalf("expected one stored claim, got %d", len(routes))
-	}
-	if routes[0].SeqNo != 11 || routes[0].Hops != 4 {
-		t.Fatalf("expected A11/Hops=4 as new active lineage, got Hops=%d SeqNo=%d", routes[0].Hops, routes[0].SeqNo)
 	}
 }
 
@@ -854,22 +609,29 @@ func TestSameSeqNoHigherTrustWins(t *testing.T) {
 	}
 }
 
+// A transit slot (not the Direct (peer, peer) slot, which ApplyUpdate gates
+// before any SeqNo comparison) so the same-SeqNo trust comparison is what
+// decides: a lower-trust claim does not replace the stored one even with
+// fewer hops, because the fewer-hops rule applies only within one Source.
 func TestSameSeqNoLowerTrustRejected(t *testing.T) {
 	tbl := NewTable()
 
-	// Use a well-formed direct route: NextHop must equal Identity
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: domaintest.ID("alice"), Origin: domaintest.ID("me"), NextHop: domaintest.ID("alice"),
-		Hops: 1, SeqNo: 5, Source: RouteSourceDirect,
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("charlie"), NextHop: domaintest.ID("charlie"),
+		Hops: 3, SeqNo: 5, Source: RouteSourceHopAck,
 	})
 
 	status := mustUpdate(t, tbl, RouteEntry{
-		Identity: domaintest.ID("alice"), Origin: domaintest.ID("me"), NextHop: domaintest.ID("alice"),
-		Hops: 1, SeqNo: 5, Source: RouteSourceAnnouncement,
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("charlie"), NextHop: domaintest.ID("charlie"),
+		Hops: 2, SeqNo: 5, Source: RouteSourceAnnouncement,
 	})
 
 	if status == RouteAccepted {
 		t.Fatal("same SeqNo but lower trust should be rejected")
+	}
+	stored := tbl.InspectUplinkClaim(domaintest.ID("alice"), domaintest.ID("charlie"))
+	if stored.Source != RouteSourceHopAck || stored.Hops != 3 {
+		t.Fatalf("lower-trust claim replaced the stored one: got {Source:%s Hops:%d}, want {Source:hop_ack Hops:3}", stored.Source, stored.Hops)
 	}
 }
 
@@ -960,15 +722,15 @@ func TestUpdateRouteRefreshesTTLOnUnchangedLiveRoute(t *testing.T) {
 		WithDefaultTTL(120*time.Second),
 	)
 
-	key := RouteTriple{Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("charlie")}
+	alice, charlie := domaintest.ID("alice"), domaintest.ID("charlie")
 	if status := mustUpdate(t, tbl, RouteEntry{
-		Identity: key.Identity, Origin: key.Origin, NextHop: key.NextHop,
+		Identity: alice, Origin: domaintest.ID("bob"), NextHop: charlie,
 		Hops: 2, SeqNo: 5, Source: RouteSourceAnnouncement,
 	}); status != RouteAccepted {
 		t.Fatalf("initial insert: expected RouteAccepted, got %d", status)
 	}
 
-	initial := tbl.InspectTriple(key)
+	initial := tbl.InspectUplinkClaim(alice, charlie)
 	if initial == nil {
 		t.Fatalf("inserted route not found")
 	}
@@ -978,13 +740,13 @@ func TestUpdateRouteRefreshesTTLOnUnchangedLiveRoute(t *testing.T) {
 	current = current.Add(60 * time.Second)
 
 	if status := mustUpdate(t, tbl, RouteEntry{
-		Identity: key.Identity, Origin: key.Origin, NextHop: key.NextHop,
+		Identity: alice, Origin: domaintest.ID("bob"), NextHop: charlie,
 		Hops: 2, SeqNo: 5, Source: RouteSourceAnnouncement,
 	}); status != RouteUnchanged {
 		t.Fatalf("re-announce of alive route: expected RouteUnchanged, got %d", status)
 	}
 
-	refreshed := tbl.InspectTriple(key)
+	refreshed := tbl.InspectUplinkClaim(alice, charlie)
 	if refreshed == nil {
 		t.Fatalf("route disappeared after RouteUnchanged refresh")
 	}
@@ -1023,7 +785,7 @@ func TestUpdateRouteDirectInsertPreservesZeroExpiry(t *testing.T) {
 	}); status != RouteAccepted {
 		t.Fatalf("initial direct insert: expected RouteAccepted, got %d", status)
 	}
-	zeroIn := tbl.InspectTriple(RouteTriple{Identity: domaintest.ID("alice"), Origin: domaintest.ID("me"), NextHop: domaintest.ID("alice")})
+	zeroIn := tbl.InspectUplinkClaim(domaintest.ID("alice"), domaintest.ID("alice"))
 	if zeroIn == nil {
 		t.Fatalf("direct route not found after insert")
 	}
@@ -1042,7 +804,7 @@ func TestUpdateRouteDirectInsertPreservesZeroExpiry(t *testing.T) {
 	}); status != RouteAccepted {
 		t.Fatalf("direct insert with non-zero ExpiresAt: expected RouteAccepted, got %d", status)
 	}
-	nonZeroIn := tbl.InspectTriple(RouteTriple{Identity: domaintest.ID("bob"), Origin: domaintest.ID("me"), NextHop: domaintest.ID("bob")})
+	nonZeroIn := tbl.InspectUplinkClaim(domaintest.ID("bob"), domaintest.ID("bob"))
 	if nonZeroIn == nil {
 		t.Fatalf("direct route 'bob' not found after insert")
 	}
@@ -1055,7 +817,7 @@ func TestUpdateRouteDirectInsertPreservesZeroExpiry(t *testing.T) {
 	// clock has advanced — that is the whole point of ExpiresAt=zero.
 	current = current.Add(10 * time.Hour)
 	tbl.TickTTL()
-	if got := tbl.InspectTriple(RouteTriple{Identity: domaintest.ID("alice"), Origin: domaintest.ID("me"), NextHop: domaintest.ID("alice")}); got == nil {
+	if got := tbl.InspectUplinkClaim(domaintest.ID("alice"), domaintest.ID("alice")); got == nil {
 		t.Fatalf("TickTTL evicted active direct route — invariant ExpiresAt=zero failed")
 	}
 }
@@ -1094,9 +856,7 @@ func TestUpdateRouteUnchangedDirectRoutePreservesZeroExpiry(t *testing.T) {
 		t.Fatalf("re-apply of alive direct route: expected RouteUnchanged, got %d", status)
 	}
 
-	after := tbl.InspectTriple(RouteTriple{
-		Identity: domaintest.ID("peer-A"), Origin: domaintest.ID("hub"), NextHop: domaintest.ID("peer-A"),
-	})
+	after := tbl.InspectUplinkClaim(domaintest.ID("peer-A"), domaintest.ID("peer-A"))
 	if after == nil {
 		t.Fatalf("direct route disappeared after RouteUnchanged refresh")
 	}
@@ -1124,14 +884,14 @@ func TestUpdateRouteUnchangedWorseHopsDoesNotRefreshTTL(t *testing.T) {
 		WithDefaultTTL(120*time.Second),
 	)
 
-	key := RouteTriple{Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("charlie")}
+	alice, charlie := domaintest.ID("alice"), domaintest.ID("charlie")
 	if status := mustUpdate(t, tbl, RouteEntry{
-		Identity: key.Identity, Origin: key.Origin, NextHop: key.NextHop,
+		Identity: alice, Origin: domaintest.ID("bob"), NextHop: charlie,
 		Hops: 2, SeqNo: 5, Source: RouteSourceAnnouncement,
 	}); status != RouteAccepted {
 		t.Fatalf("initial insert: expected RouteAccepted, got %d", status)
 	}
-	initial := tbl.InspectTriple(key)
+	initial := tbl.InspectUplinkClaim(alice, charlie)
 	if initial == nil {
 		t.Fatalf("inserted route not found")
 	}
@@ -1147,13 +907,13 @@ func TestUpdateRouteUnchangedWorseHopsDoesNotRefreshTTL(t *testing.T) {
 	// from the origin.
 	current = current.Add(60 * time.Second)
 	if status := mustUpdate(t, tbl, RouteEntry{
-		Identity: key.Identity, Origin: key.Origin, NextHop: key.NextHop,
+		Identity: alice, Origin: domaintest.ID("bob"), NextHop: charlie,
 		Hops: 3, SeqNo: 5, Source: RouteSourceAnnouncement,
 	}); status != RouteUnchanged {
 		t.Fatalf("worse-hops same-SeqNo: expected RouteUnchanged, got %d", status)
 	}
 
-	after := tbl.InspectTriple(key)
+	after := tbl.InspectUplinkClaim(alice, charlie)
 	if after == nil {
 		t.Fatalf("route disappeared after RouteUnchanged on worse-hops re-apply")
 	}
@@ -1272,9 +1032,7 @@ func TestAnnounceToAppliesSplitHorizon(t *testing.T) {
 // information (who first announced the route). The only meaningful
 // filter that remains is: skip routes whose Identity equals the peer
 // we're announcing to — a "you can reach yourself via me" claim is
-// always degenerate, and on pre-A1 receivers it would also trip the
-// own-origin anti-spoof if Identity happened to equal that
-// receiver's localOrigin. The pre-Phase-A "Origin == excludeVia for
+// always degenerate. The pre-Phase-A "Origin == excludeVia for
 // arbitrary transit Origin" filter is intentionally gone — the
 // field-data motivation (Origin was protocol metadata, not
 // routing-decision input) is captured in uplink_claim.go's
@@ -1329,11 +1087,9 @@ func TestAnnounceToOmitsRoutesToSelfDestination(t *testing.T) {
 }
 
 // TestAnnounceToStripsInternalFields pins the wire-emit shape of
-// AnnounceTo. The Phase A contract is "every wire emit (live or
-// withdrawal) carries Origin = localOrigin", which keeps pre-A1
-// receivers' (Identity, Origin, NextHop)-keyed storage finding the
-// same triple for live and subsequent withdrawals — see
-// uplink_claim.go for the migration rationale.
+// AnnounceTo. The contract is "every wire emit (live or withdrawal)
+// carries Origin = localOrigin": receivers accept a withdrawal only
+// when its Origin is the sending peer — see uplink_claim.go.
 //
 // Two sub-tests are required to cover the contract:
 //
@@ -1464,7 +1220,7 @@ func TestAnnounceToExcludesTransitTombstones(t *testing.T) {
 		Hops: 3, SeqNo: 1, Source: RouteSourceAnnouncement,
 	})
 	// Withdraw with higher SeqNo.
-	tbl.WithdrawRoute(domaintest.ID("alice"), domaintest.ID("peer-X"), domaintest.ID("peer-B"), 2)
+	tbl.WithdrawRoute(domaintest.ID("alice"), domaintest.ID("peer-B"), 2)
 
 	// AnnounceTo should NOT include the transit tombstone.
 	entries := tbl.AnnounceTo(domaintest.ID("peer-C"))
@@ -1523,7 +1279,7 @@ func TestWithdrawRouteSetHopsInfinity(t *testing.T) {
 		Hops: 2, SeqNo: 5, Source: RouteSourceAnnouncement,
 	})
 
-	ok := tbl.WithdrawRoute(domaintest.ID("alice"), domaintest.ID("bob"), domaintest.ID("charlie"), 6)
+	ok := tbl.WithdrawRoute(domaintest.ID("alice"), domaintest.ID("charlie"), 6)
 	if !ok {
 		t.Fatal("withdrawal with higher SeqNo should succeed")
 	}
@@ -1546,7 +1302,7 @@ func TestWithdrawRouteEqualSeqNoRejected(t *testing.T) {
 		Hops: 2, SeqNo: 10, Source: RouteSourceAnnouncement,
 	})
 
-	ok := tbl.WithdrawRoute(domaintest.ID("alice"), domaintest.ID("bob"), domaintest.ID("charlie"), 10)
+	ok := tbl.WithdrawRoute(domaintest.ID("alice"), domaintest.ID("charlie"), 10)
 	if ok {
 		t.Fatal("withdrawal with equal SeqNo should be rejected — origin must increment")
 	}
@@ -1565,7 +1321,7 @@ func TestWithdrawRouteStaleSeqNoRejected(t *testing.T) {
 		Hops: 2, SeqNo: 10, Source: RouteSourceAnnouncement,
 	})
 
-	ok := tbl.WithdrawRoute(domaintest.ID("alice"), domaintest.ID("bob"), domaintest.ID("charlie"), 5)
+	ok := tbl.WithdrawRoute(domaintest.ID("alice"), domaintest.ID("charlie"), 5)
 	if ok {
 		t.Fatal("withdrawal with lower SeqNo should be rejected")
 	}
@@ -1575,7 +1331,7 @@ func TestWithdrawRouteNonexistentCreatesTombstone(t *testing.T) {
 	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 	tbl := NewTable(WithClock(fixedClock(now)))
 
-	ok := tbl.WithdrawRoute(domaintest.ID("alice"), domaintest.ID("bob"), domaintest.ID("charlie"), 5)
+	ok := tbl.WithdrawRoute(domaintest.ID("alice"), domaintest.ID("charlie"), 5)
 	if !ok {
 		t.Fatal("withdrawal of unseen route should succeed (tombstone created)")
 	}
@@ -1605,7 +1361,7 @@ func TestWithdrawTombstoneBlocksStaleAnnouncement(t *testing.T) {
 	tbl := NewTable(WithClock(fixedClock(now)))
 
 	// Withdrawal arrives first with SeqNo=10 — creates tombstone.
-	ok := tbl.WithdrawRoute(domaintest.ID("alice"), domaintest.ID("bob"), domaintest.ID("charlie"), 10)
+	ok := tbl.WithdrawRoute(domaintest.ID("alice"), domaintest.ID("charlie"), 10)
 	if !ok {
 		t.Fatal("tombstone creation should succeed")
 	}
@@ -1632,7 +1388,7 @@ func TestWithdrawTombstoneSupersededByNewerAnnouncement(t *testing.T) {
 	tbl := NewTable(WithClock(fixedClock(now)))
 
 	// Tombstone at SeqNo=5.
-	tbl.WithdrawRoute(domaintest.ID("alice"), domaintest.ID("bob"), domaintest.ID("charlie"), 5)
+	tbl.WithdrawRoute(domaintest.ID("alice"), domaintest.ID("charlie"), 5)
 
 	// Newer announcement with SeqNo=7 — should be accepted.
 	status := mustUpdate(t, tbl, RouteEntry{
@@ -1660,7 +1416,7 @@ func TestWithdrawnRouteRejectsSameSeqNoHigherTrustUpdate(t *testing.T) {
 	})
 
 	// Withdraw at SeqNo=6 (strictly greater than active SeqNo=5) — sets Hops=HopsInfinity.
-	if !tbl.WithdrawRoute(domaintest.ID("alice"), domaintest.ID("bob"), domaintest.ID("charlie"), 6) {
+	if !tbl.WithdrawRoute(domaintest.ID("alice"), domaintest.ID("charlie"), 6) {
 		t.Fatal("withdraw should succeed")
 	}
 
@@ -1774,14 +1530,12 @@ func TestAddDirectPeerCreatesRoute(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	entry := result.Entry
-	// Phase A migration contract: boundary RouteEntry carries
-	// Origin = localOrigin ("sender originated route"), matching the
-	// wire-emit Origin used by AnnounceTo / InvalidateAllVia. This
-	// preserves the pre-A1 expectation for own-direct routes
-	// (Origin = our localOrigin) and gives pre-A1 receivers a
-	// consistent value for live + withdrawal anti-spoof. Storage
-	// internally no longer keeps Origin — see route_store_lookup.go
-	// for the synthesis contract.
+	// Boundary RouteEntry carries Origin = localOrigin ("sender
+	// originated route"), matching the wire-emit Origin used by
+	// AnnounceTo / InvalidateAllVia, so live and withdrawal frames
+	// carry the same value that receivers check before accepting a
+	// withdrawal. Storage internally does not keep Origin — see
+	// route_store_lookup.go for the synthesis contract.
 	if entry.Identity != domaintest.ID("peer-A") || entry.Origin != domaintest.ID("me") || entry.NextHop != domaintest.ID("peer-A") {
 		t.Fatalf("unexpected entry fields: %+v", entry)
 	}
@@ -2599,30 +2353,36 @@ func TestTrustHierarchyPerTripleNotPerNextHop(t *testing.T) {
 
 // --- HopAck confirms specific route only ---
 
-func TestHopAckScopedToTriple(t *testing.T) {
+// A hop_ack confirms the one (Identity, Uplink) claim it was received
+// through; a claim for the same destination via another uplink keeps
+// its own Source.
+func TestHopAckScopedToUplinkClaim(t *testing.T) {
 	tbl := NewTable()
+	alice, viaB, viaE := domaintest.ID("alice"), domaintest.ID("B"), domaintest.ID("E")
+
+	for _, uplink := range []PeerIdentity{viaB, viaE} {
+		mustUpdate(t, tbl, RouteEntry{
+			Identity: alice, Origin: uplink, NextHop: uplink,
+			Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
+		})
+	}
 
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: domaintest.ID("alice"), Origin: domaintest.ID("C"), NextHop: domaintest.ID("B"),
-		Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
-	})
-	mustUpdate(t, tbl, RouteEntry{
-		Identity: domaintest.ID("alice"), Origin: domaintest.ID("D"), NextHop: domaintest.ID("B"),
-		Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
-	})
-
-	mustUpdate(t, tbl, RouteEntry{
-		Identity: domaintest.ID("alice"), Origin: domaintest.ID("C"), NextHop: domaintest.ID("B"),
+		Identity: alice, Origin: viaB, NextHop: viaB,
 		Hops: 2, SeqNo: 1, Source: RouteSourceHopAck,
 	})
 
-	snap := tbl.Snapshot()
-	for _, r := range snap.Routes[domaintest.ID("alice")] {
-		if r.Origin == domaintest.ID("D") && r.Source != RouteSourceAnnouncement {
-			t.Fatal("hop_ack for (alice,C,B) should not upgrade (alice,D,B)")
-		}
-		if r.Origin == domaintest.ID("C") && r.Source != RouteSourceHopAck {
-			t.Fatal("hop_ack for (alice,C,B) should upgrade it")
+	wantSource := map[PeerIdentity]RouteSource{
+		viaB: RouteSourceHopAck,
+		viaE: RouteSourceAnnouncement,
+	}
+	routes := tbl.Lookup(alice)
+	if len(routes) != len(wantSource) {
+		t.Fatalf("expected one claim per uplink, got %+v", routes)
+	}
+	for _, r := range routes {
+		if want, ok := wantSource[r.NextHop]; !ok || r.Source != want {
+			t.Fatalf("claim via %s: Source=%v, want %v", r.NextHop, r.Source, wantSource[r.NextHop])
 		}
 	}
 }

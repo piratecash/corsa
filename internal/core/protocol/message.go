@@ -94,9 +94,7 @@ const (
 	// ReceiptStatusSeenAck is the end-to-end acknowledgement the ORIGINAL
 	// message sender returns for a received "seen" receipt, so the
 	// seen-sender can stop retrying it. Travels over the existing receipt
-	// transport (push_delivery_receipt / relay_delivery_receipt) — additive
-	// in ProtocolVersion 23; older binaries reject the unknown status at
-	// parse time and simply drop the frame, which the seen-retry absorbs.
+	// transport (push_delivery_receipt / relay_delivery_receipt).
 	ReceiptStatusSeenAck = "seen_ack"
 )
 

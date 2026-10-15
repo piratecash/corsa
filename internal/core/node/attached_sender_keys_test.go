@@ -1,14 +1,15 @@
 package node
 
-// attached_sender_keys_test.go locks the v27 self-certifying sender-key
-// contract (config.ProtocolVersionDMSenderKeys): DM transport frames
-// carry the origin sender's PUBLIC key triple, the final recipient
-// validates it against the sender address (the address IS the signing
-// key's fingerprint) and imports it, and transit hops copy the triple
-// through — or backfill it from local knowledge for keyless frames from
-// pre-v27 origins. This is what makes a FIRST-CONTACT DM deliverable
-// over relay hops that never met the sender, where the on-demand
-// fetch_contacts recovery (previous hop only) has nothing to serve.
+// attached_sender_keys_test.go locks the self-certifying sender-key
+// contract: DM transport frames carry the origin sender's PUBLIC key
+// triple, the final recipient validates it against the sender address
+// (the address IS the signing key's fingerprint) and imports it, and
+// transit hops copy the triple through — or backfill it from local
+// knowledge for a frame that arrived keyless (an upstream hop could not
+// attach the keys, dropped oversized ones or stripped them). This is
+// what makes a FIRST-CONTACT DM deliverable over relay hops that never
+// met the sender, where the on-demand fetch_contacts recovery (previous
+// hop only) has nothing to serve.
 
 import (
 	"bufio"
@@ -207,9 +208,10 @@ func TestRelayForwardPreservesAttachedSenderKeys(t *testing.T) {
 	}
 }
 
-// TestRelayForwardBackfillsKnownSenderKeys covers the mixed-network
-// bridge: a pre-v27 origin sends the frame keyless, but THIS hop knows
-// the origin's keys (e.g. cached from a direct handshake) — the forward
+// TestRelayForwardBackfillsKnownSenderKeys covers the backfill: the
+// frame arrives keyless (an upstream hop rebuilt it from a stored
+// envelope whose sender it had evicted), but THIS hop knows the origin's
+// keys (e.g. cached from a direct handshake) — the forward
 // must attach them so a downstream first-contact recipient still gets
 // the fast path.
 func TestRelayForwardBackfillsKnownSenderKeys(t *testing.T) {
@@ -246,7 +248,7 @@ func TestRelayForwardBackfillsKnownSenderKeys(t *testing.T) {
 		MaxHops:     10,
 		TTLSeconds:  300,
 		PreviousHop: "origin-fingerprint",
-		// No key fields — legacy keyless origin.
+		// No key fields — an upstream hop could not attach them.
 	}
 
 	status := svc.handleRelayMessage(domain.PeerAddress("10.0.0.1:64646"), nil, frame)
@@ -550,7 +552,7 @@ func TestSenderKeySyncFanoutRecoversFromOtherPeer(t *testing.T) {
 		t.Fatalf("net.Listen: %v", err)
 	}
 	defer func() { _ = ln.Close() }()
-	go interleavedSyncPeerMockServer(t, ln, 0, nil, nil, []protocol.ContactFrame{contact})
+	go interleavedSyncPeerMockServer(t, ln, 0, nil, []protocol.ContactFrame{contact})
 
 	candidateAddr := domain.PeerAddress(ln.Addr().String())
 	markOldNode(svc, candidateAddr)
@@ -891,7 +893,7 @@ func TestSenderKeySyncCooldownMapBounded(t *testing.T) {
 // contact sync — a window of up to peerRequestTimeout) must be
 // DISPATCHED, not discarded as an unexpected reply. The mock peer
 // receives fetch_contacts, first pushes a fully-valid first-contact DM
-// relay frame (attached v27 keys), then answers with contacts.
+// relay frame (with attached sender keys), then answers with contacts.
 func TestRelayMessageDispatchedDuringOwnedSync(t *testing.T) {
 	t.Parallel()
 	svc := newTestService(t, config.NodeTypeFull)

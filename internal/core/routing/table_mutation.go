@@ -324,13 +324,7 @@ func (t *Table) InvalidateUplinkClaim(identity, uplink PeerIdentity) bool {
 		// layer — see the idempotency note above.
 		return false
 	}
-	// Origin field on the WithdrawTriple key is preserved for
-	// LastIngressOrigin / SeenOriginSeqs bookkeeping only — storage
-	// dedup is per-(Identity, Uplink) after Phase A. Using uplink
-	// as origin matches the sender-originated semantic the poison
-	// sender attests to.
-	key := RouteTriple{Identity: identity, Origin: uplink, NextHop: uplink}
-	mutated := t.store.WithdrawTriple(key, seqNo+1, now)
+	mutated := t.store.WithdrawUplinkClaim(identity, uplink, seqNo+1, now)
 	if mutated {
 		t.dirty.Store(true)
 		t.markSnapDirtyLocked(identity, JournalCausePoison)
@@ -338,10 +332,14 @@ func (t *Table) InvalidateUplinkClaim(identity, uplink PeerIdentity) bool {
 	return mutated
 }
 
-// WithdrawRoute marks a specific route as withdrawn by setting hops to
-// HopsInfinity. This should be called when processing an incoming withdrawal
-// from the wire (hops=16, incremented SeqNo). For local peer disconnects,
-// use RemoveDirectPeer instead.
+// WithdrawRoute marks the (identity, nextHop) claim as withdrawn by setting
+// hops to HopsInfinity. This should be called when processing an incoming
+// withdrawal from the wire (hops=16, incremented SeqNo). For local peer
+// disconnects, use RemoveDirectPeer instead.
+//
+// The withdrawal frame's Origin is not a parameter: the receive path
+// accepts an entry only when its Origin is the sending peer, which is
+// nextHop, so the slot key already carries everything it said.
 //
 // Returns true if the withdrawal was applied.
 //
@@ -350,7 +348,7 @@ func (t *Table) InvalidateUplinkClaim(identity, uplink PeerIdentity) bool {
 // TotalEntries without ever corresponding to a real route. It is rejected
 // before any mutation — symmetric with UpdateRoute, where RouteEntry.Validate
 // rejects a zero Identity.
-func (t *Table) WithdrawRoute(identity, origin, nextHop PeerIdentity, seqNo uint64) bool {
+func (t *Table) WithdrawRoute(identity, nextHop PeerIdentity, seqNo uint64) bool {
 	if identity.IsZero() {
 		return false
 	}
@@ -358,8 +356,7 @@ func (t *Table) WithdrawRoute(identity, origin, nextHop PeerIdentity, seqNo uint
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	key := RouteTriple{Identity: identity, Origin: origin, NextHop: nextHop}
-	mutated := t.store.WithdrawTriple(key, seqNo, t.clock())
+	mutated := t.store.WithdrawUplinkClaim(identity, nextHop, seqNo, t.clock())
 	if mutated {
 		t.dirty.Store(true)
 		t.markSnapDirtyLocked(identity, JournalCauseWithdrawal)
