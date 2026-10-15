@@ -138,18 +138,21 @@ hooks-status:
 	git config --get core.hooksPath
 
 .PHONY: mocks
-# v3.7.4 is the first release pinning golang.org/x/tools v0.49.0. Up to v3.7.2
-# mockery pinned x/tools v0.42.0, whose go/packages cannot read export data
-# produced by the Go 1.27 compiler — it dies with
-#   internal error: package "net/netip" without types was imported from "net"
-# The pin is therefore a floor tied to the toolchain in go.mod, not a
-# preference: raise it whenever the Go version moves ahead of x/tools again.
+# Both tools below type-check through golang.org/x/tools go/packages, which
+# must read the export data of the compiler in go.mod. Go 1.27.2 writes
+# export data version 5; x/tools v0.49.0 reads at most version 4 and dies with
+#   cannot decode "net/netip", export data version 5 is greater than maximum supported version 4
+# mockery v3.8.1 (x/tools v0.51.0) and golangci-lint v2.14.0 (x/tools v0.50.0)
+# are the first releases that read it; mockery v3.8.0 and golangci-lint
+# v2.13.2 still pin v0.49.0. The pins are therefore floors tied to the
+# toolchain in go.mod, not a preference: raise them whenever the Go version
+# moves ahead of x/tools again, and regenerate the mocks in the same change.
 mocks:
-	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) $(GO) run github.com/vektra/mockery/v3@v3.7.4
+	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) $(GO) run github.com/vektra/mockery/v3@v3.8.1
 
 .PHONY: lint
 lint:
-	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) $(GO) run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.1 run ./... --timeout=7m --color always
+	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) $(GO) run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0 run ./... --timeout=7m --color always
 
 .PHONY: fmt gofmt-changed
 fmt:
