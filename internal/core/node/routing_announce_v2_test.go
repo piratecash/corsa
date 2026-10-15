@@ -58,9 +58,8 @@ func TestHandleRequestResync_MarksInvalidAndTriggersUpdate(t *testing.T) {
 // The handler's normal effect — MarkInvalid(senderIdentity) +
 // TriggerUpdate — forces the next announce cycle to ship a FULL
 // baseline TO that peer, which is exactly the outbound
-// routing-control traffic the design contract (see
-// docs/refactoring/route-withdrawal-grace-period.md) bans for a
-// quarantined sender. Without the top-level gate, a quarantined
+// routing-control traffic a quarantined sender must not be able to
+// trigger. Without the top-level gate, a quarantined
 // peer could send request_resync on demand and keep our announce
 // loop spinning on forced-full sync cycles.
 //
@@ -387,9 +386,9 @@ func TestHandleAnnounceRoutes_LegacyEmptyFrame_StillFlipsBaseline(t *testing.T) 
 // path, including (and especially) when the session has not yet
 // received a baseline. Without the top-level gate, the baseline
 // branch would emit SendRequestResync back to the peer — outbound
-// routing-control traffic toward a quarantined peer, which violates
-// the design contract in
-// docs/refactoring/route-withdrawal-grace-period.md. Also asserts
+// routing-control traffic toward a quarantined peer, whose
+// routing-plane frames must be silently dropped
+// (docs/protocol/network_security.md §13). Also asserts
 // that AnnouncePeerState is NOT created so quarantine produces an
 // "as if peer was never heard from" state.
 func TestHandleRoutesUpdate_QuarantinedSender_DropsSilentlyNoResync(t *testing.T) {

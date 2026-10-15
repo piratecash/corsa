@@ -16,8 +16,9 @@ import (
 )
 
 // datagramGoldenVector mirrors testdata/datagram_vector_v2.json field for
-// field; the file name lives in datagramGoldenVectorFile. The file is the artefact §3.2 requires to ship with the spec, so
-// it is kept as data rather than as Go literals: it can be copied into the
+// field; the file name lives in datagramGoldenVectorFile. The file is the
+// artefact docs/protocol/datagram.md §3.3 requires to ship with the spec, so it
+// is kept as data rather than as Go literals: it can be copied into the
 // document and re-used by an independent implementation unchanged.
 type datagramGoldenVector struct {
 	Description   string `json:"description"`
@@ -44,9 +45,9 @@ func loadDatagramGoldenVector(t *testing.T) datagramGoldenVector {
 }
 
 // TestDatagramGoldenVector is the mandatory cross-implementation test
-// vector of §3.2: frame JSON, transcript, sha256(transcript), private key
-// and signature all compared BYTE for byte. Without it two independent
-// implementations diverge on the first ambiguity.
+// vector of docs/protocol/datagram.md §3.3: frame JSON, transcript,
+// sha256(transcript), private key and signature all compared BYTE for byte.
+// Without it two independent implementations diverge on the first ambiguity.
 func TestDatagramGoldenVector(t *testing.T) {
 	vector := loadDatagramGoldenVector(t)
 
@@ -123,9 +124,10 @@ func TestDatagramTranscriptRejectsEmptyNetwork(t *testing.T) {
 }
 
 // TestDatagramTranscriptCoversMiddlemanMutations walks the exact attack
-// list of §3.2: every field a relay could rewrite to change routing,
-// authority or meaning is inside the transcript, so each rewrite breaks the
-// signature. `ttl` is the deliberate exception — it changes every hop.
+// list of docs/protocol/datagram.md §3.2: every field a relay could rewrite to
+// change routing, authority or meaning is inside the transcript, so each
+// rewrite breaks the signature. `ttl` is the deliberate exception — it changes
+// every hop.
 func TestDatagramTranscriptCoversMiddlemanMutations(t *testing.T) {
 	network := testDatagramNetwork
 	mutations := map[string]func(*DatagramFrame){
@@ -160,8 +162,8 @@ func TestDatagramTranscriptCoversMiddlemanMutations(t *testing.T) {
 	})
 
 	// Downgrading the mode is caught even earlier: routed without auth and
-	// request with auth are both outside the §2.1 matrix, so the frame never
-	// reaches the signature check at all.
+	// request with auth are both outside the docs/protocol/datagram.md §2.1
+	// matrix, so the frame never reaches the signature check at all.
 	t.Run("mode", func(t *testing.T) {
 		mutated := newSignedDatagram(t).Clone()
 		mutated.Mode = domain.DatagramModeRequest
@@ -224,7 +226,8 @@ func TestDatagramTranscriptCoversMiddlemanMutations(t *testing.T) {
 // TestDatagramTranscriptIsUnambiguous pins the reason every segment is
 // length-prefixed: without lp() a longer dtype and a shorter payload would
 // concatenate into the same byte string, and a second field combination
-// with the same signature would be a matter of technique (§3.2).
+// with the same signature would be a matter of technique
+// (docs/protocol/datagram.md §3.2).
 func TestDatagramTranscriptIsUnambiguous(t *testing.T) {
 	network := testDatagramNetwork
 	base := newSignedDatagram(t).Clone()
@@ -282,7 +285,7 @@ func TestDatagramTranscriptEndsWithThePayload(t *testing.T) {
 
 // TestDatagramReplayKeyIsSHA256OfTranscript pins the derivation itself: the
 // key is never carried on the wire, so it has to be reproducible from the
-// frame alone by any node that holds it (§3.1).
+// frame alone by any node that holds it (docs/protocol/datagram.md §3.1).
 func TestDatagramReplayKeyIsSHA256OfTranscript(t *testing.T) {
 	transcript, err := BuildDatagramTranscript(newSignedDatagram(t), testDatagramNetwork)
 	if err != nil {
@@ -294,9 +297,10 @@ func TestDatagramReplayKeyIsSHA256OfTranscript(t *testing.T) {
 	}
 }
 
-// TestDatagramSignerMatchesSrc covers the fingerprint gate of §3.1, kept
-// separate from signature verification: a frame may carry a perfectly valid
-// signature over a key that is not the one src names.
+// TestDatagramSignerMatchesSrc covers the fingerprint gate of
+// docs/protocol/datagram.md §3.1, kept separate from signature verification: a
+// frame may carry a perfectly valid signature over a key that is not the one
+// src names.
 func TestDatagramSignerMatchesSrc(t *testing.T) {
 	signed := newSignedDatagram(t)
 	if !DatagramSignerMatchesSrc(signed) {

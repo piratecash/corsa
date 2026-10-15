@@ -11,17 +11,17 @@ import (
 )
 
 // datagram.go defines the datagram wire format: the decoded frame, its
-// structural contract (the mode matrix of §2.1) and the canonical
-// serialization. The strict parser lives in datagram_parse.go and the
-// signature transcript in datagram_transcript.go.
+// structural contract (the mode matrix of docs/protocol/datagram.md §2.1) and
+// the canonical serialization. The strict parser lives in datagram_parse.go and
+// the signature transcript in datagram_transcript.go.
 //
-// Reference: docs/refactoring/datagram-transport.md §2, §2.1, §2.2, §2.3, §3.
+// Reference: docs/protocol/datagram.md §2, §2.1, §2.3, §2.4, §3.
 
 // DatagramFrameType is the top-level `type` of every datagram, in every
 // header version. The name never changes: dispatch happens on it, so an
 // old node always recognises the command, reads `v` and drops an unknown
 // version silently instead of answering unknown_command and closing the
-// connection (§2).
+// connection (docs/protocol/datagram.md §2).
 const DatagramFrameType = "datagram"
 
 // Structural rejects are distinguishable sentinels so the pipeline can act
@@ -35,40 +35,42 @@ var (
 
 	// ErrDatagramDuplicateKey marks a repeated JSON key anywhere in the
 	// frame. Kept separate because it is the one reject encoding/json
-	// cannot produce on its own (§3.4).
+	// cannot produce on its own (docs/protocol/datagram.md §3.5).
 	ErrDatagramDuplicateKey = errors.New("datagram: duplicate JSON key")
 
 	// ErrDatagramUnknownField marks an unknown key in the header or the auth
 	// object. Extension goes through `v` and `av`, never through a field the
-	// receiver silently ignores (§3.4).
+	// receiver silently ignores (docs/protocol/datagram.md §3.5).
 	ErrDatagramUnknownField = errors.New("datagram: unknown field")
 
 	// ErrDatagramUnknownVersion marks a header version this build does not
 	// implement. The pipeline drops such a frame WITHOUT forwarding, which
-	// is why it must be distinguishable from every other reject (§2).
+	// is why it must be distinguishable from every other reject
+	// (docs/protocol/datagram.md §2).
 	ErrDatagramUnknownVersion = errors.New("datagram: unknown header version")
 
 	// ErrDatagramModeMatrix marks a mode/class/auth/route_policy tuple
-	// outside the closed contract of §2.1.
+	// outside the closed contract of docs/protocol/datagram.md §2.1.
 	ErrDatagramModeMatrix = errors.New("datagram: mode combination not allowed")
 
 	// ErrDatagramPayloadTooLarge marks a decoded payload above the class
-	// ceiling of §2.3.
+	// ceiling of docs/protocol/datagram.md §2.4.
 	ErrDatagramPayloadTooLarge = errors.New("datagram: payload exceeds class cap")
 
 	// ErrDatagramEncoding marks a non-canonical encoding: uppercase hex,
 	// padded base64url, or a binary field of the wrong length.
 	ErrDatagramEncoding = errors.New("datagram: non-canonical encoding")
 
-	// ErrDatagramAuth marks an auth block violating §2.1/§3.1: present in
-	// the wrong mode, missing, or with a wrong-sized key/salt/signature.
+	// ErrDatagramAuth marks an auth block violating
+	// docs/protocol/datagram.md §2.1 and §3.1: present in the wrong mode,
+	// missing, or with a wrong-sized key/salt/signature.
 	ErrDatagramAuth = errors.New("datagram: invalid auth block")
 )
 
 // DatagramFrame is the decoded frame. Binary values (payload, src/dst,
 // pubkey, salt, signature) are held decoded: base64url and hex exist only at
 // the wire boundary, so no code path can accidentally sign, size or compare
-// the textual form (§3.2).
+// the textual form (docs/protocol/datagram.md §3.2).
 //
 // The envelope carries NO extension points. It used to carry `req_caps` and
 // `ext`, and both were path-wide: every transit checked the names and refused
@@ -81,8 +83,8 @@ var (
 // There are no struct tags because encoding/json handles neither end of
 // this contract: it cannot pin key order for the canonical form, cannot
 // tell an absent optional field from an empty one, and cannot reject
-// duplicate or unknown keys the way §3.4 demands. The wire key of each
-// field is named beside it, and the closed key sets live in
+// duplicate or unknown keys the way docs/protocol/datagram.md §3.5 demands. The
+// wire key of each field is named beside it, and the closed key sets live in
 // datagram_parse.go.
 type DatagramFrame struct {
 	Version domain.DatagramVersion // "v"
@@ -92,20 +94,21 @@ type DatagramFrame struct {
 	Dst     domain.PeerIdentity    // "dst", lowercase 40-hex
 	// TTL is the RAW hop budget exactly as it arrived. Clamping to
 	// DatagramDefaultMaxHops and the single per-hop decrement belong to the
-	// pipeline (§4.1.1); the wire layer must not hide the raw value,
-	// because `ttl <= auth.max_ttl` is checked against it.
+	// pipeline (docs/protocol/datagram.md §4.2); the wire layer must not hide
+	// the raw value, because `ttl <= auth.max_ttl` is checked against it.
 	TTL         uint8              // "ttl"
 	RoutePolicy domain.RoutePolicy // "route_policy", absent in response
 	DType       domain.DType       // "dtype"
 	Payload     []byte             // "payload", base64url without padding
-	// Auth is "auth": present exactly for mode routed (§2.1).
+	// Auth is "auth": present exactly for mode routed
+	// (docs/protocol/datagram.md §2.1).
 	Auth *DatagramAuth
 }
 
 // DatagramAuth is the self-contained signature block of a routed datagram.
 // The public key travels in the frame on purpose: a transit relay must be
 // able to verify authenticity without resolving src through any trust
-// store (§3.1).
+// store (docs/protocol/datagram.md §3.1).
 type DatagramAuth struct {
 	AuthVersion domain.AuthVersion // "av"
 	PubKey      []byte             // "pubkey", 32 raw Ed25519 bytes
@@ -125,7 +128,7 @@ func (d DatagramFrame) Validate() error {
 
 // validate runs the structural contract. requireSig is false only while
 // signing, where the signature is the value being produced and the
-// transcript covers everything except it (§3.2).
+// transcript covers everything except it (docs/protocol/datagram.md §3.2).
 func (d DatagramFrame) validate(requireSig bool) error {
 	if d.Version != domain.DatagramHeaderVersion {
 		return fmt.Errorf("%w: %d", ErrDatagramUnknownVersion, d.Version)
@@ -211,7 +214,8 @@ func (d DatagramFrame) validateAuth(rule domain.DatagramModeRule, requireSig boo
 		// frame: that is the same reject class an unknown `v` gets, and the
 		// pipeline already reacts to it the only correct way — drop without
 		// forwarding, without ban, because a version this build never
-		// implemented is the extension mechanism working as designed (§2).
+		// implemented is the extension mechanism working as designed
+		// (docs/protocol/datagram.md §2).
 		return fmt.Errorf("%w: av %d", ErrDatagramUnknownVersion, d.Auth.AuthVersion)
 	}
 	if len(d.Auth.PubKey) != domain.DatagramPubKeyBytes {
@@ -245,16 +249,17 @@ func (d DatagramFrame) Clone() DatagramFrame {
 // Canonical serialization
 // ---------------------------------------------------------------------------
 
-// DecodedPayloadLen is the quantity the class ceiling of §2.3 is measured
-// in: DECODED payload bytes. Named rather than inlined because the wire
-// field is base64url and roughly a third larger, and comparing the wrong
-// one against the cap silently changes the admitted frame size.
+// DecodedPayloadLen is the quantity the class ceiling of
+// docs/protocol/datagram.md §2.4 is measured in: DECODED payload bytes. Named
+// rather than inlined because the wire field is base64url and roughly a third
+// larger, and comparing the wrong one against the cap silently changes the
+// admitted frame size.
 func (d DatagramFrame) DecodedPayloadLen() int { return len(d.Payload) }
 
 // WireFrameSize is the quantity byte budgets and queue accounting are
-// measured in (§2.3, §5): the canonical JSON plus its terminating newline.
-// 64 KiB of payload occupy ≈ 88 KiB on the wire, and charging them as 64
-// KiB would give away a third of the link for free.
+// measured in (docs/protocol/datagram.md §2.4, §5): the canonical JSON plus its
+// terminating newline. 64 KiB of payload occupy ≈ 88 KiB on the wire, and
+// charging them as 64 KiB would give away a third of the link for free.
 //
 // For a frame that ARRIVED, the pipeline charges the received line length
 // it already holds — this method sizes a frame this node is about to emit,
@@ -324,7 +329,7 @@ func MarshalDatagramFrameLine(d DatagramFrame) (string, error) {
 // explicit budget. The size is measured on the FULL line INCLUDING the
 // trailing newline, byte-for-byte with the receive-side line counter: a
 // JSON body of exactly maxBytes would be rejected by the remote reader as
-// maxBytes+1, so it is rejected here too (§2.3).
+// maxBytes+1, so it is rejected here too (docs/protocol/datagram.md §2.4).
 func MarshalDatagramFrameLineWithLimit(d DatagramFrame, maxBytes int) (string, error) {
 	body, err := MarshalDatagramFrame(d)
 	if err != nil {
@@ -367,7 +372,8 @@ func writeJSONString(buf *bytes.Buffer, s string) {
 
 // decodeDatagramHex decodes a canonical lowercase 40-hex address. Uppercase
 // input is rejected rather than folded: two spellings of one address would
-// otherwise produce two different frames with the same meaning (§3.4).
+// otherwise produce two different frames with the same meaning
+// (docs/protocol/datagram.md §3.5).
 func decodeDatagramHex(field, s string) (domain.PeerIdentity, error) {
 	id, err := domain.ParsePeerIdentity(s)
 	if err != nil || id.IsZero() {
@@ -379,14 +385,14 @@ func decodeDatagramHex(field, s string) (domain.PeerIdentity, error) {
 // decodeDatagramBase64 decodes CANONICAL base64url: no padding, and no
 // non-zero trailing bits in the last character.
 //
-// Both halves are the same rule of §3.4 — one value, one representation — and
-// both are load-bearing for the same reason. A padded value is a second
-// spelling. So is a value whose final character carries data bits that decode
-// to nothing: `Strict()` is what rejects it, and without it the two lines
-// "...Hw" and "...Hx" parse into byte-identical frames while remaining two
-// different transcripts on the wire. Two implementations would then disagree
-// on which line was signed, and a relay could rewrite the tail of a payload
-// without touching the frame anybody verified.
+// Both halves are the same rule of docs/protocol/datagram.md §3.5 — one value,
+// one representation — and both are load-bearing for the same reason. A padded
+// value is a second spelling. So is a value whose final character carries data
+// bits that decode to nothing: `Strict()` is what rejects it, and without it
+// the two lines "...Hw" and "...Hx" parse into byte-identical frames while
+// remaining two different transcripts on the wire. Two implementations would
+// then disagree on which line was signed, and a relay could rewrite the tail of
+// a payload without touching the frame anybody verified.
 func decodeDatagramBase64(field, s string) ([]byte, error) {
 	out, err := base64.RawURLEncoding.Strict().DecodeString(s)
 	if err != nil {

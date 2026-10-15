@@ -60,6 +60,13 @@ var (
 	// the identity the caller expected (the dst of the lookup, the session
 	// identity of a push, the address inside a corsa: link).
 	ErrIdentityRecordAddressMismatch = errors.New("identity record: address does not match expected identity")
+
+	// ErrIdentityRecordTooManyDTypes marks an issue attempt whose declared
+	// dtypes list is longer than a record may carry. It exists only on the
+	// owner's side: a receiver does not reject such a record, it reads the
+	// list as absent — so issuing it would tell every holder "this node
+	// handles no type" while the handshake says otherwise.
+	ErrIdentityRecordTooManyDTypes = errors.New("identity record: too many declared dtypes")
 )
 
 // ---------------------------------------------------------------------------
@@ -373,9 +380,9 @@ func VerifyIdentityRecord(record SignedIdentityRecord, network domain.NetworkID,
 // IdentityRecordSpec is what the owner states when issuing a record; keys
 // and address come from the identity itself.
 type IdentityRecordSpec struct {
-	// DTypes is the declared handler set (§6.1 mechanism 2). Absent when the
-	// datagram plane is disabled; explicitly empty when the plane is up with
-	// no handlers.
+	// DTypes is the declared handler set (docs/protocol/datagram.md §6.1
+	// mechanism 2). Absent when the datagram plane is disabled; explicitly
+	// empty when the plane is up with no handlers.
 	DTypes domain.DeclaredDTypeSet
 	// Network binds the signature to one protocol network.
 	Network domain.NetworkID
@@ -391,9 +398,11 @@ type IdentityRecordSpec struct {
 }
 
 // BuildSignedIdentityRecord issues the owner's own record: marshals the
-// body, signs it and validates the result against the same caps every
-// receiver enforces, so an oversized dtypes set fails at issue time on the
-// owner's machine rather than as a silent drop across the network.
+// body, signs it and validates the dtypes count and the byte budgets the way
+// every receiver counts them, so an oversized dtypes set fails at issue time
+// on the owner's machine rather than as a silent drop across the network.
+// Name validity is not re-checked here: the names come from the node's own
+// registry, which a guard test pins to the released set.
 func BuildSignedIdentityRecord(owner *identity.Identity, spec IdentityRecordSpec) (SignedIdentityRecord, error) {
 	if owner == nil {
 		return SignedIdentityRecord{}, fmt.Errorf("%w: nil owner identity", ErrIdentityRecordMalformed)
@@ -401,11 +410,15 @@ func BuildSignedIdentityRecord(owner *identity.Identity, spec IdentityRecordSpec
 	if spec.Seq == 0 {
 		return SignedIdentityRecord{}, fmt.Errorf("%w: seq 0 is reserved for \"no record\"", ErrIdentityRecordMalformed)
 	}
+	dtypes := spec.DTypes.WireField()
+	if err := checkIssuedDTypesCount(dtypes); err != nil {
+		return SignedIdentityRecord{}, err
+	}
 	wire := identityRecordBodyWire{
 		Address:  owner.Address,
 		PubKey:   identity.PublicKeyBase64(owner.PublicKey),
 		DM:       spec.DM,
-		DTypes:   spec.DTypes.WireField(),
+		DTypes:   dtypes,
 		IssuedAt: spec.IssuedAt,
 		Seq:      uint64(spec.Seq),
 	}
@@ -435,6 +448,17 @@ func BuildSignedIdentityRecord(owner *identity.Identity, spec IdentityRecordSpec
 			ErrIdentityRecordTooLarge, len(encoded), domain.MaxIdentityRecordBytes)
 	}
 	return record, nil
+}
+
+// checkIssuedDTypesCount refuses a dtypes field longer than a record may
+// carry. It counts the names as they will be SENT, duplicates included,
+// because that is what the receive side counts (ParseIdentityRecordDTypesField).
+func checkIssuedDTypesCount(field *[]string) error {
+	if field == nil || len(*field) <= domain.MaxIdentityRecordDTypes {
+		return nil
+	}
+	return fmt.Errorf("%w: %d names exceed %d",
+		ErrIdentityRecordTooManyDTypes, len(*field), domain.MaxIdentityRecordDTypes)
 }
 
 // ---------------------------------------------------------------------------

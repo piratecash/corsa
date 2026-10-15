@@ -71,7 +71,10 @@ Rules:
   baseline. Wire contract: order insignificant, duplicates collapse, names
   `[a-z0-9_]` ≤ 64 chars, at most **8** elements counted before
   deduplication; a bounds breach drops the FIELD to its absent value, never
-  the record. The handshake declaration always beats the record's.
+  the record. The handshake declaration always beats the record's. The owner
+  never issues a record that breaks these bounds: a list of more than 8 names
+  is an explicit error at issue time, because every receiver would read it as
+  declaring no type at all.
 - **Parsing:** duplicate JSON keys are a reject at every level (envelope and
   body). Unknown fields are ignored and their bytes preserved; the payload
   is never rebuilt.
@@ -808,7 +811,9 @@ DM, `fetch_contacts`) в record-хранилище не попадают — о�
   не значим, дубликаты схлопываются, имена `[a-z0-9_]` ≤ 64 символов, не
   более **8** элементов, считая по проводу до дедупликации; нарушение
   границ роняет ПОЛЕ к отсутствующему значению, а не запись. Рукопожатие
-  всегда приоритетнее записи.
+  всегда приоритетнее записи. Владелец никогда не выпускает запись, нарушающую
+  эти границы: список из более чем 8 имён — явная ошибка при выпуске, потому
+  что любой получатель прочитал бы его как отсутствие объявленных типов.
 - **Парсинг:** дублирующиеся ключи JSON — reject на всех уровнях (конверт и
   body). Неизвестные поля игнорируются, байты сохраняются, payload не
   пересобирается.

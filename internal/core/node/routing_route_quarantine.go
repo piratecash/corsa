@@ -13,7 +13,9 @@ import (
 // Per-peer route quarantine (Part 2 of probation + quarantine design)
 // ---------------------------------------------------------------------------
 //
-// Background: docs/refactoring/route-withdrawal-grace-period.md
+// Why: a peer whose sessions keep failing, or that floods delta announces,
+// must stop shaping our view of the network without losing direct
+// reachability. Triggers and effects: docs/protocol/network_security.md §13.
 //
 // What this does:
 //   - Detects when a peer's session is unstable (disconnect rate
@@ -112,11 +114,11 @@ const (
 
 	// chattyAnnounceWindow is the sliding window over which inbound
 	// DELTA announce-plane frames are counted toward the chatty_routes
-	// quarantine trigger. Matches the design doc table
-	// (docs/refactoring/route-withdrawal-grace-period.md): "Inbound
-	// chatty routes | 50 announce/sec | 10s". Only delta frames feed
-	// this window — see recordInboundAnnounceAndMaybeArm; full
-	// baselines and request_resync are excluded.
+	// quarantine trigger: chatty_routes is a sustained rate held over
+	// this whole window (the base threshold below is 500 frames, i.e.
+	// 50 per second), not a burst. Only delta frames feed this window —
+	// see recordInboundAnnounceAndMaybeArm; full baselines and
+	// request_resync are excluded.
 	chattyAnnounceWindow = 10 * time.Second
 
 	// chattyAnnounceThreshold is the number of inbound DELTA announce
@@ -136,7 +138,7 @@ const (
 	// frames per 10s without tripping the route-based limiter (which
 	// would allow 200 ROUTES/sec = much higher entry budget) yet
 	// still arm chatty_routes here. That's by design — many small
-	// delta frames are the "chatty" pattern the doc targets.
+	// delta frames are the "chatty" pattern this trigger targets.
 	//
 	// This 500 is the BASE/floor of an adaptive threshold (see
 	// chattyThresholdLocked): the effective trigger grows with the
@@ -338,8 +340,8 @@ func (s *Service) isPeerTransitQuarantinedLocked(peer domain.PeerIdentity, now t
 // Direct destinations (hops == 1) ALWAYS pass — recipient is the
 // quarantined peer itself, and quarantine deliberately suppresses
 // transit trust without blocking data-plane delivery to the peer.
-// See routing_route_quarantine.go's file-level docstring and the
-// contract tables in docs/refactoring/route-withdrawal-grace-period.md.
+// See routing_route_quarantine.go's file-level docstring and
+// docs/protocol/network_security.md §13.
 //
 // Sharing the gate across call-sites guarantees the
 // "skip transit only" rule lives in one place — earlier passes

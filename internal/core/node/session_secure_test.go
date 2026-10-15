@@ -64,7 +64,12 @@ func marksOf(svc *Service) (bound, v1 int) {
 	store.mu.Unlock()
 	marks.mu.Lock()
 	defer marks.mu.Unlock()
-	return bound, len(marks.v1)
+	for _, mark := range marks.marks {
+		if mark.v1 != nil {
+			v1++
+		}
+	}
+	return bound, v1
 }
 
 func listenerNode(t *testing.T, setup func(*Service)) (*Service, string, func()) {
@@ -143,7 +148,7 @@ func TestAnAddressThatSpokeV2IsNotDowngraded(t *testing.T) {
 	defer stopOld()
 	bound := domain.PeerAddress(normalizeAddress(address))
 	dialer, stopDialer := dialerNode(t, address, func(svc *Service) {
-		if err := svc.secureSessions.store.noteProvenOutbound(bound, domain.PeerIdentity{1}, false); err != nil {
+		if _, err := svc.secureSessions.store.noteProvenOutbound(bound, domain.PeerIdentity{1}, endpointProtectionNone()); err != nil {
 			t.Fatalf("bind: %v", err)
 		}
 	})
@@ -162,8 +167,8 @@ func TestAnAddressThatSpokeV2IsNotDowngraded(t *testing.T) {
 func assertDowngradeRefused(t *testing.T, dialer, old *Service, bound domain.PeerAddress, what string) {
 	t.Helper()
 	dialerID := peerIdentityOf(t, dialer)
-	awaitRepeatedRefusal(t, what+": the downgrade refusal",
-		func() uint64 { return dialer.SecureSessionStoreStats().V1RefusalsEndpointBound },
+	awaitRepeatedRefusal(t, what+": the downgrade refusal, then the backoff",
+		refusalThenHolds(dialer, func(stats domain.SecureSessionStoreStats) uint64 { return stats.V1RefusalsEndpointBound }),
 		func() bool {
 			_, seenV1 := marksOf(dialer)
 			return nodeAuthenticatedIdentity(old, dialerID) || seenV1 > 0
@@ -206,6 +211,20 @@ func peerIdentityOf(t *testing.T, svc *Service) domain.PeerIdentity {
 		t.Fatalf("identity: %v", err)
 	}
 	return id
+}
+
+// refusalThenHolds counts a first refusal of the kind primary reads and,
+// after it, every attempt the backoffs it started held — the fall back to v1
+// held, or the dial held by the v2 retry backoff. 0 until the first refusal.
+func refusalThenHolds(svc *Service, primary func(domain.SecureSessionStoreStats) uint64) func() uint64 {
+	return func() uint64 {
+		stats := svc.SecureSessionStoreStats()
+		first := primary(stats)
+		if first == 0 {
+			return 0
+		}
+		return first + stats.V1DialsHeldByRefusalBackoff + stats.DialsHeldByV2RetryBackoff
+	}
 }
 
 // awaitRepeatedRefusal waits until refusals has counted at least two refusals
@@ -349,11 +368,11 @@ func TestEveryV1RefusalOfAPinnedIdentityIsCounted(t *testing.T) {
 	}
 
 	for attempt := range 2 {
-		if err := svc.refuseLegacyIdentity(pinned.String()); !errors.Is(err, errLegacyRefusedPinned) {
+		if err := svc.refuseLegacyIdentity(pinned); !errors.Is(err, errLegacyRefusedPinned) {
 			t.Fatalf("attempt %d: refuseLegacyIdentity(pinned) = %v, want errLegacyRefusedPinned", attempt, err)
 		}
 	}
-	if err := svc.refuseLegacyIdentity(unpinned.String()); err != nil {
+	if err := svc.refuseLegacyIdentity(unpinned); err != nil {
 		t.Fatalf("refuseLegacyIdentity(unpinned) = %v, want nil", err)
 	}
 	if got := svc.SecureSessionStoreStats().V1RefusalsIdentityPinned; got != 2 {
@@ -369,7 +388,7 @@ func TestEveryRefusedDowngradeIsCounted(t *testing.T) {
 	defer stopOld()
 	bound := domain.PeerAddress(normalizeAddress(address))
 	dialer, stopDialer := startQuietNode(t, func(svc *Service) {
-		if err := svc.secureSessions.store.noteProvenOutbound(bound, domain.PeerIdentity{1}, false); err != nil {
+		if _, err := svc.secureSessions.store.noteProvenOutbound(bound, domain.PeerIdentity{1}, endpointProtectionNone()); err != nil {
 			t.Fatalf("bind: %v", err)
 		}
 	})
@@ -379,6 +398,9 @@ func TestEveryRefusedDowngradeIsCounted(t *testing.T) {
 		if established, err := dialPastTransport(t, dialer, bound); established || !errors.Is(err, errLegacyRefusedV2Bound) {
 			t.Fatalf("attempt %d ended with established=%v err=%v, want the downgrade refused", attempt, established, err)
 		}
+		// The refusal starts the v2 retry backoff; the next attempt here
+		// stands for the one made once it has run out.
+		dialer.secureSessions.marks.clearV2Retry(bound)
 	}
 	if got := dialer.SecureSessionStoreStats().V1RefusalsEndpointBound; got != 2 {
 		t.Fatalf("refused downgrades counted = %d, want 2", got)
@@ -403,9 +425,11 @@ func TestAPinnedIdentityIsRefusedInAV1Welcome(t *testing.T) {
 
 	// Refused twice by the connection manager's own attempts: the second
 	// came after the manager reacted to the first, and a reaction that
-	// dropped the pin would let it sign the v1 session.
-	awaitRepeatedRefusal(t, "the refusal of a v1 welcome naming a pinned identity",
-		func() uint64 { return dialer.SecureSessionStoreStats().V1RefusalsIdentityPinned },
+	// dropped the pin would let it sign the v1 session. The first refusal
+	// starts the address's backoffs, so the second attempt is held by them
+	// before it reaches the welcome.
+	awaitRepeatedRefusal(t, "the refusal of a v1 welcome naming a pinned identity, then the hold",
+		refusalThenHolds(dialer, func(stats domain.SecureSessionStoreStats) uint64 { return stats.V1RefusalsIdentityPinned }),
 		func() bool { return nodeAuthenticatedIdentity(old, dialerID) })
 	if nodeAuthenticatedIdentity(old, dialerID) {
 		t.Fatal("the dialler signed a v1 session for an identity pinned to v2: the old node authenticated it")
@@ -468,7 +492,7 @@ func TestARecoverySyncToABoundEndpointIsNotDowngraded(t *testing.T) {
 	defer stopOld()
 	bound := domain.PeerAddress(normalizeAddress(address))
 	dialer, stopDialer := startTestNodeWithSetup(t, config.Node{ListenAddress: freeAddress(t), BootstrapPeers: []string{}, Type: domain.NodeTypeFull}, func(svc *Service) {
-		if err := svc.secureSessions.store.noteProvenOutbound(bound, domain.PeerIdentity{1}, false); err != nil {
+		if _, err := svc.secureSessions.store.noteProvenOutbound(bound, domain.PeerIdentity{1}, endpointProtectionNone()); err != nil {
 			t.Fatalf("bind: %v", err)
 		}
 	})
@@ -583,7 +607,7 @@ func TestAContactEndpointRefusesASubstituteIdentityAfterThirtyDays(t *testing.T)
 	dialer, stopDialer := dialerNode(t, address, func(svc *Service) {
 		clock := newStoreClock()
 		store := loadSecureSessionStore("", clock.read)
-		if err := store.noteProvenOutbound(bound, domain.PeerIdentity{7}, true); err != nil {
+		if _, err := store.noteProvenOutbound(bound, domain.PeerIdentity{7}, endpointProtectionWanted(domain.ProtectedBindingPoolContact)); err != nil {
 			t.Fatalf("bind: %v", err)
 		}
 		clock.now = clock.now.Add(endpointBindingTTL + 24*time.Hour)

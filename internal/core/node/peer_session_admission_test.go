@@ -25,15 +25,15 @@ import (
 //
 // The two obligations pinned here are:
 //
-//   - §4.1 step 1 / §2.3 (spec lines 278-281, 1074): the strict MaxFrameLine
+//   - docs/protocol/datagram.md §4.1 step 1 and §2: the strict MaxFrameLine
 //     budget is an ADMISSION check. It has to refuse before anything is
 //     parsed, because the peer-session reader itself accepts up to
 //     maxResponseLineBytes (8 MiB) and a gate below protocol.ParseFrameLine
 //     lets a peer make this node decode eight megabytes of JSON per frame
 //     first;
-//   - §3.4 / §5 (spec lines 372-381): the datagram plane counts and parses the
-//     SAME bytes the wire delivered. A trimmed line under-charges the
-//     neighbour's byte budget by every byte of outside whitespace and hands
+//   - docs/protocol/datagram.md §3.5 and §5: the datagram plane counts and
+//     parses the SAME bytes the wire delivered. A trimmed line under-charges
+//     the neighbour's byte budget by every byte of outside whitespace and hands
 //     the strict parser something the wire never carried.
 
 // ---------------------------------------------------------------------------
@@ -147,7 +147,7 @@ func oversizeUnparseableDatagramLine(t *testing.T) string {
 }
 
 // ---------------------------------------------------------------------------
-// §4.1 step 1 — admission before any parsing
+// docs/protocol/datagram.md §4.1 step 1 — admission before any parsing
 // ---------------------------------------------------------------------------
 
 // TestPeerSessionRefusesOversizeDatagramBeforeParsing is the ordering test.
@@ -205,17 +205,19 @@ func unclassifiedOversizeLine(t *testing.T, realType string) string {
 	return line
 }
 
-// TestPeerSessionRefusesUnclassifiedOversizeLineBeforeParsing is the §4.1
-// step 1 obligation stated as the rule the budget really is: the wide
-// maxResponseLineBytes budget is earned by a POSITIVELY IDENTIFIED type that is
-// entitled to it, not granted by default to whatever the scan failed to read.
+// TestPeerSessionRefusesUnclassifiedOversizeLineBeforeParsing is the
+// docs/protocol/datagram.md §4.1 step 1 obligation stated as the rule the
+// budget really is: the wide maxResponseLineBytes budget is earned by a
+// POSITIVELY IDENTIFIED type that is entitled to it, not granted by default to
+// whatever the scan failed to read.
 //
 // The fixture parses as `ping` — a type the strict 128 KiB budget does not
 // cover — so before this rule the line was admitted, unmarshalled in full and
 // handed to the dispatcher: a neighbour hiding its `"type"` key behind a decoy
 // bought itself up to 8 MiB of JSON decoding per frame, which is exactly the
-// work §4.1 step 1 forbids it to be able to impose. The refusal now happens on
-// the bytes in hand, before protocol.ParseFrameLine is reached.
+// work docs/protocol/datagram.md §4.1 step 1 forbids it to be able to impose.
+// The refusal now happens on the bytes in hand, before protocol.ParseFrameLine
+// is reached.
 //
 // The mutation this kills: granting the wide budget to an unidentified line
 // (`!named → admit`) puts the frame back in the inbox.
@@ -290,8 +292,8 @@ func TestPeerSessionOversizeGateSurvivesTypeObfuscation(t *testing.T) {
 //
 //   - AMBIGUOUS is refused at ANY size. A line whose type only
 //     protocol.ParseFrameLine could resolve cannot be routed before the parse,
-//     so it must not be parsed at all (§4.1 step 1). This is what removes the
-//     residue branch rather than shrinking it;
+//     so it must not be parsed at all (docs/protocol/datagram.md §4.1 step 1).
+//     This is what removes the residue branch rather than shrinking it;
 //   - OVER BUDGET is a line past MaxFrameLine that did not name a type entitled
 //     to the wide response budget — including every type this node has never
 //     heard of, which is the closure finding 2 is about;
@@ -344,10 +346,10 @@ func TestPreParseFrameLineAdmissionHasThreeAnswers(t *testing.T) {
 	}
 }
 
-// TestStrictFrameLineBudgetCountsTheNewline pins the accounting unit of §2.3
-// on the shared predicate: the sender caps the frame INCLUDING the newline it
-// writes, so a receiver counting without it accepts one byte the writer would
-// have refused.
+// TestStrictFrameLineBudgetCountsTheNewline pins the accounting unit of
+// docs/protocol/datagram.md §2 on the shared predicate: the sender caps the
+// frame INCLUDING the newline it writes, so a receiver counting without it
+// accepts one byte the writer would have refused.
 func TestStrictFrameLineBudgetCountsTheNewline(t *testing.T) {
 	t.Parallel()
 
@@ -375,15 +377,17 @@ func TestStrictFrameLineBudgetCountsTheNewline(t *testing.T) {
 }
 
 // TestInboundOversizeDatagramIsASilentDropThatStillPays is the inbound half of
-// the §2.3 price rule: the same verdict the peer-session reader reaches, on the
-// reader that used to answer an over-long line by closing the connection.
+// the docs/protocol/datagram.md §2 price rule: the same verdict the
+// peer-session reader reaches, on the reader that used to answer an over-long
+// line by closing the connection.
 //
 // A neighbour that relays a frame did not write it, so the size of the line it
-// hands over is not misbehaviour it can be charged for (§4.4) — and on this
-// direction "charged" meant the strongest answer the node has: an error frame
-// and a tear-down. The refusal is now silent, the remainder is skipped so the
-// connection resynchronises on the next frame, and what the line costs is the
-// bytes it made this node read, billed to the plane's own §5 budget.
+// hands over is not misbehaviour it can be charged for
+// (docs/protocol/datagram.md §4.1) — and on this direction "charged" meant the
+// strongest answer the node has: an error frame and a tear-down. The refusal is
+// now silent, the remainder is skipped so the connection resynchronises on the
+// next frame, and what the line costs is the bytes it made this node read,
+// billed to the plane's own docs/protocol/datagram.md §5 budget.
 //
 // The controls are the whole safety of the rule: the claim buys the silence for
 // NOTHING but a datagram, and only where there is a budget to charge and a
@@ -407,11 +411,11 @@ func TestInboundOversizeDatagramIsASilentDropThatStillPays(t *testing.T) {
 		// MaxFrameLine plus the discard hands those last bytes over for free —
 		// and on this path the bytes are the entire price of the refusal.
 		if charged := datagramAdmissionStats(svc).AdmittedBytes; charged != uint64(len(oversize)) {
-			t.Fatalf("the §5 budget was charged %d bytes for a line of %d: an under-charged refusal is a load channel priced below cost",
+			t.Fatalf("the docs/protocol/datagram.md §5 budget was charged %d bytes for a line of %d: an under-charged refusal is a load channel priced below cost",
 				charged, len(oversize))
 		}
 		if score := banScoreForIP(svc, datagramTestPeerIP); score != 0 {
-			t.Fatalf("ban score = %d for an oversize datagram (§4.4)", score)
+			t.Fatalf("ban score = %d for an oversize datagram (docs/protocol/datagram.md §4.1)", score)
 		}
 
 		// The remainder was skipped, so the connection is still framed: the
@@ -427,10 +431,10 @@ func TestInboundOversizeDatagramIsASilentDropThatStillPays(t *testing.T) {
 
 	t.Run("a_stream_rather_than_a_frame_still_ends_the_connection", func(t *testing.T) {
 		svc, _, connID := newRoutableDatagramInboundFixture(t, domain.CapMeshDatagramV1)
-		// Never terminated, and far past the one frame of slack §2.3 can
-		// justify: at that point the peer is streaming, not framing, and the
-		// silent rule stops applying — otherwise the claim would buy an
-		// unbounded read.
+		// Never terminated, and far past the one frame of slack
+		// docs/protocol/datagram.md §2 can justify: at that point the peer is
+		// streaming, not framing, and the silent rule stops applying —
+		// otherwise the claim would buy an unbounded read.
 		stream := `{"type":"datagram","payload":"` + strings.Repeat("A", 3*protocol.MaxFrameLine)
 
 		if _, err := svc.readInboundCommandLine(newTestBufioReader(stream), connID); !errors.Is(err, errFrameTooLarge) {
@@ -460,8 +464,9 @@ func TestInboundOversizeDatagramIsASilentDropThatStillPays(t *testing.T) {
 	})
 
 	t.Run("no_layer_buys_nothing", func(t *testing.T) {
-		// No conveyor, so no §5 budget to move the cost onto — the same
-		// "no layer, no exemption" condition the command-limiter carve-out has.
+		// No conveyor, so no docs/protocol/datagram.md §5 budget to move the
+		// cost onto — the same "no layer, no exemption" condition the
+		// command-limiter carve-out has.
 		svc, _, connID := newDatagramInboundFixture(t, domain.CapMeshDatagramV1)
 		if svc.datagramLayer() != nil {
 			t.Fatal("precondition: this fixture must have no conveyor")
@@ -481,8 +486,8 @@ func TestInboundOversizeDatagramIsASilentDropThatStillPays(t *testing.T) {
 // which then either ends the connection or, for the one plane whose size rule is
 // silent, skips the line and reads on (readInboundCommandLine). Widening
 // maxCommandLineBytes without adding a gate would silently reopen on inbound
-// exactly the hole §2.3 closes on the peer-session reader, and this test is what
-// stops that from being quiet.
+// exactly the hole docs/protocol/datagram.md §2 closes on the peer-session
+// reader, and this test is what stops that from being quiet.
 func TestInboundCommandReaderIsTheStrictBudget(t *testing.T) {
 	t.Parallel()
 
@@ -510,7 +515,7 @@ func TestInboundCommandReaderIsTheStrictBudget(t *testing.T) {
 // asserted structurally, the same way command_scope_test asserts the dispatch
 // switch. Re-introducing strings.TrimSpace there is silent otherwise: every
 // frame still works, and only the datagram byte budget quietly starts counting
-// fewer bytes than the wire carried (§5).
+// fewer bytes than the wire carried (docs/protocol/datagram.md §5).
 func TestInboundReadLoopHandsOverTheWireLine(t *testing.T) {
 	t.Parallel()
 
@@ -545,7 +550,7 @@ func TestInboundReadLoopHandsOverTheWireLine(t *testing.T) {
 		calls++
 		argument, isIdent := call.Args[1].(*ast.Ident)
 		if !isIdent || argument.Name != "line" {
-			t.Errorf("handleConn passes %T to handleCommand instead of the wire line: the datagram byte budget of §5 is charged on those bytes", call.Args[1])
+			t.Errorf("handleConn passes %T to handleCommand instead of the wire line: the datagram byte budget of docs/protocol/datagram.md §5 is charged on those bytes", call.Args[1])
 		}
 		return true
 	})
@@ -555,7 +560,8 @@ func TestInboundReadLoopHandsOverTheWireLine(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// §3.4 / §5 — the plane counts and parses the bytes the wire carried
+// docs/protocol/datagram.md §3.5 and §5 — the plane counts and parses the bytes
+// the wire carried
 // ---------------------------------------------------------------------------
 
 // paddedDatagramWireLine returns a VALID datagram line padded with outside
@@ -580,15 +586,15 @@ func paddedDatagramWireLine(t *testing.T) (wire, trimmed string) {
 	return wire, trimmed
 }
 
-// TestOutboundSessionChargesTheDatagramBudgetOnTheWireLine is the §5 half of
-// finding 1 on the peer-session path.
+// TestOutboundSessionChargesTheDatagramBudgetOnTheWireLine is the
+// docs/protocol/datagram.md §5 half of finding 1 on the peer-session path.
 //
-// The admission budget of §5 is spent on the wire, so it has to be counted on
-// the wire. With the trimmed line reaching the layer, a peer pads a frame with
-// outside whitespace to just under MaxFrameLine and has almost none of it
-// charged — the byte budget stops bounding what the neighbour can push. The
-// assertion is on AdmittedBytes, which HandleInbound charges from len(Line)
-// before anything is decoded (§4.1 step 1).
+// The admission budget of docs/protocol/datagram.md §5 is spent on the wire, so
+// it has to be counted on the wire. With the trimmed line reaching the layer, a
+// peer pads a frame with outside whitespace to just under MaxFrameLine and has
+// almost none of it charged — the byte budget stops bounding what the neighbour
+// can push. The assertion is on AdmittedBytes, which HandleInbound charges from
+// len(Line) before anything is decoded (docs/protocol/datagram.md §4.1 step 1).
 func TestOutboundSessionChargesTheDatagramBudgetOnTheWireLine(t *testing.T) {
 	t.Parallel()
 
@@ -624,16 +630,17 @@ func TestInboundDispatchChargesTheDatagramBudgetOnTheWireLine(t *testing.T) {
 	}
 }
 
-// TestOutboundSessionKeepsTheDatagramRawLineIntact pins the §3.4 half: the
-// line the reader hands the strict parser is the one the wire delivered, byte
-// for byte, and no datagram field is lost on the way.
+// TestOutboundSessionKeepsTheDatagramRawLineIntact pins the
+// docs/protocol/datagram.md §3.5 half: the line the reader hands the strict
+// parser is the one the wire delivered, byte for byte, and no datagram field is
+// lost on the way.
 //
 // The observable is the conveyor rather than a Frame in the inbox, because the
-// reader no longer builds one: §4.1 step 1 puts the neighbour's budget before
-// any decoding, so a datagram is diverted to the ingress ahead of
-// protocol.ParseFrameLine. What that leaves to check is the same statement from
-// the other end — the strict parser accepted the padded WIRE line, and the
-// whole of it was charged.
+// reader no longer builds one: docs/protocol/datagram.md §4.1 step 1 puts the
+// neighbour's budget before any decoding, so a datagram is diverted to the
+// ingress ahead of protocol.ParseFrameLine. What that leaves to check is the
+// same statement from the other end — the strict parser accepted the padded
+// WIRE line, and the whole of it was charged.
 func TestOutboundSessionKeepsTheDatagramRawLineIntact(t *testing.T) {
 	t.Parallel()
 

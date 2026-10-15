@@ -18,8 +18,7 @@ import (
 // syncPeer and sendNoticeToPeer (one-shot dials). There is deliberately no
 // net.Conn-accepting helper on Service for this — the set of such methods is
 // frozen by scripts/enforce-netcore-boundary.sh. The reasoning and the list
-// of deliberate exclusions live in docs/refactoring/dht/05-rollout-metrics.md
-// §5.3.
+// of deliberate exclusions live in docs/metrics.md ("Transport totals").
 
 // TransportTrafficStats returns the cumulative transport byte counts.
 // Lock-free: the counters are atomics and startedAt is immutable. Reading

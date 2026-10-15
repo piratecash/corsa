@@ -12,14 +12,15 @@ import (
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
-// pipeline_routed.go is the routed fork of §4.1 — steps 5 to 11 — plus the
-// forwarding cycle shared with a locally created frame.
+// pipeline_routed.go is the routed fork of docs/protocol/datagram.md §4.1 —
+// steps 5 to 11 — plus the forwarding cycle shared with a locally created
+// frame.
 //
 // The routed plane is the only one with anti-replay and the only one with a
 // signature. It NEVER touches reverse state, and the unsigned planes never
-// touch its cache (§4.1).
+// touch its cache (docs/protocol/datagram.md §4.1).
 //
-// Reference: docs/protocol/datagram.md §4.1, §4.1.1, §4.4.
+// Reference: docs/protocol/datagram.md §4.1, §4.2, §4.4.
 
 // handleRouted runs steps 5..11 in the fixed order.
 func (p *Pipeline) handleRouted(ctx context.Context, arrival inboundFrame) InboundResult {
@@ -155,7 +156,8 @@ func (p *Pipeline) verifyRouted(
 	frame := arrival.frame
 	if !TTLWithinBudget(frame.TTL, frame.Auth.MaxTTL) {
 		// A stable-header violation every datagram transit is obliged to
-		// check, so it is one of the few ban-worthy refusals (§4.4).
+		// check, so it is one of the few ban-worthy refusals
+		// (docs/protocol/datagram.md §4.1).
 		return Deadlines{}, droppedWithBan(DropTTLBudget, fmt.Errorf(
 			"datagram: ttl %d exceeds signed max_ttl %d", frame.TTL, frame.Auth.MaxTTL)), true
 	}
@@ -203,13 +205,13 @@ var unconditionalTimingRefusals = map[DeadlineOutcome]DropReason{
 // with, or reports that the frame lives on.
 //
 // DeadlinesExpired is the one verdict that is NOT in the map, because it is not
-// a fact about the frame alone: §2.2 makes it a refusal of the send path — the
-// frame is alive, only the room reserved for writing it is gone — so it ends a
-// frame this node still has to write and says nothing about one addressed here.
-// Answering it uniformly in either direction is a bug either way round: refuse
-// everything and a live datagram is dropped at its destination, refuse nothing
-// and the frame is verified, reserved and walked before the writer queue turns
-// it away as backpressure.
+// a fact about the frame alone: docs/protocol/datagram.md §3.4 makes it a
+// refusal of the send path — the frame is alive, only the room reserved for
+// writing it is gone — so it ends a frame this node still has to write and says
+// nothing about one addressed here. Answering it uniformly in either direction
+// is a bug either way round: refuse everything and a live datagram is dropped
+// at its destination, refuse nothing and the frame is verified, reserved and
+// walked before the writer queue turns it away as backpressure.
 func timingRefusal(outcome DeadlineOutcome, fate routedFate) (DropReason, bool) {
 	if reason, refused := unconditionalTimingRefusals[outcome]; refused {
 		return reason, true
@@ -238,10 +240,10 @@ func (p *Pipeline) transitRouted(ctx context.Context, delivery routedDelivery) I
 		return dropped(DropTransitGate, nil)
 	}
 
-	// Rule 4 of §4.1.1: exactly ONE decrement, and only when forwarding
-	// somebody else's frame. It happens here and not inside forwardRouted,
-	// which is shared with the locally created path — the origin does not
-	// decrement, and the shared code must not be able to.
+	// Rule 4 of docs/protocol/datagram.md §4.2: exactly ONE decrement, and only
+	// when forwarding somebody else's frame. It happens here and not inside
+	// forwardRouted, which is shared with the locally created path — the origin
+	// does not decrement, and the shared code must not be able to.
 	forwarded, alive := forwardedFrame(delivery.frame)
 	if !alive {
 		return dropped(DropTTLExhausted, nil)
@@ -289,7 +291,8 @@ func transitResult(outcome SendOutcome) InboundResult {
 // reserveRefusal maps the two negative reservation outcomes. They are kept
 // apart because they say different things to an operator: a duplicate is the
 // cache doing its job on a racing second instance of one frame, while a
-// rejection is the cache out of room for this neighbour (§5).
+// rejection is the cache out of room for this neighbour
+// (docs/protocol/datagram.md §5).
 func reserveRefusal(result ReserveResult) InboundResult {
 	if result.Outcome() == ReserveDuplicate {
 		return dropped(DropReserveDuplicate, nil)
@@ -313,8 +316,8 @@ type forwardPlan struct {
 	firstHop PreferredFirstHops
 }
 
-// forwardRouted places a routed frame, running the cycle of §4.1 step 11 in the
-// normative order:
+// forwardRouted places a routed frame, running the cycle of
+// docs/protocol/datagram.md §4.1 step 11 in the normative order:
 //
 //	candidates → Reserve → publish → Commit | Release
 //
@@ -330,11 +333,12 @@ func (p *Pipeline) forwardRouted(ctx context.Context, plan forwardPlan) SendOutc
 	local := plan.incoming.IsLocal()
 
 	// One selection, one outcome vocabulary. The scheduler answers with the
-	// FULL §4.3 verdict — including `rejected(unsupported_dtype)` from the
-	// last-hop gate and `rejected(missing_capability)` from the role gate —
-	// and this path passes it straight through instead of flattening every
-	// negative answer into `no_route`, which would tell a sender to wait for a
-	// route when the destination has told us it cannot handle the type at all.
+	// FULL docs/protocol/datagram.md §4.4 verdict — including
+	// `rejected(unsupported_dtype)` from the last-hop gate and
+	// `rejected(missing_capability)` from the role gate — and this path passes
+	// it straight through instead of flattening every negative answer into
+	// `no_route`, which would tell a sender to wait for a route when the
+	// destination has told us it cannot handle the type at all.
 	job := sendJob{frame: plan.frame, incoming: plan.incoming, avoid: plan.avoid, firstHop: plan.firstHop}
 	selection := p.selectFor(ctx, job)
 	if !selection.publishable() {
@@ -355,10 +359,11 @@ func (p *Pipeline) forwardRouted(ctx context.Context, plan forwardPlan) SendOutc
 	placed := p.scheduler.dispatch(ctx, job, selection, p.forwardPublisher(plan))
 	if placed.Kind() != SendQueued {
 		// Every candidate refused AFTER the reservation: this is one of the
-		// Release branches of §4.1. The outcome itself is NOT rewritten —
-		// §4.3 wants `failed` here (a fallible branch before the enqueue) or
-		// the hop's own `rejected`, and never a `no_route` that would send the
-		// caller waiting for a route it already has.
+		// Release branches of docs/protocol/datagram.md §4.1. The outcome
+		// itself is NOT rewritten — docs/protocol/datagram.md §4.4 wants
+		// `failed` here (a fallible branch before the enqueue) or the hop's own
+		// `rejected`, and never a `no_route` that would send the caller waiting
+		// for a route it already has.
 		p.release(ctx, rsv)
 		return placed
 	}
@@ -381,9 +386,10 @@ func (p *Pipeline) forwardPublisher(plan forwardPlan) hopPublisher {
 	return func(ctx context.Context, candidate RouteCandidate) hopSendOutcome {
 		// nextHopEgress and NOT the candidate's channel: on this plane the
 		// scheduler picks a NEIGHBOUR and the transport picks the socket among
-		// that peer's gated connections (§4.3 item 3). There is no reverse record
-		// here to name a return path, so pinning would buy nothing and would cost
-		// the gated fall-back the emitter's walk exists for.
+		// that peer's gated connections (docs/protocol/datagram.md §4.4 item
+		// 3). There is no reverse record here to name a return path, so pinning
+		// would buy nothing and would cost the gated fall-back the emitter's
+		// walk exists for.
 		if !p.emit(ctx, nextHopEgress(candidate.NextHop()), plan.frame, plan.deadlines.SendUntil()) {
 			return hopFailedOutcome(errEnqueueRefused)
 		}
@@ -396,16 +402,16 @@ func (p *Pipeline) forwardPublisher(plan forwardPlan) hopPublisher {
 // there is no room for it, and in either case nothing was written and repeating
 // the SAME frame would be refused for the same reason.
 //
-// `failed` would be the wrong answer and not merely a coarser one: §4.3 reads it
-// as a fallible step of this node BEFORE the enqueue, worth repeating with a
-// backoff, and it does not license the transport fallback that `rejected` and
-// `no_route` do (see SendFailed).
+// `failed` would be the wrong answer and not merely a coarser one:
+// docs/protocol/datagram.md §4.4 reads it as a fallible step of this node
+// BEFORE the enqueue, worth repeating with a backoff, and it does not license
+// the transport fallback that `rejected` and `no_route` do (see SendFailed).
 func reserveRefusalOutcome(local bool, result ReserveResult) SendOutcome {
 	return SendOutcome{kind: SendRejected, local: local, err: result.Err()}
 }
 
 // release is the ONE place the layer gives a reservation back, so the branch
-// list of §4.1 can be read off the call sites.
+// list of docs/protocol/datagram.md §4.1 can be read off the call sites.
 //
 // The outcome is deliberately not read: BaseReplayCache.Release either drops the
 // record or reports a stale token as ok — that is the ABA guard, not a failure —
@@ -417,6 +423,7 @@ func (p *Pipeline) release(ctx context.Context, rsv ReservationToken) {
 }
 
 // sendDeadlineFor is the writer deadline of an UNSIGNED frame: the moment of
-// arrival plus queue_residence(control) (§4.2). It is computed locally
-// because there is no wire field for it and there cannot be one.
+// arrival plus queue_residence(control) (docs/protocol/datagram.md §4.3). It is
+// computed locally because there is no wire field for it and there cannot be
+// one.
 func sendDeadlineFor(receivedAt time.Time) time.Time { return ResponseSendDeadline(receivedAt) }

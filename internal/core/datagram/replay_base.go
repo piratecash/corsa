@@ -19,10 +19,11 @@ import (
 // immediately before the first mutating operation. Inserting on the early
 // probe would let an unauthenticated frame poison the cache and suppress the
 // genuine one; hence a key is only ever taken after the frame is proven
-// authentic and deliverable (§4.1).
+// authentic and deliverable (docs/protocol/datagram.md §4.1).
 //
 // The cache keeps its records in TWO indexes beside the key map, and each of
-// them answers exactly one question of §5 that the other cannot:
+// them answers exactly one question of docs/protocol/datagram.md §5 that the
+// other cannot:
 //
 //   - an EXPIRY HEAP ordered by the moment a record may be deleted, so "is
 //     anything removable" costs O(1) whatever the insertion order was;
@@ -34,7 +35,7 @@ import (
 // defects that walk had were anti-replay defects rather than slow paths — see
 // sweepExpiredLocked and evictOldestOfLocked.
 //
-// Reference: docs/refactoring/datagram-transport.md §2.2, §4.1, §5.
+// Reference: docs/protocol/datagram.md §2.3, §4.1, §5.
 
 const (
 	// DefaultBaseReplayCapacity bounds the live entry count. Matched to the
@@ -78,7 +79,7 @@ type BaseReplayCacheConfig struct {
 
 // BaseReplayCacheMetrics is the counter set of the base cache. Overflow in
 // particular has to be observable: a cache that silently refuses traffic
-// looks exactly like a network that lost it (§5, §9).
+// looks exactly like a network that lost it (docs/protocol/datagram.md §5).
 type BaseReplayCacheMetrics struct {
 	Reserved          uint64
 	Duplicates        uint64
@@ -98,9 +99,10 @@ type BaseReplayCacheMetrics struct {
 
 // baseHeldReservationGrace is how long past replay_until an UNCOMMITTED
 // reservation may still belong to a live operation: the whole hop budget of
-// the slowest class — queue residence plus write grace (§4.2). After it the
-// frame is long dead by Validity and no operation over this key can still be
-// running, so the record is a lost branch rather than a quarantine.
+// the slowest class — queue residence plus write grace
+// (docs/protocol/datagram.md §4.3). After it the frame is long dead by Validity
+// and no operation over this key can still be running, so the record is a lost
+// branch rather than a quarantine.
 //
 // The cache needs this watchdog because nothing else will ever come back for
 // the key: nothing survives a restart, and there is no retry owner outside the
@@ -193,12 +195,12 @@ type BaseReplayCache struct {
 	clock func() time.Time
 
 	entries map[domain.ReplayKey]*baseEntry
-	// owners is the fairness accounting of §5, keyed by the QUOTA OWNER and
-	// never by the arrival value. Two arrivals of one neighbour over two
-	// channels — a reconnect, or two parallel sessions — are ONE bucket, which
-	// is what stops a reconnect from renewing a neighbour's share of the cache;
-	// two neighbours presenting one name are two, because the name is not what
-	// anybody is billed by (ingressOwner).
+	// owners is the fairness accounting of docs/protocol/datagram.md §5, keyed
+	// by the QUOTA OWNER and never by the arrival value. Two arrivals of one
+	// neighbour over two channels — a reconnect, or two parallel sessions — are
+	// ONE bucket, which is what stops a reconnect from renewing a neighbour's
+	// share of the cache; two neighbours presenting one name are two, because
+	// the name is not what anybody is billed by (ingressOwner).
 	owners map[ingressOwner]ownerBucket
 	// expiry is a binary MIN-HEAP over removableFromLocked: the record that may
 	// be deleted soonest is always at index 0, whatever order the records
@@ -259,9 +261,10 @@ func (c *BaseReplayCache) Len() int {
 // holds — not its channel. Two arrivals of one neighbour over two channels
 // answer the same number, because they are one bucket (ingressOwner).
 //
-// The fairness rule of §5 reads the buckets directly (noisiestOwnerLocked); this
-// is the same number as one question, and its only callers are the tests of that
-// rule, which reach it through export_test.go. Caller holds c.mu.
+// The fairness rule of docs/protocol/datagram.md §5 reads the buckets directly
+// (noisiestOwnerLocked); this is the same number as one question, and its only
+// callers are the tests of that rule, which reach it through export_test.go.
+// Caller holds c.mu.
 func (c *BaseReplayCache) ownerLoadLocked(incoming IngressPeer) int {
 	return c.owners[incoming.owner()].count
 }
@@ -326,8 +329,9 @@ func (c *BaseReplayCache) Reserve(_ context.Context, key domain.ReplayKey, incom
 // What the node DID with the frame — forwarded it, delivered it locally,
 // refused it — is a fact about that one arrival, and the only reader this
 // memory ever has is the duplicate check, which drops the repeat on all three
-// alike. The counters of §10 are where the three outcomes are told apart, and
-// they are told apart there per FRAME rather than per surviving cache record.
+// alike. The counters (docs/rpc/datagram.md, `metrics`) are where the three
+// outcomes are told apart, and they are told apart there per FRAME rather than
+// per surviving cache record.
 func (c *BaseReplayCache) Commit(_ context.Context, rsv ReservationToken) MutationResult {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -354,9 +358,9 @@ func (c *BaseReplayCache) Commit(_ context.Context, rsv ReservationToken) Mutati
 // A stale token is a no-op reported as ok: by the time a late Release
 // arrives, the key may already belong to a newer reservation held by a
 // parallel handler of the same frame, and cancelling THAT one is the bug the
-// token exists to prevent (§4.1). A committed reservation is a no-op too —
-// its fate is already fixed, and dropping the key would re-open a frame the
-// node has already acted on.
+// token exists to prevent (docs/protocol/datagram.md §4.1). A committed
+// reservation is a no-op too — its fate is already fixed, and dropping the key
+// would re-open a frame the node has already acted on.
 func (c *BaseReplayCache) Release(_ context.Context, rsv ReservationToken) MutationResult {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -428,10 +432,11 @@ func (c *BaseReplayCache) lookupLocked(key domain.ReplayKey, now time.Time) (*ba
 // caller must be refused.
 //
 // Overflow is charged to the NOISIEST neighbour rather than flushed
-// globally (§5): a peer that filled the cache is refused itself, while a
-// quiet neighbour is admitted by evicting the oldest disposable record of
-// the noisy one. A global flush would let one peer erase everyone else's
-// anti-replay memory, which is the attack this rule exists to stop.
+// globally (docs/protocol/datagram.md §5): a peer that filled the cache is
+// refused itself, while a quiet neighbour is admitted by evicting the oldest
+// disposable record of the noisy one. A global flush would let one peer erase
+// everyone else's anti-replay memory, which is the attack this rule exists to
+// stop.
 //
 // "Noisiest" is decided per OWNER and never per arrival: a neighbour that
 // spreads its records over N reconnects and parallel sessions used to read as N
@@ -452,7 +457,8 @@ func (c *BaseReplayCache) makeRoomLocked(incoming IngressPeer, now time.Time) bo
 	if !ok {
 		// A full cache with no recorded load is an internal inconsistency, and
 		// the caller is refused either way — but a refusal nobody counts looks
-		// exactly like a network that lost the frame (§5).
+		// exactly like a network that lost the frame
+		// (docs/protocol/datagram.md §5).
 		c.metrics.RejectedCapacity++
 		return false
 	}

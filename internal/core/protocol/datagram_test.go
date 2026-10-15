@@ -357,9 +357,9 @@ func TestDatagramPayloadCapPerClass(t *testing.T) {
 	}
 }
 
-// TestMaxBulkDatagramFitsFrameLine is the size boundary of §2.3: a full
-// 64 KiB bulk payload must stay under MaxFrameLine once the line includes
-// its terminating newline.
+// TestMaxBulkDatagramFitsFrameLine is the size boundary of
+// docs/protocol/datagram.md §2.4: a full 64 KiB bulk payload must stay under
+// MaxFrameLine once the line includes its terminating newline.
 func TestMaxBulkDatagramFitsFrameLine(t *testing.T) {
 	d := newSignedDatagram(t)
 	d.Class = domain.DatagramClassBulk
@@ -386,8 +386,9 @@ func TestMaxBulkDatagramFitsFrameLine(t *testing.T) {
 		t.Fatalf("decoded payload = %d bytes, want %d", parsed.DecodedPayloadLen(), domain.DatagramBulkPayloadCap)
 	}
 
-	// The two measures of §2.3 are deliberately different quantities: the
-	// class ceiling counts decoded payload, budgets count the whole line.
+	// The two measures of docs/protocol/datagram.md §2.4 are deliberately
+	// different quantities: the class ceiling counts decoded payload, budgets
+	// count the whole line.
 	wireSize, err := parsed.WireFrameSize()
 	if err != nil {
 		t.Fatalf("WireFrameSize: %v", err)
@@ -439,9 +440,10 @@ func TestDatagramCloneIsDeep(t *testing.T) {
 }
 
 // nonCanonicalBase64 returns the SAME bytes spelled with non-zero trailing
-// padding bits — the second wire form §3.4 forbids. It searches the alphabet
-// instead of hard-coding a character so the helper states its own premise: a
-// spelling is only "second" if the permissive decoder maps both to one value.
+// padding bits — the second wire form docs/protocol/datagram.md §3.5 forbids.
+// It searches the alphabet instead of hard-coding a character so the helper
+// states its own premise: a spelling is only "second" if the permissive decoder
+// maps both to one value.
 func nonCanonicalBase64(t *testing.T, canonical string) string {
 	t.Helper()
 	const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
@@ -466,10 +468,11 @@ func nonCanonicalBase64(t *testing.T, canonical string) string {
 }
 
 // TestParseDatagramFrameRejectsNonCanonicalBase64 pins the canonical-form rule
-// of §3.4 on EVERY base64url field of the wire: one value has exactly one
-// spelling. The permissive decoder maps both spellings to the same bytes, so
-// without the strict decoder two different lines would produce one frame — and
-// two implementations would disagree on which one was signed.
+// of docs/protocol/datagram.md §3.5 on EVERY base64url field of the wire: one
+// value has exactly one spelling. The permissive decoder maps both spellings to
+// the same bytes, so without the strict decoder two different lines would
+// produce one frame — and two implementations would disagree on which one was
+// signed.
 func TestParseDatagramFrameRejectsNonCanonicalBase64(t *testing.T) {
 	frame := newSignedDatagram(t)
 	line, err := MarshalDatagramFrame(frame)

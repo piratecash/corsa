@@ -18,10 +18,10 @@ import (
 var updateGoldenVector = flag.Bool("update-golden", false,
 	"rewrite testdata/"+datagramGoldenVectorFile+" from the reference frame")
 
-// datagramGoldenVectorFile is the artefact §3.2 ships with the spec. The name
-// carries the header version, so a bump means a NEW file rather than an edited
-// one: an implementation that still speaks the old version keeps a vector to
-// check itself against.
+// datagramGoldenVectorFile is the artefact docs/protocol/datagram.md §3.3 ships
+// with the spec. The name carries the header version, so a bump means a NEW
+// file rather than an edited one: an implementation that still speaks the old
+// version keeps a vector to check itself against.
 const datagramGoldenVectorFile = "datagram_vector_v2.json"
 
 // TestWriteDatagramGoldenVector regenerates the golden vector from the same
@@ -60,7 +60,7 @@ func TestWriteDatagramGoldenVector(t *testing.T) {
 	vector := datagramGoldenVector{
 		Description: "corsa datagram transport golden vector, header v2, base auth profile (av=1). " +
 			"The v1 envelope carried req_caps and ext; both are gone, and with them four transcript " +
-			"segments. Reference: docs/refactoring/datagram-transport.md 3.2.",
+			"segments. Reference: docs/protocol/datagram.md §3.2.",
 		Frame:         string(line),
 		Network:       testDatagramNetwork.String(),
 		PubKeyHex:     hex.EncodeToString(key.Public().(ed25519.PublicKey)),

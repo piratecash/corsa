@@ -16,7 +16,7 @@ import "time"
 //
 // Neither is an estimate of the network. A node sees its own neighbours and
 // nothing else, and the types say so rather than letting a reader mistake a
-// local sample for a population statistic (docs/refactoring/dht/05-rollout-metrics.md).
+// local sample for a population statistic (docs/rpc/routing.md, fetchRouteSummary).
 
 // CapabilityUsage counts how many live connections advertise one capability
 // and how many distinct peers those connections belong to.
@@ -133,4 +133,94 @@ type SessionOutcomeStats struct {
 	// implicit so the four numbers sum to Attempts and a gap is visible
 	// instead of silently absorbed.
 	ErrorsOther uint64
+}
+
+// LiveSessionKindCount is one bucket of the live-session census: how many
+// live sessions it holds and how many DISTINCT identities those sessions
+// belong to. Identities is bounded by Sessions (and so by the connection
+// count): two sessions to one peer are two sessions and one identity.
+type LiveSessionKindCount struct {
+	Sessions   int
+	Identities int
+}
+
+// LiveSessionKinds is a point-in-time gauge of the sessions live right now,
+// by kind and direction, built by a background walk and published whole. It
+// is the reading that resists the inflation the cumulative counters allow: a
+// peer that opens and drops sessions runs the cumulative counts up, but holds
+// no more LIVE sessions than it has connections, and its Identities stays one.
+//
+// READINESS IS A FIELD, not an inference from zeros: before the first walk
+// every count is legitimately zero, and so is the count on a node with no
+// sessions. Ready tells the two apart.
+type LiveSessionKinds struct {
+	Ready     bool
+	UpdatedAt time.Time
+
+	InboundV2      LiveSessionKindCount
+	InboundLegacy  LiveSessionKindCount
+	OutboundV2     LiveSessionKindCount
+	OutboundLegacy LiveSessionKindCount
+}
+
+// SessionKindStats counts this node's authenticated peer sessions by kind —
+// secure session v2 or legacy v1 — and by direction, plus the sessions whose
+// peer announced a protocol version below the one that brought v2. They are
+// the measurements the decision to switch the legacy path off is taken by: a
+// node that no longer accepts or dials legacy sessions cuts off exactly the
+// peers counted as legacy here.
+//
+// THE CUMULATIVE COUNTERS COUNT SESSIONS, NOT PEERS, AND ARE GAMEABLE. One peer that
+// opens many sessions runs them up, so they are a lower bound on activity, not
+// a count of distinct nodes. The decision to raise MinimumProtocolVersion must
+// rest on Live (the distinct-identity gauge below), on LegacyAtClaimedV2, and
+// on out-of-band data about which releases the network has taken — never on
+// the cumulative counts alone.
+//
+// Every cumulative counter is CUMULATIVE since StartedAt: reading resets
+// nothing, and two readings with the same StartedAt give the sessions
+// authenticated between them. A different StartedAt means the node restarted.
+//
+// A session is counted once, when its identity is authenticated: on accept in
+// completeInboundAuth when the v2 session_proof or the v1 auth_session
+// verifies, on dial in publishAndServeCMSession right before the
+// ConnectionManager slot is promoted — after the setup succeeded, the session
+// was registered and the pin let it through — so a dialled session whose setup
+// failed, whose slot was evicted under the setup or that the pin refused is
+// not counted. The one-shot
+// service dials (the sync and notice dials) never become sessions and are not
+// counted on the dialling side; their listener cannot tell them from a session
+// and counts them as inbound.
+type SessionKindStats struct {
+	// StartedAt is when accumulation began; the counters are in-memory.
+	StartedAt time.Time
+	// ReadAt is when the counters were loaded.
+	ReadAt time.Time
+
+	// InboundV2 and InboundLegacy are the accepted sessions of each kind.
+	InboundV2     uint64
+	InboundLegacy uint64
+	// OutboundV2 and OutboundLegacy are the dialled peer sessions of each
+	// kind.
+	OutboundV2     uint64
+	OutboundLegacy uint64
+	// HellosBelowSecureVersion is the accepted sessions whose hello announced
+	// a protocol version below the one that brought v2;
+	// WelcomesBelowSecureVersion is the dialled ones whose welcome did. The
+	// announced version is unsigned on a legacy session, so these say what
+	// peers claim, not what they run.
+	HellosBelowSecureVersion   uint64
+	WelcomesBelowSecureVersion uint64
+	// LegacyAtClaimedV2 is the legacy sessions, either direction, whose peer
+	// ANNOUNCED a version at or above the one that brought v2. These are the
+	// sessions that raising MinimumProtocolVersion would cut off even though
+	// the peer claims to speak v2: a secure handshake was expected and did not
+	// happen — DPI stripping the ALPN corsa/2, or a man in the middle. It is a
+	// claim, not proof, so it over- rather than under-counts the exposure.
+	LegacyAtClaimedV2 uint64
+
+	// Live is the point-in-time gauge of the sessions live now, with distinct
+	// identities per bucket. It is the reading to weigh for the switch-off,
+	// because the cumulative counts above can be run up by one busy peer.
+	Live LiveSessionKinds
 }

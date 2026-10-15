@@ -1767,7 +1767,7 @@ const (
 // here rather than derived by a second look at the same capabilities: the
 // branch that decides is the only place that knows which comparison settled
 // it, and a reason computed anywhere else is a second implementation of this
-// function waiting to disagree with it (docs/refactoring/dht/05-rollout-metrics.md).
+// function waiting to disagree with it.
 //
 // localCaps is what THIS node advertises. It is a third input rather than a
 // package variable because the reason must say WHOSE absence capped the

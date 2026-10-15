@@ -14,19 +14,19 @@ import (
 // Both exist because the previous rounds keyed channel-relative state on
 // domain.PeerIdentity and called that identity "the channel's label". It is not
 // one. On a session THIS node dialled, the identity is the welcome address the
-// remote chose for itself (§2.1, connauth: the challenge of that handshake
-// travels the other way), so a neighbour willing to write somebody else's
-// fingerprint into its welcome shared that node's reverse quota, and an answer
-// addressed to "the neighbour the question came from" was resolved through the
-// identity map and could leave over a DIFFERENT session belonging to the node
-// whose name was borrowed.
+// remote chose for itself (docs/protocol/datagram.md §2.2, connauth: the
+// challenge of that handshake travels the other way), so a neighbour willing to
+// write somebody else's fingerprint into its welcome shared that node's reverse
+// quota, and an answer addressed to "the neighbour the question came from" was
+// resolved through the identity map and could leave over a DIFFERENT session
+// belonging to the node whose name was borrowed.
 //
 // A channel is not an identity and the two must never be interchangeable, which
 // is why ChannelID is a type of its own with its own constructor rather than a
 // second meaning bolted onto domain.PeerIdentity — the same argument Label
 // (reverse_state.go) and AdmissionKey (admission.go) already make.
 //
-// Reference: docs/refactoring/datagram-transport.md §2.1.1, §4.2, §4.3, §7.
+// Reference: docs/protocol/datagram.md §2.2, §4.3, §4.4, §7.
 
 // ChannelID names ONE live transport channel of this node.
 //
@@ -140,8 +140,8 @@ func (a IngressAuthority) Proven() bool { return a == AuthorityProven }
 //
 // A ROUTED hand-over names a neighbour: the scheduler picked an identity, and
 // which of that peer's sockets carries the bytes is the transport's choice
-// (§4.3 — the candidate walk). Nothing on that plane remembers the socket, so
-// nothing on it can be misled about one.
+// (docs/protocol/datagram.md §4.4 — the candidate walk). Nothing on that plane
+// remembers the socket, so nothing on it can be misled about one.
 //
 // A CHANNEL hand-over names the socket itself, and it is the only correct shape
 // for every frame that belongs to ONE EXCHANGE the layer keeps state about: an

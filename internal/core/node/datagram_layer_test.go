@@ -20,9 +20,9 @@ import (
 // datagram_layer_test.go covers the wiring of the layer into node.Service:
 // the feature flag, the resolver adapters and the frame emitter.
 //
-// The two obligations of §9 that live here are line 1088 — the metadata a
-// candidate is ranked by must describe the connection the send would really
-// use — and line 1089 — the reachability probe must agree with the send over
+// The two obligations of docs/protocol/datagram.md §4.4 that live here are: the
+// metadata a candidate is ranked by must describe the connection the send would
+// really use, and the reachability probe must agree with the send over
 // an unchanged routing table.
 
 // ---------------------------------------------------------------------------
@@ -106,8 +106,9 @@ type datagramPeerConn struct {
 	// declared overrides the RAW handshake declarations of THIS connection.
 	// The zero value means the default below — both role names, no dtypes
 	// field. A test that needs two connections of one peer to disagree about
-	// what they advertise sets it, which is the shape §4.3 line 574 is about:
-	// the declarations belong to a connection, not to a peer.
+	// what they advertise sets it, which is the shape
+	// docs/protocol/datagram.md §4.4 is about: the declarations belong to a
+	// connection, not to a peer.
 	declared *netcore.HandshakeDeclarations
 	// inbound picks the tier.
 	inbound bool
@@ -122,10 +123,10 @@ type datagramPeerConn struct {
 // writes both halves from the same welcome frame.
 //
 // The `dtypes` half is stated for the same reason. An endpoint declares its
-// set explicitly (§6.1) and nothing is implied by its absence, so a fixture
-// that left the field out would be a peer that promised no handler — refused
-// by the LAST-HOP gate the moment it is the destination, again for a reason no
-// production endpoint can hit.
+// set explicitly (docs/protocol/datagram.md §6.1) and nothing is implied by its
+// absence, so a fixture that left the field out would be a peer that promised
+// no handler — refused by the LAST-HOP gate the moment it is the destination,
+// again for a reason no production endpoint can hit.
 func datagramPeerDeclarations() netcore.HandshakeDeclarations {
 	return netcore.HandshakeDeclarations{
 		AdvertisedNames: []domain.CapabilityName{
@@ -203,7 +204,7 @@ func installDatagramPeer(
 }
 
 // ---------------------------------------------------------------------------
-// Feature flag (§10)
+// Feature flag (docs/protocol/datagram.md §8)
 // ---------------------------------------------------------------------------
 
 // TestDatagramLayerAbsentWithFlagOff pins the rollout contract: with the flag
@@ -229,9 +230,9 @@ func TestDatagramLayerAbsentWithFlagOff(t *testing.T) {
 		t.Fatalf("localDTypeStrings = %v with the flag off, want nil", names)
 	}
 	// The inbound command limiter must keep covering datagrams: the exemption
-	// is paid for by the layer's own §5 budget, and there is no layer. The
-	// question is asked of the read loop's decision function, which is where the
-	// exemption is really taken.
+	// is paid for by the layer's own docs/protocol/datagram.md §5 budget, and
+	// there is no layer. The question is asked of the read loop's decision
+	// function, which is where the exemption is really taken.
 	authenticated := registerDatagramCommandConn(t, svc, domain.ConnID(8812), true)
 	if svc.frameLineExemptFromCommandLimit(authenticated, mustDatagramLine(t, newNodeDatagram(t, nil))) {
 		t.Fatal("datagram exempted from the command rate limiter without a layer to charge it")
@@ -273,9 +274,10 @@ func TestDatagramLayerBuiltWithFlagOn(t *testing.T) {
 		t.Fatal("the datagram layer was not constructed with the feature flag on")
 	}
 	// BOTH halves are on immediately and neither reads the type registry
-	// (§6): the endpoint name says the envelope is understood, the transit
-	// name says other people's frames will be forwarded, and PR-0's empty
-	// registry contradicts neither. What the registry decides is `dtypes`.
+	// (docs/protocol/datagram.md §6): the endpoint name says the envelope is
+	// understood, the transit name says other people's frames will be
+	// forwarded, and PR-0's empty registry contradicts neither. What the
+	// registry decides is `dtypes`.
 	if advertise := svc.localDatagramAdvertise(); !advertise.Endpoint || !advertise.Transit {
 		t.Fatalf("localDatagramAdvertise() = %+v with an empty registry, want endpoint and transit", advertise)
 	}
@@ -284,8 +286,9 @@ func TestDatagramLayerBuiltWithFlagOn(t *testing.T) {
 		t.Fatalf("localDatagramAdvertise() = %+v with the fixture kit, want endpoint and transit", advertise)
 	}
 	// The exemption is asked of an AUTHENTICATED connection: it is a swap for
-	// the layer's §5 budget, and that budget is charged on what the connection
-	// is billed to (see datagram_command_budget_test.go for the boundary).
+	// the layer's docs/protocol/datagram.md §5 budget, and that budget is
+	// charged on what the connection is billed to (see
+	// datagram_command_budget_test.go for the boundary).
 	authenticated := registerDatagramCommandConn(t, svc, domain.ConnID(8811), true)
 	if !svc.frameLineExemptFromCommandLimit(authenticated, mustDatagramLine(t, newNodeDatagram(t, nil))) {
 		t.Fatal("datagram not exempted from the command limiter although the layer charges its own budget")
@@ -372,10 +375,10 @@ func TestDatagramCapabilitiesHaveOneRepresentation(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// PeerMetadata (§4.3, §9 line 1088)
+// PeerMetadata (docs/protocol/datagram.md §4.4)
 // ---------------------------------------------------------------------------
 
-// TestDatagramPeerMetadataDescribesTheConnectionTheSendUses is §9 line 1088.
+// TestDatagramPeerMetadataDescribesTheConnectionTheSendUses.
 //
 // The peer has TWO connections: an inbound one claiming a newer protocol
 // version, and an outbound one claiming an older one. The send path prefers
@@ -448,10 +451,10 @@ func TestDatagramPeerMetadataRejectsStalledPeer(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Reachability (§4.3, §9 line 1089)
+// Reachability (docs/protocol/datagram.md §4.4)
 // ---------------------------------------------------------------------------
 
-// TestDatagramProbeAgreesWithSendOnUnchangedTable is §9 line 1089.
+// TestDatagramProbeAgreesWithSendOnUnchangedTable.
 //
 // Over a routing state that does not move between the two calls, the probe's
 // one-way guarantee must hold: "unreachable" means a send performed at the
@@ -480,8 +483,9 @@ func TestDatagramProbeAgreesWithSendOnUnchangedTable(t *testing.T) {
 		if err := json.Unmarshal(data, &answer); err != nil {
 			t.Fatalf("decode the reachability answer: %v", err)
 		}
-		// A negative answer always names a reason: §6.1 acts on
-		// unsupported_dtype and must not act on a plain missing route.
+		// A negative answer always names a reason:
+		// docs/protocol/datagram.md §6.1 acts on unsupported_dtype and must not
+		// act on a plain missing route.
 		if !answer.Reachable && answer.Reason == "" {
 			t.Fatalf("an unreachable answer named no reason: %s", data)
 		}
@@ -555,7 +559,7 @@ func newServiceDatagram(
 }
 
 // ---------------------------------------------------------------------------
-// FrameEmitter (§4.2, §5)
+// FrameEmitter (docs/protocol/datagram.md §4.3, §5)
 // ---------------------------------------------------------------------------
 
 // TestDatagramEmitterWritesTheLayersLine pins that the emitter hands the
@@ -635,8 +639,8 @@ func TestDatagramEmitterRefusesUnknownPeer(t *testing.T) {
 	}
 }
 
-// TestDatagramOutboundWriteCarriesClassWriteGrace pins §4.2 for every frame the
-// layer emits.
+// TestDatagramOutboundWriteCarriesClassWriteGrace pins
+// docs/protocol/datagram.md §4.3 for every frame the layer emits.
 //
 // Before OutboundFrame carried a class and a deadline, a frame could reach the
 // writer with the connection's 30 s default write deadline. The hop budget

@@ -11,7 +11,7 @@ import (
 )
 
 // admission_legacy_keys_test.go pins the two namespaces of an ACCEPTED legacy
-// connection (docs/refactoring/n1-legacy-residual.md §1): its auth_session can
+// connection (docs/protocol/network_security.md §13): its auth_session can
 // be relayed, so it is billed and owned by what this node observed of the
 // socket, it never shares a bucket with the identity it names, and it never
 // reads as proven.

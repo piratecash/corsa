@@ -6922,8 +6922,8 @@ func (w *Window) bubbleBody(message service.DirectMessage, isMine bool) layout.W
 // What it draws comes from the conversation cache rather than from the message,
 // because a reaction is not a property of a message: it is a fact by an actor,
 // merged from what this node decided and what peers stated, and it changes
-// without the message changing. See reactions.go and
-// docs/refactoring/reactions-protocol.md.
+// without the message changing. See reactions.go and docs/ui.md ("Shared UI
+// components", reactions).
 func (w *Window) bubbleReactions(message service.DirectMessage) layout.Widget {
 	reactions := w.messageReactions(message)
 	if len(reactions) == 0 {

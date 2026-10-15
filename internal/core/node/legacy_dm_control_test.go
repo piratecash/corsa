@@ -17,7 +17,7 @@ import (
 )
 
 // legacy_dm_control_test.go pins the dm_control half of N1
-// (docs/refactoring/n1-legacy-residual.md §3): a connection that does not
+// (docs/protocol/network_security.md §13): a connection that does not
 // declare the dm_control dtype says so about ITSELF, for as long as it lives.
 // It holds the batch that would have left over it; it does not forbid
 // reactions to the identity for an hour, and it does not stop the next pass

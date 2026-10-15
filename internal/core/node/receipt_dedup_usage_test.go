@@ -17,7 +17,7 @@ import (
 // domain behind a 50 000-key scan. A measuring instrument that stalls the thing
 // it measures is not a measurement.
 //
-// Reference: docs/refactoring/dht/13-measurements.md §4, §8.1.
+// Reference: docs/rpc/system.md (getResourceBreakdown).
 
 // TestStoredLenDoesNotRotate pins the second half of the problem: Len rotates
 // when a rotation is due, and rotation is a WRITE. An accounting read must not

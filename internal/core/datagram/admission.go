@@ -13,8 +13,8 @@ import (
 	"github.com/piratecash/corsa/internal/core/sessionv2"
 )
 
-// admission.go implements the TWO-STAGE per-neighbour admission of §4.1
-// steps 1 and 8.
+// admission.go implements the TWO-STAGE per-neighbour admission of
+// docs/protocol/datagram.md §4.1 steps 1 and 8.
 //
 // Why two stages and not one. Stage one — bytes and frames per second —
 // happens BEFORE any parsing, because a single budget checked after parsing
@@ -34,11 +34,12 @@ import (
 // it. One neighbour, one bucket, two call sites — and neither of them derives
 // the key from anything the neighbour wrote.
 //
-// Why ONE budget per neighbour and not one per class. §5 is explicit: the
-// budget is per neighbour and the classes DIVIDE it. A per-class budget is
-// self-defeating — the class is a field the sender writes, so a per-class
-// budget is a budget the sender can double by alternating the field. Nothing
-// in this file reads the class; that is not an omission, it is the rule.
+// Why ONE budget per neighbour and not one per class.
+// docs/protocol/datagram.md §5 is explicit: the budget is per neighbour and the
+// classes DIVIDE it. A per-class budget is self-defeating — the class is a
+// field the sender writes, so a per-class budget is a budget the sender can
+// double by alternating the field. Nothing in this file reads the class; that
+// is not an omission, it is the rule.
 //
 // Why never `src`. On the direction where an identity IS proven, it is proven
 // by the handshake before the first datagram arrives. `src` exists only in
@@ -59,7 +60,7 @@ import (
 // unexported field mean the caller has to say which namespace it is in, and
 // two namespaces can never collide on one bucket.
 //
-// Reference: docs/refactoring/datagram-transport.md §4.1, §5, §9.
+// Reference: docs/protocol/datagram.md §4.1, §5; docs/protocol/network_security.md §13.
 
 // AdmissionKeySpace names WHICH KIND of neighbour identifier a key carries.
 // It is part of the key, so a bucket belongs to exactly one namespace.
@@ -238,7 +239,7 @@ type AdmissionConfig struct {
 	// convention. Defaults to time.Now.
 	Clock func() time.Time
 	// Budget is the per-neighbour budget. Non-positive fields fall back to
-	// the §5 starting values.
+	// the docs/protocol/datagram.md §5 starting values.
 	Budget PeerBudget
 }
 
@@ -253,8 +254,9 @@ type AdmissionStats struct {
 	RefusedBytes uint64
 	// RefusedFrames counts frames refused for lack of frame budget.
 	RefusedFrames uint64
-	// AdmittedBytes counts the serialized bytes actually charged (§5:
-	// counted on the wire form, including base64 and the auth block).
+	// AdmittedBytes counts the serialized bytes actually charged
+	// (docs/protocol/datagram.md §5: counted on the wire form, including base64
+	// and the auth block).
 	AdmittedBytes uint64
 	// VerifiesCharged counts tokens spent immediately before a signature
 	// check.
@@ -294,7 +296,8 @@ type peerBuckets struct {
 	verifies   float64
 }
 
-// PeerAdmission is the per-neighbour admission controller of §5.
+// PeerAdmission is the per-neighbour admission controller of
+// docs/protocol/datagram.md §5.
 //
 // Locking contract: mu guards the bucket map and every bucket in it. The
 // critical section is arithmetic only — no I/O, no callbacks — which is what
@@ -324,7 +327,8 @@ type PeerAdmission struct {
 // path, which calls Admit directly with the key that direction can defend
 // (node/datagram_integration.go). Both stages are therefore the same
 // controller and the same bucket by construction, which is the whole content of
-// "the crypto budget is part of the neighbour's budget" (§5).
+// "the crypto budget is part of the neighbour's budget"
+// (docs/protocol/datagram.md §5).
 //
 // There are no identity-typed adapters over the two entry points any more.
 // They could only ever address the PROVEN namespace, which made them unusable

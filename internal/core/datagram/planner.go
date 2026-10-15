@@ -15,9 +15,10 @@ import (
 
 // planner.go is the scheduler itself: it turns a frame into an ordered list
 // of next hops, walks it until one accepts the frame, and reports an
-// outcome whose shape depends on WHOSE frame it is (§4.3).
+// outcome whose shape depends on WHOSE frame it is
+// (docs/protocol/datagram.md §4.4).
 //
-// Reference: docs/refactoring/datagram-transport.md §4.3, §6, §6.1.
+// Reference: docs/protocol/datagram.md §4.4, §6, §6.1.
 
 // ---------------------------------------------------------------------------
 // avoid_next_hop
@@ -167,10 +168,11 @@ func (p PreferredFirstHops) hoist(candidates []RouteCandidate) []RouteCandidate 
 // ---------------------------------------------------------------------------
 
 // sendJob is one scheduling call. It is UNEXPORTED on purpose: the layer has
-// exactly two entry points into §4.3 — Pipeline.SendLocal for a frame this
-// node created and Pipeline.HandleInbound for one passing through — and a
-// second, publicly reachable scheduler entry is how the vocabulary of §4.3
-// grew two implementations that disagreed.
+// exactly two entry points into docs/protocol/datagram.md §4.4 —
+// Pipeline.SendLocal for a frame this node created and Pipeline.HandleInbound
+// for one passing through — and a second, publicly reachable scheduler entry is
+// how the vocabulary of docs/protocol/datagram.md §4.4 grew two implementations
+// that disagreed.
 type sendJob struct {
 	// frame is the datagram to place. Its dst, dtype and route_policy drive
 	// every gate and the rotation key.
@@ -183,8 +185,9 @@ type sendJob struct {
 	// synchronous outcome or the frame is dropped silently.
 	incoming IngressPeer
 	// avoid is the optional avoid_next_hop exclusion. It reaches the
-	// SELECTION, not a post-filter: §4.3 applies it before direct-first and
-	// therefore before the explore rotation counts its modulus.
+	// SELECTION, not a post-filter: docs/protocol/datagram.md §4.4 applies it
+	// before direct-first and therefore before the explore rotation counts its
+	// modulus.
 	avoid AvoidedNextHop
 	// firstHop is the caller's guard policy: neighbours to try before the
 	// ranking's own order. Local sends only — a transited frame's first hop
@@ -192,10 +195,11 @@ type sendJob struct {
 	// this node's guard set into somebody else's path.
 	firstHop PreferredFirstHops
 	// readOnly marks a selection that will NOT publish: the early
-	// deliverability sieve of §4.1 step 7. §4.3 is explicit that the explore
-	// counter mutates on a SEND, so a read-only look must leave it alone —
-	// otherwise a transited explore frame would rotate twice on every hop,
-	// once for the sieve and once for the selection that follows it.
+	// deliverability sieve of docs/protocol/datagram.md §4.1 step 7.
+	// docs/protocol/datagram.md §4.4 is explicit that the explore counter
+	// mutates on a SEND, so a read-only look must leave it alone — otherwise a
+	// transited explore frame would rotate twice on every hop, once for the
+	// sieve and once for the selection that follows it.
 	readOnly bool
 }
 
@@ -207,7 +211,8 @@ func (j sendJob) isLocal() bool { return j.incoming.IsLocal() }
 // Outcome
 // ---------------------------------------------------------------------------
 
-// SendOutcomeKind is the four-way result of a local send (§4.3 item 4).
+// SendOutcomeKind is the four-way result of a local send
+// (docs/protocol/datagram.md §4.4 item 4).
 type SendOutcomeKind uint8
 
 const (
@@ -253,7 +258,8 @@ const (
 	// transport answers the same question differently. Here the layer's own way
 	// is intact and one local step failed; falling back would put the same
 	// ciphertext on the wire twice, once after the retry and once in a legacy
-	// envelope, which is the duplicate §8 says does not exist.
+	// envelope, which is the duplicate docs/protocol/datagram.md §4.4 says does
+	// not exist.
 	SendFailed
 )
 
@@ -275,10 +281,11 @@ func (k SendOutcomeKind) String() string { return enumName(sendOutcomeKindNames,
 // anything else that runs after the frame is in the queue — may rewrite a
 // queued outcome into a rejection.
 // This is enforced by the type rather than asked for in a comment, because
-// the migration's transport fallback (§8) fires on exactly `no_route |
-// rejected` under the assumption that nothing went out; a late `rejected`
-// after an enqueue would send the same ciphertext a second time in a legacy
-// envelope — a duplicate attempt that the contract says does not exist.
+// the migration's transport fallback (docs/protocol/datagram.md §4.4) fires on
+// exactly `no_route | rejected` under the assumption that nothing went out; a
+// late `rejected` after an enqueue would send the same ciphertext a second time
+// in a legacy envelope — a duplicate attempt that the contract says does not
+// exist.
 type SendOutcome struct {
 	err error
 	// attempted is who the walk actually offered the frame to, in order,
@@ -428,9 +435,9 @@ type SchedulerConfig struct {
 	ExploreCounters int
 }
 
-// Scheduler places datagrams on next hops (§4.3) and answers the two
-// read-only questions built on the same code: is a destination reachable,
-// and what would the plan be.
+// Scheduler places datagrams on next hops (docs/protocol/datagram.md §4.4) and
+// answers the two read-only questions built on the same code: is a destination
+// reachable, and what would the plan be.
 type Scheduler struct {
 	clock    func() time.Time
 	routes   RouteResolver
@@ -507,12 +514,14 @@ func NewScheduler(cfg SchedulerConfig) (*Scheduler, error) {
 }
 
 // selectFor is step 1 of a send: it turns a frame into the ordered candidate
-// list §4.3 prescribes, WITHOUT touching a single piece of state.
+// list docs/protocol/datagram.md §4.4 prescribes, WITHOUT touching a single
+// piece of state.
 //
 // It is deliberately separate from dispatch, because the reservation of the
-// replay key stands between the two: §4.1 puts Reserve next to the first
-// mutating operation and after every decision that must not occupy state, and
-// "there are no candidates" is one of those decisions.
+// replay key stands between the two: docs/protocol/datagram.md §4.1 puts
+// Reserve next to the first mutating operation and after every decision that
+// must not occupy state, and "there are no candidates" is one of those
+// decisions.
 //
 // The selection is the WHOLE verdict, refusal included, and that is why it is
 // the only return value: this step never ends a send by itself. The variant
@@ -529,9 +538,9 @@ func (s *Scheduler) selectFor(ctx context.Context, job sendJob) candidateSelecti
 	return s.ordinaryCandidates(ctx, job.frame, opts)
 }
 
-// ordinaryCandidates builds the §4.3 list: the direct session first when it
-// passes its gates, then the ranked routing-table candidates, rotated when
-// the policy is explore.
+// ordinaryCandidates builds the docs/protocol/datagram.md §4.4 list: the direct
+// session first when it passes its gates, then the ranked routing-table
+// candidates, rotated when the policy is explore.
 func (s *Scheduler) ordinaryCandidates(
 	ctx context.Context,
 	frame protocol.DatagramFrame,
@@ -555,7 +564,7 @@ func (s *Scheduler) ordinaryCandidates(
 
 	// The ranked list learns whether the destination was already offered the
 	// frame here, so the two branches cannot both produce it and cannot both
-	// drop it (§4.3 item 2).
+	// drop it (docs/protocol/datagram.md §4.4 item 2).
 	opts.directTried = direct.present
 	ranked, refused := s.selector.rank(ctx, frame, s.routeHints(ctx, frame.Dst, opts), opts)
 	selection.refusal.merge(refused)
@@ -584,11 +593,11 @@ type directProbe struct {
 	present   bool
 }
 
-// directSessionCandidate applies step 1 of §4.3: the direct session goes
-// first, but ONLY after the same gates every other candidate faces. A live
-// session is not enough — today's file router sends directly only to peers
-// advertising file_transfer_v1, and an ungated direct branch would quietly
-// lose that check.
+// directSessionCandidate applies step 1 of docs/protocol/datagram.md §4.4: the
+// direct session goes first, but ONLY after the same gates every other
+// candidate faces. A live session is not enough — today's file router sends
+// directly only to peers advertising file_transfer_v1, and an ungated direct
+// branch would quietly lose that check.
 //
 // The exclusions run BEFORE the lookup: avoid_next_hop must cover the
 // direct branch, and a frame must never be handed back to the neighbour it
@@ -623,9 +632,10 @@ func (s *Scheduler) routeHints(ctx context.Context, dst domain.PeerIdentity, opt
 	// A panic in the node's resolver becomes NO HINTS, which is the answer the
 	// seam already defines for a destination with no route: the direct branch
 	// has already run and keeps whatever it found, and a frame left without
-	// candidates ends as `no_route` — an outcome §4.3 makes every caller
-	// handle. It is deliberately not an empty-and-therefore-fatal case: this
-	// runs on the session reader, which serves every other peer as well.
+	// candidates ends as `no_route` — an outcome docs/protocol/datagram.md §4.4
+	// makes every caller handle. It is deliberately not an
+	// empty-and-therefore-fatal case: this runs on the session reader, which
+	// serves every other peer as well.
 	site := hookSite{hook: "CachedRoutes", peer: dst}
 	call := func() []RouteHint { return s.routes.CachedRoutes(ctx, dst) }
 	if opts.incomingPeer.IsLocal() {
@@ -654,8 +664,9 @@ func (s *Scheduler) lookupDirectSession(
 // failure parks the frame until the application times out, even though a
 // working second next hop was available right away.
 //
-// The outcome of an unsuccessful walk distinguishes two situations that §4.3
-// treats differently, and merging them mistreats both:
+// The outcome of an unsuccessful walk distinguishes two situations that
+// docs/protocol/datagram.md §4.4 treats differently, and merging them mistreats
+// both:
 //
 //   - admitted candidates existed and none took the frame: a temporary local
 //     failure. Not `rejected` — the gate refusal of some OTHER peer says
@@ -706,8 +717,8 @@ func (s *Scheduler) dispatch(
 			Str("dtype", job.frame.DType.String()).
 			// Which plane offered the hop that refused, and on what evidence.
 			// Without it a journal of refusals cannot say whether one plane is
-			// producing hops the other would not have — the question §1 of the
-			// step exists to make answerable.
+			// producing hops the other would not have — the question route
+			// attribution exists to make answerable.
 			Str("route_attribution", candidate.attribution.String()).
 			Str("outcome", outcome.Kind().String()).
 			Msg("datagram: next hop refused the frame, trying next candidate")

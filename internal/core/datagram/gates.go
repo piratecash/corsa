@@ -5,26 +5,26 @@ import (
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
-// gates.go holds the ROLE gate of §6 and the candidate filter it implies: may
-// this peer be an endpoint of the plane at all, and may it forward somebody
-// else's frame.
+// gates.go holds the ROLE gate of docs/protocol/datagram.md §6 and the
+// candidate filter it implies: may this peer be an endpoint of the plane at
+// all, and may it forward somebody else's frame.
 //
 // THE PATH-WIDE GATES ARE GONE — first the tuple-gate over (av, ext.v), then
 // the `req_caps` name gate that outlived it. Both made every relay a judge of
 // the endpoint protocol: a frame naming a capability its relay had never heard
 // of was refused mid-path, so a protocol released after a node could not travel
 // through it. That is the opposite of what a stable envelope is for. What
-// remains is a peer's own role — the two capabilities of §6 — and the endpoint
-// gate over `dtype`, which only the hop handing the frame to its destination
-// applies.
+// remains is a peer's own role — the two capabilities of
+// docs/protocol/datagram.md §6 — and the endpoint gate over `dtype`, which only
+// the hop handing the frame to its destination applies.
 //
-// Reference: docs/protocol/datagram.md §4.1 step 3, §4.3, §6.
+// Reference: docs/protocol/datagram.md §4.1 step 3, §4.4, §6.
 
-// The two role capabilities of §6, in the layer's own name type. They are
-// CONVERSIONS of the typed domain constants and never literals: the node builds
-// its role advertisement from domain.Capability while this layer gates on
-// domain.CapabilityName, and a second spelling of the same wire name would
-// eventually disagree with the first.
+// The two role capabilities of docs/protocol/datagram.md §6, in the layer's own
+// name type. They are CONVERSIONS of the typed domain constants and never
+// literals: the node builds its role advertisement from domain.Capability while
+// this layer gates on domain.CapabilityName, and a second spelling of the same
+// wire name would eventually disagree with the first.
 const (
 	// CapabilityDatagramV1 means the node understands the envelope and can
 	// be an ENDPOINT: accept datagrams addressed to it and send its own.
@@ -72,7 +72,7 @@ func (a AdvertisedCapabilities) Has(name domain.CapabilityName) bool {
 }
 
 // ---------------------------------------------------------------------------
-// Candidate filter (§4.3, §6)
+// Candidate filter (docs/protocol/datagram.md §4.4, §6)
 // ---------------------------------------------------------------------------
 
 // CandidateRole is the role a peer would play for this frame. It is DERIVED
@@ -151,9 +151,9 @@ func (d CandidateDecision) Missing() (domain.CapabilityName, bool) {
 	return d.missing, true
 }
 
-// AdmitCandidate is the ROLE filter of §6 as a pure function of the names a
-// candidate advertises. The rule lives here so the scheduler and the
-// reachability probe apply ONE implementation.
+// AdmitCandidate is the ROLE filter of docs/protocol/datagram.md §6 as a pure
+// function of the names a candidate advertises. The rule lives here so the
+// scheduler and the reachability probe apply ONE implementation.
 //
 // Two checks, and deliberately no third:
 //
@@ -161,7 +161,7 @@ func (d CandidateDecision) Missing() (domain.CapabilityName, bool) {
 //     and closes the connection;
 //  2. mesh_datagram_transit_v1 unless the candidate IS the dst — an
 //     endpoint-only client must be able to receive what is addressed to it
-//     without ever claiming to relay (§6).
+//     without ever claiming to relay (docs/protocol/datagram.md §6).
 //
 // Both names describe what the PEER is on this plane, not what the frame
 // carries. The gate that used to read the frame — every name from `req_caps`,

@@ -92,6 +92,18 @@ func failedDial(err error, count func(*secureSessionStore)) cmFailureKind {
 	}
 }
 
+// failedLegacyRefusal is a failedDial whose error is a refusal by pin. Such a
+// refusal is not charged to the address (no cooldown), so after replacing the
+// slot the manager picks the same peer again: its own reactions are done once
+// the replacement slot has made its first attempt.
+func failedLegacyRefusal(err error, count func(*secureSessionStore)) cmFailureKind {
+	kind := failedDial(err, count)
+	kind.done = func(_ reactionFixture, attempts int64) bool {
+		return attempts >= reconnectMaxRetries+2
+	}
+	return kind
+}
+
 // failedSetup is the kind whose attempts open a session that then fails its
 // setup: the far end of each session is closed before the manager hands it
 // to the node, so initPeerSession fails on its first request.
@@ -147,8 +159,10 @@ func deadOutboundSession(t *testing.T, f reactionFixture) *peerSession {
 func cmFailureKinds() map[string]cmFailureKind {
 	nothing := func(*secureSessionStore) {}
 	return map[string]cmFailureKind{
-		"downgrade refused":       failedDial(fmt.Errorf("%w: contract", errLegacyRefusedV2Bound), (*secureSessionStore).noteEndpointRefusal),
-		"identity pinned to v2":   failedDial(fmt.Errorf("%w: contract", errLegacyRefusedPinned), (*secureSessionStore).noteIdentityRefusal),
+		"downgrade refused":       failedLegacyRefusal(fmt.Errorf("%w: contract", errLegacyRefusedV2Bound), (*secureSessionStore).noteEndpointRefusal),
+		"identity pinned to v2":   failedLegacyRefusal(fmt.Errorf("%w: contract", errLegacyRefusedPinned), (*secureSessionStore).noteIdentityRefusal),
+		"v1 dial held":            failedLegacyRefusal(fmt.Errorf("%w: contract", errLegacyRefusedBackoff), (*secureSessionStore).noteLegacyDialHeld),
+		"v2 retry held":           failedLegacyRefusal(fmt.Errorf("%w: contract", errV2RetryHeld), (*secureSessionStore).noteDialHeldByV2Retry),
 		"pin store full":          failedDial(errPinStoreFull, nothing),
 		"binding not written":     failedDial(fmt.Errorf("secure session store: %w", errors.New("disk full")), nothing),
 		"incompatible protocol":   failedDial(fmt.Errorf("%w: contract", errIncompatibleProtocol), nothing),
@@ -170,7 +184,7 @@ func TestTheConnectionManagersReactionToAFailedDialNeverUndoesProtection(t *test
 			peer, _ := sessionv2test.NewProvenPeer(t)
 			f := reactionFixture{svc: svc, bound: domain.PeerAddress(endpoint), peer: peer}
 			bound, id := f.bound, peer.Identity
-			if err := store.noteProvenOutbound(bound, id, false); err != nil {
+			if _, err := store.noteProvenOutbound(bound, id, endpointProtectionNone()); err != nil {
 				t.Fatalf("bind: %v", err)
 			}
 

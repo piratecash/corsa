@@ -2161,15 +2161,15 @@ func (s *Service) handleRoutesUpdate(sender routingSender, senderAddress domain.
 		return
 	}
 	// Route-quarantine gate (top-level). Per
-	// docs/refactoring/route-withdrawal-grace-period.md a peer in route
+	// docs/protocol/network_security.md §13 a peer in route
 	// quarantine MUST be silently dropped from EVERY routing-plane
 	// receive path, not just from applyAnnounceEntries. The
 	// applyAnnounceEntries gate alone is insufficient here: if the
 	// quarantined peer reconnects, this session's
 	// HasReceivedBaseline() is false, so the baseline gate below
 	// would otherwise reply with SendRequestResync — that's outbound
-	// routing-control traffic toward a quarantined peer, which the
-	// design doc explicitly forbids. Drop the frame and DO NOT
+	// routing-control traffic toward a quarantined peer, and answering
+	// would let that peer drive our announce loop. Drop the frame and DO NOT
 	// create AnnouncePeerState for the peer either, so quarantine
 	// produces a clean "as if peer was never heard from" state.
 	if s.isSubjectInRouteQuarantine(sender.penalty) {
@@ -2438,8 +2438,8 @@ func (s *Service) handleRouteAnnounceV3(sender routingSender, senderAddress doma
 	// handleRoutesUpdate above. See that comment for the rationale:
 	// the delta/epoch baseline branch below can emit SendRequestResync
 	// back to the peer, which is outbound routing-control traffic
-	// toward a quarantined peer and explicitly forbidden by
-	// docs/refactoring/route-withdrawal-grace-period.md. We also do
+	// toward a quarantined peer — the very peer whose routing input
+	// we have stopped trusting. We also do
 	// NOT touch AnnouncePeerState (no GetOrCreate, no ObserveV3Epoch)
 	// so the quarantine window leaves no per-peer routing state
 	// residue.

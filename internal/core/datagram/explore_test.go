@@ -8,12 +8,12 @@ import (
 	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 )
 
-// explore_test.go states the rotation guarantee of §4.3 exactly as the spec
-// states it — no stronger. Consecutive explore sends of ONE key walk the
-// candidates round-robin under TWO conditions at once: no other send of the
-// same key in between, and an unchanged ordered candidate set. Everything
-// else legally degrades to decorrelation, and these tests pin the
-// degradation instead of denying it.
+// explore_test.go states the rotation guarantee of
+// docs/protocol/datagram.md §4.4 exactly as the spec states it — no stronger.
+// Consecutive explore sends of ONE key walk the candidates round-robin under
+// TWO conditions at once: no other send of the same key in between, and an
+// unchanged ordered candidate set. Everything else legally degrades to
+// decorrelation, and these tests pin the degradation instead of denying it.
 
 // exploreFixture builds a destination reachable only through K relays —
 // no direct session, because the direct path is not part of the rotation.
@@ -43,9 +43,10 @@ func exploreSend(t *testing.T, fixture *schedFixture, dst domain.PeerIdentity, m
 	// built by fixture.transit out of a real receive path — this is the test's
 	// instruction about which path to take, and nothing more.
 	if via := mutation.via; !via.IsZero() {
-		// A transited frame rotates the SAME counter (§4.3): the public entry
-		// for it is HandleInbound, and the hop it reached shows up in the
-		// emitter journal rather than in a synchronous outcome.
+		// A transited frame rotates the SAME counter
+		// (docs/protocol/datagram.md §4.4): the public entry for it is
+		// HandleInbound, and the hop it reached shows up in the emitter journal
+		// rather than in a synchronous outcome.
 		fixture.sender.reset()
 		result := fixture.transit(t, via, dst, withExplore, withDType(mutation.dtype))
 		if result.Outcome() != InboundForwarded {
@@ -345,9 +346,10 @@ func TestExploreKeyIncludesTheDType(t *testing.T) {
 	}
 }
 
-// TestAvoidNextHopShrinksTheRotationSet is the exact observable §4.3 names for
-// "the exclusion is applied BEFORE direct-first": the rotation index is taken
-// modulo K, and K must be the size of the set the send may actually use.
+// TestAvoidNextHopShrinksTheRotationSet is the exact observable
+// docs/protocol/datagram.md §4.4 names for "the exclusion is applied BEFORE
+// direct-first": the rotation index is taken modulo K, and K must be the size
+// of the set the send may actually use.
 //
 // With the exclusion applied as a filter BEHIND the selection, K still counted
 // the excluded hop — so consecutive retries of the same key could land on the

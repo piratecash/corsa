@@ -139,7 +139,7 @@ func TestParseDatagramRejects(t *testing.T) {
 		{"auth not an object", buildDatagramJSON(fragType, fragVersion, fragModeRouted, fragClassControl,
 			fragSrc, fragDst, fragTTL, fragPolicyBest, fragDType, fragPayload, `"auth":"signed"`), ErrDatagramMalformed},
 		// A key that is not base64url at all is refused by the encoding gate,
-		// before there is anything to fingerprint or verify (§9, public key).
+		// before there is anything to fingerprint or verify.
 		{"pubkey not base64url", buildDatagramJSON(fragType, fragVersion, fragModeRouted, fragClassControl,
 			fragSrc, fragDst, fragTTL, fragPolicyBest, fragDType, fragPayload,
 			authFragment("1", "not*base64url!", testDatagramSalt, "10", "1780000000", testDatagramSig)), ErrDatagramEncoding},
@@ -205,10 +205,11 @@ func TestParseDatagramRejects(t *testing.T) {
 
 // TestParseDatagramReadsVersionBeforeTheClosedFieldSet pins the ORDER of two
 // rejects whose price to the sender differs. A header version this build does
-// not implement is dropped without forwarding and WITHOUT ban points (§2),
-// while an unknown key under the implemented version is a violation of the
-// stable header and IS charged (§3.4, §4.4). The closed key set is therefore
-// the key set of a KNOWN version: judging it before `v` is read turns a lawful
+// not implement is dropped without forwarding and WITHOUT ban points
+// (docs/protocol/datagram.md §2), while an unknown key under the implemented
+// version is a violation of the stable header and IS charged
+// (docs/protocol/datagram.md §3.5, §4.1). The closed key set is therefore the
+// key set of a KNOWN version: judging it before `v` is read turns a lawful
 // future extension into misbehaviour and punishes the neighbour that relayed
 // it.
 //
@@ -294,9 +295,9 @@ func TestParseDatagramReadsVersionBeforeTheClosedFieldSet(t *testing.T) {
 // a v2 number, so applying it to a v3 frame prices a lawful future structure as
 // ErrDatagramMalformed — which parseRefusal (datagram/pipeline.go) and
 // datagramBanWorthy (node) both read as a stable-header violation and charge ban
-// points for. The neighbour that handed the frame over did not write it, so what
-// the extension mechanism costs it must be a silent drop and nothing else (§2,
-// §4.4).
+// points for. The neighbour that handed the frame over did not write it, so
+// what the extension mechanism costs it must be a silent drop and nothing else
+// (docs/protocol/datagram.md §2, §4.1).
 //
 // The legs live in one fixture for the reason the field test states: a parser
 // that answered ErrDatagramUnknownVersion to every deep document would pass the
@@ -451,8 +452,9 @@ func TestParseDatagramIgnoresKeyOrder(t *testing.T) {
 }
 
 // The duplicate scan and encoding/json must agree on what "the same key" is,
-// or the two parsers diverge exactly the way §3.4 exists to prevent: one
-// verifies the signature over one spelling and routes the other.
+// or the two parsers diverge exactly the way docs/protocol/datagram.md §3.5
+// exists to prevent: one verifies the signature over one spelling and routes
+// the other.
 //
 // Invalid UTF-8 is where they part company unless the scan normalises: the
 // raw bytes 0x80 and the literal U+FFFD are different byte strings, while
@@ -509,9 +511,10 @@ func TestDuplicateScanKeepsDistinctKeysApart(t *testing.T) {
 }
 
 // The scan runs BEFORE authentication — before the signature, before
-// requireKnownFields — so its allocations are a pre-auth amplifier (§2.2). A
-// map per open object turns a 128 KiB frame of tiny objects into ~10k map
-// allocations that any unauthenticated peer can ask for.
+// requireKnownFields — so its allocations are a pre-auth amplifier
+// (docs/protocol/datagram.md §4.1). A map per open object turns a 128 KiB frame
+// of tiny objects into ~10k map allocations that any unauthenticated peer can
+// ask for.
 func TestDuplicateScanDoesNotAllocatePerObject(t *testing.T) {
 	var body strings.Builder
 	body.WriteString(`{"objects":[`)

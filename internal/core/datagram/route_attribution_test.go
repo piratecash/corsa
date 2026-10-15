@@ -9,11 +9,12 @@ import (
 	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 )
 
-// route_attribution_test.go covers the layer's half of step 02: the two axes
-// reach the candidate and the plan intact, and neither of them reaches the
-// ranking.
+// route_attribution_test.go covers the layer's half of route attribution: the
+// two axes reach the candidate and the plan intact, and neither of them reaches
+// the ranking.
 //
-// Reference: docs/refactoring/dht/02-route-source.md §4, §5.
+// Reference: docs/rpc/datagram.md (explainDatagramRoute, `route_source` and
+// `discovery_plane`).
 
 // planFor builds the read-only plan for one destination, which is the surface
 // an operator and the node's JSON both read.
@@ -56,14 +57,15 @@ func requireAttribution(
 	}
 }
 
-// TestOverlayDiscoveredDirectSessionKeepsBothFacts is the §5 criterion at the
+// TestOverlayDiscoveredDirectSessionKeepsBothFacts pins the attribution at the
 // layer's own surface, and it is about the branch that has no RouteHint at all.
 //
-// Step 1 of §4.3 promotes a live direct session ahead of the routing table. A
-// session opened because the overlay answered a lookup is BOTH: direct by
-// proof, overlay by discovery. The plan has to show both — the trust axis
-// alone would erase the overlay's contribution exactly where it is the whole
-// point, and the plane alone would deny that a live session is a live session.
+// Step 1 of docs/protocol/datagram.md §4.4 promotes a live direct session ahead
+// of the routing table. A session opened because the overlay answered a lookup
+// is BOTH: direct by proof, overlay by discovery. The plan has to show both —
+// the trust axis alone would erase the overlay's contribution exactly where it
+// is the whole point, and the plane alone would deny that a live session is a
+// live session.
 //
 // The mutation this kills: deriving one axis from the other — reporting `mesh`
 // for anything direct, or `announcement` for anything the overlay produced.
@@ -153,8 +155,8 @@ func TestRoutedHintAttributionSurvivesToThePlan(t *testing.T) {
 	requireAttribution(t, entry, domain.RouteSourceHopAck, domain.DiscoveryPlaneOverlay)
 }
 
-// TestDiscoveryPlaneDoesNotRankCandidates is the §4 boundary: this step adds
-// attribution, it does not move ranking.
+// TestDiscoveryPlaneDoesNotRankCandidates pins the boundary: attribution is
+// added, ranking does not move.
 //
 // Both directions are checked with the SAME topology and only the planes
 // swapped, so the assertion is about the plane and nothing else. Under a

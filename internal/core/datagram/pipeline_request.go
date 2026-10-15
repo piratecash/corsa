@@ -9,7 +9,8 @@ import (
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
-// pipeline_request.go is the request fork of §4.1 — steps 4 to 6.
+// pipeline_request.go is the request fork of docs/protocol/datagram.md §4.1 —
+// steps 4 to 6.
 //
 // The fork exists because the common conveyor breaks this plane: a request is
 // addressed by `dst` but travels with an answer slot attached, so the reverse
@@ -18,9 +19,10 @@ import (
 //
 // There is no auth stage here at all, therefore no anti-replay: a replay key
 // without a transcript does not exist. What protects the plane instead is the
-// reverse state, the probe budget and the per-neighbour limits (§4.1, §4.2).
+// reverse state, the probe budget and the per-neighbour limits
+// (docs/protocol/datagram.md §4.1, §4.3).
 //
-// Reference: docs/protocol/datagram.md §4.1, §4.1.1, §4.2, §4.4.
+// Reference: docs/protocol/datagram.md §4.1, §4.2, §4.3.
 
 // handleRequest runs steps 4..6.
 func (p *Pipeline) handleRequest(ctx context.Context, arrival inboundFrame) InboundResult {
@@ -93,13 +95,14 @@ func (p *Pipeline) answerLocally(
 }
 
 // forwardRequest is step 6: the transit gate, deliverability, and only then
-// the two-phase reservation of §4.2.
+// the two-phase reservation of docs/protocol/datagram.md §4.3.
 //
 // The order inside is normative: reserve the slot, fix the downstream, clamp
 // the ttl, decrement, publish. The clamp stands HERE, in the conveyor, and is
-// not implied by §4.1.1: this plane has no auth.max_ttl to check a budget
-// against, and without an explicit clamp an unsigned request with `ttl = 255`
-// would travel twenty-five times further than the reverse state is sized for.
+// not implied by docs/protocol/datagram.md §4.2: this plane has no auth.max_ttl
+// to check a budget against, and without an explicit clamp an unsigned request
+// with `ttl = 255` would travel twenty-five times further than the reverse
+// state is sized for.
 func (p *Pipeline) forwardRequest(
 	ctx context.Context,
 	arrival inboundFrame,
@@ -136,10 +139,10 @@ func (p *Pipeline) forwardRequest(
 		Dst:        destination,
 		DType:      arrival.frame.DType,
 		// The three facts of the arrival, kept apart because they answer three
-		// different questions (§4.2). The CHANNEL is where the answer goes back;
-		// the BUDGET KEY owns the slot, so the per-upstream quota survives the
-		// neighbour reconnecting on a fresh channel; the presented NAME is for
-		// the log and nothing else.
+		// different questions (docs/protocol/datagram.md §4.3). The CHANNEL is
+		// where the answer goes back; the BUDGET KEY owns the slot, so the
+		// per-upstream quota survives the neighbour reconnecting on a fresh
+		// channel; the presented NAME is for the log and nothing else.
 		//
 		// Answering any two of them with one value was the defect, twice over: the
 		// name addressed answers to whatever node the asker NAMED, and the channel
@@ -167,10 +170,10 @@ func (p *Pipeline) forwardRequest(
 	return dropped(DropForwardFailed, nil)
 }
 
-// requestForwardFrame applies the clamp and the single decrement of §4.1.1 to
-// a forwarded request. The bool is false when there is no budget left, which
-// the common part has already excluded — it is checked anyway so no caller can
-// underflow a uint8 into a full new life.
+// requestForwardFrame applies the clamp and the single decrement of
+// docs/protocol/datagram.md §4.2 to a forwarded request. The bool is false when
+// there is no budget left, which the common part has already excluded — it is
+// checked anyway so no caller can underflow a uint8 into a full new life.
 func requestForwardFrame(frame protocol.DatagramFrame) (protocol.DatagramFrame, bool) {
 	ttl, ok := ClampAndDecrement(frame.TTL)
 	if !ok {
@@ -191,10 +194,10 @@ func reverseReserveRefusal(result ReverseReserveResult) InboundResult {
 
 // emitAnswer builds and sends a response frame.
 //
-// Its shape is fixed by §2.1.1 and §4.4: mode = response, the request's label
-// echoed in dst, `src` = the address the question was ADDRESSED TO, because src
-// here is a logical subject and not the sender — no auth, no route_policy, and
-// ttl = defaultMaxHops whoever produced it.
+// Its shape is fixed by docs/protocol/datagram.md §2.2 and §4.2: mode =
+// response, the request's label echoed in dst, `src` = the address the question
+// was ADDRESSED TO, because src here is a logical subject and not the sender —
+// no auth, no route_policy, and ttl = defaultMaxHops whoever produced it.
 //
 // The send deadline is computed LOCALLY as arrival + queue_residence(control):
 // there is no wire field for it, and the node forming an answer knows nobody
@@ -207,14 +210,14 @@ func (p *Pipeline) emitAnswer(
 ) InboundResult {
 	// THE PAIRING IS CHECKED HERE TOO, not only where an answer arrives.
 	//
-	// §4.2 pairs an answer with its request by type: the answer's dtype must
-	// declare `answers_to` the request's. The receiving side already refuses a
-	// pair that does not hold — otherwise a formally valid answer of another
-	// protocol would take somebody else's single claimed slot — and this node,
-	// which PRODUCED the answer, was not asking the same question. A handler
-	// answering with a mispaired dtype therefore killed the exchange in both
-	// directions, permanently and repeatably for that (type, node) pair, while
-	// this node logged it as answered.
+	// docs/protocol/datagram.md §4.3 pairs an answer with its request by type:
+	// the answer's dtype must declare `answers_to` the request's. The receiving
+	// side already refuses a pair that does not hold — otherwise a formally
+	// valid answer of another protocol would take somebody else's single
+	// claimed slot — and this node, which PRODUCED the answer, was not asking
+	// the same question. A handler answering with a mispaired dtype therefore
+	// killed the exchange in both directions, permanently and repeatably for
+	// that (type, node) pair, while this node logged it as answered.
 	//
 	// The predicate is the same one pairingHolds uses, and the "unknown type,
 	// no check" rule is the same: a node cannot be asked to know pairs it never
@@ -261,14 +264,14 @@ func (p *Pipeline) answerPairs(answer, request domain.DType) bool {
 	return entry.AnswersRequest(request)
 }
 
-// sendLocalRequest is the origin half of §4.2: a request created here takes
-// its own reverse slot with the LOCAL upstream marker — a marker, never this
-// node's address, so the transit path and the local path do not mix in any
-// comparison.
+// sendLocalRequest is the origin half of docs/protocol/datagram.md §4.3: a
+// request created here takes its own reverse slot with the LOCAL upstream
+// marker — a marker, never this node's address, so the transit path and the
+// local path do not mix in any comparison.
 //
-// The origin does NOT decrement the ttl (§4.1.1 rule 4): the frame leaves for
-// the first hop with the full budget, which is what makes a maximum-length
-// round trip arrive with ttl = 1 rather than 0.
+// The origin does NOT decrement the ttl (docs/protocol/datagram.md §4.2 rule
+// 4): the frame leaves for the first hop with the full budget, which is what
+// makes a maximum-length round trip arrive with ttl = 1 rather than 0.
 func (p *Pipeline) sendLocalRequest(ctx context.Context, opts LocalSendOpts) SendOutcome {
 	frame := opts.Frame
 	header, err := NewDeliveryHeader(frame)
@@ -279,9 +282,10 @@ func (p *Pipeline) sendLocalRequest(ctx context.Context, opts LocalSendOpts) Sen
 	if !ok {
 		return failedOutcome(true, errors.New("datagram: local request without a label"))
 	}
-	// avoid_next_hop reaches the SELECTION, not a filter behind it: §4.3
-	// applies the exclusion before direct-first, so the excluded peer is
-	// invisible to the direct branch and to the explore modulus alike.
+	// avoid_next_hop reaches the SELECTION, not a filter behind it:
+	// docs/protocol/datagram.md §4.4 applies the exclusion before direct-first,
+	// so the excluded peer is invisible to the direct branch and to the explore
+	// modulus alike.
 	job := sendJob{
 		frame:    frame,
 		incoming: LocalIngress(),
@@ -317,10 +321,11 @@ func (p *Pipeline) sendLocalRequest(ctx context.Context, opts LocalSendOpts) Sen
 }
 
 // requestPublisher is the request plane's half of the candidate walk: phase 3
-// of §4.2 (the downstream is written into the taken slot BEFORE the frame is
-// published, so an answer cannot physically outrun the record) followed by the
-// enqueue. Phase 4 is the failure branch — the frame never left towards this
-// candidate, so the next one simply rewrites downstream.
+// of docs/protocol/datagram.md §4.3 (the downstream is written into the taken
+// slot BEFORE the frame is published, so an answer cannot physically outrun the
+// record) followed by the enqueue. Phase 4 is the failure branch — the frame
+// never left towards this candidate, so the next one simply rewrites
+// downstream.
 //
 // # Why the request is PINNED to the candidate's channel
 //
@@ -334,17 +339,18 @@ func (p *Pipeline) sendLocalRequest(ctx context.Context, opts LocalSendOpts) Sen
 //   - phase 3 is BEFORE the publication by definition. A channel learned from
 //     the emitter's return arrives after the frame is already in a write queue,
 //     which is the very race the two-phase record exists to close;
-//   - with the class queue of §5 in front of the writer — the production wiring
-//     — the socket is chosen on the far side of a lane the frame may sit in for
-//     seconds, so the enqueue call has no channel to report at all.
+//   - with the class queue of docs/protocol/datagram.md §5 in front of the
+//     writer — the production wiring — the socket is chosen on the far side of
+//     a lane the frame may sit in for seconds, so the enqueue call has no
+//     channel to report at all.
 //
 // So the layer decides, and the candidate is what it decides from. That is not
 // the name check coming back in a new spelling: a candidate describes ONE
-// CONCRETE CONNECTION and is gated as such (§4.3 line 574), the channel is this
-// node's own socket rather than anything the neighbour said about itself, and
-// the pin is binding on the emitter — a frame carrying a channel goes over that
-// channel or is refused (OutboundFrame.Channel), never over a second socket of
-// whatever peer answered to the name.
+// CONCRETE CONNECTION and is gated as such (docs/protocol/datagram.md §4.4),
+// the channel is this node's own socket rather than anything the neighbour said
+// about itself, and the pin is binding on the emitter — a frame carrying a
+// channel goes over that channel or is refused (OutboundFrame.Channel), never
+// over a second socket of whatever peer answered to the name.
 //
 // A candidate with no channel is refused instead. It means the resolver names no
 // connections, and the alternatives are a record with no return path or a record
@@ -377,12 +383,13 @@ func (p *Pipeline) requestPublisher(
 // a policy refusal: nothing about the route or the gates changed.
 var errReverseSlotLost = errors.New("datagram: the reverse slot is no longer owned by this send")
 
-// errEnqueueRefused names a write queue that did not CONFIRM the frame. §4.3
-// keeps it apart from `rejected` because repeating IS worth it, once the queue
-// drains — and not because the bytes are known to have stayed home: a queue
-// answers about admission, so a refusal read after the frame is already in it
-// can follow a completed write on a link that died afterwards. What makes the
-// repeat safe is the receiver's anti-replay cache, which drops the duplicate.
+// errEnqueueRefused names a write queue that did not CONFIRM the frame.
+// docs/protocol/datagram.md §4.4 keeps it apart from `rejected` because
+// repeating IS worth it, once the queue drains — and not because the bytes are
+// known to have stayed home: a queue answers about admission, so a refusal read
+// after the frame is already in it can follow a completed write on a link that
+// died afterwards. What makes the repeat safe is the receiver's anti-replay
+// cache, which drops the duplicate.
 var errEnqueueRefused = errors.New("datagram: the next hop's write queue refused the frame")
 
 // errCandidateWithoutChannel names a candidate the request plane cannot use: the

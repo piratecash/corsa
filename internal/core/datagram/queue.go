@@ -9,7 +9,7 @@ import (
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
-// queue.go implements the WEIGHTED class queue of §5.
+// queue.go implements the WEIGHTED class queue of docs/protocol/datagram.md §5.
 //
 // What it is and what it is NOT. This queue decides the ORDER in which the
 // layer hands frames on for queueing; it does not replace peerSession.sendCh
@@ -20,23 +20,25 @@ import (
 // belongs to netcore, and none of it reports back: the ticket travels one way
 // (netcore/write_ticket.go). Per-PEER fairness is therefore not
 // this queue's job either: each neighbour already has its own write queue.
-// The only fairness dimension here is the one §5 names, between CLASSES.
+// The only fairness dimension here is the one docs/protocol/datagram.md §5
+// names, between CLASSES.
 //
 // Why weighted and not strict priority. Strict priority means a permanent
 // control stream stops file transfer completely, and a permanent control
 // stream is cheap to produce. So control is served BEFORE bulk within its own
 // share, and bulk keeps a guaranteed minimum share of the dispatched bytes —
-// one quarter to start with (§5, §11.3).
+// one quarter to start with (docs/protocol/datagram.md §5).
 //
-// Why deficit round robin and why in BYTES. The share §5 promises is a share
-// of BUDGET, and §5 measures budget in serialized frame bytes — the same
-// quantity admission is charged in. Counting frames instead would hand bulk a
-// sixteenth of the bytes it was promised, because a bulk frame is ~16 times a
-// control frame on the wire. Deficit round robin gives the byte share exactly
-// and needs no timers: each lane accumulates its weight in bytes per round
-// and spends it on whole frames, carrying the remainder into the next round,
-// so a frame larger than one quantum is never starved and a lane that empties
-// banks nothing.
+// Why deficit round robin and why in BYTES. The share
+// docs/protocol/datagram.md §5 promises is a share of BUDGET, and
+// docs/protocol/datagram.md §5 measures budget in serialized frame bytes — the
+// same quantity admission is charged in. Counting frames instead would hand
+// bulk a sixteenth of the bytes it was promised, because a bulk frame is ~16
+// times a control frame on the wire. Deficit round robin gives the byte share
+// exactly and needs no timers: each lane accumulates its weight in bytes per
+// round and spends it on whole frames, carrying the remainder into the next
+// round, so a frame larger than one quantum is never starved and a lane that
+// empties banks nothing.
 //
 // Overflow contract, stated once so callers do not have to infer it:
 //
@@ -50,30 +52,31 @@ import (
 //   - a frame whose send deadline has already passed is refused on the way
 //     in and dropped on the way out. That is the interaction with
 //     `send_until`: the queue never hands the emitter a frame the writer
-//     would only throw away, and the writer checks again anyway (§4.2) —
-//     the two checks are deliberately redundant because queue residence is
-//     exactly what the deadline bounds;
+//     would only throw away, and the writer checks again anyway
+//     (docs/protocol/datagram.md §5) — the two checks are deliberately
+//     redundant because queue residence is exactly what the deadline bounds;
 //   - a frame REMOVED here is COUNTED and nothing more. The layer keeps no
 //     per-send record for a removal to close, so DroppedExpired is the whole
-//     of what a caller can learn about it (§10).
+//     of what a caller can learn about it.
 //
-// Reference: docs/protocol/datagram.md §4.2, §5, §9.
+// Reference: docs/protocol/datagram.md §4.3, §5.
 
 // QueuedFrame is one frame waiting for its turn, together with everything the
 // emitter needs and nothing it does not.
 type QueuedFrame struct {
 	// SendUntil is the deadline the writer re-checks before the socket
-	// write (§4.2). Zero means "no deadline", which is legal only for
-	// frames the layer creates outside the three modes' timing rules; every
-	// pipeline path sets it.
+	// write (docs/protocol/datagram.md §3.4). Zero means "no deadline", which
+	// is legal only for frames the layer creates outside the three modes'
+	// timing rules; every pipeline path sets it.
 	SendUntil time.Time
 	// Peer is the neighbour the frame is destined for.
 	Peer domain.PeerIdentity
 	// Frame is the datagram itself; its Class picks the lane.
 	Frame protocol.DatagramFrame
 	// Line is the serialized wire line the layer already produced. It travels
-	// with the frame so the writer does not serialize it a second time (§2.3,
-	// §5); a caller that has no line yet leaves it nil and only Bytes matters.
+	// with the frame so the writer does not serialize it a second time
+	// (docs/protocol/datagram.md §2.4, §5); a caller that has no line yet
+	// leaves it nil and only Bytes matters.
 	Line []byte
 	// Channel is the channel constraint of OutboundFrame, carried through the
 	// lane unchanged.
@@ -89,9 +92,9 @@ type QueuedFrame struct {
 	// the queue, the write grace and netcore.OutboundWrite all read ONE value.
 	Class domain.DatagramClass
 	// Bytes is the SERIALIZED size of the frame, the same quantity
-	// admission is charged in (§5). Callers that do not have it already can
-	// take it from MeasureFrame; the queue refuses to guess, because a
-	// guessed size is a wrong share.
+	// admission is charged in (docs/protocol/datagram.md §5). Callers that do
+	// not have it already can take it from MeasureFrame; the queue refuses to
+	// guess, because a guessed size is a wrong share.
 	Bytes int
 }
 
@@ -113,7 +116,7 @@ type QueueStats struct {
 	// have a lane for, or for a missing serialized size.
 	RefusedInvalid uint64
 	// DroppedExpired counts frames dropped on the way OUT: they waited past
-	// their send deadline (§4.2).
+	// their send deadline (docs/protocol/datagram.md §3.4).
 	DroppedExpired uint64
 	// ControlDepth and BulkDepth are the current per-lane frame counts.
 	ControlDepth int
@@ -130,8 +133,8 @@ type WeightedQueueConfig struct {
 	// Clock is the injectable time source, following the package
 	// convention. Defaults to time.Now.
 	Clock func() time.Time
-	// Caps are the §5 queue numbers. Non-positive fields fall back to the
-	// starting values.
+	// Caps are the docs/protocol/datagram.md §5 queue numbers. Non-positive
+	// fields fall back to the starting values.
 	Caps QueueCaps
 }
 
@@ -168,7 +171,8 @@ func (l *lane) full(item QueuedFrame) bool {
 	return len(l.items) >= l.maxFrames || l.bytes+item.Bytes > l.maxBytes
 }
 
-// WeightedQueue is the class-fair dispatch order of §5.
+// WeightedQueue is the class-fair dispatch order of
+// docs/protocol/datagram.md §5.
 //
 // Locking contract: mu guards the lanes and the round-robin cursor. Nothing
 // external is called while it is held — the queue only decides who is next — so
@@ -196,7 +200,7 @@ type WeightedQueue struct {
 // NewWeightedQueue builds the queue. Control is lane 0 and bulk is lane 1,
 // and the order is the contract: within a round the control lane is offered
 // its quantum first, which is what "control is served before bulk WITHIN its
-// share" means (§5).
+// share" means (docs/protocol/datagram.md §5).
 func NewWeightedQueue(cfg WeightedQueueConfig) *WeightedQueue {
 	caps := cfg.Caps.normalized(DefaultLimits().Queue)
 	clock := cfg.Clock
@@ -473,15 +477,16 @@ func (q *WeightedQueue) signalReady() {
 
 // expired reports whether a send deadline has passed. The deadline itself is
 // alive: the boundary belongs to the frame, exactly as it does for validity
-// (§2.2).
+// (docs/protocol/datagram.md §3.4).
 func expired(sendUntil, now time.Time) bool {
 	return !sendUntil.IsZero() && now.After(sendUntil)
 }
 
 // MeasureFrame returns the serialized size of a frame — the quantity both the
-// budget of §5 and this queue account in. It exists so a caller never has to
-// approximate: the number must be the wire size including base64 and the auth
-// block, and the only honest way to get it is to serialize.
+// budget of docs/protocol/datagram.md §5 and this queue account in. It exists
+// so a caller never has to approximate: the number must be the wire size
+// including base64 and the auth block, and the only honest way to get it is to
+// serialize.
 func MeasureFrame(frame protocol.DatagramFrame) (int, error) {
 	line, err := protocol.MarshalDatagramFrameLine(frame)
 	if err != nil {

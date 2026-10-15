@@ -6,11 +6,12 @@ import (
 	"github.com/piratecash/corsa/internal/core/domain"
 )
 
-// authorize.go is the authorization hook of §7 — the interface behind the
-// pipeline's requirement "authorize at dst == self BEFORE the replay key is
-// committed". Without it the migrations would hit an empty space: the file
-// transport has to ask its trust policy, receipts have to check the sender is
-// admissible and connected to the message they claim to acknowledge.
+// authorize.go is the authorization hook of docs/protocol/datagram.md §7 — the
+// interface behind the pipeline's requirement "authorize at dst == self BEFORE
+// the replay key is committed". Without it the migrations would hit an empty
+// space: the file transport has to ask its trust policy, receipts have to check
+// the sender is admissible and connected to the message they claim to
+// acknowledge.
 //
 // Three properties are load-bearing:
 //
@@ -21,11 +22,11 @@ import (
 //   - `reject` is a SILENT drop WITHOUT committing the replay key, so an
 //     authentic but untrusted sender cannot evict other people's records;
 //   - in request/response `header.src` is not authenticated — it is a
-//     one-shot label, not a sender (§2.1.1). The hook is not entitled to
-//     build a decision on it, and DeliveryHeader makes that structural: in
-//     those modes there is no accessor returning src as a sender. The
-//     authentic sender, if a type needs one, arrives signed INSIDE the
-//     payload; the neighbour that handed the frame over arrives as
+//     one-shot label, not a sender (docs/protocol/datagram.md §2.2). The hook
+//     is not entitled to build a decision on it, and DeliveryHeader makes that
+//     structural: in those modes there is no accessor returning src as a
+//     sender. The authentic sender, if a type needs one, arrives signed INSIDE
+//     the payload; the neighbour that handed the frame over arrives as
 //     IncomingPeer, with the level of proof behind it attached.
 //
 // THE FOURTH PROPERTY IS ABOUT IncomingPeer ITSELF, and it is enforced in TWO
@@ -46,13 +47,13 @@ import (
 //
 // The declaration is what decides, and NOT the presence of a hook in this file.
 // A hook that authenticates its sender from a signature in the payload — the
-// path §7 describes — reads nothing about the neighbour and must keep running on
-// every direction; inferring the requirement from the hook took exactly those
-// types off every session this node dialled.
+// path docs/protocol/datagram.md §7 describes — reads nothing about the
+// neighbour and must keep running on every direction; inferring the requirement
+// from the hook took exactly those types off every session this node dialled.
 //
-// Reference: docs/refactoring/datagram-transport.md §4.1, §7.
+// Reference: docs/protocol/datagram.md §4.1, §7.
 
-// AuthorizationOutcome is the two-way verdict of §7.
+// AuthorizationOutcome is the two-way verdict of docs/protocol/datagram.md §7.
 type AuthorizationOutcome uint8
 
 const (
@@ -113,7 +114,8 @@ func (d AuthorizationDecision) Err() error { return d.err }
 //   - it is called exactly once per local delivery, after the registry has
 //     admitted the mode and the class and before the handler;
 //   - an unknown dtype never reaches it at all: such a frame is dropped at
-//     the registry step and occupies no replay slot (§7).
+//     the registry step and occupies no replay slot
+//     (docs/protocol/datagram.md §7).
 type Authorizer interface {
 	Authorize(ctx context.Context, delivery DeliveryContext, payload []byte) AuthorizationDecision
 }
@@ -127,8 +129,9 @@ func (f AuthorizerFunc) Authorize(ctx context.Context, delivery DeliveryContext,
 }
 
 // authorizeLocalDelivery runs the hook of a registered type. A type WITHOUT a
-// hook is authorized trivially with `accept` (§7) — expressed here once, so
-// no call site has to remember it and none can decide it differently.
+// hook is authorized trivially with `accept` (docs/protocol/datagram.md §7) —
+// expressed here once, so no call site has to remember it and none can decide
+// it differently.
 //
 // It is a free function rather than a method of the pipeline because it is a
 // pure decision over its inputs: nothing it does depends on pipeline state,
@@ -160,13 +163,14 @@ func authorizeLocalDelivery(
 	})
 }
 
-// admitRegisteredFrame is the registry gate of §4.1 step 10 and of both
-// unsigned local branches: mode and class must be admissible for the type.
+// admitRegisteredFrame is the registry gate of docs/protocol/datagram.md §4.1
+// step 10 and of both unsigned local branches: mode and class must be
+// admissible for the type.
 //
-// It is what makes the demotion of §3.6 harmless: a receipt that lost its
-// auth block and arrived as `request` is refused here — before the handler,
-// before the authorization hook and before any reservation — because its type
-// declared `routed` only.
+// It is what makes the demotion of docs/protocol/datagram.md §3.7 harmless: a
+// receipt that lost its auth block and arrived as `request` is refused here —
+// before the handler, before the authorization hook and before any reservation
+// — because its type declared `routed` only.
 func admitRegisteredFrame(entry RegisteredType, mode domain.DatagramMode, class domain.DatagramClass) DropReason {
 	switch {
 	case !entry.AllowsMode(mode):

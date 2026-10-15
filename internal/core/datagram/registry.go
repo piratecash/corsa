@@ -13,23 +13,25 @@ import (
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
-// registry.go is the type registry of §7 — knowledge of the ENDPOINT, never a
-// condition of forwarding. Transit does not look into it at all, which is what
-// makes "new protocols without a network upgrade" true rather than
-// aspirational: an unknown dtype is relayed untouched, and at dst == self it is
-// a silent drop with a metric — the connection stays up and no ban is charged.
+// registry.go is the type registry of docs/protocol/datagram.md §7 — knowledge
+// of the ENDPOINT, never a condition of forwarding. Transit does not look into
+// it at all, which is what makes "new protocols without a network upgrade" true
+// rather than aspirational: an unknown dtype is relayed untouched, and at dst
+// == self it is a silent drop with a metric — the connection stays up and no
+// ban is charged.
 //
 // Two things are deliberately NOT stored here:
 //
-//   - whether auth is mandatory. It follows from `mode` (§2.1) and is
-//     identical for every type; storing it per type would let the registry
-//     contradict the header, and transit — which has no registry — could not
-//     enforce a per-type rule anyway (§3.5);
+//   - whether auth is mandatory. It follows from `mode`
+//     (docs/protocol/datagram.md §2.1) and is identical for every type; storing
+//     it per type would let the registry contradict the header, and transit —
+//     which has no registry — could not enforce a per-type rule anyway
+//     (docs/protocol/datagram.md §3.6);
 //   - the signature profile. That is picked by `av`, and the wire admits
 //     exactly the one this build implements — a per-type opinion about it
 //     would be a second, contradictable source.
 //
-// Reference: docs/refactoring/datagram-transport.md §3.6, §4.1, §6.1, §7.
+// Reference: docs/protocol/datagram.md §3.7, §4.1, §6.1, §7.
 
 // Registration failures are sentinels: the wiring code reacts to the reason,
 // never to error text.
@@ -40,27 +42,28 @@ var (
 
 	// ErrTypeRegistrationInvalid marks a registration that could never
 	// receive a lawful frame: no modes, no classes, no handler, or a
-	// mode/class pair the §2.1 matrix forbids.
+	// mode/class pair the docs/protocol/datagram.md §2.1 matrix forbids.
 	ErrTypeRegistrationInvalid = errors.New("datagram: invalid type registration")
 
 	// ErrTypePairingRequired marks a `response` type that declared no request
 	// dtypes. Without the pairing set an answer of another protocol would be
-	// free to take somebody else's single claimed slot (§4.2).
+	// free to take somebody else's single claimed slot
+	// (docs/protocol/datagram.md §4.3).
 	ErrTypePairingRequired = errors.New("datagram: response type must declare the requests it answers")
 
 	// ErrTypePairingForbidden marks pairing declared by a type that has no
-	// `response` mode: §7 defines the property for response types only, and a
-	// pairing nobody checks is a contract two implementations would read
-	// differently.
+	// `response` mode: docs/protocol/datagram.md §7 defines the property for
+	// response types only, and a pairing nobody checks is a contract two
+	// implementations would read differently.
 	ErrTypePairingForbidden = errors.New("datagram: only a response type may declare paired requests")
 
 	// ErrTypeMixesAuthenticatedPlanes marks a type that declared both the
 	// authenticated plane (routed) and an unauthenticated one
-	// (request/response). §3.6 states the rule without exceptions: one and the
-	// same MEANING must not be accepted both authenticated and unauthenticated
-	// — and one dtype is one meaning, so a type allowing itself both would open
-	// the demotion path with its own hands. A protocol that genuinely needs
-	// both planes needs two dtypes.
+	// (request/response). docs/protocol/datagram.md §3.7 states the rule
+	// without exceptions: one and the same MEANING must not be accepted both
+	// authenticated and unauthenticated — and one dtype is one meaning, so a
+	// type allowing itself both would open the demotion path with its own
+	// hands. A protocol that genuinely needs both planes needs two dtypes.
 	ErrTypeMixesAuthenticatedPlanes = errors.New("datagram: a type must not accept both the authenticated and an unauthenticated plane")
 )
 
@@ -69,16 +72,18 @@ var (
 // ---------------------------------------------------------------------------
 
 // The context carries NO delivery marker. The hook and the handler run only on
-// local delivery — transit calls neither of them (§4.1) — so a field able to
-// state exactly one value stated nothing, while remaining the seam through
-// which transit hooks would come back. The day transit needs a hook, the
-// context grows the field together with the caller that fills it.
+// local delivery — transit calls neither of them
+// (docs/protocol/datagram.md §4.1) — so a field able to state exactly one value
+// stated nothing, while remaining the seam through which transit hooks would
+// come back. The day transit needs a hook, the context grows the field together
+// with the caller that fills it.
 
 // DeliveryHeader is the header as an endpoint and the authorization hook see
 // it — for ALL THREE modes, unlike Header (header.go) which exists only on the
 // signed routed plane.
 //
-// The accessors encode §2.1.1 rather than describing it:
+// The accessors encode docs/protocol/datagram.md §2.2 rather than describing
+// it:
 //
 //   - SignedSrc exists only for `routed`, where src is a verified signer;
 //   - Label exists only for `request`/`response`, where the same 20 bytes are
@@ -88,8 +93,8 @@ var (
 //     who answered.
 //
 // This is what makes "the hook may not build a decision on header.src in the
-// unauthenticated modes" (§7) a property of the type: in those modes there is
-// no accessor that returns src as a sender at all.
+// unauthenticated modes" (docs/protocol/datagram.md §7) a property of the type:
+// in those modes there is no accessor that returns src as a sender at all.
 type DeliveryHeader struct {
 	mode        domain.DatagramMode
 	class       domain.DatagramClass
@@ -173,7 +178,8 @@ func (h DeliveryHeader) Label() (Label, bool) {
 }
 
 // Subject returns who the question was addressed to, as echoed in the src of
-// a response. It is a logical subject and NOT the sender (§2.1.1).
+// a response. It is a logical subject and NOT the sender
+// (docs/protocol/datagram.md §2.2).
 func (h DeliveryHeader) Subject() (domain.PeerIdentity, bool) {
 	if h.mode != domain.DatagramModeResponse {
 		return domain.PeerIdentity{}, false
@@ -185,9 +191,9 @@ func (h DeliveryHeader) Subject() (domain.PeerIdentity, bool) {
 // The context the hook and the handler share
 // ---------------------------------------------------------------------------
 
-// DeliveryContextOpts collects the §7 context. An opts struct because the
-// three identity-shaped fields are not interchangeable and a positional swap
-// of incoming_peer and local_identity would compile.
+// DeliveryContextOpts collects the docs/protocol/datagram.md §7 context. An
+// opts struct because the three identity-shaped fields are not interchangeable
+// and a positional swap of incoming_peer and local_identity would compile.
 type DeliveryContextOpts struct {
 	Header DeliveryHeader
 	// IncomingPeer is where the frame entered this node from: the CHANNEL, the
@@ -209,7 +215,8 @@ type DeliveryContextOpts struct {
 }
 
 // DeliveryContext is the read-only context handed to the authorization hook
-// and — by the same value, as §7 requires — to the type handler.
+// and — by the same value, as docs/protocol/datagram.md §7 requires — to the
+// type handler.
 type DeliveryContext struct {
 	header        DeliveryHeader
 	incomingPeer  IngressPeer
@@ -249,9 +256,9 @@ func (c DeliveryContext) LocalIdentity() domain.PeerIdentity { return c.localIde
 // Handler
 // ---------------------------------------------------------------------------
 
-// HandlerOutcome is the three-way result of a type handler (§7). The three
-// differ by the FATE OF THE REPLAY KEY, which is why they are three and not a
-// bool with an error.
+// HandlerOutcome is the three-way result of a type handler
+// (docs/protocol/datagram.md §7). The three differ by the FATE OF THE REPLAY
+// KEY, which is why they are three and not a bool with an error.
 type HandlerOutcome uint8
 
 const (
@@ -282,9 +289,10 @@ var handlerOutcomeNames = map[HandlerOutcome]string{
 func (o HandlerOutcome) String() string { return enumName(handlerOutcomeNames, o) }
 
 // HandlerResponse is the answer a `request` handler produced. It exists only
-// together with HandlerAccepted (§4.1): answering on a refusal would disguise
-// the refusal as success, and a "negative answer", where a type needs one, is
-// application content inside an accepted answer, not a transport branch.
+// together with HandlerAccepted (docs/protocol/datagram.md §4.1): answering on
+// a refusal would disguise the refusal as success, and a "negative answer",
+// where a type needs one, is application content inside an accepted answer, not
+// a transport branch.
 type HandlerResponse struct {
 	dtype   domain.DType
 	payload []byte
@@ -341,15 +349,15 @@ func (r HandlerResult) Err() error { return r.err }
 
 // Handler is the endpoint function of a type: the terminal receiver at
 // dst == self. It receives incoming_peer through the same context as the
-// authorization hook (§7).
+// authorization hook (docs/protocol/datagram.md §7).
 //
 // It MUST be idempotent: the layer promises ZERO OR MORE deliveries — neither
-// at least once nor exactly once (§4.5). Zero, because a frame is dropped
-// outright when no route is found, when an admission budget refuses it, when a
-// queue is full or when a writer fails, and nothing here resends it. More than
-// one, because a repeat arrives after a lost Commit, after a restart, and after
-// an honest loop. Retransmission and acknowledgement belong to the two
-// endpoints of the type, never to this layer.
+// at least once nor exactly once (docs/protocol/datagram.md §4.5). Zero,
+// because a frame is dropped outright when no route is found, when an admission
+// budget refuses it, when a queue is full or when a writer fails, and nothing
+// here resends it. More than one, because a repeat arrives after a lost Commit,
+// after a restart, and after an honest loop. Retransmission and acknowledgement
+// belong to the two endpoints of the type, never to this layer.
 type Handler interface {
 	Handle(ctx context.Context, delivery DeliveryContext, payload []byte) HandlerResult
 }
@@ -367,13 +375,14 @@ func (f HandlerFunc) Handle(ctx context.Context, delivery DeliveryContext, paylo
 // ---------------------------------------------------------------------------
 
 // PayloadSchema names the format and the version INSIDE the payload — never
-// in the type name (§7). Growing a schema means ADDITIVE fields only, and the
-// receiver IGNORES unknown ones; a change of meaning is a new dtype.
+// in the type name (docs/protocol/datagram.md §7). Growing a schema means
+// ADDITIVE fields only, and the receiver IGNORES unknown ones; a change of
+// meaning is a new dtype.
 //
 // This is the exact opposite of the header, where an unknown field is a
-// reject (§3.4), and the asymmetry is deliberate: the header is a closed
-// contract every transit node enforces, while the payload belongs to two
-// endpoints that may ship at different times.
+// reject (docs/protocol/datagram.md §3.5), and the asymmetry is deliberate: the
+// header is a closed contract every transit node enforces, while the payload
+// belongs to two endpoints that may ship at different times.
 type PayloadSchema struct {
 	// Name is the schema identifier, free-form and meaningful to the type.
 	Name string
@@ -404,11 +413,12 @@ func (s PayloadSchema) Decode(payload []byte, into any) error {
 //
 // It replaces an inference — "the type registered an Authorizer, so it must
 // depend on the neighbour's identity" — that was wrong in both directions and
-// silently so. §7 describes a sender authenticated by a signature INSIDE the
-// payload; such a type has an Authorizer that never reads IncomingPeer and must
-// keep working on every session this node dialled, which the inference took it
-// off. And a type with NO Authorizer may build its handler on the neighbour's
-// name just as easily, which the inference let through.
+// silently so. docs/protocol/datagram.md §7 describes a sender authenticated by
+// a signature INSIDE the payload; such a type has an Authorizer that never
+// reads IncomingPeer and must keep working on every session this node dialled,
+// which the inference took it off. And a type with NO Authorizer may build its
+// handler on the neighbour's name just as easily, which the inference let
+// through.
 //
 // The two members are ordered so the ZERO VALUE is the strict one, and the
 // choice is deliberate rather than incidental. A type that forgot to declare
@@ -422,15 +432,15 @@ type SenderProofPolicy uint8
 const (
 	// RequiresProvenPeer is the ZERO VALUE: the type's local delivery may only
 	// run where this node has been SHOWN who the neighbour is (an accepted
-	// connection, where connauth verified a signature over a challenge this node
-	// generated). On every other direction the frame is refused above the §7
-	// seams with DropUnprovenSender.
+	// connection, where connauth verified a signature over a challenge this
+	// node generated). On every other direction the frame is refused above the
+	// docs/protocol/datagram.md §7 seams with DropUnprovenSender.
 	RequiresProvenPeer SenderProofPolicy = iota
 	// SenderProvenInPayload states that the type carries its own proof of the
 	// sender inside the payload and reads nothing about the neighbour from the
 	// transport. Such a type is served on every direction — which is the path
-	// §7 describes and the one a client node, whose traffic is almost all
-	// dialled, depends on.
+	// docs/protocol/datagram.md §7 describes and the one a client node, whose
+	// traffic is almost all dialled, depends on.
 	//
 	// Declaring it is a statement about the TYPE's handler and hooks, not about
 	// this frame: a type that declares it and then reads IncomingPeer.Identity
@@ -447,28 +457,29 @@ var senderProofPolicyNames = map[SenderProofPolicy]string{
 // String returns the log label of the policy.
 func (p SenderProofPolicy) String() string { return enumName(senderProofPolicyNames, p) }
 
-// TypeRegistration is one dtype's entry (§7).
+// TypeRegistration is one dtype's entry (docs/protocol/datagram.md §7).
 type TypeRegistration struct {
 	// Handler is the terminal receiver. Mandatory: a type nobody can receive
 	// has nothing to register.
 	Handler Handler
 	// Authorizer is optional; a type without one is authorized trivially
-	// (§7).
+	// (docs/protocol/datagram.md §7).
 	Authorizer Authorizer
 	// DType is the name.
 	DType domain.DType
-	// Modes are the modes the type sends in and accepts on reception. §3.6
-	// forbids one MEANING in both an authenticated and an unauthenticated
-	// mode: a type that allows itself both routed and request for one action
-	// opens the demotion path with its own hands.
+	// Modes are the modes the type sends in and accepts on reception.
+	// docs/protocol/datagram.md §3.7 forbids one MEANING in both an
+	// authenticated and an unauthenticated mode: a type that allows itself both
+	// routed and request for one action opens the demotion path with its own
+	// hands.
 	Modes []domain.DatagramMode
-	// Classes is a SET: one type may legitimately use several (§7). Declaring
-	// a whole protocol `bulk` would queue its own progress-control frames
-	// behind its own large answers.
+	// Classes is a SET: one type may legitimately use several
+	// (docs/protocol/datagram.md §7). Declaring a whole protocol `bulk` would
+	// queue its own progress-control frames behind its own large answers.
 	Classes []domain.DatagramClass
 	// AnswersTo is the pairing set — only for types with a `response` mode:
 	// the request dtypes this type answers, checked against the dtype in the
-	// reverse record BEFORE the claim (§4.2).
+	// reverse record BEFORE the claim (docs/protocol/datagram.md §4.3).
 	AnswersTo []domain.DType
 	// Payload is the schema descriptor.
 	Payload PayloadSchema
@@ -496,7 +507,7 @@ func (t RegisteredType) DType() domain.DType { return t.dtype }
 
 // AllowsMode reports whether the type accepts this mode. A receipt arriving
 // as `request` is refused here, BEFORE the handler — which is what makes the
-// demotion of §3.6 harmless.
+// demotion of docs/protocol/datagram.md §3.7 harmless.
 func (t RegisteredType) AllowsMode(mode domain.DatagramMode) bool {
 	_, ok := t.modes[mode]
 	return ok
@@ -512,7 +523,8 @@ func (t RegisteredType) AllowsClass(class domain.DatagramClass) bool {
 func (t RegisteredType) Handler() Handler { return t.handler }
 
 // Authorizer returns the authorization hook. The bool is false for a type
-// without one; §7 authorizes such types trivially with `accept`.
+// without one; docs/protocol/datagram.md §7 authorizes such types trivially
+// with `accept`.
 func (t RegisteredType) Authorizer() (Authorizer, bool) {
 	if t.authorizer == nil {
 		return nil, false
@@ -524,7 +536,8 @@ func (t RegisteredType) Authorizer() (Authorizer, bool) {
 // dtype. It is only ever asked of a node that KNOWS the answer type: a node
 // that does not know it performs no pairing check and forwards as before —
 // demanding knowledge of future pairs from an old transit is impossible,
-// which is why the check is typed rather than transport-level (§4.2).
+// which is why the check is typed rather than transport-level
+// (docs/protocol/datagram.md §4.3).
 func (t RegisteredType) AnswersRequest(request domain.DType) bool {
 	_, ok := t.answersTo[request]
 	return ok
@@ -643,15 +656,16 @@ func (r *TypeRegistry) Register(registration TypeRegistration) error {
 
 // Lookup resolves a dtype. The bool is false for a type this node does not
 // implement — which at dst == self is a SILENT drop with a metric, reached
-// before the authorization hook and before any replay slot is taken (§7).
+// before the authorization hook and before any replay slot is taken
+// (docs/protocol/datagram.md §7).
 func (r *TypeRegistry) Lookup(dtype domain.DType) (RegisteredType, bool) {
 	entry, ok := r.current()[dtype]
 	return entry, ok
 }
 
 // DTypes returns the registered names in a stable order — the set advertised
-// in the handshake (§6.1), where order is not significant but determinism
-// keeps the frame byte-stable.
+// in the handshake (docs/protocol/datagram.md §6.1), where order is not
+// significant but determinism keeps the frame byte-stable.
 func (r *TypeRegistry) DTypes() []domain.DType {
 	entries := r.current()
 	out := make([]domain.DType, 0, len(entries))
@@ -683,7 +697,8 @@ func validateTypeModes(dtype domain.DType, registration TypeRegistration) (map[d
 	return modes, nil
 }
 
-// refuseMixedPlanes enforces the type-level rule of §3.6 constructively.
+// refuseMixedPlanes enforces the type-level rule of
+// docs/protocol/datagram.md §3.7 constructively.
 //
 // A hostile relay can strip the auth block off a signed routed datagram and
 // pass it off as a request; the only reason that is harmless is that the
@@ -719,9 +734,10 @@ func validateTypeClasses(dtype domain.DType, registration TypeRegistration) (map
 }
 
 // validateModeClassMatrix refuses a registration no lawful frame could ever
-// satisfy: a mode of which NONE of the declared classes is admitted by §2.1 —
-// `request` with `bulk` alone being the canonical case. The matrix stays the
-// single source of truth; the registry only refuses to contradict it.
+// satisfy: a mode of which NONE of the declared classes is admitted by
+// docs/protocol/datagram.md §2.1 — `request` with `bulk` alone being the
+// canonical case. The matrix stays the single source of truth; the registry
+// only refuses to contradict it.
 func validateModeClassMatrix(
 	dtype domain.DType,
 	modes map[domain.DatagramMode]struct{},

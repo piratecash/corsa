@@ -12,7 +12,7 @@ import (
 // SEPARATION is the invariant — an implementation that computed both from one
 // instant would delete a record while an operation still addressed it.
 //
-// Reference: docs/refactoring/datagram-transport.md §2.2, §4.1.
+// Reference: docs/protocol/datagram.md §2.3, §4.1.
 
 // BaseReplayDeadline computes `base_until` — how long the BASE cache holds a
 // key:
@@ -40,7 +40,7 @@ func BaseReplayDeadline(authTime, replayUntil time.Time) time.Time {
 
 // ReplayRetention separates the two events that must never be merged: the
 // SEMANTIC expiry of the anti-replay key and the PHYSICAL removal of its
-// record (§4.1).
+// record (docs/protocol/datagram.md §4.1).
 //
 // Strictly after replay_until the key stops meaning "replay" — and that is
 // safe, because any frame with this transcript carries valid_until ≤
@@ -74,9 +74,10 @@ func NewReplayRetention(replayUntil time.Time) ReplayRetention {
 func (r ReplayRetention) Until() time.Time { return r.replayUntil }
 
 // AliveAt reports whether the key still carries anti-replay meaning. The
-// boundary is INCLUSIVE — the key is alive while now ≤ replay_until (§2.2) —
-// so that Validity and anti-replay both treat the boundary instant as live
-// and no re-delivery window exists in any single second.
+// boundary is INCLUSIVE — the key is alive while now ≤ replay_until
+// (docs/protocol/datagram.md §3.4) — so that Validity and anti-replay both
+// treat the boundary instant as live and no re-delivery window exists in any
+// single second.
 func (r ReplayRetention) AliveAt(now time.Time) bool {
 	return !now.After(r.replayUntil)
 }

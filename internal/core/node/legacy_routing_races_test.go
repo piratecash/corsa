@@ -15,7 +15,7 @@ import (
 
 // legacy_routing_races_test.go pins three orderings a review found between a
 // legacy connection's routing input and the v2 proof of the identity it names
-// (docs/refactoring/n1-legacy-residual.md §8).
+// (docs/routing.md, "Legacy claims of an identity that proved v2").
 
 // unpinnedRoutingNode is a v2-capable node on which X has not proved itself
 // yet, with an impostor's legacy session naming X.

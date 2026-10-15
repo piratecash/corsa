@@ -16,8 +16,8 @@ import (
 // v2_identity_claims.go is what a legacy (v1) connection that merely NAMES an
 // identity may still do once that identity has proved itself over v2 to this
 // node — nothing on the routing plane, and nothing at all from the moment of
-// the proof (docs/refactoring/n1-legacy-residual.md §2, owner decision on
-// С-9 and L-RT-1…3).
+// the proof (docs/routing.md, "Legacy claims of an identity that proved v2";
+// docs/protocol/network_security.md §13).
 //
 //   - An identity REQUIRES v2 here once it is pinned (it proved v2 to this
 //     node, persisted across restarts) or while it has a live v2 connection.
@@ -149,13 +149,18 @@ func (s *Service) closeLegacyClaimsOf(ctx context.Context, id domain.PeerIdentit
 	})
 	s.peerMu.RUnlock()
 
+	// A dialled legacy session is closed as this node's decision, like a v1
+	// welcome refused by the pin: the address that answered it is not
+	// charged for the close, and the fall back to v1 there is held.
 	for _, session := range dialled {
+		hold := s.secureSessions.marks.noteLegacyRefused(session.address)
 		log.Warn().
 			Str("peer", id.String()).
 			Str("address", string(session.address)).
 			Uint64("conn_id", uint64(session.connID)).
+			Dur("legacy_hold", hold).
 			Msg("legacy_session_closed_identity_proved_v2")
-		_ = session.Close()
+		_ = session.closeAs(peerSessionClosedByLegacyRefusal)
 	}
 	network := s.Network()
 	for _, connID := range accepted {

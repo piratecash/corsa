@@ -227,7 +227,7 @@ const (
 	// CapMeshDatagramV1 gates the datagram transport layer as an
 	// ENDPOINT: the node understands the `datagram` envelope, accepts
 	// datagrams addressed to it and sends its own
-	// (docs/refactoring/datagram-transport.md §6). Datagrams travel only
+	// (docs/protocol/datagram.md §6). Datagrams travel only
 	// into sessions that negotiated it — an older peer does not have the
 	// command at all and would answer unknown_command and close.
 	//
@@ -240,8 +240,8 @@ const (
 	CapMeshDatagramV1 Capability = "mesh_datagram_v1"
 
 	// CapMeshDatagramTransitV1 gates FORWARDING other nodes' datagrams
-	// (§6). It is a strictly separate advertisement from
-	// CapMeshDatagramV1: an endpoint-only client must be able to receive
+	// (docs/protocol/datagram.md §6). It is a strictly separate advertisement
+	// from CapMeshDatagramV1: an endpoint-only client must be able to receive
 	// what is addressed to it without ever claiming to relay, and a
 	// transit candidate must prove it really forwards. The distinction
 	// outlives any MinimumProtocolVersion bump: neither capability follows

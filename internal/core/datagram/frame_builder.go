@@ -12,8 +12,8 @@ import (
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
-// frame_builder.go closes the last thing §8 leaves to every migrating
-// protocol: assembling and signing a `routed` datagram.
+// frame_builder.go closes the last thing (docs/protocol/datagram.md §4.4) left
+// to every migrating protocol: assembling and signing a `routed` datagram.
 //
 // LocalSendOpts takes a frame "already signed when the mode requires it", so
 // without this type each protocol holds the node's Ed25519 key and its network
@@ -28,7 +28,7 @@ import (
 // class, policy and payload. The node's private key stops travelling into every
 // adapter as a side effect.
 //
-// Reference: docs/refactoring/datagram-transport.md §2.1, §3.1, §8.
+// Reference: docs/protocol/datagram.md §2.1, §3.1, §4.4 (the routed frame builder).
 
 // ErrFrameBuilderConfig marks a builder that cannot be constructed.
 var ErrFrameBuilderConfig = errors.New("datagram: invalid routed frame builder configuration")
@@ -38,7 +38,7 @@ var ErrFrameBuilderConfig = errors.New("datagram: invalid routed frame builder c
 // error, not a frame the network drops (CLAUDE.md).
 type RoutedFrameBuilderConfig struct {
 	// Network is the network id bound into the transcript, so a frame of one
-	// network can never verify on another (§3.1).
+	// network can never verify on another (docs/protocol/datagram.md §3.2).
 	Network domain.NetworkID
 	// LocalID is this node's identity; it becomes header.src and must be the
 	// fingerprint of PrivateKey, which the transcript check enforces.
@@ -107,16 +107,17 @@ type RoutedFrameOpts struct {
 	Dst domain.PeerIdentity
 	// DType is the registered type name.
 	DType domain.DType
-	// Class picks the size cap, the queue lane and the write grace (§2.1).
+	// Class picks the size cap, the queue lane and the write grace
+	// (docs/protocol/datagram.md §2.4).
 	Class domain.DatagramClass
-	// RoutePolicy is `best` or `explore` (§4.3). The zero value is refused
-	// rather than defaulted: "which policy did this retry use" is exactly the
-	// question §8 makes the adapter answer, and a silent default would hide
-	// it.
+	// RoutePolicy is `best` or `explore` (docs/protocol/datagram.md §4.4). The
+	// zero value is refused rather than defaulted: "which policy did this retry
+	// use" is exactly the question a migration retry has to answer, and a
+	// silent default would hide it.
 	RoutePolicy domain.RoutePolicy
 	// Payload is the already-encrypted body, raw bytes. The serializer does
 	// the base64url encoding, so handing it a string here is the double
-	// encoding of §2.3.
+	// encoding of docs/protocol/datagram.md §2.4.
 	Payload []byte
 }
 
@@ -147,7 +148,7 @@ func (b *RoutedFrameBuilder) Build(opts RoutedFrameOpts) (protocol.DatagramFrame
 		Dst:     opts.Dst,
 		// The origin does NOT decrement: the first hop receives the full
 		// budget, and max_ttl mirrors it so `ttl > max_ttl` cannot be true of
-		// a frame this node produced (§4.1 rule 2).
+		// a frame this node produced (docs/protocol/datagram.md §4.2 rule 2).
 		TTL:         OriginTTL(),
 		RoutePolicy: opts.RoutePolicy,
 		DType:       opts.DType,
@@ -172,8 +173,9 @@ func (b *RoutedFrameBuilder) Build(opts RoutedFrameOpts) (protocol.DatagramFrame
 }
 
 // salt draws the per-frame salt. A fresh one per frame is what lets the SAME
-// ciphertext be resent without hitting the anti-replay cache (§3.1), so it is
-// drawn here and never carried over from a previous attempt.
+// ciphertext be resent without hitting the anti-replay cache
+// (docs/protocol/datagram.md §3.1), so it is drawn here and never carried over
+// from a previous attempt.
 func (b *RoutedFrameBuilder) salt() ([]byte, error) {
 	salt := make([]byte, domain.DatagramSaltBytes)
 	if _, err := io.ReadFull(b.entropy, salt); err != nil {

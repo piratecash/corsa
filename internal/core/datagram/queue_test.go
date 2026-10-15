@@ -10,10 +10,11 @@ import (
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
-// queue_test.go covers the weighted class queue of §5. The headline property
-// is the one §9 names: bulk keeps its guaranteed share under a permanent
-// control stream. Everything else here is the overflow and send_until
-// contract the doc comment on WeightedQueue promises.
+// queue_test.go covers the weighted class queue of
+// docs/protocol/datagram.md §5. The headline property is the one
+// docs/protocol/datagram.md §5 promises: bulk keeps its guaranteed share under
+// a permanent control stream. Everything else here is the overflow and
+// send_until contract the doc comment on WeightedQueue promises.
 
 func queuedFrame(class domain.DatagramClass, bytes int, sendUntil time.Time) QueuedFrame {
 	return QueuedFrame{
@@ -27,7 +28,8 @@ func queuedFrame(class domain.DatagramClass, bytes int, sendUntil time.Time) Que
 
 // Strict priority would starve bulk completely under a permanent control
 // stream, and a permanent control stream is cheap to produce. The queue must
-// hand bulk its guaranteed share of the DISPATCHED BYTES instead (§5).
+// hand bulk its guaranteed share of the DISPATCHED BYTES instead
+// (docs/protocol/datagram.md §5).
 func TestQueueBulkKeepsItsShareUnderConstantControl(t *testing.T) {
 	t.Parallel()
 
@@ -49,7 +51,7 @@ func TestQueueBulkKeepsItsShareUnderConstantControl(t *testing.T) {
 	)
 	// Both classes stay saturated for the whole run: the control lane is
 	// refilled after every dispatch, which is exactly the "permanent control
-	// stream" §5 is worried about.
+	// stream" docs/protocol/datagram.md §5 is worried about.
 	for i := 0; i < dispatches*2; i++ {
 		queue.Enqueue(queuedFrame(domain.DatagramClassControl, controlBytes, time.Time{}))
 	}
@@ -246,7 +248,8 @@ func TestQueueByteBoundBindsIndependently(t *testing.T) {
 
 // The send deadline is checked on both sides: a frame that is already dead is
 // refused on the way in, and one that died while waiting is dropped on the
-// way out instead of being handed to the writer (§4.2, §5).
+// way out instead of being handed to the writer
+// (docs/protocol/datagram.md §3.4, §5).
 func TestQueueHonoursSendUntilOnBothSides(t *testing.T) {
 	t.Parallel()
 
@@ -262,7 +265,8 @@ func TestQueueHonoursSendUntilOnBothSides(t *testing.T) {
 	if queue.Enqueue(queuedFrame(domain.DatagramClassControl, 100, now.Add(-time.Second))) {
 		t.Fatal("a frame past its deadline was queued")
 	}
-	// The deadline itself is alive, exactly as it is for validity (§2.2).
+	// The deadline itself is alive, exactly as it is for validity
+	// (docs/protocol/datagram.md §3.4).
 	if !queue.Enqueue(queuedFrame(domain.DatagramClassControl, 100, now)) {
 		t.Fatal("a frame exactly at its deadline was refused")
 	}
@@ -359,7 +363,7 @@ func TestQueueDequeueDropsTheDeadHeadsItStepsOver(t *testing.T) {
 }
 
 // A frame without a serialized size, or of a class the layer has no lane for,
-// is refused: a guessed size is a wrong share (§5).
+// is refused: a guessed size is a wrong share (docs/protocol/datagram.md §5).
 func TestQueueRefusesUnmeasuredAndUnknownClass(t *testing.T) {
 	t.Parallel()
 
@@ -472,7 +476,8 @@ func TestQueueConcurrentEnqueueAndDrain(t *testing.T) {
 }
 
 // The serialized size the queue accounts in is the WIRE size, including
-// base64 and the auth block (§5) — the same number admission is charged.
+// base64 and the auth block (docs/protocol/datagram.md §5) — the same number
+// admission is charged.
 func TestQueueMeasureFrameMatchesTheWireLine(t *testing.T) {
 	t.Parallel()
 

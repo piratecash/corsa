@@ -11,18 +11,18 @@ import (
 	"github.com/piratecash/corsa/internal/core/domain"
 )
 
-// TestMaxFileChunkFitsBulkDatagram is the size boundary §2.3 requires to be
-// measured on real bytes rather than on filler: the largest chunk the file
-// transport produces today, through the real encryption path, with every
-// optional header field populated. It answers the only two questions the
-// layer owes the migration — does the decoded payload fit the class cap,
-// and does the whole line fit MaxFrameLine.
+// TestMaxFileChunkFitsBulkDatagram is the size boundary
+// docs/protocol/datagram.md §2.4 requires to be measured on real bytes rather
+// than on filler: the largest chunk the file transport produces today, through
+// the real encryption path, with every optional header field populated. It
+// answers the only two questions the layer owes the migration — does the
+// decoded payload fit the class cap, and does the whole line fit MaxFrameLine.
 //
-// The double-encoding trap of §2.3 is deliberately NOT tested here:
-// EncryptFileCommandPayload returns base64 text, and whether the adapter
-// decodes it once before building the datagram is the adapter's contract.
-// The layer cannot tell "arbitrary bytes" from "bytes that happen to be
-// base64 text", and pretending otherwise would be a test of nothing.
+// The double-encoding trap of docs/protocol/datagram.md §2.4 is deliberately
+// NOT tested here: EncryptFileCommandPayload returns base64 text, and whether
+// the adapter decodes it once before building the datagram is the adapter's
+// contract. The layer cannot tell "arbitrary bytes" from "bytes that happen to
+// be base64 text", and pretending otherwise would be a test of nothing.
 func TestMaxFileChunkFitsBulkDatagram(t *testing.T) {
 	chunk := make([]byte, domain.DefaultChunkSize)
 	if _, err := rand.Read(chunk); err != nil {
@@ -95,9 +95,10 @@ func TestMaxFileChunkFitsBulkDatagram(t *testing.T) {
 		t.Fatalf("VerifyDatagramSignature after round trip: %v", err)
 	}
 
-	// §2.3 sizes the maximum chunk at ≈ 22 046 decoded bytes — three times
-	// under the bulk cap. Pin the order of magnitude so a change in the
-	// chunk or command format that eats the headroom is visible here.
+	// docs/protocol/datagram.md §2.4 sizes the maximum chunk at ≈ 22 046
+	// decoded bytes — three times under the bulk cap. Pin the order of
+	// magnitude so a change in the chunk or command format that eats the
+	// headroom is visible here.
 	if signed.DecodedPayloadLen() > bulkCap/2 {
 		t.Fatalf("the largest chunk now takes %d of the %d byte bulk cap, headroom is gone",
 			signed.DecodedPayloadLen(), bulkCap)

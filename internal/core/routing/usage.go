@@ -8,11 +8,10 @@ import (
 // way an accounting pass is allowed to: by asking containers for their len.
 //
 // Nothing here walks a bucket, a claim list or a health map. That is not a
-// performance preference, it is the constraint the measurement step names
-// outright — a pass that scanned the routing table under t.mu would stall the
-// announce loop it shares that mutex with, and an instrument that changes the
-// system it measures produces a number about the instrument
-// (13-measurements.md §4).
+// performance preference, it is what makes the measurement valid at all — a
+// pass that scanned the routing table under t.mu would stall the announce loop
+// it shares that mutex with, and an instrument that changes the system it
+// measures produces a number about the instrument.
 //
 // What this costs the caller is therefore one RLock and a handful of map
 // lookups, all O(1), on a mutex the hot read paths do not take at all (they
@@ -24,7 +23,7 @@ import (
 // snapshot instead, where SnapshotIncremental has already paid for it as a
 // by-product — see node.Service.ResourceBreakdown.
 //
-// Reference: docs/refactoring/dht/13-measurements.md §2, §4.
+// Reference: docs/rpc/system.md (getResourceBreakdown).
 
 // Per-entry costs, resolved once at initialisation. Each is the key plus the
 // value of one map entry and excludes what those point at: the Extra blob and

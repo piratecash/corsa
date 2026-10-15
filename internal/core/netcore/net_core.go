@@ -268,11 +268,12 @@ type Options struct {
 	// Declarations carries the raw handshake self-description. It is a
 	// POINTER, unlike every other field here, because both of its slices
 	// legitimately validate to nil — an out-of-bounds capability list is
-	// defined to empty the whole raw set (§2.2), and an absent dtypes
-	// field is defined to declare no type (§6.1). With a value field the
-	// "only non-zero fields are applied" rule of ApplyOpts would silently
-	// turn either of those two verdicts into "keep whatever was there
-	// before", which is the one outcome the spec rules out.
+	// defined to empty the whole raw set (docs/protocol/datagram.md §2.3), and
+	// an absent dtypes field is defined to declare no type
+	// (docs/protocol/datagram.md §6.1). With a value field the "only non-zero
+	// fields are applied" rule of ApplyOpts would silently turn either of those
+	// two verdicts into "keep whatever was there before", which is the one
+	// outcome the spec rules out.
 	Declarations *HandshakeDeclarations
 }
 
@@ -299,7 +300,7 @@ func MeteredOf(conn net.Conn) *MeteredConn {
 // HandshakeDeclarations is the peer's RAW, self-declared handshake state:
 // the part of hello/welcome that the compile-time typed capability set
 // cannot represent. Both fields carry a closed wire contract from
-// docs/refactoring/datagram-transport.md, and both are ALREADY VALIDATED by
+// docs/protocol/datagram.md §6 and §6.1, and both are ALREADY VALIDATED by
 // the time they reach NetCore — this type stores a verdict, it does not
 // re-derive one.
 type HandshakeDeclarations struct {
@@ -313,13 +314,13 @@ type HandshakeDeclarations struct {
 	// never tears the session down.
 	AdvertisedNames []domain.CapabilityName
 
-	// DeclaredDTypes is the dtype set of §6.1, and it keeps the wire
-	// distinction a bare slice cannot: an ABSENT field — which is also where
-	// a bounds breach lands — names no type, an explicitly EMPTY set says the
-	// peer speaks the envelope and handles no type at all, and a non-empty
-	// one means exactly those names. The first two name the same SET and are
-	// kept apart because they are different statements about the peer. Fixed
-	// for the lifetime of the session.
+	// DeclaredDTypes is the dtype set of docs/protocol/datagram.md §6.1, and it
+	// keeps the wire distinction a bare slice cannot: an ABSENT field — which
+	// is also where a bounds breach lands — names no type, an explicitly EMPTY
+	// set says the peer speaks the envelope and handles no type at all, and a
+	// non-empty one means exactly those names. The first two name the same SET
+	// and are kept apart because they are different statements about the peer.
+	// Fixed for the lifetime of the session.
 	DeclaredDTypes domain.DeclaredDTypeSet
 }
 

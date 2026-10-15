@@ -15,7 +15,8 @@ import (
 // replayed at this node afterwards:
 //
 //   - the fairness bucket is the QUOTA OWNER, so a neighbour cannot look quiet by
-//     spreading its records over reconnects and parallel sessions (§5);
+//     spreading its records over reconnects and parallel sessions
+//     (docs/protocol/datagram.md §5);
 //   - "the cache is full" is a statement about records that are actually live, so
 //     a bounded pass may not report a full cache while removable records sit in it.
 //

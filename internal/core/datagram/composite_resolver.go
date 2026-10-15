@@ -11,13 +11,11 @@ import (
 // composite_resolver.go is the place a second route plane is plugged in.
 //
 // RouteResolver has always been declared as the seam behind which the control
-// plane is replaceable (§4.3), but it had exactly one implementation and every
-// caller was wired straight to it. Introducing the composite now — with a
-// single source — is what makes step 09 an addition to ONE literal instead of
-// a change to the scheduler, the node wiring and every test that builds them.
-//
-// Reference: docs/refactoring/dht/02-route-source.md §2,
-// docs/refactoring/dht-dualstack-migration.md §4.2.
+// plane is replaceable (docs/protocol/datagram.md §4.4), but it had exactly one
+// implementation and every caller was wired straight to it. Introducing the
+// composite now — with a single source — is what makes step 09 an addition to
+// ONE literal instead of a change to the scheduler, the node wiring and every
+// test that builds them.
 
 // ErrNoRouteSources marks a composite built with nothing to ask.
 var ErrNoRouteSources = errors.New("datagram: composite route resolver requires at least one source")
@@ -40,15 +38,14 @@ var ErrNoRouteSources = errors.New("datagram: composite route resolver requires 
 // The sources are fixed when the resolver is constructed and there is no
 // setter. A deployment cannot reorder the planes, because a node whose poll
 // order differs from its neighbours' is a node whose behaviour cannot be
-// reasoned about from its version — see dht-dualstack-migration.md §4.2, which
-// makes the same call about the roll-out switch.
+// reasoned about from its version.
 //
 // # One source changes nothing, structurally
 //
 // With a single source the composite forwards that source's own answer,
 // untouched and uncopied: "introducing the composite did not change a single
 // next-hop decision" is then a property of this code rather than a claim a
-// test has to keep re-establishing. The test exists anyway (§4 of the step),
+// test has to keep re-establishing. The test exists anyway,
 // but it confirms the property instead of carrying it.
 type CompositeRouteResolver struct {
 	// sources is the poll order. Never empty — the constructor refuses that —
@@ -91,9 +88,9 @@ func (c *CompositeRouteResolver) FreshRoutes(ctx context.Context, dst domain.Pee
 
 // CachedRoutes asks every source for the coalesced snapshot, in poll order.
 //
-// The freshness contract of §4.3 is per SOURCE, not per composite: each plane
-// answers this call from whatever it treats as its cheap read, exactly as it
-// would if the scheduler held it directly.
+// The freshness contract of docs/protocol/datagram.md §4.4 is per SOURCE, not
+// per composite: each plane answers this call from whatever it treats as its
+// cheap read, exactly as it would if the scheduler held it directly.
 func (c *CompositeRouteResolver) CachedRoutes(ctx context.Context, dst domain.PeerIdentity) []RouteHint {
 	return c.collect(func(source RouteResolver) []RouteHint {
 		return source.CachedRoutes(ctx, dst)

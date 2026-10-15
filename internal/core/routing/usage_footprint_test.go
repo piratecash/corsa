@@ -11,8 +11,8 @@ import (
 
 // usage_footprint_test.go is the bench half of the measurement step: it fills
 // the route plane to the sizes the network is expected to reach and measures
-// what it actually costs, so the numbers in 13-measurements.md come from a run
-// rather than from a model.
+// what it actually costs, so the per-entry figures Usage() reports come from a
+// run rather than from a model.
 //
 // It is a TEST and not a benchmark on purpose. A benchmark reports what an
 // operation ALLOCATES, and the question here is what the structures RETAIN —
@@ -27,7 +27,7 @@ import (
 // on how much of a claim's payload is referenced rather than inlined, and
 // pinning it would be pinning the allocator.
 //
-// Reference: docs/refactoring/dht/13-measurements.md §2, §5.
+// Reference: docs/rpc/system.md (getResourceBreakdown).
 
 // footprintOf measures what building a structure RETAINS.
 //

@@ -25,7 +25,7 @@ import (
 func queryDst() domain.PeerIdentity { return domaintest.ID("query-dst") }
 
 // TestAReachabilityQueryIsRefusedUnlessARealSendCouldBuildIt walks the wire
-// rules of §2.2 and §2.1 that a probe silently ignored.
+// rules of docs/protocol/datagram.md §2 and §2.1 that a probe silently ignored.
 func TestAReachabilityQueryIsRefusedUnlessARealSendCouldBuildIt(t *testing.T) {
 	cases := []struct {
 		name string

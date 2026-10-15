@@ -13,9 +13,10 @@ package node
 // unmetered in three separate ways:
 //
 //  1. the line was READ AND COPIED in full before anything classified it, so
-//     "admission before any decoding" (§4.1 step 1, spec line 417) held against
-//     the parser but not against the read: a peer could make the node allocate
-//     eight megabytes per frame just to be told the frame was inadmissible;
+//     "admission before any decoding" (docs/protocol/datagram.md §4.1 step 1)
+//     held against the parser but not against the read: a peer could make the
+//     node allocate eight megabytes per frame just to be told the frame was
+//     inadmissible;
 //  2. a size violation was a silent per-frame drop with no cost to the sender,
 //     so it could be repeated forever;
 //  3. of the two types that DO buy the wide budget, `contacts` is a REPLY and
@@ -26,19 +27,20 @@ package node
 //
 // # Why a budget of its own and not datagram.PeerAdmission
 //
-// The datagram plane already owns the §5 two-stage per-neighbour budget, and
-// reusing it here was considered and rejected on four counts:
+// The datagram plane already owns the docs/protocol/datagram.md §5 two-stage
+// per-neighbour budget, and reusing it here was considered and rejected on four
+// counts:
 //
 //   - AVAILABILITY. PeerAdmission exists only when the datagram layer is built
 //     (capability plus feature flag). The response plane carries DM delivery on
 //     every node, including every node with the layer off; a core DoS defence
 //     must not be conditional on an experimental flag;
-//   - INDEPENDENCE. §5 sizes the datagram budget for datagram traffic. Sharing
-//     one bucket would let an announce full-sync or a DM backlog starve the
-//     datagram plane and vice versa — the response plane would either have to
-//     inherit a budget sized for 88 KiB bulk frames, or force the datagram
-//     budget up to accommodate a 176 KiB DM, and each answer breaks the other
-//     plane's sizing argument;
+//   - INDEPENDENCE. docs/protocol/datagram.md §5 sizes the datagram budget for
+//     datagram traffic. Sharing one bucket would let an announce full-sync or a
+//     DM backlog starve the datagram plane and vice versa — the response plane
+//     would either have to inherit a budget sized for 88 KiB bulk frames, or
+//     force the datagram budget up to accommodate a 176 KiB DM, and each answer
+//     breaks the other plane's sizing argument;
 //   - SHAPE. PeerAdmission charges a KNOWN frame size after the frame is in
 //     hand. The hole above is precisely that the size is not known until the
 //     bytes are read, so what this plane needs is a gate consulted DURING the
@@ -50,9 +52,9 @@ package node
 //     receive path in the node would buy nothing.
 //
 // What IS reused is the design: token buckets refilled in continuous time, one
-// budget per neighbour whose types DIVIDE it rather than extend it (§5), and a
-// cheap probe before the expensive work rather than an accounting pass after
-// it.
+// budget per neighbour whose types DIVIDE it rather than extend it
+// (docs/protocol/datagram.md §5), and a cheap probe before the expensive work
+// rather than an accounting pass after it.
 //
 // # Punishment follows the model the project already has
 //
@@ -70,9 +72,10 @@ package node
 //
 //   - a `datagram` line arriving while the datagram layer is built does not
 //     charge these buckets at all — not its bytes, not its frame — so it can
-//     neither be scored by this ledger nor empty the bucket for anybody else. It
-//     pays the §5 per-neighbour budget of its own plane instead, charged on the
-//     same raw wire line by the ingress the read loop diverts it to;
+//     neither be scored by this ledger nor empty the bucket for anybody else.
+//     It pays the docs/protocol/datagram.md §5 per-neighbour budget of its own
+//     plane instead, charged on the same raw wire line by the ingress the read
+//     loop diverts it to;
 //   - an ADMISSIBLE `file_command` — one this session negotiated and this node
 //     has a router for — does not charge them either, which is what the accepted
 //     direction has done since the plane existed. The full argument, including
@@ -84,16 +87,18 @@ package node
 // of valid datagrams emptied it, and the next line of any other plane — a
 // `ping`, a file chunk, an announce — met an empty bucket, took the violation
 // and, repeated, ended the session with `rate-limited`. The punishment was not
-// removed but moved onto the neighbour's other traffic, which is what §5's
-// "types divide a budget rather than extend it" forbids ACROSS planes: two
-// budgets that are meant to be independent cannot share one bucket.
+// removed but moved onto the neighbour's other traffic, which is what
+// docs/protocol/datagram.md §5's "types divide a budget rather than extend it"
+// forbids ACROSS planes: two budgets that are meant to be independent cannot
+// share one bucket.
 //
 // The SAME division holds for an oversize line that claims that plane: it pays
-// the plane's §5 budget for the bytes it made this node read and nothing else
-// (refuseOverBudgetSessionLine, refuseOversizeDatagramClaim). A relay does not
-// author the frame it forwards, so §2.3's size verdict is a silent drop rather
-// than a violation — the ledger below would otherwise end the session over a
-// frame the neighbour only carried.
+// the plane's docs/protocol/datagram.md §5 budget for the bytes it made this
+// node read and nothing else (refuseOverBudgetSessionLine,
+// refuseOversizeDatagramClaim). A relay does not author the frame it forwards,
+// so docs/protocol/datagram.md §2's size verdict is a silent drop rather than a
+// violation — the ledger below would otherwise end the session over a frame the
+// neighbour only carried.
 //
 // Every other refusal on this reader keeps both its charge and its score.
 
@@ -162,10 +167,10 @@ const peerSessionFrameBurst = 4 * peerSessionFramesPerSecond
 //
 // It is a sub-budget of the shared byte bucket, never an addition to it: a push
 // charges both, so the type divides the neighbour's budget rather than widening
-// it (§5). 512 KiB/s is ~3 maximum-size DMs per second (a body at
-// maxPeerCommandBodyBytes is ~176 KiB on the wire) or ~128 ordinary ones, while
-// the sender's own push loop is ack-gated and ships one DM at a time per
-// session — so no legitimate delivery approaches it.
+// it (docs/protocol/datagram.md §5). 512 KiB/s is ~3 maximum-size DMs per
+// second (a body at maxPeerCommandBodyBytes is ~176 KiB on the wire) or ~128
+// ordinary ones, while the sender's own push loop is ack-gated and ships one DM
+// at a time per session — so no legitimate delivery approaches it.
 const peerSessionPushBytesPerSecond = 512 << 10
 
 // peerSessionPushByteBurst is the push bucket depth, again four seconds. It is
@@ -618,9 +623,9 @@ func (e *peerSessionAdmissionError) Unwrap() error { return protocol.ErrRateLimi
 //     with the parse never paid for and one violation on the ledger. Two kinds
 //     of line do not reach this step at all, and both are DATA PLANES this
 //     reader only carries: a datagram, which the read loop hands to the plane
-//     that charges §5 on the very same bytes, and an admissible file command,
-//     which the inbound direction has never charged either
-//     (sessionFileCommandIsAdmissible).
+//     that charges docs/protocol/datagram.md §5 on the very same bytes, and an
+//     admissible file command, which the inbound direction has never charged
+//     either (sessionFileCommandIsAdmissible).
 //
 // It returns errPeerSessionLineRefused when one line was consumed and dropped
 // and the loop should continue, and any other error when the session is over.
@@ -645,11 +650,12 @@ func (s *Service) readAdmittedSessionLine(reader *bufio.Reader, session *peerSes
 
 	// The one line this budget does not meter. It is admitted UNCHARGED and
 	// handed on unchanged: the read loop's diversion takes it from here to the
-	// plane's ingress, which charges §5 on these same raw bytes before it decodes
-	// any of them. "The neighbour pays for the bytes it made this node read" is
-	// therefore not waived, it is paid in the other currency — and the narrower
-	// one, since §5 allows one neighbour 1 MiB/s and 64 frames/s against the
-	// 4 MiB/s and 256 frames/s of this file.
+	// plane's ingress, which charges docs/protocol/datagram.md §5 on these same
+	// raw bytes before it decodes any of them. "The neighbour pays for the
+	// bytes it made this node read" is therefore not waived, it is paid in the
+	// other currency — and the narrower one, since docs/protocol/datagram.md §5
+	// allows one neighbour 1 MiB/s and 64 frames/s against the 4 MiB/s and 256
+	// frames/s of this file.
 	if s.sessionDatagramPaysItsOwnBudget(session, line) {
 		return line, nil
 	}
@@ -674,8 +680,9 @@ func (s *Service) readAdmittedSessionLine(reader *bufio.Reader, session *peerSes
 }
 
 // sessionDatagramPaysItsOwnBudget reports whether ONE fully-read line is
-// metered by the datagram plane's §5 per-neighbour budget INSTEAD of this one —
-// the only line on this reader that is admitted without charging these buckets.
+// metered by the datagram plane's docs/protocol/datagram.md §5 per-neighbour
+// budget INSTEAD of this one — the only line on this reader that is admitted
+// without charging these buckets.
 //
 // It answers from three conditions and none of them is negotiable, because each
 // one is a way to turn the rule into a free channel:
@@ -692,13 +699,13 @@ func (s *Service) readAdmittedSessionLine(reader *bufio.Reader, session *peerSes
 //     governs the inbound command-limiter exemption: no layer, no replacement
 //     budget, no skip. The response plane is on every node, the datagram layer is
 //     not, and a defence must not disappear with an experimental flag;
-//   - a BILLABLE neighbour on the plane's own key. §5 is charged on
-//     datagram.DialedAddressKey, and handleDatagramFrame refuses a zero key
-//     ABOVE its own charge, so a session with no dialled address would divert
-//     into a budget that is never charged. The key is derived here through the
-//     same constructor the ingress uses, so the two cannot disagree about who is
-//     billable, and the answer fails CLOSED: not billable there means charged
-//     here.
+//   - a BILLABLE neighbour on the plane's own key. docs/protocol/datagram.md §5
+//     is charged on datagram.DialedAddressKey, and handleDatagramFrame refuses
+//     a zero key ABOVE its own charge, so a session with no dialled address
+//     would divert into a budget that is never charged. The key is derived here
+//     through the same constructor the ingress uses, so the two cannot disagree
+//     about who is billable, and the answer fails CLOSED: not billable there
+//     means charged here.
 //
 // # Why the whole meter and not just the ledger
 //
@@ -706,11 +713,12 @@ func (s *Service) readAdmittedSessionLine(reader *bufio.Reader, session *peerSes
 // a READER's defence — it bounds what one neighbour makes the widest reader on
 // the node read, hold and decode — and it needs a ledger, because this direction
 // has no ban surface and a violation that costs nothing is repeated forever. The
-// datagram plane's §5 budget is a per-neighbour SHARE of a data plane, and
-// exhausting it is normatively "this frame is not carried, and nothing else": no
-// `rate-limited`, no TCP tear-down, no ban score, whatever the frame's dtype,
-// class or payload. That rule already holds on the accepted-connection
-// direction, where a datagram pays no command bucket at all.
+// datagram plane's docs/protocol/datagram.md §5 budget is a per-neighbour SHARE
+// of a data plane, and exhausting it is normatively "this frame is not carried,
+// and nothing else": no `rate-limited`, no TCP tear-down, no ban score,
+// whatever the frame's dtype, class or payload. That rule already holds on the
+// accepted-connection direction, where a datagram pays no command bucket at
+// all.
 //
 // Charging the shared bucket and only sparing the ledger left the same defect
 // one frame later. The bucket is shared by construction, so a datagram stream
@@ -723,31 +731,35 @@ func (s *Service) readAdmittedSessionLine(reader *bufio.Reader, session *peerSes
 // preference:
 //
 //   - a line whose type cannot be resolved (frame_line_ambiguous) belongs to no
-//     plane at all — §3.4 refuses a duplicate top-level key on this one
-//     outright — so it is not a frame of the datagram plane to begin with;
+//     plane at all — docs/protocol/datagram.md §3.5 refuses a duplicate
+//     top-level key on this one outright — so it is not a frame of the datagram
+//     plane to begin with;
 //   - a line PAST the strict budget never reaches this predicate at all: it is
 //     refused DURING the read, where the only type name available is the
 //     untrusted claim. That refusal has a rule of its own — the claim moves the
-//     charge onto the plane's §5 budget and drops the punishment
-//     (refuseOverBudgetSessionLine) — because §2.3 is a verdict about the LINE
-//     and the neighbour that carried it did not write the frame inside it.
+//     charge onto the plane's docs/protocol/datagram.md §5 budget and drops the
+//     punishment (refuseOverBudgetSessionLine) — because
+//     docs/protocol/datagram.md §2 is a verdict about the LINE and the
+//     neighbour that carried it did not write the frame inside it.
 //
 // # It is not free
 //
-// "Not charged here" is not "not metered". §5 charges the neighbour's bytes AND
-// frames on the raw wire line at the ingress (dispatchSessionDatagramLine, keyed
-// on the dialled address), before anything is decoded, and it is the narrower of
-// the two budgets in both dimensions: 1 MiB/s and 64 frames/s per neighbour
-// against 4 MiB/s and 256 frames/s here. A datagram stream on this reader is
-// bounded by that, and by protocol.MaxFrameLine per line, which the staged read
-// enforces before this point for every type not entitled to the wide budget.
+// "Not charged here" is not "not metered". docs/protocol/datagram.md §5 charges
+// the neighbour's bytes AND frames on the raw wire line at the ingress
+// (dispatchSessionDatagramLine, keyed on the dialled address), before anything
+// is decoded, and it is the narrower of the two budgets in both dimensions: 1
+// MiB/s and 64 frames/s per neighbour against 4 MiB/s and 256 frames/s here. A
+// datagram stream on this reader is bounded by that, and by
+// protocol.MaxFrameLine per line, which the staged read enforces before this
+// point for every type not entitled to the wide budget.
 func (s *Service) sessionDatagramPaysItsOwnBudget(session *peerSession, line string) bool {
 	if !isDatagramWireLine(line) {
 		return false
 	}
 	// The session's own billable key, and handing it to the shared predicate
 	// is what keeps the two directions from drifting: the exemption holds
-	// exactly where the §5 budget has somebody to charge.
+	// exactly where the docs/protocol/datagram.md §5 budget has somebody to
+	// charge.
 	return s.datagramCarriesOwnBudget(protocol.DatagramFrameType, sessionDatagramAdmissionKey(session))
 }
 
@@ -799,14 +811,14 @@ func (s *Service) sessionDatagramPaysItsOwnBudget(session *peerSession, line str
 // so every line of it is still refused past protocol.MaxFrameLine during the
 // read, and that refusal keeps both its charge and its score. What is removed is
 // the per-neighbour RATE, and the risk is named rather than hidden: unlike the
-// datagram plane there is no §5 budget of the file plane's own to move the cost
-// onto, so a neighbour that negotiated file_transfer_v1 can stream 128 KiB lines
-// at line rate and pay only the file router's own admission (nonce cache, TTL,
-// signature). That is the same exposure the accepted direction has carried since
-// the plane existed, and it is bounded work per frame; a per-neighbour file
-// budget belongs to the file plane, which does not have one yet, and inventing
-// one here would silently stall transfers rather than protect anything the size
-// cap does not.
+// datagram plane there is no docs/protocol/datagram.md §5 budget of the file
+// plane's own to move the cost onto, so a neighbour that negotiated
+// file_transfer_v1 can stream 128 KiB lines at line rate and pay only the file
+// router's own admission (nonce cache, TTL, signature). That is the same
+// exposure the accepted direction has carried since the plane existed, and it
+// is bounded work per frame; a per-neighbour file budget belongs to the file
+// plane, which does not have one yet, and inventing one here would silently
+// stall transfers rather than protect anything the size cap does not.
 func (s *Service) sessionFileCommandIsAdmissible(session *peerSession, line string) bool {
 	if !isFileCommandWireLine(line) {
 		return false
@@ -824,12 +836,13 @@ func (s *Service) sessionFileCommandIsAdmissible(session *peerSession, line stri
 // WHAT ELSE it is charged depends on which plane the line claimed, and the two
 // answers differ because the two planes price a size violation differently:
 //
-//   - a line claiming `datagram` is refused by the rule of §2.3 alone
-//     (refuseOversizeDatagramClaim): its bytes go to that plane's own §5
-//     per-neighbour budget and the refusal costs nothing else — no violation, no
+//   - a line claiming `datagram` is refused by the rule of
+//     docs/protocol/datagram.md §2 alone (refuseOversizeDatagramClaim): its
+//     bytes go to that plane's own docs/protocol/datagram.md §5 per-neighbour
+//     budget and the refusal costs nothing else — no violation, no
 //     `rate-limited`, no teardown. A relay is not the author of the frame it
-//     forwards, and §4.4 keeps punishment for what a transit is obliged to
-//     check;
+//     forwards, and docs/protocol/datagram.md §4.1 keeps punishment for what a
+//     transit is obliged to check;
 //   - everything else keeps both the charge and the score. The response plane
 //     has no per-neighbour byte budget to move the cost onto, so the ledger is
 //     the only thing that makes a repetition cost the sender anything.
@@ -852,9 +865,9 @@ func (s *Service) refuseOverBudgetSessionLine(
 	budgetKey := sessionDatagramAdmissionKey(session)
 	discardLimit := maxResponseLineBytes
 	if claimed == protocol.DatagramFrameType {
-		// A datagram is MaxFrameLine at most (§2.3), so one frame of slack is
-		// all a resynchronisation can legitimately need; past that the peer is
-		// streaming, not framing.
+		// A datagram is MaxFrameLine at most (docs/protocol/datagram.md §2), so
+		// one frame of slack is all a resynchronisation can legitimately need;
+		// past that the peer is streaming, not framing.
 		discardLimit = oversizeDatagramResyncBytes
 	}
 	discarded, err := 0, error(nil)
@@ -871,7 +884,7 @@ func (s *Service) refuseOverBudgetSessionLine(
 	_ = session.admission.chargeLine(size, false)
 	// The refusal lands on the same per-reason counter the post-parse gate
 	// feeds. It has moved one step earlier, not changed meaning, and giving it
-	// a reason of its own would make the two impossible to add up (§10).
+	// a reason of its own would make the two impossible to add up.
 	s.countOversizeDatagramRefusal(claimed)
 	if err != nil {
 		// Either the peer never terminated the line within the budget above —

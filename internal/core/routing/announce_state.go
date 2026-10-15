@@ -30,13 +30,13 @@ type AnnouncePeerState struct {
 	//
 	// This is a mark, not a copy. It used to be the snapshot itself
 	// (lastSentSnapshot *AnnounceSnapshot), retained per peer on the
-	// theory that it was the forced-full baseline; step 14 read the code
+	// theory that it was the forced-full baseline; an audit read the code
 	// and found nothing ever read its CONTENT. The delta path projects the
 	// change journal from announceCursor, the forced full rebuilds from the
 	// live table, and the only reader of the retained entries was the
 	// diagnostic gauge that reported how large they were. What the field
 	// really expressed was one bit, and it cost 42.9 MB on a 5 000-identity
-	// table across 32 peers (docs/refactoring/dht/14-memory-cleanup.md §8′).
+	// table across 32 peers.
 	//
 	// The nil/empty distinction the pointer used to carry is preserved: a
 	// full sync of an EMPTY table establishes a baseline (true) and is not

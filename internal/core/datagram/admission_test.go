@@ -10,10 +10,10 @@ import (
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
-// admission_test.go covers the two-stage per-neighbour budget of §5 and the
-// three properties §9 names by hand: the crypto budget runs out before the
-// byte budget on small signed frames, the class does not widen the budget,
-// and the budget is keyed per neighbour.
+// admission_test.go covers the two-stage per-neighbour budget of
+// docs/protocol/datagram.md §5 and the three properties it rests on: the crypto
+// budget runs out before the byte budget on small signed frames, the class does
+// not widen the budget, and the budget is keyed per neighbour.
 //
 // It also pins what the KEY is allowed to be. AdmissionKey carries its
 // namespace, so a bucket opened for an identity the peer proved and a bucket
@@ -48,7 +48,7 @@ func (c *limitsClock) advance(d time.Duration) {
 // A stream of small SIGNED control frames must run out of verification tokens
 // while the byte budget is still nearly untouched, and it must be turned away
 // BEFORE ed25519.Verify — which is what ChargeVerify returning false means
-// (§4.1 step 8, §5, §9).
+// (docs/protocol/datagram.md §4.1 step 8, §5).
 func TestAdmissionCryptoBudgetRunsOutBeforeBytes(t *testing.T) {
 	t.Parallel()
 
@@ -420,7 +420,8 @@ func TestDialedAddressKeyIsStableAcrossRenames(t *testing.T) {
 // calls Admit directly. So the property worth stating here is not "both
 // interfaces are implemented" — there is one — but that a charge taken through
 // the seam and a charge taken directly land on the SAME neighbour, which is the
-// whole content of "the crypto budget is part of the neighbour's budget" (§5).
+// whole content of "the crypto budget is part of the neighbour's budget"
+// (docs/protocol/datagram.md §5).
 func TestAdmissionServesBothStagesFromOneBucket(t *testing.T) {
 	t.Parallel()
 
@@ -447,9 +448,9 @@ func TestAdmissionServesBothStagesFromOneBucket(t *testing.T) {
 	}
 }
 
-// The end-to-end shape of §9: a flood of small signed control frames reaching
-// a real pipeline is turned away with DropCryptoBudget — before Verify, and
-// while the byte budget is still open.
+// The end-to-end shape of the same property: a flood of small signed control
+// frames reaching a real pipeline is turned away with DropCryptoBudget — before
+// Verify, and while the byte budget is still open.
 func TestPipelineRefusesSignedFloodOnTheCryptoBudget(t *testing.T) {
 	t.Parallel()
 

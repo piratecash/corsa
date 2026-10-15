@@ -60,7 +60,7 @@ import (
 // overhead is not counted at all. A floor from exact counts is worth more than
 // an estimate from a walk nobody can afford to run on a busy node.
 //
-// Reference: docs/refactoring/dht/13-measurements.md §2, §4, §5.
+// Reference: docs/rpc/system.md (getResourceBreakdown).
 
 // Per-entry costs, resolved once at initialisation.
 var (
@@ -303,8 +303,8 @@ func (s *Service) datagramUsage() domain.SubsystemUsage {
 // The fixed buffers a socket allocates — the writer channel, the inbox, the
 // read buffer — are NOT counted per entry here: they are a constant per
 // connection rather than a property of these maps, and the constant is
-// measured on the bench rather than asserted in a comment (13-measurements.md
-// §2, "стоимость одной сессии").
+// measured on the bench (session_footprint_test.go) rather than asserted in a
+// comment.
 //
 // The queues ARE counted, as slots: a buffered channel allocates every slot
 // at construction, so an outbound session costs its send and inbox

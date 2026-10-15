@@ -15,12 +15,12 @@ import (
 // wire bytes, never on an already-decoded generic Frame: ParseFrameLine
 // collapses duplicate keys, drops unknown fields and does not keep the
 // original bytes, so a datagram that arrives as a Frame can no longer
-// honour a single promise of §3.4.
+// honour a single promise of docs/protocol/datagram.md §3.5.
 //
 // The parser is pure: no clock, no trust store, no per-peer state. It
 // returns ttl exactly as received — clamping and the single per-hop
-// decrement belong to the pipeline (§4.1.1), and `ttl <= auth.max_ttl` is
-// checked against the raw value.
+// decrement belong to the pipeline (docs/protocol/datagram.md §4.2), and `ttl
+// <= auth.max_ttl` is checked against the raw value.
 
 // maxDatagramJSONDepth bounds nesting during the raw scan. A legal frame
 // reaches depth 2 (frame object → auth object); the slack keeps the bound
@@ -31,7 +31,7 @@ import (
 // (see ParseDatagramFrame): the shape of a version this build never implemented
 // is not ours to bound, and pricing a lawful future structure as
 // ErrDatagramMalformed would charge ban points to the neighbour that merely
-// relayed it (§2, §4.4).
+// relayed it (docs/protocol/datagram.md §2, §4.1).
 const maxDatagramJSONDepth = 4
 
 // datagramTypeKey and datagramVersionKey are the two top-level keys whose
@@ -44,12 +44,13 @@ const (
 )
 
 // datagramHeaderFields and datagramAuthFields are the closed key sets of
-// §3.4 FOR HEADER VERSION 2, and they are consulted only once `v` has
-// matched this build. Under a known version an unknown key is rejected
-// instead of ignored: extension goes through `v` and `av`, never through a
-// field a receiver may skip. Under an unknown version they say nothing at
-// all — the key set of a version this build never implemented is not ours to
-// close, and a frame naming one is dropped as an unknown version (§2).
+// docs/protocol/datagram.md §3.5 FOR HEADER VERSION 2, and they are consulted
+// only once `v` has matched this build. Under a known version an unknown key is
+// rejected instead of ignored: extension goes through `v` and `av`, never
+// through a field a receiver may skip. Under an unknown version they say
+// nothing at all — the key set of a version this build never implemented is not
+// ours to close, and a frame naming one is dropped as an unknown version
+// (docs/protocol/datagram.md §2).
 var (
 	datagramHeaderFields = map[string]struct{}{
 		"type": {}, "v": {}, "mode": {}, "class": {}, "src": {}, "dst": {},
@@ -65,7 +66,7 @@ var (
 // budget. The size is measured on the full line INCLUDING the terminating
 // newline — with or without it actually present in the argument — so the
 // sender-side budget of MarshalDatagramFrameLineWithLimit and this gate
-// agree byte for byte (§2.3).
+// agree byte for byte (docs/protocol/datagram.md §2).
 func ParseDatagramFrameLine(line string) (DatagramFrame, error) {
 	budget := len(line)
 	if !strings.HasSuffix(line, "\n") {
@@ -85,13 +86,14 @@ func ParseDatagramFrameLine(line string) (DatagramFrame, error) {
 // value — so none of it may run for a frame this build cannot claim to
 // understand: judging a future frame by this version's schema prices the
 // extension mechanism as a stable-header violation, and the neighbour that
-// merely relayed the frame pays the ban points (§2, §4.4).
+// merely relayed the frame pays the ban points (docs/protocol/datagram.md §2,
+// §4.1).
 //
 // `type` and `v` are then read a SECOND time, out of the decoded field map.
 // That is the divergence guard, not a leftover: if the pre-pass and
 // encoding/json ever read the two keys differently, the frame is refused by the
 // stricter of the two answers instead of being routed on one and validated by
-// the other (§3.4).
+// the other (docs/protocol/datagram.md §3.5).
 func ParseDatagramFrame(raw []byte) (DatagramFrame, error) {
 	if _, err := peekDatagramStableHeader(raw); err != nil {
 		return DatagramFrame{}, err
@@ -148,7 +150,8 @@ func requireDatagramFrameType(raw json.RawMessage) error {
 // parseDatagramVersion separates two rejects that look alike but are
 // acted on differently: a syntactically broken `v` is a malformed frame,
 // while a well-formed version this build does not implement is dropped
-// without forwarding and must stay distinguishable (§2).
+// without forwarding and must stay distinguishable
+// (docs/protocol/datagram.md §2).
 func parseDatagramVersion(raw json.RawMessage) (domain.DatagramVersion, error) {
 	if raw == nil {
 		return 0, fmt.Errorf("%w: missing v", ErrDatagramMalformed)
@@ -281,7 +284,8 @@ func fillDatagramAuth(datagram *DatagramFrame, fields map[string]json.RawMessage
 // requiredAuthField reads a mandatory auth key. Every field of the block is
 // mandatory, and every absence reports the SAME sentinel: the pipeline
 // decides metrics and ban on the class of reject, and "auth without a
-// pubkey" and "auth without a time" are one class (§3.1).
+// pubkey" and "auth without a time" are one class
+// (docs/protocol/datagram.md §3.1).
 func requiredAuthField(fields map[string]json.RawMessage, key string) (json.RawMessage, error) {
 	raw, ok := fields[key]
 	if !ok {
@@ -337,9 +341,10 @@ func (k *stableDatagramKeys) slotFor(key []byte) *json.RawMessage {
 // It exists because the two verdicts a receiver can reach about a frame it will
 // not process cost the sender different things: a stable-header violation is
 // ban-worthy, a header version this build does not implement is a silent drop
-// (§2, §4.4). Deciding which one applies requires the version, so every rule
-// that a version owns — the closed key set, the nesting bound, the type of each
-// value — has to run BELOW this function and never above it.
+// (docs/protocol/datagram.md §2, §4.1). Deciding which one applies requires the
+// version, so every rule that a version owns — the closed key set, the nesting
+// bound, the type of each value — has to run BELOW this function and never
+// above it.
 func peekDatagramStableHeader(raw []byte) (domain.DatagramVersion, error) {
 	keys, err := scanStableDatagramKeys(raw)
 	if err != nil {
@@ -498,9 +503,10 @@ func skipDatagramJSONSpace(raw []byte, pos int) int {
 
 // decodeJSONObject decodes one JSON object into its raw key/value pairs and
 // refuses trailing content. Decoding into a map instead of a tagged struct
-// is deliberate: it puts the closed key set of §3.4 under our own control
-// (a typed reject, not a text-matched encoding/json message) and keeps
-// every value raw, so each field is validated by the rule that owns it.
+// is deliberate: it puts the closed key set of docs/protocol/datagram.md §3.5
+// under our own control (a typed reject, not a text-matched encoding/json
+// message) and keeps every value raw, so each field is validated by the rule
+// that owns it.
 func decodeJSONObject(scope string, raw []byte) (map[string]json.RawMessage, error) {
 	if len(bytes.TrimSpace(raw)) == 0 || bytes.TrimSpace(raw)[0] != '{' {
 		return nil, fmt.Errorf("%w: %s is not a JSON object", ErrDatagramMalformed, scope)
@@ -563,7 +569,7 @@ func wireByte(label string, raw json.RawMessage) (uint8, error) {
 // wireInt64 requires a JSON INTEGER literal. Fractions, exponents, plus
 // signs and quoted numbers are rejected: "1.0", "1e0" and "1" would each
 // have to become one transcript byte, and letting two parsers pick
-// differently is exactly the ambiguity §3.4 closes.
+// differently is exactly the ambiguity docs/protocol/datagram.md §3.5 closes.
 func wireInt64(label string, raw json.RawMessage) (int64, error) {
 	token := string(raw)
 	if err := requireIntegerLiteral(label, token); err != nil {
@@ -604,8 +610,9 @@ const jsonScanInlineKeys = 16
 // value, which is the only way to tell them apart without parsing.
 //
 // The key storage is REUSED as the scan pushes and pops: the scan runs before
-// authentication (§2.2), so a frame full of tiny objects must not translate
-// into an allocation per object for anyone who can open a socket.
+// authentication (docs/protocol/datagram.md §4.1), so a frame full of tiny
+// objects must not translate into an allocation per object for anyone who can
+// open a socket.
 type jsonScanScope struct {
 	// keys are the raw key bytes seen in this object. For an unescaped,
 	// valid-UTF-8 key the entry aliases `raw` and costs nothing.
@@ -628,7 +635,8 @@ func (s *jsonScanScope) reset(isObject bool) {
 // repeats inside any object — the frame itself, auth, ext, or any nested
 // object. encoding/json silently keeps the LAST occurrence even with
 // DisallowUnknownFields, so without this scan one implementation could
-// verify the signature over one spelling and route the other (§3.4).
+// verify the signature over one spelling and route the other
+// (docs/protocol/datagram.md §3.5).
 //
 // Keys are compared after the SAME normalisation encoding/json applies, so
 // `"ab"` and `"ab"` collide as they must, and so do a raw invalid UTF-8 byte
@@ -721,7 +729,7 @@ func (s *jsonScanScope) recordKey(key []byte) error {
 // Everything else goes through encoding/json itself rather than through a
 // second implementation of its rules: invalid UTF-8 and lone surrogates both
 // decode to U+FFFD there, and a hand-written approximation of that is exactly
-// how the two parsers would drift apart again (§3.4).
+// how the two parsers would drift apart again (docs/protocol/datagram.md §3.5).
 func scanJSONStringToken(raw []byte, start int) ([]byte, int, error) {
 	escaped := false
 	for i := start + 1; i < len(raw); i++ {

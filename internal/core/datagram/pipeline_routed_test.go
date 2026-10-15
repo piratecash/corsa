@@ -12,9 +12,10 @@ import (
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
-// pipeline_routed_test.go covers the ORDER of §4.1 on the signed plane: what
-// is charged before what, what may occupy state and what may not, and the
-// exhaustive Release branch list of §4.1 line 454.
+// pipeline_routed_test.go covers the ORDER of docs/protocol/datagram.md §4.1 on
+// the signed plane: what is charged before what, what may occupy state and what
+// may not, and the exhaustive Release branch list of
+// docs/protocol/datagram.md §4.1.
 
 // transitFixture is a relay with a route to the destination.
 //
@@ -122,15 +123,16 @@ func TestUnbillableArrivalIsRefusedBeforeParsingAndBeforeCrypto(t *testing.T) {
 	}
 }
 
-// TestOversizeLineIsADropAndNeverABan pins the price of the §2.3 size rule
-// INSIDE the layer, on the one path that can still reach the parser with a line
-// past MaxFrameLine.
+// TestOversizeLineIsADropAndNeverABan pins the price of the
+// docs/protocol/datagram.md §2 size rule INSIDE the layer, on the one path that
+// can still reach the parser with a line past MaxFrameLine.
 //
 // A frame too large is not a stable-header violation: the neighbour that handed
 // it over did not write it, and nothing in the envelope tells it how big the
-// frame was when the previous hop read it. §4.4 reserves punishment for what
-// every transit is obliged to CHECK about a frame it forwards, so the size gate
-// answers with a drop under its own reason and nothing else.
+// frame was when the previous hop read it. docs/protocol/datagram.md §4.1
+// reserves punishment for what every transit is obliged to CHECK about a frame
+// it forwards, so the size gate answers with a drop under its own reason and
+// nothing else.
 //
 // The mutation this kills: folding ErrFrameTooLarge back into parseRefusal's
 // default branch, where it becomes droppedWithBan(DropMalformed).
@@ -182,7 +184,7 @@ func TestTheEnvelopeCarriesNoPathRequirement(t *testing.T) {
 	}
 }
 
-// TestUndeliverableFrameNeverEntersTheCache is one of the three §9 cases in
+// TestUndeliverableFrameNeverEntersTheCache is one of the three cases in
 // which the anti-replay key must NOT be cached.
 func TestUndeliverableFrameNeverEntersTheCache(t *testing.T) {
 	net := newFakeNetwork()
@@ -202,7 +204,7 @@ func TestUndeliverableFrameNeverEntersTheCache(t *testing.T) {
 	}
 }
 
-// TestForgedSignatureNeverEntersTheCacheAndCarriesBan is the second §9 case,
+// TestForgedSignatureNeverEntersTheCacheAndCarriesBan is the second case,
 // and at the same time the pre-poison test: the forged frame has the SAME
 // transcript — hence the same replay key — as the genuine one, so if the key
 // were cached before verification the genuine frame would be silenced.
@@ -223,7 +225,7 @@ func TestForgedSignatureNeverEntersTheCacheAndCarriesBan(t *testing.T) {
 	result := receiver.deliver(t, sender.id, poisoned)
 	requireDrop(t, result, DropSignature)
 	if !result.BanWorthy() {
-		t.Fatal("a forged signature is exactly what ban points are for (§4.4)")
+		t.Fatal("a forged signature is exactly what ban points are for (docs/protocol/datagram.md §4.1)")
 	}
 	if receiver.replay.Len() != 0 {
 		t.Fatal("an unauthentic frame must not occupy a replay slot")
@@ -237,8 +239,8 @@ func TestForgedSignatureNeverEntersTheCacheAndCarriesBan(t *testing.T) {
 }
 
 // TestFingerprintMismatchIsBanWorthy pins the other ban-worthy auth violation
-// of §4.4: the frame carries a key that does not fingerprint to src, and the
-// refusal happens before any replay slot is taken.
+// of docs/protocol/datagram.md §4.1: the frame carries a key that does not
+// fingerprint to src, and the refusal happens before any replay slot is taken.
 func TestFingerprintMismatchIsBanWorthy(t *testing.T) {
 	net := newFakeNetwork()
 	private, signer := newSigner(t)
@@ -265,7 +267,7 @@ func TestFingerprintMismatchIsBanWorthy(t *testing.T) {
 	}
 }
 
-// TestAuthorizationRejectDoesNotCommitTheKey is the third §9 case: an
+// TestAuthorizationRejectDoesNotCommitTheKey is the third case: an
 // authentic but untrusted sender must not evict other people's records.
 func TestAuthorizationRejectDoesNotCommitTheKey(t *testing.T) {
 	net := newFakeNetwork()
@@ -291,13 +293,14 @@ func TestAuthorizationRejectDoesNotCommitTheKey(t *testing.T) {
 		t.Fatal("a rejected frame must not reach the handler")
 	}
 	if receiver.replay.Len() != 0 {
-		t.Fatal("`reject` must not commit the replay key (§7)")
+		t.Fatal("`reject` must not commit the replay key (docs/protocol/datagram.md §7)")
 	}
 }
 
 // TestAuthorizationHookSeesTheAuthenticatedSession is the push_identity rule of
-// §7: the hook can refuse a frame whose payload names an address other than the
-// identity of the session it arrived on — and it does so BEFORE the commit.
+// docs/protocol/datagram.md §7: the hook can refuse a frame whose payload names
+// an address other than the identity of the session it arrived on — and it does
+// so BEFORE the commit.
 func TestAuthorizationHookSeesTheAuthenticatedSession(t *testing.T) {
 	net := newFakeNetwork()
 	private, signer := newSigner(t)
@@ -338,7 +341,8 @@ func TestAuthorizationHookSeesTheAuthenticatedSession(t *testing.T) {
 	requireOutcome(t, accepted, InboundDelivered)
 }
 
-// TestUnknownDTypeNeverReachesTheHookAndTakesNoSlot is §7's last clause.
+// TestUnknownDTypeNeverReachesTheHookAndTakesNoSlot is
+// docs/protocol/datagram.md §7's last clause.
 func TestUnknownDTypeNeverReachesTheHookAndTakesNoSlot(t *testing.T) {
 	net := newFakeNetwork()
 	private, signer := newSigner(t)
@@ -383,9 +387,9 @@ func TestUnknownDTypeNeverReachesTheHookAndTakesNoSlot(t *testing.T) {
 	}
 }
 
-// TestModeDemotionIsRefusedByTheRegistry is §3.6 and §9: stripping auth from a
-// signed routed datagram and passing it off as a request does not get it
-// accepted by a type that declared `routed` only.
+// TestModeDemotionIsRefusedByTheRegistry is docs/protocol/datagram.md §3.7:
+// stripping auth from a signed routed datagram and passing it off as a request
+// does not get it accepted by a type that declared `routed` only.
 func TestModeDemotionIsRefusedByTheRegistry(t *testing.T) {
 	net := newFakeNetwork()
 	receiver := newPipelineNode(t, net, nodeOpts{name: "receiver"})
@@ -411,7 +415,7 @@ func TestModeDemotionIsRefusedByTheRegistry(t *testing.T) {
 	}
 }
 
-// TestTransitGateDropsBeforeReservation is §9: a node without
+// TestTransitGateDropsBeforeReservation: a node without
 // mesh_datagram_transit_v1 drops somebody else's frame before the reservation
 // and takes no replay slot, EVEN THOUGH it has a route to the destination.
 func TestTransitGateDropsBeforeReservation(t *testing.T) {
@@ -433,7 +437,7 @@ func TestTransitGateDropsBeforeReservation(t *testing.T) {
 	requireDrop(t, fixture.relay.deliver(t, fixture.sender.id, repeat), DropReplayDuplicate)
 }
 
-// TestCryptoTokenIsChargedOnlyImmediatelyBeforeVerify is §9: a frame sieved by
+// TestCryptoTokenIsChargedOnlyImmediatelyBeforeVerify: a frame sieved by
 // the early Has, by `ttl <= max_ttl` or by the validity window spends no token.
 func TestCryptoTokenIsChargedOnlyImmediatelyBeforeVerify(t *testing.T) {
 	t.Run("early Has", func(t *testing.T) {
@@ -499,17 +503,18 @@ func TestCryptoTokenIsChargedOnlyImmediatelyBeforeVerify(t *testing.T) {
 	})
 }
 
-// TestSpentSendWindowRefusesOnlyTheTransitPath is §2.2 on the outcome the
-// conveyor used to ignore: a frame still inside its validity interval whose
-// clamped send_until is already behind now.
+// TestSpentSendWindowRefusesOnlyTheTransitPath is
+// docs/protocol/datagram.md §3.4 on the outcome the conveyor used to ignore: a
+// frame still inside its validity interval whose clamped send_until is already
+// behind now.
 //
-// §2.2 says such a frame is not enqueued AT ALL, so the refusal has to happen
-// where every other timing refusal happens — before the signature and before
-// the anti-replay reservation. Left unhandled it was the most expensive drop
-// the layer has: an Ed25519 verification, a crypto token and a replay slot are
-// all spent, every candidate is walked, and the frame dies at the writer queue
-// as `forward_failed`, which reads as backpressure at the next hop rather than
-// as a timing refusal.
+// docs/protocol/datagram.md §3.4 says such a frame is not enqueued AT ALL, so
+// the refusal has to happen where every other timing refusal happens — before
+// the signature and before the anti-replay reservation. Left unhandled it was
+// the most expensive drop the layer has: an Ed25519 verification, a crypto
+// token and a replay slot are all spent, every candidate is walked, and the
+// frame dies at the writer queue as `forward_failed`, which reads as
+// backpressure at the next hop rather than as a timing refusal.
 //
 // The second half is the reason the check cannot simply be added to the switch:
 // the same outcome on a frame addressed HERE is not a refusal at all. There is
@@ -526,7 +531,7 @@ func TestSpentSendWindowRefusesOnlyTheTransitPath(t *testing.T) {
 
 		requireDrop(t, fixture.relay.deliver(t, fixture.sender.id, frame), DropSendWindowExpired)
 		if charged := fixture.relay.crypto.charged(); charged != 0 {
-			t.Fatalf("%d verification tokens paid for a frame §2.2 forbids enqueueing at all", charged)
+			t.Fatalf("%d verification tokens paid for a frame docs/protocol/datagram.md §3.4 forbids enqueueing at all", charged)
 		}
 		assertNoReservationTouched(t, fixture.relay)
 		if fixture.relay.replay.Len() != 0 {
@@ -578,9 +583,10 @@ func TestReplayHitDropsBeforeCryptography(t *testing.T) {
 // Reserve and Release
 // ---------------------------------------------------------------------------
 
-// TestReserveStandsAfterEveryReadOnlyDecision is §4.1 line 452 and §9: every
-// decision that can end a frame BEFORE the reservation happens before it, so
-// none of them occupies a slot — and none of them calls Release.
+// TestReserveStandsAfterEveryReadOnlyDecision is
+// docs/protocol/datagram.md §4.1: every decision that can end a frame BEFORE
+// the reservation happens before it, so none of them occupies a slot — and none
+// of them calls Release.
 //
 // The list used to be longer, and every entry that left was a hook a TRANSIT
 // ran over somebody else's frame: an interceptor's `drop`, HandleTransit's
@@ -626,7 +632,7 @@ func assertNoReservationSince(t *testing.T, node *pipelineNode, before replayCal
 	}
 }
 
-// TestBranchBeforeReserveDoesNotStripAParallelReservation is the explicit §9
+// TestBranchBeforeReserveDoesNotStripAParallelReservation is the explicit
 // test: one instance of a frame is refused before the reservation while a
 // parallel instance holds the reservation of the very same key — and that
 // reservation survives, because branches before Reserve never call Release.
@@ -639,11 +645,11 @@ func assertNoReservationSince(t *testing.T, node *pipelineNode, before replayCal
 // code does, so the assertion would hold on a build that called Release on every
 // branch.
 //
-// The holder is taken from INSIDE the route lookup, which is the window §4.1
-// line 456 is about: the instance under test has already passed its early Has as
-// a miss, and the reservation appears before the branch that ends it. Staging it
-// earlier would make the early probe a hit and the frame would never reach the
-// branch at all.
+// The holder is taken from INSIDE the route lookup, which is the window
+// docs/protocol/datagram.md §4.1 line 456 is about: the instance under test has
+// already passed its early Has as a miss, and the reservation appears before
+// the branch that ends it. Staging it earlier would make the early probe a hit
+// and the frame would never reach the branch at all.
 func TestBranchBeforeReserveDoesNotStripAParallelReservation(t *testing.T) {
 	fixture := newTransitFixture(t, true)
 	frame := fixture.frame(t)
@@ -690,20 +696,22 @@ func TestBranchBeforeReserveDoesNotStripAParallelReservation(t *testing.T) {
 	}
 }
 
-// TestReleaseOnEveryFailureAfterReservation walks the §4.1 line 454 list that
-// the routed conveyor owns. Only one branch is left on the transit path — every
-// candidate refusing — because the frame is never written anywhere: the
-// StoreIfAbsent rows this test used to carry disappeared with the `store`
-// verdict, not because they stopped being checked.
+// TestReleaseOnEveryFailureAfterReservation walks the
+// docs/protocol/datagram.md §4.1 list that the routed conveyor owns. Only one
+// branch is left on the transit path — every candidate refusing — because the
+// frame is never written anywhere: the StoreIfAbsent rows this test used to
+// carry disappeared with the `store` verdict, not because they stopped being
+// checked.
 func TestReleaseOnEveryFailureAfterReservation(t *testing.T) {
 	t.Run("every candidate refuses", func(t *testing.T) {
 		fixture := newTransitFixture(t, true)
 		fixture.net.refuseQueue(fixture.nextHop)
 
-		// §4.3 keeps this apart from "no route": admitted candidates existed
-		// and the enqueue failed, which is a temporary LOCAL failure — the
-		// drop reason is forward_failed, and the reservation is still given
-		// back, which is what §4.1 line 454 demands.
+		// docs/protocol/datagram.md §4.4 keeps this apart from "no route":
+		// admitted candidates existed and the enqueue failed, which is a
+		// temporary LOCAL failure — the drop reason is forward_failed, and the
+		// reservation is still given back, which is what
+		// docs/protocol/datagram.md §4.1 demands.
 		requireDrop(t, fixture.relay.deliver(t, fixture.sender.id, fixture.frame(t)), DropForwardFailed)
 		calls := fixture.relay.replayCalls()
 		if calls.reserves != 1 || calls.releases != 1 {
@@ -715,8 +723,8 @@ func TestReleaseOnEveryFailureAfterReservation(t *testing.T) {
 	})
 }
 
-// TestAFrameWithNowhereToGoNeverPaysForAVerification is §4.1 step 7, and the
-// sieve has no exceptions left.
+// TestAFrameWithNowhereToGoNeverPaysForAVerification is
+// docs/protocol/datagram.md §4.1 step 7, and the sieve has no exceptions left.
 //
 // The two it used to have were static flags of a behaviour profile:
 // can_store_without_route bought a verification for a frame the relay would
@@ -825,7 +833,7 @@ func TestLocalSendNoRouteDoesNotReserve(t *testing.T) {
 // The duplicate branch
 // ---------------------------------------------------------------------------
 
-// TestBaseCacheDuplicateStaysASilentDrop is the other half of §9: the
+// TestBaseCacheDuplicateStaysASilentDrop is the other half: the
 // five-minute plane keeps its cheap silent drop before cryptography.
 func TestBaseCacheDuplicateStaysASilentDrop(t *testing.T) {
 	net := newFakeNetwork()
@@ -850,8 +858,8 @@ func TestBaseCacheDuplicateStaysASilentDrop(t *testing.T) {
 	}
 }
 
-// TestRoutedPlaneNeverTouchesReverseState is the other direction of the §4.1
-// plane separation.
+// TestRoutedPlaneNeverTouchesReverseState is the other direction of the
+// docs/protocol/datagram.md §4.1 plane separation.
 func TestRoutedPlaneNeverTouchesReverseState(t *testing.T) {
 	fixture := newTransitFixture(t, true)
 	requireOutcome(t, fixture.relay.deliver(t, fixture.sender.id, fixture.frame(t)), InboundForwarded)
@@ -864,7 +872,7 @@ func TestRoutedPlaneNeverTouchesReverseState(t *testing.T) {
 }
 
 // TestCommitForwardedFailureReleasesAndKeepsTheFrameQueued is the transit
-// branch of "Commit.fail in all three branches" (§9): the frame is already
+// branch of "Commit.fail in all three branches": the frame is already
 // queued and the outcome is FINAL, so the layer releases the key, logs, and
 // does not rewrite the outcome — a repeat of the frame will pass and at worst
 // yields one duplicate the neighbours' anti-replay puts out.

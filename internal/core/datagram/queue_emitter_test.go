@@ -11,13 +11,14 @@ import (
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
-// queue_emitter_test.go is the END-TO-END half of §5: the class queue sits on
-// the path a real frame takes, not beside it.
+// queue_emitter_test.go is the END-TO-END half of docs/protocol/datagram.md §5:
+// the class queue sits on the path a real frame takes, not beside it.
 //
 // The gap it closes: the weighted queue had no producer and no consumer
 // outside its own unit tests, so "bulk keeps a guaranteed share under a
-// constant control stream" (§9) was a property of a type nobody called. The
-// pipeline published straight to the writer, first come first served.
+// constant control stream" (docs/protocol/datagram.md §5) was a property of a
+// type nobody called. The pipeline published straight to the writer, first come
+// first served.
 
 // recordingWriter is the writer end of the layer: it records what the class
 // queue released, in release order.
@@ -45,13 +46,14 @@ func (w *recordingWriter) released() []OutboundFrame {
 
 // TestBulkKeepsItsShareThroughTheLayersOwnPath drives the queue exactly as the
 // conveyor does — Pipeline.SendLocal → Pipeline.emit → ClassQueueEmitter — and
-// asserts §5's guarantee on what actually came out.
+// asserts docs/protocol/datagram.md §5's guarantee on what actually came out.
 //
 // The control stream is kept PERMANENT for the whole run, refilled through the
-// pipeline after every dispatch: that is the situation §5 is about, and it is
-// also what separates a weighted queue from no queue at all. Without one the
-// conveyor hands frames to the writer in submission order, so a control stream
-// that never stops means the bulk frames behind it never move.
+// pipeline after every dispatch: that is the situation
+// docs/protocol/datagram.md §5 is about, and it is also what separates a
+// weighted queue from no queue at all. Without one the conveyor hands frames to
+// the writer in submission order, so a control stream that never stops means
+// the bulk frames behind it never move.
 func TestBulkKeepsItsShareThroughTheLayersOwnPath(t *testing.T) {
 	t.Parallel()
 
@@ -152,8 +154,9 @@ func TestBulkKeepsItsShareThroughTheLayersOwnPath(t *testing.T) {
 
 // TestQueuedEmissionCarriesTheClassAndTheDeadline pins the other half of the
 // hand-over contract: the writer receives the class and the send deadline of
-// EVERY frame the layer emits, so §4.2's "the writer drops a frame that
-// outlived its deadline" is true of the real path and not of one plane.
+// EVERY frame the layer emits, so docs/protocol/datagram.md §5's "the writer
+// drops a frame that outlived its deadline" is true of the real path and not of
+// one plane.
 func TestQueuedEmissionCarriesTheClassAndTheDeadline(t *testing.T) {
 	t.Parallel()
 
@@ -188,8 +191,9 @@ func TestQueuedEmissionCarriesTheClassAndTheDeadline(t *testing.T) {
 	if out.SendUntil.IsZero() {
 		t.Fatal("a bulk frame reached the writer without a send deadline")
 	}
-	// The bulk queue residence is what bounds it (§4.2), and the layer's own
-	// clamps may only shorten it.
+	// The bulk queue residence is what bounds it
+	// (docs/protocol/datagram.md §4.3), and the layer's own clamps may only
+	// shorten it.
 	residence, err := domain.QueueResidence(domain.DatagramClassBulk)
 	if err != nil {
 		t.Fatalf("QueueResidence: %v", err)
@@ -245,7 +249,7 @@ type refusingWriter struct{}
 
 func (refusingWriter) EmitTo(context.Context, OutboundFrame) bool { return false }
 
-// TestFrameRefusedAfterTheDequeueIsCounted pins the §10 rule "dropped by
+// TestFrameRefusedAfterTheDequeueIsCounted pins the rule "dropped by
 // reason" on the one path that used to lose a frame silently: the queue never
 // puts a refused frame back — already-queued frames are not re-ordered or
 // resurrected — so a frame the writer turns away here is gone from the layer

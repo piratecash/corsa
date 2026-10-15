@@ -7,7 +7,7 @@ import (
 	"github.com/piratecash/corsa/internal/core/domain"
 )
 
-// Mode-selection telemetry (docs/refactoring/dht/05-rollout-metrics.md).
+// Mode-selection telemetry (docs/rpc/routing.md, fetchRouteSummary `mode_selection`).
 //
 // The property under test throughout: the REASON comes from the branch that
 // decided the mode. Every case below fixes both halves at once, so a reason

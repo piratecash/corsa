@@ -27,7 +27,8 @@ import "fmt"
 // defeat exactly that seam. routing re-exports the type and its values, so the
 // distance-vector plane's own call sites are unchanged.
 //
-// Reference: docs/refactoring/dht/02-route-source.md §1, §2.
+// Reference: docs/rpc/datagram.md (explainDatagramRoute, `route_source` and
+// `discovery_plane`).
 
 // RouteSource indicates how a route was learned. The trust hierarchy is:
 // direct > hop_ack > announcement. A route learned through a more trusted
@@ -100,7 +101,7 @@ const (
 	// DiscoveryPlaneOverlay is the structured overlay. No production code
 	// produces it yet; it exists now because the fact it records — an overlay
 	// lookup that ended in a direct session — is precisely the pair of facts
-	// this type must be shown not to lose (02-route-source.md §5).
+	// this type must be shown not to lose.
 	DiscoveryPlaneOverlay
 )
 

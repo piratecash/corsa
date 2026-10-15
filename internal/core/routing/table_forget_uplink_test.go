@@ -9,7 +9,8 @@ import (
 
 // table_forget_uplink_test.go pins ForgetUplink — the local, wire-silent purge
 // of what an unproven connection may have written about an uplink before the
-// identity proved itself over v2 (docs/refactoring/n1-legacy-residual.md §2).
+// identity proved itself over v2 (docs/routing.md, "Legacy claims of an
+// identity that proved v2").
 // Unlike InvalidateTransitRoutes it leaves NO tombstone: a tombstone with an
 // impostor's SeqNo is exactly the residue that would refuse the real
 // identity's own announcements.

@@ -914,7 +914,7 @@ func (s *Service) routingTargetsForMessage(msg protocol.Envelope) []domain.PeerA
 		// fallback would happily pick the peer and re-introduce the
 		// transit path the table-routing gate (routeIsBlockedByQuarantine)
 		// and failover gate just closed. See
-		// docs/refactoring/route-withdrawal-grace-period.md.
+		// docs/protocol/network_security.md §13.
 		//
 		// MUST use the lock-held helper (isPeerTransitQuarantinedLocked)
 		// because routingTargetsFiltered already holds peerMu.RLock
@@ -1222,6 +1222,7 @@ func (s *Service) sendNoticeToPeer(address domain.PeerAddress, ttl time.Duration
 
 	welcome, ok := s.noticeDialWelcome(conn, reader, address, transport)
 	if !ok {
+		s.forgetV1MarkWithoutWelcome(address, transport)
 		return
 	}
 	// One gate for both session kinds, before auth_session is signed and

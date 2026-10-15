@@ -11,8 +11,9 @@ import (
 )
 
 // datagram_diagnostics.go is the read-only surface of the datagram plane: the
-// operator's summary and the two interfaces §4.3 makes a CONTRACT of the layer
-// rather than a convenience — the reachability probe and the route plan.
+// operator's summary and the two interfaces docs/protocol/datagram.md §4.4
+// makes a CONTRACT of the layer rather than a convenience — the reachability
+// probe and the route plan.
 //
 // They are here, on the node, for the same reason isPeerReachable and
 // ExplainFileRoute are: an artifact owner builds its retries on the probe and
@@ -20,7 +21,7 @@ import (
 // its JSON shapes. Everything they decide is decided INSIDE the layer, over
 // the same selection code a real send walks — this file only asks and renders.
 //
-// Reference: docs/refactoring/datagram-transport.md §4.3, §5, §9, §10.
+// Reference: docs/protocol/datagram.md §4.4, §5; docs/rpc/datagram.md.
 
 // errDatagramNotEnabled marks every diagnostic asked of a node whose plane is
 // off. It is an error rather than an empty answer on purpose: "no candidates"
@@ -34,7 +35,8 @@ type datagramError struct {
 
 func (e *datagramError) Error() string { return "datagram: " + e.msg }
 
-// FetchDatagramSummary returns the whole §5 / §10 picture of the local plane:
+// FetchDatagramSummary returns the whole limits-and-metrics picture
+// (docs/protocol/datagram.md §5; docs/rpc/datagram.md) of the local plane:
 // what the conveyor decided, what the per-neighbour budgets did, what the class
 // queue holds, what the anti-replay cache refused, and the numbers they all run
 // on.
@@ -44,12 +46,12 @@ func (e *datagramError) Error() string { return "datagram: " + e.msg }
 // atomics, the queue and the replay cache publish their own snapshots under
 // their own mutexes, and no domain mutex of the Service is involved at all.
 //
-// The `replay` block is the only place the §5 fairness refusals surface. The
-// cache evicts and refuses records under pressure — RejectedNoisyPeer,
-// EvictedNoisyPeer, RejectedCapacity — and reclaims lost pipeline branches
-// (AbandonedReservations); a rule that fires invisibly is a rule nobody can
-// act on, so those counters are reported here beside the occupancy they must
-// be read against.
+// The `replay` block is the only place the docs/protocol/datagram.md §5
+// fairness refusals surface. The cache evicts and refuses records under
+// pressure — RejectedNoisyPeer, EvictedNoisyPeer, RejectedCapacity — and
+// reclaims lost pipeline branches (AbandonedReservations); a rule that fires
+// invisibly is a rule nobody can act on, so those counters are reported here
+// beside the occupancy they must be read against.
 //
 // Wire schema:
 //
@@ -63,7 +65,7 @@ func (e *datagramError) Error() string { return "datagram: " + e.msg }
 //	  "queue":     { ... },               // weighted class queue depths
 //	  "replay":    { "Counters": {...}, "Held": 0 }, // anti-replay cache
 //	  "reverse":   { "Held": 0, "LocalSlots": 0, "LocalRefusals": {} }, // request quota
-//	  "limits":    { ... }                // the §5 numbers in force
+//	  "limits":    { ... }                // the docs/protocol/datagram.md §5 numbers in force
 //	}
 //
 // Every key CollectDiagnostics fills must appear here. That is not a style
@@ -86,9 +88,10 @@ func (s *Service) FetchDatagramSummary() (json.RawMessage, error) {
 		"enabled":  true,
 		"endpoint": s.localDatagramAdvertise().Endpoint,
 		"transit":  s.localDatagramAdvertise().Transit,
-		// The declared set IS the registered set (§6.1): one field would be
-		// enough, and the two are kept so a reader can see at a glance that
-		// they agree — the pair that used to disagree is exactly the bug.
+		// The declared set IS the registered set
+		// (docs/protocol/datagram.md §6.1): one field would be enough, and the
+		// two are kept so a reader can see at a glance that they agree — the
+		// pair that used to disagree is exactly the bug.
 		"dtypes":            dtypeNames(s.localDatagramDTypes()),
 		"registered_dtypes": dtypeNames(layer.types.DTypes()),
 		"metrics":           diagnostics.Metrics,
@@ -117,7 +120,7 @@ func dtypeNames(dtypes []domain.DType) []string {
 }
 
 // DatagramReachable answers "is there anybody to give the first hop to" for
-// one exact datagram (§4.3).
+// one exact datagram (docs/protocol/datagram.md §4.4).
 //
 // The guarantee is ONE-WAY and covers BOTH negative outcomes of a send: false
 // means a send performed at the same moment over the same data would NOT have
@@ -136,11 +139,12 @@ func dtypeNames(dtypes []domain.DType) []string {
 // it reads the FRESH lookup — the same source a locally originated send reads
 // — so an action taken right after a route appears is not answered with
 // "unreachable" while the send would already work.
-// The negative answer is REPORTED WITH ITS REASON, not as a bare false. §6.1
-// makes "the peer declared no handler for this dtype" cancel a cached
-// confirmation immediately, while a destination that is merely off the routing
-// table must not cancel anything — one bool cannot carry that difference, and
-// an operator reading "unreachable" needs the same distinction.
+// The negative answer is REPORTED WITH ITS REASON, not as a bare false.
+// docs/protocol/datagram.md §6.1 makes "the peer declared no handler for this
+// dtype" cancel a cached confirmation immediately, while a destination that is
+// merely off the routing table must not cancel anything — one bool cannot carry
+// that difference, and an operator reading "unreachable" needs the same
+// distinction.
 func (s *Service) DatagramReachable(
 	ctx context.Context,
 	dst domain.PeerIdentity,
@@ -197,7 +201,7 @@ func (s *Service) DatagramReachable(
 // reading both consoles does not have to learn two vocabularies.
 //
 // One field has no file-router equivalent and it exists to stop the plan from
-// over-promising (§4.3):
+// over-promising (docs/protocol/datagram.md §4.4):
 //
 //   - "first_candidate_guaranteed" is false under `explore`. The rotation
 //     counter mutates on a SEND; a read-only plan neither moves nor reserves

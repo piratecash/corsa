@@ -19,12 +19,13 @@ import (
 // layer instances joined by a fake transport, plus the frame builders every
 // pipeline test shares.
 //
-// The topology is not decoration. "Ten hops there and ten back" (§9) cannot be
-// checked on a single instance, and neither can "the reverse record survives a
-// full round trip", "a repeated request does not re-point downstream" or "the
-// answer arrives before the request has finished being published" — the last
-// one only shows up because delivery here is SYNCHRONOUS and re-entrant, which
-// is the harshest possible version of the race §4.2 phase 3 exists to close.
+// The topology is not decoration. "Ten hops there and ten back"
+// (docs/protocol/datagram.md §4.2) cannot be checked on a single instance, and
+// neither can "the reverse record survives a full round trip", "a repeated
+// request does not re-point downstream" or "the answer arrives before the
+// request has finished being published" — the last one only shows up because
+// delivery here is SYNCHRONOUS and re-entrant, which is the harshest possible
+// version of the race docs/protocol/datagram.md §4.3 phase 3 exists to close.
 
 const (
 	testNetwork    = domain.NetworkID("corsa-test")
@@ -36,8 +37,8 @@ const (
 )
 
 // declaredDTypes is what every fixture peer announces in its handshake, so the
-// last-hop dtype gate of §4.3 never masks the behaviour under test. The gate
-// itself is M7's and has its own tests.
+// last-hop dtype gate of docs/protocol/datagram.md §4.4 never masks the
+// behaviour under test. The gate itself is M7's and has its own tests.
 func declaredDTypes() DeclaredDTypes {
 	return NewDeclaredDTypes(domain.ParseDeclaredDTypes([]string{
 		dtypeQuery.String(), dtypeAnswer.String(), dtypeCached.String(),
@@ -442,7 +443,7 @@ func (n *pipelineNode) onBeforeEmit(hook func()) {
 // not be, since that seam was also the way a blocking or disk-backed memory
 // could reach the pipeline. The counters lose nothing that these tests assert:
 // the cache increments exactly one of them per call, and they are the record an
-// operator reads anyway (§5).
+// operator reads anyway (docs/protocol/datagram.md §5).
 type replayCalls struct {
 	reserves uint64
 	releases uint64
@@ -617,7 +618,7 @@ func signedRouted(t *testing.T, opts routedOpts) protocol.DatagramFrame {
 }
 
 // newLabel mints a one-shot request label. It is a random 20-byte tag and is
-// deliberately not derived from any identity (§2.1.1).
+// deliberately not derived from any identity (docs/protocol/datagram.md §2.2).
 func newLabel(t *testing.T, seed string) Label {
 	t.Helper()
 	return NewLabel(domaintest.ID("label-" + seed))

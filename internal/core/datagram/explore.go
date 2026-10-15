@@ -11,7 +11,7 @@ import (
 )
 
 // explore.go implements the deterministic rotation of route_policy
-// `explore` (§4.3).
+// `explore` (docs/protocol/datagram.md §4.4).
 //
 // The candidates are already sorted, so the rotation only chooses where to
 // START walking them: the offset HMAC(node_local_secret, dst) mod K
@@ -22,7 +22,7 @@ import (
 // modulo K, so "the retry goes through a different candidate" has to be
 // produced by an algorithm rather than hoped for.
 //
-// Reference: docs/refactoring/datagram-transport.md §4.3.
+// Reference: docs/protocol/datagram.md §4.4.
 
 // DefaultExploreCounters is the starting size of the bounded counter LRU.
 // A map keyed by an arbitrary tuple would grow without bound, so the LRU is
@@ -30,7 +30,8 @@ import (
 // node-wide counter and degrade to decorrelation.
 const DefaultExploreCounters = 4096
 
-// exploreKey is the rotation key of §4.3: (dst, hash(dtype)).
+// exploreKey is the rotation key of docs/protocol/datagram.md §4.4: (dst,
+// hash(dtype)).
 //
 // The key is wider than dst on purpose. A counter keyed by address alone
 // would be shifted by unrelated sends — transit frames to the same
@@ -67,8 +68,8 @@ type exploreCounter struct {
 // Concurrency: one mutex guards both the LRU and the global counter, so the
 // increment and the lookup that consumes it are one atomic step. Two
 // concurrent sends of the same key get two different counters — which is
-// all the guarantee §4.3 makes for that case, since it degrades to
-// decorrelation under concurrency anyway.
+// all the guarantee docs/protocol/datagram.md §4.4 makes for that case, since
+// it degrades to decorrelation under concurrency anyway.
 type exploreRotator struct {
 	entries  map[exploreKey]*list.Element
 	order    *list.List
@@ -96,7 +97,8 @@ func newExploreRotator(secret NodeSecret, capacity int) *exploreRotator {
 // walk the candidates round-robin, which is the honest half of the
 // guarantee. A miss seeds the entry from the node-wide counter, so the very
 // first send of a key and any send after an eviction are decorrelated
-// rather than aligned — §4.3 promises exactly that and no more.
+// rather than aligned — docs/protocol/datagram.md §4.4 promises exactly that
+// and no more.
 func (r *exploreRotator) next(key exploreKey) uint64 {
 	r.mu.Lock()
 	defer r.mu.Unlock()

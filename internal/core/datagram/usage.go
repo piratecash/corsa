@@ -14,7 +14,7 @@ import (
 // reverse table keeps a per-owner tally precisely so a decision about a full
 // bucket never has to count one.
 //
-// Reference: docs/refactoring/dht/13-measurements.md §2, §4.
+// Reference: docs/rpc/system.md (getResourceBreakdown).
 
 // localRefusalDTypeCap bounds the attribution map of local refusals.
 //

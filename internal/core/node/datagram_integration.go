@@ -13,9 +13,10 @@ import (
 )
 
 // datagram_integration.go is the wire-level wiring of the datagram transport
-// layer into the node: the two capabilities of §6, the raw advertised
-// capability set and the `dtypes` set of §6.1, and the single ingress every
-// arriving `datagram` frame passes through, on BOTH network directions.
+// layer into the node: the two capabilities of docs/protocol/datagram.md §6,
+// the raw advertised capability set and the `dtypes` set of
+// docs/protocol/datagram.md §6.1, and the single ingress every arriving
+// `datagram` frame passes through, on BOTH network directions.
 //
 // What is deliberately NOT here, and lives in its own file for a reason:
 // constructing datagram.Pipeline and driving its schedules (datagram_layer.go),
@@ -25,18 +26,18 @@ import (
 // know each other's capabilities and types — with or without a conveyor behind
 // the ingress.
 //
-// Reference: docs/refactoring/datagram-transport.md §2.2, §2.3, §3.4, §4.4,
-// §6, §6.1.
+// Reference: docs/protocol/datagram.md §2.3, §2.4, §3.5, §6, §6.1, §7.
 
 // ---------------------------------------------------------------------------
-// Local advertisement (§6)
+// Local advertisement (docs/protocol/datagram.md §6)
 // ---------------------------------------------------------------------------
 
 // datagramAdvertise is what THIS node claims about the datagram plane. The
 // two flags are separate because the two capabilities are separate
-// statements (§6): "I can be an endpoint" and "I will carry other people's
-// datagrams" are different promises, and a client node keeps the second one
-// to itself so an honest neighbour never picks it as a relay.
+// statements (docs/protocol/datagram.md §6): "I can be an endpoint" and "I will
+// carry other people's datagrams" are different promises, and a client node
+// keeps the second one to itself so an honest neighbour never picks it as a
+// relay.
 type datagramAdvertise struct {
 	// Endpoint advertises mesh_datagram_v1.
 	Endpoint bool
@@ -57,18 +58,20 @@ type datagramAdvertise struct {
 // frames on it.
 //
 // The ENDPOINT half depends on the flag and on nothing else — least of all on
-// the type registry. mesh_datagram_v1 states exactly one thing (§6): this node
-// understands the envelope and can receive a datagram addressed to it at the
-// TRANSPORT level, instead of answering unknown_command and closing the
-// connection. That is true the moment the layer is wired, whatever the
-// registry holds. WHICH types the node can handle is stated by `dtypes` alone
-// (§6.1), and an empty registry states it there, as an explicitly empty set.
+// the type registry. mesh_datagram_v1 states exactly one thing
+// (docs/protocol/datagram.md §6): this node understands the envelope and can
+// receive a datagram addressed to it at the TRANSPORT level, instead of
+// answering unknown_command and closing the connection. That is true the moment
+// the layer is wired, whatever the registry holds. WHICH types the node can
+// handle is stated by `dtypes` alone (docs/protocol/datagram.md §6.1), and an
+// empty registry states it there, as an explicitly empty set.
 //
 // Tying the endpoint half to the registry is what used to leave the plane
 // unable to carry anything at all: the candidate filter demands
-// mesh_datagram_v1 from EVERY candidate, transit included (§2.2 rule 2,
-// §4.3), so a network of PR-0 nodes with empty registries had no admissible
-// next hop for anybody's frame — not even a purely transit one.
+// mesh_datagram_v1 from EVERY candidate, transit included
+// (docs/protocol/datagram.md §6, §4.4), so a network of PR-0 nodes with empty
+// registries had no admissible next hop for anybody's frame — not even a purely
+// transit one.
 //
 // This is the value the PIPELINE's own gates are built from
 // (localAdvertisedCapabilities), and it deliberately does NOT read whether the
@@ -151,7 +154,7 @@ func localHandshakeCapabilityStrings(names []domain.CapabilityName) []string {
 }
 
 // localDatagramDTypes is the dtype set this build handles as an ENDPOINT —
-// the value of the `dtypes` handshake field (§6.1).
+// the value of the `dtypes` handshake field (docs/protocol/datagram.md §6.1).
 //
 // It is read from the REAL registry, never from a constant. The registry is
 // the single place that knows which types have a handler, and deriving the
@@ -171,12 +174,12 @@ func (s *Service) localDatagramDTypes() []domain.DType {
 // (possibly empty) name list otherwise.
 //
 // An ENDPOINT always emits the field, in full, EMPTY INCLUDED. The field IS
-// the set (§6.1): an empty registry is emitted as an explicitly empty array —
-// this node speaks the envelope (it advertises mesh_datagram_v1, it accepts
-// and forwards frames) and has a handler for no type — and a non-empty one is
-// emitted whole, because a partial list would both understate what this node
-// handles and disagree with the identity record's `dtypes`, which carries the
-// same set by contract.
+// the set (docs/protocol/datagram.md §6.1): an empty registry is emitted as an
+// explicitly empty array — this node speaks the envelope (it advertises
+// mesh_datagram_v1, it accepts and forwards frames) and has a handler for no
+// type — and a non-empty one is emitted whole, because a partial list would
+// both understate what this node handles and disagree with the identity
+// record's `dtypes`, which carries the same set by contract.
 //
 // There is no set whose omission "says the same thing". Omitting the field for
 // a set that happened to match a declared baseline was the shorthand this
@@ -194,7 +197,7 @@ func (s *Service) localDTypeStrings(advertise datagramAdvertise) *[]string {
 }
 
 // ---------------------------------------------------------------------------
-// Peer declarations (§2.2, §6.1)
+// Peer declarations (docs/protocol/datagram.md §2.3, §6.1)
 // ---------------------------------------------------------------------------
 
 // declarationsFromHandshake validates a peer's hello/welcome into the raw
@@ -207,19 +210,21 @@ func (s *Service) localDTypeStrings(advertise datagramAdvertise) *[]string {
 //     peer stops being a datagram candidate — the role gate reads this set;
 //     the typed set is untouched and the session lives on;
 //   - a dtypes list breaching its bounds is read as an ABSENT field, hence
-//     as no declared type at all (§6.1) — conservative degradation, never a
-//     torn-down handshake. The peer stops being a lawful DESTINATION for any
-//     type while remaining a lawful transit hop.
+//     as no declared type at all (docs/protocol/datagram.md §6.1) —
+//     conservative degradation, never a torn-down handshake. The peer stops
+//     being a lawful DESTINATION for any type while remaining a lawful transit
+//     hop.
 //
 // Neither branch returns an error, and that is the contract, not an
 // omission: the caller has no lawful reaction other than to carry on.
 //
-// "Fixed for the lifetime of the session" (§6.1) is enforced by the call
-// sites, not here: outbound sessions run applyWelcomeMetadata exactly once,
-// and the inbound path refuses a second hello as soon as auth is initiated
-// (the re-hello guard in dispatchNetworkFrame). A pre-auth re-hello can still
-// replace the values, which is the same window in which the TYPED capability
-// set is replaceable — there is no session yet to be inconsistent with.
+// "Fixed for the lifetime of the session" (docs/protocol/datagram.md §6.1) is
+// enforced by the call sites, not here: outbound sessions run
+// applyWelcomeMetadata exactly once, and the inbound path refuses a second
+// hello as soon as auth is initiated (the re-hello guard in
+// dispatchNetworkFrame). A pre-auth re-hello can still replace the values,
+// which is the same window in which the TYPED capability set is replaceable —
+// there is no session yet to be inconsistent with.
 func declarationsFromHandshake(frame protocol.Frame) netcore.HandshakeDeclarations {
 	return netcore.HandshakeDeclarations{
 		AdvertisedNames: domain.ParseRawCapabilityNames(frame.Capabilities),
@@ -276,7 +281,7 @@ func (s *Service) sessionDeclarations(address domain.PeerAddress) netcore.Handsh
 }
 
 // ---------------------------------------------------------------------------
-// Ingress (§2.3, §3.4, §4.4)
+// Ingress (docs/protocol/datagram.md §2, §3.5, §4.1)
 // ---------------------------------------------------------------------------
 
 // datagramDirection names which of the two network paths a frame arrived on.
@@ -313,13 +318,13 @@ func (d datagramDirection) String() string {
 // that called it.
 //
 // Ban travels as its own field rather than as a class of refusals because
-// §4.4 draws the line by WHAT was violated, not by how bad it looked: the
-// stable header and auth — a fingerprint mismatch, a forged signature, a
-// field out of bounds — are what every datagram transit is obliged to check, so
-// getting them wrong is punishable. An unknown dtype and application-level
-// garbage are not: the layer explicitly allows an honest node to relay a
-// type it cannot read, so punishing it would hit exactly the well-behaved
-// baseline relays the layer depends on.
+// docs/protocol/datagram.md §4.1 draws the line by WHAT was violated, not by
+// how bad it looked: the stable header and auth — a fingerprint mismatch, a
+// forged signature, a field out of bounds — are what every datagram transit is
+// obliged to check, so getting them wrong is punishable. An unknown dtype and
+// application-level garbage are not: the layer explicitly allows an honest node
+// to relay a type it cannot read, so punishing it would hit exactly the
+// well-behaved baseline relays the layer depends on.
 type datagramIngressResult struct {
 	err      error
 	accepted bool
@@ -336,9 +341,9 @@ func (r datagramIngressResult) BanWorthy() bool { return r.ban }
 func (r datagramIngressResult) Err() error { return r.err }
 
 // exceedsDatagramFrameLine reports whether a line breaches the strict
-// 128 KiB budget of §2.3. The budget itself is wireLineBudget (admission.go),
-// shared with the announce plane, which obeys the same 128 KiB ceiling on the
-// same two readers.
+// 128 KiB budget of docs/protocol/datagram.md §2. The budget itself is
+// wireLineBudget (admission.go), shared with the announce plane, which obeys
+// the same 128 KiB ceiling on the same two readers.
 func exceedsDatagramFrameLine(line string) bool {
 	return wireLineBudget(line) > protocol.MaxFrameLine
 }
@@ -348,7 +353,7 @@ func exceedsDatagramFrameLine(line string) bool {
 // (refuseOversizeFrameLine), which judges the type protocol.ParseFrameLine
 // resolved and therefore never reaches this plane's own refusal path.
 //
-// Without it the frame would leave no trace at all, so §10's "dropped by
+// Without it the frame would leave no trace at all, so the "dropped by
 // reason" ledger would be missing a refusal the widest reader on the node can
 // produce. The reason is the same DropFrameTooLarge the ingress uses, because
 // it is the same gate applied at a different point — a second reason for one
@@ -365,7 +370,7 @@ func (s *Service) countOversizeDatagramRefusal(frameType string) {
 }
 
 // ---------------------------------------------------------------------------
-// The size rule of §2.3, stated once
+// The size rule of docs/protocol/datagram.md §2, stated once
 // ---------------------------------------------------------------------------
 
 // oversizeDatagramResyncBytes is how far PAST protocol.MaxFrameLine a reader
@@ -373,18 +378,19 @@ func (s *Service) countOversizeDatagramRefusal(frameType string) {
 // on reading the connection.
 //
 // One frame of slack is the whole allowance, and it is derived rather than
-// chosen: §2.3 caps a datagram at MaxFrameLine, so anything a conforming sender
-// anywhere on the path could have produced is already in hand when the reader
-// stops. Beyond this bound the bytes are not an over-sized FRAME any more, they
-// are an unterminated stream — which is the immediate neighbour's own transport
-// behaviour and not a property of anything it relayed — and a stream stays fatal
-// for the connection exactly as it is for every other frame type.
+// chosen: docs/protocol/datagram.md §2 caps a datagram at MaxFrameLine, so
+// anything a conforming sender anywhere on the path could have produced is
+// already in hand when the reader stops. Beyond this bound the bytes are not an
+// over-sized FRAME any more, they are an unterminated stream — which is the
+// immediate neighbour's own transport behaviour and not a property of anything
+// it relayed — and a stream stays fatal for the connection exactly as it is for
+// every other frame type.
 //
 // It also keeps the charge below meaningful: what a refused line bills is what
 // the two stages actually read, which is at most MaxFrameLine + this plus the
-// part of one buffer fill each stage stops on — still far inside the §5 byte
-// burst, so the bucket is really drained instead of the charge being refused
-// whole for exceeding it.
+// part of one buffer fill each stage stops on — still far inside the
+// docs/protocol/datagram.md §5 byte burst, so the bucket is really drained
+// instead of the charge being refused whole for exceeding it.
 const oversizeDatagramResyncBytes = protocol.MaxFrameLine
 
 // refuseOversizeDatagram is the SINGLE statement of what a datagram past
@@ -392,21 +398,22 @@ const oversizeDatagramResyncBytes = protocol.MaxFrameLine
 // two readers that stop mid-line and judge from the CLAIM, and the ingress that
 // measures the complete line.
 //
-// The price is one DropFrameTooLarge in the §10 ledger and a log line. NOT a ban
-// score, not a rate-limit verdict, not a violation on a session ledger, and
-// never a closed connection — and the reason is the same one §4.4 gives for
-// every other refusal it keeps ban-free: the neighbour that handed the line over
-// is not the author of the frame inside it. A relay forwards what it was given;
-// nothing in the envelope obliges it to have measured the frame the way this
-// node does, and punishing it hits exactly the honest baseline relays the plane
-// depends on. The frame is still refused — the limit is what protects the
-// reader, and it is not weakened here.
+// The price is one DropFrameTooLarge in the drop-reason ledger and a log line.
+// NOT a ban score, not a rate-limit verdict, not a violation on a session
+// ledger, and never a closed connection — and the reason is the same one
+// docs/protocol/datagram.md §4.1 gives for every other refusal it keeps
+// ban-free: the neighbour that handed the line over is not the author of the
+// frame inside it. A relay forwards what it was given; nothing in the envelope
+// obliges it to have measured the frame the way this node does, and punishing
+// it hits exactly the honest baseline relays the plane depends on. The frame is
+// still refused — the limit is what protects the reader, and it is not weakened
+// here.
 //
 // What makes the silence affordable is the CHARGE, which is the callers'
-// business: the ingress has already billed §5 on the raw line before it reaches
-// this verdict, and the pre-parse callers bill it through
-// refuseOversizeDatagramClaim below. A refusal nobody paid for would be the one
-// free channel on the node.
+// business: the ingress has already billed docs/protocol/datagram.md §5 on the
+// raw line before it reaches this verdict, and the pre-parse callers bill it
+// through refuseOversizeDatagramClaim below. A refusal nobody paid for would be
+// the one free channel on the node.
 func (s *Service) refuseOversizeDatagram(
 	direction datagramDirection,
 	key datagram.AdmissionKey,
@@ -432,28 +439,29 @@ func (s *Service) refuseOversizeDatagram(
 // the bytes ever had is the one their first bytes gave
 // (claimedFrameTypeFromPrefix). That claim is trusted for exactly two things —
 // moving the charge from the response plane's shared bucket to this plane's own,
-// NARROWER §5 one, and dropping a punishment §2 and §4.4 forbid for a size
-// verdict in the first place. It cannot buy processing, because the line is
-// refused either way, so unlike the budget replacement of
-// sessionDatagramPaysItsOwnBudget there is no keyword here that turns a meter
-// off: prepending `{"type":"datagram",` moves a neighbour onto a stricter budget
-// and nothing else.
+// NARROWER docs/protocol/datagram.md §5 one, and dropping a punishment
+// docs/protocol/datagram.md §2 and §4.1 forbid for a size verdict in the first
+// place. It cannot buy processing, because the line is refused either way, so
+// unlike the budget replacement of sessionDatagramPaysItsOwnBudget there is no
+// keyword here that turns a meter off: prepending `{"type":"datagram",` moves a
+// neighbour onto a stricter budget and nothing else.
 //
 // # Why the charge comes first
 //
-// §4.1 step 1 puts admission before any decoding, and this refusal is the
-// cheapest verdict on the widest reader of the node — the classic shape of a
-// free flood. The bytes this node was made to READ are billed before the
-// verdict, so a stream of oversize claims drains the very bucket a stream of
-// legal datagrams would, and drains the sender's own plane with it. The verdict
-// of the charge is deliberately ignored: it is not a second decision, the line
-// is refused whichever way it goes.
+// docs/protocol/datagram.md §4.1 step 1 puts admission before any decoding, and
+// this refusal is the cheapest verdict on the widest reader of the node — the
+// classic shape of a free flood. The bytes this node was made to READ are
+// billed before the verdict, so a stream of oversize claims drains the very
+// bucket a stream of legal datagrams would, and drains the sender's own plane
+// with it. The verdict of the charge is deliberately ignored: it is not a
+// second decision, the line is refused whichever way it goes.
 //
-// With no layer there is no §5 budget to move the cost to, so the claim buys
-// nothing at all and the caller keeps its own refusal — the same "no layer, no
-// exemption" condition datagramCarriesOwnBudget carries. Likewise for a
-// neighbour with no billable key: the charge would land nowhere, and a free
-// refusal is exactly what must not exist here.
+// With no layer there is no docs/protocol/datagram.md §5 budget to move the
+// cost to, so the claim buys nothing at all and the caller keeps its own
+// refusal — the same "no layer, no exemption" condition
+// datagramCarriesOwnBudget carries. Likewise for a neighbour with no billable
+// key: the charge would land nowhere, and a free refusal is exactly what must
+// not exist here.
 func (s *Service) refuseOversizeDatagramClaim(
 	direction datagramDirection,
 	claimed string,
@@ -474,11 +482,11 @@ func (s *Service) refuseOversizeDatagramClaim(
 // datagram.
 //
 // The reason is DropMalformed and not a new one, because it is the SAME verdict
-// the strict parser of §3.4 would have reached one step later: a duplicate
-// top-level key is malformed for this plane by contract. Before the refusal
-// moved above the parser, that is exactly where such a line was counted, and
-// changing the reason with the position would have made a §10 ledger that no
-// longer adds up across the change.
+// the strict parser of docs/protocol/datagram.md §3.5 would have reached one
+// step later: a duplicate top-level key is malformed for this plane by
+// contract. Before the refusal moved above the parser, that is exactly where
+// such a line was counted, and changing the reason with the position would have
+// made a drop-reason ledger that no longer adds up across the change.
 //
 // The attribution is peekFrameType and is best-effort BY CONSTRUCTION — the
 // line refused to name itself, so no scan can do better. That cuts both ways
@@ -497,11 +505,12 @@ func (s *Service) countAmbiguousDatagramRefusal(line string) {
 // judged before anything is parsed.
 //
 // It is the classification both receive paths divert on, and it exists because
-// §4.1 step 1 puts the neighbour's byte and frame budget "before any decoding":
-// a line that reaches protocol.ParseFrameLine has already cost this node a full
-// JSON unmarshal that nobody charged for. Diverting on this predicate means a
-// datagram is charged by the layer first and never meets the universal parser
-// at all — the strict parser of §3.4 has to read the original bytes anyway.
+// docs/protocol/datagram.md §4.1 step 1 puts the neighbour's byte and frame
+// budget "before any decoding": a line that reaches protocol.ParseFrameLine has
+// already cost this node a full JSON unmarshal that nobody charged for.
+// Diverting on this predicate means a datagram is charged by the layer first
+// and never meets the universal parser at all — the strict parser of
+// docs/protocol/datagram.md §3.5 has to read the original bytes anyway.
 //
 // It answers from topLevelFrameType and not from peekFrameType, which is the
 // same correctness argument the pre-parse budget makes: peekFrameType reports
@@ -530,10 +539,11 @@ func isDatagramWireLine(line string) bool {
 //
 // It is a LOG and a drop rather than a delivery, and that is the point of
 // finding 1: delivering it would put the universal parse back in front of the
-// neighbour's budget (§4.1 step 1), which is exactly the residue the pre-parse
-// classification exists to remove. An Error line is the right volume because
-// the condition is a disagreement between two scanners in this repository — it
-// cannot be produced by a peer, only by a bug in one of them.
+// neighbour's budget (docs/protocol/datagram.md §4.1 step 1), which is exactly
+// the residue the pre-parse classification exists to remove. An Error line is
+// the right volume because the condition is a disagreement between two scanners
+// in this repository — it cannot be produced by a peer, only by a bug in one of
+// them.
 func (s *Service) reportDatagramResidueUnreachable(direction, peer string) {
 	s.datagramMetrics.ObserveInbound("", datagram.InboundDropped, datagram.DropMalformed)
 	log.Error().
@@ -555,7 +565,7 @@ func (s *Service) reportDatagramResidueUnreachable(direction, peer string) {
 //     never a string the neighbour chose, because a budget keyed on the
 //     sender's own claim is reset by the sender at will, and one keyed on a
 //     relayable v1 auth_session is spent by whoever relays it (see
-//     AdmissionKeySpace and docs/refactoring/n1-legacy-residual.md §1);
+//     AdmissionKeySpace and docs/protocol/network_security.md §13);
 //   - identity is the NAME the neighbour presents, and on a legacy session it
 //     is an unproven claim: on a dialled one the challenge travels the other way
 //     (authenticatePeerSession signs OURS, nothing signs theirs), and on an
@@ -712,9 +722,10 @@ func (s *Service) inboundDatagramBudgetKey(connID domain.ConnID) datagram.Admiss
 // to peer health.
 //
 // The capability gate that used to stand here now stands INSIDE the ingress,
-// below the charge (§4.1 step 1): refusing above it made the cheapest verdict
-// this direction has also its only free one, so a neighbour that authenticated
-// without mesh_datagram_v1 could hold the socket at line rate for nothing.
+// below the charge (docs/protocol/datagram.md §4.1 step 1): refusing above it
+// made the cheapest verdict this direction has also its only free one, so a
+// neighbour that authenticated without mesh_datagram_v1 could hold the socket
+// at line rate for nothing.
 func (s *Service) dispatchSessionDatagramLine(session *peerSession, line string) {
 	if session == nil {
 		// Without the session there is no dial address, hence no key that is
@@ -749,8 +760,8 @@ func (s *Service) dispatchSessionDatagramLine(session *peerSession, line string)
 // Reached from the pre-parse diversion in dispatchNetworkFrame, through
 // dispatchInboundDatagramWire. It reports whether the frame was ACCEPTED, not
 // whether the connection survives — for this plane the connection always does:
-// §2 makes a datagram this node will not process a silent drop, never an error
-// frame and never a tear-down.
+// docs/protocol/datagram.md §2 makes a datagram this node will not process a
+// silent drop, never an error frame and never a tear-down.
 //
 // The capability gate moved INTO the ingress, below the charge, for the reason
 // stated on dispatchSessionDatagramLine: a refusal above the budget is a
@@ -758,9 +769,10 @@ func (s *Service) dispatchSessionDatagramLine(session *peerSession, line string)
 func (s *Service) dispatchInboundDatagramLine(connID domain.ConnID, wire string) bool {
 	result := s.handleDatagramFrame(s.runCtx, wire, s.inboundDatagramNeighbour(connID))
 	if result.BanWorthy() {
-		// §4.4: punishment is reserved for violations of the stable header and
-		// auth, which every datagram transit is obliged to check. An unknown header
-		// version and an unimplemented dtype never reach this branch.
+		// docs/protocol/datagram.md §4.1: punishment is reserved for violations
+		// of the stable header and auth, which every datagram transit is
+		// obliged to check. An unknown header version and an unimplemented
+		// dtype never reach this branch.
 		s.addBanScore(connID, banIncrementInvalidSig)
 	}
 	return result.Accepted()
@@ -778,7 +790,8 @@ func (s *Service) dispatchInboundDatagramLine(connID domain.ConnID, wire string)
 // protocol_trace line is what an operator greps a receive path by.
 //
 // It always keeps the connection: a datagram this node will not process is a
-// silent drop by contract (§2), never an error frame and never a tear-down.
+// silent drop by contract (docs/protocol/datagram.md §2), never an error frame
+// and never a tear-down.
 func (s *Service) dispatchInboundDatagramWire(connID domain.ConnID, addr string, wire string) bool {
 	accepted := false
 	defer func() {
@@ -802,35 +815,37 @@ func (s *Service) dispatchInboundDatagramWire(connID domain.ConnID, addr string,
 
 // handleDatagramFrame is the SINGLE ingress of the datagram plane. Both
 // network directions end here with the raw wire line they read, and nothing
-// between the socket and this function is allowed to re-encode it: §3.4
-// requires the strict parser to see the original bytes, because duplicate
-// keys, unknown fields and canonical encodings are all invisible after a
-// round trip through the universal Frame.
+// between the socket and this function is allowed to re-encode it:
+// docs/protocol/datagram.md §3.5 requires the strict parser to see the original
+// bytes, because duplicate keys, unknown fields and canonical encodings are all
+// invisible after a round trip through the universal Frame.
 //
-// The order of the gates is fixed by §2.3 and §4.1:
+// The order of the gates is fixed by docs/protocol/datagram.md §2 and §4.1:
 //
 //  1. the neighbour must be BILLABLE — the dispatcher must have produced a key
 //     that is either proven or ours. This is the only step above the charge,
 //     and it is allowed there because it does not read the frame at all: it is
 //     a property of the connection, decided before the line arrived;
-//  2. the charge of §4.1 step 1: bytes and frames of the FULL wire line,
-//     before any decoding and before EVERY refusal below. A refusal that runs
-//     above the charge is a refusal the neighbour gets for free, and the
-//     cheapest verdict on the node makes the best flood;
+//  2. the charge of docs/protocol/datagram.md §4.1 step 1: bytes and frames of
+//     the FULL wire line, before any decoding and before EVERY refusal below. A
+//     refusal that runs above the charge is a refusal the neighbour gets for
+//     free, and the cheapest verdict on the node makes the best flood;
 //  3. the capability of THIS connection. A neighbour that never negotiated
 //     mesh_datagram_v1 is dropped silently — no error frame, no tear-down, no
-//     ban score, whatever the dtype, class or payload — because §2 makes every
-//     refusal of this plane silent and §4.4 reserves punishment for the stable
-//     header and auth;
+//     ban score, whatever the dtype, class or payload — because
+//     docs/protocol/datagram.md §2 makes every refusal of this plane silent and
+//     docs/protocol/datagram.md §4.1 reserves punishment for the stable header
+//     and auth;
 //  4. the two things the conveyor is told about the neighbour: the NAME it
 //     presents and the CHANNEL it arrived on. A frame carrying neither is
 //     dropped, having paid. They are separate gates because they are separate
-//     facts — the name is what the §7 seams are shown, the channel is what every
-//     channel-relative decision keys on — and on an outbound session only the
-//     channel is defensible. "Not proven" is not a warning left to the reader:
-//     the value the seams receive answers Identity() only where the budget key
-//     itself names this identity as proven, and a type that DECLARED it needs
-//     that proof is not delivered to at all on such a direction;
+//     facts — the name is what the docs/protocol/datagram.md §7 seams are
+//     shown, the channel is what every channel-relative decision keys on — and
+//     on an outbound session only the channel is defensible. "Not proven" is
+//     not a warning left to the reader: the value the seams receive answers
+//     Identity() only where the budget key itself names this identity as
+//     proven, and a type that DECLARED it needs that proof is not delivered to
+//     at all on such a direction;
 //  5. the strict MaxFrameLine budget, counted on the raw line INCLUDING its
 //     newline. The inbound command reader already caps at 128 KiB, but the
 //     peer-session reader accepts up to 8 MiB, and without this the claim
@@ -839,27 +854,29 @@ func (s *Service) dispatchInboundDatagramWire(connID domain.ConnID, addr string,
 //  6. the strict parser, on the raw bytes.
 //
 // Past those gates the frame goes to the conveyor, which re-runs the strict
-// parse itself: §4.1 step 1 charges the neighbour's admission budget on the
-// RAW bytes before anything is decoded, so the parse cannot be hoisted above
-// it. That is why the line — not a parsed frame — is what crosses this
-// boundary, and why nothing above changes when the conveyor is absent.
+// parse itself: docs/protocol/datagram.md §4.1 step 1 charges the neighbour's
+// admission budget on the RAW bytes before anything is decoded, so the parse
+// cannot be hoisted above it. That is why the line — not a parsed frame — is
+// what crosses this boundary, and why nothing above changes when the conveyor
+// is absent.
 //
 // THIS FUNCTION IS THE ONLY PLACE STAGE ONE IS CHARGED, and it is the only
 // place that CAN be: two of the gates above — the plane and the size — never
 // reach the conveyor, so a charge below them would leave each of them free. The
 // conveyor declares no stage-one seam at all for that reason, and the key
-// charged here is handed down to it (InboundOpts.BudgetKey) so stage two of §5
-// lands in the same bucket instead of deriving one from a neighbour that may
-// have proven nothing.
+// charged here is handed down to it (InboundOpts.BudgetKey) so stage two of
+// docs/protocol/datagram.md §5 lands in the same bucket instead of deriving one
+// from a neighbour that may have proven nothing.
 //
 // Without a conveyor (the feature flag off, or its construction failed) the
 // function stops at the parse. It counts the frame honestly — nothing was
 // delivered, forwarded or answered — and the reason is unknown_dtype, which is
 // literally the state of such a build: there is no type registry, so every
-// dtype is one it does not implement, and §2 makes that a silent drop on a
-// live connection with no ban. Nothing is charged either, because there is no
-// budget to charge; in practice the path is unreachable from the network,
-// since a node without the plane never advertises mesh_datagram_v1.
+// dtype is one it does not implement, and docs/protocol/datagram.md §2 makes
+// that a silent drop on a live connection with no ban. Nothing is charged
+// either, because there is no budget to charge; in practice the path is
+// unreachable from the network, since a node without the plane never advertises
+// mesh_datagram_v1.
 func (s *Service) handleDatagramFrame(ctx context.Context, line string, neighbour datagramNeighbour) datagramIngressResult {
 	direction := neighbour.direction
 	if neighbour.budgetKey.IsZero() {
@@ -891,9 +908,9 @@ func (s *Service) handleDatagramFrame(ctx context.Context, line string, neighbou
 		// sender: the writer's own budget is the same 128 KiB. On the
 		// peer-session path it means the peer pushed a multi-megabyte
 		// line through the wide response reader, which is the exact
-		// attack §2.3 closes. The bytes have been charged above; what the
-		// refusal costs beyond that is stated in one place
-		// (refuseOversizeDatagram), and it is nothing.
+		// attack docs/protocol/datagram.md §2 closes. The bytes have been
+		// charged above; what the refusal costs beyond that is stated in one
+		// place (refuseOversizeDatagram), and it is nothing.
 		return s.refuseOversizeDatagram(direction, neighbour.budgetKey, wireLineBudget(line))
 	}
 
@@ -908,9 +925,9 @@ func (s *Service) handleDatagramFrame(ctx context.Context, line string, neighbou
 			// own claim.
 			Channel: neighbour.channel,
 			// The key stage one was just charged on, carried down so the
-			// verification budget of §5 cannot land anywhere else. On an
-			// outbound session Peer above is the neighbour's own claim; this is
-			// the host:port THIS node dialled.
+			// verification budget of docs/protocol/datagram.md §5 cannot land
+			// anywhere else. On an outbound session Peer above is the
+			// neighbour's own claim; this is the host:port THIS node dialled.
 			BudgetKey: neighbour.budgetKey,
 		}))
 	}
@@ -936,25 +953,26 @@ func (s *Service) handleDatagramFrame(ctx context.Context, line string, neighbou
 //
 // The neighbour has ALREADY been charged by the caller, which is the whole
 // change: the drop costs the sender exactly what the frame cost this node to
-// read. Beyond that the refusal is as quiet as §2 requires — no error frame, no
-// tear-down, no ban score — and the rule does not look at the dtype, the class
-// or the payload, because none of them can make a plane exist on a connection
-// that never negotiated it.
+// read. Beyond that the refusal is as quiet as docs/protocol/datagram.md §2
+// requires — no error frame, no tear-down, no ban score — and the rule does not
+// look at the dtype, the class or the payload, because none of them can make a
+// plane exist on a connection that never negotiated it.
 //
 // It deliberately does NOT go through refuseDatagram. That helper counts an
 // inbound OUTCOME, and Metrics.Observed means "frames the conveyor decided on";
 // a frame refused above the plane was never handed to it, and counting it there
 // would make the two disagree. ObserveDrop is the seam for exactly this shape —
-// it moves the reason breakdown of §10 and leaves the inbound totals alone — so
+// it moves the drop-reason breakdown and leaves the inbound totals alone — so
 // the drop is now in the ledger under a reason of its own without becoming an
 // observation.
 //
-// The counter is not a weakening of §2. "Silent" there is a property of the
-// WIRE: the neighbour still learns nothing, is still not disconnected and is
-// still not scored. What it must not also be is invisible to the operator — a
-// neighbour off the plane pushing frames at line rate was, until this counter,
-// indistinguishable from ordinary load in the §10 ledger, with only a Debug line
-// nobody has enabled to say otherwise.
+// The counter is not a weakening of docs/protocol/datagram.md §2. "Silent"
+// there is a property of the WIRE: the neighbour still learns nothing, is still
+// not disconnected and is still not scored. What it must not also be is
+// invisible to the operator — a neighbour off the plane pushing frames at line
+// rate was, until this counter, indistinguishable from ordinary load in the
+// drop-reason ledger, with only a Debug line nobody has enabled to say
+// otherwise.
 func (s *Service) dropDatagramOffThePlane(neighbour datagramNeighbour) datagramIngressResult {
 	s.datagramMetrics.ObserveDrop(datagram.DropPlaneNotNegotiated)
 	log.Debug().
@@ -971,9 +989,9 @@ func (s *Service) dropDatagramOffThePlane(neighbour datagramNeighbour) datagramI
 // total rather than a subset: "accepted" is every non-drop outcome, because
 // the dispatcher's only use for the flag is the frame-accounting counter, and
 // a stored or answered frame was accepted by every reading of the word. The
-// ban verdict is passed through untouched — §4.4 decides it inside the layer,
-// where the reason lives, and re-deriving it here from the drop reason is how
-// the two surfaces would come to disagree.
+// ban verdict is passed through untouched — docs/protocol/datagram.md §4.1
+// decides it inside the layer, where the reason lives, and re-deriving it here
+// from the drop reason is how the two surfaces would come to disagree.
 //
 // The conveyor already counted the outcome through the SAME metrics instance
 // this file's refusal paths use, so nothing is counted again here.
@@ -998,12 +1016,13 @@ func datagramIngressResultOf(result datagram.InboundResult) datagramIngressResul
 //     per chunk — so a file transfer moved onto this plane would be throttled
 //     to a rate no legacy path was ever throttled to, and the throttle's
 //     answer is not a drop but a connection tear-down with ban points;
-//   - the layer's own two-stage admission (§5) is strictly stronger where it
-//     matters: it is charged per AUTHENTICATED NEIGHBOUR rather than per
-//     socket, it counts BYTES as well as frames — the command limiter counts
-//     neither — and its third dimension caps signature verifications, which
-//     is what actually bounds the CPU a hostile peer can spend. It also
-//     refuses silently, which is what §2 requires of this plane;
+//   - the layer's own two-stage admission (docs/protocol/datagram.md §5) is
+//     strictly stronger where it matters: it is charged per AUTHENTICATED
+//     NEIGHBOUR rather than per socket, it counts BYTES as well as frames — the
+//     command limiter counts neither — and its third dimension caps signature
+//     verifications, which is what actually bounds the CPU a hostile peer can
+//     spend. It also refuses silently, which is what
+//     docs/protocol/datagram.md §2 requires of this plane;
 //   - and it is charged BEFORE parsing, on the raw line, so an exempt frame
 //     is not an uncounted frame for even one step.
 //
@@ -1020,16 +1039,16 @@ func datagramIngressResultOf(result datagram.InboundResult) datagramIngressResul
 // diversion (isDatagramWireLine) therefore answer from ONE classification, so
 // the exemption and the diversion cannot disagree about what a line IS.
 //
-// The second argument is the KEY the §5 budget would be charged on, and it is
-// the other half of "the layer charges it itself". A budget nobody can be billed
-// for is not a budget: on an accepted connection the key is the identity the
-// neighbour PROVED, and before `auth_ok` there is none — the inbound dispatcher
-// answers `auth_required` above the ingress, so the line reaches neither budget.
-// Exempting it there gave an unauthenticated socket a free, unmetered way to
-// make this node build and write a sync error frame per line. The caller passes
-// the key its own direction defends (the proven identity inbound, the dialled
-// address on an outbound session), so the exemption and the charge cannot
-// disagree about who pays.
+// The second argument is the KEY the docs/protocol/datagram.md §5 budget would
+// be charged on, and it is the other half of "the layer charges it itself". A
+// budget nobody can be billed for is not a budget: on an accepted connection
+// the key is the identity the neighbour PROVED, and before `auth_ok` there is
+// none — the inbound dispatcher answers `auth_required` above the ingress, so
+// the line reaches neither budget. Exempting it there gave an unauthenticated
+// socket a free, unmetered way to make this node build and write a sync error
+// frame per line. The caller passes the key its own direction defends (the
+// proven identity inbound, the dialled address on an outbound session), so the
+// exemption and the charge cannot disagree about who pays.
 //
 // And the layer now charges EVERY line it diverts, which is what makes the
 // exemption sound. The role gate used to stand above the charge — both
@@ -1094,15 +1113,15 @@ var errDatagramPlaneNotNegotiated = errors.New("datagram: the plane was not nego
 // identity. No ban: nothing about it is the neighbour's doing.
 var errDatagramNoChannel = errors.New("datagram: frame from a neighbour with no transport channel")
 
-// datagramBanWorthy applies the punishment rule of §4.4 to a strict-parser
-// refusal.
+// datagramBanWorthy applies the punishment rule of
+// docs/protocol/datagram.md §4.1 to a strict-parser refusal.
 //
 // TWO refusals are explicitly NOT misbehaviour, and they are the two a
 // neighbour can be handed by somebody else:
 //
-//   - an unknown header VERSION: §2 makes a future `v` a silent drop without
-//     forwarding, on a connection that stays up, precisely so that a v3 frame
-//     crossing a v2 node costs its sender nothing;
+//   - an unknown header VERSION: docs/protocol/datagram.md §2 makes a future
+//     `v` a silent drop without forwarding, on a connection that stays up,
+//     precisely so that a v3 frame crossing a v2 node costs its sender nothing;
 //   - a line past MaxFrameLine: the size is a verdict about the LINE, and the
 //     relay that forwarded it did not write the frame inside it
 //     (refuseOversizeDatagram states the rule and the ingress applies it above
@@ -1116,7 +1135,8 @@ var errDatagramNoChannel = errors.New("datagram: frame from a neighbour with no 
 //
 // Note what is NOT reachable here and therefore never punished: an unknown
 // dtype and a malformed payload schema. The parser does not interpret either
-// one; they are the endpoint's business, and §4.4 keeps them ban-free.
+// one; they are the endpoint's business, and docs/protocol/datagram.md §4.1
+// keeps them ban-free.
 func datagramBanWorthy(err error) bool {
 	return !errors.Is(err, protocol.ErrDatagramUnknownVersion) &&
 		!errors.Is(err, protocol.ErrFrameTooLarge)

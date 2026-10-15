@@ -146,7 +146,7 @@ type Frame struct {
 	Capabilities    []string              `json:"capabilities,omitempty"`
 
 	// DTypes is the datagram type set the peer declares on hello/welcome
-	// (docs/refactoring/datagram-transport.md §6.1). The wire contract is
+	// (docs/protocol/datagram.md §6.1). The wire contract is
 	// closed and is enforced on the receive side by
 	// domain.ParseDeclaredDTypesField: the field IS the set, so a non-empty
 	// array means exactly the names it carries, an explicitly EMPTY array

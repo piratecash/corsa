@@ -73,12 +73,13 @@ func applyWelcomeMetadata(session *peerSession, welcome protocol.Frame, enableV3
 	session.version = welcome.Version
 	session.peerIdentity = domain.PeerIdentityFromWire(welcome.Address)
 	session.capabilities = intersectCapabilities(localCapabilities(enableV3, datagrams), welcome.Capabilities)
-	// The raw declarations (§2.2 raw capability names, §6.1 dtypes) are
-	// mirrored beside the typed set, derived from the SAME welcome frame,
-	// for the same reason the typed set is mirrored at all: the outbound
-	// dispatcher is addressed by PeerAddress and has no ConnID with which to
-	// reach NetCore. Deriving both here, in one pass, is what stops the two
-	// views of one handshake from ever disagreeing.
+	// The raw declarations (docs/protocol/datagram.md §2.3 raw capability
+	// names, docs/protocol/datagram.md §6.1 dtypes) are mirrored beside the
+	// typed set, derived from the SAME welcome frame, for the same reason the
+	// typed set is mirrored at all: the outbound dispatcher is addressed by
+	// PeerAddress and has no ConnID with which to reach NetCore. Deriving both
+	// here, in one pass, is what stops the two views of one handshake from ever
+	// disagreeing.
 	session.declarations = declarationsFromHandshake(welcome)
 	if session.netCore == nil {
 		return
@@ -214,6 +215,14 @@ func (s *Service) runPeerSession(ctx context.Context, address domain.PeerAddress
 				log.Warn().Str("peer", string(address)).Msg("peer_session_stopped_self_identity")
 				return
 			}
+			// A refusal by pin is this node's decision, not a failure of
+			// the address (onCMDialFailed): nothing is charged, and the
+			// loop stops — the refusal already holds the fall back to v1
+			// at the address, and this path has no v2 to try instead.
+			if isOutboundLegacyRefusal(err) {
+				log.Warn().Err(err).Str("peer", string(address)).Msg("peer_session_stopped_legacy_refused")
+				return
+			}
 			// servePeerSession calls markPeerDisconnected before
 			// returning its error.  For all other error paths (dial
 			// failure, handshake, subscribe, sync) we must call it here
@@ -312,6 +321,13 @@ func (s *Service) openPeerSession(ctx context.Context, address domain.PeerAddres
 
 	welcome, err := s.peerSessionRequest(session, protocol.Frame{}, "welcome", true)
 	if err != nil {
+		return false, err
+	}
+	// This path speaks v1 only, so every welcome it reads is a v1 welcome:
+	// one naming an identity that requires v2 is refused before anything is
+	// signed, as on the connection manager's path.
+	if err := s.refuseLegacyWelcome(address, domain.PeerIdentityFromWire(welcome.Address)); err != nil {
+		log.Warn().Err(err).Str("peer", string(address)).Msg("outbound_v1_refused_identity_pinned_to_v2")
 		return false, err
 	}
 	if err := s.refuseIncompatibleWelcome(address, welcome); err != nil {
@@ -902,7 +918,7 @@ func (s *Service) retirePeerSession(session *peerSession, err error) {
 	// close error adds nothing to it.
 	_ = session.Close()
 	s.runPeerTeardownBarrier()
-	if session.closedByLocalEviction() {
+	if session.closedByLocalDecision() {
 		s.markPeerDisconnectedByLocalDecision(session.address)
 		return
 	}
@@ -1138,8 +1154,9 @@ func (s *Service) openPeerSessionForCM(ctx context.Context, address domain.PeerA
 		welcome = transport.proven.Intro
 	} else if welcome, err = s.peerSessionRequest(session, protocol.Frame{}, "welcome", true); err != nil {
 		closeOnError()
+		s.forgetV1MarkWithoutWelcome(address, transport)
 		return nil, err
-	} else if err := s.refuseLegacyIdentity(welcome.Address); err != nil {
+	} else if err := s.refuseLegacyWelcome(address, domain.PeerIdentityFromWire(welcome.Address)); err != nil {
 		closeOnError()
 		log.Warn().Err(err).Str("peer", string(address)).Msg("outbound_v1_refused_identity_pinned_to_v2")
 		return nil, err
@@ -1423,7 +1440,7 @@ func (s *Service) failCMSessionSetup(session *peerSession, slotAddress domain.Pe
 	// transit usage for the same peer. Two complementary
 	// brakes on the same root signal. See
 	// routing_route_quarantine.go and
-	// docs/refactoring/route-withdrawal-grace-period.md.
+	// docs/protocol/network_security.md §13.
 	if !session.peerIdentity.IsZero() && s.setupFailureExceedsThresholdLocked(slotAddress) {
 		s.armRouteQuarantineLocked(session.penaltySubject(), quarantineReasonSetupFailureCycle, now)
 	}
@@ -1464,10 +1481,6 @@ func (s *Service) forgetUnpublishedDialOriginLocked(session *peerSession) {
 // and does not register; if this section came first, the teardown finds the
 // entry and withdraws it. A closed session is never left registered.
 //
-// Clearing the setup-failure counter happens in the same section for the same
-// reason: only a setup that ends with a published session proves the peer
-// healthy.
-//
 // What the check does NOT cover is an eviction that lands after this section
 // and before publishAndServeCMSession's markPeerConnected /
 // onPeerSessionEstablished. That session IS published — registered, marked
@@ -1494,8 +1507,6 @@ func (s *Service) registerCMSession(session *peerSession, slotAddress domain.Pee
 	if session.closedByLocalEviction() {
 		return false
 	}
-
-	s.clearSetupFailuresLocked(slotAddress)
 
 	log.Trace().Str("site", "registerCMSession").Str("phase", "lock_wait").Str("address", string(dialAddress)).Msg("delivery_mu_writer")
 	s.deliveryMu.Lock()
@@ -1531,31 +1542,46 @@ func (s *Service) publishAndServeCMSession(session *peerSession, slotAddress dom
 		return
 	}
 
-	// --- Phase 2: session is fully operational ---
-	// Promote CM slot from Initializing → Active so ActiveCount() and
-	// buildPeerExchangeResponse() start counting and advertising this
-	// peer, and Slots() reports it as Active. Until this event the slot
-	// is not advertised to peer exchange. Emitted only once the session is
-	// registered, so a slot is never promoted for a session the Service
-	// did not publish.
-	s.connManager.EmitSlot(SessionInitReady{
-		Address:        slotAddress,
-		SlotGeneration: slotGeneration,
-	})
-
 	// The welcome was checked against the pin during the dial; the
 	// identity may have proved itself over v2 since, and the sweep that
 	// closes legacy sessions (v2_identity_claims.go) only sees sessions
 	// already registered. Checking AFTER registering leaves no window: a
 	// proof that came first is seen here, one that comes later sweeps
-	// this session. A refused session is closed and its serve loop ends
-	// on the closed socket through the ordinary teardown.
-	if _, proven := session.provenIdentity(); !proven {
-		if err := s.refuseLegacyIdentity(session.peerIdentity.String()); err != nil {
+	// this session. A refused session is withdrawn before anything is
+	// published for it, and charged to nobody (isOutboundLegacyRefusal).
+	_, proven := session.provenIdentity()
+	if !proven {
+		if err := s.refuseLegacyWelcome(dialAddress, session.peerIdentity); err != nil {
 			log.Warn().Err(err).Str("peer", string(dialAddress)).Msg("outbound_v1_refused_identity_proved_v2_during_setup")
-			_ = session.Close()
+			s.withdrawRefusedCMSession(session, slotAddress, slotGeneration, err)
+			return
 		}
 	}
+
+	// Only a setup that ends with a published session proves the peer
+	// healthy, so the setup-failure counter is cleared once the session has
+	// passed the pin — a session refused above is not published.
+	s.peerMu.Lock()
+	s.clearSetupFailuresLocked(slotAddress)
+	s.peerMu.Unlock()
+
+	// The session counts as an outbound session of its kind only now that it
+	// is going to be published: a setup that failed, a slot the
+	// ConnectionManager evicted under the setup and a refusal by the pin
+	// above all end before this line, and none of them served the peer.
+	s.sessionKinds.outbound().note(proven, domain.ProtocolVersion(session.version))
+
+	// --- Phase 2: session is fully operational ---
+	// Promote CM slot from Initializing → Active so ActiveCount() and
+	// buildPeerExchangeResponse() start counting and advertising this
+	// peer, and Slots() reports it as Active. Until this event the slot
+	// is not advertised to peer exchange. Emitted only once the session is
+	// registered and has passed the pin, so a slot is never promoted for a
+	// session the Service did not publish.
+	s.connManager.EmitSlot(SessionInitReady{
+		Address:        slotAddress,
+		SlotGeneration: slotGeneration,
+	})
 
 	s.markPeerConnected(dialAddress, peerDirectionOutbound)
 	s.flushPendingPeerFrames(dialAddress)
@@ -1584,6 +1610,40 @@ func (s *Service) publishAndServeCMSession(session *peerSession, slotAddress dom
 	_ = session.Close()
 
 	s.withdrawServedCMSession(session, slotAddress, slotGeneration, err)
+}
+
+// withdrawRefusedCMSession takes back a session that registerCMSession
+// entered and the pin then refused: its identity proved v2 between the dial
+// and the registration. Nothing else was published for it — no connected
+// health, no route, no sync — so only the registration is undone. The close
+// is recorded as this node's decision, and the loss is reported to the
+// ConnectionManager as a failed setup carrying the refusal, which
+// onCMDialFailed does not charge to the address.
+func (s *Service) withdrawRefusedCMSession(session *peerSession, slotAddress domain.PeerAddress, slotGeneration uint64, refusal error) {
+	dialAddress := session.address
+	_ = session.closeAs(peerSessionClosedByLegacyRefusal)
+	// Cross-domain: s.sessions / s.dialOrigin → s.peerMu; s.upstream →
+	// s.deliveryMu. Canonical s.peerMu OUTER → s.deliveryMu INNER.
+	s.peerMu.Lock()
+	s.deliveryMu.Lock()
+	if s.sessions[dialAddress] == session {
+		delete(s.sessions, dialAddress)
+		delete(s.upstream, dialAddress)
+		delete(s.dialOrigin, dialAddress)
+	}
+	s.deliveryMu.Unlock()
+	s.peerMu.Unlock()
+	s.dropOutboundControlFrameBucket(session.connID)
+	if session.metered != nil {
+		s.accumulateSessionTraffic(dialAddress, session.metered)
+	}
+	s.connManager.EmitSlot(ActiveSessionLost{
+		Address:        slotAddress,
+		Identity:       session.peerIdentity,
+		Error:          refusal,
+		WasHealthy:     false,
+		SlotGeneration: slotGeneration,
+	})
 }
 
 // withdrawServedCMSession undoes publishAndServeCMSession once the serve loop
@@ -1659,7 +1719,7 @@ func (s *Service) withdrawServedCMSession(session *peerSession, slotAddress doma
 // serve loop's error would read the read error on the socket the
 // ConnectionManager closed as the peer hanging up.
 func (s *Service) deregisterServedCMSessionRouting(session *peerSession, err error) {
-	if session.closedByLocalEviction() {
+	if session.closedByLocalDecision() {
 		s.onPeerSessionClosedWithCause(session.peerIdentity, session.penaltySubject(), session.capabilities, sessionCloseLocalEviction)
 		return
 	}
@@ -1784,6 +1844,16 @@ func (s *Service) onCMDialFailed(address domain.PeerAddress, err error, incompat
 	// protocol.ErrSelfIdentity from the remote-first notice decode) so
 	// every dial-failure dispatcher converges on one penalty path.
 	if s.tryApplySelfIdentityCooldown(address, err) {
+		return
+	}
+	// A v1 answer refused because the peer requires v2 — or the v1 dial
+	// held after such a refusal — is this node's decision, and a man in the
+	// middle can provoke it at will. Charging the address for it would let
+	// him push the address out of rotation and keep v2 away from it, so the
+	// only consequence is the hold of the v1 dial, set where the refusal was
+	// made; the refusal counters are kept by the store.
+	if isOutboundLegacyRefusal(err) {
+		log.Debug().Err(err).Str("peer", string(address)).Msg("cm_dial_refused_legacy_not_charged")
 		return
 	}
 	if incompatible {

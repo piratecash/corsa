@@ -21,7 +21,7 @@ import (
 // says about itself at one instant. A sample alone is a cumulative number
 // whose period is "since this incarnation started"; what the stand reports is
 // a WINDOW — the difference of two samples — and a window is admitted only
-// under the pair rules of docs/refactoring/dht/05-rollout-metrics.md §5.1.1:
+// under the pair rules of docs/rpc/routing.md (fetchRouteSummary):
 // the same incarnation at both edges, the later read strictly after the
 // earlier, and every counter family still in the period it began with. Each
 // family's window spans that family's own read_at pair, not the node's.

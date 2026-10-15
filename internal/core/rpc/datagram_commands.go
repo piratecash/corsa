@@ -26,7 +26,7 @@ import (
 // before the queue is not a diagnostic, it is a wrong answer with a route in
 // it.
 //
-// Reference: docs/refactoring/datagram-transport.md §4.3, §5, §10.
+// Reference: docs/rpc/datagram.md; docs/protocol/datagram.md §4.4, §5.
 
 // RegisterDatagramCommands registers the datagram observability commands.
 // When the provider is nil (a node built without the plane) the commands are
@@ -128,10 +128,10 @@ func commandContext(req CommandRequest) context.Context {
 }
 
 // datagramQuery is the datagram both read-only surfaces answer about: the
-// fields the send gates depend on (§4.3) plus the route policy the frame must
-// carry. Parsing them in one place is what stops the probe and the plan from
-// disagreeing about what a missing dtype means — and what it means is now
-// stated once: it is refused.
+// fields the send gates depend on (docs/protocol/datagram.md §4.4) plus the
+// route policy the frame must carry. Parsing them in one place is what stops
+// the probe and the plan from disagreeing about what a missing dtype means —
+// and what it means is now stated once: it is refused.
 type datagramQuery struct {
 	dst    domain.PeerIdentity
 	dtype  domain.DType
@@ -150,9 +150,9 @@ var datagramSendShapeSrc = domain.PeerIdentity{0x01}
 // parseDatagramProbeQuery parses and wire-checks the probe's arguments.
 //
 // The probe takes no route_policy — reachability does not depend on it — but a
-// routed frame must carry one (§2.1), so the check runs against `best`, which
-// is also this group's default. The two legal policies validate identically,
-// so the choice cannot change the verdict.
+// routed frame must carry one (docs/protocol/datagram.md §2.1), so the check
+// runs against `best`, which is also this group's default. The two legal
+// policies validate identically, so the choice cannot change the verdict.
 func parseDatagramProbeQuery(req CommandRequest) (datagramQuery, CommandResponse, bool) {
 	query, response, ok := parseDatagramQuery(req)
 	if !ok {
@@ -198,14 +198,15 @@ func checkDatagramSendShape(query datagramQuery) (datagramQuery, CommandResponse
 }
 
 // sendFrame renders the query as the routed frame a local send of it would put
-// on the wire (§2.1, §3.1). Every field the operator does not supply takes the
-// value the layer fixes for it, so the frame is the one Validate is asked
-// about, not a lookalike:
+// on the wire (docs/protocol/datagram.md §2.1, §3.1). Every field the operator
+// does not supply takes the value the layer fixes for it, so the frame is the
+// one Validate is asked about, not a lookalike:
 //
 //   - class is `control`: it is not an argument of either surface — the gates
 //     never read it — and of the two ceilings it is the strict one;
 //   - ttl equals auth.max_ttl at the origin, which is what makes `ttl >
-//     max_ttl` impossible for a frame this node produced (§4.1 rule 2);
+//     max_ttl` impossible for a frame this node produced
+//     (docs/protocol/datagram.md §4.2 rule 2);
 //   - payload is empty, because neither surface accepts one.
 func (q datagramQuery) sendFrame() protocol.DatagramFrame {
 	return protocol.DatagramFrame{
@@ -279,9 +280,10 @@ func parseDatagramQuery(req CommandRequest) (datagramQuery, CommandResponse, boo
 
 // parseDatagramRoutePolicy reads the optional route_policy argument. An absent
 // value means `best`, which is both the common case and the only policy whose
-// plan promises that element 0 is what a send would really try first (§4.3).
-// Anything else goes through the wire's own parser, so the RPC admits exactly
-// the two values the mode matrix admits for a routed frame (§2.1).
+// plan promises that element 0 is what a send would really try first
+// (docs/protocol/datagram.md §4.4). Anything else goes through the wire's own
+// parser, so the RPC admits exactly the two values the mode matrix admits for a
+// routed frame (docs/protocol/datagram.md §2.1).
 func parseDatagramRoutePolicy(req CommandRequest) (domain.RoutePolicy, CommandResponse, bool) {
 	raw, _ := req.Args["route_policy"].(string)
 	raw = strings.TrimSpace(raw)

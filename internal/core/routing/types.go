@@ -325,9 +325,9 @@ type peerFlapState struct {
 // TrustRank.
 //
 // It is an ALIAS of the domain type, not a copy: the datagram layer's
-// RouteResolver seam must be nameable by a control plane that is not this one
-// (docs/refactoring/dht/02-route-source.md §1), and two enumerations of one
-// fact is how the trust order acquires a second, divergent spelling. The
+// RouteResolver seam must be nameable by a control plane that is not this one,
+// and two enumerations of one fact is how the trust order acquires a second,
+// divergent spelling. The
 // values below are re-exported so every call site in this package — and the
 // admission, eviction and scoring paths that read TrustRank — keeps reading
 // exactly what it read before.

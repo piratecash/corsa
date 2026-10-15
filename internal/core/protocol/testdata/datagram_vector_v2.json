@@ -1,5 +1,5 @@
 {
-  "description": "corsa datagram transport golden vector, header v2, base auth profile (av=1). The v1 envelope carried req_caps and ext; both are gone, and with them four transcript segments. Reference: docs/refactoring/datagram-transport.md 3.2.",
+  "description": "corsa datagram transport golden vector, header v2, base auth profile (av=1). The v1 envelope carried req_caps and ext; both are gone, and with them four transcript segments. Reference: docs/protocol/datagram.md §3.2.",
   "frame": "{\"type\":\"datagram\",\"v\":2,\"mode\":\"routed\",\"class\":\"control\",\"src\":\"56475aa75463474c0285df5dbf2bcab73da65135\",\"dst\":\"00f39d89f345eb1613bb2fa02ee883a214a6a697\",\"ttl\":10,\"route_policy\":\"best\",\"dtype\":\"delivery_receipt\",\"payload\":\"EBESExQVFhcYGRobHB0eHw\",\"auth\":{\"av\":1,\"pubkey\":\"A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg\",\"salt\":\"oKGio6SlpqeoqaqrrK2urw\",\"max_ttl\":10,\"time\":1780000000,\"sig\":\"Sfr2Hw9RmWy0DnmS33ow61vwZP4RMz3z1ummTq3ZQkLPA_si-_KWVCwG9q6xxZ1L9hg1ehr1Xw2WFFa6T37XCA\"}}",
   "network": "gazeta-devnet",
   "pubkey_hex": "03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8",

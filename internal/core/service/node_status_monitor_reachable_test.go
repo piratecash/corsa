@@ -14,7 +14,7 @@ import (
 )
 
 // TestReachableIDsReconcileOnlyOnSnapshotReason is the monitor half of the
-// §1.2 regression (docs/refactoring/identity-discovery-lookup.md): the
+// snapshot-reason regression (docs/locking.md, `ReachableIDs`): the
 // ReachableIDs rebuild runs on the snapshot-published reason and on nothing
 // else. The mutation-time reasons fire while the cached routing snapshot is
 // still the previous generation, so a rebuild on them wrote stale data —

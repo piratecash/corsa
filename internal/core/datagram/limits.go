@@ -7,51 +7,58 @@ import (
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
-// limits.go is the ONE place where the numbers of §5 live, and the one place
-// where they are justified. §11.3 leaves them to the implementation, which
-// means the values below are starting points chosen from what the layer's own
+// limits.go is the ONE place where the numbers of docs/protocol/datagram.md §5
+// live, and the one place where they are justified.
+// docs/protocol/datagram.md §5 leaves them to the implementation, which means
+// the values below are starting points chosen from what the layer's own
 // geometry allows — frame sizes, class caps, the 240 s reverse window, the
 // five-minute replay window — and NOT from telemetry that does not exist yet.
 // Every field says what it is derived from, so retuning one number is an
 // argument about that derivation instead of a guess.
 //
-// The four groups map one-to-one onto the four components of §5:
+// The four groups map one-to-one onto the four components of
+// docs/protocol/datagram.md §5:
 //
 //   - Peer     → admission.go: the two-stage per-neighbour budget;
 //   - Queue    → queue.go: the weighted class queue;
 //   - Reverse  → reverse_state.go: the caps of the request/response table;
 //   - Replay   → replay_base.go: the bound of the anti-replay cache.
 //
-// Reference: docs/refactoring/datagram-transport.md §4.2, §5, §11.3.
+// Reference: docs/protocol/datagram.md §4.3, §5.
 
-// Limits is the complete §5 configuration. It is a value, copied into the
-// components that need it: a shared mutable knob object would let one
-// component's retuning silently change another's behaviour mid-flight.
+// Limits is the complete docs/protocol/datagram.md §5 configuration. It is a
+// value, copied into the components that need it: a shared mutable knob object
+// would let one component's retuning silently change another's behaviour
+// mid-flight.
 type Limits struct {
-	// Peer is the per-neighbour admission budget (§4.1 steps 1 and 8).
+	// Peer is the per-neighbour admission budget
+	// (docs/protocol/datagram.md §4.1 steps 1 and 8).
 	Peer PeerBudget
-	// Queue is the weighted class queue of §5.
+	// Queue is the weighted class queue of docs/protocol/datagram.md §5.
 	Queue QueueCaps
-	// Reverse is the reverse-state table cap set of §4.2 / §5.
+	// Reverse is the reverse-state table cap set of
+	// docs/protocol/datagram.md §4.3 and §5.
 	Reverse ReverseCaps
 	// Replay is the bound of the base anti-replay cache.
 	Replay ReplayCaps
 }
 
 // PeerBudget is the two-stage admission budget of one AUTHENTICATED
-// neighbour (§5). The identity is the session's, never `src` from the
-// header: `src` exists only in routed frames and only becomes meaningful
-// AFTER the signature check, which is itself paid for out of this budget.
+// neighbour (docs/protocol/datagram.md §5). The identity is the session's,
+// never `src` from the header: `src` exists only in routed frames and only
+// becomes meaningful AFTER the signature check, which is itself paid for out of
+// this budget.
 //
 // The three dimensions are ONE budget with three units, not three budgets to
 // pick from: every inbound frame charges bytes and frames regardless of its
 // class, and every signature check charges a verification on top. A neighbour
 // cannot widen any of them by choosing a class — that is the whole point of
-// the rule "the budget is per neighbour, classes divide it" (§5).
+// the rule "the budget is per neighbour, classes divide it"
+// (docs/protocol/datagram.md §5).
 type PeerBudget struct {
 	// BytesPerSecond is the sustained inbound byte rate of one neighbour,
 	// counted on the SERIALIZED frame including base64 and the auth block
-	// (§5). One legitimate bulk frame is at most
+	// (docs/protocol/datagram.md §5). One legitimate bulk frame is at most
 	// DatagramBulkPayloadCap (64 KiB) of payload ≈ 88 KiB on the wire, so
 	// 1 MiB/s is roughly twelve full bulk frames per second — comfortably
 	// above a single file transfer's chunk rate and far below what a link
@@ -76,18 +83,19 @@ type PeerBudget struct {
 	FrameBurst int
 
 	// VerifiesPerSecond is the sustained Ed25519 verification rate of one
-	// neighbour, charged immediately before the check (§4.1 step 8). One
-	// verification costs ~50 µs, so 32/s is ~0.2% of one core per
-	// neighbour and ~4% across twenty of them: a hostile peer cannot make
-	// signature checking the node's dominant cost, and an honest one never
-	// approaches it, because routed frames are the minority of a session's
-	// traffic and each one is checked once.
+	// neighbour, charged immediately before the check
+	// (docs/protocol/datagram.md §4.1 step 8). One verification costs ~50 µs,
+	// so 32/s is ~0.2% of one core per neighbour and ~4% across twenty of them:
+	// a hostile peer cannot make signature checking the node's dominant cost,
+	// and an honest one never approaches it, because routed frames are the
+	// minority of a session's traffic and each one is checked once.
 	VerifiesPerSecond int
 	// VerifyBurst is the verification-bucket depth. It is deliberately HALF
 	// the frame burst, which is what makes the crypto budget — not the byte
 	// or frame budget — the binding constraint on a flood of small SIGNED
-	// frames (§9): a stream of minimum-size routed frames runs out of
-	// verifications long before it runs out of either of the other two.
+	// frames (docs/protocol/datagram.md §5): a stream of minimum-size routed
+	// frames runs out of verifications long before it runs out of either of the
+	// other two.
 	VerifyBurst int
 
 	// TrackedPeers bounds the number of per-neighbour buckets kept in
@@ -102,7 +110,8 @@ type PeerBudget struct {
 	IdleRetention time.Duration
 }
 
-// QueueCaps configures the weighted class queue of §5.
+// QueueCaps configures the weighted class queue of
+// docs/protocol/datagram.md §5.
 //
 // The weights are the normative part: control is served BEFORE bulk within
 // its own share, and bulk keeps a guaranteed minimum share of the byte budget
@@ -110,8 +119,9 @@ type PeerBudget struct {
 // file transfer entirely.
 type QueueCaps struct {
 	// ControlWeight and BulkWeight are the byte shares of one scheduling
-	// round. 3:1 is the starting split of §5: bulk is guaranteed one
-	// quarter of the dispatched bytes under saturation of both classes.
+	// round. 3:1 is the starting split of docs/protocol/datagram.md §5: bulk is
+	// guaranteed one quarter of the dispatched bytes under saturation of both
+	// classes.
 	ControlWeight int
 	// BulkWeight is bulk's share of a round; see ControlWeight.
 	BulkWeight int
@@ -130,10 +140,10 @@ type QueueCaps struct {
 	//
 	// The depth is a MEMORY bound, not a latency one: latency is already
 	// bounded by the send deadline, which is queue_residence of the class
-	// (5 s for control, 30 s for bulk, §4.2). A queue deeper than what the
-	// link drains inside that window only holds frames that will be dropped
-	// on their deadline anyway — which the queue does itself, rather than
-	// handing the writer a frame it would refuse.
+	// (5 s for control, 30 s for bulk, docs/protocol/datagram.md §4.3). A queue
+	// deeper than what the link drains inside that window only holds frames
+	// that will be dropped on their deadline anyway — which the queue does
+	// itself, rather than handing the writer a frame it would refuse.
 	ControlFrames int
 	// ControlBytes bounds the control lane in bytes; see ControlFrames.
 	ControlBytes int
@@ -147,7 +157,8 @@ type QueueCaps struct {
 	BulkBytes int
 }
 
-// ReverseCaps configures the reverse-state table (§4.2, §5).
+// ReverseCaps configures the reverse-state table
+// (docs/protocol/datagram.md §4.3, §5).
 type ReverseCaps struct {
 	// GlobalCap is the total number of live reverse records. A record is
 	// ~200 bytes, so 4096 of them is ~800 KiB, and with PerUpstreamCap = 64
@@ -160,17 +171,18 @@ type ReverseCaps struct {
 	// request round-trips in flight through this node at once. The node's
 	// relay subsystem allows 500 per peer over a 180 s window; the
 	// datagram reverse table is stricter because its plane is
-	// unauthenticated by construction (§2.1) and a slot here also carries a
-	// probe budget.
+	// unauthenticated by construction (docs/protocol/datagram.md §2.1) and a
+	// slot here also carries a probe budget.
 	PerUpstreamCap int
 	// ProbeBudget is how many REFUSED answers one record tolerates before
-	// it stops looking at answers at all (§4.2). Four lets a genuine answer
-	// survive three forged ones racing it, and bounds what a hostile
-	// downstream can make the node spend per outstanding request.
+	// it stops looking at answers at all (docs/protocol/datagram.md §4.3). Four
+	// lets a genuine answer survive three forged ones racing it, and bounds
+	// what a hostile downstream can make the node spend per outstanding
+	// request.
 	ProbeBudget int
 }
 
-// ReplayCaps bounds the base anti-replay cache (§5).
+// ReplayCaps bounds the base anti-replay cache (docs/protocol/datagram.md §5).
 type ReplayCaps struct {
 	// Capacity is the live entry count of the base cache. It is
 	// deliberately SMALLER than what one neighbour could produce inside the
@@ -178,9 +190,9 @@ type ReplayCaps struct {
 	// frames — because the overflow rule is what protects the cache, not
 	// its size: at capacity a routed frame from the NOISIEST neighbour is
 	// refused while a quiet neighbour is still admitted by evicting one of
-	// the noisy one's records (§5, replay_base.go). Sizing the cache for
-	// the worst case would trade ~2 MiB of memory for nothing, since the
-	// rule would still be the thing doing the work.
+	// the noisy one's records (docs/protocol/datagram.md §5, replay_base.go).
+	// Sizing the cache for the worst case would trade ~2 MiB of memory for
+	// nothing, since the rule would still be the thing doing the work.
 	Capacity int
 }
 
@@ -210,9 +222,9 @@ const (
 	defaultReverseProbes = DefaultReverseProbeBudget
 )
 
-// DefaultLimits returns the starting values of §5. They are a function, not a
-// package-level variable, so no caller can mutate the defaults for everybody
-// else (CLAUDE.md: no global singletons).
+// DefaultLimits returns the starting values of docs/protocol/datagram.md §5.
+// They are a function, not a package-level variable, so no caller can mutate
+// the defaults for everybody else (CLAUDE.md: no global singletons).
 func DefaultLimits() Limits {
 	return Limits{
 		Peer: PeerBudget{
@@ -298,7 +310,8 @@ func positiveOr(value, fallback int) int {
 }
 
 // ReverseStateCaps implements the reverseLimits seam of reverse_state.go: the
-// whole view the table has of §5 is these two numbers.
+// whole view the table has of docs/protocol/datagram.md §5 is these two
+// numbers.
 func (l Limits) ReverseStateCaps() (global, perUpstream int) {
 	caps := l.Reverse.normalized(DefaultLimits().Reverse)
 	return caps.GlobalCap, caps.PerUpstreamCap
@@ -306,7 +319,7 @@ func (l Limits) ReverseStateCaps() (global, perUpstream int) {
 
 // ReverseTableConfig builds the table's config from the limits, so a caller
 // cannot wire the caps and forget the probe budget — they are one decision
-// (§4.2, §5).
+// (docs/protocol/datagram.md §4.3, §5).
 func (l Limits) ReverseTableConfig(clock func() time.Time, metrics reverseMetrics) ReverseTableConfig {
 	normalized := l.Normalized()
 	return ReverseTableConfig{
@@ -319,7 +332,8 @@ func (l Limits) ReverseTableConfig(clock func() time.Time, metrics reverseMetric
 
 // BaseReplayCacheConfig builds the anti-replay cache's config from the
 // limits. The window is deliberately NOT exposed here: it is wire-normative
-// (domain.DatagramBaseReplayWindow, §2.2) and is not a limit to tune.
+// (domain.DatagramBaseReplayWindow, docs/protocol/datagram.md §3.4) and is not
+// a limit to tune.
 func (l Limits) BaseReplayCacheConfig(clock func() time.Time) BaseReplayCacheConfig {
 	return BaseReplayCacheConfig{Clock: clock, Capacity: l.Normalized().Replay.Capacity}
 }

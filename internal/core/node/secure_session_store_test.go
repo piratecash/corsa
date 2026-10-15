@@ -23,7 +23,7 @@ func TestTheDowngradeProtectionSurvivesARestart(t *testing.T) {
 	endpoint, id := domain.PeerAddress("192.0.2.1:64646"), domain.PeerIdentity{7}
 
 	first := loadSecureSessionStore(path, clock.read)
-	if err := first.noteProvenOutbound(endpoint, id, false); err != nil {
+	if _, err := first.noteProvenOutbound(endpoint, id, endpointProtectionNone()); err != nil {
 		t.Fatalf("note: %v", err)
 	}
 
@@ -53,11 +53,11 @@ func TestAFullStoreRefusesNewPinsAndKeepsTheOld(t *testing.T) {
 		t.Fatal("a pin was added past the bound")
 	}
 
-	for i := range maxEndpointBindings {
-		_ = store.noteProvenOutbound(domain.PeerAddress("192.0.2.1:"+string(rune('a'+i%26))+string(rune(i))), honest, false)
+	for i := range maxGeneralBindings {
+		_, _ = store.noteProvenOutbound(domain.PeerAddress("192.0.2.1:"+string(rune('a'+i%26))+string(rune(i))), honest, endpointProtectionNone())
 	}
 	first := domain.PeerAddress("192.0.2.1:a\x00")
-	_ = store.noteProvenOutbound("198.51.100.1:64646", honest, false)
+	_, _ = store.noteProvenOutbound("198.51.100.1:64646", honest, endpointProtectionNone())
 	if !store.endpointRequiresV2(first) {
 		t.Fatal("a live endpoint binding was dropped to make room")
 	}
@@ -66,14 +66,14 @@ func TestAFullStoreRefusesNewPinsAndKeepsTheOld(t *testing.T) {
 	}
 }
 
-// The endpoint binding lasts 30 days from the last v2 session (owner's
-// decision); the identity pin does not expire.
+// The endpoint binding lasts 30 days from the last v2 session, since an
+// address may change hands; the identity pin does not expire.
 func TestAnEndpointBindingExpiresAndAnIdentityPinDoesNot(t *testing.T) {
 	t.Parallel()
 	clock := newStoreClock()
 	store := loadSecureSessionStore("", clock.read)
 	endpoint, id := domain.PeerAddress("192.0.2.1:64646"), domain.PeerIdentity{7}
-	_ = store.noteProvenOutbound(endpoint, id, false)
+	_, _ = store.noteProvenOutbound(endpoint, id, endpointProtectionNone())
 
 	clock.now = clock.now.Add(endpointBindingTTL - time.Second)
 	if !store.endpointRequiresV2(endpoint) {
@@ -138,14 +138,14 @@ func TestAFailedWriteIsReportedAndRetriedUntilItLands(t *testing.T) {
 
 // A binding to a contact is protected: it does not expire. After 30 days a
 // v1 answer from that endpoint — whatever identity it names — is still a
-// downgrade. An ordinary binding expires (owner's decision С-15).
+// downgrade. An ordinary binding expires after its 30 days.
 func TestAProtectedBindingDoesNotExpire(t *testing.T) {
 	t.Parallel()
 	clock := newStoreClock()
 	store := loadSecureSessionStore("", clock.read)
 	contactEndpoint, otherEndpoint := domain.PeerAddress("192.0.2.1:64646"), domain.PeerAddress("192.0.2.2:64646")
-	_ = store.noteProvenOutbound(contactEndpoint, domain.PeerIdentity{7}, true)
-	_ = store.noteProvenOutbound(otherEndpoint, domain.PeerIdentity{8}, false)
+	_, _ = store.noteProvenOutbound(contactEndpoint, domain.PeerIdentity{7}, endpointProtectionWanted(domain.ProtectedBindingPoolContact))
+	_, _ = store.noteProvenOutbound(otherEndpoint, domain.PeerIdentity{8}, endpointProtectionNone())
 
 	clock.now = clock.now.Add(endpointBindingTTL + 24*time.Hour)
 	if !store.endpointRequiresV2(contactEndpoint) {
@@ -155,7 +155,7 @@ func TestAProtectedBindingDoesNotExpire(t *testing.T) {
 		t.Fatal("an ordinary binding outlived its 30 days")
 	}
 	// A later ordinary note on the protected endpoint never lowers it.
-	_ = store.noteProvenOutbound(contactEndpoint, domain.PeerIdentity{9}, false)
+	_, _ = store.noteProvenOutbound(contactEndpoint, domain.PeerIdentity{9}, endpointProtectionNone())
 	clock.now = clock.now.Add(endpointBindingTTL + 24*time.Hour)
 	if !store.endpointRequiresV2(contactEndpoint) {
 		t.Fatal("a protected binding was lowered to an expiring one")

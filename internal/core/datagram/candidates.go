@@ -10,14 +10,15 @@ import (
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
-// candidates.go builds and ranks the next-hop list of §4.3.
+// candidates.go builds and ranks the next-hop list of
+// docs/protocol/datagram.md §4.4.
 //
 // The order of operations is normative and carried over from the file
 // router without a change of behaviour, because "one deterministic
 // comparator" is too vague to preserve anything:
 //
-//  1. capability filter (§6, §2.2 rule 2) BEFORE the sort, never as a
-//     penalty;
+//  1. capability filter (docs/protocol/datagram.md §6) BEFORE the sort, never
+//     as a penalty;
 //  2. exclusions: the neighbour the frame came from (split-horizon),
 //     routes to self, the destination already tried by the direct branch,
 //     expired / withdrawn / stalled entries;
@@ -26,7 +27,7 @@ import (
 //  4. sort: protocolVersion DESC → hops ASC → connectedAt ASC (zero last,
 //     meaning unknown) → next hop lexicographic.
 //
-// Reference: docs/refactoring/datagram-transport.md §4.3, §6, §2.2.
+// Reference: docs/protocol/datagram.md §4.4, §6, §2.3.
 
 // versionInflationWarnGap is how far above the local protocol version a
 // peer may claim before the cap is logged as a probable misconfiguration or
@@ -39,10 +40,10 @@ import (
 // single neighbour one version ahead would otherwise flood the journal.
 const versionInflationWarnGap = 4
 
-// versionNormalizer implements the mandatory version normalization of §4.3:
-// the handshake value is reported by the peer itself and may claim v999, so
-// ranking uses min(reported, local) while the raw value is kept apart for
-// diagnostics.
+// versionNormalizer implements the mandatory version normalization of
+// docs/protocol/datagram.md §4.4: the handshake value is reported by the peer
+// itself and may claim v999, so ranking uses min(reported, local) while the raw
+// value is kept apart for diagnostics.
 //
 // It caps rather than zeroes. Zeroing neutralised the same attack but broke
 // staged rollout: the single upgraded node was pushed behind every legacy
@@ -97,8 +98,9 @@ func (c RouteCandidate) NextHop() domain.PeerIdentity { return c.nextHop }
 // rank it: a forwarded request is pinned to this channel and the channel goes
 // into the reverse record, so an answer can be checked against the socket the
 // question left over instead of against the name of whoever the question named
-// (§4.2). The routed plane ignores it — there the transport chooses the socket
-// among all the peer's gated connections (§4.3).
+// (docs/protocol/datagram.md §4.3). The routed plane ignores it — there the
+// transport chooses the socket among all the peer's gated connections
+// (docs/protocol/datagram.md §4.4).
 func (c RouteCandidate) Channel() (ChannelID, bool) {
 	if c.channel.IsZero() {
 		return ChannelID{}, false
@@ -124,7 +126,8 @@ func (c RouteCandidate) RawProtocolVersion() domain.ProtocolVersion { return c.r
 func (c RouteCandidate) ConnectedAt() time.Time { return c.connectedAt }
 
 // IsDirect reports whether this is the direct session to the destination
-// promoted by step 1 of §4.3 rather than a routing-table entry.
+// promoted by step 1 of docs/protocol/datagram.md §4.4 rather than a
+// routing-table entry.
 func (c RouteCandidate) IsDirect() bool { return c.direct }
 
 // Attribution is the two-axis record of who says this route exists and which
@@ -189,8 +192,9 @@ const (
 	// mesh_datagram_v1, or mesh_datagram_transit_v1 in the transit role.
 	RejectionMissingCapability
 	// RejectionUnsupportedDType means the destination is the peer we would
-	// hand the frame to and it never declared this dtype (§6.1) — the
-	// last-hop gate of §4.3.
+	// hand the frame to and it never declared this dtype
+	// (docs/protocol/datagram.md §6.1) — the last-hop gate of
+	// docs/protocol/datagram.md §4.4.
 	RejectionUnsupportedDType
 )
 
@@ -211,7 +215,8 @@ type peerAdmission struct {
 	admitted bool
 }
 
-// admitPeer applies BOTH gates, in the order §4.3 fixes:
+// admitPeer applies BOTH gates, in the order docs/protocol/datagram.md §4.4
+// fixes:
 //
 //  1. the role gate — AdmitCandidate from gates.go: mesh_datagram_v1
 //     always, mesh_datagram_transit_v1 unless the peer IS the destination;
@@ -243,19 +248,21 @@ func admitPeer(frame protocol.DatagramFrame, peer domain.PeerIdentity, conn Peer
 }
 
 // AdmitPeer reports whether this frame may be handed to this peer over this
-// connection, applying BOTH gates of §4.3 in their fixed order.
+// connection, applying BOTH gates of docs/protocol/datagram.md §4.4 in their
+// fixed order.
 //
 // It exists because the decision has a second caller outside the layer, and
 // that caller now has two duties rather than one. PeerMetadata must hand back
-// the FIRST connection of a peer that may carry this frame (§4.3 line 574 —
-// "the metadata describes the connection the send will try"), and the emitter
-// must refuse every socket that may not, so no fall-back connection carries
-// bytes nobody gated. Both duties ask this one question, and a second spelling
-// of the rule is how one copy silently loses a check the day a third gate is
-// added — so the layer exports its own decision instead of letting the node
-// re-derive it. The layer still re-applies the gates over whatever connection
-// comes back: the node picks WHICH connection is described, the layer decides
-// whether it is admitted, and neither answer is derived from the other.
+// the FIRST connection of a peer that may carry this frame
+// (docs/protocol/datagram.md §4.4 — "the metadata describes the connection the
+// send will try"), and the emitter must refuse every socket that may not, so no
+// fall-back connection carries bytes nobody gated. Both duties ask this one
+// question, and a second spelling of the rule is how one copy silently loses a
+// check the day a third gate is added — so the layer exports its own decision
+// instead of letting the node re-derive it. The layer still re-applies the
+// gates over whatever connection comes back: the node picks WHICH connection is
+// described, the layer decides whether it is admitted, and neither answer is
+// derived from the other.
 //
 // The reason is not returned: a caller choosing between sockets of one peer
 // acts identically on every refusal, and the diagnostic reason belongs to the
@@ -317,7 +324,8 @@ type selectionOpts struct {
 	rotate bool
 	// directTried marks that the direct branch already offered the frame to
 	// the destination, which is what turns "next_hop == dst" into a duplicate
-	// candidate rather than the only remaining way to reach it (§4.3 item 2).
+	// candidate rather than the only remaining way to reach it
+	// (docs/protocol/datagram.md §4.4 item 2).
 	directTried bool
 }
 
@@ -336,18 +344,20 @@ type candidateSelection struct {
 
 // publishable reports whether the walk has anything to try. It is the ONE
 // definition of "there is somebody to hand the frame to": the reservation of
-// the replay key is taken only when it answers true, because §4.1 forbids an
-// empty candidate list from occupying a reservation slot even briefly.
+// the replay key is taken only when it answers true, because
+// docs/protocol/datagram.md §4.1 forbids an empty candidate list from occupying
+// a reservation slot even briefly.
 func (s candidateSelection) publishable() bool {
 	return !s.aborted && len(s.candidates) > 0
 }
 
-// outcomeWithoutCandidates names WHY the walk had nothing to try, and §4.3
-// makes that two different answers: a gate verdict is `rejected` — repeating
-// it without changed conditions is pointless — while the plain absence of a
-// route is `no_route`, worth waiting on. Collapsing them would make the
-// reachability probe, which must call a dtype-refusing destination
-// unreachable, disagree with the send it exists to predict.
+// outcomeWithoutCandidates names WHY the walk had nothing to try, and
+// docs/protocol/datagram.md §4.4 makes that two different answers: a gate
+// verdict is `rejected` — repeating it without changed conditions is pointless
+// — while the plain absence of a route is `no_route`, worth waiting on.
+// Collapsing them would make the reachability probe, which must call a
+// dtype-refusing destination unreachable, disagree with the send it exists to
+// predict.
 func (s candidateSelection) outcomeWithoutCandidates(local bool) SendOutcome {
 	if s.refusal.set {
 		return rejectedOutcome(local, s.refusal)
@@ -392,18 +402,20 @@ type peerConnectionResult struct {
 	resolved bool
 }
 
-// rank applies the four steps of §4.3 to the raw hints.
+// rank applies the four steps of docs/protocol/datagram.md §4.4 to the raw
+// hints.
 //
 // A route whose next hop IS the destination is dropped only when the direct
-// branch ALREADY TRIED it (opts.directTried) — which is exactly how §4.3
-// item 2 words the exclusion. While DirectSession and PeerMetadata answer
-// from one node-side helper the two readings coincide; the moment they
-// disagree, an unconditional drop makes the destination unreachable through
-// BOTH paths at once — no session for the direct branch, no route for the
-// ranked one. The gates are unchanged either way: such a hop is the last hop,
-// so admitPeer applies the same role and dtype checks the direct branch would
-// have applied, and the two exclusions of avoid_next_hop and split-horizon are
-// enforced below for every hop including this one.
+// branch ALREADY TRIED it (opts.directTried) — which is exactly how
+// docs/protocol/datagram.md §4.4 item 2 words the exclusion. While
+// DirectSession and PeerMetadata answer from one node-side helper the two
+// readings coincide; the moment they disagree, an unconditional drop makes the
+// destination unreachable through BOTH paths at once — no session for the
+// direct branch, no route for the ranked one. The gates are unchanged either
+// way: such a hop is the last hop, so admitPeer applies the same role and dtype
+// checks the direct branch would have applied, and the two exclusions of
+// avoid_next_hop and split-horizon are enforced below for every hop including
+// this one.
 func (s candidateSelector) rank(
 	ctx context.Context,
 	frame protocol.DatagramFrame,

@@ -138,7 +138,38 @@ Response:
     "pin_refusals_pin_store_full": 0,
     "v1_refusals_identity_pinned": 0,
     "v1_refusals_endpoint_bound": 0,
+    "v1_dials_held_by_refusal_backoff": 0,
+    "dials_held_by_v2_retry_backoff": 0,
+    "protected_bindings_contact": 37,
+    "protected_bindings_relation": 0,
+    "protected_capacity": 32768,
+    "protected_reserve_contact": 8192,
+    "protected_per_identity_capacity": 4,
+    "general_bindings": 412,
+    "general_capacity": 16384,
+    "protected_refusals_per_identity": 0,
+    "protected_refusals_pool_r_full": 0,
+    "protected_refusals_store_full": 0,
     "store_unreadable": false
+  },
+  "session_kinds": {
+    "started_at": "2026-09-06T09:00:00.104512Z",
+    "read_at": "2026-09-06T09:31:44.512904002Z",
+    "inbound_v2": 31,
+    "inbound_legacy": 9,
+    "outbound_v2": 27,
+    "outbound_legacy": 6,
+    "hellos_below_secure_version": 8,
+    "welcomes_below_secure_version": 6,
+    "legacy_at_claimed_v2": 2,
+    "live": {
+      "ready": true,
+      "updated_at": "2026-09-06T09:31:40.004002001Z",
+      "inbound_v2": {"sessions": 5, "identities": 5},
+      "inbound_legacy": {"sessions": 2, "identities": 2},
+      "outbound_v2": {"sessions": 4, "identities": 4},
+      "outbound_legacy": {"sessions": 1, "identities": 1}
+    }
   }
 }
 ```
@@ -148,8 +179,8 @@ Response:
 > their own `read_at` (counters) and `updated_at` (the census); a rate or a window computed against
 > `snapshot_at` is wrong by however long the table stood still.
 >
-> **Five snapshots in one response are NOT one atomic snapshot.** `mode_selection`,
-> `session_outcomes`, `transport_traffic` and `secure_sessions` are counters read at slightly different
+> **Six snapshots in one response are NOT one atomic snapshot.** `mode_selection`,
+> `session_outcomes`, `transport_traffic`, `secure_sessions` and `session_kinds` are counters read at slightly different
 > instants; `neighbours` is a gauge with its own `updated_at`, refreshed in the
 > background. Arithmetic across them assumes a simultaneity these timestamps do
 > not support.
@@ -271,6 +302,26 @@ whole network is in".
 | `secure_sessions.v1_refusals_identity_pinned` | uint64 | v1 sessions refused because the identity they name requires v2 — pinned, or holding a live v2 connection — since the process started (in memory, reset on restart). Counted at every check: on accept at the `hello` and again at `auth_session`, on dial at the `welcome` and again right after an outbound v1 session is registered. The `hello` and `welcome` refusals come before anything is signed for that identity; the two re-checks come after the v1 `auth_session` signature and close the session instead. |
 | `secure_sessions.v1_refusals_endpoint_bound` | uint64 | v1 answers refused on dial because the endpoint that gave them is bound to v2 — a downgrade, not followed: the dial fails instead of falling back — since the process started (in memory, reset on restart). |
 | `secure_sessions.store_unreadable` | bool | The store file exists but could not be read: every peer is treated as pinned, v1 is refused, v2 keeps working until an operator repairs the file. |
+| `secure_sessions.v1_dials_held_by_refusal_backoff` | uint64 | Fall backs to v1 this node withheld after a v2 attempt answered with a v1 line, because an earlier v1 answer from the same address was refused (the two counters above) and the hold that follows such a refusal had not run out — 5 minutes, doubled per further refusal, at most 6 hours — since the process started (in memory, reset on restart). This hold withholds only the fall back to v1 and never delays a v2 attempt itself; the next v2 attempt is paced only by the address's v2 retry backoff (`dials_held_by_v2_retry_backoff` below). A refusal never lowers the address's score or puts it into the candidate cooldown. |
+| `secure_sessions.dials_held_by_v2_retry_backoff` | uint64 | Dials refused before any socket because their address's v2 retry backoff ran: after a v2 attempt there ended without v2 (the v1 answer was refused, or its fall back held), the next dial waits 30 s, doubled per further such end, at most 30 min; the address is not a candidate meanwhile. Pacing of the next v2 attempt, not the failure cooldown: score, failures and setup failures are untouched. Since the process started (in memory, reset on restart). |
+| `secure_sessions.protected_bindings_contact` / `.protected_bindings_relation` | int | Protected endpoint bindings in the contact pool (K) and the relation pool (R). The pool is fixed when a binding is created or raised. |
+| `secure_sessions.protected_capacity` | int | Bound on protected bindings of both pools together (32 768). |
+| `secure_sessions.protected_reserve_contact` | int | Places of `protected_capacity` only the contact pool may take (8 192): the relation pool holds at most `protected_capacity − protected_reserve_contact`. |
+| `secure_sessions.protected_per_identity_capacity` | int | Bound on the protected bindings one identity gives (4). |
+| `secure_sessions.general_bindings` / `.general_capacity` | int | Ordinary bindings (30 days from the last v2 session) and their bound (16 384), apart from the protected ones. |
+| `secure_sessions.protected_refusals_per_identity` / `.protected_refusals_pool_r_full` / `.protected_refusals_store_full` | uint64 | Protected bindings refused at a bound, by reason, once per binding, since the process started (in memory, reset on restart). A refusal for a new owner of an endpoint (`owner_changed`) is not a bound and is not counted here. Nothing existing is removed or lowered for a refusal; the endpoint may have got an ordinary binding instead. Each refusal is also logged as `protected_binding_limit_reached`. |
+| `session_kinds` | object | **Sessions by kind** ([session_v2.md](../protocol/session_v2.md), "Measuring the legacy share"). How many sessions this node authenticated as secure sessions v2 and how many as legacy v1, per direction, and how many of them had a peer announcing a protocol version below 31 — the figures the switch-off of the legacy path is decided by. A session is counted once: on accept when the v2 `session_proof` or the v1 `auth_session` verifies; on dial when the ConnectionManager session is published — after its setup succeeded and the pin let it through, so a dialled session whose setup failed, whose slot was evicted during the setup, or that the pin refused is not counted. The dialling side counts its ConnectionManager peer sessions only, not the one-shot recovery and notice dials; a listener cannot tell such a dial from a session and counts it as inbound. Cumulative, in memory only, never reset by reading. Lock-free: the counters are atomics. Each count is this node's own sample, not an estimate of the network. **The cumulative counts count sessions, not peers, and are gameable:** one peer opening many sessions runs them up. The switch-off decision weighs `legacy_at_claimed_v2`, the distinct-identity `live` gauge below, and out-of-band release-adoption data — never the cumulative counts alone. |
+| `session_kinds.started_at` | string\|null | RFC 3339 (nanoseconds) start of the period — the node's start. A different `started_at` between two answers means the process restarted: discard the pair. |
+| `session_kinds.read_at` | string\|null | RFC 3339 (nanoseconds) moment the counters were loaded. The sessions authenticated between two readings with the same `started_at` are the differences of the counts. |
+| `session_kinds.inbound_v2` / `.inbound_legacy` | uint64 | Accepted sessions authenticated over v2 / over v1. |
+| `session_kinds.outbound_v2` / `.outbound_legacy` | uint64 | Published dialled peer sessions proven over v2 / authenticated over v1. A v1 session that followed a v2 attempt answered by an old node is one legacy session. |
+| `session_kinds.hellos_below_secure_version` | uint64 | Accepted sessions whose `hello` announced a protocol version below 31. |
+| `session_kinds.welcomes_below_secure_version` | uint64 | Dialled peer sessions whose `welcome` announced a protocol version below 31. The version in a v1 `hello` or `welcome` is not signed: both counters say what peers claim, and a legacy session with a peer claiming 31 is counted as legacy but not here. |
+| `session_kinds.legacy_at_claimed_v2` | uint64 | Legacy sessions, either direction, whose peer ANNOUNCED a version at or above 31 — reached over v1 while claiming v2. A secure handshake was expected and did not happen: DPI stripping the ALPN `corsa/2`, or a man in the middle. These are what raising the minimum would cut off despite the claim. A claim, not proof, so it over-counts rather than under-counts. |
+| `session_kinds.live` | object | Point-in-time gauge of the sessions live now, by kind and direction, built by a background walk on the announce cadence and published whole. It resists the inflation the cumulative counts allow: a peer that opens and drops sessions holds no more live sessions than it has connections. |
+| `session_kinds.live.ready` | bool | `false` until the first walk; tells "not measured yet" from "measured, no sessions". |
+| `session_kinds.live.updated_at` | string\|null | RFC 3339 (nanoseconds) of the last walk. |
+| `session_kinds.live.inbound_v2` / `.inbound_legacy` / `.outbound_v2` / `.outbound_legacy` | object | `{"sessions", "identities"}`: live sessions in the bucket and the DISTINCT identities behind them. `identities` never exceeds `sessions` (and so is bounded by the connection count) — two sessions to one peer are two sessions and one identity. This is the reading to weigh for the switch-off. |
 
 ### fetchRouteLookup
 
@@ -627,7 +678,38 @@ corsa-cli fetchRouteSummary
     "pin_refusals_pin_store_full": 0,
     "v1_refusals_identity_pinned": 0,
     "v1_refusals_endpoint_bound": 0,
+    "v1_dials_held_by_refusal_backoff": 0,
+    "dials_held_by_v2_retry_backoff": 0,
+    "protected_bindings_contact": 37,
+    "protected_bindings_relation": 0,
+    "protected_capacity": 32768,
+    "protected_reserve_contact": 8192,
+    "protected_per_identity_capacity": 4,
+    "general_bindings": 412,
+    "general_capacity": 16384,
+    "protected_refusals_per_identity": 0,
+    "protected_refusals_pool_r_full": 0,
+    "protected_refusals_store_full": 0,
     "store_unreadable": false
+  },
+  "session_kinds": {
+    "started_at": "2026-09-06T09:00:00.104512Z",
+    "read_at": "2026-09-06T09:31:44.512904002Z",
+    "inbound_v2": 31,
+    "inbound_legacy": 9,
+    "outbound_v2": 27,
+    "outbound_legacy": 6,
+    "hellos_below_secure_version": 8,
+    "welcomes_below_secure_version": 6,
+    "legacy_at_claimed_v2": 2,
+    "live": {
+      "ready": true,
+      "updated_at": "2026-09-06T09:31:40.004002001Z",
+      "inbound_v2": {"sessions": 5, "identities": 5},
+      "inbound_legacy": {"sessions": 2, "identities": 2},
+      "outbound_v2": {"sessions": 4, "identities": 4},
+      "outbound_legacy": {"sessions": 1, "identities": 1}
+    }
   }
 }
 ```
@@ -637,8 +719,8 @@ corsa-cli fetchRouteSummary
 > (счётчики) и `updated_at` (перепись). Скорость или окно, посчитанные против `snapshot_at`, неверны
 > ровно на то время, что таблица простояла.
 >
-> **Пять снимков в одном ответе — не один атомарный снимок.** `mode_selection`,
-> `session_outcomes`, `transport_traffic` и `secure_sessions` — счётчики, прочитанные в чуть разные моменты;
+> **Шесть снимков в одном ответе — не один атомарный снимок.** `mode_selection`,
+> `session_outcomes`, `transport_traffic`, `secure_sessions` и `session_kinds` — счётчики, прочитанные в чуть разные моменты;
 > `neighbours` — гейдж с собственным `updated_at`, обновляемый фоново. Считать
 > арифметику между ними так, будто они сняты одновременно, эти отметки времени
 > не позволяют.
@@ -757,6 +839,26 @@ negotiated(O)    = Σ count где reason = negotiated / total(O)
 | `secure_sessions.v1_refusals_identity_pinned` | uint64 | Сессии v1, отклонённые потому, что названная в них identity требует v2 — закреплена или держит живое v2-соединение, — с запуска процесса (в памяти, сбрасывается при перезапуске). Учитывается каждая проверка: на приёме — на `hello` и повторно на `auth_session`, при дозвоне — на `welcome` и повторно сразу после регистрации исходящей v1-сессии. Отказы на `hello` и `welcome` происходят до того, как для этой identity что-либо подписано; две повторные проверки идут после подписи v1 `auth_session` и вместо этого закрывают сессию. |
 | `secure_sessions.v1_refusals_endpoint_bound` | uint64 | Ответы v1, отклонённые при дозвоне потому, что давший их адрес привязан к v2, — понижение, за которым не следуют: дозвон завершается неудачей вместо отката, — с запуска процесса (в памяти, сбрасывается при перезапуске). |
 | `secure_sessions.store_unreadable` | bool | Файл хранилища есть, но не читается: все пиры считаются закреплёнными, v1 отвергается, v2 работает, пока оператор не исправит файл. |
+| `secure_sessions.v1_dials_held_by_refusal_backoff` | uint64 | Откаты на v1 после попытки v2, получившей ответ строкой v1, которые этот узел задержал, потому что прежний ответ v1 с того же адреса был отвергнут (два счётчика выше), а задержка после такого отказа ещё не истекла — 5 минут, удвоение на каждый следующий отказ, не больше 6 часов, — с запуска процесса (в памяти, сбрасывается при перезапуске). Эта задержка удерживает только откат на v1 и саму попытку v2 не задерживает; следующую попытку v2 откладывает только отступ повторов v2 этого адреса (`dials_held_by_v2_retry_backoff` ниже). Отказ не снижает рейтинг адреса и не ставит его в охлаждение кандидатов. |
+| `secure_sessions.dials_held_by_v2_retry_backoff` | uint64 | Дозвоны, отвергнутые до открытия сокета, потому что действовал отступ повторов v2 их адреса: после попытки v2, закончившейся там без v2 (ответ v1 отвергнут или откат задержан), следующий дозвон ждёт 30 с, удвоение на каждый следующий такой исход, не больше 30 мин; адрес на это время не кандидат. Темп следующей попытки v2, а не охлаждение за неудачи: рейтинг, неудачи и неудачи установки сессии не меняются. С запуска процесса (в памяти, сбрасывается при перезапуске). |
+| `secure_sessions.protected_bindings_contact` / `.protected_bindings_relation` | int | Защищённые привязки адресов в пуле контактов (K) и в пуле отношений (R). Пул фиксируется при создании или повышении привязки. |
+| `secure_sessions.protected_capacity` | int | Предел защищённых привязок обоих пулов вместе (32 768). |
+| `secure_sessions.protected_reserve_contact` | int | Места из `protected_capacity`, которые может занять только пул контактов (8 192): у пула отношений не больше `protected_capacity − protected_reserve_contact`. |
+| `secure_sessions.protected_per_identity_capacity` | int | Предел защищённых привязок, которые даёт одна identity (4). |
+| `secure_sessions.general_bindings` / `.general_capacity` | int | Обычные привязки (30 суток с последней сессии v2) и их предел (16 384), отдельно от защищённых. |
+| `secure_sessions.protected_refusals_per_identity` / `.protected_refusals_pool_r_full` / `.protected_refusals_store_full` | uint64 | Защищённые привязки, в которых отказано на пределе, по причинам, один раз на привязку, с запуска процесса (в памяти, сбрасывается при перезапуске). Отказ новому владельцу адреса (`owner_changed`) — не предел и здесь не считается. Ради отказа ничего существующего не удаляется и не понижается; адрес мог вместо этого получить обычную привязку. Каждый отказ также пишется в журнал как `protected_binding_limit_reached`. |
+| `session_kinds` | object | **Сессии по видам** ([session_v2.md](../protocol/session_v2.md), «Измерение доли legacy»). Сколько сессий этот узел аутентифицировал как защищённые сессии v2 и сколько как legacy v1, по направлениям, и у скольких из них пир объявил версию протокола ниже 31, — величины, по которым решается отключение legacy-пути. Сессия учитывается один раз: на приёме — когда проходит проверку v2 `session_proof` или v1 `auth_session`; при дозвоне — когда сессия менеджера соединений публикуется, то есть после успешной настройки и пропуска pin-ом, поэтому исходящая сессия, чья настройка упала, чей слот вытеснен во время настройки или которую отверг pin, не учитывается. Дозванивающаяся сторона считает только свои сессии менеджера соединений с пирами, без одноразовых recovery- и notice-дозвонов; слушатель не отличает такой дозвон от сессии и считает его входящим. Накопительно, только в памяти, чтением не сбрасывается. Без блокировок: счётчики atomic. Каждое число — собственная выборка этого узла, а не оценка сети. **Накопительные счётчики считают сессии, а не пиров, и накручиваются:** один пир, открывающий много сессий, их поднимает. Решение об отключении взвешивает `legacy_at_claimed_v2`, срез различных identity `live` ниже и внешние данные о принятии релизов — но не накопительные счётчики сами по себе. |
+| `session_kinds.started_at` | string\|null | RFC 3339 (наносекунды) начало периода — старт узла. Другой `started_at` между двумя ответами означает рестарт процесса: такую пару отбрасывать. |
+| `session_kinds.read_at` | string\|null | RFC 3339 (наносекунды) момент загрузки счётчиков. Сессии, аутентифицированные между двумя чтениями с одинаковым `started_at`, — разности счётчиков. |
+| `session_kinds.inbound_v2` / `.inbound_legacy` | uint64 | Принятые сессии, аутентифицированные по v2 / по v1. |
+| `session_kinds.outbound_v2` / `.outbound_legacy` | uint64 | Опубликованные исходящие сессии с пирами, доказанные по v2 / аутентифицированные по v1. Сессия v1 после попытки v2, на которую ответил старый узел, — одна legacy-сессия. |
+| `session_kinds.hellos_below_secure_version` | uint64 | Принятые сессии, чей `hello` объявил версию протокола ниже 31. |
+| `session_kinds.welcomes_below_secure_version` | uint64 | Исходящие сессии с пирами, чей `welcome` объявил версию протокола ниже 31. Версия в v1 `hello` и `welcome` не подписана: оба счётчика говорят о том, что пиры заявляют, а legacy-сессия с пиром, заявившим 31, учитывается как legacy, но не здесь. |
+| `session_kinds.legacy_at_claimed_v2` | uint64 | Legacy-сессии в любом направлении, чей пир ОБЪЯВИЛ версию 31 и выше, — достигнут по v1, заявляя v2. Ожидалось защищённое рукопожатие, но его не было: DPI, срезавший ALPN `corsa/2`, или посредник. Именно их отрежет подъём минимума, несмотря на заявление. Это заявление, а не доказательство, поэтому счётчик скорее завышает, чем занижает. |
+| `session_kinds.live` | object | Мгновенный срез сессий, живых сейчас, по виду и направлению; строится фоновым обходом на такте анонса и публикуется целиком. Устойчив к накрутке накопительных счётчиков: пир, открывающий и бросающий сессии, держит живыми не больше, чем у него соединений. |
+| `session_kinds.live.ready` | bool | `false` до первого обхода; отличает «ещё не измерено» от «измерено, сессий нет». |
+| `session_kinds.live.updated_at` | string\|null | RFC 3339 (наносекунды) последнего обхода. |
+| `session_kinds.live.inbound_v2` / `.inbound_legacy` / `.outbound_v2` / `.outbound_legacy` | object | `{"sessions", "identities"}`: живые сессии в корзине и РАЗЛИЧНЫЕ identity за ними. `identities` не превышает `sessions` (и потому ограничено числом соединений) — две сессии к одному пиру это две сессии и одна identity. Это и есть величина, которую взвешивают для отключения. |
 
 ### fetchRouteLookup
 

@@ -7,7 +7,7 @@ import (
 	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 )
 
-// Admission-refusal counters (docs/refactoring/dht/05-rollout-metrics.md).
+// Admission-refusal counters (docs/rpc/datagram.md, `metrics.SendRefusals`).
 //
 // Two properties, and the second is the one that is easy to lose: a refusal is
 // counted where a SEND was refused, and NOT where a read-only projection

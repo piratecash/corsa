@@ -4,10 +4,10 @@ import (
 	"github.com/piratecash/corsa/internal/core/domain"
 )
 
-// ttl.go holds the WHOLE ttl life cycle of §4.1.1 as pure functions, in one
-// place. Each of the five rules looks obvious on its own; together they
-// admit exactly one correct order, and splitting them across the three mode
-// branches is how implementations drift apart:
+// ttl.go holds the WHOLE ttl life cycle of docs/protocol/datagram.md §4.2 as
+// pure functions, in one place. Each of the five rules looks obvious on its
+// own; together they admit exactly one correct order, and splitting them across
+// the three mode branches is how implementations drift apart:
 //
 //  1. the zero check runs on the RAW incoming value, before anything else —
 //     clamping first would resurrect a dead datagram;
@@ -20,9 +20,10 @@ import (
 //     else's frame: the origin node does not decrement, and local delivery
 //     (dst == self, or a response whose upstream is local) does not either;
 //  5. a response starts at defaultMaxHops, and the only thing that produces
-//     one is the target's handler — a transit never answers (§4.4).
+//     one is the target's handler — a transit never answers
+//     (docs/protocol/datagram.md §4.1).
 //
-// Reference: docs/refactoring/datagram-transport.md §4.1, §4.1.1, §4.2.
+// Reference: docs/protocol/datagram.md §4.1, §4.2, §4.3.
 
 // TTLExhausted reports rule 1: a RAW incoming ttl of zero is dropped before
 // any clamp. The argument is named raw to make the call site say out loud
@@ -37,7 +38,7 @@ func TTLExhausted(raw uint8) bool { return raw == 0 }
 //
 // It exists only on the routed plane: request and response carry no auth,
 // hence no max_ttl, which is exactly why rule 3 needs an explicit clamp
-// step there (§4.1 request step 6, response step 6).
+// step there (docs/protocol/datagram.md §4.1 request step 6, response step 6).
 func TTLWithinBudget(raw, maxTTL uint8) bool { return raw <= maxTTL }
 
 // ClampTTL implements rule 3. defaultMaxHops is a WIRE constant, not a
@@ -58,15 +59,16 @@ func ClampTTL(raw uint8) uint8 {
 // It refuses `ttl = 1` as well, and that is the point rather than an
 // off-by-one. The decrement pays for the hop that is ABOUT to be made, so a
 // frame leaving with `ttl = 0` arrives at a neighbour who is obliged by step 3
-// of §4.1 to drop it on the raw value. Serializing and writing it anyway buys
-// nothing and costs a socket write plus one frame of that neighbour's inbound
-// budget for every frame that reaches the end of its hop budget — and the
-// budget is exhausted precisely where loops and long paths concentrate.
+// of docs/protocol/datagram.md §4.1 to drop it on the raw value. Serializing
+// and writing it anyway buys nothing and costs a socket write plus one frame of
+// that neighbour's inbound budget for every frame that reaches the end of its
+// hop budget — and the budget is exhausted precisely where loops and long paths
+// concentrate.
 //
 // It is deliberately not called anywhere on a local-delivery path: there is
-// no hop to pay for, and §4.1.1 lists the three call sites exhaustively —
-// routed transit forwarding, request forwarding, and handing a response to
-// a network upstream.
+// no hop to pay for, and docs/protocol/datagram.md §4.2 lists the three call
+// sites exhaustively — routed transit forwarding, request forwarding, and
+// handing a response to a network upstream.
 func DecrementTTL(ttl uint8) (uint8, bool) {
 	if ttl <= 1 {
 		return 0, false
@@ -90,12 +92,13 @@ func OriginTTL() uint8 { return domain.DatagramDefaultMaxHops }
 func ResponseTTL() uint8 { return domain.DatagramDefaultMaxHops }
 
 // ClampAndDecrement is rule 3 followed by rule 4 — the pair the unsigned
-// planes perform as one explicit pipeline step (§4.1 request step 6,
-// response step 6). They are exposed together because on those planes there
-// is no budget check between them, and a caller that clamped without
-// decrementing (or the reverse) would be the exact defect §4.1.1 warns
-// about: an unsigned request with `ttl = 255` living twenty-five times
-// longer than the reverse state that has to survive it.
+// planes perform as one explicit pipeline step (docs/protocol/datagram.md §4.1
+// request step 6, response step 6). They are exposed together because on those
+// planes there is no budget check between them, and a caller that clamped
+// without decrementing (or the reverse) would be the exact defect
+// docs/protocol/datagram.md §4.2 warns about: an unsigned request with `ttl =
+// 255` living twenty-five times longer than the reverse state that has to
+// survive it.
 func ClampAndDecrement(raw uint8) (uint8, bool) {
 	return DecrementTTL(ClampTTL(raw))
 }

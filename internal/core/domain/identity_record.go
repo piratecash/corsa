@@ -45,7 +45,9 @@ const (
 	// MaxIdentityRecordDTypes bounds the dtypes list INSIDE a record. The
 	// record budget is far tighter than a handshake frame, hence the cap is
 	// its own constant rather than MaxDTypesPerNode. A bounds breach drops
-	// the field to its ABSENT value instead of rejecting the record.
+	// the field to its ABSENT value instead of rejecting the record, which is
+	// why the owner refuses to ISSUE such a record at all: what it would
+	// publish is "no type", not the list it meant.
 	MaxIdentityRecordDTypes = 8
 )
 
@@ -157,8 +159,9 @@ func DecideIdentityRecordMerge(stored StoredIdentityRecordState, incomingSeq Ide
 // ParseIdentityRecordDTypesField parses the OPTIONAL dtypes field of a
 // record body under the record's own bounds (≤ MaxIdentityRecordDTypes
 // names, each `[a-z0-9_]` ≤ MaxDTypeLen; duplicates collapse). The three
-// wire forms keep their §6.1 meanings: an absent field declares no type, an
-// explicit empty array additionally states "envelope yes, handlers no".
+// wire forms keep their docs/protocol/datagram.md §6.1 meanings: an absent
+// field declares no type, an explicit empty array additionally states "envelope
+// yes, handlers no".
 //
 // A bounds breach drops the WHOLE field to its absent value rather than
 // rejecting the record: the record stays valid and the peer merely declares

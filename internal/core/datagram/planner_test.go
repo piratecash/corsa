@@ -9,9 +9,9 @@ import (
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
-// planner_test.go covers the scheduling half of §4.3: the gated
-// direct-first branch, the walk to the first successful enqueue, the four
-// synchronous outcomes and avoid_next_hop.
+// planner_test.go covers the scheduling half of docs/protocol/datagram.md §4.4:
+// the gated direct-first branch, the walk to the first successful enqueue, the
+// four synchronous outcomes and avoid_next_hop.
 
 // TestDirectSessionIsTriedFirst pins step 1: a live, gated direct session
 // beats every routing-table candidate, however well the relay ranks.
@@ -34,10 +34,10 @@ func TestDirectSessionIsTriedFirst(t *testing.T) {
 	requireHops(t, fixture.sender.tried(), dst)
 }
 
-// TestDirectSessionRequiresTheRoleGate is §4.3 item 1 and §9: a live
-// session is NOT enough. The peer must pass the same role check as any
-// candidate — mesh_datagram_v1 — and the check cannot be walked around by the
-// session being up.
+// TestDirectSessionRequiresTheRoleGate is docs/protocol/datagram.md §4.4 item
+// 1: a live session is NOT enough. The peer must pass the same role check as
+// any candidate — mesh_datagram_v1 — and the check cannot be walked around by
+// the session being up.
 func TestDirectSessionRequiresTheRoleGate(t *testing.T) {
 	t.Parallel()
 
@@ -65,10 +65,10 @@ func TestDirectSessionRequiresTheRoleGate(t *testing.T) {
 	requireHops(t, fixture.sender.tried(), relay)
 }
 
-// TestLastHopDTypeGateRejectsInsteadOfDroppingSilently is the core of §4.3
-// item 1 and §9: sending to a dst that never declared this dtype does not
-// happen, and the caller gets a REFUSAL rather than the silent drop it would
-// have suffered at the destination.
+// TestLastHopDTypeGateRejectsInsteadOfDroppingSilently is the core of
+// docs/protocol/datagram.md §4.4 item 1: sending to a dst that never declared
+// this dtype does not happen, and the caller gets a REFUSAL rather than the
+// silent drop it would have suffered at the destination.
 //
 // The relay route is present on purpose: the gate is a hard stop, not a
 // reason to take the long way to the same dead end — otherwise the
@@ -110,10 +110,10 @@ func TestLastHopDTypeGateRejectsInsteadOfDroppingSilently(t *testing.T) {
 }
 
 // TestLastHopGateRefusesADestinationThatDeclaredNoType is the send-side half of
-// §6.1. A destination that named no type is an endpoint for none, and it
-// reaches that state two ways which the wire tells apart and the gate does not:
-// a node with an empty type registry says `"dtypes": []`, while a node that
-// never sent the field says nothing at all.
+// docs/protocol/datagram.md §6.1. A destination that named no type is an
+// endpoint for none, and it reaches that state two ways which the wire tells
+// apart and the gate does not: a node with an empty type registry says
+// `"dtypes": []`, while a node that never sent the field says nothing at all.
 //
 // Both are asserted with a type from the WITHDRAWN baseline, because that is
 // the set an absent field used to be credited with: it is the case a
@@ -176,8 +176,9 @@ func TestLastHopGateRefusesADestinationThatDeclaredNoType(t *testing.T) {
 	}
 }
 
-// TestLastHopGateLetsADeclaredTypeThrough pins the positive half of §6.1: the
-// ONE thing that opens the gate is the destination having listed the type.
+// TestLastHopGateLetsADeclaredTypeThrough pins the positive half of
+// docs/protocol/datagram.md §6.1: the ONE thing that opens the gate is the
+// destination having listed the type.
 //
 // The second half of the test is what makes the first mean something — the
 // same destination, the same connection, a type it did not list, refused. A
@@ -220,9 +221,10 @@ func TestLastHopGateAppliesOnTransit(t *testing.T) {
 	fixture.routes.setCached(dst, fixture.route(dst, 1))
 
 	// The frame never reaches the scheduler at all: the early deliverability
-	// sieve of §4.1 step 7 finds no viable candidate and drops it BEFORE the
-	// signature is paid for. Either way the refusal is silent — that is the
-	// asymmetry of §4.3 item 4 — and nothing is enqueued.
+	// sieve of docs/protocol/datagram.md §4.1 step 7 finds no viable candidate
+	// and drops it BEFORE the signature is paid for. Either way the refusal is
+	// silent — that is the asymmetry of docs/protocol/datagram.md §4.4 item 4 —
+	// and nothing is enqueued.
 	result := fixture.transit(t, upstream, dst)
 	if !result.Dropped() {
 		t.Fatalf("outcome = %s, want a silent drop", result.Outcome())
@@ -232,10 +234,11 @@ func TestLastHopGateAppliesOnTransit(t *testing.T) {
 	}
 }
 
-// TestQueuedCarriesTheActuallyChosenNextHop pins §4.3 item 3 together with
-// the reason `queued` carries a hop at all: candidates are walked until one
-// accepts, so the caller must learn where the frame really went — otherwise
-// the next retry's avoid_next_hop would exclude the wrong peer.
+// TestQueuedCarriesTheActuallyChosenNextHop pins docs/protocol/datagram.md §4.4
+// item 3 together with the reason `queued` carries a hop at all: candidates are
+// walked until one accepts, so the caller must learn where the frame really
+// went — otherwise the next retry's avoid_next_hop would exclude the wrong
+// peer.
 func TestQueuedCarriesTheActuallyChosenNextHop(t *testing.T) {
 	t.Parallel()
 
@@ -318,9 +321,9 @@ func TestAvoidNextHopChangesTheFirstHop(t *testing.T) {
 	requireHops(t, fixture.sender.tried(), other)
 }
 
-// TestNoCandidatesIsSynchronousForLocalAndSilentForTransit pins §4.3
-// item 4: the same situation is a synchronous refusal to a local caller
-// and a silent drop for a frame passing through.
+// TestNoCandidatesIsSynchronousForLocalAndSilentForTransit pins
+// docs/protocol/datagram.md §4.4 item 4: the same situation is a synchronous
+// refusal to a local caller and a silent drop for a frame passing through.
 func TestNoCandidatesIsSynchronousForLocalAndSilentForTransit(t *testing.T) {
 	t.Parallel()
 
@@ -365,9 +368,10 @@ func TestSplitHorizonExcludesTheIncomingNeighbour(t *testing.T) {
 	requireHops(t, fixture.sender.tried(), onward)
 }
 
-// TestFreshnessDependsOnWhoCreatedTheFrame pins the §4.3 freshness rule:
-// a locally originated send reads the fresh lookup so a route accepted a
-// moment ago is visible, a transit frame reads the coalesced snapshot.
+// TestFreshnessDependsOnWhoCreatedTheFrame pins the
+// docs/protocol/datagram.md §4.4 freshness rule: a locally originated send
+// reads the fresh lookup so a route accepted a moment ago is visible, a transit
+// frame reads the coalesced snapshot.
 func TestFreshnessDependsOnWhoCreatedTheFrame(t *testing.T) {
 	t.Parallel()
 
@@ -395,27 +399,29 @@ func TestFreshnessDependsOnWhoCreatedTheFrame(t *testing.T) {
 	}
 	requireHops(t, fixture.sender.tried(), cachedOnly)
 	// The transit frame touches the cached source twice — once for the early
-	// deliverability sieve of §4.1 step 7, once for the selection itself — and
-	// never the fresh lookup. That the FRESH counter is still 1 is the
-	// assertion; the cached count only has to stay away from it.
+	// deliverability sieve of docs/protocol/datagram.md §4.1 step 7, once for
+	// the selection itself — and never the fresh lookup. That the FRESH counter
+	// is still 1 is the assertion; the cached count only has to stay away from
+	// it.
 	if fresh, _ := fixture.routes.sourceCalls(); fresh != 1 {
 		t.Fatalf("a transit frame read the fresh lookup %d times, want 1 (the local send's)", fresh)
 	}
 }
 
-// TestOutcomeIsFinalFromTheEnqueue pins the §4.3 finality rule that
-// protects the migration's transport fallback (§8): a refusal discovered
-// AFTER the enqueue does not rewrite `queued` into `rejected`, so the same
-// ciphertext never leaves a second time in a legacy envelope.
+// TestOutcomeIsFinalFromTheEnqueue pins the docs/protocol/datagram.md §4.4
+// finality rule that protects the migration's transport fallback
+// (docs/protocol/datagram.md §4.4): a refusal discovered AFTER the enqueue does
+// not rewrite `queued` into `rejected`, so the same ciphertext never leaves a
+// second time in a legacy envelope.
 //
 // The late refusal used here is the real one: Commit(forwarded) fails after the
 // frame is already in the queue. The layer's memory answers `fail` for exactly
 // one reason — the record is gone — and the cache reaches that state by itself
 // when the abandoned-reservation watchdog reclaims a branch that outlived
-// replay_until plus the whole hop budget. The fixture puts the cache in the same
-// state at the same moment, from the emitter the publish runs through. §4.1
-// answers with a Release and a log, and §4.3 forbids it from touching the
-// outcome.
+// replay_until plus the whole hop budget. The fixture puts the cache in the
+// same state at the same moment, from the emitter the publish runs through.
+// docs/protocol/datagram.md §4.1 answers with a Release and a log, and
+// docs/protocol/datagram.md §4.4 forbids it from touching the outcome.
 func TestOutcomeIsFinalFromTheEnqueue(t *testing.T) {
 	t.Parallel()
 
@@ -489,9 +495,9 @@ func TestRejectionNamesTheMissingCapability(t *testing.T) {
 // and the outcome: when every ADMITTED candidate refuses the enqueue, nothing
 // about policy failed, so the caller must not get `rejected` — and nothing
 // about the route failed either, so it must not get `no_route` and be told to
-// wait for a route that is already there. §4.3 has the third outcome for
-// exactly this: a temporary local failure, provably before the enqueue, worth
-// a retry with backoff.
+// wait for a route that is already there. docs/protocol/datagram.md §4.4 has
+// the third outcome for exactly this: a temporary local failure, provably
+// before the enqueue, worth a retry with backoff.
 func TestAllCandidatesRefusingIsALocalFailure(t *testing.T) {
 	t.Parallel()
 
@@ -517,9 +523,10 @@ func TestAllCandidatesRefusingIsALocalFailure(t *testing.T) {
 }
 
 // A gate refusal of ONE peer must not become the outcome of a walk in which
-// OTHER, admitted peers were tried and failed to take the frame. §4.3 defines
-// `rejected` as "repeating is pointless", and reporting it here would stop the
-// retries of a caller whose real problem is a temporary local one.
+// OTHER, admitted peers were tried and failed to take the frame.
+// docs/protocol/datagram.md §4.4 defines `rejected` as "repeating is
+// pointless", and reporting it here would stop the retries of a caller whose
+// real problem is a temporary local one.
 func TestEnqueueFailureIsNotReportedAsAForeignPeersRejection(t *testing.T) {
 	t.Parallel()
 

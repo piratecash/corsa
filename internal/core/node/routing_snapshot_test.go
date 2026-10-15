@@ -519,8 +519,8 @@ func TestReachableIDsSnapshotNormalizesDirectOnlyClassification(t *testing.T) {
 	}
 }
 
-// TestRoutingSnapshotEventOrdersReachability is the §1.2 regression test of
-// docs/refactoring/identity-discovery-lookup.md: after a table mutation, the
+// TestRoutingSnapshotEventOrdersReachability is the snapshot-reason regression
+// test (docs/locking.md, `ReachableIDs`): after a table mutation, the
 // snapshot-reason TopicRouteTableChanged event must arrive strictly AFTER the
 // fresh snapshot is readable — a subscriber that reconciles reachability on
 // this event observes the mutated route, never the previous generation.

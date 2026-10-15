@@ -18,7 +18,7 @@ import (
 // cardinality — a container's len, read where the owner already holds its
 // lock — plus the size of one entry, and never a walk over the entries
 // themselves: an accounting pass that scanned the routing table under its
-// mutex would change the thing it measures (13-measurements.md §4).
+// mutex would change the thing it measures.
 //
 // The byte figure that follows from those two numbers is therefore a FLOOR and
 // is named one. It counts the key and the value a container stores and nothing
@@ -32,7 +32,7 @@ import (
 // It belongs to the node's diagnostic surface, the same way the datagram route
 // plan is rendered where it is served rather than where it is produced.
 //
-// Reference: docs/refactoring/dht/13-measurements.md §2, §4, §5.
+// Reference: docs/rpc/system.md (getResourceBreakdown).
 
 // ResourceSubsystem names one owner of long-lived state.
 //

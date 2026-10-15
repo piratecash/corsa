@@ -286,8 +286,9 @@ func TestCandidates_RuntimePrivateIPv4NotFilteredByPersistedRule(t *testing.T) {
 // bypasses Candidates), but a persisted Source=Manual entry on a private /
 // loopback IP must NOT auto-dial after restart. Otherwise the operator's
 // one-shot intent silently turns into a permanent reconnect loop on every
-// boot, and the private-IP guard documented in docs/connection-manager.md §6a.1
-// becomes a no-op for any peer that was ever added by hand.
+// boot, and the private-IP guard documented in docs/mesh.md ("Private/loopback
+// address isolation") becomes a no-op for any peer that was ever added by
+// hand.
 func TestCandidates_PersistedManualPrivateFiltered(t *testing.T) {
 	cfg := testProviderConfig()
 	cfg.AllowPrivateCandidates = false

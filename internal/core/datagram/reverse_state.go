@@ -7,8 +7,9 @@ import (
 	"github.com/piratecash/corsa/internal/core/domain"
 )
 
-// reverse_state.go implements the two-phase reverse state of §4.2 — the only
-// state a transit node keeps for the unsigned request/response planes.
+// reverse_state.go implements the two-phase reverse state of
+// docs/protocol/datagram.md §4.3 — the only state a transit node keeps for the
+// unsigned request/response planes.
 //
 // Two properties drive every decision in this file:
 //
@@ -26,17 +27,17 @@ import (
 //     BEFORE the expensive check.
 //
 // The routed plane never touches anything here, and nothing here ever touches
-// the routed replay cache (§4.1).
+// the routed replay cache (docs/protocol/datagram.md §4.1).
 //
-// Reference: docs/refactoring/datagram-transport.md §4.1, §4.2, §5.
+// Reference: docs/protocol/datagram.md §4.1, §4.3, §5.
 
 // ---------------------------------------------------------------------------
 // Label — the key of the reverse state
 // ---------------------------------------------------------------------------
 
 // Label is the one-shot 20-byte tag an initiator puts in `request.src` and
-// gets echoed back in `response.dst` (§2.1.1). It is the key of the reverse
-// state and it is NOT an address.
+// gets echoed back in `response.dst` (docs/protocol/datagram.md §2.2). It is
+// the key of the reverse state and it is NOT an address.
 //
 // It is a distinct type from domain.PeerIdentity on purpose. On the wire the
 // two share a shape, and that similarity is exactly the trap: a label is not
@@ -71,8 +72,8 @@ func (l Label) String() string { return l.raw.String() }
 //   - WHERE DOES THE ANSWER GO — the CHANNEL the request arrived on, or the
 //     LOCAL marker for a request this node originated;
 //   - WHOSE SLOT IS THIS — the AdmissionKey the arrival was billed to, which is
-//     what the per-upstream cap and the fairness eviction of §5 group by
-//     (upstreamKey).
+//     what the per-upstream cap and the fairness eviction of
+//     docs/protocol/datagram.md §5 group by (upstreamKey).
 //
 // Neither is derivable from the other, and each earlier answer to both at once
 // lost one half:
@@ -98,11 +99,12 @@ func (l Label) String() string { return l.raw.String() }
 // peer travels alongside as a NAME — for the log line, and for the writer's own
 // diagnostics through OutboundFrame.Peer. It is part of neither answer.
 //
-// `local` is a marker and never this node's own address (§4.2): an answer to
-// our own request goes to a resolver inside the process, not into a session,
-// and encoding that as "the peer happens to be me" would mix the transit and
-// the local path in every comparison. It has no owner either — our own requests
-// are not billed to a neighbour — which is what keeps its bucket unshareable.
+// `local` is a marker and never this node's own address
+// (docs/protocol/datagram.md §4.3): an answer to our own request goes to a
+// resolver inside the process, not into a session, and encoding that as "the
+// peer happens to be me" would mix the transit and the local path in every
+// comparison. It has no owner either — our own requests are not billed to a
+// neighbour — which is what keeps its bucket unshareable.
 type Upstream struct {
 	owner   AdmissionKey
 	channel ChannelID
@@ -110,8 +112,9 @@ type Upstream struct {
 	local   bool
 }
 
-// upstreamKey is what the per-upstream accounting of §5 groups by: the OWNER of
-// the quota, with the local marker as its own bucket.
+// upstreamKey is what the per-upstream accounting of
+// docs/protocol/datagram.md §5 groups by: the OWNER of the quota, with the
+// local marker as its own bucket.
 //
 // It is a type of its own rather than "the Upstream value used as a map key"
 // because the value also carries the return path and the presented name, and a
@@ -225,11 +228,12 @@ func (u Upstream) String() string {
 // itself: one value, one meaning per accessor.
 //
 // It carries NO quota owner, unlike Upstream, and the asymmetry is the honest
-// one: §5 bounds how many records a neighbour may make this node HOLD, and that
-// is an inbound quantity. Nothing is metered per egress, so an AdmissionKey here
-// would be a field with no reader — and there is nothing to put in it either,
-// since an admission key is what a RECEIVE path proved about a neighbour and the
-// scheduler's candidate is an outbound connection nobody billed.
+// one: docs/protocol/datagram.md §5 bounds how many records a neighbour may
+// make this node HOLD, and that is an inbound quantity. Nothing is metered per
+// egress, so an AdmissionKey here would be a field with no reader — and there
+// is nothing to put in it either, since an admission key is what a RECEIVE path
+// proved about a neighbour and the scheduler's candidate is an outbound
+// connection nobody billed.
 type Downstream struct {
 	channel ChannelID
 	peer    domain.PeerIdentity
@@ -266,17 +270,17 @@ func (d Downstream) String() string {
 }
 
 // ---------------------------------------------------------------------------
-// Window arithmetic (§4.2)
+// Window arithmetic (docs/protocol/datagram.md §4.3)
 // ---------------------------------------------------------------------------
 
 // reverseTargetBudget is the processing allowance at the target inside the
-// reverse_state_ttl formula of §4.2. It is the one term of that formula with
-// no constant of its own in domain, so it is named here rather than folded
-// into a literal total.
+// reverse_state_ttl formula of docs/protocol/datagram.md §4.3. It is the one
+// term of that formula with no constant of its own in domain, so it is named
+// here rather than folded into a literal total.
 const reverseTargetBudget = 10 * time.Second
 
-// ReverseStateWindow derives reverse_state_ttl from the §4.2 formula instead
-// of hard-coding 240 seconds:
+// ReverseStateWindow derives reverse_state_ttl from the
+// docs/protocol/datagram.md §4.3 formula instead of hard-coding 240 seconds:
 //
 //	reverse_state_ttl = 2 × defaultMaxHops × (queue_residence + write_grace)
 //	                    of the control class + target_budget
@@ -313,10 +317,11 @@ func roundUpToMinute(d time.Duration) time.Duration {
 }
 
 // ResponseSendDeadline is the send deadline of an answer, computed LOCALLY:
-// moment_of_arrival + queue_residence(control) (§4.2). There is no wire field
-// for it and there cannot be one — the node forming the answer does not know
-// anybody else's expires_at, and the target's handler, which is the only thing
-// that answers, creates no reverse record at all.
+// moment_of_arrival + queue_residence(control)
+// (docs/protocol/datagram.md §4.3). There is no wire field for it and there
+// cannot be one — the node forming the answer does not know anybody else's
+// expires_at, and the target's handler, which is the only thing that answers,
+// creates no reverse record at all.
 //
 // The value must be the same 5 seconds the reverse window is computed from:
 // take thirty here and a ten-hop round trip would need more than 1200 s while
@@ -360,7 +365,7 @@ var reverseSlotStateNames = map[ReverseSlotState]string{
 func (s ReverseSlotState) String() string { return enumName(reverseSlotStateNames, s) }
 
 // ReverseRecord is the read-only view of one reverse-state entry — the value
-// the response fork judges an answer against (§4.2).
+// the response fork judges an answer against (docs/protocol/datagram.md §4.3).
 //
 // It is a value copy with unexported fields and no setters, which is how "a
 // reader mutates nothing" is enforced rather than requested: every mutation
@@ -382,12 +387,13 @@ type ReverseRecord struct {
 func (r ReverseRecord) Label() Label { return r.label }
 
 // Dst returns the destination of the REQUEST, which a lawful answer must
-// carry in its `src` (§2.1.1).
+// carry in its `src` (docs/protocol/datagram.md §2.2).
 func (r ReverseRecord) Dst() domain.PeerIdentity { return r.dst }
 
 // DType returns the dtype of the REQUEST. It is stored because without it a
 // formally valid answer of ANOTHER protocol whose type this node happens to
-// know would take the single claimed slot of somebody else's exchange (§4.2).
+// know would take the single claimed slot of somebody else's exchange
+// (docs/protocol/datagram.md §4.3).
 func (r ReverseRecord) DType() domain.DType { return r.dtype }
 
 // Upstream returns where the answer has to go.
@@ -401,8 +407,9 @@ func (r ReverseRecord) Upstream() Upstream { return r.upstream }
 // previous round left open here. The upstream is an arrival, so its channel was
 // always at hand; the downstream is an egress, and the channel it names is one
 // the LAYER chose before publishing rather than one it learned afterwards — the
-// emitter's answer comes too late for phase 3 and, behind the class queue of §5,
-// never comes at all (see Pipeline.requestPublisher).
+// emitter's answer comes too late for phase 3 and, behind the class queue of
+// docs/protocol/datagram.md §5, never comes at all (see
+// Pipeline.requestPublisher).
 func (r ReverseRecord) Downstream() (Downstream, bool) {
 	if r.downstream.IsZero() {
 		return Downstream{}, false
@@ -574,7 +581,8 @@ const (
 	ReverseEventReserved
 	// ReverseEventBusy counts a label whose slot was already taken.
 	ReverseEventBusy
-	// ReverseEventCapped counts a record refused by the caps of §5.
+	// ReverseEventCapped counts a record refused by the caps of
+	// docs/protocol/datagram.md §5.
 	ReverseEventCapped
 	// ReverseEventEvicted counts a record dropped to make room, fairly.
 	ReverseEventEvicted
@@ -622,10 +630,11 @@ func (e ReverseEvent) String() string { return enumName(reverseEventNames, e) }
 // Narrow seams to M8
 // ---------------------------------------------------------------------------
 
-// reverseLimits is the WHOLE view the reverse table needs of §5: two numbers.
-// M8 owns their tuning and their telemetry; the table only asks. Keeping the
-// seam this narrow is what stops the limits package and the state machine
-// from growing a shared idea of "how full is full".
+// reverseLimits is the WHOLE view the reverse table needs of
+// docs/protocol/datagram.md §5: two numbers. M8 owns their tuning and their
+// telemetry; the table only asks. Keeping the seam this narrow is what stops
+// the limits package and the state machine from growing a shared idea of "how
+// full is full".
 type reverseLimits interface {
 	// ReverseStateCaps returns the global cap and the per-upstream cap of
 	// reverse records. Non-positive values mean "use the layer default".
@@ -644,11 +653,11 @@ type reverseMetrics interface {
 
 const (
 	// DefaultReverseProbeBudget is the starting budget of REFUSED answers per
-	// record (§4.2).
+	// record (docs/protocol/datagram.md §4.3).
 	DefaultReverseProbeBudget = 4
 
 	// defaultReverseGlobalCap and defaultReversePerUpstreamCap are the
-	// starting caps of §5 until M8 supplies its own.
+	// starting caps of docs/protocol/datagram.md §5 until M8 supplies its own.
 	defaultReverseGlobalCap      = 4096
 	defaultReversePerUpstreamCap = 64
 )
@@ -657,7 +666,8 @@ const (
 type ReverseTableConfig struct {
 	// Clock is the injectable time source, following the package convention.
 	Clock func() time.Time
-	// Limits is the optional §5 seam; nil means the layer defaults.
+	// Limits is the optional docs/protocol/datagram.md §5 seam; nil means the
+	// layer defaults.
 	Limits reverseLimits
 	// Metrics is the optional counting seam.
 	Metrics reverseMetrics
@@ -671,7 +681,7 @@ type ReverseTableConfig struct {
 // it is held — the pipeline publishes frames and reaches handlers strictly
 // outside these methods, which is what lets a fast answer
 // arrive re-entrantly on the very same goroutine that is still publishing the
-// request (§4.2, phase 3).
+// request (docs/protocol/datagram.md §4.3, phase 3).
 type ReverseTable struct {
 	clock   func() time.Time
 	limits  reverseLimits
@@ -765,7 +775,8 @@ type ReverseReserveOpts struct {
 	Upstream Upstream
 }
 
-// Reserve takes the slot of one label in state pending — phase 1 of §4.2.
+// Reserve takes the slot of one label in state pending — phase 1 of
+// docs/protocol/datagram.md §4.3.
 //
 // It runs only where a request is actually PUT ON THE WIRE — a transit forward
 // or a locally created request, after the candidates are chosen: a request this
@@ -816,8 +827,9 @@ func (t *ReverseTable) Reserve(opts ReverseReserveOpts) ReverseReserveResult {
 }
 
 // FixDownstream writes the CHANNEL the chosen candidate will be published over
-// into the slot — phase 3 of §4.2, performed BEFORE the frame is handed to the
-// writer so an answer cannot physically outrun the record.
+// into the slot — phase 3 of docs/protocol/datagram.md §4.3, performed BEFORE
+// the frame is handed to the writer so an answer cannot physically outrun the
+// record.
 //
 // It is also phase 4: an enqueue failure means the frame never left towards
 // that candidate, so the caller calls it again with the next one.
@@ -843,8 +855,9 @@ func (t *ReverseTable) FixDownstream(slot ReverseSlot, downstream Downstream) bo
 }
 
 // Rollback frees the record entirely — the "candidates ran out" branch of
-// §4.2 phase 4. The generation guard makes a late rollback of an abandoned
-// request a no-op instead of an eviction of somebody else's fresh record.
+// docs/protocol/datagram.md §4.3 phase 4. The generation guard makes a late
+// rollback of an abandoned request a no-op instead of an eviction of somebody
+// else's fresh record.
 func (t *ReverseTable) Rollback(slot ReverseSlot) bool {
 	t.mu.Lock()
 	defer t.unlockAndPublish()
@@ -870,9 +883,10 @@ func (t *ReverseTable) Lookup(label Label) (ReverseRecord, bool) {
 	return entry.view(t.probes), true
 }
 
-// ReserveProbe is the atomic increment-and-test of §4.2: every candidate
-// answer takes one unit of budget, and only the one that won a non-zero
-// remainder enters the expensive check.
+// ReserveProbe is the atomic increment-and-test of
+// docs/protocol/datagram.md §4.3: every candidate answer takes one unit of
+// budget, and only the one that won a non-zero remainder enters the expensive
+// check.
 //
 // Atomicity is the whole point. Without it several forged answers would each
 // see a free budget and all of them would reach the expensive check — the limit
@@ -908,7 +922,7 @@ func (t *ReverseTable) ReserveProbe(record ReverseRecord) (ProbeTicket, ReverseP
 
 // RefundProbe returns the unit taken by an attempt that turned out to be
 // legitimate: only REFUSED attempts spend budget, a successful `forward`
-// followed by a claim does not (§4.2).
+// followed by a claim does not (docs/protocol/datagram.md §4.3).
 func (t *ReverseTable) RefundProbe(ticket ProbeTicket) {
 	if ticket.IsZero() {
 		return
@@ -949,9 +963,10 @@ func (t *ReverseTable) Claim(record ReverseRecord) (ReverseSlot, bool) {
 }
 
 // Complete frees the record after the answer REACHED its upstream — the ONLY
-// release path of a claimed record (§4.2). That is a successful enqueue on a
-// network upstream and a resolver that accepted the answer on a local one:
-// both are the mutating step of their branch, and both end the exchange.
+// release path of a claimed record (docs/protocol/datagram.md §4.3). That is a
+// successful enqueue on a network upstream and a resolver that accepted the
+// answer on a local one: both are the mutating step of their branch, and both
+// end the exchange.
 //
 // The failure of either leaves the record claimed until expires_at on purpose:
 // the answer is lost, the initiator retries with a fresh label, and no second
@@ -1056,12 +1071,13 @@ func (t *ReverseTable) caps() (global, perUpstream int) {
 	return global, perUpstream
 }
 
-// makeRoomLocked enforces both caps of §5 and evicts by FAIRNESS: when the
-// table is full, the victim is the oldest record of the QUOTA OWNER holding the
-// most slots. A plain "oldest overall" would let one noisy neighbour push out
-// everybody else's exchanges, which is the opposite of what the cap is for — and
-// so would an owner counted once per channel, since a neighbour spreading its
-// records over N sessions would then read as N quiet upstreams.
+// makeRoomLocked enforces both caps of docs/protocol/datagram.md §5 and evicts
+// by FAIRNESS: when the table is full, the victim is the oldest record of the
+// QUOTA OWNER holding the most slots. A plain "oldest overall" would let one
+// noisy neighbour push out everybody else's exchanges, which is the opposite of
+// what the cap is for — and so would an owner counted once per channel, since a
+// neighbour spreading its records over N sessions would then read as N quiet
+// upstreams.
 func (t *ReverseTable) makeRoomLocked(upstream Upstream, now time.Time) bool {
 	global, perUpstream := t.caps()
 	if t.loadLocked(upstream) >= perUpstream || len(t.entries) >= global {

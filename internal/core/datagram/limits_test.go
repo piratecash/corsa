@@ -10,14 +10,15 @@ import (
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
-// limits_test.go pins the §5 numbers to the reasoning that produced them.
-// These are not "the constants have the values they have" tests: each one
-// fails when a retuning breaks a property the layer depends on elsewhere.
+// limits_test.go pins the docs/protocol/datagram.md §5 numbers to the reasoning
+// that produced them. These are not "the constants have the values they have"
+// tests: each one fails when a retuning breaks a property the layer depends on
+// elsewhere.
 
 // The crypto budget must be the BINDING constraint on a flood of small signed
-// frames (§9). If a retuning ever made the frame budget bite first, the test
-// in admission_test.go would still pass — it would just stop testing what it
-// claims to. This one states the invariant directly.
+// frames (docs/protocol/datagram.md §5). If a retuning ever made the frame
+// budget bite first, the test in admission_test.go would still pass — it would
+// just stop testing what it claims to. This one states the invariant directly.
 func TestLimitsCryptoBudgetBindsBeforeTheOthers(t *testing.T) {
 	t.Parallel()
 
@@ -94,8 +95,9 @@ func TestLimitsQueueLanesDispatchAMaximumFrame(t *testing.T) {
 	}
 }
 
-// Bulk's guaranteed share is the §5 starting value of one quarter. The test
-// exists so a change of weights is a deliberate change of the promise.
+// Bulk's guaranteed share is the docs/protocol/datagram.md §5 starting value of
+// one quarter. The test exists so a change of weights is a deliberate change of
+// the promise.
 func TestLimitsBulkShareIsOneQuarter(t *testing.T) {
 	t.Parallel()
 
@@ -172,7 +174,8 @@ func TestLimitsDerivedConfigsCarryTheNumbers(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// The caps the numbers above configure (§5): reverse state and anti-replay
+// The caps the numbers above configure (docs/protocol/datagram.md §5): reverse
+// state and anti-replay
 // ---------------------------------------------------------------------------
 
 // m8ReplayKey is a distinct, reproducible replay key per test index.
@@ -187,7 +190,7 @@ func m8ReplayKey(n byte) domain.ReplayKey {
 // The reverse table is capped globally and per upstream, and when it is full
 // the victim is the OLDEST record of the BUSIEST upstream. "Oldest overall"
 // would let one noisy neighbour push out everybody else's exchanges, which is
-// the opposite of what the cap is for (§5).
+// the opposite of what the cap is for (docs/protocol/datagram.md §5).
 func TestLimitsReverseStateEvictsTheBusiestUpstream(t *testing.T) {
 	t.Parallel()
 
@@ -256,7 +259,8 @@ func TestLimitsReverseStateEvictsTheBusiestUpstream(t *testing.T) {
 
 // At capacity the anti-replay cache refuses the NOISIEST neighbour rather
 // than flushing: a global flush would let one peer erase everybody else's
-// anti-replay memory, which is the attack the rule exists to stop (§5).
+// anti-replay memory, which is the attack the rule exists to stop
+// (docs/protocol/datagram.md §5).
 func TestLimitsReplayOverflowRefusesTheNoisiestNeighbour(t *testing.T) {
 	t.Parallel()
 

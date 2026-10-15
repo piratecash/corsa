@@ -514,7 +514,7 @@ func controlSenderWithKey(t *testing.T, now *time.Time, peer *identity.Identity)
 
 // The connection the send would use declared its dtypes at handshake and
 // dm_control was not among them. Three things follow
-// (docs/refactoring/n1-legacy-residual.md §3):
+// (docs/protocol/network_security.md §13):
 //
 //  1. It is about the TYPE, not about whichever command was in the frame — and
 //     it is not a belief about the identity at all: the peer's reactions are

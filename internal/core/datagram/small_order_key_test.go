@@ -8,13 +8,13 @@ import (
 	"github.com/piratecash/corsa/internal/testutil/edforgery"
 )
 
-// TestSmallOrderSignerIsDroppedWithoutBan pins the one auth refusal of §4.4
-// that is NOT ban-worthy: an auth.pubkey no honest node can hold. The frame is
-// self-consistent — src is the key's fingerprint and stdlib accepts the
-// universal signature under it — so a relay on a build without the key check
-// forwards it in good faith; the neighbour is not its author. It is refused
-// before the verification token and before any replay slot, like the
-// fingerprint check next to it.
+// TestSmallOrderSignerIsDroppedWithoutBan pins the one auth refusal of
+// docs/protocol/datagram.md §4.1 that is NOT ban-worthy: an auth.pubkey no
+// honest node can hold. The frame is self-consistent — src is the key's
+// fingerprint and stdlib accepts the universal signature under it — so a relay
+// on a build without the key check forwards it in good faith; the neighbour is
+// not its author. It is refused before the verification token and before any
+// replay slot, like the fingerprint check next to it.
 func TestSmallOrderSignerIsDroppedWithoutBan(t *testing.T) {
 	net := newFakeNetwork()
 	private, signer := newSigner(t)

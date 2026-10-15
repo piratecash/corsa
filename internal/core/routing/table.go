@@ -197,7 +197,7 @@ type Table struct {
 	// AUTHORITATIVE: the journal drives what the announce delta sends. Mutations
 	// that do NOT change the wire projection (TTL-only ExpiresAt refresh, cap
 	// rejections) deliberately do not append, so cursor deltas do not fan out
-	// unchanged routes. See docs/refactoring/phase3-announce-delta-cursor.md.
+	// unchanged routes.
 	// Guarded by t.mu, same as snapDirtyIDs.
 	changeLog *routeChangeLog
 

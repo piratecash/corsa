@@ -1682,7 +1682,7 @@ telemetry that does not exist yet.
   that names identity X never spends X's v2 budget, replay share or reverse
   quota. No registered type currently declares `requires_proven_peer`, so
   reading legacy connections as unproven makes no type unavailable to old
-  nodes (docs/refactoring/n1-legacy-residual.md §1).
+  nodes ([network_security.md §13](network_security.md)).
 - **A weighted queue, not strict priority.** `control` is served before `bulk`
   *within its own share*, and `bulk` keeps a guaranteed minimum share of the
   dispatched bytes (a quarter to start with). Strict priority would mean that a
@@ -1841,9 +1841,15 @@ migration this is a question of correctness rather than optimisation:
 
 **Mechanism 2 — a `dtypes` list in the owner's identity record**, signed by the
 owner: which types the node handles. It says the same thing the handshake field
-says, for a node that is not a direct peer. This mechanism belongs to the
-identity-record work and is **not implemented in this build** (§8); the rules
-below are the contract it must satisfy when it lands.
+says, for a node that is not a direct peer. **The publishing half is
+implemented:** every endpoint signs its handshake set into its own record
+(`docs/protocol/identity-lookup.md` §2), re-issues the record under a new `seq`
+whenever the set changes, and pushes it to each new session peer that declares
+`push_identity`. **The reading
+half is not:** a received record's `dtypes` is parsed and stored, but no send
+decision consults it yet — the handshake set is the only one that gates a send
+(§8). The freshness rules below are the contract that reading half must satisfy
+when it lands.
 
 **The record carries `dtypes` and nothing beside it.** It used to be a PAIR —
 `dtypes` plus a `caps` list of profile capabilities — because `req_caps` made
@@ -2053,22 +2059,28 @@ because the name states only that the envelope is understood (§6);
 node does not forward. What the registry decides is the `dtypes` field, not a
 capability.
 
-**No type ships yet, and the node says so with an empty `dtypes`.** With the flag on,
+**This build ships exactly four types, and the set is fixed.** With the flag on,
 the plane is fully assembled — the conveyor is connected to the node ingress on
 both network directions, the scheduler runs over the node's route and session
 adapters, and the queue, the reverse table and the replay cache are swept on
-their own schedules — but the **type registry is empty**. A datagram addressed
-to this node therefore always ends as an unknown `dtype`: a silent drop on a
-live connection, with a metric and without ban (§2). The layer's one anti-replay
+their own schedules — and the type registry holds exactly `get_identity`,
+`post_identity`, `push_identity` (`docs/protocol/identity-lookup.md`) and
+`dm_control`. A datagram addressed to this node with any other `dtype` ends as
+an unknown `dtype`: a silent drop on a live connection, with a metric and
+without ban (§2). A test pins this exact set in three places — the registry, the
+`dtypes` field of the node's own hello/welcome and the `dtypes` list of its own
+identity record — so adding or removing a type is never a side effect: it is a
+protocol change made only in the release that ships the type. The layer's one anti-replay
 memory is the in-memory cache; nothing else keeps a frame anywhere.
 
 **The type set follows the registry; the capability follows the flag.** The
 `dtypes` field is always derived from the real registry: an empty registry is
 emitted as an explicitly empty array, anything else in full. So this build
-advertises both capabilities of §6 and declares `"dtypes": []` — it relays other
+advertises both capabilities of §6 and declares exactly its four names, while a
+build with an empty registry would declare `"dtypes": []` — it relays other
 nodes' frames, it accepts frames addressed to it at the transport level, and it
 promises no handler it does not have. A peer reading that empty set keeps its
-legacy fallback, and a send **to** this node is refused with
+legacy fallback, and a send **to** such a node is refused with
 `rejected(unsupported_dtype)` for any type.
 
 There is **no release invariant tied to a version**, and there is nothing left
@@ -2086,8 +2098,9 @@ path memory, recovery and the boot generation. A new endpoint protocol is a new
 `dtype` and new `payload` bytes (§2.3).
 
 **Not implemented today, and genuinely future work:** any auth version other
-than `av = 1`; and the identity-record `dtypes` list with its freshness rules
-(§6.1 mechanism 2), which depends on the identity-record work.
+than `av = 1`; and any send decision based on another node's identity-record
+`dtypes`, together with the freshness rules of §6.1 mechanism 2. The record
+already carries the owner's set; nothing reads it for routing yet.
 
 ---
 
@@ -3749,7 +3762,7 @@ misconfig или попытка захвата трафика. Это кап, а
   долю кеша и её квоту. Ни один зарегистрированный тип сейчас не объявляет
   `requires_proven_peer`, поэтому чтение legacy-соединений как недоказанных не
   делает недоступным для старых узлов ни один тип
-  (docs/refactoring/n1-legacy-residual.md §1).
+  ([network_security.md §13](network_security.md)).
 - **Взвешенная очередь, а не строгий приоритет.** `control` обслуживается раньше
   `bulk` *в пределах своей доли*, а за `bulk` закреплена гарантированная
   минимальная доля отправляемых байтов (стартово — четверть). Строгий приоритет
@@ -3906,9 +3919,15 @@ baseline-набор из `get_identity`, `post_identity`, `cached_identity` и
 
 **Механизм 2 — список `dtypes` в подписанной записи identity владельца**: какие
 типы узел умеет обрабатывать. Он говорит то же, что поле рукопожатия, но про
-узел, который не является прямым пиром. Этот механизм относится к работе над
-записями identity и **в этой сборке не реализован** (§8); правила ниже —
-контракт, которому он обязан удовлетворять, когда появится.
+узел, который не является прямым пиром. **Публикующая половина реализована:**
+каждый конечный узел подписывает набор из своего рукопожатия в собственную запись
+(`docs/protocol/identity-lookup.md` §2), перевыпускает запись с новым `seq` при
+любом изменении набора и отправляет её каждому новому пиру сессии, объявившему
+`push_identity`. **Читающая
+половина — нет:** `dtypes` полученной записи разбирается и сохраняется, но ни
+одно решение об отправке его пока не учитывает — отправку ограничивает только
+набор из рукопожатия (§8). Правила свежести ниже — контракт, которому обязана
+удовлетворять читающая половина, когда появится.
 
 **Запись несёт `dtypes` и ничего рядом.** Раньше это была ПАРА — `dtypes` плюс
 список `caps` профильных возможностей, — потому что `req_caps` делал возможности
@@ -4115,19 +4134,26 @@ payload, а по одному заголовку эту проверку сде�
 дополнительно требует полного узла, поскольку клиентская нода не форвардит. От
 реестра зависит поле `dtypes`, а не возможность.
 
-**Ни одного типа ещё не выпущено, и узел сообщает это пустым `dtypes`.** При включённом флаге плоскость собрана
-полностью: конвейер соединён с ingress узла на обоих сетевых направлениях,
-планировщик работает поверх узловых адаптеров маршрутов и сессий, а очередь,
-таблица reverse-состояния и кэш реплея подчищаются по собственным расписаниям —
-но **реестр типов пуст**. Поэтому датаграмма, адресованная этому узлу, всегда
+**Эта сборка выпускает ровно четыре типа, и набор зафиксирован.** При включённом
+флаге плоскость собрана полностью: конвейер соединён с ingress узла на обоих
+сетевых направлениях, планировщик работает поверх узловых адаптеров маршрутов и
+сессий, а очередь, таблица reverse-состояния и кэш реплея подчищаются по
+собственным расписаниям, — и реестр типов содержит ровно `get_identity`,
+`post_identity`, `push_identity` (`docs/protocol/identity-lookup.md`) и
+`dm_control`. Датаграмма, адресованная этому узлу с любым другим `dtype`,
 заканчивается незнакомым `dtype`: молчаливый дроп на живом соединении, с
-метрикой и без ban (§2). Анти-реплейная память слоя одна, и это кэш в памяти;
+метрикой и без ban (§2). Тест фиксирует этот точный набор в трёх местах — в
+реестре, в поле `dtypes` собственных hello/welcome узла и в списке `dtypes` его
+собственной identity-записи, — поэтому добавление или удаление типа никогда не
+бывает побочным эффектом: это изменение протокола, которое вносится только в
+выпуске, поставляющем тип. Анти-реплейная память слоя одна, и это кэш в памяти;
 больше кадр нигде и ничем не удерживается.
 
 **Набор типов следует за реестром, возможность — за флагом.** Поле `dtypes`
 всегда выводится из реального реестра: пустой реестр — явный пустой массив,
 всё остальное — полный список. Поэтому эта сборка рекламирует обе возможности §6
-и объявляет `"dtypes": []`: она носит чужие кадры, принимает адресованные ей на
+и объявляет ровно свои четыре имени, а сборка с пустым реестром объявила бы
+`"dtypes": []`: она носит чужие кадры, принимает адресованные ей на
 транспортном уровне и не обещает ни одного обработчика, которого у неё нет.
 Сосед, прочитавший пустое множество, сохраняет legacy-fallback, а отправка **на**
 такой узел отвергается с `rejected(unsupported_dtype)` для любого типа.
@@ -4147,6 +4173,7 @@ durable-хранилища профилей, транзитные хуки, пе
 это новый `dtype` и новые байты `payload` (§2.3).
 
 **Не реализовано сегодня и действительно относится к будущей работе:** любая
-версия аутентификации, кроме `av = 1`; а также список `dtypes` в записи identity
-вместе с правилами свежести (§6.1, механизм 2), зависящий от работы над записями
-identity.
+версия аутентификации, кроме `av = 1`; а также любое решение об отправке на
+основе `dtypes` из записи identity другого узла вместе с правилами свежести
+(§6.1, механизм 2). Запись уже несёт набор владельца; для маршрутизации его пока
+никто не читает.

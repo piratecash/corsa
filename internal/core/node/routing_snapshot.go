@@ -370,7 +370,8 @@ func (s *Service) rebuildRoutingSnapshot() {
 	// keeps it until the next unrelated route event. This event is the one
 	// with the ordering guarantee — a subscriber that reconciles on it
 	// reads a snapshot at least as fresh as the change that made the table
-	// dirty (docs/refactoring/identity-discovery-lookup.md §1.2).
+	// dirty (docs/locking.md: only the snapshot-reason subscriber writes
+	// ReachableIDs).
 	//
 	s.eventBus.Publish(ebus.TopicRouteTableChanged, ebus.RouteTableChange{
 		Reason: domain.RouteChangeSnapshot,

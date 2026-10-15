@@ -107,9 +107,10 @@ func (script preAuthDatagramScript) run(ln net.Listener) error {
 // refuses nothing fails the negative one.
 //
 // The admission ledger is asserted too, and it is the third leg: BOTH frames are
-// charged. A refusal that ran above the §4.1 step 1 charge would be the cheapest
-// verdict on the node and also its only free one, which is the hole
-// datagram_budget_key_test.go closed — this gate must not reopen it.
+// charged. A refusal that ran above the docs/protocol/datagram.md §4.1 step 1
+// charge would be the cheapest verdict on the node and also its only free one,
+// which is the hole datagram_budget_key_test.go closed — this gate must not
+// reopen it.
 //
 // The mutation this kills: dropping the authOK requirement from
 // sessionHasCapability. The pre-auth datagram is then judged by a set
@@ -187,7 +188,7 @@ func TestOutboundSessionDatagramBeforeAuthOKIsOffThePlane(t *testing.T) {
 	}
 	stats := datagramAdmissionStats(svc)
 	if stats.Admitted != 2 {
-		t.Fatalf("charged %d frames, want 2 — the refusal must stand BELOW the §4.1 step 1 charge, or it is a free load channel", stats.Admitted)
+		t.Fatalf("charged %d frames, want 2 — the refusal must stand BELOW the docs/protocol/datagram.md §4.1 step 1 charge, or it is a free load channel", stats.Admitted)
 	}
 	if stats.AdmittedBytes != uint64(2*len(line)) {
 		t.Fatalf("charged %d bytes, want %d (the whole wire line, twice)", stats.AdmittedBytes, 2*len(line))

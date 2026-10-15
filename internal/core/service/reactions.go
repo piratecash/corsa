@@ -12,8 +12,8 @@ import (
 )
 
 // reactions.go is the service half of message reactions: the decisions, and
-// nothing about how they are drawn or how they are stored. The model is in
-// docs/refactoring/reactions-protocol.md.
+// nothing about how they are drawn or how they are stored. The model is
+// described in docs/chatlog.md (the `message_reactions` table).
 //
 // The only decision this layer makes today is what a tap MEANS — set or clear,
 // and under which counter value. Getting that fact to the peer attaches to

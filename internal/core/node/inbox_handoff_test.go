@@ -15,10 +15,9 @@ import (
 //
 // The inbox is the single largest fixed cost of a live session: 256 slots of
 // protocol.Frame, a struct of 1224 bytes, is 313 KB per connection before a
-// single frame arrives (13-measurements.md §8.4). Carrying pointers instead
-// makes an idle queue cost 2 KB — but it moves the frame onto the heap on
-// every arrival, so what is saved in resident memory is paid in allocation
-// rate on the receive path.
+// single frame arrives. Carrying pointers instead makes an idle queue cost
+// 2 KB — but it moves the frame onto the heap on every arrival, so what is
+// saved in resident memory is paid in allocation rate on the receive path.
 //
 // Both sides of that trade are measured HERE, in one run, rather than by
 // changing production and comparing two runs: a benchmark that only exists in
@@ -41,11 +40,9 @@ import (
 //     plus parse plus dispatch under load. Per-frame cost from here does not
 //     become application cost by multiplication.
 //
-// If the pointer form is ever adopted, the integration checks it needs are
-// listed in 14-memory-cleanup.md §8 — they belong against the real loop, and
-// they do not exist yet.
-//
-// Reference: docs/refactoring/dht/14-memory-cleanup.md §8.
+// If the pointer form is ever adopted, it needs integration checks that drive
+// the real reader loop — they belong against that loop, and they do not exist
+// yet.
 
 // inboxBenchCapacity mirrors peerSessionInboxBuffer so the measurement
 // describes the queue the node actually builds.
@@ -322,7 +319,7 @@ func TestInboxQueueModelOrderingCapacityAndClose(t *testing.T) {
 // reading it — the frame is declared inside the read loop with `:=` and is not
 // touched after the send — and a regression there would leave this test green.
 // A guard that covers it has to drive the reader loop itself, which is one of
-// the integration checks 14-memory-cleanup.md §8 lists as missing.
+// the integration checks the pointer form would need and that do not exist yet.
 func TestInboxQueueModelHandsOverDistinctFrames(t *testing.T) {
 	t.Parallel()
 
@@ -489,8 +486,9 @@ func TestInboxQueueModelUnderConcurrentSenderAndSlowConsumer(t *testing.T) {
 	}
 }
 
-// inboxFrameBytes reports what one protocol.Frame occupies, so the numbers in
-// 14-memory-cleanup.md can be recomputed rather than trusted.
+// inboxFrameBytes reports what one protocol.Frame occupies, so the per-session
+// inbox cost quoted at the top of this file can be recomputed rather than
+// trusted.
 func TestInboxFrameSizeIsWorthCarryingByPointer(t *testing.T) {
 	t.Parallel()
 

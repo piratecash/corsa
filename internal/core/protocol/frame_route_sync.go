@@ -88,7 +88,7 @@ const RouteSyncSummaryFrameType = "route_sync_summary_v1"
 // to the agreed subset, so a converged pair exchanges only cheap
 // heartbeats and the byte-heavy full rebuild is reserved for genuine
 // stale-route divergence (and a slow safety cadence). See
-// docs/refactoring/scaling-to-dht-roadmap.md Phase 0.
+// docs/protocol/route_sync.md ("Phase-0 version vector and safety reconcile").
 type RouteSyncDigestFrame struct {
 	Type                 string                 `json:"type"`
 	Digest               string                 `json:"digest"`

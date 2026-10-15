@@ -14,8 +14,8 @@ import (
 
 // dm_control.go is the receiving half of the conversation-control datagram
 // type: registration, and what happens when one arrives. Sending is in
-// dm_control_send.go, the payload is internal/core/dmcontrol, and the model is
-// docs/refactoring/reactions-protocol.md.
+// dm_control_send.go, the payload is internal/core/dmcontrol, and the reaction
+// model is described in docs/chatlog.md (the `message_reactions` table).
 
 // ConversationControlStore is where an accepted control command lands. The node
 // does not own conversation state — the desktop layer does — so this is the
@@ -107,9 +107,9 @@ var errNoConversationControlStore = errors.New("dm_control: this node keeps no c
 // registerDMControlTypes adds dm_control to the type registry.
 //
 // Called from newDatagramPlaneParts alongside the identity-discovery types, and
-// for the same reason: §6.1 fixes the declared dtype set for a session's whole
-// lifetime, so every type this node can receive has to exist before any
-// handshake can run.
+// for the same reason: docs/protocol/datagram.md §6.1 fixes the declared dtype
+// set for a session's whole lifetime, so every type this node can receive has
+// to exist before any handshake can run.
 func registerDMControlTypes(types *datagram.TypeRegistry, svc *Service) error {
 	return types.Register(datagram.TypeRegistration{
 		DType:   domain.DTypeDMControl,

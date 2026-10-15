@@ -22,7 +22,7 @@ import (
 // operator reads a contract, asks for the number, and concludes the quota
 // never refuses anybody.
 //
-// Reference: docs/rpc/datagram.md, docs/refactoring/dht/13-measurements.md §8.5.
+// Reference: docs/rpc/datagram.md.
 
 // TestDatagramSummaryRendersEveryCollectedBlock is the structural guard, and it
 // is written against the TYPE rather than against a list of names on purpose:

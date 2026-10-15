@@ -17,7 +17,7 @@ import (
 // subsystem that can hold state is present, so a growth this node suffers has
 // a line it can appear on.
 //
-// Reference: docs/refactoring/dht/13-measurements.md §5.
+// Reference: docs/rpc/system.md (getResourceBreakdown).
 
 // TestBreakdownCoversEveryStateOwningSubsystem is the coverage assertion.
 //

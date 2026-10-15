@@ -13,8 +13,8 @@ import (
 
 // Package dmcontrol is the sealed payload of the dm_control datagram: what one
 // side asks the other to change about a conversation, and nothing about how it
-// travels. The transport is in internal/core/node; the model is in
-// docs/refactoring/reactions-protocol.md.
+// travels. The transport is in internal/core/node; the reaction model it
+// carries is described in docs/chatlog.md (the `message_reactions` table).
 //
 // Everything here is pure. A payload can be built, padded, sealed, opened and
 // read without a node, a session or a database, which is what makes the wire

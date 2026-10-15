@@ -14,8 +14,8 @@ import (
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
-// session_footprint_test.go measures part of the number 13-measurements.md §2
-// calls blocking: what ONE session costs.
+// session_footprint_test.go measures part of a number the overlay migration is
+// blocked on: what ONE session costs.
 //
 // It is blocking because the overlay's whole premise turns on it. A structured
 // overlay wants 32–64 structural sessions against today's eight outgoing
@@ -35,9 +35,6 @@ import (
 //     not measurable here. It needs two nodes exchanging over time, which is a
 //     load harness this tree does not have. It stays an open item of §8.6
 //     rather than an assumed zero.
-//
-// Reference: docs/refactoring/dht/13-measurements.md §2 ("стоимость одной
-// сессии"), §5, §8.4.
 
 // sessionFootprintCount is enough sessions for the per-session figure to
 // dominate the fixed cost of the measurement itself, and few enough to keep
@@ -329,7 +326,7 @@ func TestSessionFixedFootprint(t *testing.T) {
 	// new shape and the multiplication in the roadmap needs redoing.
 	inboxBytes := uint64(peerSessionInboxBuffer) * domain.SizeOfAll(protocol.Frame{})
 	if inboxBytes*2 < bufferFloor {
-		t.Fatalf("the inbox buffer is no longer the dominant fixed cost of a session (%d B of %d B): the per-session figure in 13-measurements.md was derived from it",
+		t.Fatalf("the inbox buffer is no longer the dominant fixed cost of a session (%d B of %d B): the per-session cost figure was derived from it",
 			inboxBytes, bufferFloor)
 	}
 

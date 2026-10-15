@@ -339,7 +339,7 @@ func routeSummaryHandler(rp RoutingProvider) CommandHandler {
 		// something new). Sample this to see which cause leads before tuning.
 		journalChurn := rp.JournalCauseStats()
 
-		// Capability-rollout telemetry (docs/refactoring/dht/05-rollout-metrics.md).
+		// Capability-rollout telemetry (docs/rpc/routing.md, fetchRouteSummary).
 		// Grouped into their own objects rather than sprinkled among the
 		// existing keys: they answer a different question (what the fleet
 		// around this node runs) and are read together or not at all.
@@ -417,17 +417,48 @@ func routeSummaryHandler(rp RoutingProvider) CommandHandler {
 		// The v2 downgrade-protection store (docs/protocol/session_v2.md):
 		// when it is full, a v2 session of an identity not pinned yet is
 		// refused with pin_store_full — pinned identities keep being served —
-		// and this is where an operator sees it without reading logs.
+		// and a protected endpoint binding refused at a bound is counted by
+		// reason; this is where an operator sees both without reading logs.
 		pinStore := rp.SecureSessionStoreStats()
 		secureSessions := map[string]interface{}{
-			"read_at":                     formatOptionalTime(pinStore.ReadAt),
-			"pinned_identities":           pinStore.PinnedIdentities,
-			"pin_capacity":                pinStore.PinCapacity,
-			"pin_store_full":              pinStore.Full,
-			"pin_refusals_pin_store_full": pinStore.PinRefusalsStoreFull,
-			"v1_refusals_identity_pinned": pinStore.V1RefusalsIdentityPinned,
-			"v1_refusals_endpoint_bound":  pinStore.V1RefusalsEndpointBound,
-			"store_unreadable":            pinStore.Unreadable,
+			"read_at":                          formatOptionalTime(pinStore.ReadAt),
+			"pinned_identities":                pinStore.PinnedIdentities,
+			"pin_capacity":                     pinStore.PinCapacity,
+			"pin_store_full":                   pinStore.Full,
+			"pin_refusals_pin_store_full":      pinStore.PinRefusalsStoreFull,
+			"v1_refusals_identity_pinned":      pinStore.V1RefusalsIdentityPinned,
+			"v1_refusals_endpoint_bound":       pinStore.V1RefusalsEndpointBound,
+			"v1_dials_held_by_refusal_backoff": pinStore.V1DialsHeldByRefusalBackoff,
+			"dials_held_by_v2_retry_backoff":   pinStore.DialsHeldByV2RetryBackoff,
+			"protected_bindings_contact":       pinStore.ProtectedBindingsContact,
+			"protected_bindings_relation":      pinStore.ProtectedBindingsRelation,
+			"protected_capacity":               pinStore.ProtectedCapacity,
+			"protected_reserve_contact":        pinStore.ProtectedReserveContact,
+			"protected_per_identity_capacity":  pinStore.ProtectedPerIdentityCapacity,
+			"general_bindings":                 pinStore.GeneralBindings,
+			"general_capacity":                 pinStore.GeneralCapacity,
+			"protected_refusals_per_identity":  pinStore.ProtectedRefusalsPerIdentity,
+			"protected_refusals_pool_r_full":   pinStore.ProtectedRefusalsPoolRFull,
+			"protected_refusals_store_full":    pinStore.ProtectedRefusalsStoreFull,
+			"store_unreadable":                 pinStore.Unreadable,
+		}
+
+		// Sessions by kind (docs/protocol/session_v2.md): cumulative since
+		// started_at, never reset by reading, so the share of v2 against
+		// legacy and the old peers still met are read as differences between
+		// two answers with the same started_at.
+		kinds := rp.SessionKindStats()
+		sessionKinds := map[string]interface{}{
+			"started_at":                    formatOptionalTime(kinds.StartedAt),
+			"read_at":                       formatOptionalTime(kinds.ReadAt),
+			"inbound_v2":                    kinds.InboundV2,
+			"inbound_legacy":                kinds.InboundLegacy,
+			"outbound_v2":                   kinds.OutboundV2,
+			"outbound_legacy":               kinds.OutboundLegacy,
+			"hellos_below_secure_version":   kinds.HellosBelowSecureVersion,
+			"welcomes_below_secure_version": kinds.WelcomesBelowSecureVersion,
+			"legacy_at_claimed_v2":          kinds.LegacyAtClaimedV2,
+			"live":                          liveSessionKindsJSON(kinds.Live),
 		}
 
 		return jsonResponse(map[string]interface{}{
@@ -447,7 +478,28 @@ func routeSummaryHandler(rp RoutingProvider) CommandHandler {
 			"neighbours":           neighbours,
 			"transport_traffic":    transportTraffic,
 			"secure_sessions":      secureSessions,
+			"session_kinds":        sessionKinds,
 		})
+	}
+}
+
+// liveSessionKindsJSON projects the live-session gauge. ready distinguishes
+// "the walk has not run yet" from "it ran and found no sessions".
+func liveSessionKindsJSON(live domain.LiveSessionKinds) map[string]interface{} {
+	return map[string]interface{}{
+		"ready":           live.Ready,
+		"updated_at":      formatOptionalTime(live.UpdatedAt),
+		"inbound_v2":      liveSessionKindCountJSON(live.InboundV2),
+		"inbound_legacy":  liveSessionKindCountJSON(live.InboundLegacy),
+		"outbound_v2":     liveSessionKindCountJSON(live.OutboundV2),
+		"outbound_legacy": liveSessionKindCountJSON(live.OutboundLegacy),
+	}
+}
+
+func liveSessionKindCountJSON(count domain.LiveSessionKindCount) map[string]interface{} {
+	return map[string]interface{}{
+		"sessions":   count.Sessions,
+		"identities": count.Identities,
 	}
 }
 

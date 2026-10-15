@@ -428,7 +428,7 @@ func TestQuarantine_RoutingTargetsForMessageAllowsRecipientEvenIfQuarantined(t *
 // TestQuarantine_SetupFailureCycleArmsQuarantine simulates the
 // setup-failure path: N consecutive setupFailures for the same
 // address must arm route quarantine on the corresponding identity
-// (the same trigger documented in route-withdrawal-grace-period.md
+// (the same trigger documented in docs/protocol/network_security.md §13
 // and wired in peer_sessions.go::onCMSessionEstablished setup-failed
 // branch).
 func TestQuarantine_SetupFailureCycleArmsQuarantine(t *testing.T) {

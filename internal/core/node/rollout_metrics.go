@@ -20,7 +20,7 @@ import (
 // lock-free as it was. A metric that made the hot read take peerMu would slow
 // down the subsystem it was added to observe.
 //
-// Reference: docs/refactoring/dht/05-rollout-metrics.md.
+// Reference: docs/rpc/routing.md (fetchRouteSummary).
 
 // localAdvertisedCapabilities is what this node puts on the wire, for the
 // telemetry that must say whose absence capped an announce ladder.
@@ -163,6 +163,7 @@ func (s *Service) NeighbourComposition() domain.NeighbourComposition {
 // complete.
 func (s *Service) announceTargets() []routing.AnnounceTarget {
 	s.refreshNeighbourComposition()
+	s.refreshLiveSessionKinds()
 	return s.routingCapablePeers()
 }
 

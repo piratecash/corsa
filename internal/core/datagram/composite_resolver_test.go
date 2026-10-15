@@ -12,11 +12,8 @@ import (
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
-// composite_resolver_test.go carries the §4 acceptance criterion of step 02:
-// "the composite with one element must not change behaviour, and that is
-// proved by a test rather than argued".
-//
-// Reference: docs/refactoring/dht/02-route-source.md §4, §5.
+// composite_resolver_test.go proves, rather than argues, that a composite with
+// one element does not change behaviour.
 
 // staticRouteSource is a resolver that answers from a fixed pair of tables and
 // records what it was asked. Two of them make the poll order observable.
@@ -165,8 +162,9 @@ func TestCompositeWithOneSourceDecidesIdenticallyToTheBareResolver(t *testing.T)
 	fixture.datagramPeer(far, time.Hour, string(schedDType))
 	fixture.datagramPeer(stale, time.Hour, string(schedDType))
 	fixture.datagramPeer(gone, time.Hour, string(schedDType))
-	// The destination is also a live neighbour, so the direct branch of §4.3
-	// contributes element 0 and the ranked list must not duplicate it.
+	// The destination is also a live neighbour, so the direct branch of
+	// docs/protocol/datagram.md §4.4 contributes element 0 and the ranked list
+	// must not duplicate it.
 	fixture.direct.set(dst, fixture.datagramPeer(dst, 3*time.Hour, string(schedDType)))
 
 	expired := fixture.route(stale, 2)

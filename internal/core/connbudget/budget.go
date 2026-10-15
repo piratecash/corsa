@@ -21,7 +21,7 @@
 //     the forbidden `cm.mu → peerMu` edge never appears, because neither of
 //     them is taken here.
 //
-// Reference: docs/refactoring/dht/15-overlay-parameters.md §0.1.1.
+// Reference: docs/locking.md (`connBudget`).
 package connbudget
 
 import (

@@ -47,7 +47,7 @@ import (
 //     short-circuits the next forced full-sync. Orthogonal to the
 //     announce-plane caps — peers without it keep receiving the
 //     full announce stream as before. See
-//     docs/cluster-mesh/phase-3-multipath-reputation.md §4.5.
+//     docs/protocol/route_sync.md.
 //   - mesh_routing_v3: Phase 4 compact announce wire frame
 //     (route_announce_v3). Conditionally added when enableV3 is true
 //     (CORSA_ENABLE_MESH_ROUTING_V3, default TRUE; operators opt out
@@ -55,13 +55,15 @@ import (
 //     rather than read from a package-level global so a Service
 //     constructed with v3 disabled never accidentally advertises v3
 //     because some other Service in the same process flipped a global.
-//     See docs/cluster-mesh/phase-4-compact-wire-signed.md §7.
+//     See docs/protocol/route_announce_v3.md ("Capability negotiation")
+//     and docs/routing.md ("Phase 4 — Compact wire frames, attested links,
+//     poison-reverse") for the flag.
 //   - mesh_datagram_v1 / mesh_datagram_transit_v1: the datagram transport
 //     layer, gated by datagrams (see datagramAdvertise). Threaded as a
 //     parameter for the same reason enableV3 is: the advertise must be a
 //     property of THIS Service, not of a package global some other Service
 //     in the process flipped. See
-//     docs/refactoring/datagram-transport.md §6.
+//     docs/protocol/datagram.md §6.
 func localCapabilities(enableV3 bool, datagrams datagramAdvertise) []domain.Capability {
 	caps := []domain.Capability{
 		domain.CapMeshRelayV1,
@@ -119,10 +121,11 @@ func localCapabilities(enableV3 bool, datagrams datagramAdvertise) []domain.Capa
 		caps = append(caps, domain.CapMeshPoisonReverseV2)
 	}
 	// The two datagram capabilities are advertised INDEPENDENTLY of each
-	// other and of every routing capability (§6). Endpoint support says
-	// "datagrams addressed to me are welcome"; transit support says "I
-	// will carry other people's". A client node advertises the first and
-	// never the second, so an honest neighbour never picks it as a relay.
+	// other and of every routing capability (docs/protocol/datagram.md §6).
+	// Endpoint support says "datagrams addressed to me are welcome"; transit
+	// support says "I will carry other people's". A client node advertises the
+	// first and never the second, so an honest neighbour never picks it as a
+	// relay.
 	if datagrams.Endpoint {
 		caps = append(caps, domain.CapMeshDatagramV1)
 	}
@@ -207,9 +210,10 @@ func intersectCapabilities(local []domain.Capability, remote []string) []domain.
 // legitimate. No conforming peer may put plane traffic in this window — its own
 // inbound reader refuses ours identically — so a frame landing here is one the
 // sender was never entitled to send; and holding the window's frames back would
-// mean a per-session queue whose size the neighbour alone decides. §2 already
-// makes every refusal of the datagram plane a silent drop, and the announce
-// plane self-heals through the forced periodic full sync and route TTL.
+// mean a per-session queue whose size the neighbour alone decides.
+// A datagram the plane refuses is dropped without closing the connection
+// (docs/protocol/datagram.md §2), and the announce plane self-heals through the forced
+// periodic full sync and route TTL.
 //
 // The address-keyed siblings (sendTargetHasCapability, peerSupportsRoutingV3,
 // peerSupportsAttestedLinks, sessionDeclarations) need no such gate: they resolve

@@ -44,12 +44,13 @@ func newMockRoutingProvider(
 	// default to nil, override in churn-specific tests.
 	m.On("JournalCauseStats").Return(map[string]uint64(nil)).Maybe()
 	// Capability-rollout telemetry surfaces through fetchRouteSummary too
-	// (docs/refactoring/dht/05-rollout-metrics.md). Defaults are the empty
+	// (docs/rpc/routing.md). Defaults are the empty
 	// period and the not-ready census — override in rollout-specific tests.
 	m.On("ModeSelectionStats").Return(routing.ModeSelectionStats{}).Maybe()
 	m.On("SessionOutcomeStats").Return(domain.SessionOutcomeStats{}).Maybe()
 	m.On("NeighbourComposition").Return(domain.NeighbourComposition{}).Maybe()
 	m.On("TransportTrafficStats").Return(domain.TransportTrafficStats{}).Maybe()
+	m.On("SessionKindStats").Return(domain.SessionKindStats{}).Maybe()
 	m.On("SecureSessionStoreStats").Return(domain.SecureSessionStoreStats{}).Maybe()
 	// fetchRouteLookup reads HealthSnapshot (full per-pair tiers) for its
 	// Dead/cooldown filters + CompositeScore ranking, because the published
@@ -424,6 +425,7 @@ func TestFetchRouteSummary_OverloadEngagedCyclesSurfaced(t *testing.T) {
 	provider.On("NeighbourComposition").Return(domain.NeighbourComposition{}).Once()
 	provider.On("SecureSessionStoreStats").Return(domain.SecureSessionStoreStats{}).Once()
 	provider.On("TransportTrafficStats").Return(domain.TransportTrafficStats{}).Once()
+	provider.On("SessionKindStats").Return(domain.SessionKindStats{}).Once()
 
 	table := rpc.NewCommandTable()
 	rpc.RegisterRoutingCommands(table, provider)
@@ -487,6 +489,7 @@ func TestFetchRouteSummary_DigestStatsSurfaced(t *testing.T) {
 	provider.On("NeighbourComposition").Return(domain.NeighbourComposition{}).Once()
 	provider.On("SecureSessionStoreStats").Return(domain.SecureSessionStoreStats{}).Once()
 	provider.On("TransportTrafficStats").Return(domain.TransportTrafficStats{}).Once()
+	provider.On("SessionKindStats").Return(domain.SessionKindStats{}).Once()
 
 	table := rpc.NewCommandTable()
 	rpc.RegisterRoutingCommands(table, provider)
@@ -546,6 +549,7 @@ func TestFetchRouteSummary_JournalChurnSurfaced(t *testing.T) {
 	provider.On("NeighbourComposition").Return(domain.NeighbourComposition{}).Once()
 	provider.On("SecureSessionStoreStats").Return(domain.SecureSessionStoreStats{}).Once()
 	provider.On("TransportTrafficStats").Return(domain.TransportTrafficStats{}).Once()
+	provider.On("SessionKindStats").Return(domain.SessionKindStats{}).Once()
 
 	table := rpc.NewCommandTable()
 	rpc.RegisterRoutingCommands(table, provider)
@@ -1322,6 +1326,10 @@ func TestFetchRouteSummaryKeepsSubSecondPrecisionOnRolloutTimestamps(t *testing.
 	provider.On("SecureSessionStoreStats").Return(domain.SecureSessionStoreStats{
 		ReadAt: now,
 	}).Once()
+	provider.On("SessionKindStats").Return(domain.SessionKindStats{
+		StartedAt: started,
+		ReadAt:    now,
+	}).Once()
 
 	table := rpc.NewCommandTable()
 	rpc.RegisterRoutingCommands(table, provider)
@@ -1343,6 +1351,7 @@ func TestFetchRouteSummaryKeepsSubSecondPrecisionOnRolloutTimestamps(t *testing.
 		{"neighbours", "updated_at"},
 		{"transport_traffic", "read_at"},
 		{"secure_sessions", "read_at"},
+		{"session_kinds", "read_at"},
 	} {
 		section, ok := result[probe.section].(map[string]interface{})
 		if !ok {

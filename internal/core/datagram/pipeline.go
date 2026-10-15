@@ -12,10 +12,11 @@ import (
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
-// pipeline.go is the inbound conveyor of §4.1: the common part shared by all
-// three modes, the vocabulary of its outcomes, the narrow seams to the
-// limits and metrics of §5, and the locally originated send path — which runs
-// the SAME Reserve / Commit / Release cycle with incoming_peer = local.
+// pipeline.go is the inbound conveyor of docs/protocol/datagram.md §4.1: the
+// common part shared by all three modes, the vocabulary of its outcomes, the
+// narrow seams to the limits and metrics of docs/protocol/datagram.md §5, and
+// the locally originated send path — which runs the SAME Reserve / Commit /
+// Release cycle with incoming_peer = local.
 //
 // The order of the steps is the contract, not an implementation detail. Two
 // invariants are the reason it is written out step by step:
@@ -25,15 +26,16 @@ import (
 //   - a node that has not declared itself a transit spends not one line of
 //     state on somebody else's frames.
 //
-// Reference: docs/protocol/datagram.md §4.1, §4.1.1, §4.2, §4.4, §5, §7.
+// Reference: docs/protocol/datagram.md §4.1, §4.2, §4.3, §5, §7.
 
 // ---------------------------------------------------------------------------
 // Narrow seams to M8 (limits, budgets, metrics)
 // ---------------------------------------------------------------------------
 
-// cryptoBudget is the SECOND stage of the two-stage admission of §5: a
-// fixed-price token per signature verification, charged IMMEDIATELY BEFORE
-// ed25519.Verify and never earlier (§4.1 step 8).
+// cryptoBudget is the SECOND stage of the two-stage admission of
+// docs/protocol/datagram.md §5: a fixed-price token per signature verification,
+// charged IMMEDIATELY BEFORE ed25519.Verify and never earlier
+// (docs/protocol/datagram.md §4.1 step 8).
 //
 // STAGE ONE IS NOT DECLARED HERE, and its absence is the wiring rule rather
 // than an omission. Bytes and frames are charged on the RAW line before
@@ -70,10 +72,12 @@ type metricsSink interface {
 	// inbound outcome, or was never inbound at all.
 	ObserveDrop(reason DropReason)
 	// ObserveUnknownDType counts a frame addressed to this node whose dtype
-	// is not in the registry: a silent drop, a live connection, no ban (§2).
+	// is not in the registry: a silent drop, a live connection, no ban
+	// (docs/protocol/datagram.md §2).
 	ObserveUnknownDType(dtype domain.DType)
-	// ObserveReverseState counts one reverse-state transition (§4.2). The
-	// same method satisfies reverseMetrics, so one M8 type serves both.
+	// ObserveReverseState counts one reverse-state transition
+	// (docs/protocol/datagram.md §4.3). The same method satisfies
+	// reverseMetrics, so one M8 type serves both.
 	ObserveReverseState(event ReverseEvent)
 	// ObserveSendRefusal counts one SEND the admission gates refused — not
 	// one rejected candidate and not a failed delivery. See the method on
@@ -90,25 +94,27 @@ type metricsSink interface {
 //
 //   - Line is the serialized wire line INCLUDING its newline. The layer has to
 //     produce it anyway — the class queue accounts in exactly these bytes, and
-//     so does the neighbour's inbound budget (§2.3, §5) — and handing it over
-//     is what stops the netcore adapter from serializing the same frame a
-//     second time;
+//     so does the neighbour's inbound budget (docs/protocol/datagram.md §2.4,
+//     §5) — and handing it over is what stops the netcore adapter from
+//     serializing the same frame a second time;
 //
 //   - Class and SendUntil are what netcore.OutboundWrite is assembled from.
 //     There is no wire field for the deadline and there cannot be one: for
-//     routed frames it comes from the timing rule of §3.3 after the layer's
-//     clamps, and for request/response it is computed locally as
-//     arrival + queue_residence(control), because the node forming an answer
-//     does not know anybody else's expires_at.
+//     routed frames it comes from the timing rule of
+//     docs/protocol/datagram.md §3.4 after the layer's clamps, and for
+//     request/response it is computed locally as arrival +
+//     queue_residence(control), because the node forming an answer does not
+//     know anybody else's expires_at.
 //
-//   - Channel is the CHANNEL CONSTRAINT of §4.2, and it is the one field an
-//     emitter may not treat as a hint. A zero value means "the scheduler chose a
-//     neighbour; pick any of its gated sockets", which is the routed plane. A
-//     SET value means "the only lawful place for this frame is that channel":
-//     an emitter that cannot reach it MUST refuse the frame rather than fall
-//     back to the identity map. Resolving through the identity map is precisely
-//     how "back to whoever asked" became "to whoever the asker NAMED" — and on a
-//     session this node dialled, the asker chooses that name (see channel.go).
+//   - Channel is the CHANNEL CONSTRAINT of docs/protocol/datagram.md §4.3, and
+//     it is the one field an emitter may not treat as a hint. A zero value
+//     means "the scheduler chose a neighbour; pick any of its gated sockets",
+//     which is the routed plane. A SET value means "the only lawful place for
+//     this frame is that channel": an emitter that cannot reach it MUST refuse
+//     the frame rather than fall back to the identity map. Resolving through
+//     the identity map is precisely how "back to whoever asked" became "to
+//     whoever the asker NAMED" — and on a session this node dialled, the asker
+//     chooses that name (see channel.go).
 //
 //     Three kinds of frame carry a channel, and each of them owns a leg of one
 //     exchange: an answer produced here, a `response` travelling to a record's
@@ -131,12 +137,13 @@ type OutboundFrame struct {
 	// Channel pins the frame to one channel; zero leaves the socket to the
 	// transport.
 	Channel ChannelID
-	// Class picks the write grace and the queue lane (§5).
+	// Class picks the write grace and the queue lane
+	// (docs/protocol/datagram.md §5).
 	Class domain.DatagramClass
 }
 
-// Bytes is the serialized size — the ONE quantity §5 accounts in, so a caller
-// cannot pick a different one by accident.
+// Bytes is the serialized size — the ONE quantity docs/protocol/datagram.md §5
+// accounts in, so a caller cannot pick a different one by accident.
 func (o OutboundFrame) Bytes() int { return len(o.Line) }
 
 // newOutboundFrame serializes once, at the single boundary where the layer
@@ -225,18 +232,18 @@ const (
 	// charged BEFORE any parsing — and therefore charged by the OWNER of the
 	// receive path rather than by this conveyor, which only ever sees a line
 	// somebody already paid for. The reason lives in this enumeration anyway,
-	// because §10's ledger is one ledger: a drop counted under a name of its
-	// own somewhere else could not be added to the rest.
+	// because the drop-reason ledger is one ledger: a drop counted under a name
+	// of its own somewhere else could not be added to the rest.
 	DropAdmission
-	// DropFrameTooLarge is the MaxFrameLine gate of §2.3, counted on the raw
-	// line including its newline and applied BEFORE the parser.
+	// DropFrameTooLarge is the MaxFrameLine gate of
+	// docs/protocol/datagram.md §2, counted on the raw line including its
+	// newline and applied BEFORE the parser.
 	//
 	// It is its own reason and not a flavour of `malformed` because the two
 	// are produced by different gates and only one of them is even reachable
 	// on the wide peer-session reader. Sharing a counter made the gate
 	// untestable: an oversize line with the gate removed simply reached the
-	// parser, which refused it and incremented the same counter (§10, "dropped
-	// by reason").
+	// parser, which refused it and incremented the same counter.
 	DropFrameTooLarge
 	// DropMalformed is a strict-parser refusal: duplicate key, unknown
 	// field, out-of-bounds value, matrix violation, oversized payload.
@@ -269,10 +276,11 @@ const (
 	// It is kept apart from DropStale because the two say different things
 	// about the SENDER's clock: `stale` is a frame this node may no longer
 	// carry at all, while this one is a frame that arrived alive and simply
-	// has no room left for the write §3.3 reserves for it. It is also kept
-	// apart from DropForwardFailed, which is where such a frame used to be
-	// counted: that reason means backpressure at the next hop, and reading a
-	// timing refusal as a full queue sends an operator after the wrong fault.
+	// has no room left for the write docs/protocol/datagram.md §3.4 reserves
+	// for it. It is also kept apart from DropForwardFailed, which is where such
+	// a frame used to be counted: that reason means backpressure at the next
+	// hop, and reading a timing refusal as a full queue sends an operator after
+	// the wrong fault.
 	DropSendWindowExpired
 	// DropCryptoBudget is the verification budget of the neighbour.
 	DropCryptoBudget
@@ -280,9 +288,9 @@ const (
 	DropFingerprint
 	// DropSignature is a signature that does not verify. Ban-worthy even
 	// though the frame is somebody else's: every transit must verify the
-	// signature itself before forwarding (§4.1 step 8), under one equation
-	// all builds share, so handing over a forged frame is the neighbour's
-	// own omission.
+	// signature itself before forwarding (docs/protocol/datagram.md §4.1 step
+	// 8), under one equation all builds share, so handing over a forged frame
+	// is the neighbour's own omission.
 	DropSignature
 	// DropSignerKey is an auth.pubkey no honest node can hold — a small-order
 	// or non-canonical encoding (identity.ParsePublicKey). NOT ban-worthy,
@@ -295,7 +303,7 @@ const (
 	// not implement: silent, live connection, no ban, no replay slot.
 	DropUnknownDType
 	// DropModeNotAllowedForType is a type refusing this mode — the gate that
-	// makes mode demotion (§3.6) harmless.
+	// makes mode demotion (docs/protocol/datagram.md §3.7) harmless.
 	DropModeNotAllowedForType
 	// DropClassNotAllowedForType is a type refusing this traffic class.
 	DropClassNotAllowedForType
@@ -311,8 +319,9 @@ const (
 	DropReserveDuplicate
 	// DropReserveRejected is a deterministic capacity or quota refusal: the
 	// anti-replay cache is full and this neighbour is the one charged for it
-	// (§5). It is the ONLY way a reservation can be refused other than by a
-	// duplicate — the cache is in memory and cannot fail halfway.
+	// (docs/protocol/datagram.md §5). It is the ONLY way a reservation can be
+	// refused other than by a duplicate — the cache is in memory and cannot
+	// fail halfway.
 	DropReserveRejected
 	// DropForwardFailed is every candidate refusing the frame.
 	DropForwardFailed
@@ -326,7 +335,8 @@ const (
 	// DropReverseSlotBusy is a label whose slot is already taken: no
 	// overwrite, no ban — a repeat may be an honest loop.
 	DropReverseSlotBusy
-	// DropReverseSlotCapped is a reverse record refused by the caps of §5.
+	// DropReverseSlotCapped is a reverse record refused by the caps of
+	// docs/protocol/datagram.md §5.
 	DropReverseSlotCapped
 	// DropReverseUnknownLabel is a response with no live record.
 	DropReverseUnknownLabel
@@ -364,10 +374,11 @@ const (
 	// DropUnsupportedMode is a mode this entry point does not serve.
 	DropUnsupportedMode
 	// DropWriterRefused is a frame the writer turned away AFTER the class
-	// queue had already released it (§5). The queue never puts such a frame
-	// back — already-queued frames are not re-ordered or resurrected — so
-	// without this counter the frame vanished from every counter the node
-	// publishes, which §10 forbids ("dropped by reason").
+	// queue had already released it (docs/protocol/datagram.md §5). The queue
+	// never puts such a frame back — already-queued frames are not re-ordered
+	// or resurrected — so without this counter the frame vanished from every
+	// counter the node publishes, while every drop must be observable by
+	// reason.
 	DropWriterRefused
 	// DropWriterPanicked is a frame lost the same way and at the same place,
 	// to a writer that CRASHED instead of answering. It is its own reason
@@ -375,7 +386,7 @@ const (
 	// writer_refused is ordinary backpressure and rises with load, while
 	// writer_panicked is a defect in the adapter and any non-zero value is a
 	// crash report waiting in the log — folded together, the second would be
-	// invisible inside the first (§10).
+	// invisible inside the first.
 	DropWriterPanicked
 	// DropPlaneNotNegotiated is a datagram that arrived on a connection whose
 	// handshake never established mesh_datagram_v1 — the peer did not advertise
@@ -388,10 +399,10 @@ const (
 	// about the HANDSHAKE of that connection and about nothing in the frame,
 	// which is why no drop reason read from the envelope can stand in for it.
 	//
-	// "Silent" in §2 is a statement about the WIRE — no error frame, no
-	// tear-down, no ban score — and never about the operator: a neighbour off the
-	// plane pushing frames at line rate has to be distinguishable from ordinary
-	// load, and a Debug line is not a ledger.
+	// "Silent" in docs/protocol/datagram.md §2 is a statement about the WIRE —
+	// no error frame, no tear-down, no ban score — and never about the
+	// operator: a neighbour off the plane pushing frames at line rate has to be
+	// distinguishable from ordinary load, and a Debug line is not a ledger.
 	DropPlaneNotNegotiated
 
 	// --- proof of the sender ---
@@ -416,7 +427,8 @@ const (
 	// hook that was never allowed to decide.
 	//
 	// No ban. Naming yourself in your own welcome is what the handshake asks
-	// for, and §4.4 reserves punishment for the stable header and auth.
+	// for, and docs/protocol/datagram.md §4.1 reserves punishment for the
+	// stable header and auth.
 	DropUnprovenSender
 )
 
@@ -473,12 +485,13 @@ func (r DropReason) String() string { return enumName(dropReasonNames, r) }
 
 // InboundResult is what HandleInbound reports.
 //
-// Ban is a separate field rather than a class of drop reasons because §4.4 is
-// explicit about where punishment belongs: violations of the STABLE HEADER
-// and of auth — a fingerprint mismatch, a forged signature, a field out of
-// bounds — which every datagram transit is obliged to check. An unknown dtype and a
-// refused authorization are never ban-worthy, because
-// the layer itself allows an honest node to relay a type it cannot read.
+// Ban is a separate field rather than a class of drop reasons because
+// docs/protocol/datagram.md §4.1 is explicit about where punishment belongs:
+// violations of the STABLE HEADER and of auth — a fingerprint mismatch, a
+// forged signature, a field out of bounds — which every datagram transit is
+// obliged to check. An unknown dtype and a refused authorization are never
+// ban-worthy, because the layer itself allows an honest node to relay a type it
+// cannot read.
 type InboundResult struct {
 	err     error
 	outcome InboundOutcome
@@ -524,9 +537,9 @@ func handled(outcome InboundOutcome) InboundResult {
 type PipelineConfig struct {
 	// Clock is the injectable time source, following the package convention.
 	Clock func() time.Time
-	// Types is the ENDPOINT registry of §7: the handlers and authorizers of the
-	// types this node implements. It decides local delivery and nothing about
-	// transit.
+	// Types is the ENDPOINT registry of docs/protocol/datagram.md §7: the
+	// handlers and authorizers of the types this node implements. It decides
+	// local delivery and nothing about transit.
 	Types *TypeRegistry
 	// ReplayCache is the anti-replay memory of the routed plane: RAM for the
 	// freshness window, never storage. It is the ONLY state a frame occupies on
@@ -538,25 +551,27 @@ type PipelineConfig struct {
 	// not something to refuse in prose but a value that cannot be passed (see
 	// "What the memory is NOT" in replay_cache.go).
 	ReplayCache *BaseReplayCache
-	// Reverse is the request/response reverse state (§4.2).
+	// Reverse is the request/response reverse state
+	// (docs/protocol/datagram.md §4.3).
 	Reverse *ReverseTable
-	// Scheduler ranks and filters next-hop candidates (§4.3).
+	// Scheduler ranks and filters next-hop candidates
+	// (docs/protocol/datagram.md §4.4).
 	Scheduler *Scheduler
 	// Emitter publishes a frame to a neighbour together with its deadline.
 	Emitter FrameEmitter
-	// Queue is the weighted class queue of §5. When it is supplied the layer
-	// puts it BETWEEN the conveyor and Emitter, which is the only placement
-	// that makes "bulk keeps a guaranteed share under a constant control
-	// stream" true of the real path rather than of a type nobody produces
-	// into. The owner drains it — Pipeline.OutboundQueue().Run or Drain — for
-	// the same reason it owns every other schedule in the layer.
+	// Queue is the weighted class queue of docs/protocol/datagram.md §5. When
+	// it is supplied the layer puts it BETWEEN the conveyor and Emitter, which
+	// is the only placement that makes "bulk keeps a guaranteed share under a
+	// constant control stream" true of the real path rather than of a type
+	// nobody produces into. The owner drains it — Pipeline.OutboundQueue().Run
+	// or Drain — for the same reason it owns every other schedule in the layer.
 	//
 	// Optional: without it the conveyor publishes straight to Emitter, which
 	// is what a unit test that reasons about one frame wants.
 	Queue *WeightedQueue
-	// Crypto is the VERIFICATION budget of §5 — stage two, and the only stage
-	// the conveyor owns. Optional; nil charges nothing, which is the shape a
-	// unit test reasoning about one frame wants.
+	// Crypto is the VERIFICATION budget of docs/protocol/datagram.md §5 — stage
+	// two, and the only stage the conveyor owns. Optional; nil charges nothing,
+	// which is the shape a unit test reasoning about one frame wants.
 	//
 	// There is no companion field for stage one. It is charged by the owner of
 	// the receive path, above this layer, because it has to stand above refusals
@@ -567,10 +582,11 @@ type PipelineConfig struct {
 	// Metrics counts decisions. Optional.
 	Metrics metricsSink
 	// Advertised is the set THIS node advertises. It serves the transit gate
-	// of §4.1 step 11 — one source of truth, so a node cannot relay while
-	// telling the network it does not.
+	// of docs/protocol/datagram.md §4.1 step 11 — one source of truth, so a
+	// node cannot relay while telling the network it does not.
 	Advertised AdvertisedCapabilities
-	// Network is the network id bound into every transcript (§3.2).
+	// Network is the network id bound into every transcript
+	// (docs/protocol/datagram.md §3.2).
 	Network domain.NetworkID
 	// LocalID is this node's address: the whole definition of dst == self.
 	LocalID domain.PeerIdentity
@@ -681,8 +697,9 @@ func NewPipeline(cfg PipelineConfig) (*Pipeline, error) {
 // ticker and a test can inspect it.
 func (p *Pipeline) ReverseState() *ReverseTable { return p.reverse }
 
-// OutboundQueue returns the class queue of §5 when the layer is wired with
-// one. The bool is false for a pipeline that publishes straight to the writer.
+// OutboundQueue returns the class queue of docs/protocol/datagram.md §5 when
+// the layer is wired with one. The bool is false for a pipeline that publishes
+// straight to the writer.
 //
 // The owner drives it — Run in a goroutine, or Drain on its own schedule —
 // because the layer starts no goroutine of its own (CLAUDE.md: a goroutine is
@@ -703,9 +720,10 @@ type InboundOpts struct {
 	// The zero value means "now".
 	ReceivedAt time.Time
 	// Line is the raw wire line as the reader saw it, INCLUDING its newline.
-	// The pipeline parses it itself, on these exact bytes: §3.4 requires the
-	// strict parser to see what arrived, and the caller has already charged
-	// stage one on the same quantity (§4.1 step 1).
+	// The pipeline parses it itself, on these exact bytes:
+	// docs/protocol/datagram.md §3.5 requires the strict parser to see what
+	// arrived, and the caller has already charged stage one on the same
+	// quantity (docs/protocol/datagram.md §4.1 step 1).
 	Line []byte
 	// Peer is the identity the neighbour PRESENTS, and nothing more.
 	//
@@ -744,7 +762,8 @@ type InboundOpts struct {
 	BudgetKey AdmissionKey
 }
 
-// HandleInbound runs the conveyor of §4.1 over one arriving frame.
+// HandleInbound runs the conveyor of docs/protocol/datagram.md §4.1 over one
+// arriving frame.
 //
 // Step 1 — admission by bytes and frames, before any parsing — has ALREADY run
 // when this is called: it belongs to the owner of the receive path, which is
@@ -758,11 +777,12 @@ type InboundOpts struct {
 //  2. strict parsing and the mode matrix;
 //  3. `ttl == 0` on the RAW value.
 //
-// Then the proof of the SENDER, which §4.1 gives no number of its own because
-// §4.1 numbers the routed fork from 5 onwards: a frame that would end at a
-// local handler whose type asks WHO SENT IT is refused when the direction
-// proved nothing about the neighbour (senderProofGate). It stands above the
-// fork because all three planes end at the same §7 hook.
+// Then the proof of the SENDER, which docs/protocol/datagram.md §4.1 gives no
+// number of its own because that section numbers the routed
+// fork from 5 onwards: a frame that would end at a local handler whose type
+// asks WHO SENT IT is refused when the direction proved nothing about the
+// neighbour (senderProofGate). It stands above the fork because all three
+// planes end at the same docs/protocol/datagram.md §7 hook.
 //
 // Then the frame forks by mode, because one common conveyor is not enough:
 // a response has no route to its dst and must not have one, and a request may
@@ -926,12 +946,13 @@ var errUnprovenSender = errors.New(
 //
 // The gate refuses a DECLARED REQUIREMENT, not a direction and not a hook. It
 // used to read "the type registered an Authorizer" as the requirement, and that
-// inference was wrong in both directions: §7 describes a sender authenticated by
-// a signature INSIDE the payload, whose Authorizer never touches the neighbour's
-// name and which has to keep working on every session this node dialled, while a
-// type with no Authorizer at all may perfectly well build its HANDLER on who the
-// neighbour is. So the requirement is a field of the registration
-// (SenderProofPolicy) and the gate reads exactly that.
+// inference was wrong in both directions: docs/protocol/datagram.md §7
+// describes a sender authenticated by a signature INSIDE the payload, whose
+// Authorizer never touches the neighbour's name and which has to keep working
+// on every session this node dialled, while a type with no Authorizer at all
+// may perfectly well build its HANDLER on who the neighbour is. So the
+// requirement is a field of the registration (SenderProofPolicy) and the gate
+// reads exactly that.
 //
 // Refusing the whole direction instead would take the request/response plane
 // off every session this node dialled — most of a client node's traffic — to
@@ -939,11 +960,12 @@ var errUnprovenSender = errors.New(
 //
 // # Why here, above the fork
 //
-// All three planes end at the same §7 seam, so one gate covers them and a fourth
-// entry point cannot be added without it. It also stands before anti-replay and
-// before the verification budget, which is strictly better than refusing at the
-// hook: a frame the layer will not authorize spends no crypto token and takes
-// no reservation slot, exactly as §7 requires of `reject`.
+// All three planes end at the same docs/protocol/datagram.md §7 seam, so one
+// gate covers them and a fourth entry point cannot be added without it. It also
+// stands before anti-replay and before the verification budget, which is
+// strictly better than refusing at the hook: a frame the layer will not
+// authorize spends no crypto token and takes no reservation slot, exactly as
+// docs/protocol/datagram.md §7 requires of `reject`.
 //
 // The bool reports a refusal.
 func (p *Pipeline) senderProofGate(arrival inboundFrame) (InboundResult, bool) {
@@ -968,8 +990,9 @@ func (p *Pipeline) deliversToATypeThatNeedsAProvenNeighbour(arrival inboundFrame
 		return false
 	}
 	// An unknown dtype declared nothing and has no seam to mislead, and it is
-	// refused one step later with its own reason and its own metric (§7).
-	// Answering here would move that refusal onto this counter.
+	// refused one step later with its own reason and its own metric
+	// (docs/protocol/datagram.md §7). Answering here would move that refusal
+	// onto this counter.
 	entry, known := p.types.Lookup(arrival.frame.DType)
 	if !known || !entry.RequiresProvenPeer() {
 		return false
@@ -979,8 +1002,8 @@ func (p *Pipeline) deliversToATypeThatNeedsAProvenNeighbour(arrival inboundFrame
 
 // deliversHere answers "would this frame end at a handler of THIS node", which
 // is the only place the authorization hook runs. A frame in transit never
-// reaches §7 at all, and refusing it would turn a hardening rule into a routing
-// outage for every type that declares a hook.
+// reaches docs/protocol/datagram.md §7 at all, and refusing it would turn a
+// hardening rule into a routing outage for every type that declares a hook.
 func (p *Pipeline) deliversHere(frame protocol.DatagramFrame) bool {
 	addressed, mapped := localDeliveryTargets[frame.Mode]
 	if !mapped {
@@ -1054,16 +1077,17 @@ func (p *Pipeline) commonGates(frame protocol.DatagramFrame) (InboundResult, boo
 // handed by somebody else:
 //
 //   - an unknown header VERSION is the extension mechanism working as designed
-//     (§2): a v3 frame crossing a v2 node must cost its sender nothing;
-//   - a line past MaxFrameLine is a §2.3 size verdict about the LINE, not a
-//     statement the sender made about the frame. The neighbour that relayed it
-//     is not its author, and nothing in the envelope obliges it to have measured
-//     the frame the way this node does, so the size rule is a silent drop under
-//     its own reason and never a punishment.
+//     (docs/protocol/datagram.md §2): a v3 frame crossing a v2 node must cost
+//     its sender nothing;
+//   - a line past MaxFrameLine is a docs/protocol/datagram.md §2 size verdict
+//     about the LINE, not a statement the sender made about the frame. The
+//     neighbour that relayed it is not its author, and nothing in the envelope
+//     obliges it to have measured the frame the way this node does, so the size
+//     rule is a silent drop under its own reason and never a punishment.
 //
 // Everything else the parser refuses is a violation of the stable header, which
-// every datagram node is obliged to check, and §4.4 puts exactly those in the
-// ban-worthy set.
+// every datagram node is obliged to check, and docs/protocol/datagram.md §4.1
+// puts exactly those in the ban-worthy set.
 func parseRefusal(err error) InboundResult {
 	switch {
 	case errors.Is(err, protocol.ErrDatagramUnknownVersion):
@@ -1117,8 +1141,8 @@ func (p *Pipeline) observeSendRefusal(outcome SendOutcome) {
 // emit is the ONE place the layer hands a frame over, so the serialization, the
 // class and the deadline cannot diverge between the call sites. It reports
 // false for both a refused queue and a frame that could not be serialized:
-// neither one left the node, and §4.3 treats both as a local failure of this
-// hop.
+// neither one left the node, and docs/protocol/datagram.md §4.4 treats both as
+// a local failure of this hop.
 func (p *Pipeline) emit(
 	ctx context.Context,
 	out egress,
@@ -1150,13 +1174,14 @@ func (p *Pipeline) emit(
 // address comparison and is never asked of a response, whose dst is a label.
 func (p *Pipeline) isSelf(id domain.PeerIdentity) bool { return id == p.localID }
 
-// transitAllowed is the transit gate of §4.1 step 11. It is not a formality:
-// the capability filter stops an HONEST neighbour from picking an
-// endpoint-only client as a relay, but not a hostile one from handing it a
-// frame directly. Without this gate a client with a non-empty routing table
-// would start forwarding other people's frames and committing replay keys —
-// and after self-contained authentication, signing a valid frame costs an
-// attacker almost nothing, so its bounded storage would be evicted for free.
+// transitAllowed is the transit gate of docs/protocol/datagram.md §4.1 step 11.
+// It is not a formality: the capability filter stops an HONEST neighbour from
+// picking an endpoint-only client as a relay, but not a hostile one from
+// handing it a frame directly. Without this gate a client with a non-empty
+// routing table would start forwarding other people's frames and committing
+// replay keys — and after self-contained authentication, signing a valid frame
+// costs an attacker almost nothing, so its bounded storage would be evicted for
+// free.
 func (p *Pipeline) transitAllowed() bool {
 	return p.advertised.Has(CapabilityDatagramTransitV1)
 }
@@ -1170,24 +1195,27 @@ func (p *Pipeline) transitAllowed() bool {
 // refusal behind an empty list.
 //
 // Returning the whole verdict rather than just the slice is the point: the
-// vocabulary of §4.3 (`no_route`, `rejected(unsupported_dtype)`,
-// `rejected(missing_capability)`, `failed`) lives in that verdict, and a
-// caller that threw it away could only ever answer `no_route` — which is
-// exactly the refusal §4.3 forbids collapsing, because a policy refusal must
-// stop a retry that `no_route` would encourage.
+// vocabulary of docs/protocol/datagram.md §4.4 (`no_route`,
+// `rejected(unsupported_dtype)`, `rejected(missing_capability)`, `failed`)
+// lives in that verdict, and a caller that threw it away could only ever answer
+// `no_route` — which is exactly the refusal docs/protocol/datagram.md §4.4
+// forbids collapsing, because a policy refusal must stop a retry that
+// `no_route` would encourage.
 //
 // It is called before the reservation on purpose: an empty candidate set must
-// not consume a reservation slot, and §4.1 lists "no candidates" among the
-// branches that happen BEFORE Reserve and therefore never call Release —
-// releasing there would be worse than useless, since the key is one per frame
-// and the release would strip a reservation a concurrent instance is holding.
+// not consume a reservation slot, and docs/protocol/datagram.md §4.1 lists "no
+// candidates" among the branches that happen BEFORE Reserve and therefore never
+// call Release — releasing there would be worse than useless, since the key is
+// one per frame and the release would strip a reservation a concurrent instance
+// is holding.
 func (p *Pipeline) selectFor(ctx context.Context, job sendJob) candidateSelection {
 	return p.scheduler.selectFor(ctx, job)
 }
 
 // deliverableCandidates answers the read-only "is there anybody to hand it to"
 // question of the early sieve. It never rotates the explore counter: the sieve
-// publishes nothing, and §4.3 makes the rotation a property of a send.
+// publishes nothing, and docs/protocol/datagram.md §4.4 makes the rotation a
+// property of a send.
 func (p *Pipeline) deliverableCandidates(
 	ctx context.Context,
 	frame protocol.DatagramFrame,
@@ -1205,9 +1233,9 @@ func (p *Pipeline) deliverableCandidates(
 	return selection.candidates
 }
 
-// deliverable is the early sieve of §4.1 step 7: dst == self, or at least one
-// viable candidate. A frame with nowhere to go must not be paid for with a
-// signature verification.
+// deliverable is the early sieve of docs/protocol/datagram.md §4.1 step 7: dst
+// == self, or at least one viable candidate. A frame with nowhere to go must
+// not be paid for with a signature verification.
 //
 // It has no exceptions left. The one that survived the durable cut belonged to a
 // profile that could name a next hop the routing table does not know; a
@@ -1228,8 +1256,8 @@ func (p *Pipeline) deliverable(ctx context.Context, arrival inboundFrame) bool {
 type LocalSendOpts struct {
 	// Frame is the datagram, already signed when the mode requires it.
 	Frame protocol.DatagramFrame
-	// Avoid is the optional avoid_next_hop exclusion (§4.3). It never
-	// reaches the wire.
+	// Avoid is the optional avoid_next_hop exclusion
+	// (docs/protocol/datagram.md §4.4). It never reaches the wire.
 	Avoid AvoidedNextHop
 	// FirstHop is the caller's first-hop preference — the guard set of
 	// docs/protocol/presence.md §4.2. It never reaches the wire, and it never
@@ -1246,7 +1274,8 @@ type LocalSendOpts struct {
 // returning through a loop would not be recognised as our own repeat.
 //
 // The one thing that IS different is the ttl: the origin does not decrement
-// (§4.1.1 rule 4), so the first hop receives the full budget.
+// (docs/protocol/datagram.md §4.2 rule 4), so the first hop receives the full
+// budget.
 func (p *Pipeline) SendLocal(ctx context.Context, opts LocalSendOpts) SendOutcome {
 	return p.sendLocal(ctx, opts)
 }
@@ -1288,7 +1317,7 @@ func (p *Pipeline) sendLocalRouted(ctx context.Context, opts LocalSendOpts) Send
 	}
 	if decision.Outcome() == DeadlinesExpired {
 		// The clamped send window is already behind now: nothing is enqueued
-		// at all, exactly as §2.2 requires.
+		// at all, exactly as docs/protocol/datagram.md §3.4 requires.
 		return localRefusal()
 	}
 	transcript, err := protocol.BuildDatagramTranscript(frame, p.network)

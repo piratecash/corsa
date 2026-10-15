@@ -40,8 +40,6 @@ import (
 // is actually keyed on the identifier. What the real production adapter adds on
 // top — the deferred-write and deleted-id gates of MessageStoreAdapter — is NOT
 // in this loop, and that limit is stated rather than implied.
-//
-// Reference: docs/refactoring/dht/20-cross-plane-dedup.md.
 
 // chatlogBackedStore is the node-side MessageStore backed by a real chatlog.
 //
@@ -419,8 +417,7 @@ func TestSameIdentifierWithDifferentBodyDoesNotOverwriteTheAcceptedMessage(t *te
 //
 // So the transformations are exercised directly, on one envelope, and each
 // result is checked against the identifier it started with. These are the ones
-// callable as functions; the rest of the twelve rebuild points named in
-// docs/refactoring/dht/20-cross-plane-dedup.md §3.1 are frame literals inside
+// callable as functions; the remaining rebuild points are frame literals inside
 // send paths that need a network, and for those the audit is a READING of the
 // code, not an execution of it. The step says so rather than letting "audited"
 // be mistaken for "tested".

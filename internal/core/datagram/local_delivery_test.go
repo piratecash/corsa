@@ -7,9 +7,9 @@ import (
 	"github.com/piratecash/corsa/internal/core/domain"
 )
 
-// local_delivery_test.go pins the outcome table of §4.1 step 10: what happens
-// to the replay key for each of the three handler outcomes, and what the
-// sender's repeat then meets.
+// local_delivery_test.go pins the outcome table of
+// docs/protocol/datagram.md §4.1 step 10: what happens to the replay key for
+// each of the three handler outcomes, and what the sender's repeat then meets.
 
 // reclaimingHandler answers like any other handler, but first reclaims its own
 // replay record — so the Commit that follows meets the one state in which the
@@ -46,12 +46,12 @@ func newReclaimingHandler(
 // ---------------------------------------------------------------------------
 
 // TestLocalDeliveryOutcomeTable walks all three handler outcomes and pins the
-// fate of the replay key for each (§4.1, §9): accepted and rejected both COMMIT
-// the key, failed releases it.
+// fate of the replay key for each (docs/protocol/datagram.md §4.1): accepted
+// and rejected both COMMIT the key, failed releases it.
 //
-// The three outcomes are told apart by the layer's counters (§10) and not by
-// the cache record, which carries no verdict: what the record decides is only
-// what the repeat below meets.
+// The three outcomes are told apart by the layer's counters
+// (docs/rpc/datagram.md) and not by the cache record, which carries no verdict:
+// what the record decides is only what the repeat below meets.
 func TestLocalDeliveryOutcomeTable(t *testing.T) {
 	cases := []struct {
 		name        string
@@ -133,7 +133,7 @@ func TestPanicInHandlerIsTreatedAsFailed(t *testing.T) {
 	}
 }
 
-// TestCommitRejectedFailureReleases is the third Commit.fail branch of §9.
+// TestCommitRejectedFailureReleases is the third Commit.fail branch.
 func TestCommitRejectedFailureReleases(t *testing.T) {
 	net := newFakeNetwork()
 	private, signer := newSigner(t)

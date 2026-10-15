@@ -21,7 +21,8 @@ import (
 // mesh attribution of the routing table and the plane of a live connection are
 // really joined.
 //
-// Reference: docs/refactoring/dht/02-route-source.md §5.
+// Reference: docs/rpc/datagram.md (explainDatagramRoute, `route_source` and
+// `discovery_plane`).
 
 // datagramPlanCandidate is the wire shape ExplainDatagramRoute renders, read
 // back through the same JSON a console would.

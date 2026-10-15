@@ -14,7 +14,10 @@ import (
 // Route withdrawal grace period (probation on close)
 // ---------------------------------------------------------------------------
 //
-// Background and rationale: see docs/refactoring/route-withdrawal-grace-period.md
+// Rationale: a session's lifetime is not a route's lifetime. Withdrawing on
+// every close turned each disconnect-reconnect cycle into two SeqNo bumps that
+// neighbours read as a flap; holding the withdrawal for a short probation
+// keeps a quick reconnect invisible to the mesh.
 //
 // Summary:
 //   - onPeerSessionClosed schedules executeDeferredWithdrawal after

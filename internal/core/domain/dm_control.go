@@ -12,8 +12,7 @@ import "fmt"
 //
 // The cost of sharing a name is that "the peer declared dm_control" stops
 // proving "the peer understands this command", and that is what
-// DMControlUnsupported exists to repair. See
-// docs/refactoring/reactions-protocol.md §6.
+// DMControlUnsupported exists to repair.
 
 // DTypeDMControl is the datagram type of a sealed conversation-control command.
 const DTypeDMControl DType = "dm_control"

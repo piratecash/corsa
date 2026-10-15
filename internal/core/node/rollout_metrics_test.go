@@ -60,7 +60,7 @@ func declaringSession(id domain.PeerIdentity, advertised ...domain.Capability) *
 	}
 }
 
-// Rollout telemetry (docs/refactoring/dht/05-rollout-metrics.md).
+// Rollout telemetry (docs/rpc/routing.md, fetchRouteSummary `session_outcomes`).
 //
 // The property under test: an outbound attempt is classified by the TYPE of
 // its error, and the four outcomes always sum to the attempts. Both halves
@@ -344,7 +344,7 @@ func TestSessionOutcomeSnapshotStampsItsOwnReadTime(t *testing.T) {
 }
 
 // TestNeighbourCompositionCountsOnlyV2AsProven pins the census to the same
-// rule the budgets use (docs/refactoring/n1-legacy-residual.md §1): an
+// rule the budgets use (docs/protocol/network_security.md §13): an
 // identity is proven only by a v2 session, in either direction. An accepted v1
 // connection is authenticated by an auth_session that can be relayed, so its
 // identity is a claim; a dialled v2 session proved its identity to us.

@@ -22,8 +22,8 @@ import (
 
 var errNotTheTrustedNeighbour = errors.New("the authorizer does not trust this sender")
 
-// trustOnly is an authorization hook of the shape §7 exists for: it answers
-// "who sent this" and admits exactly one neighbour.
+// trustOnly is an authorization hook of the shape docs/protocol/datagram.md §7
+// exists for: it answers "who sent this" and admits exactly one neighbour.
 func trustOnly(trusted domain.PeerIdentity) AuthorizerFunc {
 	return func(_ context.Context, delivery DeliveryContext, _ []byte) AuthorizationDecision {
 		peer, remote := delivery.IncomingPeer().Identity()
@@ -42,7 +42,8 @@ func dialedSession() AdmissionKey {
 }
 
 // askFor builds a request addressed to this node, which is the shortest path
-// to the §7 hook: no signature, no anti-replay, no reverse state.
+// to the docs/protocol/datagram.md §7 hook: no signature, no anti-replay, no
+// reverse state.
 func askFor(t *testing.T, node *pipelineNode, seed string, dtype domain.DType) protocol.DatagramFrame {
 	t.Helper()
 	return requestFrame(t, requestOpts{label: newLabel(t, seed), dst: node.id, dtype: dtype})
@@ -97,7 +98,7 @@ func TestADialedSessionCannotBorrowAnotherPeersIdentity(t *testing.T) {
 		t.Fatalf("a frame under a borrowed name reached the handler: %d calls", handler.callCount())
 	}
 	if borrowed.BanWorthy() {
-		t.Fatal("naming yourself in your own welcome is what the handshake asks for; §4.4 charges no ban for it")
+		t.Fatal("naming yourself in your own welcome is what the handshake asks for; docs/protocol/datagram.md §5 charges no ban for it")
 	}
 }
 
@@ -135,9 +136,10 @@ func TestAProvenKeyThatNamesAnotherNeighbourIsNotProof(t *testing.T) {
 // blast-radius control.
 //
 // The gate refuses a DECLARED REQUIREMENT, not a direction: a type that states
-// its sender is authenticated inside the payload (§7) has nothing to be misled
-// about, and refusing it would take the whole request/response plane off every
-// session this node dialled — which is most of a client node's traffic.
+// its sender is authenticated inside the payload (docs/protocol/datagram.md §7)
+// has nothing to be misled about, and refusing it would take the whole
+// request/response plane off every session this node dialled — which is most of
+// a client node's traffic.
 //
 // The mutation this kills: hoisting the refusal to "any claimed ingress", or
 // dropping the registry lookup from the gate.
@@ -167,7 +169,8 @@ func TestADialedSessionStillServesATypeThatDeclaredItNeedsNoProof(t *testing.T) 
 // authorization hook is handed the same unprovable name.
 //
 // The record is checked afterwards on purpose: a refusal before the CAS must
-// leave the exchange pending, so the genuine answer can still arrive (§4.2).
+// leave the exchange pending, so the genuine answer can still arrive
+// (docs/protocol/datagram.md §4.3).
 func TestADialedSessionCannotBorrowAnIdentityOnTheResponsePlane(t *testing.T) {
 	t.Parallel()
 

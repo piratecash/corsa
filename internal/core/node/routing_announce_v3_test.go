@@ -110,9 +110,8 @@ func TestHandleRouteAnnounceV3_DeltaBeforeBaselineRequestsResync(t *testing.T) {
 // v3 counterpart of the v2 quarantine-gate regression test. The delta-
 // before-baseline branch would otherwise emit SendRequestResync back to
 // the quarantined peer (line ~1726 of routing_announce.go), violating
-// the "silently dropped" contract in
-// docs/refactoring/route-withdrawal-grace-period.md. Also asserts no
-// AnnouncePeerState is created (top-level gate runs before
+// the "silently dropped" contract of docs/protocol/network_security.md §13.
+// Also asserts no AnnouncePeerState is created (top-level gate runs before
 // GetOrCreate/ObserveV3Epoch).
 func TestHandleRouteAnnounceV3_QuarantinedSender_DropsSilentlyNoResync(t *testing.T) {
 	svc := newTestServiceWithRouting(t, idNodeA)

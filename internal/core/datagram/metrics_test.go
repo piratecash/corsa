@@ -9,8 +9,9 @@ import (
 	"github.com/piratecash/corsa/internal/core/domain"
 )
 
-// metrics_test.go covers §10: every drop reason observable, the snapshot
-// internally consistent, concurrent counting safe.
+// metrics_test.go covers the drop-reason metrics (docs/rpc/datagram.md,
+// `metrics`): every drop reason observable, the snapshot internally consistent,
+// concurrent counting safe.
 
 // A drop nobody can see is a drop nobody can debug, and the layer refuses
 // SILENTLY on the wire. So every reason in the closed enum must reach the
@@ -57,7 +58,7 @@ func TestMetricsEveryDropReasonIsObservable(t *testing.T) {
 	}
 }
 
-// "Refused answers" is a metric §10 asks for by name, and it is a SET of drop
+// "Refused answers" is a published metric, and it is a SET of drop
 // reasons, not a prefix: a refused request also starts with DropReverse and
 // must not be counted here.
 func TestMetricsRefusedAnswersCountsTheAnswerPlaneOnly(t *testing.T) {
@@ -80,8 +81,9 @@ func TestMetricsRefusedAnswersCountsTheAnswerPlaneOnly(t *testing.T) {
 	}
 }
 
-// The reverse-state events of §4.2 land in the same snapshot: one type serves
-// both the pipeline's sink and the table's, so the two views cannot drift.
+// The reverse-state events of docs/protocol/datagram.md §4.3 land in the same
+// snapshot: one type serves both the pipeline's sink and the table's, so the
+// two views cannot drift.
 func TestMetricsCountsReverseStateEvents(t *testing.T) {
 	t.Parallel()
 
@@ -202,7 +204,8 @@ func TestMetricsDiagnosticsAssembleFromWhatIsWired(t *testing.T) {
 	admission.Admit(provenIdentityKey(domain.PeerIdentity{1}), 64)
 
 	// One settled record, so the replay block reports a live occupancy AND a
-	// live counter — the pair the §5 refusals have to be read against.
+	// live counter — the pair the docs/protocol/datagram.md §5 refusals have to
+	// be read against.
 	replay := NewBaseReplayCache(BaseReplayCacheConfig{})
 	key := domain.ReplayKey{9, 8, 7}
 	token, held := replay.Reserve(

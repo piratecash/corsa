@@ -12,8 +12,9 @@ import (
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
-// pipeline_response_test.go covers the response fork of §4.1 and the claim
-// discipline of §4.2 as the conveyor drives it.
+// pipeline_response_test.go covers the response fork of
+// docs/protocol/datagram.md §4.1 and the claim discipline of
+// docs/protocol/datagram.md §4.3 as the conveyor drives it.
 
 // responseFixture is origin → relay → target, with the relay already holding a
 // pending reverse record for `label`.
@@ -46,7 +47,7 @@ func (f *responseFixture) answer(t *testing.T, dtype domain.DType) InboundResult
 	}))
 }
 
-// TestResponseIsDeliveredWithoutAnyRouteToItsDst is the first §9 row of the
+// TestResponseIsDeliveredWithoutAnyRouteToItsDst covers the first case of the
 // mode fork: a response travels on stored state alone, so the absence of a
 // route to its dst is irrelevant — it is not even a destination.
 func TestResponseIsDeliveredWithoutAnyRouteToItsDst(t *testing.T) {
@@ -67,9 +68,10 @@ func TestResponseIsDeliveredWithoutAnyRouteToItsDst(t *testing.T) {
 	}
 }
 
-// TestResponseReadOnlyInvariants walks the §4.2 checks that run BEFORE the
-// claim. Every one of them leaves the record pending, so the genuine answer
-// can still arrive — which the last step of the test proves.
+// TestResponseReadOnlyInvariants walks the docs/protocol/datagram.md §4.3
+// checks that run BEFORE the claim. Every one of them leaves the record
+// pending, so the genuine answer can still arrive — which the last step of the
+// test proves.
 func TestResponseReadOnlyInvariants(t *testing.T) {
 	t.Run("from the wrong neighbour", func(t *testing.T) {
 		fixture := newResponseFixture(t, newLabel(t, "wrong-peer"))
@@ -211,10 +213,10 @@ func TestUnknownAnswerTypeIsForwardedWithoutPairing(t *testing.T) {
 	requireOutcome(t, fixture.answer(t, dtypeCached), InboundForwarded)
 }
 
-// TestProbeBudgetLimitsExpensiveValidations is §4.2 and §9: the reservation is
-// what stands between a forged answer and the expensive part of the fork, and
-// it has to hold under the only condition that produces forged answers in the
-// first place — several of them at once.
+// TestProbeBudgetLimitsExpensiveValidations is docs/protocol/datagram.md §4.3:
+// the reservation is what stands between a forged answer and the expensive part
+// of the fork, and it has to hold under the only condition that produces forged
+// answers in the first place — several of them at once.
 //
 // The refusal used to spend a probe is the forwarding ttl, which is the first
 // step past the reservation. It used to be an interceptor, and that was a
@@ -251,10 +253,11 @@ func TestProbeBudgetLimitsExpensiveValidations(t *testing.T) {
 
 	t.Run("all at once", func(t *testing.T) {
 		// The sequential loop above is green against a budget that is merely
-		// counted, and a counter is not what §4.2 asks for: without atomicity
-		// several forged answers each see a free budget and ALL of them reach
-		// the expensive check, so the limit would protect exactly the case that
-		// was already safe. Only a race can tell the two apart.
+		// counted, and a counter is not what docs/protocol/datagram.md §4.3
+		// asks for: without atomicity several forged answers each see a free
+		// budget and ALL of them reach the expensive check, so the limit would
+		// protect exactly the case that was already safe. Only a race can tell
+		// the two apart.
 		fixture := newResponseFixture(t, newLabel(t, "probes-parallel"))
 		budget := fixture.relay.reverse.ProbeBudget()
 		const racers = 64
@@ -358,8 +361,8 @@ func TestEveryProbeRefusalIsReportedAsItself(t *testing.T) {
 			if !classified {
 				t.Fatalf("the refusal %s has no drop reason: it would be dropped as somebody else's", name)
 			}
-			// §10 counts "refused answers" as a listed SET, so a reason left
-			// out of it is a refusal that disappears from that total.
+			// The metrics count "refused answers" as a listed SET, so a reason
+			// left out of it is a refusal that disappears from that total.
 			if !slices.Contains(refusedAnswerReasons[:], reason) {
 				t.Fatalf("%s drops with %s, which is not counted as a refused answer", name, reason)
 			}
@@ -443,7 +446,7 @@ func TestTheForkReportsAStaleRecordAsItsOwnReason(t *testing.T) {
 }
 
 // TestSuccessfulForwardDoesNotSpendProbeBudget is the other half of the rule:
-// only REFUSED attempts pay (§4.2, §9 line 1086).
+// only REFUSED attempts pay (docs/protocol/datagram.md §4.3).
 //
 // The old version of this test was a tautology — it forwarded one answer, saw
 // the record disappear and asserted that a FRESH record starts with a full
@@ -451,7 +454,8 @@ func TestTheForkReportsAStaleRecordAsItsOwnReason(t *testing.T) {
 // The budget is only observable on a record that SURVIVES its claim, and on
 // each branch there is exactly one such record: an enqueue the upstream's queue
 // refused, and a resolver that refused the answer. Both claimed first, which is
-// what the refund is a fact about, and both are held until expires_at by §4.2.
+// what the refund is a fact about, and both are held until expires_at by
+// docs/protocol/datagram.md §4.3.
 func TestSuccessfulForwardDoesNotSpendProbeBudget(t *testing.T) {
 	t.Run("network upstream", func(t *testing.T) {
 		fixture := newResponseFixture(t, newLabel(t, "refund"))
@@ -514,9 +518,10 @@ func TestSuccessfulForwardDoesNotSpendProbeBudget(t *testing.T) {
 	})
 }
 
-// TestFailedEnqueueToUpstreamLeavesTheRecordClaimed is §4.2: the answer is
-// lost, the initiator retries with a fresh label, and no second chance is
-// granted — otherwise repeats could hammer the upstream for free.
+// TestFailedEnqueueToUpstreamLeavesTheRecordClaimed is
+// docs/protocol/datagram.md §4.3: the answer is lost, the initiator retries
+// with a fresh label, and no second chance is granted — otherwise repeats could
+// hammer the upstream for free.
 func TestFailedEnqueueToUpstreamLeavesTheRecordClaimed(t *testing.T) {
 	fixture := newResponseFixture(t, newLabel(t, "queue-refused"))
 	fixture.net.refuseQueue(fixture.origin.id)
@@ -534,7 +539,8 @@ func TestFailedEnqueueToUpstreamLeavesTheRecordClaimed(t *testing.T) {
 	requireDrop(t, fixture.answer(t, dtypeAnswer), DropReverseNotPending)
 }
 
-// TestResponseTTLIsCheckedBeforeTheClaim is rule 4 of §4.1.1 met by the §4.2
+// TestResponseTTLIsCheckedBeforeTheClaim is rule 4 of
+// docs/protocol/datagram.md §4.2 met by the docs/protocol/datagram.md §4.3
 // invariant "a drop at any step before the CAS leaves the record pending".
 //
 // An answer that cannot be forwarded — the decrement pays for the hop about to
@@ -569,8 +575,9 @@ func TestResponseTTLIsCheckedBeforeTheClaim(t *testing.T) {
 		handler := acceptingHandler()
 		registerType(t, fixture.origin, responseType(dtypeAnswer, dtypeQuery, handler))
 
-		// Rule 4 of §4.1.1: local delivery does not decrement, so there is no
-		// budget to run out of and `ttl = 1` is a perfectly good answer.
+		// Rule 4 of docs/protocol/datagram.md §4.2: local delivery does not
+		// decrement, so there is no budget to run out of and `ttl = 1` is a
+		// perfectly good answer.
 		requireOutcome(t, fixture.origin.deliver(t, fixture.relay.id, responseFrame(t, responseOpts{
 			label: fixture.label, subject: fixture.target.id, ttl: 1,
 		})), InboundDelivered)
@@ -585,8 +592,8 @@ func TestResponseTTLIsCheckedBeforeTheClaim(t *testing.T) {
 	})
 }
 
-// TestResponsePlaneNeverTouchesTheRoutedReplayCache is the §4.1 separation of
-// the planes on the way back.
+// TestResponsePlaneNeverTouchesTheRoutedReplayCache is the
+// docs/protocol/datagram.md §4.1 separation of the planes on the way back.
 func TestResponsePlaneNeverTouchesTheRoutedReplayCache(t *testing.T) {
 	fixture := newResponseFixture(t, newLabel(t, "planes"))
 
@@ -631,10 +638,10 @@ func (f *localResponseFixture) answer(t *testing.T, dtype domain.DType) InboundR
 	}))
 }
 
-// TestLocalResponseGatesRunBeforeTheClaim is §4.1 and §9: an answer of an
-// unknown or forbidden type is refused by the registry and by authorization
-// BEFORE the CAS, so it does not eat the single slot — and the next valid
-// answer passes.
+// TestLocalResponseGatesRunBeforeTheClaim is docs/protocol/datagram.md §4.1: an
+// answer of an unknown or forbidden type is refused by the registry and by
+// authorization BEFORE the CAS, so it does not eat the single slot — and the
+// next valid answer passes.
 func TestLocalResponseGatesRunBeforeTheClaim(t *testing.T) {
 	t.Run("unknown type", func(t *testing.T) {
 		fixture := newLocalResponseFixture(t, newLabel(t, "local-unknown"))
@@ -649,7 +656,7 @@ func TestLocalResponseGatesRunBeforeTheClaim(t *testing.T) {
 		fixture := newLocalResponseFixture(t, newLabel(t, "local-pairing"))
 		// A type this node knows, but one that never declared get_identity
 		// among the requests it answers: it must not take the single slot of
-		// somebody else's exchange (§4.2).
+		// somebody else's exchange (docs/protocol/datagram.md §4.3).
 		registerType(t, fixture.origin, responseType(dtypeCached, dtypeUnrelated, acceptingHandler()))
 		registerType(t, fixture.origin, responseType(dtypeAnswer, dtypeQuery, acceptingHandler()))
 
@@ -690,7 +697,7 @@ func requireLocalPending(t *testing.T, fixture *localResponseFixture) {
 	}
 }
 
-// TestLocalResolverOutcomeAfterTheClaimLeavesItClaimed is the §9 row: a
+// TestLocalResolverOutcomeAfterTheClaimLeavesItClaimed: a
 // `rejected` or `failed` from the resolver AFTER the CAS is the local twin of a
 // failed enqueue — the answer never reached the thing that asked for it, so the
 // record stays claimed until expires_at and no second chance is granted.
@@ -752,12 +759,12 @@ func TestLocallyDeliveredAnswerFreesItsRecord(t *testing.T) {
 // makes the missing release a P1 rather than a tidiness matter.
 //
 // Every request this node originates takes a slot in the LocalUpstream bucket,
-// which §5 caps at defaultReversePerUpstreamCap for a whole reverse window of
-// 240 s. If a finished exchange never gives its slot back, the node can start
-// no more than that many request exchanges per window however promptly they are
-// answered — and the refusal surfaces as `rejected`, which tells the caller
-// that retrying is pointless when the truth is that the node ran out of its own
-// bookkeeping.
+// which docs/protocol/datagram.md §5 caps at defaultReversePerUpstreamCap for a
+// whole reverse window of 240 s. If a finished exchange never gives its slot
+// back, the node can start no more than that many request exchanges per window
+// however promptly they are answered — and the refusal surfaces as `rejected`,
+// which tells the caller that retrying is pointless when the truth is that the
+// node ran out of its own bookkeeping.
 func TestAnsweredLocalRequestsDoNotFillThePerUpstreamQuota(t *testing.T) {
 	net := newFakeNetwork()
 	nodes := lineTopology(t, net, 2)
@@ -781,8 +788,8 @@ func TestAnsweredLocalRequestsDoNotFillThePerUpstreamQuota(t *testing.T) {
 	}
 }
 
-// TestLocalResponseIsNotDecrementedAndNotEnqueued is rule 4 of §4.1.1 for the
-// `upstream = local` branch.
+// TestLocalResponseIsNotDecrementedAndNotEnqueued is rule 4 of
+// docs/protocol/datagram.md §4.2 for the `upstream = local` branch.
 func TestLocalResponseIsNotDecrementedAndNotEnqueued(t *testing.T) {
 	fixture := newLocalResponseFixture(t, newLabel(t, "local-ttl"))
 	handler := acceptingHandler()
@@ -809,7 +816,7 @@ func TestLocalResponseIsNotDecrementedAndNotEnqueued(t *testing.T) {
 	}
 }
 
-// TestAuthorizationHookRunsOnAllThreePlanes is the last §9 row of the mode
+// TestAuthorizationHookRunsOnAllThreePlanes covers the last case of the mode
 // fork: the hook is called on local delivery in routed, request and response.
 func TestAuthorizationHookRunsOnAllThreePlanes(t *testing.T) {
 	net := newFakeNetwork()

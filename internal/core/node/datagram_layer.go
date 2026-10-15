@@ -24,9 +24,9 @@ import (
 // them holds a domain mutex while calling into it.
 //
 // The whole file is dead weight when cfg.EnableDatagramV1 is false: nothing is
-// constructed, nothing is started, and not one allocation is made (§10).
+// constructed, nothing is started, and not one allocation is made.
 //
-// Reference: docs/refactoring/datagram-transport.md §4.2, §4.3, §5, §6, §10.
+// Reference: docs/protocol/datagram.md §4.3, §4.4, §5, §6, §8.
 
 // datagramPlaneParts are the components the plane is assembled from.
 //
@@ -100,9 +100,9 @@ type datagramLayer struct {
 
 // datagramQueueSweepInterval is how often expired frames are dropped from the
 // class queue. A frame's deadline is its class's queue residence — 5 s for
-// control, 30 s for bulk (§4.2) — so a one-second sweep resolves both by well
-// under a fifth of the shorter window, while costing one pass over two bounded
-// lanes.
+// control, 30 s for bulk (docs/protocol/datagram.md §4.3) — so a one-second
+// sweep resolves both by well under a fifth of the shorter window, while
+// costing one pass over two bounded lanes.
 //
 // The sweep is not what enforces the deadline: the writer re-checks send_until
 // immediately before the socket write, and the queue drops expired heads as it
@@ -112,10 +112,10 @@ type datagramLayer struct {
 const datagramQueueSweepInterval = time.Second
 
 // datagramReverseSweepInterval is how often the reverse-state table is swept.
-// A record lives 240 s (§4.2) and the table is bounded, so the sweep is a
-// memory hygiene pass rather than a correctness one — expiry is judged against
-// the clock on every lookup. A five-second cadence keeps the pass cheap and
-// the depth honest for the diagnostic.
+// A record lives 240 s (docs/protocol/datagram.md §4.3) and the table is
+// bounded, so the sweep is a memory hygiene pass rather than a correctness one
+// — expiry is judged against the clock on every lookup. A five-second cadence
+// keeps the pass cheap and the depth honest for the diagnostic.
 const datagramReverseSweepInterval = 5 * time.Second
 
 // datagramMaintenanceInterval paces the base replay cache's expiry sweep — the
@@ -162,9 +162,9 @@ func newDatagramPlaneParts(svc *Service, metrics *datagram.Metrics) (datagramPla
 	// The registry starts with the identity-discovery kit
 	// (docs/protocol/identity-lookup.md): get_identity / post_identity /
 	// push_identity. Registration happens HERE — before any handshake can
-	// run — because §6.1 fixes the declared dtype set for the lifetime of a
-	// session, and the self identity record issued later in NewService
-	// declares this very set.
+	// run — because docs/protocol/datagram.md §6.1 fixes the declared dtype set
+	// for the lifetime of a session, and the self identity record issued later
+	// in NewService declares this very set.
 	types := datagram.NewTypeRegistry()
 	if err := registerIdentityDiscoveryTypes(types, svc, network); err != nil {
 		return datagramPlaneParts{}, err
@@ -174,7 +174,8 @@ func newDatagramPlaneParts(svc *Service, metrics *datagram.Metrics) (datagramPla
 	}
 
 	// The poll order of the route planes is fixed HERE, by this literal, and
-	// nowhere else — not by configuration (dht-dualstack-migration.md §4.2).
+	// nowhere else — not by configuration: a node whose poll order differs from
+	// its neighbours' cannot be reasoned about from its version.
 	// Today the mesh is the only plane, so the composite forwards its answer
 	// unchanged; step 09 appends the overlay to this list and every caller
 	// below stays as it is.
@@ -227,8 +228,8 @@ func assembleDatagramLayer(svc *Service, parts datagramPlaneParts) (*datagramLay
 		// step above, in handleDatagramFrame, because it has to stand above the
 		// two refusals that never reach the conveyor — a connection off the plane
 		// and an oversize line. The conveyor charges stage two, on the key
-		// handleDatagramFrame hands it, so both stages of §5 bill one bucket per
-		// neighbour.
+		// handleDatagramFrame hands it, so both stages of
+		// docs/protocol/datagram.md §5 bill one bucket per neighbour.
 		Crypto:     parts.admission,
 		Metrics:    parts.metrics,
 		Advertised: svc.localAdvertisedCapabilities(),
@@ -241,10 +242,11 @@ func assembleDatagramLayer(svc *Service, parts datagramPlaneParts) (*datagramLay
 
 	// The queue was supplied above, so the pipeline must have put the class
 	// queue between the conveyor and the emitter. Checking the bool rather
-	// than discarding it keeps the §5 promise — "bulk keeps a guaranteed
-	// share under a constant control stream" — a property of the real path:
-	// a silently absent queue would publish straight to the writer, first
-	// come first served, and nothing else in the tree would notice.
+	// than discarding it keeps the docs/protocol/datagram.md §5 promise — "bulk
+	// keeps a guaranteed share under a constant control stream" — a property of
+	// the real path: a silently absent queue would publish straight to the
+	// writer, first come first served, and nothing else in the tree would
+	// notice.
 	outbound, queued := pipeline.OutboundQueue()
 	if !queued {
 		return nil, errors.New("datagram: the pipeline did not install the class queue")
@@ -259,11 +261,11 @@ func assembleDatagramLayer(svc *Service, parts datagramPlaneParts) (*datagramLay
 // localAdvertisedCapabilities is the RAW capability set THIS node publishes,
 // in the layer's own type.
 //
-// The pipeline reads it for the transit gate of §4.1 step 11, which must agree
-// with what this node tells the network, or it would relay while claiming it
-// does not. It is therefore built from exactly the function the hello/welcome
-// frames are built from, localCapabilityStrings, and there is no second notion
-// of "what this build could serve" beside it.
+// The pipeline reads it for the transit gate of docs/protocol/datagram.md §4.1
+// step 11, which must agree with what this node tells the network, or it would
+// relay while claiming it does not. It is therefore built from exactly the
+// function the hello/welcome frames are built from, localCapabilityStrings, and
+// there is no second notion of "what this build could serve" beside it.
 //
 // It reads datagramPlaneCapability and NOT localDatagramAdvertise, and the
 // difference is that this is a CONSTRUCTION-TIME snapshot taken before the
@@ -333,8 +335,8 @@ func (s *Service) startDatagramLayer(ctx context.Context) {
 // worker is still inside of.
 func (s *Service) startDatagramSchedules(ctx context.Context, layer *datagramLayer) {
 	// The outbound pump. It is the only consumer of the class queue, so the
-	// deficit round robin of §5 decides the real send order rather than the
-	// order frames happened to be produced in.
+	// deficit round robin of docs/protocol/datagram.md §5 decides the real send
+	// order rather than the order frames happened to be produced in.
 	s.goRunLoop(func() { layer.outbound.Run(ctx) })
 	s.goRunLoop(func() { layer.sweepQueueLoop(ctx) })
 	s.goRunLoop(func() { layer.sweepReverseLoop(ctx) })
@@ -359,10 +361,10 @@ func (s *Service) startDatagramSchedules(ctx context.Context, layer *datagramLay
 
 // datagramPlaneReady reports whether this node has a plane at all.
 //
-// It is what localDatagramAdvertise answers from, so the two capabilities of §6
-// are claimed exactly while there is a conveyor behind them. A node without a
-// layer answers false, and every path that touches the plane is one nil check
-// away from the pre-datagram behaviour.
+// It is what localDatagramAdvertise answers from, so the two capabilities of
+// docs/protocol/datagram.md §6 are claimed exactly while there is a conveyor
+// behind them. A node without a layer answers false, and every path that
+// touches the plane is one nil check away from the pre-datagram behaviour.
 func (s *Service) datagramPlaneReady() bool {
 	return s.datagramLayer() != nil
 }

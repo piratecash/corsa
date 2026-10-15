@@ -10,18 +10,18 @@ import (
 	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 )
 
-// reverse_state_test.go covers the table itself: the §4.2 window formula, the
-// two-phase reservation, the probe budget and the caps. The pipeline-level
-// assertions of the same section live in pipeline_request_test.go and
-// pipeline_response_test.go.
+// reverse_state_test.go covers the table itself: the
+// docs/protocol/datagram.md §4.3 window formula, the two-phase reservation, the
+// probe budget and the caps. The pipeline-level assertions of the same section
+// live in pipeline_request_test.go and pipeline_response_test.go.
 
 func newTestReverseTable(now *time.Time) *ReverseTable {
 	return NewReverseTable(ReverseTableConfig{Clock: func() time.Time { return *now }})
 }
 
-// TestReverseWindowIsDerivedFromTheFormula pins §4.2: 240 seconds is a RESULT,
-// not a literal — 2 × 10 hops × (5 s queue + 5 s write grace) + 10 s target
-// budget = 210 s, rounded up to whole minutes.
+// TestReverseWindowIsDerivedFromTheFormula pins docs/protocol/datagram.md §4.3:
+// 240 seconds is a RESULT, not a literal — 2 × 10 hops × (5 s queue + 5 s write
+// grace) + 10 s target budget = 210 s, rounded up to whole minutes.
 func TestReverseWindowIsDerivedFromTheFormula(t *testing.T) {
 	residence, err := domain.QueueResidence(domain.DatagramClassControl)
 	if err != nil {
@@ -50,10 +50,11 @@ func TestReverseWindowIsDerivedFromTheFormula(t *testing.T) {
 	}
 }
 
-// TestResponseDeadlineEqualsControlQueueResidence pins §9: the send deadline
-// of an answer is arrival + queue_residence(control), the SAME 5 seconds the
-// reverse window is computed from. Thirty here would make a ten-hop round trip
-// take 1200 s against a record that lives 240.
+// TestResponseDeadlineEqualsControlQueueResidence pins
+// docs/protocol/datagram.md §4.3: the send deadline of an answer is arrival +
+// queue_residence(control), the SAME 5 seconds the reverse window is computed
+// from. Thirty here would make a ten-hop round trip take 1200 s against a
+// record that lives 240.
 func TestResponseDeadlineEqualsControlQueueResidence(t *testing.T) {
 	residence, err := domain.QueueResidence(domain.DatagramClassControl)
 	if err != nil {
@@ -98,7 +99,8 @@ func TestReverseRecordStoresTheRequestDType(t *testing.T) {
 	if record.State() != ReverseSlotPending {
 		t.Fatalf("a fresh record is %s, want pending", record.State())
 	}
-	// expires_at = moment of arrival + the derived window (§4.2).
+	// expires_at = moment of arrival + the derived window
+	// (docs/protocol/datagram.md §4.3).
 	if want := now.Add(ReverseStateWindow()); !record.ExpiresAt().Equal(want) {
 		t.Fatalf("expires_at %s, want %s", record.ExpiresAt(), want)
 	}
@@ -107,9 +109,10 @@ func TestReverseRecordStoresTheRequestDType(t *testing.T) {
 	}
 }
 
-// TestRepeatedLabelDoesNotOverwriteTheRecord is §4.2 phase 2: a busy slot is a
-// drop with no overwrite. Re-pointing downstream would lose the return path of
-// the first forward, and a repeat can be an honest loop, so no ban either.
+// TestRepeatedLabelDoesNotOverwriteTheRecord is docs/protocol/datagram.md §4.3
+// phase 2: a busy slot is a drop with no overwrite. Re-pointing downstream
+// would lose the return path of the first forward, and a repeat can be an
+// honest loop, so no ban either.
 func TestRepeatedLabelDoesNotOverwriteTheRecord(t *testing.T) {
 	now := time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
 	table := newTestReverseTable(&now)
@@ -139,7 +142,7 @@ func TestRepeatedLabelDoesNotOverwriteTheRecord(t *testing.T) {
 	}
 }
 
-// TestFreshLabelTakesItsOwnSlot is the other half of §9's "label as the state
+// TestFreshLabelTakesItsOwnSlot is the other half of "label as the state
 // key": the initiator's retry arrives with a NEW label, so the no-overwrite
 // rule costs nothing.
 func TestFreshLabelTakesItsOwnSlot(t *testing.T) {
@@ -162,9 +165,9 @@ func TestFreshLabelTakesItsOwnSlot(t *testing.T) {
 	}
 }
 
-// TestRollbackReleasesTheWholeSlot is §4.2 phase 4: when the candidates run
-// out the record goes entirely, so a later request with the same label is not
-// blocked by a forward that never happened.
+// TestRollbackReleasesTheWholeSlot is docs/protocol/datagram.md §4.3 phase 4:
+// when the candidates run out the record goes entirely, so a later request with
+// the same label is not blocked by a forward that never happened.
 func TestRollbackReleasesTheWholeSlot(t *testing.T) {
 	now := time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
 	table := newTestReverseTable(&now)
@@ -194,9 +197,9 @@ func TestRollbackReleasesTheWholeSlot(t *testing.T) {
 }
 
 // TestProbeBudgetIsAtomicAndOnlyRefusalsPayIt covers the two probe rules of
-// §4.2 at once: the increment-and-test is atomic, so no more than `probes`
-// attempts ever reach the expensive check, and a successful forward refunds
-// its unit.
+// docs/protocol/datagram.md §4.3 at once: the increment-and-test is atomic, so
+// no more than `probes` attempts ever reach the expensive check, and a
+// successful forward refunds its unit.
 func TestProbeBudgetIsAtomicAndOnlyRefusalsPayIt(t *testing.T) {
 	now := time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
 	table := newTestReverseTable(&now)
@@ -247,7 +250,8 @@ func TestProbeBudgetIsAtomicAndOnlyRefusalsPayIt(t *testing.T) {
 }
 
 // TestClaimIsASingleShotCAS covers "a second valid response is dropped" and
-// "a drop before the CAS leaves the record pending" (§4.2).
+// "a drop before the CAS leaves the record pending"
+// (docs/protocol/datagram.md §4.3).
 func TestClaimIsASingleShotCAS(t *testing.T) {
 	now := time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
 	table := newTestReverseTable(&now)
@@ -297,8 +301,9 @@ func TestExpiredRecordIsNotLive(t *testing.T) {
 	}
 }
 
-// TestLocalUpstreamIsAMarkerNotAnAddress pins §4.2: `upstream = local` is its
-// own bucket, so the transit path and the local one never mix.
+// TestLocalUpstreamIsAMarkerNotAnAddress pins docs/protocol/datagram.md §4.3:
+// `upstream = local` is its own bucket, so the transit path and the local one
+// never mix.
 func TestLocalUpstreamIsAMarkerNotAnAddress(t *testing.T) {
 	if peer, ok := LocalUpstream().Peer(); ok {
 		t.Fatalf("the local marker must not be addressable, got %v", peer)
@@ -312,11 +317,11 @@ func TestLocalUpstreamIsAMarkerNotAnAddress(t *testing.T) {
 	if LocalUpstream().String() != "local" {
 		t.Fatalf("the marker renders as %q", LocalUpstream().String())
 	}
-	// The response fork of §4.1 step 6 picks its branch by Peer()'s bool alone,
-	// so that bool must be EXACTLY the negation of IsLocal(). A third answer
-	// here — an upstream that is neither local nor addressable — would put a
-	// drop after the CAS again, and such a drop holds the single answer slot
-	// until expires_at.
+	// The response fork of docs/protocol/datagram.md §4.1 step 6 picks its
+	// branch by Peer()'s bool alone, so that bool must be EXACTLY the negation
+	// of IsLocal(). A third answer here — an upstream that is neither local nor
+	// addressable — would put a drop after the CAS again, and such a drop holds
+	// the single answer slot until expires_at.
 	neighbour := testUpstream(domaintest.ID("upstream"))
 	peer, addressable := neighbour.Peer()
 	if !addressable || peer != domaintest.ID("upstream") {
@@ -332,9 +337,9 @@ type stubLimits struct{ global, perUpstream int }
 
 func (l stubLimits) ReverseStateCaps() (int, int) { return l.global, l.perUpstream }
 
-// TestCapsAndFairEviction covers the §5 bound: a per-upstream cap, a global
-// cap, and eviction that takes from the BUSIEST upstream rather than from
-// whoever happens to be oldest overall.
+// TestCapsAndFairEviction covers the docs/protocol/datagram.md §5 bound: a
+// per-upstream cap, a global cap, and eviction that takes from the BUSIEST
+// upstream rather than from whoever happens to be oldest overall.
 func TestCapsAndFairEviction(t *testing.T) {
 	now := time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
 	table := NewReverseTable(ReverseTableConfig{
@@ -515,13 +520,14 @@ func TestClaimRefusesAStaleGeneration(t *testing.T) {
 // further along: Rollback, Complete and Claim took the handle or the record the
 // caller owned, while the probe budget was still charged BY LABEL.
 //
-// The window is between the Lookup of §4.1 step 4 and the reservation of step 5.
-// The label belongs to whoever sent the request, so an exchange can end —
-// rolled back, completed or expired — and a FRESH one take the same label
-// inside that window. A budget charged by label alone is then charged to the
-// fresh record for an answer that was validated against the old one, and a
-// handful of such answers leave the live exchange unable to pay for its own
-// genuine reply while its slot is still pending and its label still valid.
+// The window is between the Lookup of docs/protocol/datagram.md §4.1 step 4 and
+// the reservation of step 5. The label belongs to whoever sent the request, so
+// an exchange can end — rolled back, completed or expired — and a FRESH one
+// take the same label inside that window. A budget charged by label alone is
+// then charged to the fresh record for an answer that was validated against the
+// old one, and a handful of such answers leave the live exchange unable to pay
+// for its own genuine reply while its slot is still pending and its label still
+// valid.
 func TestReserveProbeRefusesAStaleGeneration(t *testing.T) {
 	now := time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
 	table := newTestReverseTable(&now)

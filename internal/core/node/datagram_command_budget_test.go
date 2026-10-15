@@ -12,7 +12,8 @@ import (
 
 // datagram_command_budget_test.go pins the swap the `datagram` exemption is:
 // the plane leaves the per-connection command limiter because it charges its
-// own §5 budget instead, so a line that reaches NEITHER must not be exempt.
+// own docs/protocol/datagram.md §5 budget instead, so a line that reaches
+// NEITHER must not be exempt.
 //
 // That is exactly what an unauthenticated connection produces. The inbound
 // dispatcher answers `auth_required` above the ingress, so nothing on such a
@@ -91,13 +92,14 @@ func TestPreAuthDatagramStreamMeetsTheCommandLimiter(t *testing.T) {
 	}
 
 	// The other half, and the reason the fix is not "drop the exemption":
-	// an authenticated neighbour is billed by §5 and must not be billed twice.
-	// Its bulk chunks do not fit a control-plane rate, and the limiter's answer
-	// is a tear-down with ban points rather than a drop.
+	// an authenticated neighbour is billed by docs/protocol/datagram.md §5 and
+	// must not be billed twice. Its bulk chunks do not fit a control-plane
+	// rate, and the limiter's answer is a tear-down with ban points rather than
+	// a drop.
 	neighbour := registerDatagramCommandConn(t, svc, domain.ConnID(8802), true)
 	if refused := runCommandLineFlood(svc, neighbour, "203.0.113.12:1002", line, attempts); refused != 0 {
 		t.Fatalf("%d of %d datagram lines from an AUTHENTICATED neighbour were charged the command "+
-			"limiter: that plane already pays the §5 budget, and paying both throttles it to a "+
+			"limiter: that plane already pays the docs/protocol/datagram.md §5 budget, and paying both throttles it to a "+
 			"control-plane rate", refused, attempts)
 	}
 }
@@ -115,7 +117,7 @@ func TestDatagramExemptionFollowsTheBillableKey(t *testing.T) {
 	id := registerDatagramCommandConn(t, svc, domain.ConnID(8803), false)
 
 	if svc.frameLineExemptFromCommandLimit(id, line) {
-		t.Fatal("a datagram on an unauthenticated connection was exempted although its §5 budget " +
+		t.Fatal("a datagram on an unauthenticated connection was exempted although its docs/protocol/datagram.md §5 budget " +
 			"has no key to charge")
 	}
 

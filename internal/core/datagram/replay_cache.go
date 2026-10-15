@@ -39,7 +39,7 @@ import (
 // What the cache CAN still refuse is capacity, and that refusal is
 // deterministic and observable: Reserve answers `rejected`
 // (ErrReplayCacheCapacity) and the cache's own counters separate a refused
-// neighbour from an evicted one (§5).
+// neighbour from an evicted one (docs/protocol/datagram.md §5).
 //
 // # Optional values
 //
@@ -76,8 +76,8 @@ var (
 // IngressPeer is where a frame entered this node from: a CHANNEL, what this node
 // has been shown about the neighbour on the other end of it, and the BUDGET that
 // arrival was billed to — or the node itself for a locally originated datagram
-// (§4.1 — a local frame runs the same Reserve/Commit/Release cycle with
-// incoming_peer = local).
+// (docs/protocol/datagram.md §4.1 — a local frame runs the same
+// Reserve/Commit/Release cycle with incoming_peer = local).
 //
 // "Local" is a named state rather than a zero PeerIdentity: the zero value
 // here means "not set", and a cache that quotas by neighbour must not merge
@@ -369,7 +369,7 @@ func (o ingressOwner) compare(other ingressOwner) int {
 // ReservationToken is `rsv`: the local handle of one reservation of one replay
 // key. It never appears on the wire — it is neither the datagram
 // UUID nor `retry` — and it exists to close two holes that a bare replay key
-// leaves open (§4.1):
+// leaves open (docs/protocol/datagram.md §4.1):
 //
 //   - read-back of a racing Reserve could not tell the cache's own
 //     reservation from the competitor's reservation of the same key;
@@ -453,7 +453,8 @@ func (o HasOutcome) String() string {
 // HasResult is the outcome of the early replay probe. It is a SNAPSHOT rather
 // than a fact about the present: the record it was read from may be released by
 // a concurrent instance of the same frame the moment after. It may therefore
-// decide "is this worth going on with" and never "I still own the frame" (§4.1).
+// decide "is this worth going on with" and never "I still own the frame"
+// (docs/protocol/datagram.md §4.1).
 //
 // A hit says the key is TAKEN and nothing more, and that is the whole memory
 // the probe has to expose: a reserved key and a committed key are the same
@@ -478,9 +479,10 @@ func (r HasResult) Outcome() HasOutcome { return r.outcome }
 // ---------------------------------------------------------------------------
 
 // ReserveOutcome enumerates the three answers of the atomic check-and-reserve
-// that stands immediately before the first mutating operation (§4.1). Both
-// negative answers are DETERMINISTIC — the key was taken, or there was no room
-// for it — and neither leaves the caller guessing whether something landed.
+// that stands immediately before the first mutating operation
+// (docs/protocol/datagram.md §4.1). Both negative answers are DETERMINISTIC —
+// the key was taken, or there was no room for it — and neither leaves the
+// caller guessing whether something landed.
 type ReserveOutcome uint8
 
 const (
@@ -510,7 +512,7 @@ func (o ReserveOutcome) String() string {
 
 // ReserveResult is the outcome of Reserve. A successful reservation takes
 // the slot PHYSICALLY, which is what makes the later Commit incapable of
-// failing for lack of room (§4.1).
+// failing for lack of room (docs/protocol/datagram.md §4.1).
 type ReserveResult struct {
 	err         error
 	reservation ReservationToken

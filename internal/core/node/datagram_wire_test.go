@@ -23,18 +23,18 @@ import (
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
-// datagram_wire_test.go covers the wire-level obligations of
-// docs/refactoring/datagram-transport.md §9:
+// datagram_wire_test.go covers the wire-level obligations of the datagram
+// plane (docs/protocol/datagram.md §3.5, and the MaxFrameLine bound of §8):
 //
-//   - line 1073: a raw line reaches the STRICT parser on BOTH directions;
+//   - a raw line reaches the STRICT parser on BOTH directions;
 //     duplicate `type`, `ttl` and `auth` are rejected; not one datagram field
 //     is lost in the outbound-session read loop, and a datagram sent over an
 //     outbound session does arrive and parse (the one-directional
 //     disappearance regression);
-//   - line 1074: a frame above 128 KiB is refused on inbound TCP AND in the
+//   - a frame above 128 KiB is refused on inbound TCP AND in the
 //     peer-session read loop, which itself accepts up to 8 MiB, with the
 //     budget counted on len(line) including the newline;
-//   - line 1091: the size boundary measured on REAL encryption of the largest
+//   - the size boundary measured on REAL encryption of the largest
 //     chunk, on both receive paths.
 
 // ---------------------------------------------------------------------------
@@ -163,10 +163,11 @@ func newDatagramInboundFixture(t *testing.T, caps ...domain.Capability) (*Servic
 // CONVEYOR wired — the production shape of the ingress.
 //
 // The distinction is not cosmetic. Without a layer the ingress stops at the
-// strict parser and every test of §9 lines 1073-1074 exercises the fall-back
+// strict parser and every wire test here exercises the fall-back
 // branch, not the `layer != nil → pipeline.HandleInbound` path a running node
-// takes. The baseline kit is registered too, because §6.1 makes advertising
-// mesh_datagram_v1 a promise to handle it.
+// takes. The baseline kit is registered too, because
+// docs/protocol/datagram.md §6.1 makes advertising mesh_datagram_v1 a promise
+// to handle it.
 func newLayeredDatagramInboundFixture(
 	t *testing.T,
 	caps ...domain.Capability,
@@ -262,7 +263,8 @@ func acceptedLegacyDatagramNeighbour(peer domain.PeerIdentity, direction datagra
 
 // deliverOutboundSessionLine feeds ONE wire line to the outbound-session
 // receive path in the order readPeerSession applies it: admission first
-// (§4.1 step 1), then the classification-driven diversion to the ingress.
+// (docs/protocol/datagram.md §4.1 step 1), then the classification-driven
+// diversion to the ingress.
 //
 // It exists because a datagram no longer travels through the universal Frame at
 // all, so a test can no longer reach the ingress by handing
@@ -284,7 +286,7 @@ func deliverOutboundSessionLine(t *testing.T, svc *Service, session *peerSession
 
 // datagramDropCount returns how many refusals of one reason the ingress has
 // counted. The metric is the only observable the wire layer has — every
-// refusal is silent on the wire by contract (§2).
+// refusal is silent on the wire by contract (docs/protocol/datagram.md §2).
 func datagramDropCount(svc *Service, reason datagram.DropReason) uint64 {
 	return svc.datagramMetrics.Snapshot().DropsByReason[reason.String()]
 }
@@ -300,19 +302,20 @@ func newTestBufioReader(line string) *bufio.Reader {
 }
 
 // ---------------------------------------------------------------------------
-// Dispatch surface (§3.4)
+// Dispatch surface (docs/protocol/datagram.md §3.5)
 // ---------------------------------------------------------------------------
 
-// TestDatagramIsRawLineBacked pins the §3.4 requirement that dispatch keys on
-// the TOP-LEVEL type and that the type uses the RawLine bypass. Without the
-// entry the outbound-session dispatcher re-parses an empty string and the
-// frame disappears in exactly one direction of the wire — the bug
-// route_announce_v3 and route_poison_v1 were both fixed for.
+// TestDatagramIsRawLineBacked pins the docs/protocol/datagram.md §3.5
+// requirement that dispatch keys on the TOP-LEVEL type and that the type uses
+// the RawLine bypass. Without the entry the outbound-session dispatcher
+// re-parses an empty string and the frame disappears in exactly one direction
+// of the wire — the bug route_announce_v3 and route_poison_v1 were both fixed
+// for.
 func TestDatagramIsRawLineBacked(t *testing.T) {
 	t.Parallel()
 
 	if !isRawLineBackedFrameType(protocol.DatagramFrameType) {
-		t.Fatal("isRawLineBackedFrameType(datagram) = false: the strict parser of §3.4 would never see the original bytes on the outbound path")
+		t.Fatal("isRawLineBackedFrameType(datagram) = false: the strict parser of docs/protocol/datagram.md §3.5 would never see the original bytes on the outbound path")
 	}
 	// The inner dtype must NOT be a dispatch key: it is a datagram-internal
 	// field the universal Frame does not even carry.
@@ -394,7 +397,7 @@ func TestWideFrameLineBudgetIsAClosedAllowlist(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// End to end, both directions (§9 line 1073)
+// End to end, both directions (docs/protocol/datagram.md §3.5)
 // ---------------------------------------------------------------------------
 
 // TestDatagramReachesStrictParser_InboundTCP walks the inbound path: a raw
@@ -433,11 +436,11 @@ func TestDatagramReachesStrictParser_OutboundSession(t *testing.T) {
 }
 
 // TestDatagramOutboundSessionLosesNoField is the field-preservation half of
-// §9 line 1073. The universal Frame cannot carry mode, class, src, dst, ttl,
-// route_policy, dtype, payload or auth, so a read loop that forwarded the
-// PARSED frame instead of the raw line would silently drop all of them.
-// Re-parsing what the loop hands to dispatch must reproduce the original frame
-// field for field.
+// docs/protocol/datagram.md §3.5. The universal Frame cannot carry mode, class,
+// src, dst, ttl, route_policy, dtype, payload or auth, so a read loop that
+// forwarded the PARSED frame instead of the raw line would silently drop all of
+// them. Re-parsing what the loop hands to dispatch must reproduce the original
+// frame field for field.
 func TestDatagramOutboundSessionLosesNoField(t *testing.T) {
 	t.Parallel()
 
@@ -505,11 +508,11 @@ func TestDatagramOutboundSessionDropsEmptyRawLine(t *testing.T) {
 	}
 }
 
-// TestDatagramDuplicateKeysRejected is the strict-parsing half of §9 line
-// 1073, exercised through the REAL dispatchers on both directions: a repeated
-// `type`, `ttl` or `auth` must be refused. encoding/json collapses duplicate
-// keys silently, so a datagram that reached dispatch as a universal Frame
-// would accept every one of these.
+// TestDatagramDuplicateKeysRejected is the strict-parsing half of
+// docs/protocol/datagram.md §3.5, exercised through the REAL dispatchers on
+// both directions: a repeated `type`, `ttl` or `auth` must be refused.
+// encoding/json collapses duplicate keys silently, so a datagram that reached
+// dispatch as a universal Frame would accept every one of these.
 func TestDatagramDuplicateKeysRejected(t *testing.T) {
 	valid := mustDatagramLine(t, newNodeDatagram(t, nil))
 	valid = strings.TrimSuffix(valid, "\n")
@@ -616,15 +619,15 @@ func TestDatagramUnauthenticatedPeerGetsAuthRequired(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// MaxFrameLine on receive (§9 line 1074)
+// MaxFrameLine on receive (docs/protocol/datagram.md §2)
 // ---------------------------------------------------------------------------
 
-// TestWireLineBudgetCountsTheNewline pins the accounting rule of §2.3:
-// the budget is len(line) INCLUDING the terminating newline, whether or not
-// the caller has already stripped it. The peer-session reader hands over a
-// trimmed line and the inbound reader hands over the line as read, so a
-// helper that disagreed by one byte would move the boundary between the two
-// paths.
+// TestWireLineBudgetCountsTheNewline pins the accounting rule of
+// docs/protocol/datagram.md §2: the budget is len(line) INCLUDING the
+// terminating newline, whether or not the caller has already stripped it. The
+// peer-session reader hands over a trimmed line and the inbound reader hands
+// over the line as read, so a helper that disagreed by one byte would move the
+// boundary between the two paths.
 func TestWireLineBudgetCountsTheNewline(t *testing.T) {
 	t.Parallel()
 
@@ -644,10 +647,11 @@ func TestWireLineBudgetCountsTheNewline(t *testing.T) {
 	}
 }
 
-// TestDatagramOversizeRefusedOnInboundTCP covers the inbound half of §9 line
-// 1074 at both of its gates: the command reader itself (bound by
-// maxCommandLineBytes) and the ingress, which repeats the check because the
-// peer-session path reaches it through a much wider reader.
+// TestDatagramOversizeRefusedOnInboundTCP covers the inbound half of the
+// MaxFrameLine rule (docs/protocol/datagram.md §2) at both of its gates: the
+// command reader itself (bound by maxCommandLineBytes) and the ingress, which
+// repeats the check because the peer-session path reaches it through a much
+// wider reader.
 func TestDatagramOversizeRefusedOnInboundTCP(t *testing.T) {
 	oversize := oversizeDatagramLine(t)
 
@@ -687,7 +691,7 @@ func TestDatagramOversizeRefusedOnInboundTCP(t *testing.T) {
 		t.Fatalf("a legal frame was counted as oversize: %d", got)
 	}
 	if datagramObservedCount(svc) == 0 {
-		t.Fatal("the legal frame never reached the conveyor: §9 lines 1073-1074 would be checked on the fall-back path only")
+		t.Fatal("the legal frame never reached the conveyor: the wire tests would check the fall-back path only")
 	}
 }
 
@@ -725,12 +729,13 @@ func TestDatagramOversizeRefusedInPeerSessionLoop(t *testing.T) {
 // TestOversizeDatagramIsNeverBanWorthy pins the PRICE of the size gate, which
 // is the one thing the two tests above do not state.
 //
-// §2.3 is a rule about the LINE, and the neighbour that handed the line over is
-// not the author of the frame inside it: nothing in the envelope obliges a relay
-// to have measured the frame the way this node does, and §4.4 reserves
-// punishment for what every datagram transit IS obliged to check — the
-// stable header and auth. So an oversize datagram is counted and forgotten: no ban score, no
-// error frame, no tear-down.
+// docs/protocol/datagram.md §2 is a rule about the LINE, and the neighbour that
+// handed the line over is not the author of the frame inside it: nothing in the
+// envelope obliges a relay to have measured the frame the way this node does,
+// and docs/protocol/datagram.md §4.1 reserves punishment for what every
+// datagram transit IS obliged to check — the stable header and auth. So an
+// oversize datagram is counted and forgotten: no ban score, no error frame, no
+// tear-down.
 //
 // The mutation this kills: `ban: true` on the exceedsDatagramFrameLine branch of
 // handleDatagramFrame, which charged banIncrementInvalidSig on every accepted
@@ -756,7 +761,7 @@ func TestOversizeDatagramIsNeverBanWorthy(t *testing.T) {
 			t.Log("the oversize line was refused, as it must be")
 		}
 		if score := banScoreForIP(svc, datagramTestPeerIP); score != 0 {
-			t.Fatalf("ban score = %d for an oversize datagram: the neighbour that relayed a frame is not its author (§4.4)", score)
+			t.Fatalf("ban score = %d for an oversize datagram: the neighbour that relayed a frame is not its author (docs/protocol/datagram.md §4.1)", score)
 		}
 		select {
 		case data := <-backend.Outbound(connID):
@@ -811,15 +816,16 @@ func oversizeDatagramLine(t *testing.T) string {
 }
 
 // ---------------------------------------------------------------------------
-// Size boundary on real encryption, both receive paths (§9 line 1091)
+// Size boundary on real encryption, both receive paths
+// (docs/protocol/datagram.md §2.4)
 // ---------------------------------------------------------------------------
 
-// TestMaxEncryptedChunkPassesBothReceivePaths is the boundary §2.3 demands be
-// measured on real bytes: the largest chunk the file transport produces,
-// through the real encryption path, with every optional header field filled,
-// must be accepted on BOTH receive paths. A regression that shrinks the
-// budget on either side shows up here as a refusal, not as a silent
-// production drop of the largest legitimate frame.
+// TestMaxEncryptedChunkPassesBothReceivePaths is the boundary
+// docs/protocol/datagram.md §2.4 demands be measured on real bytes: the largest
+// chunk the file transport produces, through the real encryption path, with
+// every optional header field filled, must be accepted on BOTH receive paths. A
+// regression that shrinks the budget on either side shows up here as a refusal,
+// not as a silent production drop of the largest legitimate frame.
 func TestMaxEncryptedChunkPassesBothReceivePaths(t *testing.T) {
 	line := maxEncryptedChunkDatagramLine(t)
 	if len(line) > protocol.MaxFrameLine {
@@ -859,7 +865,8 @@ func TestMaxEncryptedChunkPassesBothReceivePaths(t *testing.T) {
 
 // maxEncryptedChunkDatagramLine builds the boundary frame: a real
 // EncryptFileCommandPayload ciphertext of a full-size chunk, decoded ONCE
-// (the adapter's obligation, §2.3), inside a bulk datagram.
+// (the adapter's obligation, docs/protocol/datagram.md §2.4), inside a bulk
+// datagram.
 func maxEncryptedChunkDatagramLine(t *testing.T) string {
 	t.Helper()
 	chunk := make([]byte, domain.DefaultChunkSize)

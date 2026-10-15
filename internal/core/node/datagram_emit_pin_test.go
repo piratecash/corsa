@@ -17,16 +17,16 @@ import (
 // queued on the CONNECTION the selection chose, and on no other.
 //
 // The selection reads a peer's connections under peerMu, applies the frame's
-// gates per connection (§4.3, §6) and, for a frame the layer pinned to a
-// channel, narrows the walk to that one socket (§4.2). All of that describes
-// concrete sockets. The hand-over used to describe an ADDRESS — the dial
-// address of an outbound session, the "inbound:<remoteAddr>" key of an accepted
-// one — and both were re-resolved at the queue. A peer that reconnected in
-// between owns those addresses with a NEW socket: a different handshake, a
-// different declared dtype set and a different ConnID. The frame then left over
-// a connection nobody had gated, and on the request plane over a channel the
-// reverse record does not name — which is exactly the substitution the pin
-// exists to prevent.
+// gates per connection (docs/protocol/datagram.md §4.4, §6) and, for a frame
+// the layer pinned to a channel, narrows the walk to that one socket
+// (docs/protocol/datagram.md §4.3). All of that describes concrete sockets. The
+// hand-over used to describe an ADDRESS — the dial address of an outbound
+// session, the "inbound:<remoteAddr>" key of an accepted one — and both were
+// re-resolved at the queue. A peer that reconnected in between owns those
+// addresses with a NEW socket: a different handshake, a different declared
+// dtype set and a different ConnID. The frame then left over a connection
+// nobody had gated, and on the request plane over a channel the reverse record
+// does not name — which is exactly the substitution the pin exists to prevent.
 //
 // Every test below drives the window through the emitter's selectionBarrier,
 // which stops the emission between the selection and the first hand-over. The
@@ -143,13 +143,14 @@ func TestEmitToQueuesOnTheSelectedSessionAfterAReconnect(t *testing.T) {
 
 // TestEmitToRefusesAPinnedFrameWhenItsChannelIsGone is the reverse plane.
 //
-// A `response` travels to the upstream of a reverse-state record (§4.2), and
-// the record stores the CHANNEL the question arrived on. EmitTo narrows the walk
-// to that one connection — and then handed the frame over by address, so a
-// reconnect turned "answer over the channel the record names" back into "answer
-// over whatever session that node's name resolves to now". A refusal is the
-// correct outcome here: the return path of the question is gone, and the caller
-// treats it like any other unreachable target.
+// A `response` travels to the upstream of a reverse-state record
+// (docs/protocol/datagram.md §4.3), and the record stores the CHANNEL the
+// question arrived on. EmitTo narrows the walk to that one connection — and
+// then handed the frame over by address, so a reconnect turned "answer over the
+// channel the record names" back into "answer over whatever session that node's
+// name resolves to now". A refusal is the correct outcome here: the return path
+// of the question is gone, and the caller treats it like any other unreachable
+// target.
 func TestEmitToRefusesAPinnedFrameWhenItsChannelIsGone(t *testing.T) {
 	t.Parallel()
 

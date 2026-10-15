@@ -17,8 +17,8 @@ import (
 // accepted by one node and dropped by its neighbour, so these values are
 // NOT local tuning knobs.
 //
-// Reference: docs/refactoring/datagram-transport.md §2, §2.1, §2.2, §2.3,
-// §3.3, §4.2, §4.4.1.
+// Reference: docs/protocol/datagram.md §2, §2.1, §2.3, §2.4, §3.4,
+// §4.3, §5 and the wire-normative constants of §8.
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -45,14 +45,16 @@ var (
 // ---------------------------------------------------------------------------
 
 const (
-	// MaxDTypeLen bounds a dtype name (§6.1: `[a-z0-9_]`, ≤ 64 chars).
+	// MaxDTypeLen bounds a dtype name (docs/protocol/datagram.md §6.1:
+	// `[a-z0-9_]`, ≤ 64 chars).
 	MaxDTypeLen = 64
 
-	// MaxDTypesPerNode bounds the advertised dtypes set of one peer (§6.1).
+	// MaxDTypesPerNode bounds the advertised dtypes set of one peer
+	// (docs/protocol/datagram.md §6.1).
 	MaxDTypesPerNode = 64
 
-	// MaxCapabilityNameLen bounds a capability name (§2.2: `[a-z0-9_]`,
-	// ≤ 40 chars).
+	// MaxCapabilityNameLen bounds a capability name
+	// (docs/protocol/datagram.md §2.3: `[a-z0-9_]`, ≤ 40 chars).
 	MaxCapabilityNameLen = 40
 
 	// MaxRawCapabilityNames bounds the raw advertised capability set that a
@@ -62,29 +64,32 @@ const (
 	MaxRawCapabilityNames = 64
 
 	// DatagramPubKeyBytes / DatagramSaltBytes / DatagramSigBytes fix the
-	// binary shape of the auth block (§3.1). The public key is Ed25519 and
-	// its size is part of the header version: another algorithm would need
-	// another `v`, not another `av` (§2.2).
+	// binary shape of the auth block (docs/protocol/datagram.md §3.1). The
+	// public key is Ed25519: `av = 1` names that signature algorithm together
+	// with the temporal policy (docs/protocol/datagram.md §3.4), so these sizes
+	// change only with a new auth version.
 	DatagramPubKeyBytes = 32
 	DatagramSaltBytes   = 16
 	DatagramSigBytes    = 64
 
 	// DatagramControlPayloadCap and DatagramBulkPayloadCap are the DECODED
-	// payload ceilings per class (§2.3). Budgets and queues are accounted
-	// on the serialized frame size instead — see §5.
+	// payload ceilings per class (docs/protocol/datagram.md §2.4). Budgets and
+	// queues are accounted on the serialized frame size instead — see
+	// docs/protocol/datagram.md §5.
 	DatagramControlPayloadCap = 4 * 1024
 	DatagramBulkPayloadCap    = 64 * 1024
 
 	// DatagramDefaultMaxHops is the hop budget of a locally originated
-	// datagram and the clamp applied to any received ttl (§4.1.1). Equal to
-	// today's file-command default so the migration keeps byte parity.
+	// datagram and the clamp applied to any received ttl
+	// (docs/protocol/datagram.md §4.2). Equal to today's file-command default
+	// so the migration keeps byte parity.
 	DatagramDefaultMaxHops uint8 = 10
 )
 
 // DatagramHeaderVersion is the only header version this build understands.
 // The frame type name never changes; the version lives here alone, so an
 // older node recognises the command, reads `v` and drops silently instead
-// of tearing the connection down (§2).
+// of tearing the connection down (docs/protocol/datagram.md §2).
 //
 // v2 dropped `req_caps` and `ext` from the envelope. Both the field set and
 // the signed transcript changed, so the two versions are not interchangeable
@@ -94,28 +99,30 @@ const DatagramHeaderVersion DatagramVersion = 2
 
 const (
 	// DatagramBaseReplayWindow is the LAYER's base replay-cache window,
-	// measured from auth.time (§2.2). It is the ceiling for BOTH validity and
-	// replay retention, with no exception left to declare: the profiles that
-	// could ask to own their own replay store went with the durable half of
-	// the layer, so every frame on this plane is clamped to this value.
+	// measured from auth.time (docs/protocol/datagram.md §3.4). It is the
+	// ceiling for BOTH validity and replay retention, with no exception left to
+	// declare: the profiles that could ask to own their own replay store went
+	// with the durable half of the layer, so every frame on this plane is
+	// clamped to this value.
 	DatagramBaseReplayWindow = 5 * time.Minute
 
 	// DatagramFreshnessWindow is the |now − auth.time| tolerance of the
-	// av = 1 profile (§3.3). It equals DatagramBaseReplayWindow today but is
-	// a SEPARATE constant on purpose: the base pipeline holds no freshness
-	// constant of its own (§2.2), so a future av may move this one without
-	// touching the layer's replay window.
+	// av = 1 profile (docs/protocol/datagram.md §3.4). It equals
+	// DatagramBaseReplayWindow today but is a SEPARATE constant on purpose: the
+	// base pipeline holds no freshness constant of its own
+	// (docs/protocol/datagram.md §3.4), so a future av may move this one
+	// without touching the layer's replay window.
 	DatagramFreshnessWindow = 5 * time.Minute
 
 	// ReverseStateTTL is the lifetime of one request/response reverse-state
-	// entry, derived in §4.2 from the round trip:
+	// entry, derived in docs/protocol/datagram.md §4.3 from the round trip:
 	// 2 × DatagramDefaultMaxHops × (queue residence + write grace) of the
 	// control class + 10 s target budget = 210 s, rounded up to 240 s.
 	ReverseStateTTL = 240 * time.Second
 
 	// controlQueueResidence / bulkQueueResidence are the per-class times a
-	// frame may sit in a send queue (§4.2). They are wire-normative because
-	// ReverseStateTTL is computed from them.
+	// frame may sit in a send queue (docs/protocol/datagram.md §4.3). They are
+	// wire-normative because ReverseStateTTL is computed from them.
 	controlQueueResidence = 5 * time.Second
 	bulkQueueResidence    = 30 * time.Second
 )
@@ -148,7 +155,7 @@ func ParseDatagramVersion(n int64) (DatagramVersion, error) {
 type AuthVersion uint8
 
 // AuthVersionBase is the base profile: fingerprint binding, Ed25519 and the
-// five-minute window of §3.3.
+// five-minute window of docs/protocol/datagram.md §3.4.
 const AuthVersionBase AuthVersion = 1
 
 // ParseAuthVersion converts a JSON integer into an auth version.
@@ -160,10 +167,10 @@ func ParseAuthVersion(n int64) (AuthVersion, error) {
 	return AuthVersion(b), nil
 }
 
-// parseVersionByte enforces the single rule shared by `v` and `av` (§3.4): a
-// JSON integer in 1…255, one byte in the transcript. Zero, negative and
-// out-of-range values are rejected here so two parsers cannot disagree on
-// what the signed byte was.
+// parseVersionByte enforces the single rule shared by `v` and `av`
+// (docs/protocol/datagram.md §3.5): a JSON integer in 1…255, one byte in the
+// transcript. Zero, negative and out-of-range values are rejected here so two
+// parsers cannot disagree on what the signed byte was.
 func parseVersionByte(n int64) (uint8, error) {
 	if n < 1 || n > 255 {
 		return 0, fmt.Errorf("version %d outside 1..255", n)
@@ -177,7 +184,7 @@ func parseVersionByte(n int64) (uint8, error) {
 
 // DatagramMode tells transit how to route the frame. It is a header field
 // and never derived from dtype: an old transit must handle request and
-// response of a type it has never heard of (§2, §4.2).
+// response of a type it has never heard of (docs/protocol/datagram.md §4.3).
 type DatagramMode string
 
 const (
@@ -210,13 +217,13 @@ func ParseDatagramMode(s string) (DatagramMode, error) {
 }
 
 // ---------------------------------------------------------------------------
-// Mode matrix (§2.1)
+// Mode matrix (docs/protocol/datagram.md §2.1)
 // ---------------------------------------------------------------------------
 
-// DatagramModeRule is one row of the §2.1 matrix: which classes the mode
-// admits, and whether auth and route_policy are required or forbidden.
-// Presence of both is a boolean contract per mode — never "optional" — so
-// one flag each expresses the whole row.
+// DatagramModeRule is one row of the docs/protocol/datagram.md §2.1 matrix:
+// which classes the mode admits, and whether auth and route_policy are required
+// or forbidden. Presence of both is a boolean contract per mode — never
+// "optional" — so one flag each expresses the whole row.
 type DatagramModeRule struct {
 	classes             map[DatagramClass]struct{}
 	AuthRequired        bool
@@ -229,10 +236,10 @@ func (r DatagramModeRule) AllowsClass(class DatagramClass) bool {
 	return ok
 }
 
-// datagramModeMatrix is the closed contract of §2.1 expressed as data, not
-// as a validation branch per rule. Anything outside this table is a reject,
-// and one table means a new mode cannot be half-added by touching a single
-// `if`.
+// datagramModeMatrix is the closed contract of docs/protocol/datagram.md §2.1
+// expressed as data, not as a validation branch per rule. Anything outside this
+// table is a reject, and one table means a new mode cannot be half-added by
+// touching a single `if`.
 var datagramModeMatrix = map[DatagramMode]DatagramModeRule{
 	DatagramModeRouted: {
 		classes:             map[DatagramClass]struct{}{DatagramClassControl: {}, DatagramClassBulk: {}},
@@ -251,8 +258,9 @@ var datagramModeMatrix = map[DatagramMode]DatagramModeRule{
 	},
 }
 
-// DatagramModeRuleFor returns the §2.1 row of the mode. The bool is false
-// for a mode outside the closed contract, which is itself a reject reason.
+// DatagramModeRuleFor returns the docs/protocol/datagram.md §2.1 row of the
+// mode. The bool is false for a mode outside the closed contract, which is
+// itself a reject reason.
 func DatagramModeRuleFor(mode DatagramMode) (DatagramModeRule, bool) {
 	rule, ok := datagramModeMatrix[mode]
 	return rule, ok
@@ -264,7 +272,8 @@ func DatagramModeRuleFor(mode DatagramMode) (DatagramModeRule, bool) {
 
 // DatagramClass picks the size ceiling, the queue and the budget share.
 // The enumeration is closed in this header version: a third class would be
-// a new wire format, so growth happens as a dtype on top of bulk (§2.3).
+// a new wire format, so growth happens as a dtype on top of bulk
+// (docs/protocol/datagram.md §2.4).
 type DatagramClass string
 
 const (
@@ -314,7 +323,8 @@ func DatagramPayloadCap(class DatagramClass) (int, error) {
 }
 
 // QueueResidence returns how long a frame of this class may wait in a send
-// queue before it is dropped as too late to be worth writing (§4.2).
+// queue before it is dropped as too late to be worth writing
+// (docs/protocol/datagram.md §4.3).
 func QueueResidence(class DatagramClass) (time.Duration, error) {
 	d, ok := datagramQueueResidence[class]
 	if !ok {
@@ -325,9 +335,9 @@ func QueueResidence(class DatagramClass) (time.Duration, error) {
 
 // WriteGrace returns the maximum time one frame of this class may spend
 // inside the socket write itself. Numerically equal to QueueResidence:
-// §4.2 defines the hop budget as queue time plus write time and needs both
-// tails bounded, and a second independent constant would only let the two
-// drift apart.
+// docs/protocol/datagram.md §4.3 defines the hop budget as queue time plus
+// write time and needs both tails bounded, and a second independent constant
+// would only let the two drift apart.
 func WriteGrace(class DatagramClass) (time.Duration, error) {
 	return QueueResidence(class)
 }
@@ -336,9 +346,10 @@ func WriteGrace(class DatagramClass) (time.Duration, error) {
 // RoutePolicy
 // ---------------------------------------------------------------------------
 
-// RoutePolicy selects the candidate picking strategy (§4.3). It is
-// mandatory for routed and request, and forbidden for response, where the
-// path is fixed by stored state (§2.1).
+// RoutePolicy selects the candidate picking strategy
+// (docs/protocol/datagram.md §4.4). It is mandatory for routed and request, and
+// forbidden for response, where the path is fixed by stored state
+// (docs/protocol/datagram.md §2.1).
 type RoutePolicy string
 
 const (
@@ -388,7 +399,7 @@ func ParseRoutePolicy(s string) (RoutePolicy, error) {
 
 // DType names the datagram protocol carried in payload. Transit never
 // interprets it; only endpoints and interceptors resolve it in the type
-// registry (§2, §7).
+// registry (docs/protocol/datagram.md §2, §7).
 type DType string
 
 // String returns the wire form, which is also the transcript form.
@@ -453,24 +464,24 @@ func ParseRawCapabilityNames(names []string) []CapabilityName {
 }
 
 // ---------------------------------------------------------------------------
-// The declared dtype set (§6.1)
+// The declared dtype set (docs/protocol/datagram.md §6.1)
 // ---------------------------------------------------------------------------
 
-// DTypeDeclaration says WHICH of the two shapes §6.1 allows the `dtypes`
-// field to take. Both shapes name the same SET when the list is empty — a
-// peer that listed nothing is an endpoint for nothing either way — but they
-// are different STATEMENTS, and the diagnostics report which one arrived: "it
-// told us it handles no type" and "it told us nothing" are distinguishable
-// facts about a peer, and a wire form that collapsed them could not be
-// un-collapsed later.
+// DTypeDeclaration says WHICH of the two shapes docs/protocol/datagram.md §6.1
+// allows the `dtypes` field to take. Both shapes name the same SET when the
+// list is empty — a peer that listed nothing is an endpoint for nothing either
+// way — but they are different STATEMENTS, and the diagnostics report which one
+// arrived: "it told us it handles no type" and "it told us nothing" are
+// distinguishable facts about a peer, and a wire form that collapsed them could
+// not be un-collapsed later.
 type DTypeDeclaration uint8
 
 const (
 	// DTypeDeclarationAbsent is a field that was never sent. It names NO
-	// type: §6.1 implies nothing on a silent peer's behalf, because unproven
-	// support equals no support. Only a node that does not speak the envelope
-	// emits this form, and its handshake stays wire-identical to a legacy
-	// one.
+	// type: docs/protocol/datagram.md §6.1 implies nothing on a silent peer's
+	// behalf, because unproven support equals no support. Only a node that does
+	// not speak the envelope emits this form, and its handshake stays
+	// wire-identical to a legacy one.
 	//
 	// It is the zero value on purpose, and that is not a hidden signal: a
 	// peer whose handshake has not been recorded at all made no statement,
@@ -499,8 +510,8 @@ func (d DTypeDeclaration) String() string {
 	return "unknown"
 }
 
-// DeclaredDTypeSet is the `dtypes` field of §6.1 as a value: the names plus
-// the fact of whether the field was there at all.
+// DeclaredDTypeSet is the `dtypes` field of docs/protocol/datagram.md §6.1 as a
+// value: the names plus the fact of whether the field was there at all.
 //
 // Both halves are kept because the field has three WIRE forms — absent,
 // empty, non-empty — while a bare []DType has two. The third form is what
@@ -512,7 +523,8 @@ type DeclaredDTypeSet struct {
 	declaration DTypeDeclaration
 }
 
-// AbsentDTypes is the field that was not sent, which names no type (§6.1).
+// AbsentDTypes is the field that was not sent, which names no type
+// (docs/protocol/datagram.md §6.1).
 func AbsentDTypes() DeclaredDTypeSet {
 	return DeclaredDTypeSet{declaration: DTypeDeclarationAbsent}
 }
@@ -532,8 +544,8 @@ func ExplicitDTypes(types []DType) DeclaredDTypeSet {
 }
 
 // ParseDeclaredDTypes validates a `dtypes` field that WAS PRESENT on the
-// wire (§6.1). For the optional field itself use ParseDeclaredDTypesField,
-// which maps its absence onto AbsentDTypes.
+// wire (docs/protocol/datagram.md §6.1). For the optional field itself use
+// ParseDeclaredDTypesField, which maps its absence onto AbsentDTypes.
 //
 // The wire contract is closed, and every clause of it is expressed here:
 //
@@ -575,10 +587,11 @@ func ParseDeclaredDTypes(names []string) DeclaredDTypeSet {
 //
 // The pointer is what carries the third wire state into Go: a plain
 // []string cannot distinguish "no field" from "[]" once it has been through
-// encoding/json, and the difference is exactly what §6.1 now assigns two
-// different meanings to. A JSON `null` decodes to a nil pointer and is
-// therefore read as absent — the conservative reading, and the only one that
-// keeps a peer's malformed field from being taken as "no handlers".
+// encoding/json, and the difference is exactly what
+// docs/protocol/datagram.md §6.1 now assigns two different meanings to. A JSON
+// `null` decodes to a nil pointer and is therefore read as absent — the
+// conservative reading, and the only one that keeps a peer's malformed field
+// from being taken as "no handlers".
 func ParseDeclaredDTypesField(field *[]string) DeclaredDTypeSet {
 	if field == nil {
 		return AbsentDTypes()
@@ -590,7 +603,7 @@ func ParseDeclaredDTypesField(field *[]string) DeclaredDTypeSet {
 func (s DeclaredDTypeSet) Declaration() DTypeDeclaration { return s.declaration }
 
 // Types returns the declared names as a copy — empty for an absent field,
-// which names no type (§6.1).
+// which names no type (docs/protocol/datagram.md §6.1).
 func (s DeclaredDTypeSet) Types() []DType {
 	return append(make([]DType, 0, len(s.types)), s.types...)
 }
@@ -615,7 +628,7 @@ func (s DeclaredDTypeSet) Clone() DeclaredDTypeSet {
 //
 // The returned slice is never nil for an explicit set, and that is
 // load-bearing: a *[]string pointing at a nil slice marshals as `null`,
-// which is neither of the two forms §6.1 defines.
+// which is neither of the two forms docs/protocol/datagram.md §6.1 defines.
 func (s DeclaredDTypeSet) WireField() *[]string {
 	if s.declaration == DTypeDeclarationAbsent {
 		return nil
@@ -628,8 +641,8 @@ func (s DeclaredDTypeSet) WireField() *[]string {
 }
 
 // validateWireName enforces the name alphabet shared by dtype, capability
-// names and the dtypes list (§2.2, §6.1). One implementation so the three
-// call sites cannot drift apart.
+// names and the dtypes list (docs/protocol/datagram.md §2.3, §6.1). One
+// implementation so the three call sites cannot drift apart.
 func validateWireName(s string, maxLen int) error {
 	if s == "" {
 		return errors.New("empty name")
@@ -652,19 +665,22 @@ func validateWireName(s string, maxLen int) error {
 // ---------------------------------------------------------------------------
 
 // NetworkID names the network a datagram belongs to. It is bound into every
-// transcript (§3.2) so a relay cannot re-bind a signed frame to another
-// network. Kept as a value passed in by the node rather than a constant
-// duplicated in the protocol package: the network name has exactly one
-// declaration, and signing a second copy of it would only let the two drift.
+// transcript (docs/protocol/datagram.md §3.2) so a relay cannot re-bind a
+// signed frame to another network. Kept as a value passed in by the node rather
+// than a constant duplicated in the protocol package: the network name has
+// exactly one declaration, and signing a second copy of it would only let the
+// two drift.
 type NetworkID string
 
-// String returns the wire/transcript form: UTF-8 bytes, no BOM (§3.2).
+// String returns the wire/transcript form: UTF-8 bytes, no BOM
+// (docs/protocol/datagram.md §3.2).
 func (n NetworkID) String() string { return string(n) }
 
-// ParseNetworkID enforces the transcript encoding of §3.2: non-empty valid
-// UTF-8 without a BOM. Empty would produce a zero-length segment and make
-// every network sign identically — precisely the re-binding the field
-// exists to prevent — and a BOM would make one network name sign two ways.
+// ParseNetworkID enforces the transcript encoding of
+// docs/protocol/datagram.md §3.2: non-empty valid UTF-8 without a BOM. Empty
+// would produce a zero-length segment and make every network sign identically —
+// precisely the re-binding the field exists to prevent — and a BOM would make
+// one network name sign two ways.
 func ParseNetworkID(s string) (NetworkID, error) {
 	switch {
 	case s == "":
@@ -683,8 +699,9 @@ func ParseNetworkID(s string) (NetworkID, error) {
 // ---------------------------------------------------------------------------
 
 // ReplayKey is sha256(transcript) — the anti-replay cache key of a routed
-// datagram (§3.2). It never travels on the wire: any node holding the frame
-// derives it, so there is nothing to forge and nothing to compare against.
+// datagram (docs/protocol/datagram.md §3.2). It never travels on the wire: any
+// node holding the frame derives it, so there is nothing to forge and nothing
+// to compare against.
 type ReplayKey [32]byte
 
 // IsZero reports whether the key is the zero value, i.e. not derived yet.

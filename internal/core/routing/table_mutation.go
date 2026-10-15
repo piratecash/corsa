@@ -640,10 +640,10 @@ func (t *Table) InvalidateTransitRoutes(peerIdentity PeerIdentity) (int, []PeerI
 // except a live direct claim to the uplink itself), the health of every pair
 // through it — black-hole cooldowns included — and its flap history.
 //
-// It exists for one moment (docs/refactoring/n1-legacy-residual.md §2): an
-// identity has just proved itself over v2, and before that a legacy
-// connection that merely NAMED it may have written claims, withdrawals with an
-// arbitrary SeqNo, cooldowns and flaps against it. None of that came from the
+// It exists for one moment (docs/routing.md, "Legacy claims of an identity
+// that proved v2"): an identity has just proved itself over v2, and before that
+// a legacy connection that merely NAMED it may have written claims, withdrawals
+// with an arbitrary SeqNo, cooldowns and flaps against it. None of that came from the
 // identity, so none of it may stand in the way of what the identity says next.
 // Unlike InvalidateTransitRoutes nothing is tombstoned; the identity's own
 // connect-time full sync repopulates the table. Neighbours simply stop seeing

@@ -183,7 +183,7 @@ type dmControlSender struct {
 	// dm_control dtype, because the connection a send would have used declared
 	// none. It is NOT a belief and holds nothing back: what a connection
 	// declared is a property of that connection, re-read on every send and gone
-	// with it (docs/refactoring/n1-legacy-residual.md §3). It only remembers
+	// with it (docs/protocol/network_security.md §13). It only remembers
 	// that the UI was told, so a change of the peer's connections tells it
 	// again (noteDMControlConnectionsChanged) and a refusal per frame does not.
 	typeRefusalShown map[domain.PeerIdentity]struct{}
@@ -726,7 +726,7 @@ func (d *dmControlSender) sendOne(ctx context.Context, peer domain.PeerIdentity,
 			// belief about the identity is recorded — a legacy connection that
 			// merely names the identity must not be able to forbid it reactions,
 			// and an hour-long belief would outlive the connection it was about
-			// (docs/refactoring/n1-legacy-residual.md §3).
+			// (docs/protocol/network_security.md §13).
 			//
 			// About the TYPE and not about frame.command: the gate answers
 			// before anything is opened, so it cannot know which command was

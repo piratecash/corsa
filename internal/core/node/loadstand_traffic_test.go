@@ -10,8 +10,8 @@ import (
 )
 
 // The stand's byte figures are the node's transport counters
-// (Service.TransportTrafficStats, docs/refactoring/dht/05-rollout-metrics.md
-// §5.3): every byte read from or written to a peer socket, counted once, at
+// (Service.TransportTrafficStats, docs/metrics.md "Transport totals"): every
+// byte read from or written to a peer socket, counted once, at
 // the socket, for the life of the node's Service — one incarnation — never
 // persisted and never decreasing. Within one incarnation a byte window is therefore always
 // defined, whatever connections opened, closed or were evicted between its

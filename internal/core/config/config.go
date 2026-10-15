@@ -97,8 +97,7 @@ type Node struct {
 	// ZERO MEANS THE SHARED CEILING IS OFF, and that is the default: the
 	// value of B is approved from the load bench, not derived from a single
 	// memory figure, so shipping a number before that bench exists would be
-	// choosing a limit nobody measured
-	// (docs/refactoring/dht/15-overlay-parameters.md §0.1.1).
+	// choosing a limit nobody measured.
 	//
 	// Off does NOT mean unlimited admission — MaxOutgoingPeers and
 	// MaxIncomingPeers keep applying. What B adds is the one thing neither
@@ -352,17 +351,19 @@ type Node struct {
 
 	// EnableDatagramV1 controls whether this node runs the datagram transport
 	// layer (env: CORSA_ENABLE_DATAGRAM_V1, default TRUE): the capabilities of
-	// §6, the `dtypes` handshake field, the conveyor and its background loops.
-	// Operators opt out via CORSA_ENABLE_DATAGRAM_V1=0 (or false/no/off).
+	// docs/protocol/datagram.md §6, the `dtypes` handshake field, the conveyor
+	// and its background loops. Operators opt out via
+	// CORSA_ENABLE_DATAGRAM_V1=0 (or false/no/off).
 	//
 	// The two capabilities are gated differently BELOW this flag, and neither
 	// of them reads the type registry (datagramPlaneCapability):
 	//
 	//   - the endpoint capability (mesh_datagram_v1) follows the flag and
-	//     nothing else. §6 makes it exactly one statement — this node
-	//     understands the envelope — which is true the moment the layer is
-	//     wired, whatever the registry holds. WHICH types it can terminate is
-	//     stated by `dtypes` alone (§6.1), and an empty registry states that
+	//     nothing else. docs/protocol/datagram.md §6 makes it exactly one
+	//     statement — this node understands the envelope — which is true the
+	//     moment the layer is wired, whatever the registry holds. WHICH types
+	//     it can terminate is stated by `dtypes` alone
+	//     (docs/protocol/datagram.md §6.1), and an empty registry states that
 	//     there as an explicitly empty set;
 	//   - the transit capability (mesh_datagram_transit_v1) additionally
 	//     requires a full node: forwarding is what a client node does not do.
@@ -375,8 +376,7 @@ type Node struct {
 	// The zero value is FALSE, so a config.Node built by struct literal (test
 	// fixtures, embedders) stays off unless it says otherwise; the default
 	// lives in Default() via enableDatagramV1FromEnv, not in the type. Same
-	// split as EnableMeshRoutingV3. See docs/refactoring/datagram-transport.md
-	// §6 and §10.
+	// split as EnableMeshRoutingV3. See docs/protocol/datagram.md §6 and §8.
 	EnableDatagramV1 bool
 
 	// IdentityLookupBGAttempts caps the background-phase attempts of one
@@ -1346,23 +1346,24 @@ func enableMeshRoutingV3FromEnv() bool {
 
 // enableDatagramV1FromEnv reads CORSA_ENABLE_DATAGRAM_V1 and returns whether
 // this node runs the datagram transport layer at all: the two capabilities of
-// §6, the `dtypes` handshake field, the conveyor and every background loop
-// that serves it.
+// docs/protocol/datagram.md §6, the `dtypes` handshake field, the conveyor and
+// every background loop that serves it.
 //
 // Same polarity as enableMeshRoutingV3FromEnv — default ON with an escape
 // hatch. The layer is wanted in the network now rather than after the first
 // type ships: the transit substrate has to soak BEFORE anything rides on it,
-// and §11 leaves the limit numbers to be set from telemetry that a plane
-// nobody advertises never produces. Only the explicit falsey set — "0",
-// "false", "no", "off" after trimming and lower-casing — turns it off.
+// and the limit numbers of docs/protocol/datagram.md §5 are starting values
+// waiting for telemetry that a plane nobody advertises never produces. Only the
+// explicit falsey set — "0", "false", "no", "off" after trimming and
+// lower-casing — turns it off.
 //
 // Reading an unrecognised value as ON is safe in a way it would not have been
 // while the layer was half-built, because the capability and the type set are
-// two separate statements (§6, §6.1): mesh_datagram_v1 promises only that the
-// envelope is understood, while a build with an empty registry declares an
-// explicitly empty `dtypes` — so it relays, and is relayed through, without
-// ever promising a handler it does not have. See
-// docs/refactoring/datagram-transport.md §6 and §10.
+// two separate statements (docs/protocol/datagram.md §6, §6.1):
+// mesh_datagram_v1 promises only that the envelope is understood, while a build
+// with an empty registry declares an explicitly empty `dtypes` — so it relays,
+// and is relayed through, without ever promising a handler it does not have.
+// See docs/protocol/datagram.md §6 and §8.
 func enableDatagramV1FromEnv() bool {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("CORSA_ENABLE_DATAGRAM_V1"))) {
 	case "0", "false", "no", "off":

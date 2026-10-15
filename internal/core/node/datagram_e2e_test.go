@@ -16,10 +16,12 @@ import (
 
 // datagram_e2e_test.go drives the whole plane over real TCP sessions: a
 // datagram created on node A leaves through the layer's scheduler, crosses the
-// wire, passes the strict parser, the §5 admission, the signature check and
-// the conveyor on the far side, and reaches a registered handler.
+// wire, passes the strict parser, the docs/protocol/datagram.md §5 admission,
+// the signature check and the conveyor on the far side, and reaches a
+// registered handler.
 //
-// Two topologies, because they exercise different halves of §4.3:
+// Two topologies, because they exercise different halves of
+// docs/protocol/datagram.md §4.4:
 //
 //   - A → B: the direct-session branch of step 1, including the role gate and
 //     the last-hop dtype gate;
@@ -27,8 +29,9 @@ import (
 //     decrement and the second hop's direct branch.
 //
 // The dtype has to be DECLARED by the destination for either topology to
-// deliver: §6.1 credits a peer with no type it did not list, so both nodes
-// register the same fixture kit and their `dtypes` field carries it in full.
+// deliver: docs/protocol/datagram.md §6.1 credits a peer with no type it did
+// not list, so both nodes register the same fixture kit and their `dtypes`
+// field carries it in full.
 //
 // A third topology, A → C → B with an EMPTY registry on C, covers the state
 // PR-0 really ships: no handler for any type, and still a lawful relay.
@@ -48,7 +51,8 @@ const datagramE2EDType = domain.DType("e2e_sink")
 // It also fills in the REST of the fixture kit, so every node in this file
 // declares the same set and no topology fails on a type its destination merely
 // happens not to have registered. The set reaches the wire as an explicit list
-// either way: an endpoint always states its `dtypes` (§6.1).
+// either way: an endpoint always states its `dtypes`
+// (docs/protocol/datagram.md §6.1).
 func registerDatagramSink(t *testing.T, svc *Service) <-chan []byte {
 	t.Helper()
 	if svc.datagramLayer() == nil {
@@ -90,9 +94,9 @@ func registerDatagramSink(t *testing.T, svc *Service) <-chan []byte {
 // startDatagramNode starts a full node with the plane enabled and its fixture
 // kit registered BEFORE the first handshake.
 //
-// The order is load-bearing, not tidiness: §6.1 fixes the declared type set
-// for the lifetime of a session, so a type registered after the peers
-// connected would never reach the wire.
+// The order is load-bearing, not tidiness: docs/protocol/datagram.md §6.1 fixes
+// the declared type set for the lifetime of a session, so a type registered
+// after the peers connected would never reach the wire.
 func startDatagramNode(t *testing.T, listen string, bootstrap ...string) (*Service, <-chan []byte, func()) {
 	t.Helper()
 	var delivered <-chan []byte
@@ -104,9 +108,10 @@ func startDatagramNode(t *testing.T, listen string, bootstrap ...string) (*Servi
 
 // startEmptyRegistryDatagramNode starts a full node with the plane enabled and
 // NOTHING registered — the exact state PR-0 ships. Such a node handles no
-// dtype and says so with an explicitly empty `dtypes` (§6.1), while still
-// advertising both capabilities of §6: it understands the envelope, and it
-// forwards other people's frames.
+// dtype and says so with an explicitly empty `dtypes`
+// (docs/protocol/datagram.md §6.1), while still advertising both capabilities
+// of docs/protocol/datagram.md §6: it understands the envelope, and it forwards
+// other people's frames.
 func startEmptyRegistryDatagramNode(t *testing.T, listen string, bootstrap ...string) (*Service, func()) {
 	t.Helper()
 	return startDatagramNodeWithRegistry(t, listen, nil, bootstrap...)
@@ -148,9 +153,9 @@ func startDatagramNodeWithRegistry(
 }
 
 // sendDatagramTo builds a routed datagram from svc to dst and places it
-// through the layer's own local-send path — the same path §4.3 defines, with
-// the same gates, the same reservation and the same candidate walk a real
-// protocol would use.
+// through the layer's own local-send path — the same path
+// docs/protocol/datagram.md §4.4 defines, with the same gates, the same
+// reservation and the same candidate walk a real protocol would use.
 func sendDatagramTo(t *testing.T, svc *Service, dst domain.PeerIdentity, payload string) datagram.SendOutcome {
 	t.Helper()
 	frame := newServiceDatagram(t, svc, dst, datagramE2EDType, domain.RoutePolicyBest)
@@ -282,18 +287,19 @@ func TestDatagramDeliveredThroughTransit(t *testing.T) {
 }
 
 // TestEmptyRegistryRelayCarriesSomebodyElsesDatagram is the case the plane
-// could not do at all before the §6 amendment, and the reason it exists.
+// could not do at all before the docs/protocol/datagram.md §6 amendment, and
+// the reason it exists.
 //
 // C is a PR-0 node in its shipping state: the layer wired, the type registry
 // EMPTY. It handles no dtype and declares exactly that (`"dtypes": []`), yet
 // it understands the envelope and forwards, so it advertises both capabilities
-// of §6 — and A may therefore pick it as the next hop for a frame addressed to
-// B.
+// of docs/protocol/datagram.md §6 — and A may therefore pick it as the next hop
+// for a frame addressed to B.
 //
 // With the endpoint capability withheld until a type kit is registered,
 // C failed the candidate filter, which demands mesh_datagram_v1 from EVERY
-// candidate including a purely transit one (§2.2 rule 2). A found no
-// admissible hop and the whole plane carried nothing.
+// candidate including a purely transit one (docs/protocol/datagram.md §6). A
+// found no admissible hop and the whole plane carried nothing.
 func TestEmptyRegistryRelayCarriesSomebodyElsesDatagram(t *testing.T) {
 	t.Parallel()
 
@@ -355,8 +361,9 @@ func TestEmptyRegistryRelayCarriesSomebodyElsesDatagram(t *testing.T) {
 }
 
 // datagramReachableNow decodes the probe's JSON answer down to the one bit the
-// e2e tests wait on. The answer carries its reason as well (§6.1), which the
-// unit tests assert; here only the bit matters.
+// e2e tests wait on. The answer carries its reason as well
+// (docs/protocol/datagram.md §6.1), which the unit tests assert; here only the
+// bit matters.
 func datagramReachableNow(t *testing.T, svc *Service, dst domain.PeerIdentity, dtype domain.DType) bool {
 	t.Helper()
 	data, err := svc.DatagramReachable(context.Background(), dst, dtype)

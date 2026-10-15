@@ -33,8 +33,8 @@ import (
 // place a decision is made and one place its failure is reported.
 //
 // What is NOT here is the wire: the decision is stored and shown, and the node
-// carries it to the peer a second or so later. See
-// docs/refactoring/reactions-protocol.md.
+// carries it to the peer a second or so later. See docs/ui.md ("Shared UI
+// components", reactions).
 
 // reactionRouter is everything a reaction decision needs from the router, and
 // nothing else.
@@ -326,7 +326,8 @@ func (w *Window) announceReactionsAreLocalOnly() {
 	// offline (it may be reachable through routes), and not that the reaction
 	// is queued (whether it is, is the queue's to say). Claiming it cannot
 	// arrive would be the false statement the old hour-long belief made after a
-	// disconnect (docs/refactoring/n1-legacy-residual.md §3).
+	// disconnect (docs/ui.md, "Shared UI components";
+	// docs/protocol/network_security.md §13).
 	if router.ReactionsSupportOf(peer) != domain.ReactionsSupportAbsent {
 		// Not (or no longer) refused, so the notice goes — WITHOUT asking
 		// whether it was this conversation that put it there. The status line is

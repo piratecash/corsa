@@ -123,6 +123,9 @@ func (s *Service) bootstrapLoop(ctx context.Context) {
 			s.maybeSavePeerState()
 			s.refreshAggregateStatus()
 			s.emitTrafficDeltas()
+			// Last: a batch can be a whole-file write of the secure-session
+			// store, and it must not hold up the tick's other duties.
+			s.flushSecureSessionRenewals(flushRenewalsWhenDue)
 		}
 	}
 }
@@ -1457,6 +1460,7 @@ func (s *Service) syncPeer(ctx context.Context, address domain.PeerAddress, requ
 	// version implements it yet.
 	welcome, ok := s.syncPeerWelcome(pc, reader, address, transport)
 	if !ok {
+		s.forgetV1MarkWithoutWelcome(address, transport)
 		return 0
 	}
 	// One gate for both session kinds, before auth_session is signed and
@@ -2684,11 +2688,12 @@ func (s *Service) readPeerSession(reader *bufio.Reader, session *peerSession) {
 		// megabytes were read and copied before the node could say it never
 		// wanted them.
 		//
-		// ONE type is returned UNCHARGED: a datagram is metered by the §5
-		// per-neighbour budget of its own plane instead, charged on these same
-		// bytes at the diversion below. The two budgets replace each other rather
-		// than stack, so a datagram stream cannot empty the bucket the other
-		// planes on this session are paying from.
+		// ONE type is returned UNCHARGED: a datagram is metered by the
+		// docs/protocol/datagram.md §5 per-neighbour budget of its own plane
+		// instead, charged on these same bytes at the diversion below. The two
+		// budgets replace each other rather than stack, so a datagram stream
+		// cannot empty the bucket the other planes on this session are paying
+		// from.
 		line, err := s.readAdmittedSessionLine(reader, session)
 		if errors.Is(err, errPeerSessionLineRefused) {
 			// One line consumed and dropped on admission grounds. The violation
@@ -2721,9 +2726,9 @@ func (s *Service) readPeerSession(reader *bufio.Reader, session *peerSession) {
 		// whitespace is part of the wire payload for diagnostics.
 		s.captureOutboundRecv(session.connID, strings.TrimRight(line, "\r\n"))
 
-		// ADMISSION FIRST (§4.1 step 1). The line is classified by
-		// classifyFrameLine — a single bounded scan that never builds a JSON
-		// value — and BOTH a line that has not earned the wide
+		// ADMISSION FIRST (docs/protocol/datagram.md §4.1 step 1). The line is
+		// classified by classifyFrameLine — a single bounded scan that never
+		// builds a JSON value — and BOTH a line that has not earned the wide
 		// maxResponseLineBytes budget and a line whose type the scan cannot
 		// resolve are refused BEFORE protocol.ParseFrameLine gets to copy and
 		// decode it. The order is the whole point on this reader: it accepts up
@@ -2742,21 +2747,23 @@ func (s *Service) readPeerSession(reader *bufio.Reader, session *peerSession) {
 			continue
 		}
 
-		// A DATAGRAM NEVER REACHES protocol.ParseFrameLine. §4.1 step 1 charges
-		// the neighbour's byte and frame budget "before any decoding", and the
-		// universal parser is decoding: running it first let a neighbour impose
-		// a full JSON unmarshal of every datagram-shaped line for free, and the
-		// layer only found out afterwards. Diverting here — the same shape
-		// file_command already uses below — puts the budget first and skips the
-		// universal parse entirely, because the strict parser of §3.4 has to
-		// read the ORIGINAL bytes anyway.
+		// A DATAGRAM NEVER REACHES protocol.ParseFrameLine.
+		// docs/protocol/datagram.md §4.1 step 1 charges the neighbour's byte
+		// and frame budget "before any decoding", and the universal parser is
+		// decoding: running it first let a neighbour impose a full JSON
+		// unmarshal of every datagram-shaped line for free, and the layer only
+		// found out afterwards. Diverting here — the same shape file_command
+		// already uses below — puts the budget first and skips the universal
+		// parse entirely, because the strict parser of
+		// docs/protocol/datagram.md §3.5 has to read the ORIGINAL bytes anyway.
 		//
 		// This is also the ONLY meter such a line meets on this reader: the
 		// response-plane budget above admitted it without charging, on the same
 		// classification this predicate answers from
-		// (sessionDatagramPaysItsOwnBudget), so the §5 charge inside the ingress
-		// is what makes the line cost its sender anything at all. The two
-		// predicates are one call for exactly that reason.
+		// (sessionDatagramPaysItsOwnBudget), so the
+		// docs/protocol/datagram.md §5 charge inside the ingress is what makes
+		// the line cost its sender anything at all. The two predicates are one
+		// call for exactly that reason.
 		if isDatagramWireLine(line) {
 			s.dispatchSessionDatagramLine(session, line)
 			continue
@@ -2832,9 +2839,9 @@ func (s *Service) readPeerSession(reader *bufio.Reader, session *peerSession) {
 	}
 }
 
-// refuseUnadmissibleFrameLine is admission (§4.1 step 1) on the peer-session
-// reader: it runs on the CLASSIFICATION, before anything is parsed, and reports
-// whether the line was dropped.
+// refuseUnadmissibleFrameLine is admission (docs/protocol/datagram.md §4.1 step
+// 1) on the peer-session reader: it runs on the CLASSIFICATION, before anything
+// is parsed, and reports whether the line was dropped.
 //
 // See admitFrameLinePreParse for the rule. The two refusals are separate calls
 // rather than one because they are different facts about the neighbour and an
@@ -2848,9 +2855,9 @@ func (s *Service) readPeerSession(reader *bufio.Reader, session *peerSession) {
 // Both refusals here stay scored, and neither carries the datagram carve-out —
 // deliberately, and for different reasons:
 //
-//   - an AMBIGUOUS line names no plane at all (§3.4 refuses a duplicate
-//     top-level key on this one outright), so it is not a frame of the datagram
-//     plane whose rules could apply to it;
+//   - an AMBIGUOUS line names no plane at all (docs/protocol/datagram.md §3.5
+//     refuses a duplicate top-level key on this one outright), so it is not a
+//     frame of the datagram plane whose rules could apply to it;
 //   - the OVER-BUDGET verdict is unreachable for a datagram. The wide response
 //     budget is bought at the read, from the line's first bytes, and `datagram`
 //     is not a type that can buy it (hasWideFrameLineBudget) — so a line this
@@ -2902,7 +2909,7 @@ func sessionAdmissionFatal(err error) error {
 // The DECISION belongs to the classification, which is why it is not this
 // function's business; the ATTRIBUTION is best-effort and falls back to
 // peekFrameType, because a line refused without ever naming itself still has to
-// land on the drop counter of the plane it CLAIMED to belong to, or §10's
+// land on the drop counter of the plane it CLAIMED to belong to, or the
 // "dropped by reason" ledger loses exactly the refusals the widest reader on
 // this node produces.
 func oversizeRefusalAttribution(claimed, line string) string {
@@ -2925,7 +2932,7 @@ func oversizeRefusalAttribution(claimed, line string) string {
 // and then watches our own size-aware sender silently drop the same route on
 // re-announce — sender and receiver diverging on which routes the peer "knows
 // about". For a datagram the same hole would make "a frame is smaller than
-// 128 KiB" stop being a property of reception (§2.3).
+// 128 KiB" stop being a property of reception (docs/protocol/datagram.md §2).
 //
 // It is DEFENCE IN DEPTH now rather than a second decision: admission refuses
 // every oversize line whose type is not frameLineNamed-and-entitled, and a
@@ -2962,24 +2969,25 @@ func (s *Service) dropOversizeFrameLine(address domain.PeerAddress, frameType, l
 //
 // # Why the neighbour is charged for a refusal
 //
-// §4.1 step 1 puts admission before any decoding, and an unmetered refusal is a
-// free load channel: the cheapest verdict this reader has would also be its only
-// uncharged one, so a peer would hold the node at line rate for nothing by
-// sending garbage that refuses to name itself. The same argument is already
-// recorded on the closed-barrier branch of handleDatagramFrame, which charges
-// before refusing for exactly this reason. The charge decides nothing here —
-// the line is refused either way — it only makes the refusal cost the sender
-// what it cost the receiver.
+// docs/protocol/datagram.md §4.1 step 1 puts admission before any decoding, and
+// an unmetered refusal is a free load channel: the cheapest verdict this reader
+// has would also be its only uncharged one, so a peer would hold the node at
+// line rate for nothing by sending garbage that refuses to name itself. The
+// same argument is already recorded on the closed-barrier branch of
+// handleDatagramFrame, which charges before refusing for exactly this reason.
+// The charge decides nothing here — the line is refused either way — it only
+// makes the refusal cost the sender what it cost the receiver.
 //
 // # Why the DATAGRAM budget is the one charged
 //
-// Because it is the only per-NEIGHBOUR byte budget this node has (§5): the
-// announce plane counts routes, the command limiter counts frames per socket and
-// does not run on this reader at all. Charging it is not a claim that the line
-// was a datagram — it cannot be, since the whole point is that nothing can say
-// what it was — it is the node billing the neighbour that sent the bytes. With no
-// layer there is nothing to charge, and the line is simply dropped; that is
-// strictly what happened before this gate existed.
+// Because it is the only per-NEIGHBOUR byte budget this node has
+// (docs/protocol/datagram.md §5): the announce plane counts routes, the command
+// limiter counts frames per socket and does not run on this reader at all.
+// Charging it is not a claim that the line was a datagram — it cannot be, since
+// the whole point is that nothing can say what it was — it is the node billing
+// the neighbour that sent the bytes. With no layer there is nothing to charge,
+// and the line is simply dropped; that is strictly what happened before this
+// gate existed.
 //
 // # Why a KEY and not an identity
 //
@@ -2994,9 +3002,9 @@ func (s *Service) dropOversizeFrameLine(address domain.PeerAddress, frameType, l
 // Through countAmbiguousDatagramRefusal, on the same best-effort attribution
 // every other pre-parse refusal on this reader uses: a line the peek calls a
 // datagram lands on DropMalformed, which is the verdict the strict parser of
-// §3.4 would have reached one step later for a duplicate top-level key. The
-// Warn line carries the peeked type for every other case and says plainly that
-// it is a hint.
+// docs/protocol/datagram.md §3.5 would have reached one step later for a
+// duplicate top-level key. The Warn line carries the peeked type for every
+// other case and says plainly that it is a hint.
 func (s *Service) dropAmbiguousFrameLine(budgetKey datagram.AdmissionKey, peerLabel, line string) bool {
 	if layer := s.datagramLayer(); layer != nil {
 		// The verdict is ignored deliberately: over budget or inside it, the
@@ -4388,13 +4396,13 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *
 		// UNREACHABLE, and kept as the assertion of that fact. readPeerSession
 		// classifies every line before the parser runs: a line classifyFrameLine
 		// names `datagram` is diverted straight to the ingress, and a line it
-		// cannot resolve is refused unparsed (§4.1 step 1). What used to arrive
-		// here — a duplicate or case-variant `type` key the parser resolved and
-		// the scan could not — no longer reaches protocol.ParseFrameLine at all,
-		// so a frame in this branch means the two readers disagree on a line
-		// neither refused. That is a classifier bug, not a delivery decision,
-		// and delivering it would put the universal parse back in front of the
-		// neighbour's budget.
+		// cannot resolve is refused unparsed (docs/protocol/datagram.md §4.1
+		// step 1). What used to arrive here — a duplicate or case-variant
+		// `type` key the parser resolved and the scan could not — no longer
+		// reaches protocol.ParseFrameLine at all, so a frame in this branch
+		// means the two readers disagree on a line neither refused. That is a
+		// classifier bug, not a delivery decision, and delivering it would put
+		// the universal parse back in front of the neighbour's budget.
 		s.reportDatagramResidueUnreachable("outbound_session", string(address))
 	case "error":
 		// Remote sent an explicit error frame before closing the connection.

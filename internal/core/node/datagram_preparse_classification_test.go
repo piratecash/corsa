@@ -15,9 +15,9 @@ import (
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
-// datagram_preparse_classification_test.go pins the two rules that make §4.1
-// step 1 (spec line 417 — "admission by bytes and frames, BEFORE any decoding")
-// literally true on both receive paths:
+// datagram_preparse_classification_test.go pins the two rules that make
+// docs/protocol/datagram.md §4.1 step 1 (spec line 417 — "admission by bytes
+// and frames, BEFORE any decoding") literally true on both receive paths:
 //
 //   - a line whose type cannot be resolved without parsing it is refused
 //     WITHOUT parsing it. Before this, such a line went through
@@ -209,7 +209,7 @@ func TestNoDatagramDeliveryBelowTheUniversalParser(t *testing.T) {
 	} {
 		for _, called := range callsInsideCaseClause(t, where.file, where.function, protocol.DatagramFrameType) {
 			if forbidden[called] {
-				t.Errorf("the `datagram` case of %s.%s calls %s: a datagram delivered from a dispatch switch has already been through the universal parser, which §4.1 step 1 forbids before admission",
+				t.Errorf("the `datagram` case of %s.%s calls %s: a datagram delivered from a dispatch switch has already been through the universal parser, which docs/protocol/datagram.md §4.1 step 1 forbids before admission",
 					where.file, where.function, called)
 			}
 		}
@@ -295,7 +295,8 @@ func caseClauseNames(clause *ast.CaseClause, label string) bool {
 // the line is refused unparsed and the neighbour is charged for the bytes it
 // made this node scan. With protocol.ParseFrameLine first the line dies on the
 // parser's own error, the residue branch is never reached and the neighbour
-// pays nothing at all — the free decode §4.1 step 1 exists to prevent.
+// pays nothing at all — the free decode docs/protocol/datagram.md §4.1 step 1
+// exists to prevent.
 func ambiguousDatagramDecoy(t *testing.T) string {
 	t.Helper()
 	// `capabilities` is a []string on the universal Frame, so a number there is
@@ -330,8 +331,9 @@ func TestOutboundSessionRefusesAnAmbiguousLineBeforeTheParser(t *testing.T) {
 	svc, peerEnd, session := newReadPeerSessionFixture(t)
 	writeWireLine(t, peerEnd, ambiguousDatagramDecoy(t))
 
-	// Charged: §4.1 step 1 bills the neighbour before anything is decoded, and
-	// an unmetered refusal would be this reader's only free one.
+	// Charged: docs/protocol/datagram.md §4.1 step 1 bills the neighbour before
+	// anything is decoded, and an unmetered refusal would be this reader's only
+	// free one.
 	waitForAdmittedFrames(t, svc, 1)
 	requireNoInboxFrame(t, session, "a line whose type only the parser could resolve")
 
@@ -375,10 +377,11 @@ func TestInboundDispatchRefusesAnAmbiguousLineBeforeTheParser(t *testing.T) {
 	}
 }
 
-// TestAmbiguousDatagramClaimStillReachesTheLedger pins the §10 accounting of
-// the new refusal: a line the best-effort peek calls a datagram lands on
-// DropMalformed, which is the verdict the strict parser of §3.4 reached for the
-// same shape one step later, before the refusal moved above the parser.
+// TestAmbiguousDatagramClaimStillReachesTheLedger pins the drop-reason
+// accounting of the new refusal: a line the best-effort peek calls a datagram
+// lands on DropMalformed, which is the verdict the strict parser of
+// docs/protocol/datagram.md §3.5 reached for the same shape one step later,
+// before the refusal moved above the parser.
 func TestAmbiguousDatagramClaimStillReachesTheLedger(t *testing.T) {
 	t.Parallel()
 

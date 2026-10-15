@@ -14,8 +14,9 @@ import (
 
 // reachability_test.go covers the two read-only surfaces: the probe and the
 // plan. The centrepiece is the parity test against the file router's
-// ExplainRoute — the behaviour §4.3 says is carried over unchanged, checked
-// entry by entry on a set of topologies rather than described in prose.
+// ExplainRoute — the behaviour docs/protocol/datagram.md §4.4 says is carried
+// over unchanged, checked entry by entry on a set of topologies rather than
+// described in prose.
 
 // ---------------------------------------------------------------------------
 // Parity with the file router's ExplainRoute
@@ -43,7 +44,7 @@ type parityTopology struct {
 
 // parityDType is the type both plans are asked about. Every parity peer
 // declares it, so the last-hop gate never fires and the comparison stays about
-// candidate ORDER — the property §9 requires to be carried over unchanged.
+// candidate ORDER — the property that has to be carried over unchanged.
 const parityDType domain.DType = "file_transfer"
 
 // parityNonceCache is the trivial NonceCache the file router requires; the
@@ -63,7 +64,7 @@ func (c *parityNonceCache) TryAdd(nonce string) bool {
 	return true
 }
 
-// TestRoutePlanMatchesFileRouterExplainRoute is the §9 requirement: the
+// TestRoutePlanMatchesFileRouterExplainRoute pins the parity requirement: the
 // plan of the datagram layer agrees with today's ExplainRoute across a set
 // of topologies, entry by entry and field by field. The two implementations
 // are wired from one description of the same network, and the version cap —
@@ -333,8 +334,9 @@ func TestProbeAgreesWithTheSendOverAnUnchangedTable(t *testing.T) {
 				t.Fatalf("unreachable must mean no_route or rejected, got %s", outcome)
 			}
 			// The probe names the SAME refusal the send would: they read one
-			// verdict, so a caller acting on the reason (§6.1) acts on what
-			// the send would really have answered.
+			// verdict, so a caller acting on the reason
+			// (docs/protocol/datagram.md §6.1) acts on what the send would
+			// really have answered.
 			probeReason, probeRefused := probe.Rejection()
 			sendReason, sendRefused := outcome.Rejection()
 			if probeRefused != sendRefused || probeReason != sendReason {
@@ -345,8 +347,9 @@ func TestProbeAgreesWithTheSendOverAnUnchangedTable(t *testing.T) {
 	}
 }
 
-// TestProbeReservesNothingAndSpendsNoBudget pins the §4.3 boundary: the probe
-// is read-only. It occupies no anti-replay slot and hands nothing to a writer.
+// TestProbeReservesNothingAndSpendsNoBudget pins the
+// docs/protocol/datagram.md §4.4 boundary: the probe is read-only. It occupies
+// no anti-replay slot and hands nothing to a writer.
 func TestProbeReservesNothingAndSpendsNoBudget(t *testing.T) {
 	t.Parallel()
 
@@ -391,9 +394,10 @@ func TestProbeReadsTheFreshLookup(t *testing.T) {
 	}
 }
 
-// TestProbeDoesNotTakeAvoidNextHop pins the lawful pair of §4.3: the probe
-// answers about sends WITHOUT an exclusion, so "reachable" together with
-// no_route from a send-with-avoid is not a contradiction.
+// TestProbeDoesNotTakeAvoidNextHop pins the lawful pair of
+// docs/protocol/datagram.md §4.4: the probe answers about sends WITHOUT an
+// exclusion, so "reachable" together with no_route from a send-with-avoid is
+// not a contradiction.
 func TestProbeDoesNotTakeAvoidNextHop(t *testing.T) {
 	t.Parallel()
 
@@ -524,9 +528,9 @@ func TestPlanEntriesAreACopy(t *testing.T) {
 }
 
 // The plan ACCEPTS route_policy, so it has to say what the policy changes
-// about it: §4.3 promises that the first element is the send's first
-// candidate only for `best`. A silently ignored input is a diagnostic that
-// looks authoritative and is not.
+// about it: docs/protocol/datagram.md §4.4 promises that the first element is
+// the send's first candidate only for `best`. A silently ignored input is a
+// diagnostic that looks authoritative and is not.
 func TestPlanReportsWhetherItsFirstElementIsGuaranteed(t *testing.T) {
 	t.Parallel()
 
@@ -563,17 +567,18 @@ func TestPlanReportsWhetherItsFirstElementIsGuaranteed(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// The two negatives (§6.1)
+// The two negatives (docs/protocol/datagram.md §6.1)
 // ---------------------------------------------------------------------------
 
 // TestProbeSeparatesTheGateRefusalFromTheMissingRoute is the ШЕРОХОВАТОСТЬ-4
 // regression.
 //
-// §6.1 says a NEGATIVE LIVE ANSWER cancels a positive cached confirmation and
-// clears it immediately. That rule is about SUPPORT: the peer told us in its
-// handshake that it has no handler for this dtype. A destination that is
-// simply off the routing table this second says nothing about support, and
-// invalidating on that would wipe a good confirmation on every route flap.
+// docs/protocol/datagram.md §6.1 says a NEGATIVE LIVE ANSWER cancels a positive
+// cached confirmation and clears it immediately. That rule is about SUPPORT:
+// the peer told us in its handshake that it has no handler for this dtype. A
+// destination that is simply off the routing table this second says nothing
+// about support, and invalidating on that would wipe a good confirmation on
+// every route flap.
 //
 // While the probe answered a bare bool the two were indistinguishable, so a
 // caller could only either implement the rule wrong or not at all — which is
@@ -596,7 +601,7 @@ func TestProbeSeparatesTheGateRefusalFromTheMissingRoute(t *testing.T) {
 			setup: func(f *schedFixture) {
 				// A LIVE direct session whose declared dtype set omits the
 				// type: the last-hop gate refuses, and this is the one
-				// negative §6.1 acts on.
+				// negative docs/protocol/datagram.md §6.1 acts on.
 				f.direct.set(dst, f.datagramPeer(dst, time.Hour))
 				f.datagramPeer(relay, time.Hour)
 				f.routes.set(dst, f.route(relay, 2))
@@ -642,7 +647,7 @@ func TestProbeSeparatesTheGateRefusalFromTheMissingRoute(t *testing.T) {
 				t.Fatalf("reason = %s, want %s", reason, test.wantReason)
 			}
 			if got := probe.UnsupportedDType(); got != test.unsupport {
-				t.Fatalf("UnsupportedDType = %v, want %v — §6.1 acts on exactly this", got, test.unsupport)
+				t.Fatalf("UnsupportedDType = %v, want %v — docs/protocol/datagram.md §6.1 acts on exactly this", got, test.unsupport)
 			}
 			missing, named := probe.MissingCapability()
 			if named != (test.wantMissed != "") || (named && missing != test.wantMissed) {
@@ -684,7 +689,7 @@ func mustReachabilityQuery(t *testing.T, opts ReachabilityQueryOpts) Reachabilit
 
 // mustRoutePlanQuery is the same for the plan. A test that does not care about
 // the policy asks for `best`, which is the only one that promises anything
-// about element 0 (§4.3).
+// about element 0 (docs/protocol/datagram.md §4.4).
 func mustRoutePlanQuery(t *testing.T, opts RoutePlanQueryOpts) RoutePlanQuery {
 	t.Helper()
 	if opts.RoutePolicy == "" {

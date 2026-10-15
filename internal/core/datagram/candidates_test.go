@@ -10,10 +10,10 @@ import (
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
-// candidates_test.go covers the candidate half of §4.3: the capability
-// filter before the sort, the exclusions, the dedup that shares the
-// comparator with the sort, the sort itself, wall-clock expiry and the
-// version normalization.
+// candidates_test.go covers the candidate half of
+// docs/protocol/datagram.md §4.4: the capability filter before the sort, the
+// exclusions, the dedup that shares the comparator with the sort, the sort
+// itself, wall-clock expiry and the version normalization.
 
 func planNextHops(plan RoutePlan) []domain.PeerIdentity {
 	hops := make([]domain.PeerIdentity, 0, plan.Len())
@@ -35,8 +35,9 @@ func requireHops(t *testing.T, got []domain.PeerIdentity, want ...domain.PeerIde
 	}
 }
 
-// TestComparatorOrderIsVersionHopsUptimeIdentity pins the four keys of §4.3
-// in priority order, each decided by a pair that ties on every earlier key.
+// TestComparatorOrderIsVersionHopsUptimeIdentity pins the four keys of
+// docs/protocol/datagram.md §4.4 in priority order, each decided by a pair that
+// ties on every earlier key.
 func TestComparatorOrderIsVersionHopsUptimeIdentity(t *testing.T) {
 	t.Parallel()
 
@@ -72,10 +73,10 @@ func TestComparatorOrderIsVersionHopsUptimeIdentity(t *testing.T) {
 	}
 }
 
-// TestCapabilityFilterRunsBeforeRanking pins §6: the filter is applied
-// BEFORE the sort and is not a penalty. The peer that would win every
-// ranking key is the one without mesh_datagram_transit_v1, so a scoring
-// implementation would still surface it — and this test would fail.
+// TestCapabilityFilterRunsBeforeRanking pins docs/protocol/datagram.md §6: the
+// filter is applied BEFORE the sort and is not a penalty. The peer that would
+// win every ranking key is the one without mesh_datagram_transit_v1, so a
+// scoring implementation would still surface it — and this test would fail.
 func TestCapabilityFilterRunsBeforeRanking(t *testing.T) {
 	t.Parallel()
 
@@ -154,7 +155,7 @@ func TestStalledNextHopIsNotACandidate(t *testing.T) {
 }
 
 // TestSelfRoutesAndWithdrawnRoutesAreExcluded covers the remaining
-// structural exclusions of §4.3 item 2.
+// structural exclusions of docs/protocol/datagram.md §4.4 item 2.
 func TestSelfRoutesAndWithdrawnRoutesAreExcluded(t *testing.T) {
 	t.Parallel()
 
@@ -178,10 +179,10 @@ func TestSelfRoutesAndWithdrawnRoutesAreExcluded(t *testing.T) {
 	requireHops(t, planNextHops(plan), alive)
 }
 
-// TestWallClockExpiryAfterSnapshotPublish is the §4.3 rule that the cached
-// snapshot cannot express: the snapshot republishes on a dirty flag, so a
-// finite-TTL route that aged out between publishes still looks alive in it.
-// Expiry is judged by the clock AT SELECTION TIME.
+// TestWallClockExpiryAfterSnapshotPublish is the docs/protocol/datagram.md §4.4
+// rule that the cached snapshot cannot express: the snapshot republishes on a
+// dirty flag, so a finite-TTL route that aged out between publishes still looks
+// alive in it. Expiry is judged by the clock AT SELECTION TIME.
 func TestWallClockExpiryAfterSnapshotPublish(t *testing.T) {
 	t.Parallel()
 
@@ -211,10 +212,10 @@ func TestWallClockExpiryAfterSnapshotPublish(t *testing.T) {
 	}
 }
 
-// TestDedupUsesTheSortComparator pins §4.3 item 3. Two routing entries
-// point at the same next hop with different hop counts; the surviving one
-// must be the better one BY THE COMPARATOR, and the dedup must not change
-// the peer's ranking key relative to a second candidate.
+// TestDedupUsesTheSortComparator pins docs/protocol/datagram.md §4.4 item 3.
+// Two routing entries point at the same next hop with different hop counts; the
+// surviving one must be the better one BY THE COMPARATOR, and the dedup must
+// not change the peer's ranking key relative to a second candidate.
 func TestDedupUsesTheSortComparator(t *testing.T) {
 	t.Parallel()
 
@@ -246,11 +247,11 @@ func TestDedupUsesTheSortComparator(t *testing.T) {
 	}
 }
 
-// TestVersionNormalizationCapsInsteadOfZeroing pins both halves of §4.3:
-// a peer claiming v999 must not WIN the primary key over a legitimate peer
-// at the local version, and a peer one version ahead of this build must not
-// be pushed to the back — that earlier "clamp to zero" behaviour starved
-// staged rollouts.
+// TestVersionNormalizationCapsInsteadOfZeroing pins both halves of
+// docs/protocol/datagram.md §4.4: a peer claiming v999 must not WIN the primary
+// key over a legitimate peer at the local version, and a peer one version ahead
+// of this build must not be pushed to the back — that earlier "clamp to zero"
+// behaviour starved staged rollouts.
 func TestVersionNormalizationCapsInsteadOfZeroing(t *testing.T) {
 	t.Parallel()
 
@@ -390,12 +391,12 @@ func TestRawVersionKeptForDiagnostics(t *testing.T) {
 	}
 }
 
-// §4.3 item 2 excludes "next_hop == dst ALREADY TRIED by the direct session",
-// not every route through the destination. While DirectSession and
-// PeerMetadata answer from one helper the two readings agree; the moment they
-// disagree, the unconditional form makes the destination unreachable by BOTH
-// paths — the direct branch has no session and the routing branch throws its
-// route away.
+// docs/protocol/datagram.md §4.4 item 2 excludes "next_hop == dst ALREADY TRIED
+// by the direct session", not every route through the destination. While
+// DirectSession and PeerMetadata answer from one helper the two readings agree;
+// the moment they disagree, the unconditional form makes the destination
+// unreachable by BOTH paths — the direct branch has no session and the routing
+// branch throws its route away.
 func TestRouteThroughTheDestinationSurvivesWhenTheDirectBranchDidNot(t *testing.T) {
 	t.Parallel()
 
@@ -464,8 +465,8 @@ func TestRouteThroughTheDestinationStillFacesTheLastHopGate(t *testing.T) {
 }
 
 // TestPeerSurvivesWhenOnlyItsHeadConnectionFailsTheGates is the other side of
-// the §4.3 line 574 rule: "the metadata describes the connection the send will
-// try" has to hold in BOTH directions.
+// the docs/protocol/datagram.md §4.4 rule: "the metadata describes the
+// connection the send will try" has to hold in BOTH directions.
 //
 // What it caught: PeerMetadata.SendableConnection answered head-of-list without
 // knowing the frame, so a peer whose FIRST connection failed a gate — no
@@ -486,7 +487,8 @@ func TestPeerSurvivesWhenOnlyItsHeadConnectionFailsTheGates(t *testing.T) {
 	relay := domaintest.ID("relay-two-sockets")
 
 	// The head socket is endpoint-only: it may receive what is addressed to it
-	// and must not be asked to forward somebody else's frame (§6).
+	// and must not be asked to forward somebody else's frame
+	// (docs/protocol/datagram.md §6).
 	incapable := PeerConnection{
 		ConnectedAt:             fixture.clock().Add(-10 * time.Hour),
 		Advertised:              advertising(CapabilityDatagramV1),
@@ -511,7 +513,7 @@ func TestPeerSurvivesWhenOnlyItsHeadConnectionFailsTheGates(t *testing.T) {
 
 	// The candidate must be ranked by the connection the send really used —
 	// otherwise the plan would publish the incapable socket's uptime and
-	// version, which is the aggregate §4.3 forbids.
+	// version, which is the aggregate docs/protocol/datagram.md §4.4 forbids.
 	plan := mustExplainRoute(t, fixture.scheduler, mustRoutePlanQuery(t, RoutePlanQueryOpts{ReachabilityQueryOpts: query}))
 	requireHops(t, planNextHops(plan), relay)
 	if got := plan.Entries()[0].ConnectedAt; !got.Equal(capable.ConnectedAt) {
@@ -524,10 +526,10 @@ func TestPeerSurvivesWhenOnlyItsHeadConnectionFailsTheGates(t *testing.T) {
 }
 
 // TestDirectDestinationSurvivesWhenOnlyItsHeadConnectionFailsTheDTypeGate is
-// the same defect on step 1 of §4.3, where it is worse: the direct branch is
-// tried FIRST, and losing it demotes a neighbour to the routing table — or,
-// when the head failed the last-hop dtype gate, aborts the whole selection as
-// a hard policy stop.
+// the same defect on step 1 of docs/protocol/datagram.md §4.4, where it is
+// worse: the direct branch is tried FIRST, and losing it demotes a neighbour to
+// the routing table — or, when the head failed the last-hop dtype gate, aborts
+// the whole selection as a hard policy stop.
 func TestDirectDestinationSurvivesWhenOnlyItsHeadConnectionFailsTheDTypeGate(t *testing.T) {
 	t.Parallel()
 

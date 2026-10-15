@@ -11,7 +11,7 @@ import (
 // reverse_quota_owner_test.go pins the split this round is about: a reverse
 // record answers TWO questions and the two are answered by DIFFERENT values —
 // the CHANNEL says where the answer goes, the ADMISSION KEY says whose slot it
-// is (§4.2, §5).
+// is (docs/protocol/datagram.md §4.3, §5).
 //
 // Every fixture below therefore needs a shape none of the previous rounds' had:
 // ONE neighbour on SEVERAL channels. With one channel per neighbour, "keyed on
@@ -194,7 +194,8 @@ func TestGlobalCapEvictsTheBusiestOwnerNotTheBusiestChannel(t *testing.T) {
 	}
 
 	// The table is now full: 5 of 5. The honest neighbour's next request has to
-	// evict somebody, and §5 says it is the busiest upstream.
+	// evict somebody, and docs/protocol/datagram.md §5 says it is the busiest
+	// upstream.
 	if got := fixture.reserve("h3", honest, fixture.now.Add(10*time.Second)); got != ReverseSlotReserved {
 		t.Fatalf("h3 must be admitted by evicting the busiest upstream, got %s", got)
 	}
@@ -307,7 +308,8 @@ func TestTheReturnChannelIsNotDerivedFromTheQuotaOwner(t *testing.T) {
 		t.Fatalf("q2: %s", got)
 	}
 
-	// ONE bucket: the two sessions are one neighbour as far as §5 goes.
+	// ONE bucket: the two sessions are one neighbour as far as
+	// docs/protocol/datagram.md §5 goes.
 	if load := upstreamLoad(fixture.table, first); load != 2 {
 		t.Fatalf("the neighbour holds %d records, want 2 across both of its sessions", load)
 	}

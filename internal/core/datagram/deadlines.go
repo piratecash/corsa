@@ -19,10 +19,11 @@ import (
 // clamping after the `now` check produces a frame that passed one boundary and
 // lives by another, with send_until beyond the boundary it was admitted under.
 //
-// Reference: docs/protocol/datagram.md §2.2, §3.3, §4.2.
+// Reference: docs/protocol/datagram.md §3.4, §4.3.
 
 // sendGrace is the margin subtracted from the end of the validity window so a
-// frame is not handed to the writer at the very edge of its life (§3.3).
+// frame is not handed to the writer at the very edge of its life
+// (docs/protocol/datagram.md §3.4).
 //
 // It is deliberately NOT the same number as the per-class write grace: this one
 // bounds how late a frame may still be queued, while write_grace bounds the
@@ -47,7 +48,7 @@ const (
 	// DeadlinesExpired means the frame is still valid, but the clamped
 	// send_until is already behind now: there is no time left to write it,
 	// so it is not enqueued at all. Local delivery is unaffected — this
-	// outcome is about the send path (§2.2).
+	// outcome is about the send path (docs/protocol/datagram.md §3.4).
 	DeadlinesExpired
 )
 
@@ -87,7 +88,8 @@ func (d Deadlines) ValidUntil() time.Time { return d.validUntil }
 func (d Deadlines) ReplayUntil() time.Time { return d.replayUntil }
 
 // SendUntil is the deadline the writer checks immediately before the socket
-// write, and the queue checks on admission (§3.3 rule 5).
+// write, and the queue checks on admission (docs/protocol/datagram.md §3.4 rule
+// 5).
 func (d Deadlines) SendUntil() time.Time { return d.sendUntil }
 
 // DeadlineDecision pairs the outcome with the deadlines, when there are any.
@@ -112,10 +114,10 @@ func (d DeadlineDecision) Deadlines() (Deadlines, bool) {
 	}
 }
 
-// ComputeDeadlines is the timing rule of §3.3 as a pure function of (header,
-// now): no clock, no store, no cryptography — which is why a refusal here costs
-// the sender nothing but a parse, and costs this node neither a crypto token
-// nor a ban decision.
+// ComputeDeadlines is the timing rule of docs/protocol/datagram.md §3.4 as a
+// pure function of (header, now): no clock, no store, no cryptography — which
+// is why a refusal here costs the sender nothing but a parse, and costs this
+// node neither a crypto token nor a ban decision.
 //
 // # Everything is bounded by the base anti-replay window
 //
@@ -137,7 +139,8 @@ func ComputeDeadlines(header Header, now time.Time) DeadlineDecision {
 	freshnessEnd := signed.Add(domain.DatagramFreshnessWindow)
 	validFrom := signed.Add(-domain.DatagramFreshnessWindow)
 	// The clamp comes FIRST. Checking the raw bound and clamping afterwards
-	// would admit a frame by one boundary and run it by another (§2.2).
+	// would admit a frame by one boundary and run it by another
+	// (docs/protocol/datagram.md §3.4).
 	validUntil := earlier(freshnessEnd, baseWindowEnd)
 
 	// Both boundaries are INCLUSIVE for life — one invariant across the whole
@@ -175,7 +178,8 @@ func ComputeDeadlines(header Header, now time.Time) DeadlineDecision {
 // a different question:
 //
 //   - freshness_end − send_grace: how late the frame may still be QUEUED, so
-//     nothing enters a lane at the very edge of its life (§3.3);
+//     nothing enters a lane at the very edge of its life
+//     (docs/protocol/datagram.md §3.4);
 //   - now + queue_residence(class): how long the frame's class lets it SIT in
 //     that lane;
 //   - valid_until − write_grace(class): the room the socket WRITE itself needs,

@@ -508,6 +508,50 @@ func (_c *MockRoutingProvider_SecureSessionStoreStats_Call) RunAndReturn(run fun
 	return _c
 }
 
+// SessionKindStats provides a mock function for the type MockRoutingProvider
+func (_mock *MockRoutingProvider) SessionKindStats() domain.SessionKindStats {
+	ret := _mock.Called()
+
+	if len(ret) == 0 {
+		panic("no return value specified for SessionKindStats")
+	}
+
+	var r0 domain.SessionKindStats
+	if returnFunc, ok := ret.Get(0).(func() domain.SessionKindStats); ok {
+		r0 = returnFunc()
+	} else {
+		r0 = ret.Get(0).(domain.SessionKindStats)
+	}
+	return r0
+}
+
+// MockRoutingProvider_SessionKindStats_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'SessionKindStats'
+type MockRoutingProvider_SessionKindStats_Call struct {
+	*mock.Call
+}
+
+// SessionKindStats is a helper method to define mock.On call
+func (_e *MockRoutingProvider_Expecter) SessionKindStats() *MockRoutingProvider_SessionKindStats_Call {
+	return &MockRoutingProvider_SessionKindStats_Call{Call: _e.mock.On("SessionKindStats")}
+}
+
+func (_c *MockRoutingProvider_SessionKindStats_Call) Run(run func()) *MockRoutingProvider_SessionKindStats_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run()
+	})
+	return _c
+}
+
+func (_c *MockRoutingProvider_SessionKindStats_Call) Return(sessionKindStats domain.SessionKindStats) *MockRoutingProvider_SessionKindStats_Call {
+	_c.Call.Return(sessionKindStats)
+	return _c
+}
+
+func (_c *MockRoutingProvider_SessionKindStats_Call) RunAndReturn(run func() domain.SessionKindStats) *MockRoutingProvider_SessionKindStats_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // SessionOutcomeStats provides a mock function for the type MockRoutingProvider
 func (_mock *MockRoutingProvider) SessionOutcomeStats() domain.SessionOutcomeStats {
 	ret := _mock.Called()

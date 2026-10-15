@@ -1,8 +1,9 @@
 package node
 
-// first_hop_guard_target_exclusion_test.go is scenario S24а of
-// docs/refactoring/dht/21-anonymity-transport.md §4.3.4″.7 — the guard half of
-// the H₁ = B rule, in the form that can be run today.
+// first_hop_guard_target_exclusion_test.go is scenario S24а — the guard half of
+// the H₁ = B rule (the target of a request is never its own first hop; the
+// first-hop guard set itself is docs/protocol/presence.md §4.2), in the form
+// that can be run today.
 //
 // # The rule being modelled
 //

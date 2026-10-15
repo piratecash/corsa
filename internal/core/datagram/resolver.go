@@ -8,17 +8,17 @@ import (
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
-// resolver.go declares everything the route scheduler (§4.3) needs from the
-// node and nothing else. The layer never reaches for a routing table, a
-// session map or a socket: it asks these interfaces, and the node satisfies
-// them in M9.
+// resolver.go declares everything the route scheduler
+// (docs/protocol/datagram.md §4.4) needs from the node and nothing else. The
+// layer never reaches for a routing table, a session map or a socket: it asks
+// these interfaces, and the node satisfies them in M9.
 //
-// The indirection is not ceremony. §4.3 states it outright: "the candidate
-// source is a RESOLVER INTERFACE, not today's routing table — today a
-// distance-vector plane sits behind it, tomorrow the DHT structure, and the
-// layer will not notice".
+// The indirection is not ceremony. docs/protocol/datagram.md §4.4 states it
+// outright: "the candidate source is a RESOLVER INTERFACE, not today's routing
+// table — today a distance-vector plane sits behind it, tomorrow the DHT
+// structure, and the layer will not notice".
 //
-// Reference: docs/refactoring/datagram-transport.md §4.3, §6, §6.1.
+// Reference: docs/protocol/datagram.md §4.4, §6, §6.1.
 
 // ---------------------------------------------------------------------------
 // Route hints
@@ -30,11 +30,12 @@ import (
 // replaced, and it needs exactly four facts to rank a hop — plus one it does
 // not rank by at all, see Attribution.
 //
-// ExpiresAt is an ABSOLUTE deadline, not a remaining TTL, because §4.3
-// requires expiry to be judged against the clock AT SELECTION TIME: a
-// cached snapshot republishes on a dirty flag, so a finite-TTL route that
-// quietly aged out between two publishes still looks alive in the snapshot.
-// A relative TTL captured at publish time could not express that.
+// ExpiresAt is an ABSOLUTE deadline, not a remaining TTL, because
+// docs/protocol/datagram.md §4.4 requires expiry to be judged against the clock
+// AT SELECTION TIME: a cached snapshot republishes on a dirty flag, so a
+// finite-TTL route that quietly aged out between two publishes still looks
+// alive in the snapshot. A relative TTL captured at publish time could not
+// express that.
 type RouteHint struct {
 	// ExpiresAt is the absolute expiry of the route. The zero value means
 	// the route does not expire on its own.
@@ -71,9 +72,9 @@ func (h RouteHint) IsExpired(now time.Time) bool {
 	return !h.ExpiresAt.IsZero() && !now.Before(h.ExpiresAt)
 }
 
-// RouteResolver is the candidate source of §4.3. The two methods exist
-// separately because the freshness contract differs and the difference is
-// load-bearing, not stylistic:
+// RouteResolver is the candidate source of docs/protocol/datagram.md §4.4. The
+// two methods exist separately because the freshness contract differs and the
+// difference is load-bearing, not stylistic:
 //
 //   - FreshRoutes is the per-destination lookup used by LOCALLY ORIGINATED
 //     sends, the reachability probe and the route plan. A route accepted
@@ -101,18 +102,19 @@ type RouteResolver interface {
 // PeerConnection is the metadata of ONE CONCRETE CONNECTION — never an
 // aggregate across a peer's sockets.
 //
-// §4.3 is explicit about why: the ranking keys (version and connectedAt)
-// must come from the connection the live send path would actually try
-// first — outbound preferred over inbound — and from the same helper the
-// send itself uses. Aggregating (max version from one socket, oldest
-// connectedAt from another) already produced a real bug in the file
+// docs/protocol/datagram.md §4.4 is explicit about why: the ranking keys
+// (version and connectedAt) must come from the connection the live send path
+// would actually try first — outbound preferred over inbound — and from the
+// same helper the send itself uses. Aggregating (max version from one socket,
+// oldest connectedAt from another) already produced a real bug in the file
 // router: ranking promised an inbound path of a newer version while the
 // bytes left over an outbound session of an older one.
 //
 // ReportedProtocolVersion is the RAW handshake value, exactly as the peer
 // claimed it. The scheduler normalizes it to min(reported, local) for
-// ranking and keeps the raw value for diagnostics (§4.3); a resolver that
-// pre-capped it would hide an inflation attempt from the audit log.
+// ranking and keeps the raw value for diagnostics
+// (docs/protocol/datagram.md §4.4); a resolver that pre-capped it would hide an
+// inflation attempt from the audit log.
 type PeerConnection struct {
 	// ConnectedAt is when this connection was established. The zero value
 	// means "unknown" and sorts last in the uptime tie-break.
@@ -123,35 +125,39 @@ type PeerConnection struct {
 	Advertised AdvertisedCapabilities
 	// DTypes is the dtype set this peer declared in the handshake, and the
 	// ONLY statement about which types it can handle as an endpoint. The zero
-	// value is the empty set, which is also what an absent field says (§6.1):
-	// a peer that declared nothing is an endpoint for nothing.
+	// value is the empty set, which is also what an absent field says
+	// (docs/protocol/datagram.md §6.1): a peer that declared nothing is an
+	// endpoint for nothing.
 	DTypes DeclaredDTypes
 	// Channel NAMES the connection this metadata describes, turning it from
 	// something the layer can only judge into something the layer can also
 	// ADDRESS.
 	//
 	// The request plane is what needs it. A forwarded request's reverse record
-	// stores the channel the frame left over, and §4.2 phase 3 requires that
-	// channel to be in the record BEFORE the frame is handed to the writer — so
-	// learning it from the hand-over is too late by construction, and behind the
-	// class queue of §5 it is never learned at all, because the socket is chosen
-	// on the far side of a lane the frame may sit in for seconds.
+	// stores the channel the frame left over, and
+	// docs/protocol/datagram.md §4.3 phase 3 requires that channel to be in the
+	// record BEFORE the frame is handed to the writer — so learning it from the
+	// hand-over is too late by construction, and behind the class queue of
+	// docs/protocol/datagram.md §5 it is never learned at all, because the
+	// socket is chosen on the far side of a lane the frame may sit in for
+	// seconds.
 	//
 	// A resolver that leaves it zero still serves the routed plane in full: there
-	// the scheduler picks a NEIGHBOUR and the transport picks the socket (§4.3).
-	// The request plane refuses such a candidate instead of falling back to the
-	// peer's name, which is the closed direction — the name is precisely what may
-	// not decide where an answer comes back from.
+	// the scheduler picks a NEIGHBOUR and the transport picks the socket
+	// (docs/protocol/datagram.md §4.4). The request plane refuses such a
+	// candidate instead of falling back to the peer's name, which is the closed
+	// direction — the name is precisely what may not decide where an answer
+	// comes back from.
 	Channel ChannelID
 	// Discovery is the plane this CONNECTION was found through — not the
 	// plane of any route that happens to travel over it.
 	//
-	// It exists for the direct branch of §4.3, where the next hop IS the
-	// destination and no RouteHint is involved at all: without it, a session
-	// opened because the overlay answered a lookup would be reported as a
-	// plain direct neighbour and the overlay's contribution would be
-	// invisible exactly where it mattered. The trust axis needs no field
-	// here — a live session is RouteSourceDirect by construction.
+	// It exists for the direct branch of docs/protocol/datagram.md §4.4, where
+	// the next hop IS the destination and no RouteHint is involved at all:
+	// without it, a session opened because the overlay answered a lookup would
+	// be reported as a plain direct neighbour and the overlay's contribution
+	// would be invisible exactly where it mattered. The trust axis needs no
+	// field here — a live session is RouteSourceDirect by construction.
 	//
 	// The zero value is DiscoveryPlaneUnset and stays that way for a
 	// resolver that names no plane; nothing downstream substitutes mesh for
@@ -166,22 +172,23 @@ type PeerConnection struct {
 //
 // Implementations MUST answer from the same helper that picks the socket
 // for an actual send (outbound session first, inbound as fall-back, both
-// filtered by the same liveness policy). §4.3 makes this a contract rather
-// than advice: "the liveness filter follows the same rules by which the
-// send picks its socket — let the two sets diverge and you get candidates
-// you cannot send into, and sends that were not in the plan".
+// filtered by the same liveness policy). docs/protocol/datagram.md §4.4 makes
+// this a contract rather than advice: "the liveness filter follows the same
+// rules by which the send picks its socket — let the two sets diverge and you
+// get candidates you cannot send into, and sends that were not in the plan".
 //
 // # Why the frame is an argument
 //
-// §4.3 line 574 requires the metadata to describe "the connection the send
-// will actually try FIRST", and that connection depends on the frame: a peer
-// may hold several connections, and the emitter offers the frame only to the
-// ones that pass its gates (the role gate of §6 and the last-hop dtype
-// gate). A frame-blind head-of-list answer made the requirement true in
-// one direction only — the head, when it passed — and false in the other: a
-// peer whose HEAD failed the gates was discarded whole, although its second
-// connection would have carried the frame, and a live route became
-// unreachable while the emitter was ready to use it.
+// docs/protocol/datagram.md §4.4 requires the metadata to describe "the
+// connection the send will actually try FIRST", and that connection depends on
+// the frame: a peer may hold several connections, and the emitter offers the
+// frame only to the ones that pass its gates (the role gate of
+// docs/protocol/datagram.md §6 and the last-hop dtype gate). A frame-blind
+// head-of-list answer made the requirement true in one direction only — the
+// head, when it passed — and false in the other: a peer whose HEAD failed the
+// gates was discarded whole, although its second connection would have carried
+// the frame, and a live route became unreachable while the emitter was ready to
+// use it.
 //
 // Passing the frame is what makes the two directions one statement. It is the
 // frame and not a (dtype, role) pair because that pair IS the frame as far as
@@ -198,7 +205,7 @@ type PeerConnection struct {
 //     re-applies AdmitPeer and needs a connection to name the refusal with;
 //     answering false here would collapse "gated out" (`rejected`, pointless
 //     to wait on) into "not connected" (`no_route`, worth waiting on), and
-//     §4.3 keeps those two apart on purpose;
+//     docs/protocol/datagram.md §4.4 keeps those two apart on purpose;
 //   - ok = false means one thing only: the peer has NO usable connection at
 //     all — never connected, dropped, or stalled. Liveness is the second
 //     return value and not a field, because a zero-valued PeerConnection
@@ -212,23 +219,24 @@ type PeerMetadata interface {
 	) (PeerConnection, bool)
 }
 
-// DirectSession answers step 1 of §4.3: is there a live direct session to
-// dst that would carry THIS frame, and what does that connection look like?
+// DirectSession answers step 1 of docs/protocol/datagram.md §4.4: is there a
+// live direct session to dst that would carry THIS frame, and what does that
+// connection look like?
 //
 // It is separate from PeerMetadata because the two questions are asked at
 // different points and about different roles — "can I hand this frame to my
 // neighbour X as a relay" versus "is the destination itself my neighbour" —
 // even though M9 backs both with one helper. Keeping them apart lets a test
 // make the direct path fail while relays stay healthy, which is exactly the
-// fall-back §4.3 item 3 describes.
+// fall-back docs/protocol/datagram.md §4.4 item 3 describes.
 //
 // The frame is an argument for exactly the reason it is one on PeerMetadata,
 // and the answer obeys the same contract: the first connection that passes the
 // frame's gates, the first live one when none passes, false only when the
 // destination is not a live neighbour at all. The direct branch is not the
-// cheap case here — it is the one §4.3 tries FIRST, so a destination whose
-// head connection fails the gates while a second one passes must not be
-// demoted to the routing table.
+// cheap case here — it is the one docs/protocol/datagram.md §4.4 tries FIRST,
+// so a destination whose head connection fails the gates while a second one
+// passes must not be demoted to the routing table.
 type DirectSession interface {
 	LookupDirectSession(
 		ctx context.Context,
@@ -238,8 +246,9 @@ type DirectSession interface {
 }
 
 // NodeSecret supplies node_local_secret, the HMAC key that decorrelates the
-// explore rotation's starting offset between nodes (§4.3). No context: this
-// is a memory read of a value fixed at node start, not I/O.
+// explore rotation's starting offset between nodes
+// (docs/protocol/datagram.md §4.4). No context: this is a memory read of a
+// value fixed at node start, not I/O.
 //
 // The secret never leaves the node and never appears in a log: it is the
 // only thing that stops an observer from predicting which candidate a given
@@ -264,8 +273,8 @@ const (
 	// and a refusal read once the frame is already in it can follow a completed
 	// write on a link that died afterwards (docs/protocol/network_core.md,
 	// "Tracked sends"). Retrying the same attempt with a backoff is right
-	// anyway, and the reason is the receiver's: the anti-replay cache of §5
-	// drops the duplicate.
+	// anyway, and the reason is the receiver's: the anti-replay cache of
+	// docs/protocol/datagram.md §5 drops the duplicate.
 	hopFailed
 )
 
@@ -280,11 +289,11 @@ func (k hopSendOutcomeKind) String() string { return enumName(hopSendOutcomeKind
 
 // hopSendOutcome is what one hop answered.
 //
-// It is a typed outcome rather than a bool because the two negatives §4.3 keeps
-// apart start here: a hop that did not confirm the frame is a failure worth a
-// retry, while an empty candidate set is the gate verdict the selection
-// recorded. Flattening the first into "no route" would send a caller waiting for
-// a route it already has.
+// It is a typed outcome rather than a bool because the two negatives
+// docs/protocol/datagram.md §4.4 keeps apart start here: a hop that did not
+// confirm the frame is a failure worth a retry, while an empty candidate set is
+// the gate verdict the selection recorded. Flattening the first into "no route"
+// would send a caller waiting for a route it already has.
 //
 // The `rejected` variant is gone with the caps that produced it: a publisher is
 // now an enqueue and nothing else, so the only refusal it can report is that the
@@ -315,34 +324,36 @@ func (o hopSendOutcome) Err() error { return o.err }
 
 // hopPublisher hands the frame to ONE next hop and reports what happened.
 //
-// It is the half of §4.3 the scheduler does not own: the ORDER of the
-// candidates and the OUTCOME vocabulary are the scheduler's, while the
-// publication itself — the emitter, the deadline, the reverse record's
-// downstream — is the pipeline's. Splitting the walk this way is what keeps a
-// single implementation of §4.3 in the tree.
+// It is the half of docs/protocol/datagram.md §4.4 the scheduler does not own:
+// the ORDER of the candidates and the OUTCOME vocabulary are the scheduler's,
+// while the publication itself — the emitter, the deadline, the reverse
+// record's downstream — is the pipeline's. Splitting the walk this way is what
+// keeps a single implementation of docs/protocol/datagram.md §4.4 in the tree.
 //
-// "Enqueued" is not "written to the socket" — §4.3 is precise about this:
-// queued means queued, and the writer may still drop the frame later on
-// send_until. Every non-enqueued outcome is a refusal of THIS hop and makes
-// the scheduler try the next candidate; what differs is what the caller is
-// told once the walk ends.
+// "Enqueued" is not "written to the socket" — docs/protocol/datagram.md §4.4 is
+// precise about this: queued means queued, and the writer may still drop the
+// frame later on send_until. Every non-enqueued outcome is a refusal of THIS
+// hop and makes the scheduler try the next candidate; what differs is what the
+// caller is told once the walk ends.
 //
 // It takes the whole CANDIDATE and not just its identity, because the two planes
 // that use it need different amounts of it: the routed plane hands the frame to
 // a neighbour and lets the transport pick the socket, while the request plane
 // has to pin the frame to the candidate's own channel and store that channel in
-// the reverse record before publishing (§4.2). Passing the identity alone made
-// the second impossible and hid the fact that a candidate describes ONE
-// CONNECTION rather than a peer (§4.3 line 574).
+// the reverse record before publishing (docs/protocol/datagram.md §4.3).
+// Passing the identity alone made the second impossible and hid the fact that a
+// candidate describes ONE CONNECTION rather than a peer
+// (docs/protocol/datagram.md §4.4).
 type hopPublisher func(ctx context.Context, hop RouteCandidate) hopSendOutcome
 
 // ---------------------------------------------------------------------------
-// Declared dtypes (§6.1)
+// Declared dtypes (docs/protocol/datagram.md §6.1)
 // ---------------------------------------------------------------------------
 
 // DeclaredDTypes is the dtype set a peer announced in the handshake, in the
 // form the last-hop gate asks its question in. It is the layer's view of
-// domain.DeclaredDTypeSet, and it holds ONE rule (§6.1):
+// domain.DeclaredDTypeSet, and it holds ONE rule
+// (docs/protocol/datagram.md §6.1):
 //
 //   - the set is EXACTLY what the peer listed. A name it does not carry is
 //     unsupported, and an ABSENT field carries no name at all — a peer that
@@ -359,13 +370,14 @@ type hopPublisher func(ctx context.Context, hop RouteCandidate) hopSendOutcome
 // baseline existed here for one release that never shipped, and while it did,
 // every v27 peer advertising mesh_datagram_v1 counted as an endpoint for four
 // types no build implements — an unproven promise the last-hop gate then acted
-// on. §6.1 makes unproven support equal to no support, and this type is where
-// that is enforced.
+// on. docs/protocol/datagram.md §6.1 makes unproven support equal to no
+// support, and this type is where that is enforced.
 //
 // The endpoint promise lives HERE and nowhere else. mesh_datagram_v1 says
 // only that the envelope is understood, and every node with the layer
-// enabled advertises it whatever its registry holds (§6), so "can this peer
-// handle this type" has exactly one place to be answered.
+// enabled advertises it whatever its registry holds
+// (docs/protocol/datagram.md §6), so "can this peer handle this type" has
+// exactly one place to be answered.
 //
 // The set is fixed for the lifetime of the session: changing it means a new
 // build, hence a restart, hence new sessions.

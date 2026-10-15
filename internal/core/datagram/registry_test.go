@@ -14,7 +14,7 @@ import (
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
-// registry_test.go covers §7 and the release invariant of §10.
+// registry_test.go covers docs/protocol/datagram.md §7.
 
 func TestRegistryRejectsPairingOutsideResponseTypes(t *testing.T) {
 	registry := NewTypeRegistry()
@@ -44,8 +44,9 @@ func TestRegistryRejectsPairingOutsideResponseTypes(t *testing.T) {
 func TestRegistryRefusesModeClassCombinationOutsideTheMatrix(t *testing.T) {
 	registry := NewTypeRegistry()
 
-	// §2.1 admits only `control` on the request plane, so a request type that
-	// declares bulk alone could never receive a lawful frame.
+	// docs/protocol/datagram.md §2.1 admits only `control` on the request
+	// plane, so a request type that declares bulk alone could never receive a
+	// lawful frame.
 	err := registry.Register(TypeRegistration{
 		DType:   dtypeQuery,
 		Modes:   []domain.DatagramMode{domain.DatagramModeRequest},
@@ -71,8 +72,9 @@ func TestRegistryHoldsASetOfClasses(t *testing.T) {
 	if !ok {
 		t.Fatal("registered type not found")
 	}
-	// §7: file_transfer is accepted both as control and as bulk, because its
-	// small progress frames must not queue behind its own large answers.
+	// docs/protocol/datagram.md §7: file_transfer is accepted both as control
+	// and as bulk, because its small progress frames must not queue behind its
+	// own large answers.
 	if !entry.AllowsClass(domain.DatagramClassControl) || !entry.AllowsClass(domain.DatagramClassBulk) {
 		t.Fatal("both declared classes must be admitted")
 	}
@@ -81,10 +83,10 @@ func TestRegistryHoldsASetOfClasses(t *testing.T) {
 	}
 }
 
-// TestRegistryRefusesATypeSpanningBothPlanes is §3.6 made constructive: a type
-// that accepts the same meaning authenticated AND unauthenticated hands the
-// demotion path to any relay, and the registry is the last place that can
-// notice before the type ships.
+// TestRegistryRefusesATypeSpanningBothPlanes is docs/protocol/datagram.md §3.7
+// made constructive: a type that accepts the same meaning authenticated AND
+// unauthenticated hands the demotion path to any relay, and the registry is the
+// last place that can notice before the type ships.
 func TestRegistryRefusesATypeSpanningBothPlanes(t *testing.T) {
 	registry := NewTypeRegistry()
 	err := registry.Register(TypeRegistration{
@@ -119,10 +121,10 @@ func TestRegistryRefusesASecondOwnerOfOneDType(t *testing.T) {
 	}
 }
 
-// TestRegistryDoesNotStoreAuthRequirement pins §7: whether auth is mandatory
-// follows from the mode and is identical for every type, so there is no field
-// for it — and the registry admits a routed type without saying anything about
-// signatures.
+// TestRegistryDoesNotStoreAuthRequirement pins docs/protocol/datagram.md §7:
+// whether auth is mandatory follows from the mode and is identical for every
+// type, so there is no field for it — and the registry admits a routed type
+// without saying anything about signatures.
 func TestRegistryDoesNotStoreAuthRequirement(t *testing.T) {
 	registry := NewTypeRegistry()
 	if err := registry.Register(routedType(dtypePush, acceptingHandler())); err != nil {
@@ -139,8 +141,8 @@ func TestRegistryDoesNotStoreAuthRequirement(t *testing.T) {
 }
 
 // TestPayloadSchemaIgnoresUnknownFieldsUnlikeTheHeader is the contract
-// difference of §7 and §3.4 in one test: an unknown field in the PAYLOAD is
-// ignored, an unknown field in the HEADER is a reject.
+// difference of docs/protocol/datagram.md §7 and §3.5 in one test: an unknown
+// field in the PAYLOAD is ignored, an unknown field in the HEADER is a reject.
 func TestPayloadSchemaIgnoresUnknownFieldsUnlikeTheHeader(t *testing.T) {
 	schema := PayloadSchema{Name: "identity_record", Version: 2}
 	var decoded struct {
@@ -173,8 +175,9 @@ func TestPayloadSchemaIgnoresUnknownFieldsUnlikeTheHeader(t *testing.T) {
 }
 
 // TestDeliveryHeaderHidesSrcInUnauthenticatedModes is the type-level statement
-// of §7: in request and response there is no accessor that hands src over as a
-// sender, so a hook cannot build a decision on it even by mistake.
+// of docs/protocol/datagram.md §7: in request and response there is no accessor
+// that hands src over as a sender, so a hook cannot build a decision on it even
+// by mistake.
 func TestDeliveryHeaderHidesSrcInUnauthenticatedModes(t *testing.T) {
 	label := newLabel(t, "one")
 	target := domaintest.ID("target")

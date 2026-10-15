@@ -147,7 +147,7 @@ var requiredP2PWireCommands = map[string]bool{
 	// inbound case hands the original wire bytes to the strict parser,
 	// because duplicate keys, unknown fields and canonical encodings are
 	// unobservable once a line has been through the universal Frame. See
-	// docs/refactoring/datagram-transport.md §3.4 and §6, and
+	// docs/protocol/datagram.md §3.5 and §6, and
 	// docs/protocol/handshake.md for the capability contract.
 	"datagram": true,
 }

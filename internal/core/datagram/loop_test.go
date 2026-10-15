@@ -9,8 +9,8 @@ import (
 	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 )
 
-// loop_test.go is the "Loops" row of §9 line 1094, which the package had no
-// test for at all:
+// loop_test.go covers loops (docs/protocol/datagram.md §4.5), which the package
+// had no test for at all:
 //
 //   - a ring of honest nodes goes out by ttl, with no more forwards than the
 //     ttl allows, and the frame never comes back to its originator;
@@ -40,7 +40,8 @@ func ringTopology(t *testing.T, net *fakeNetwork, size int, dst domain.PeerIdent
 	return nodes
 }
 
-// TestRingOfHonestNodesDiesByTTL pins the first half of §9 line 1094.
+// TestRingOfHonestNodesDiesByTTL pins the honest-loop half of
+// docs/protocol/datagram.md §4.5.
 //
 // The delivery in this fixture is SYNCHRONOUS and re-entrant, so the whole
 // loop plays out inside the originating SendLocal call — which is the harshest
@@ -159,11 +160,12 @@ func TestTTLResettingRelayEscapesNeitherBudgetsNorAntiReplay(t *testing.T) {
 	restored.TTL = frame.Auth.MaxTTL
 	requireDrop(t, victim.deliver(t, hostile.id, restored), DropReplayDuplicate)
 
-	// Stage one of §5 does not live in the conveyor — it is charged by the owner
-	// of the receive path, and that a replayed lap is charged like any other
-	// frame is pinned where the charge is (node: datagram_budget_key_test.go).
-	// What this test owns is the stage the conveyor does own: the anti-replay
-	// stopped the second lap BEFORE a second verification was paid for.
+	// Stage one of docs/protocol/datagram.md §5 does not live in the conveyor —
+	// it is charged by the owner of the receive path, and that a replayed lap
+	// is charged like any other frame is pinned where the charge is (node:
+	// datagram_budget_key_test.go). What this test owns is the stage the
+	// conveyor does own: the anti-replay stopped the second lap BEFORE a second
+	// verification was paid for.
 	if victim.crypto.charged() != 1 {
 		t.Fatalf("verifications = %d, want 1 — the replay must die before cryptography",
 			victim.crypto.charged())
@@ -173,7 +175,7 @@ func TestTTLResettingRelayEscapesNeitherBudgetsNorAntiReplay(t *testing.T) {
 	}
 
 	// A header violation on a looping frame is still punishable: the ban rule
-	// of §4.4 is not weakened by the loop.
+	// of docs/protocol/datagram.md §4.1 is not weakened by the loop.
 	inflated := signedRouted(t, routedOpts{
 		private: private, src: signer, dst: dst, now: victim.clock(),
 	})

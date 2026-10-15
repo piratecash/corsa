@@ -9,8 +9,9 @@ import (
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
-// datagram_admission_order_test.go pins §4.1 step 1 — "admission by bytes and
-// frames, BEFORE any decoding" — on the two paths that broke it:
+// datagram_admission_order_test.go pins docs/protocol/datagram.md §4.1 step 1 —
+// "admission by bytes and frames, BEFORE any decoding" — on the two paths that
+// broke it:
 //
 //   - the pre-parse classifier could be STEERED, so an oversize line bought
 //     the 8 MiB response budget from the scan and delivered a strict-budget
@@ -20,7 +21,7 @@ import (
 //     both receive paths.
 
 // ---------------------------------------------------------------------------
-// The classifier cannot be steered (§4.1 step 1)
+// The classifier cannot be steered (docs/protocol/datagram.md §4.1 step 1)
 // ---------------------------------------------------------------------------
 
 // TestTopLevelFrameTypeRefusesAnAmbiguousLine states the rule the budget gate
@@ -111,8 +112,8 @@ func TestTopLevelFrameTypeRefusesAnAmbiguousLine(t *testing.T) {
 // two answers: the cheap scan takes the first key, encoding/json takes the
 // last. On the peer-session reader that is the difference between the 8 MiB
 // response budget and the strict 128 KiB one, so the decoy bought a full
-// unmarshal of up to eight megabytes — the exact work §4.1 step 1 forbids a
-// neighbour to impose.
+// unmarshal of up to eight megabytes — the exact work
+// docs/protocol/datagram.md §4.1 step 1 forbids a neighbour to impose.
 //
 // The test asserts the divergence is REAL first, so it cannot pass because the
 // fixture stopped being a decoy, and then asserts the gate refuses it.
@@ -169,13 +170,14 @@ func TestPeerSessionRefusesTheDuplicateTypeDecoyUnparsed(t *testing.T) {
 
 	// The CONVEYOR never saw it — the refusal is now one step above even the
 	// classification, inside the read — while the neighbour still paid for the
-	// bytes it made this node read and for the refusal itself (§4.1 step 1; see
-	// peer_session_admission.go for why an unmetered refusal is a free load
-	// channel). The charge lands on the RESPONSE-plane budget rather than the
-	// datagram one: this reader has a per-neighbour budget of its own now, so it
-	// no longer has to bill a line that was never a datagram to the datagram
-	// plane. The VIOLATION LEDGER is the observable and the byte bucket is not,
-	// because the byte bucket refills in real time and the ledger does not.
+	// bytes it made this node read and for the refusal itself
+	// (docs/protocol/datagram.md §4.1 step 1; see peer_session_admission.go for
+	// why an unmetered refusal is a free load channel). The charge lands on the
+	// RESPONSE-plane budget rather than the datagram one: this reader has a
+	// per-neighbour budget of its own now, so it no longer has to bill a line
+	// that was never a datagram to the datagram plane. The VIOLATION LEDGER is
+	// the observable and the byte bucket is not, because the byte bucket
+	// refills in real time and the ledger does not.
 	waitForCondition(t, 5*time.Second, func() bool {
 		return sessionViolations(session) >= 1
 	})
@@ -190,7 +192,8 @@ func TestPeerSessionRefusesTheDuplicateTypeDecoyUnparsed(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// The budget is charged before the universal parser (§4.1 step 1)
+// The budget is charged before the universal parser
+// (docs/protocol/datagram.md §4.1 step 1)
 // ---------------------------------------------------------------------------
 
 // parserHostileDatagramLine is a line that is UNAMBIGUOUSLY a datagram, is
@@ -199,9 +202,10 @@ func TestPeerSessionRefusesTheDuplicateTypeDecoyUnparsed(t *testing.T) {
 // It is what separates the two orders. A well-formed datagram is charged
 // whichever way round the parse and the budget are, so it cannot tell them
 // apart; this one can. With the universal parser first the line is dropped by
-// it and the neighbour pays nothing, which is precisely the free decode §4.1
-// step 1 exists to prevent. With the budget first the layer charges the bytes
-// and then refuses the frame on its own strict parser.
+// it and the neighbour pays nothing, which is precisely the free decode
+// docs/protocol/datagram.md §4.1 step 1 exists to prevent. With the budget
+// first the layer charges the bytes and then refuses the frame on its own
+// strict parser.
 func parserHostileDatagramLine(t *testing.T) string {
 	t.Helper()
 	// `capabilities` is a []string on the universal Frame, so a number there
@@ -230,7 +234,7 @@ func TestInboundDatagramIsChargedBeforeTheUniversalParser(t *testing.T) {
 	line := parserHostileDatagramLine(t)
 
 	if !svc.dispatchNetworkFrame(connID, strings.TrimSuffix(line, "\n")) {
-		t.Fatal("a datagram tore the connection down; §2 makes every refusal a silent drop")
+		t.Fatal("a datagram tore the connection down; a refused datagram must be dropped without closing the connection")
 	}
 
 	stats := svc.datagramLayer().admission.Stats()
@@ -238,7 +242,7 @@ func TestInboundDatagramIsChargedBeforeTheUniversalParser(t *testing.T) {
 		t.Fatalf("the neighbour was charged for %d frames, want 1: the universal parser swallowed the line before the budget ran", stats.Admitted)
 	}
 	if stats.AdmittedBytes == 0 {
-		t.Fatal("the neighbour was charged no bytes: §4.1 step 1 counts the whole wire line")
+		t.Fatal("the neighbour was charged no bytes: docs/protocol/datagram.md §4.1 step 1 counts the whole wire line")
 	}
 }
 
@@ -291,9 +295,10 @@ func waitForAdmittedFrames(t *testing.T, svc *Service, want uint64) {
 // waitForObservedFrames waits for the CONVEYOR to have seen want frames.
 //
 // It is a second wait and not a read after waitForAdmittedFrames, because the
-// two counters move at different points of §4.1: admission is step 1 and the
-// observation is the verdict at the end, so a test that read the second right
-// after the first would race the conveyor by exactly one parse.
+// two counters move at different points of docs/protocol/datagram.md §4.1:
+// admission is step 1 and the observation is the verdict at the end, so a test
+// that read the second right after the first would race the conveyor by exactly
+// one parse.
 func waitForObservedFrames(t *testing.T, svc *Service, want uint64) {
 	t.Helper()
 	waitForDatagramCounter(t, want, "frames observed by the conveyor", func() uint64 {
@@ -341,8 +346,9 @@ func TestCommandLimiterExemptionMatchesTheDiversion(t *testing.T) {
 		`{"item":{"type":"datagram"}}` + "\n",
 		`{"type":"ping"}` + "\n",
 	}
-	// The connection is AUTHENTICATED: the exemption also asks whether the §5
-	// budget has a key to charge, and this test is about the classification.
+	// The connection is AUTHENTICATED: the exemption also asks whether the
+	// docs/protocol/datagram.md §5 budget has a key to charge, and this test is
+	// about the classification.
 	authenticated := registerDatagramCommandConn(t, svc, domain.ConnID(8821), true)
 	for _, line := range lines {
 		if got, want := svc.frameLineExemptFromCommandLimit(authenticated, line), isDatagramWireLine(line); got != want {

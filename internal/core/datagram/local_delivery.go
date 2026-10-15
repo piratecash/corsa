@@ -8,14 +8,15 @@ import (
 	"github.com/piratecash/corsa/internal/core/domain"
 )
 
-// local_delivery.go implements the outcome table of §4.1 step 10.
+// local_delivery.go implements the outcome table of
+// docs/protocol/datagram.md §4.1 step 10.
 //
 // One ordering carries the whole design and it is not negotiable: the COMMIT
 // happens AFTER the handler, never before. Commit first, crash next, and the
 // frame stays undelivered forever. In the stated order the crash leaves an
 // uncommitted reservation, which dies with the process — so the sender's repeat
-// is delivered again, and the handler is idempotent by contract (§4.5): a
-// duplicate beats a loss.
+// is delivered again, and the handler is idempotent by contract
+// (docs/protocol/datagram.md §4.5): a duplicate beats a loss.
 //
 // Reference: docs/protocol/datagram.md §4.1, §4.5, §7.
 
@@ -34,7 +35,7 @@ func (p *Pipeline) deliverRoutedLocally(ctx context.Context, delivery routedDeli
 	if reason != DropReasonUnset {
 		// A silent drop WITHOUT committing the replay key, so an authentic but
 		// untrusted sender cannot evict other people's records from the
-		// bounded LRU (§7).
+		// bounded LRU (docs/protocol/datagram.md §7).
 		return dropped(reason, err)
 	}
 	entry, deliveryContext := admitted.entry, admitted.delivery
@@ -63,7 +64,7 @@ type localDelivery struct {
 	rsv      ReservationToken
 }
 
-// runLocalDelivery applies the table of §4.1 step 10.
+// runLocalDelivery applies the table of docs/protocol/datagram.md §4.1 step 10.
 //
 //	| handler outcome | the fate of the replay key |
 //	| accepted        | Commit(rsv)                |
@@ -71,13 +72,15 @@ type localDelivery struct {
 //	| failed or panic | Release(rsv)               |
 //
 // `accepted` and `rejected` share a row because the KEY is all the cache holds:
-// what the node did with the frame is counted (§10) and logged, and no reader of
-// the cache is entitled to it. A duplicate of either is dropped identically.
+// what the node did with the frame is counted (docs/rpc/datagram.md, `metrics`)
+// and logged, and no reader of the cache is entitled to it. A duplicate of
+// either is dropped identically.
 //
 // The mutations address the RESERVATION and never the replay key: the key is one
 // per frame, so a release naming it would cancel whatever reservation of that key
 // exists at that instant — which, for a late release, is the one a parallel
-// instance of the same frame is holding right now (ReservationToken, §4.1).
+// instance of the same frame is holding right now (ReservationToken,
+// docs/protocol/datagram.md §4.1).
 //
 // The three outcomes differ ONLY in the fate of the replay key. `rejected` is
 // a deliberate PERMANENT refusal, so its key is committed and a repeat is
@@ -116,7 +119,8 @@ func (p *Pipeline) commitDelivered(ctx context.Context, run localDelivery) Inbou
 	if !p.replay.Commit(ctx, run.rsv).IsApplied() {
 		// Commit.fail: Release. The delivery has already been accepted, so the
 		// sender's repeat will arrive again and reach the handler a second time
-		// — which is lawful, because §4.5 makes the handler idempotent.
+		// — which is lawful, because docs/protocol/datagram.md §4.5 makes the
+		// handler idempotent.
 		p.release(ctx, run.rsv)
 		log.Warn().
 			Str("replay_key", shortKey(run.key)).
@@ -128,9 +132,10 @@ func (p *Pipeline) commitDelivered(ctx context.Context, run localDelivery) Inbou
 // completeRejected is the `rejected` row. It is NOT a rollback: the outcome is
 // terminal and negative, and its key is committed.
 //
-// A failed commit ends with Release, which §4.1 states directly: the repeat
-// reaches the handler again and is refused again — an extra Verify and an extra
-// call, but no loss and no permanently occupied slot.
+// A failed commit ends with Release, which docs/protocol/datagram.md §4.1
+// states directly: the repeat reaches the handler again and is refused again —
+// an extra Verify and an extra call, but no loss and no permanently occupied
+// slot.
 func (p *Pipeline) completeRejected(ctx context.Context, run localDelivery, result HandlerResult) InboundResult {
 	if !p.replay.Commit(ctx, run.rsv).IsApplied() {
 		log.Warn().
@@ -150,11 +155,12 @@ func (p *Pipeline) completeFailed(ctx context.Context, run localDelivery, result
 
 // runHandler calls the type handler and turns a panic into `failed`.
 //
-// A panic is the `failed` row and not a separate one (§4.1): the key is
-// released and the sender's repeat is worth making. `rejected` would be the
-// wrong conversion for the same reason it is the wrong answer generally — it is
-// a deliberate PERMANENT refusal whose key is committed, and a crash says
-// nothing about whether a repeat would succeed.
+// A panic is the `failed` row and not a separate one
+// (docs/protocol/datagram.md §4.1): the key is released and the sender's repeat
+// is worth making. `rejected` would be the wrong conversion for the same reason
+// it is the wrong answer generally — it is a deliberate PERMANENT refusal whose
+// key is committed, and a crash says nothing about whether a repeat would
+// succeed.
 //
 // Recovering here rather than letting it unwind also keeps one broken type from
 // killing the reader goroutine that serves every other type on the same
@@ -178,9 +184,9 @@ func runHandler(ctx context.Context, handler Handler, delivery DeliveryContext, 
 //
 // There is no anti-replay here and nothing to commit, so the three handler
 // outcomes differ only in the metric and the log — with ONE exception that
-// matters: an answer is admissible only together with `accepted` (§4.1), and
-// that rule lives in the caller, which is the only place that knows whether an
-// answer has anywhere to go.
+// matters: an answer is admissible only together with `accepted`
+// (docs/protocol/datagram.md §4.1), and that rule lives in the caller, which is
+// the only place that knows whether an answer has anywhere to go.
 //
 // The authorization hook is the last gate before the handler, exactly as in
 // the routed plane; the difference is only its neighbourhood to a commit that
@@ -243,13 +249,13 @@ type admittedDelivery struct {
 // It exists as one function because the sequence is a SECURITY gate, and it
 // was written out three times — routed, request/response local delivery and
 // the local response resolver. Three copies of a gate is three chances for one
-// plane to lose a check quietly, which is exactly the failure mode §7 cannot
-// tolerate: the authorization hook is what stops an authentic but untrusted
-// sender from reaching a handler.
+// plane to lose a check quietly, which is exactly the failure mode
+// docs/protocol/datagram.md §7 cannot tolerate: the authorization hook is what
+// stops an authentic but untrusted sender from reaching a handler.
 //
 // An unknown dtype never reaches the authorization hook and occupies no replay
 // slot: it is refused at the registry step, silently, with a metric, a live
-// connection and no ban (§7).
+// connection and no ban (docs/protocol/datagram.md §7).
 //
 // The DropReason is DropReasonUnset exactly when the delivery was admitted.
 func (p *Pipeline) admitLocalDelivery(

@@ -14,8 +14,8 @@ import (
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
-// datagram_budget_key_test.go pins WHO the per-neighbour budget of §5 is
-// charged to, and WHEN.
+// datagram_budget_key_test.go pins WHO the per-neighbour budget of
+// docs/protocol/datagram.md §5 is charged to, and WHEN.
 //
 // Two defects live here, and they are one defect seen from two sides — a
 // budget that the sender can steer:
@@ -150,8 +150,9 @@ func welcomedOutboundSession(
 	return session
 }
 
-// datagramAdmissionStats is the §4.1 step 1 ledger — the only place a charge is
-// observable, and the observable every test in this file reads.
+// datagramAdmissionStats is the docs/protocol/datagram.md §4.1 step 1 ledger —
+// the only place a charge is observable, and the observable every test in this
+// file reads.
 func datagramAdmissionStats(svc *Service) datagram.AdmissionStats {
 	return svc.datagramLayer().admission.Stats()
 }
@@ -178,7 +179,7 @@ func TestCapabilityDropChargesTheNeighbourSilently(t *testing.T) {
 
 		for i := 0; i < frames; i++ {
 			if !svc.dispatchNetworkFrame(connID, line) {
-				t.Fatalf("frame %d tore the connection down: this plane drops silently (§2)", i)
+				t.Fatalf("frame %d tore the connection down: this plane drops silently (docs/protocol/datagram.md §2)", i)
 			}
 		}
 
@@ -199,7 +200,7 @@ func TestCapabilityDropChargesTheNeighbourSilently(t *testing.T) {
 		default:
 		}
 		if score := banScoreForIP(svc, datagramTestPeerIP); score != 0 {
-			t.Fatalf("ban score = %d: a missing capability is not misbehaviour (§4.4)", score)
+			t.Fatalf("ban score = %d: a missing capability is not misbehaviour (docs/protocol/datagram.md §6)", score)
 		}
 
 		// The ban observable is LIVE on this fixture — without this control the
@@ -275,8 +276,8 @@ func TestCapabilityDropChargesTheNeighbourSilently(t *testing.T) {
 // The charge alone is not enough to see it. AdmissionStats.Admitted moves for
 // every frame this node reads, served or refused, so a neighbour off the plane
 // pushing frames at line rate looked exactly like a busy healthy one — the only
-// difference was a Debug line, which is not an observable in production. §10
-// asks for "dropped by reason", and this refusal had no reason to be dropped
+// difference was a Debug line, which is not an observable in production.
+// Drops are observable by reason, and this refusal had no reason to be dropped
 // under.
 //
 // What it must NOT do is become an inbound outcome: Metrics.Observed means
@@ -295,10 +296,11 @@ func TestCapabilityDropIsCountedUnderItsOwnReason(t *testing.T) {
 		line := strings.TrimSuffix(mustDatagramLine(t, newNodeDatagram(t, nil)), "\n")
 
 		for i := 0; i < frames; i++ {
-			// A true here IS "the connection is alive": the dispatcher's bool is
-			// what decides whether the reader keeps the socket (§2).
+			// A true here IS "the connection is alive": the dispatcher's bool
+			// is what decides whether the reader keeps the socket
+			// (docs/protocol/datagram.md §2).
 			if !svc.dispatchNetworkFrame(connID, line) {
-				t.Fatalf("frame %d tore the connection down; this plane drops silently (§2)", i)
+				t.Fatalf("frame %d tore the connection down; this plane drops silently (docs/protocol/datagram.md §2)", i)
 			}
 		}
 
@@ -316,7 +318,7 @@ func TestCapabilityDropIsCountedUnderItsOwnReason(t *testing.T) {
 		default:
 		}
 		if score := banScoreForIP(svc, datagramTestPeerIP); score != 0 {
-			t.Fatalf("ban score = %d: a missing capability is not misbehaviour (§4.4)", score)
+			t.Fatalf("ban score = %d: a missing capability is not misbehaviour (docs/protocol/datagram.md §6)", score)
 		}
 	})
 

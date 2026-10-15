@@ -1,5 +1,5 @@
 // Package datagram implements the unguaranteed datagram transport layer
-// specified in docs/refactoring/datagram-transport.md.
+// specified in docs/protocol/datagram.md.
 //
 // Layering contract: this package MUST NOT import internal/core/node. Everything
 // the layer needs from the node (route candidates, session capabilities, frame

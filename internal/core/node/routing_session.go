@@ -163,9 +163,8 @@ func (s *Service) onPeerSessionEstablished(peerIdentity domain.PeerIdentity, cap
 	// (session counters in identitySessions / identityRelaySessions)
 	// was updated above under peerMu.
 	//
-	// See routing_withdrawal_grace.go for the contract and
-	// docs/refactoring/route-withdrawal-grace-period.md for the
-	// design rationale.
+	// See routing_withdrawal_grace.go for the contract and the design
+	// rationale.
 	if s.tryCancelPendingWithdrawal(peerIdentity) {
 		// Presence was told above, on the total 0 → 1 transition. It is not
 		// told again here: this branch is about the ROUTING timer, and the
@@ -493,12 +492,12 @@ func (s *Service) onPeerSessionClosedWithAttribution(
 		s.recordPeerDigestOnSessionClose(peerIdentity)
 	}
 
-	// Datagram admission buckets (§5). Dropped only on the LAST total
-	// session, because the budget is per NEIGHBOUR, not per socket: a peer
-	// with a second live connection is still the same neighbour and must
-	// keep spending the same budget. Forget does not forgive what was spent
-	// — it releases the memory of a peer that is gone — so the call is safe
-	// exactly here and would be wrong one transition earlier.
+	// Datagram admission buckets (docs/protocol/datagram.md §5). Dropped only
+	// on the LAST total session, because the budget is per NEIGHBOUR, not per
+	// socket: a peer with a second live connection is still the same neighbour
+	// and must keep spending the same budget. Forget does not forgive what was
+	// spent — it releases the memory of a peer that is gone — so the call is
+	// safe exactly here and would be wrong one transition earlier.
 	//
 	// Outside every domain mutex, like the other close-path side effects.
 	if isLastTotal {

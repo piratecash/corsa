@@ -401,3 +401,54 @@ func TestBuildSignedIdentityRecordRefusesSeqZero(t *testing.T) {
 		t.Fatal("seq 0 accepted")
 	}
 }
+
+// TestBuildSignedIdentityRecordRefusesTooManyDTypes: every receiver reads a
+// record whose dtypes list exceeds MaxIdentityRecordDTypes as declaring NO
+// type, so issuing one would silently tell the network "this node handles
+// nothing". The owner refuses at issue time instead, with a sentinel the
+// caller can tell apart — and the wire count, not the distinct count, is what
+// decides, exactly as on the receive side.
+func TestBuildSignedIdentityRecordRefusesTooManyDTypes(t *testing.T) {
+	owner := newTestRecordOwner(t)
+
+	namesOfCount := func(count int) []domain.DType {
+		names := make([]domain.DType, count)
+		for i := range names {
+			names[i] = domain.DType(fmt.Sprintf("t%d", i))
+		}
+		return names
+	}
+
+	t.Run("one over the cap is refused", func(t *testing.T) {
+		spec := defaultRecordSpec()
+		spec.DTypes = domain.ExplicitDTypes(namesOfCount(domain.MaxIdentityRecordDTypes + 1))
+		record, err := BuildSignedIdentityRecord(owner, spec)
+		if !errors.Is(err, ErrIdentityRecordTooManyDTypes) {
+			t.Fatalf("err = %v (body %q), want ErrIdentityRecordTooManyDTypes", err, record.Body)
+		}
+	})
+
+	t.Run("duplicates count as sent", func(t *testing.T) {
+		names := namesOfCount(domain.MaxIdentityRecordDTypes)
+		names = append(names, names[0])
+		spec := defaultRecordSpec()
+		spec.DTypes = domain.ExplicitDTypes(names)
+		if _, err := BuildSignedIdentityRecord(owner, spec); !errors.Is(err, ErrIdentityRecordTooManyDTypes) {
+			t.Fatalf("err = %v, want ErrIdentityRecordTooManyDTypes", err)
+		}
+	})
+
+	t.Run("exactly the cap is issued and read back whole", func(t *testing.T) {
+		spec := defaultRecordSpec()
+		spec.DTypes = domain.ExplicitDTypes(namesOfCount(domain.MaxIdentityRecordDTypes))
+		record := buildTestRecord(t, owner, spec)
+		body, err := VerifyIdentityRecord(record, testRecordNetwork, ownerPeerIdentity(t, owner))
+		if err != nil {
+			t.Fatalf("verify: %v", err)
+		}
+		if body.DTypes.Declaration() != domain.DTypeDeclarationExplicit || body.DTypes.Len() != domain.MaxIdentityRecordDTypes {
+			t.Fatalf("read back %s/%d, want explicit/%d",
+				body.DTypes.Declaration(), body.DTypes.Len(), domain.MaxIdentityRecordDTypes)
+		}
+	})
+}

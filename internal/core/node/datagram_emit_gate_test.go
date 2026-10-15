@@ -11,18 +11,18 @@ import (
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
-// datagram_emit_gate_test.go pins §4.3 line 574 where the node implements it:
-// "the metadata of a candidate describes ONE concrete connection — the one the
-// send will try — and comes from the same helper".
+// datagram_emit_gate_test.go pins docs/protocol/datagram.md §4.4 where the node
+// implements it: "the metadata of a candidate describes ONE concrete connection
+// — the one the send will try — and comes from the same helper".
 //
 // The scheduler judges a peer by the HEAD of its connection list
 // (PeerMetadata.SendableConnection) and runs the full gate set over it: the
-// role gate of §6 and the last-hop dtype gate of §6.1. The emitter then walks
-// the peer's connections until one queue
-// accepts. Walking them UNFILTERED meant the bytes could leave over a second
-// socket of the same peer whose advertised set and declared dtypes nobody had
-// looked at — a candidate admitted on the strength of one connection, delivered
-// through another that would have been refused.
+// role gate of docs/protocol/datagram.md §6 and the last-hop dtype gate of
+// docs/protocol/datagram.md §6.1. The emitter then walks the peer's connections
+// until one queue accepts. Walking them UNFILTERED meant the bytes could leave
+// over a second socket of the same peer whose advertised set and declared
+// dtypes nobody had looked at — a candidate admitted on the strength of one
+// connection, delivered through another that would have been refused.
 //
 // Every case below is the same shape: the first connection passes the gates and
 // refuses the frame at its queue, the second one would take it and does not
@@ -46,9 +46,10 @@ func declarationsWithout(missing domain.CapabilityName) *netcore.HandshakeDeclar
 }
 
 // declarationsHandlingNoDType returns the standard declarations with an
-// EXPLICITLY EMPTY dtypes field: §6.1's "I speak the envelope and handle no
-// type at all", which the last-hop gate must refuse for every dtype without
-// exception — there is no set a peer is credited with for free.
+// EXPLICITLY EMPTY dtypes field: docs/protocol/datagram.md §6.1's "I speak the
+// envelope and handle no type at all", which the last-hop gate must refuse for
+// every dtype without exception — there is no set a peer is credited with for
+// free.
 func declarationsHandlingNoDType() *netcore.HandshakeDeclarations {
 	declarations := datagramPeerDeclarations()
 	declarations.DeclaredDTypes = domain.ExplicitDTypes(nil)
@@ -101,7 +102,7 @@ func TestEmitToNeverFallsBackToAnUngatedConnection(t *testing.T) {
 
 	destination := domain.PeerIdentityFromWire(datagramTestDstHex)
 	// A relay is any peer that is not the destination, which is the whole
-	// definition of the transit role (§2.2 rule 2).
+	// definition of the transit role (docs/protocol/datagram.md §6).
 	relay := domain.PeerIdentityFromWire("1111111111111111111111111111111111111111")
 
 	cases := map[string]struct {
@@ -110,7 +111,7 @@ func TestEmitToNeverFallsBackToAnUngatedConnection(t *testing.T) {
 		refused  *netcore.HandshakeDeclarations
 		admitted *netcore.HandshakeDeclarations
 	}{
-		// §6: a transit candidate must advertise
+		// docs/protocol/datagram.md §6: a transit candidate must advertise
 		// mesh_datagram_transit_v1. The destination is somebody else, so the
 		// peer is judged as transit on both of its connections.
 		"transit capability": {
@@ -119,16 +120,17 @@ func TestEmitToNeverFallsBackToAnUngatedConnection(t *testing.T) {
 			refused:  declarationsWithout(datagram.CapabilityDatagramTransitV1),
 			admitted: nil,
 		},
-		// §6: without mesh_datagram_v1 the command does not exist for the peer
-		// at all, in either role — the destination included.
+		// docs/protocol/datagram.md §6: without mesh_datagram_v1 the command
+		// does not exist for the peer at all, in either role — the destination
+		// included.
 		"endpoint capability": {
 			frame:    newNodeDatagram(t, nil),
 			peer:     destination,
 			refused:  declarationsWithout(datagram.CapabilityDatagramV1),
 			admitted: nil,
 		},
-		// §4.3 / §6.1: the last-hop dtype gate. An explicitly empty `dtypes`
-		// refuses every type without exception.
+		// docs/protocol/datagram.md §4.4 and §6.1: the last-hop dtype gate. An
+		// explicitly empty `dtypes` refuses every type without exception.
 		"last-hop dtype": {
 			frame:    newNodeDatagram(t, nil),
 			peer:     destination,
@@ -198,10 +200,11 @@ func TestEmitToAppliesTheGateToTheFirstConnectionToo(t *testing.T) {
 // property of the plane and not a hole.
 //
 // A `response` has no candidate: its next hop is the `upstream` of the
-// reverse-state record (§4.2), which the layer never puts through
-// AdmitCandidate. There is therefore no metadata for the sockets to agree with,
-// and demanding mesh_datagram_transit_v1 from the neighbour a reply is owed to
-// would drop exactly the answers the reverse state exists to deliver.
+// reverse-state record (docs/protocol/datagram.md §4.3), which the layer never
+// puts through AdmitCandidate. There is therefore no metadata for the sockets
+// to agree with, and demanding mesh_datagram_transit_v1 from the neighbour a
+// reply is owed to would drop exactly the answers the reverse state exists to
+// deliver.
 func TestEmitToLeavesTheResponsePlaneUngated(t *testing.T) {
 	t.Parallel()
 
@@ -229,7 +232,7 @@ func TestEmitToLeavesTheResponsePlaneUngated(t *testing.T) {
 
 // newDatagramResponseFrame builds the one unsigned mode: a response carries no
 // auth, no route_policy and a `dst` that is the one-shot label of the request
-// it answers (§2.1.1).
+// it answers (docs/protocol/datagram.md §2.2).
 func newDatagramResponseFrame(t *testing.T) protocol.DatagramFrame {
 	t.Helper()
 	subject, err := domain.ParsePeerIdentity(datagramTestDstHex)

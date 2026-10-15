@@ -89,14 +89,16 @@ func TestBuiltFrameCarriesTheLayerFixedHeader(t *testing.T) {
 		t.Fatalf("VerifyDatagramSignature: %v", err)
 	}
 	// The payload travels as RAW bytes: the serializer owns the base64url, and
-	// pre-encoding here is the double encoding of §2.3.
+	// pre-encoding here is the double encoding of
+	// docs/protocol/datagram.md §2.4.
 	if !bytes.Equal(frame.Payload, []byte("sealed-bytes")) {
 		t.Fatalf("payload = %q, want the raw sealed bytes", frame.Payload)
 	}
 }
 
 // A fresh salt per frame is what lets the SAME ciphertext be resent without
-// hitting the anti-replay cache — the whole reason §3.1 puts a salt in auth.
+// hitting the anti-replay cache — the whole reason
+// docs/protocol/datagram.md §3.1 puts a salt in auth.
 func TestBuiltFramesOfOnePayloadCarryDifferentSalts(t *testing.T) {
 	t.Parallel()
 

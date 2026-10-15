@@ -7,9 +7,9 @@ import (
 	"github.com/piratecash/corsa/internal/core/domain"
 )
 
-// metrics.go is the counting end of the layer (§10): accepted, forwarded,
-// dropped BY REASON, unknown types, refused answers, plus the reverse-state
-// events of §4.2.
+// metrics.go is the counting end of the layer (docs/rpc/datagram.md,
+// `metrics`): accepted, forwarded, dropped BY REASON, unknown types, refused
+// answers, plus the reverse-state events of docs/protocol/datagram.md §4.3.
 //
 // Everything the layer refuses is refused SILENTLY on the wire — no error
 // frame, no connection tear-down — so these counters are the only place a
@@ -24,7 +24,7 @@ import (
 // system that has to be initialized before the layer works is a metric system
 // that gets disabled in tests and then rots.
 //
-// Reference: docs/refactoring/datagram-transport.md §4.2, §5, §10, §11.6.
+// Reference: docs/protocol/datagram.md §4.3, §5; docs/rpc/datagram.md (fetchDatagramSummary).
 
 // enumSlots sizes the counter arrays. All three enumerations counted here are
 // uint8, so one slot per possible value is 2 KiB per array and the array can
@@ -65,7 +65,7 @@ func modeSlot(mode domain.DatagramMode) int {
 }
 
 // refusedAnswerReasons is the set of drop reasons that mean "an answer was
-// refused" (§10). They are listed once, here, rather than derived from a
+// refused". They are listed once, here, rather than derived from a
 // naming convention: DropAnswerNotDelivered is a refused answer and does not
 // start with DropReverse, and DropReverseSlotBusy is a refused REQUEST and
 // does, so a prefix rule would get both wrong.
@@ -100,12 +100,12 @@ type Metrics struct {
 	reverse  [enumSlots]atomic.Uint64
 	unknown  atomic.Uint64
 	// sendRefusals counts sends the POLICY GATES refused, split by which gate
-	// spoke. Until this existed the three verdicts of §4.3
-	// (RejectionMissingCapability with either advertised capability, and
-	// RejectionUnsupportedDType) were per-call values that reached a JSON
-	// field of one request and nothing cumulative — a capability rollout could
-	// not be watched from a running node, which is what
-	// docs/refactoring/dht/05-rollout-metrics.md is about.
+	// spoke. Until this existed the three verdicts of
+	// docs/protocol/datagram.md §4.4 (RejectionMissingCapability with either
+	// advertised capability, and RejectionUnsupportedDType) were per-call
+	// values that reached a JSON field of one request and nothing cumulative —
+	// a capability rollout could not be watched from a running node
+	// (docs/rpc/datagram.md, `metrics.SendRefusals`).
 	sendRefusals [sendRefusalSlots]atomic.Uint64
 }
 
@@ -182,13 +182,13 @@ func (m *Metrics) ObserveInbound(mode domain.DatagramMode, outcome InboundOutcom
 
 // ObserveDrop counts a frame the layer dropped OUTSIDE the inbound conveyor —
 // today the one case is a frame the writer refused after it had already left
-// the class queue (§5).
+// the class queue (docs/protocol/datagram.md §5).
 //
 // It touches only the reason breakdown and not the inbound totals, and that is
 // the point: such a frame was already counted once as an accepted inbound
 // frame (or was created locally and never inbound at all), so adding it to
 // Observed a second time would make "observed" stop meaning "frames seen".
-// §10 asks for "dropped by reason", and until this existed a frame lost
+// Drops are observable by reason, and until this existed a frame lost
 // between the queue and the socket appeared in no counter at all.
 func (m *Metrics) ObserveDrop(reason DropReason) {
 	if m == nil || reason == DropReasonUnset {
@@ -198,12 +198,13 @@ func (m *Metrics) ObserveDrop(reason DropReason) {
 }
 
 // ObserveUnknownDType counts a frame addressed here whose dtype this build
-// does not implement: a silent drop on a live connection, with no ban (§2).
+// does not implement: a silent drop on a live connection, with no ban
+// (docs/protocol/datagram.md §2).
 //
 // Only the TOTAL is kept. Naming the types would make an attacker-controlled
-// string the key of a map this node grows, and §11.6 has not decided whether
-// the per-type breakdown is worth publishing at all; the total is what §10
-// asks for and is enough to see "the network moved on without us".
+// string the key of a map this node grows, and whether a per-type breakdown
+// is worth publishing at all is still open; the total is enough to see "the
+// network moved on without us".
 func (m *Metrics) ObserveUnknownDType(_ domain.DType) {
 	if m == nil {
 		return
@@ -211,8 +212,9 @@ func (m *Metrics) ObserveUnknownDType(_ domain.DType) {
 	m.unknown.Add(1)
 }
 
-// ObserveReverseState counts one reverse-state transition (§4.2).
-// ObserveSendRefusal records that the admission gates refused a send.
+// ObserveReverseState counts one reverse-state transition
+// (docs/protocol/datagram.md §4.3). ObserveSendRefusal records that the
+// admission gates refused a send.
 //
 // The UNIT is one refused SEND, not one rejected candidate. A send walks
 // several candidates and may reject most of them before handing the frame to
@@ -284,7 +286,7 @@ type MetricsSnapshot struct {
 	// Observed is every inbound frame the pipeline decided on.
 	Observed uint64
 	// Accepted is the frames that were not dropped: delivered, forwarded or
-	// answered — the "accepted and forwarded" pair of §10 read as one number.
+	// answered — the "accepted and forwarded" pair read as one number.
 	Accepted uint64
 	// Delivered, Forwarded, Answered and Dropped are the totals across all
 	// three modes.
@@ -296,11 +298,12 @@ type MetricsSnapshot struct {
 	// Dropped counts frames refused, all modes and all reasons.
 	Dropped uint64
 	// UnknownDType counts frames addressed here whose type this build does
-	// not implement (§10, §11.6).
+	// not implement.
 	UnknownDType uint64
 	// RefusedAnswers counts answers the response plane refused — a pairing
 	// mismatch, a wrong downstream, an exhausted probe budget, a lost claim
-	// or a write queue that would not take the answer (§4.2, §10).
+	// or a write queue that would not take the answer
+	// (docs/protocol/datagram.md §4.3).
 	RefusedAnswers uint64
 	// ByMode is the per-mode outcome breakdown, keyed by the wire name of
 	// the mode.
@@ -404,8 +407,9 @@ func (m *Metrics) modeCounts(slot int) ModeCounts {
 	return counts
 }
 
-// Diagnostics is the whole §5 / §10 picture of one layer instance in one
-// value: what the counters saw, what the budgets did, what the queue holds
+// Diagnostics is the whole limits-and-metrics picture
+// (docs/protocol/datagram.md §5; docs/rpc/datagram.md) of one layer instance in
+// one value: what the counters saw, what the budgets did, what the queue holds
 // and the numbers all three were configured with.
 //
 // It exists because the three components are deliberately independent — the
@@ -429,9 +433,9 @@ type Diagnostics struct {
 	// fairness decision rather than a queue depth: RejectedNoisyPeer,
 	// EvictedNoisyPeer and RejectedCapacity say that this node refused or
 	// evicted a record under pressure, and AbandonedReservations says a
-	// pipeline branch was lost. §5 requires that pressure to be observable,
-	// and until this field existed the counters had no reader outside the
-	// tests — a rule with no way to see it fire.
+	// pipeline branch was lost. docs/protocol/datagram.md §5 requires that
+	// pressure to be observable, and until this field existed the counters had
+	// no reader outside the tests — a rule with no way to see it fire.
 	Replay ReplayDiagnostics
 	// Reverse is the reverse-state table's occupancy and, above all, who its
 	// shared local quota refused.

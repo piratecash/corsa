@@ -14,10 +14,10 @@ import "github.com/piratecash/corsa/internal/core/domain"
 // OwnerLoadForTest reports how many records the OWNER of this arrival holds in
 // the base replay cache.
 //
-// The fairness rule of §5 charges per owner and never per channel, so this is
-// what a test of it has to observe: two arrivals of one neighbour over two
-// channels — a reconnect, or two parallel sessions — must answer the same
-// number.
+// The fairness rule of docs/protocol/datagram.md §5 charges per owner and never
+// per channel, so this is what a test of it has to observe: two arrivals of one
+// neighbour over two channels — a reconnect, or two parallel sessions — must
+// answer the same number.
 func (c *BaseReplayCache) OwnerLoadForTest(incoming IngressPeer) int {
 	c.mu.Lock()
 	defer c.mu.Unlock()

@@ -9,8 +9,8 @@ package domain
 // Merging is therefore a single comparison rather than a conflict resolution,
 // and the same fact arriving twice, late, or out of order changes nothing.
 //
-// The wire and storage sides both derive from this; see
-// docs/refactoring/reactions-protocol.md.
+// The wire and storage sides both derive from this; the storage side is
+// described in docs/chatlog.md (the `message_reactions` table).
 
 // ReactionOp is what a fact says about one emoji.
 type ReactionOp uint8

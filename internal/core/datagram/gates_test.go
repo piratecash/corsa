@@ -9,8 +9,9 @@ import (
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
-// gates_test.go checks the ROLE gate of §6 and the candidate filter it
-// implies: what a node must advertise to be handed a frame, in either role.
+// gates_test.go checks the ROLE gate of docs/protocol/datagram.md §6 and the
+// candidate filter it implies: what a node must advertise to be handed a frame,
+// in either role.
 //
 // The two path-wide gates that used to sit beside it are gone. The tuple-gate
 // compared the (av, ext.v) pair of a frame against a contract this node had
@@ -90,8 +91,8 @@ func TestRawCapabilitySetIsEmptiedWholeOnABreach(t *testing.T) {
 // Candidate filter
 // ---------------------------------------------------------------------------
 
-// TestCandidateFilterAppliesTheLastHopRule pins §6: transit needs
-// mesh_datagram_transit_v1, the destination itself does not — an
+// TestCandidateFilterAppliesTheLastHopRule pins docs/protocol/datagram.md §6:
+// transit needs mesh_datagram_transit_v1, the destination itself does not — an
 // endpoint-only client must be able to receive what is addressed to it
 // without ever claiming to relay.
 func TestCandidateFilterAppliesTheLastHopRule(t *testing.T) {
@@ -136,7 +137,8 @@ func TestCandidateFilterJudgesTheRoleAndNotTheFrame(t *testing.T) {
 
 // TestCandidateFilterNeedsTheEnvelopeCapability pins the first check: a peer
 // without mesh_datagram_v1 has no such command at all — sending to it would
-// earn an unknown_command and a closed connection (§6).
+// earn an unknown_command and a closed connection
+// (docs/protocol/datagram.md §6).
 func TestCandidateFilterNeedsTheEnvelopeCapability(t *testing.T) {
 	frame := gatesTestFrame()
 	relay := domaintest.ID("gates-relay")

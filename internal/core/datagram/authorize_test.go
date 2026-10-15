@@ -9,13 +9,13 @@ import (
 	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 )
 
-// authorize_test.go covers the §7 hook contract itself; its pipeline
-// consequences — "reject does not commit the key", "an unknown dtype never
-// reaches it", "it runs on all three planes" — are asserted in the pipeline
-// tests, where the commit is observable.
+// authorize_test.go covers the docs/protocol/datagram.md §7 hook contract
+// itself; its pipeline consequences — "reject does not commit the key", "an
+// unknown dtype never reaches it", "it runs on all three planes" — are asserted
+// in the pipeline tests, where the commit is observable.
 
-// TestTypeWithoutAHookIsAuthorizedTrivially is the §7 default, expressed once
-// so no call site has to remember it.
+// TestTypeWithoutAHookIsAuthorizedTrivially is the docs/protocol/datagram.md §7
+// default, expressed once so no call site has to remember it.
 func TestTypeWithoutAHookIsAuthorizedTrivially(t *testing.T) {
 	registry := NewTypeRegistry()
 	if err := registry.Register(routedType(dtypePush, acceptingHandler())); err != nil {
@@ -45,9 +45,9 @@ func TestZeroDecisionIsAReject(t *testing.T) {
 	}
 }
 
-// TestDeliveryContextCarriesTheContextFields pins the §7 ctx: where the frame
-// came from and our own address — the two facts push_identity's rule cannot be
-// checked without.
+// TestDeliveryContextCarriesTheContextFields pins the
+// docs/protocol/datagram.md §7 ctx: where the frame came from and our own
+// address — the two facts push_identity's rule cannot be checked without.
 //
 // The ingress is built with ProvenIngress and not with the weakest constructor,
 // because Identity() is the PROVEN accessor: a claimed ingress answers false
@@ -93,7 +93,8 @@ func TestDeliveryContextCarriesTheContextFields(t *testing.T) {
 }
 
 // TestRegistryGateRefusesForeignModesAndClasses is the gate that stands
-// immediately before the hook, and the reason mode demotion (§3.6) is harmless.
+// immediately before the hook, and the reason mode demotion
+// (docs/protocol/datagram.md §3.7) is harmless.
 func TestRegistryGateRefusesForeignModesAndClasses(t *testing.T) {
 	registry := NewTypeRegistry()
 	if err := registry.Register(TypeRegistration{

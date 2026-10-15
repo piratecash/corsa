@@ -12,7 +12,7 @@ import (
 
 // ---------------------------------------------------------------------------
 // Route withdrawal grace period tests — Part 1 of the probation +
-// quarantine design (see docs/refactoring/route-withdrawal-grace-period.md).
+// quarantine design (see routing_withdrawal_grace.go for the rationale).
 //
 // These tests exercise the unit-level state machine directly via the
 // helper API (maybeScheduleDeferredWithdrawal /

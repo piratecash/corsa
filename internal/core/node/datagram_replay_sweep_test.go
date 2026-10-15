@@ -109,15 +109,15 @@ func TestTheBackgroundPassSweepsTheBaseReplayCache(t *testing.T) {
 //
 // The base cache is the one part of the plane whose OVERFLOW is a fairness
 // decision rather than a queue depth: it refuses and evicts records under
-// pressure (§5) and its watchdog reclaims pipeline branches that never reached
-// commit or release. Every one of those counters used to have no reader outside
-// the cache's own tests — a rule that fires invisibly is a rule an operator
-// cannot act on — so the diagnostic now carries them beside the occupancy they
-// have to be read against.
+// pressure (docs/protocol/datagram.md §5) and its watchdog reclaims pipeline
+// branches that never reached commit or release. Every one of those counters
+// used to have no reader outside the cache's own tests — a rule that fires
+// invisibly is a rule an operator cannot act on — so the diagnostic now carries
+// them beside the occupancy they have to be read against.
 //
 // The mutation this kills: dropping the replay cache out of CollectDiagnostics
-// or the `replay` block out of the summary, which would take the §5 refusals
-// off every surface the node publishes.
+// or the `replay` block out of the summary, which would take the
+// docs/protocol/datagram.md §5 refusals off every surface the node publishes.
 func TestTheSummaryPublishesTheReplayCacheCounters(t *testing.T) {
 	t.Parallel()
 
@@ -159,7 +159,7 @@ func TestTheSummaryPublishesTheReplayCacheCounters(t *testing.T) {
 		t.Fatalf("decode the datagram summary: %v", err)
 	}
 	if summary.Replay == nil {
-		t.Fatal("the summary carries no replay block: the §5 fairness refusals of the " +
+		t.Fatal("the summary carries no replay block: the docs/protocol/datagram.md §5 fairness refusals of the " +
 			"anti-replay cache reach no operator surface at all")
 	}
 	if summary.Replay.Held != cache.Len() {

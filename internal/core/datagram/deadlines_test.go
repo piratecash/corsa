@@ -9,9 +9,10 @@ import (
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
-// deadlines_test.go proves the timing rule of §3.3 is CONSTRUCTIVE and is the
-// SAME on every node: it is a pure function of the signed header, so two nodes
-// on one path cannot come to different conclusions about one frame.
+// deadlines_test.go proves the timing rule of docs/protocol/datagram.md §3.4 is
+// CONSTRUCTIVE and is the SAME on every node: it is a pure function of the
+// signed header, so two nodes on one path cannot come to different conclusions
+// about one frame.
 //
 // The rule used to be split between a profile that asked and a layer that
 // clamped, and most of this file tested the clamps. There is nothing left to
@@ -52,9 +53,9 @@ func deadlineTestHeader(t *testing.T, reshape func(*protocol.DatagramFrame)) Hea
 	return header
 }
 
-// TestDeadlinesRaiseReplayUntilToValidUntil pins the one relation §2.2 rules
-// out by name: a key that dies before the frame it identifies would let an
-// exact copy through once per window, forever.
+// TestDeadlinesRaiseReplayUntilToValidUntil pins the one relation
+// docs/protocol/datagram.md §3.4 rules out by name: a key that dies before the
+// frame it identifies would let an exact copy through once per window, forever.
 func TestDeadlinesRaiseReplayUntilToValidUntil(t *testing.T) {
 	header := deadlineTestHeader(t, nil)
 
@@ -79,9 +80,9 @@ func TestDeadlinesRaiseReplayUntilToValidUntil(t *testing.T) {
 // supposed to pin it.
 //
 // The per-class queue residence is what makes the two classes differ at all —
-// 5 s for control, 30 s for bulk (§4.2) — and a flat value for both would let a
-// control frame sit in a lane six times longer than the class allows anywhere
-// else in the spec.
+// 5 s for control, 30 s for bulk (docs/protocol/datagram.md §4.3) — and a flat
+// value for both would let a control frame sit in a lane six times longer than
+// the class allows anywhere else in the spec.
 func TestSendUntilIsTheEarliestOfItsThreeBounds(t *testing.T) {
 	// The margins, spelled out. A change to any of them is a protocol change
 	// every node on a path has to make at once, so it belongs in a diff that
@@ -192,7 +193,7 @@ func TestDeadlinesExpireWhenTheClampLandsBehindNow(t *testing.T) {
 
 // TestDeadlinesRejectFrameFromTheFuture pins that valid_from is a refusal of
 // its own: "too far in the future" cannot be expressed by a single deadline,
-// which is why §2.2 uses an interval.
+// which is why docs/protocol/datagram.md §3.4 uses an interval.
 func TestDeadlinesRejectFrameFromTheFuture(t *testing.T) {
 	header := deadlineTestHeader(t, nil)
 	now := deadlineTestInstant().Add(-6 * time.Minute)
@@ -267,10 +268,10 @@ func TestDeadlinesCountFromTheSignedTime(t *testing.T) {
 	}
 }
 
-// TestDeadlineBoundariesAreInclusiveForLife is the single invariant of §2.2
-// stated as a test: at now == replay_until == valid_until the frame is ALIVE
-// and its key is ALIVE. A mismatch here would open a whole second of
-// re-delivery at second-granularity time.
+// TestDeadlineBoundariesAreInclusiveForLife is the single invariant of
+// docs/protocol/datagram.md §3.4 stated as a test: at now == replay_until ==
+// valid_until the frame is ALIVE and its key is ALIVE. A mismatch here would
+// open a whole second of re-delivery at second-granularity time.
 func TestDeadlineBoundariesAreInclusiveForLife(t *testing.T) {
 	header := deadlineTestHeader(t, nil)
 	boundary := deadlineTestInstant().Add(5 * time.Minute)
@@ -296,8 +297,9 @@ func TestDeadlineBoundariesAreInclusiveForLife(t *testing.T) {
 	}
 }
 
-// TestDeadlinesForAnOrdinaryFrame walks the whole arithmetic of §3.3 in one
-// place, so the four instants are pinned together rather than each in isolation.
+// TestDeadlinesForAnOrdinaryFrame walks the whole arithmetic of
+// docs/protocol/datagram.md §3.4 in one place, so the four instants are pinned
+// together rather than each in isolation.
 func TestDeadlinesForAnOrdinaryFrame(t *testing.T) {
 	header := deadlineTestHeader(t, nil)
 	signed := deadlineTestInstant()

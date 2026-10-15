@@ -13,10 +13,10 @@ import (
 )
 
 // reactions.go is the storage half of message reactions. The model it serves
-// is in docs/refactoring/reactions-protocol.md; the short version is that one
-// row is one FACT by one actor about one emoji on one message, the count under
-// a message is a fold over rows, and a cleared reaction stays as a tombstone so
-// a late duplicate of the "set" cannot resurrect it.
+// is described in docs/chatlog.md ("Metadata column"); the short version is
+// that one row is one FACT by one actor about one emoji on one message, the
+// count under a message is a fold over rows, and a cleared reaction stays as a
+// tombstone so a late duplicate of the "set" cannot resurrect it.
 //
 // The tables are declared by the shared migration catalog
 // (internal/core/storage/migrations/0006_message_reactions.sql); this file only

@@ -160,7 +160,7 @@ type Service struct {
 
 	// transportTotals counts every byte that crossed a peer socket of this
 	// process, advanced only inside netcore.MeteredConn (transport_traffic.go,
-	// docs/refactoring/dht/05-rollout-metrics.md §5.3). Deliberately OUTSIDE
+	// docs/metrics.md "Transport totals"). Deliberately OUTSIDE
 	// the seven-domain mutex scheme: the counters are atomics advanced on the
 	// read and write path of every connection, and putting that path behind
 	// a domain mutex would serialise the network for a statistic. Held BY
@@ -169,8 +169,25 @@ type Service struct {
 	// it. Its period starts at startedAt. See docs/locking.md.
 	transportTotals netcore.TransportTotals
 
+	// sessionKinds counts the authenticated sessions by kind (v2 or legacy)
+	// and direction, and those whose peer announced a version from before v2
+	// (session_kind_metrics.go). OUTSIDE the seven-domain mutex scheme for the
+	// reason transportTotals is: atomics written once per session (on accept
+	// and on outbound publication), read lock-free by fetchRouteSummary, part
+	// of no decision.
+	// Held BY VALUE and never replaced; its zero value counts, and its period
+	// starts at startedAt. See docs/locking.md.
+	sessionKinds sessionKindCounters
+	// liveSessionKinds is the point-in-time gauge of sessions live now, by
+	// kind and direction, with distinct identities per bucket
+	// (session_kind_metrics.go). Published by refreshLiveSessionKinds on the
+	// announce cadence and read lock-free by SessionKindStats, the same
+	// atomic.Pointer model neighbourComposition uses and for the same reason:
+	// the hot read takes no domain mutex. nil before the first walk.
+	liveSessionKinds atomic.Pointer[domain.LiveSessionKinds]
+
 	// datagramMetrics counts every decision the datagram ingress makes
-	// (docs/refactoring/datagram-transport.md §10). Deliberately OUTSIDE
+	// (docs/rpc/datagram.md, fetchDatagramSummary). Deliberately OUTSIDE
 	// the seven-domain mutex scheme: the pointer is assigned once by
 	// NewService and never replaced, and datagram.Metrics is a set of
 	// atomic counters with its own synchronisation — taking a domain mutex
@@ -183,11 +200,12 @@ type Service struct {
 	datagramMetrics *datagram.Metrics
 
 	// datagramLayer is the assembled datagram transport plane: the conveyor
-	// of §4.1, the scheduler of §4.3, the §5 budgets and queues, and the
-	// components the node drives on a schedule (datagram_layer.go). nil
-	// whenever cfg.EnableDatagramV1 is false, which is the whole feature
-	// flag: every path that touches the plane is one nil check away from the
-	// pre-datagram behaviour.
+	// of docs/protocol/datagram.md §4.1, the scheduler of
+	// docs/protocol/datagram.md §4.4, the docs/protocol/datagram.md §5 budgets
+	// and queues, and the components the node drives on a schedule
+	// (datagram_layer.go). nil whenever cfg.EnableDatagramV1 is false, which is
+	// the whole feature flag: every path that touches the plane is one nil
+	// check away from the pre-datagram behaviour.
 	//
 	// OUTSIDE the seven-domain mutex scheme, for the same reason as
 	// datagramMetrics above: every component behind it carries its own
@@ -924,8 +942,7 @@ type Service struct {
 	// connBudget is the SHARED admission ceiling over inbound plus outbound
 	// connections plus the attempts in flight — the one number neither
 	// MaxOutgoingPeers nor MaxIncomingPeers can express, because the sum of
-	// two independently bounded subsystems is not bounded
-	// (docs/refactoring/dht/15-overlay-parameters.md §0.1.1).
+	// two independently bounded subsystems is not bounded.
 	//
 	// It is deliberately NOT guarded by peerMu and holds no reference to
 	// this Service: its own mutex is a leaf, which is what lets the
@@ -1410,12 +1427,13 @@ type peerSession struct {
 	capabilities []domain.Capability // intersection of local and remote capabilities negotiated during handshake
 
 	// declarations mirrors the peer's RAW handshake self-description — the
-	// validated raw capability names of §2.2 and the declared dtype set of
-	// §6.1 — from the same welcome frame that produced capabilities above.
-	// NetCore owns the authoritative copy (applyWelcomeMetadata writes
-	// both); this mirror exists because the outbound dispatcher is
-	// addressed by PeerAddress and never sees a ConnID. Guarded by peerMu,
-	// like every other field of peerSession that outlives the handshake.
+	// validated raw capability names of docs/protocol/datagram.md §2.3 and the
+	// declared dtype set of docs/protocol/datagram.md §6.1 — from the same
+	// welcome frame that produced capabilities above. NetCore owns the
+	// authoritative copy (applyWelcomeMetadata writes both); this mirror exists
+	// because the outbound dispatcher is addressed by PeerAddress and never
+	// sees a ConnID. Guarded by peerMu, like every other field of peerSession
+	// that outlives the handshake.
 	declarations netcore.HandshakeDeclarations
 
 	// netCore owns the outbound connection and is the single writer to the
@@ -1563,6 +1581,12 @@ const (
 	// observes on the closed transport is this node's doing and says nothing
 	// about the peer.
 	peerSessionClosedByLocalEviction
+	// peerSessionClosedByLegacyRefusal: the session was a v1 session of an
+	// identity that requires v2 — refused after it was registered, or closed
+	// by the sweep when the identity proved v2. It is this node's decision
+	// and a man in the middle can provoke it, so the peer is not charged for
+	// it either.
+	peerSessionClosedByLegacyRefusal
 )
 
 // closedByLocalEviction reports whether the session was closed by a
@@ -1578,6 +1602,15 @@ const (
 func (ps *peerSession) closedByLocalEviction() bool {
 	closer := ps.closedBy.Load()
 	return closer != nil && *closer == peerSessionClosedByLocalEviction
+}
+
+// closedByLocalDecision reports whether whoever closed the session first did
+// it on this node's own decision — a ConnectionManager eviction or shutdown,
+// or a refusal by pin — so the failure the serve loop then sees is not the
+// peer's. Read it the way closedByLocalEviction is read.
+func (ps *peerSession) closedByLocalDecision() bool {
+	closer := ps.closedBy.Load()
+	return closer != nil && (*closer == peerSessionClosedByLocalEviction || *closer == peerSessionClosedByLegacyRefusal)
 }
 
 type peerHealth struct {
@@ -2198,6 +2231,7 @@ func newService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus, netw
 			return svc.isPeerRemoteBannedLocked(addr, time.Now().UTC())
 		},
 		SetupFailureBannedFn:   svc.IsSetupFailureBanned,
+		V2RetryHeldFn:          svc.v2RetryHeld,
 		ConnectOnlyFn:          svc.connectOnlyTarget,
 		ListenAddr:             domain.ListenAddress(cfg.ListenAddress),
 		DefaultPort:            config.DefaultPeerPort,
@@ -2384,7 +2418,7 @@ func newService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus, netw
 	if cfg.AnnounceInterval > 0 {
 		announceLoopOpts = append(announceLoopOpts, routing.WithAnnounceInterval(cfg.AnnounceInterval))
 	}
-	// Rollout telemetry (docs/refactoring/dht/05-rollout-metrics.md). Both
+	// Rollout telemetry (docs/rpc/routing.md, fetchRouteSummary). Both
 	// accumulators start their period at the same instant the node did, so a
 	// cumulative number read later is anchored to something.
 	svc.modeSelection = routing.NewModeSelectionCounters(svc.startedAt)
@@ -2432,7 +2466,7 @@ func newService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus, netw
 	// queue that answer from its first delivery onwards.
 	svc.dmControl = newDMControlSender(svc)
 
-	// Datagram transport layer (docs/refactoring/datagram-transport.md).
+	// Datagram transport layer (docs/protocol/datagram.md).
 	// Built after the routing table, because the scheduler's resolver reads
 	// it, and before anything can dispatch a frame.
 	//
@@ -2752,6 +2786,12 @@ func (s *Service) Run(ctx context.Context) error {
 	// The two defers registered BELOW — the pending-withdrawal cancel and the
 	// inbound-connection drain — therefore run BEFORE this join, by design and
 	// not by accident; stopRunLifecycle's own comment carries the argument.
+	// The last write of the secure-session store's batched renewals runs
+	// AFTER the join below (LIFO): by then every writer of a renewal has
+	// stopped — the outbound sessions and dial workers the join waits for,
+	// and the inbound drain, registered later, ran even earlier — so no
+	// renewal made during the shutdown is lost after the flush.
+	defer s.flushSecureSessionRenewals(flushRenewalsAtStop)
 	defer s.stopRunLifecycle(runCancel)
 
 	// Datagram transport schedules (datagram_layer.go). No-op — and no
@@ -3333,10 +3373,11 @@ func (s *Service) handleConn(conn net.Conn, reservation *connbudget.Reservation)
 		// The line goes down UNTRIMMED. Trimming is a parser convenience and
 		// dispatchNetworkFrame does it for itself; doing it here instead would
 		// destroy the only copy of the wire bytes, and the datagram plane
-		// needs exactly those — §5 charges the neighbour's byte budget on the
-		// raw line and §3.4 requires the strict parser to read the same one
-		// (see rawLineForDispatch for the full argument and for why the
-		// announce-plane types stay on the trimmed form).
+		// needs exactly those — docs/protocol/datagram.md §5 charges the
+		// neighbour's byte budget on the raw line and
+		// docs/protocol/datagram.md §3.5 requires the strict parser to read the
+		// same one (see rawLineForDispatch for the full argument and for why
+		// the announce-plane types stay on the trimmed form).
 		if !s.handleCommand(connID, line) {
 			return
 		}
@@ -3422,12 +3463,12 @@ func (s *Service) admitInboundCommandLine(id domain.ConnID, connKey string, line
 //  2. announce-plane BULK frames — see exemptFrameTypeFromCommandLimit for the
 //     boundary and for the control frames deliberately left inside the limiter.
 //
-//  3. `datagram`, and only while a layer exists to charge the §5 budget that
-//     replaces the limiter — datagramCarriesOwnBudget owns that condition, and
-//     it is the reason this decision needs the ConnID: the replacement budget
-//     is charged on the identity the neighbour PROVED, so before `auth_ok`
-//     there is nobody to bill and an exemption would be a free channel rather
-//     than a budget swap.
+//  3. `datagram`, and only while a layer exists to charge the
+//     docs/protocol/datagram.md §5 budget that replaces the limiter —
+//     datagramCarriesOwnBudget owns that condition, and it is the reason this
+//     decision needs the ConnID: the replacement budget is charged on the
+//     identity the neighbour PROVED, so before `auth_ok` there is nobody to
+//     bill and an exemption would be a free channel rather than a budget swap.
 //
 // Class 3 is the only one whose answer depends on the CONNECTION rather than
 // on the line, and resolving its key is a registry read — so the question is
@@ -3449,8 +3490,8 @@ func (s *Service) frameLineExemptFromCommandLimit(id domain.ConnID, line string)
 var errInboundLineDropped = errors.New("inbound command line dropped by admission")
 
 // readInboundCommandLine reads ONE line of the inbound command plane under the
-// strict budget of §2.3 — maxCommandLineBytes, which IS protocol.MaxFrameLine —
-// and decides what a line that breaches it costs.
+// strict budget of docs/protocol/datagram.md §2 — maxCommandLineBytes, which IS
+// protocol.MaxFrameLine — and decides what a line that breaches it costs.
 //
 // The staged reader is used for its GATE and not for an extension: no type on
 // this reader is entitled to more than the strict budget, so the callback always
@@ -3472,13 +3513,15 @@ func (s *Service) readInboundCommandLine(reader *bufio.Reader, connID domain.Con
 // refuseOversizeInboundLine decides what an over-long inbound line costs, and
 // the answer is one of exactly two:
 //
-//   - a line claiming `datagram` is the datagram plane's business. §2.3 is a
-//     verdict about the LINE, and the neighbour that relayed the frame inside it
-//     did not write it, so the refusal is silent: the bytes go to that plane's
-//     own §5 per-neighbour budget, the drop is counted, the remainder is skipped
-//     so it cannot be read as frames of its own, and the CONNECTION LIVES. That
-//     rule is stated once, in refuseOversizeDatagramClaim, and is the same one
-//     the peer-session reader applies;
+//   - a line claiming `datagram` is the datagram plane's business.
+//     docs/protocol/datagram.md §2 is a verdict about the LINE, and the
+//     neighbour that relayed the frame inside it did not write it, so the
+//     refusal is silent: the bytes go to that plane's own
+//     docs/protocol/datagram.md §5 per-neighbour budget, the drop is counted,
+//     the remainder is skipped so it cannot be read as frames of its own, and
+//     the CONNECTION LIVES. That rule is stated once, in
+//     refuseOversizeDatagramClaim, and is the same one the peer-session reader
+//     applies;
 //   - everything else ends the connection with a frame-too-large error, exactly
 //     as this reader has always answered it.
 //
@@ -3621,12 +3664,13 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, wire string) bool {
 		return false
 	}
 
-	// A DATAGRAM NEVER REACHES protocol.ParseFrameLine. §4.1 step 1 charges the
-	// neighbour's byte and frame budget "before any decoding", and the
-	// universal parser is decoding: leaving it above the layer let a neighbour
-	// impose a full JSON unmarshal of every datagram-shaped line for free, and
-	// the budget only found out afterwards. The diversion runs before the parse
-	// and skips it entirely — the strict parser of §3.4 needs the original
+	// A DATAGRAM NEVER REACHES protocol.ParseFrameLine.
+	// docs/protocol/datagram.md §4.1 step 1 charges the neighbour's byte and
+	// frame budget "before any decoding", and the universal parser is decoding:
+	// leaving it above the layer let a neighbour impose a full JSON unmarshal
+	// of every datagram-shaped line for free, and the budget only found out
+	// afterwards. The diversion runs before the parse and skips it entirely —
+	// the strict parser of docs/protocol/datagram.md §3.5 needs the original
 	// bytes anyway.
 	if isDatagramWireLine(wire) {
 		return s.dispatchInboundDatagramWire(connID, addr, wire)
@@ -3636,10 +3680,11 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, wire string) bool {
 	// peer-session reader (admitFrameLinePreParse): a line whose type only
 	// protocol.ParseFrameLine could resolve used to be dispatched on the type
 	// the PARSER produced, so a duplicate `type` key ending in `datagram`
-	// reached the layer only after the universal unmarshal — the order §4.1
-	// step 1 forbids. The reader's own maxCommandLineBytes bounds the decode
-	// here, which is why the BUDGET half of admission is not repeated on this
-	// path; the ordering half is not about size.
+	// reached the layer only after the universal unmarshal — the order
+	// docs/protocol/datagram.md §4.1 step 1 forbids. The reader's own
+	// maxCommandLineBytes bounds the decode here, which is why the BUDGET half
+	// of admission is not repeated on this path; the ordering half is not about
+	// size.
 	//
 	// The connection survives: this is a drop, not a protocol error, because
 	// nothing on the wire proves what the sender meant. Answering invalid_json
@@ -3852,7 +3897,7 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, wire string) bool {
 			// may be a man in the middle who stripped TLS to collect a
 			// relayable v1 proof. Refused without a penalty — the claim is
 			// unproven, so it may not be the named peer at all.
-			if err := s.refuseLegacyIdentity(frame.Address); err != nil {
+			if err := s.refuseLegacyIdentity(domain.PeerIdentityFromWire(frame.Address)); err != nil {
 				accepted = false
 				log.Warn().Err(err).Uint64("conn_id", uint64(connID)).Str("addr", addr).Msg("inbound_v1_refused_identity_pinned_to_v2")
 				return false
@@ -4390,13 +4435,14 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, wire string) bool {
 		// inspector, which only reads string-literal case labels, sees it — same
 		// rationale as route_probe_v1 above.
 		//
-		// dispatchNetworkFrame classifies every line before the parser runs: one
-		// classifyFrameLine names `datagram` is diverted to the ingress with the
-		// RAW wire bytes (§3.4, §5), and one it cannot resolve is refused
-		// unparsed (§4.1 step 1). A frame arriving here would mean the scan and
-		// encoding/json disagree on a line neither refused, which is a classifier
-		// bug — and delivering it would put the universal parse back in front of
-		// the neighbour's budget, which is the finding this branch used to be.
+		// dispatchNetworkFrame classifies every line before the parser runs:
+		// one classifyFrameLine names `datagram` is diverted to the ingress
+		// with the RAW wire bytes (docs/protocol/datagram.md §3.5, §5), and one
+		// it cannot resolve is refused unparsed (docs/protocol/datagram.md §4.1
+		// step 1). A frame arriving here would mean the scan and encoding/json
+		// disagree on a line neither refused, which is a classifier bug — and
+		// delivering it would put the universal parse back in front of the
+		// neighbour's budget, which is the finding this branch used to be.
 		accepted = false
 		s.reportDatagramResidueUnreachable("inbound", addr)
 		return true
@@ -4807,7 +4853,7 @@ type peerSendableConnection struct {
 // Order — v2-proven connections first, then the rest, each part in the
 // order below. A legacy connection names the identity without proving it,
 // so it is never chosen over one on which the identity proved itself
-// (docs/refactoring/n1-legacy-residual.md §3):
+// (docs/routing.md, "Legacy claims of an identity that proved v2"):
 //  1. Outbound sessions (preferred tier), sorted by:
 //     a. oldest LastConnectedAt first — empirically the most stable
 //     socket carries the least retry risk;
@@ -5322,7 +5368,7 @@ func (s *Service) handleAuthSession(
 	// that closes legacy connections then may have run before this one was
 	// recognisable. Checking again here, as the last step before the session
 	// counts, leaves no window (v2_identity_claims.go).
-	if err := s.refuseLegacyIdentity(verified.Hello.Address); err != nil {
+	if err := s.refuseLegacyIdentity(domain.PeerIdentityFromWire(verified.Hello.Address)); err != nil {
 		log.Warn().Err(err).Uint64("conn_id", uint64(id)).Msg("inbound_v1_refused_identity_proved_v2_during_auth")
 		return protocol.Frame{Type: "error", Code: protocol.ErrCodeAuthRequired, Error: "identity requires a secure session"}, false, nil, connectFullSync{}
 	}
@@ -5339,6 +5385,8 @@ func (s *Service) handleAuthSession(
 // full sync) once the session may carry it.
 func (s *Service) completeInboundAuth(id domain.ConnID, verified *connauth.State) (backlogSub *subscriber, fullSync connectFullSync) {
 	s.setConnAuthStateByID(id, verified)
+	_, proven := verified.ProvenIdentity()
+	s.sessionKinds.inbound().note(proven, domain.ProtocolVersion(verified.Hello.Version))
 
 	// Resolve the remote address through the Network surface. RemoteAddr
 	// returns "" for an unregistered ConnID — learnPeerFromFrame tolerates
@@ -10504,7 +10552,7 @@ func expectedReplyType(requestType string) string {
 //
 // datagram is fire-and-forget by the layer's own definition: the transport is
 // best-effort and a datagram has no synchronous reply on the session
-// (docs/refactoring/datagram-transport.md §2). An answer to a request-mode
+// (docs/protocol/datagram.md §1). An answer to a request-mode
 // datagram, where one exists at all, arrives later as its own unsolicited
 // inbound frame. Routing it through peerSessionRequest would make the session
 // wait with expectedReplyType("") and swallow whatever unrelated frame came

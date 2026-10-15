@@ -186,7 +186,7 @@ type RoutingProvider interface {
 	// is made of — what fraction of neighbours still forces the legacy frame,
 	// and what they are missing — which until now existed only as a per-cycle
 	// atomic in a Debug log line. Lock-free.
-	// See docs/refactoring/dht/05-rollout-metrics.md.
+	// See docs/rpc/routing.md (fetchRouteSummary, `mode_selection`).
 	ModeSelectionStats() routing.ModeSelectionStats
 
 	// SessionOutcomeStats returns how outbound session attempts ended, split
@@ -215,9 +215,16 @@ type RoutingProvider interface {
 	// process, which cannot send the in-process fetch_traffic_totals frame;
 	// fetch_network_stats is not used because polling it re-arms the per-peer
 	// snapshot rebuild and would perturb the node being measured. Lock-free —
-	// the counters are atomics. See docs/refactoring/dht/05-rollout-metrics.md
-	// §5.3.
+	// the counters are atomics. See docs/metrics.md ("Transport totals").
 	TransportTrafficStats() domain.TransportTrafficStats
+
+	// SessionKindStats returns how many sessions this node authenticated as
+	// secure sessions v2 and how many as legacy, per direction, and how many
+	// of them had a peer announcing a version from before v2 — cumulative
+	// since the process started. It is what the switch-off of the legacy path
+	// is decided by (docs/protocol/session_v2.md). Lock-free — the counters
+	// are atomics.
+	SessionKindStats() domain.SessionKindStats
 
 	// HealthSnapshot returns a deep copy of every tracked
 	// RouteHealthState (Phase 2). Used by the fetchRouteHealth RPC and,
@@ -273,7 +280,7 @@ type ConnectionDiagnosticProvider interface {
 }
 
 // DatagramProvider exposes the read-only surfaces of the datagram transport
-// layer (docs/refactoring/datagram-transport.md §4.3, §5, §10). When the node
+// layer (docs/rpc/datagram.md; docs/protocol/datagram.md §4.4, §5). When the node
 // does not implement it the commands are registered as unavailable, exactly
 // like the routing group.
 //
@@ -285,9 +292,9 @@ type ConnectionDiagnosticProvider interface {
 type DatagramProvider interface {
 	// FetchDatagramSummary returns the JSON diagnostic of the local plane:
 	// the conveyor's decision counters, the per-neighbour admission budget,
-	// the weighted class queue and the §5 numbers all three run on. Returns
-	// an error when the layer is not enabled — "off" and "idle" are
-	// different facts and an operator needs to tell them apart.
+	// the weighted class queue and the docs/protocol/datagram.md §5 numbers all
+	// three run on. Returns an error when the layer is not enabled — "off" and
+	// "idle" are different facts and an operator needs to tell them apart.
 	FetchDatagramSummary() (json.RawMessage, error)
 
 	// DatagramReachable reports whether a datagram of this type would find a
@@ -301,7 +308,8 @@ type DatagramProvider interface {
 	// It answers with the layer's own JSON rather than a bool because the
 	// two negatives are different facts: a destination that declared no
 	// handler for the type is refused by a gate, while one that is off the
-	// routing table is not, and §6.1 reacts to only one of them.
+	// routing table is not, and docs/protocol/datagram.md §6.1 reacts to only
+	// one of them.
 	DatagramReachable(
 		ctx context.Context,
 		dst domain.PeerIdentity,

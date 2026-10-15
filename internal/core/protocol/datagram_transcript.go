@@ -16,7 +16,7 @@ import (
 // datagram, derives its replay key and implements the two pure crypto
 // helpers. Everything here is stateless: no clock, no trust store, no peer
 // knowledge — a transit relay verifies authenticity from the frame bytes
-// alone (§3.1, §3.2).
+// alone (docs/protocol/datagram.md §3.1, §3.2).
 
 // ErrDatagramSignature marks a frame whose Ed25519 signature does not
 // verify against the public key it carries.
@@ -35,10 +35,10 @@ var ErrDatagramSignerKey = errors.New("datagram: unacceptable signer key")
 const datagramTranscriptDomain = "corsa-datagram-auth-v1"
 
 // BuildDatagramTranscript returns the exact byte string signed by src, per
-// §3.2. Every field with a binary meaning is length-prefixed in its BINARY
-// form — 20-byte addresses, raw salt and pubkey, decoded payload — because
-// an implementation that signed the textual form would silently produce a
-// different transcript for the same frame.
+// docs/protocol/datagram.md §3.2. Every field with a binary meaning is
+// length-prefixed in its BINARY form — 20-byte addresses, raw salt and pubkey,
+// decoded payload — because an implementation that signed the textual form
+// would silently produce a different transcript for the same frame.
 //
 // Covered: everything immutable. Excluded: ttl (changes every hop) and
 // auth.sig (a signature cannot sign itself).
@@ -80,13 +80,14 @@ func BuildDatagramTranscript(d DatagramFrame, network domain.NetworkID) ([]byte,
 }
 
 // DatagramReplayKey derives sha256(transcript) — the anti-replay cache key
-// (§3.1). It is never carried on the wire: any node holding the frame can
-// compute it, so a separate field could only add a value to forge.
+// (docs/protocol/datagram.md §3.1). It is never carried on the wire: any node
+// holding the frame can compute it, so a separate field could only add a value
+// to forge.
 //
 // It takes the transcript rather than the frame so the key is provably
 // derived from the same bytes the signature was verified over: a profile
 // cannot substitute a key, and the pipeline cannot accidentally verify one
-// byte string and cache another (§2.2).
+// byte string and cache another (docs/protocol/datagram.md §3.1).
 func DatagramReplayKey(transcript []byte) domain.ReplayKey {
 	return domain.ReplayKey(sha256.Sum256(transcript))
 }
@@ -123,7 +124,7 @@ func SignDatagram(d DatagramFrame, network domain.NetworkID, privateKey ed25519.
 // the frame. It proves INTEGRITY only: binding that key to src is
 // DatagramSignerMatchesSrc, and authorization of the sender is the
 // receiver's local trust policy. The three gates stay separate exactly as
-// the file transport separated them (§3.1).
+// the file transport separated them (docs/protocol/datagram.md §3.1).
 func VerifyDatagramSignature(d DatagramFrame, network domain.NetworkID) error {
 	if d.Auth == nil {
 		return fmt.Errorf("%w: verification requires auth", ErrDatagramAuth)
@@ -165,8 +166,9 @@ func ParseDatagramSignerKey(d DatagramFrame) (identity.PublicKey, error) {
 
 // DatagramSignerMatchesSrc reports whether the carried public key
 // fingerprints to src. Without it an attacker could keep a stranger's src
-// while substituting their own key and signature (§3.1). Pure: it derives
-// the fingerprint, it does not look the sender up anywhere.
+// while substituting their own key and signature
+// (docs/protocol/datagram.md §3.1). Pure: it derives the fingerprint, it does
+// not look the sender up anywhere.
 func DatagramSignerMatchesSrc(d DatagramFrame) bool {
 	if d.Auth == nil || len(d.Auth.PubKey) != domain.DatagramPubKeyBytes {
 		return false

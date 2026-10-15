@@ -44,7 +44,8 @@ func TestParseDatagramClass(t *testing.T) {
 	}{
 		"control": {"control", DatagramClassControl, nil},
 		"bulk":    {"bulk", DatagramClassBulk, nil},
-		// A third class would be a new wire format, not a new value (§2.3).
+		// A third class would be a new wire format, not a new value
+		// (docs/protocol/datagram.md §2.4).
 		"unknown": {"gossip", "", ErrInvalidDatagramClass},
 		"empty":   {"", "", ErrInvalidDatagramClass},
 	}
@@ -89,9 +90,10 @@ func TestParseRoutePolicy(t *testing.T) {
 	}
 }
 
-// TestDatagramModeMatrix pins the closed contract of §2.1 row by row. It is
-// stated as data here for the same reason the implementation is: a table
-// makes an accidentally half-added mode visible.
+// TestDatagramModeMatrix pins the closed contract of
+// docs/protocol/datagram.md §2.1 row by row. It is stated as data here for the
+// same reason the implementation is: a table makes an accidentally half-added
+// mode visible.
 func TestDatagramModeMatrix(t *testing.T) {
 	cases := []struct {
 		mode        DatagramMode
@@ -149,7 +151,7 @@ func TestParseVersionBytes(t *testing.T) {
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			// v and av share one rule so two parsers cannot disagree on what
-			// the single transcript byte was (§3.4).
+			// the single transcript byte was (docs/protocol/datagram.md §3.5).
 			_, headerErr := ParseDatagramVersion(tc.input)
 			_, authErr := ParseAuthVersion(tc.input)
 			for label, err := range map[string]error{"v": headerErr, "av": authErr} {
@@ -240,9 +242,10 @@ func TestParseCapabilityName(t *testing.T) {
 	}
 }
 
-// TestDatagramClassSizingConstants pins the wire-normative numbers of §2.3
-// and §4.2. They are not local tuning knobs: a mismatch shows up as a frame
-// one node accepts and its neighbour drops.
+// TestDatagramClassSizingConstants pins the wire-normative numbers of
+// docs/protocol/datagram.md §2.4 and docs/protocol/datagram.md §4.3. They are
+// not local tuning knobs: a mismatch shows up as a frame one node accepts and
+// its neighbour drops.
 func TestDatagramClassSizingConstants(t *testing.T) {
 	cases := map[DatagramClass]struct {
 		payloadCap int
@@ -271,8 +274,8 @@ func TestDatagramClassSizingConstants(t *testing.T) {
 			if err != nil {
 				t.Fatalf("WriteGrace: %v", err)
 			}
-			// §4.2 defines write grace as numerically equal to queue
-			// residence; a second constant could only drift.
+			// docs/protocol/datagram.md §4.3 defines write grace as numerically
+			// equal to queue residence; a second constant could only drift.
 			if grace != residence {
 				t.Fatalf("write grace = %s, want %s", grace, residence)
 			}
@@ -292,9 +295,10 @@ func TestDatagramClassSizingConstants(t *testing.T) {
 	}
 }
 
-// TestReverseStateTTLMatchesFormula recomputes §4.2 from its inputs: the
-// entry must survive a full round trip of DatagramDefaultMaxHops hops each
-// way, at queue residence plus write grace per hop, plus the target budget.
+// TestReverseStateTTLMatchesFormula recomputes docs/protocol/datagram.md §4.3
+// from its inputs: the entry must survive a full round trip of
+// DatagramDefaultMaxHops hops each way, at queue residence plus write grace per
+// hop, plus the target budget.
 func TestReverseStateTTLMatchesFormula(t *testing.T) {
 	residence, err := QueueResidence(DatagramClassControl)
 	if err != nil {
@@ -307,13 +311,13 @@ func TestReverseStateTTLMatchesFormula(t *testing.T) {
 	const targetBudget = 10 * time.Second
 	roundTrip := 2*time.Duration(DatagramDefaultMaxHops)*(residence+grace) + targetBudget
 	if roundTrip != 210*time.Second {
-		t.Fatalf("round trip = %s, want 210s per §4.2", roundTrip)
+		t.Fatalf("round trip = %s, want 210s per docs/protocol/datagram.md §4.3", roundTrip)
 	}
 	if ReverseStateTTL < roundTrip {
 		t.Fatalf("ReverseStateTTL = %s, shorter than the round trip %s it must survive", ReverseStateTTL, roundTrip)
 	}
 	if ReverseStateTTL != 240*time.Second {
-		t.Fatalf("ReverseStateTTL = %s, want the 240s of §4.2", ReverseStateTTL)
+		t.Fatalf("ReverseStateTTL = %s, want the 240s of docs/protocol/datagram.md §4.3", ReverseStateTTL)
 	}
 }
 
@@ -351,8 +355,9 @@ func TestParseNetworkID(t *testing.T) {
 	if got.String() != "gazeta-devnet" {
 		t.Fatalf("String() = %q, want %q", got.String(), "gazeta-devnet")
 	}
-	// §3.2 signs the network as UTF-8 without a BOM: an empty id makes every
-	// network sign alike, a BOM makes one network sign two ways.
+	// docs/protocol/datagram.md §3.2 signs the network as UTF-8 without a BOM:
+	// an empty id makes every network sign alike, a BOM makes one network sign
+	// two ways.
 	for name, input := range map[string]string{
 		"empty":        "",
 		"bom":          "\ufeffgazeta-devnet",
@@ -439,12 +444,13 @@ func TestReplayKey(t *testing.T) {
 	}
 }
 
-// TestParseDeclaredDTypes pins the closed wire contract of §6.1 as the domain
-// enforces it, INCLUDING the third state the field carries: an absent field is
-// the baseline set, an explicitly empty one is the empty set, duplicates
-// collapse into a set, and any breach of the bounds drops the WHOLE field
-// rather than the offending name — half-honouring a breached list is exactly
-// the ambiguity a closed contract exists to remove.
+// TestParseDeclaredDTypes pins the closed wire contract of
+// docs/protocol/datagram.md §6.1 as the domain enforces it, INCLUDING the third
+// state the field carries: an absent field is the baseline set, an explicitly
+// empty one is the empty set, duplicates collapse into a set, and any breach of
+// the bounds drops the WHOLE field rather than the offending name —
+// half-honouring a breached list is exactly the ambiguity a closed contract
+// exists to remove.
 func TestParseDeclaredDTypes(t *testing.T) {
 	absent := ParseDeclaredDTypesField(nil)
 	if absent.Declaration() != DTypeDeclarationAbsent {

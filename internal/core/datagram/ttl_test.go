@@ -8,12 +8,12 @@ import (
 	"github.com/piratecash/corsa/internal/core/domain"
 )
 
-// ttl_test.go covers the whole ttl block of §9: the five rules of §4.1.1 as
-// pure functions, and the end-to-end maximum-path test that only a multi-node
-// topology can express.
+// ttl_test.go covers the whole ttl life cycle: the five rules of
+// docs/protocol/datagram.md §4.2 as pure functions, and the end-to-end
+// maximum-path test that only a multi-node topology can express.
 
 func TestDefaultMaxHopsMatchesTheFileCommandBudget(t *testing.T) {
-	// §9: defaultMaxHops equals 10 and equals today's fileCommandDefaultMaxTTL,
+	// defaultMaxHops equals 10 and equals today's fileCommandDefaultMaxTTL,
 	// so the file transport's migration does not change behaviour by one bit.
 	if domain.DatagramDefaultMaxHops != 10 {
 		t.Fatalf("defaultMaxHops = %d, want 10", domain.DatagramDefaultMaxHops)
@@ -94,7 +94,7 @@ func lineTopology(t *testing.T, net *fakeNetwork, hops int) []*pipelineNode {
 	return nodes
 }
 
-// TestMaximumPathRoundTrip is the end-to-end test of §9: a request across the
+// TestMaximumPathRoundTrip is the end-to-end test: a request across the
 // full ten hops and an answer back across the same ten, with the ttl never
 // reaching zero prematurely.
 //
@@ -164,10 +164,10 @@ func TestMaximumPathRoundTrip(t *testing.T) {
 	}
 }
 
-// TestUnsignedRequestWithInflatedTTLIsClampedInThePipeline covers §9: an
-// unsigned request with ttl = 255 is clamped to defaultMaxHops in the
-// CONVEYOR — this plane has no auth.max_ttl — and therefore does not live
-// longer than the reverse state is sized for.
+// TestUnsignedRequestWithInflatedTTLIsClampedInThePipeline covers
+// docs/protocol/datagram.md §4.2 rule 3: an unsigned request with ttl = 255 is
+// clamped to defaultMaxHops in the CONVEYOR — this plane has no auth.max_ttl —
+// and therefore does not live longer than the reverse state is sized for.
 func TestUnsignedRequestWithInflatedTTLIsClampedInThePipeline(t *testing.T) {
 	net := newFakeNetwork()
 	nodes := lineTopology(t, net, 2)
@@ -190,7 +190,7 @@ func TestUnsignedRequestWithInflatedTTLIsClampedInThePipeline(t *testing.T) {
 }
 
 // TestUnsignedResponseWithInflatedTTLIsClamped is the same rule on the way
-// back (§9).
+// back.
 func TestUnsignedResponseWithInflatedTTLIsClamped(t *testing.T) {
 	net := newFakeNetwork()
 	nodes := lineTopology(t, net, 2)
@@ -242,10 +242,11 @@ func TestRoutedLocalDeliveryDoesNotDecrement(t *testing.T) {
 	}
 }
 
-// TestDecrementRefusesTheLastHop pins the stop point §4.1.1 implies but no
-// call site used to enforce: a frame whose budget the decrement would bring to
-// zero is dropped HERE, not serialized and handed to a neighbour who is
-// obliged to drop it at step 3 of §4.1.
+// TestDecrementRefusesTheLastHop pins the stop point
+// docs/protocol/datagram.md §4.2 implies but no call site used to enforce: a
+// frame whose budget the decrement would bring to zero is dropped HERE, not
+// serialized and handed to a neighbour who is obliged to drop it at step 3 of
+// docs/protocol/datagram.md §4.1.
 //
 // The decrement pays for the hop we are about to make, so `ttl = 1` at a relay
 // buys nothing: the neighbour receives a raw zero and drops it. Publishing it

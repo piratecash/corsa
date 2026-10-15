@@ -22,19 +22,20 @@ import (
 //
 // The layer never reaches into the routing table, the session map or a socket;
 // it asks these adapters. Everything here is therefore a projection of state
-// the node already owns, and the ONE rule that shapes all of it is §4.3's:
-// what the plan promises and what the send does must come from the same
-// helper. That is why every adapter below funnels through
-// peerSendableConnectionsLocked — the same list sendFrameToIdentity walks.
+// the node already owns, and the ONE rule that shapes all of it is
+// docs/protocol/datagram.md §4.4's: what the plan promises and what the send
+// does must come from the same helper. That is why every adapter below funnels
+// through peerSendableConnectionsLocked — the same list sendFrameToIdentity
+// walks.
 //
-// Reference: docs/refactoring/datagram-transport.md §4.3, §6, §6.1, §9.
+// Reference: docs/protocol/datagram.md §4.4, §6, §6.1.
 
 // ---------------------------------------------------------------------------
 // Routes
 // ---------------------------------------------------------------------------
 
-// datagramRouteResolver answers the two freshness contracts of §4.3 from the
-// node's distance-vector plane.
+// datagramRouteResolver answers the two freshness contracts of
+// docs/protocol/datagram.md §4.4 from the node's distance-vector plane.
 //
 // The split is the same one the file router already makes
 // (collectFreshRouteCandidates vs collectRouteCandidates) and for the same
@@ -75,8 +76,9 @@ func (r datagramRouteResolver) CachedRoutes(_ context.Context, dst domain.PeerId
 // interface: the layer must not learn that this control plane encodes a
 // withdrawal as Hops >= HopsInfinity; it must receive an ABSOLUTE expiry so it
 // can judge staleness against the clock at SELECTION time rather than against
-// the moment a snapshot was published (§4.3); and it must be told WHICH plane
-// answered, which this resolver is the only one able to say about itself.
+// the moment a snapshot was published (docs/protocol/datagram.md §4.4); and it
+// must be told WHICH plane answered, which this resolver is the only one able
+// to say about itself.
 //
 // The attribution keeps both axes and invents neither. RouteEntry.Source is
 // carried across unchanged — the trust hierarchy stays the routing table's
@@ -166,10 +168,11 @@ func datagramTargetsOnChannel(targets []datagramSendTarget, channel domain.ConnI
 //
 // It is a thin projection of peerSendableConnectionsLocked — the canonical
 // attempt order shared with sendFrameToIdentity and the file router — with the
-// raw handshake declarations of §2.2 / §6.1 folded in per connection. Using
-// the shared helper is not a style choice: §4.3 makes it a contract that the
-// liveness filter and the send agree on which sockets exist, "or you get
-// candidates you cannot send into, and sends that were not in the plan".
+// raw handshake declarations of docs/protocol/datagram.md §2.3 and §6.1 folded
+// in per connection. Using the shared helper is not a style choice:
+// docs/protocol/datagram.md §4.4 makes it a contract that the liveness filter
+// and the send agree on which sockets exist, "or you get candidates you cannot
+// send into, and sends that were not in the plan".
 //
 // The required capability is the NEGOTIATED mesh_datagram_v1, the same gate
 // both inbound dispatchers apply before handing a frame to the ingress. This
@@ -199,23 +202,25 @@ func (s *Service) datagramSendTargetsLocked(peer domain.PeerIdentity, now time.T
 // carry THIS frame, in the order the send would try them.
 //
 // It is the selection every emission goes through, and the reason it exists
-// apart from the liveness list above is the sentence of §4.3 that says the
-// metadata a candidate is judged by "describes ONE concrete connection — the
-// one the send will try — and comes from the same helper". The scheduler judged
-// the HEAD of the liveness list (PeerMetadata.SendableConnection) and ran the
-// full gate set of §4.3 over it: the role gate of §6 and the last-hop dtype
-// gate. The emitter then walked the WHOLE list, so the bytes
-// could leave over a second socket of the same peer whose advertised set and
-// declared dtypes nobody had looked at — a frame refused for the head being
-// incapable was delivered anyway through a connection that was more incapable
-// still.
+// apart from the liveness list above is the sentence of
+// docs/protocol/datagram.md §4.4 that says the metadata a candidate is judged
+// by "describes ONE concrete connection — the one the send will try — and comes
+// from the same helper". The scheduler judged the HEAD of the liveness list
+// (PeerMetadata.SendableConnection) and ran the full gate set of
+// docs/protocol/datagram.md §4.4 over it: the role gate of
+// docs/protocol/datagram.md §6 and the last-hop dtype gate. The emitter then
+// walked the WHOLE list, so the bytes could leave over a second socket of the
+// same peer whose advertised set and declared dtypes nobody had looked at — a
+// frame refused for the head being incapable was delivered anyway through a
+// connection that was more incapable still.
 //
 // Filtering here rather than truncating the walk to the head is the choice
-// §4.3 supports: the fall-back socket of one peer is a legitimate part of the
-// attempt order (item 3 — "try in order until one queue accepts"), and what the
-// spec forbids is not the fall-back but a fall-back nobody gated. With this
-// filter the guarantee is structural: every connection the frame can leave
-// through has passed exactly the checks the candidate's metadata was judged by.
+// docs/protocol/datagram.md §4.4 supports: the fall-back socket of one peer is
+// a legitimate part of the attempt order (item 3 — "try in order until one
+// queue accepts"), and what the spec forbids is not the fall-back but a
+// fall-back nobody gated. With this filter the guarantee is structural: every
+// connection the frame can leave through has passed exactly the checks the
+// candidate's metadata was judged by.
 //
 // The caller must hold s.peerMu (R or W).
 func (s *Service) datagramFrameSendTargetsLocked(
@@ -246,13 +251,14 @@ func (s *Service) datagramFrameSendTargetsLocked(
 //
 //   - the FIRST connection, in the send's own attempt order, that passes
 //     AdmitPeer for this frame. That is what makes "the metadata describes the
-//     connection the send will try" (§4.3 line 574) true when the head is not
-//     the connection that ends up carrying the bytes;
+//     connection the send will try" (docs/protocol/datagram.md §4.4) true when
+//     the head is not the connection that ends up carrying the bytes;
 //   - when NO connection passes, the first LIVE one, with ok = true. The
 //     refusal belongs to the layer, which re-applies AdmitPeer and needs a
 //     connection to name it with; answering false here would collapse "gated
 //     out" (`rejected`, pointless to wait on) into "not connected"
-//     (`no_route`, worth waiting on), and §4.3 keeps those apart;
+//     (`no_route`, worth waiting on), and docs/protocol/datagram.md §4.4 keeps
+//     those apart;
 //   - ok = false only when the peer has no usable connection at all.
 //
 // The gate is datagram.AdmitPeer and never a second spelling of the rule: one
@@ -280,15 +286,16 @@ func (s *Service) datagramFrameHeadTargetLocked(
 	return live[0], true
 }
 
-// datagramFrameIsGated reports whether the candidate gates of §4.3 apply to
-// the hand-over of this frame at all.
+// datagramFrameIsGated reports whether the candidate gates of
+// docs/protocol/datagram.md §4.4 apply to the hand-over of this frame at all.
 //
 // They do not for `response`, and that is a property of the plane rather than
 // an exemption: a response is not routed and has no candidate. Its next hop is
-// the `upstream` of the reverse-state record (§4.2), which the layer never put
-// through AdmitCandidate — there is no metadata for the sockets to agree with,
-// and demanding mesh_datagram_transit_v1 from the neighbour a reply is owed to
-// would drop exactly the answers the reverse state exists to deliver.
+// the `upstream` of the reverse-state record (docs/protocol/datagram.md §4.3),
+// which the layer never put through AdmitCandidate — there is no metadata for
+// the sockets to agree with, and demanding mesh_datagram_transit_v1 from the
+// neighbour a reply is owed to would drop exactly the answers the reverse state
+// exists to deliver.
 //
 // `routed` and `request` both reach their next hop through candidate selection,
 // so both are gated.
@@ -296,7 +303,8 @@ func datagramFrameIsGated(frame protocol.DatagramFrame) bool {
 	return frame.Mode != domain.DatagramModeResponse
 }
 
-// admitDatagramSendTarget applies the full §4.3 gate set to ONE connection.
+// admitDatagramSendTarget applies the full docs/protocol/datagram.md §4.4 gate
+// set to ONE connection.
 //
 // It delegates to datagram.AdmitPeer rather than composing the role gate and
 // the last-hop dtype gate here. The rule is a security rule with two callers —
@@ -359,9 +367,9 @@ func (s *Service) datagramSendTargetLocked(candidate peerSendableConnection) (da
 //
 // ReportedProtocolVersion is handed over RAW, exactly as the peer claimed it.
 // The layer normalizes to min(reported, local) for ranking and keeps the raw
-// value for diagnostics (§4.3); pre-capping here would hide an inflation
-// attempt from the audit log and would duplicate a rule that already has one
-// implementation inside the layer.
+// value for diagnostics (docs/protocol/datagram.md §4.4); pre-capping here
+// would hide an inflation attempt from the audit log and would duplicate a rule
+// that already has one implementation inside the layer.
 //
 // The connection id travels with it as the layer's ChannelID, which is what
 // turns this record from "the metadata the send will be judged by" into "the
@@ -400,8 +408,8 @@ func datagramPeerConnection(
 // call sites happen to build connection metadata by then.
 func datagramConnectionPlane() domain.DiscoveryPlane { return domain.DiscoveryPlaneMesh }
 
-// datagramPeerMetadata answers §4.3's "resolve a peer to the ONE connection a
-// send would use".
+// datagramPeerMetadata answers docs/protocol/datagram.md §4.4's "resolve a peer
+// to the ONE connection a send would use".
 type datagramPeerMetadata struct {
 	service *Service
 }
@@ -436,8 +444,9 @@ func (m datagramPeerMetadata) SendableConnection(
 	return target.conn, true
 }
 
-// datagramDirectSession answers step 1 of §4.3: is the destination itself a
-// live neighbour, and what does that connection look like?
+// datagramDirectSession answers step 1 of docs/protocol/datagram.md §4.4: is
+// the destination itself a live neighbour, and what does that connection look
+// like?
 //
 // It is a distinct interface from PeerMetadata because the two questions are
 // asked about different roles — "can my neighbour X relay this" versus "is the
@@ -454,9 +463,9 @@ type datagramDirectSession struct {
 // answers — first admitted connection, first live one when none is admitted,
 // false only when the destination is not a live neighbour at all.
 //
-// §4.3 tries the direct branch FIRST, so a destination whose head connection
-// fails the frame's gates while a second one passes must not be demoted to the
-// routing table.
+// docs/protocol/datagram.md §4.4 tries the direct branch FIRST, so a
+// destination whose head connection fails the frame's gates while a second one
+// passes must not be demoted to the routing table.
 func (d datagramDirectSession) LookupDirectSession(
 	ctx context.Context,
 	dst domain.PeerIdentity,
@@ -477,7 +486,7 @@ func (d datagramDirectSession) LookupDirectSession(
 const datagramSecretDomainTag = "corsa/datagram/v1/node-local-secret"
 
 // datagramNodeSecret supplies node_local_secret — the HMAC key behind the
-// starting offset of the explore rotation (§4.3).
+// starting offset of the explore rotation (docs/protocol/datagram.md §4.4).
 //
 // It is DERIVED from the node's Ed25519 private key rather than generated
 // randomly at start, for one reason that matters and one that follows from it:
@@ -526,8 +535,9 @@ func (s datagramNodeSecret) NodeLocalSecret() []byte { return s.secret }
 //     is passed through by MarshalFrameLine untouched, so the bytes that reach
 //     the socket are byte-for-byte the ones the layer measured;
 //   - it assembles netcore.OutboundWrite from the frame's own class and
-//     deadline, so "the writer checks send_until" (§4.2) holds for every frame
-//     the layer emits and not only for some of them;
+//     deadline, so "the writer checks send_until"
+//     (docs/protocol/datagram.md §3.4) holds for every frame the layer emits
+//     and not only for some of them;
 //   - it hands the bytes to EXACTLY ONE queue: the walk below stops at the
 //     first connection of the peer that takes the frame. What no layer can
 //     promise is exactly one WRITE — a queue answers about admission, and only
@@ -558,12 +568,12 @@ type datagramFrameEmitter struct {
 // EmitTo places one frame on the neighbour's write queue and reports whether
 // the queue accepted it.
 //
-// "Accepted by the queue" is not "written to the socket", and §4.3 depends on
-// exactly that reading: a queued outcome is final for the scheduler, while the
-// writer may still drop the frame on its send deadline. The reverse reading is
-// not available either: a refusal read after the frame was already queued does
-// not prove the bytes stayed home, so false means "not confirmed", not "not
-// sent".
+// "Accepted by the queue" is not "written to the socket", and
+// docs/protocol/datagram.md §4.4 depends on exactly that reading: a queued
+// outcome is final for the scheduler, while the writer may still drop the frame
+// on its send deadline. The reverse reading is not available either: a refusal
+// read after the frame was already queued does not prove the bytes stayed home,
+// so false means "not confirmed", not "not sent".
 //
 // The candidate walk mirrors sendFrameToIdentity: outbound sessions first,
 // inbound connections as the fall-back, in the order
@@ -571,8 +581,8 @@ type datagramFrameEmitter struct {
 // ranked by, MINUS every connection of the peer that fails the frame's own
 // gates. Walking the unfiltered list was the hole: the scheduler judged the
 // head and the bytes could leave over a socket whose advertised set and
-// declared dtypes nobody had checked (§4.3, §6). Nothing here holds peerMu:
-// both tracked senders take their own locks.
+// declared dtypes nobody had checked (docs/protocol/datagram.md §4.4, §6).
+// Nothing here holds peerMu: both tracked senders take their own locks.
 //
 // A frame that never reaches a queue simply reports false. There is nothing to
 // close on the way out: the ticket travels one way and brings nothing back, so
@@ -584,7 +594,8 @@ func (e datagramFrameEmitter) EmitTo(_ context.Context, out datagram.OutboundFra
 		// locally constructed frame with a class the matrix never allowed.
 		// Refusing it here is the honest answer: writing it with the
 		// connection's default deadline would silently give it a hop budget
-		// the reverse-state formula of §4.2 was not computed for.
+		// the reverse-state formula of docs/protocol/datagram.md §4.3 was not
+		// computed for.
 		log.Warn().
 			Err(err).
 			Str("peer", out.Peer.String()).
@@ -780,11 +791,11 @@ func (e datagramFrameEmitter) send(
 // outboundWrite builds the per-item outbound contract of one frame.
 //
 // The deadline is the layer's already-clamped send_until, and the write grace
-// is the class constant of §4.2: numerically equal to the class's queue
-// residence, because the hop budget behind the 240 s reverse-state window is
-// queue time PLUS write time, and leaving the write tail at the connection's
-// 30 s default would let a legitimate frame reach the next hop long after the
-// record that gives it meaning has died.
+// is the class constant of docs/protocol/datagram.md §4.3: numerically equal to
+// the class's queue residence, because the hop budget behind the 240 s
+// reverse-state window is queue time PLUS write time, and leaving the write
+// tail at the connection's 30 s default would let a legitimate frame reach the
+// next hop long after the record that gives it meaning has died.
 //
 // The contract travels ONE WAY: the TICKET is read-only and tells nobody how
 // the write ended, which is what makes the candidate walk above a plain loop

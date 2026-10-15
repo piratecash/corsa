@@ -19,7 +19,7 @@ import (
 //
 // The three obligations pinned here are the three holes the budget closes:
 //
-//   - §4.1 step 1 / §5 (spec lines 417, 853-862): the byte budget is charged
+//   - docs/protocol/datagram.md §4.1 step 1 and §5: the byte budget is charged
 //     BEFORE the expensive work. On this reader the expensive work starts at
 //     the read itself, because it accepts up to maxResponseLineBytes (8 MiB)
 //     and every one of those bytes is read and copied before anything looks at
@@ -480,7 +480,7 @@ func TestRepeatedOversizeFramesTearTheSessionDown(t *testing.T) {
 // met an empty bucket, took the violation, and a series of them ended the
 // session with `rate-limited`. The punishment was not removed, it was moved onto
 // the neighbour's other traffic, which is precisely what "the two budgets are
-// independent" (§5) forbids.
+// independent" (docs/protocol/datagram.md §5) forbids.
 //
 // The flood is sized to the bucket, not to the ledger: it costs strictly more
 // than the bucket holds, so an implementation that charges a datagram here meets
@@ -512,9 +512,10 @@ func TestDatagramStreamLeavesTheSharedBudgetToTheOtherPlanes(t *testing.T) {
 	for i := 0; i < stream; i++ {
 		writeWireLine(t, peerEnd, line)
 	}
-	// The §5 budget is what the stream really pays, and waiting on it is also
-	// what makes the assertion below race-free: the shared charge, if it
-	// happened at all, would have happened before this counter moved.
+	// The docs/protocol/datagram.md §5 budget is what the stream really pays,
+	// and waiting on it is also what makes the assertion below race-free: the
+	// shared charge, if it happened at all, would have happened before this
+	// counter moved.
 	waitForAdmittedFrames(t, svc, stream)
 
 	if spent := budget - sessionRawBytesRemaining(session); spent != 0 {
@@ -578,10 +579,11 @@ func TestDatagramStreamLeavesTheSharedBudgetToTheOtherPlanes(t *testing.T) {
 // What must hold instead:
 //
 //   - a datagram spends NOTHING of the shared bucket, whatever its level, and
-//     is charged the §5 budget of its own plane on the raw wire line. "Not
-//     charged here" is not "free": the assertion on AdmittedBytes is what
-//     separates the two, and it is the one that fails for an implementation
-//     that exempts a line from this budget without handing it to the other;
+//     is charged the docs/protocol/datagram.md §5 budget of its own plane on
+//     the raw wire line. "Not charged here" is not "free": the assertion on
+//     AdmittedBytes is what separates the two, and it is the one that fails for
+//     an implementation that exempts a line from this budget without handing it
+//     to the other;
 //   - with the shared bucket EMPTY the datagram still reaches the plane and
 //     still scores nothing, while an ordinary line at the same moment is
 //     dropped and scored. One violation on the ledger and not two is the whole
@@ -601,7 +603,7 @@ func TestDatagramNeverSpendsTheResponsePlaneBudget(t *testing.T) {
 		t.Fatalf("a datagram spent %v bytes of the shared bucket: the two per-neighbour budgets replace each other, they do not stack", spent)
 	}
 	if charged := svc.datagramLayer().admission.Stats().AdmittedBytes; charged != uint64(len(line)) {
-		t.Fatalf("the §5 budget was charged %d bytes, want the %d of the wire line: a line exempted here and metered nowhere is a free channel",
+		t.Fatalf("the docs/protocol/datagram.md §5 budget was charged %d bytes, want the %d of the wire line: a line exempted here and metered nowhere is a free channel",
 			charged, len(line))
 	}
 
@@ -637,16 +639,17 @@ func TestDatagramNeverSpendsTheResponsePlaneBudget(t *testing.T) {
 // The rule this file used to hold — the claim is scored, and a series ends the
 // session with `rate-limited` — punished the neighbour for a frame it did not
 // write. A relay reads a line, refuses it, and forwards nothing; the SIZE of a
-// frame it hands on is not a statement it made, so §2 keeps the refusal silent
-// and §4.4 keeps punishment for the stable header and auth. The line is refused
-// either way: the limit is not what changed.
+// frame it hands on is not a statement it made, so docs/protocol/datagram.md §2
+// keeps the refusal silent and docs/protocol/datagram.md §4.1 keeps punishment
+// for the stable header and auth. The line is refused either way: the limit is
+// not what changed.
 //
 // What replaces the ledger is the METER, and it is asserted here because a
 // silent drop with no charge would be a free load channel: the bytes the
-// neighbour made this node read are billed to the plane's own §5 per-neighbour
-// budget BEFORE the refusal, so a stream of oversize claims drains exactly the
-// bucket a stream of legal datagrams would — and drains the sender's own plane
-// with it.
+// neighbour made this node read are billed to the plane's own
+// docs/protocol/datagram.md §5 per-neighbour budget BEFORE the refusal, so a
+// stream of oversize claims drains exactly the bucket a stream of legal
+// datagrams would — and drains the sender's own plane with it.
 //
 // The mutations this kills: scoring the refusal on the session ledger again
 // (any of it — one violation or the teardown), and dropping the line without
@@ -691,7 +694,7 @@ func TestOversizeDatagramClaimIsASilentDropThatStillPays(t *testing.T) {
 	// budget, on the raw bytes this node was made to read.
 	charged := svc.datagramLayer().admission.Stats().AdmittedBytes - before
 	if charged < uint64(lines*protocol.MaxFrameLine) {
-		t.Fatalf("the §5 budget was charged %d bytes for %d refused lines, want at least %d: an uncharged refusal is a free load channel",
+		t.Fatalf("the docs/protocol/datagram.md §5 budget was charged %d bytes for %d refused lines, want at least %d: an uncharged refusal is a free load channel",
 			charged, lines, lines*protocol.MaxFrameLine)
 	}
 
@@ -746,10 +749,10 @@ func TestOversizeLineOfAnotherPlaneIsStillScored(t *testing.T) {
 //   - the layer has to exist, or there is no replacement budget to skip to —
 //     the same "no layer, no exemption" condition the inbound command-limiter
 //     exemption carries;
-//   - the neighbour has to be BILLABLE on the plane's own key. The §5 charge is
-//     keyed on the address this node dialled, and handleDatagramFrame refuses a
-//     zero key ABOVE its own charge, so a session with no address would divert
-//     into a budget nobody pays.
+//   - the neighbour has to be BILLABLE on the plane's own key. The
+//     docs/protocol/datagram.md §5 charge is keyed on the address this node
+//     dialled, and handleDatagramFrame refuses a zero key ABOVE its own charge,
+//     so a session with no address would divert into a budget nobody pays.
 func TestDatagramBudgetReplacementAnswersFromTheAuthoritativeClassification(t *testing.T) {
 	t.Parallel()
 
@@ -774,11 +777,12 @@ func TestDatagramBudgetReplacementAnswersFromTheAuthoritativeClassification(t *t
 		}
 	}
 
-	// A session with no dialled address has no §5 budget key, so the shared
-	// budget is the only one there is and the line pays it.
+	// A session with no dialled address has no docs/protocol/datagram.md §5
+	// budget key, so the shared budget is the only one there is and the line
+	// pays it.
 	unkeyed := &peerSession{}
 	if svc.sessionDatagramPaysItsOwnBudget(unkeyed, realLine) {
-		t.Fatal("a datagram skipped the response-plane budget on a session whose §5 key is the zero key: the line would be metered by nobody")
+		t.Fatal("a datagram skipped the response-plane budget on a session whose docs/protocol/datagram.md §5 key is the zero key: the line would be metered by nobody")
 	}
 
 	// With no layer there is no replacement budget either, and the response-plane

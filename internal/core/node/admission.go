@@ -211,7 +211,8 @@ func peekFrameType(line string) string {
 // and the three answers are not degrees of one another. Two of them mean the
 // scan and encoding/json return the same verdict; the third means they can
 // differ, and a line on which they can differ cannot be routed before it is
-// parsed — which is why it is the one class §4.1 step 1 refuses outright.
+// parsed — which is why it is the one class docs/protocol/datagram.md §4.1 step
+// 1 refuses outright.
 type frameLineClass uint8
 
 const (
@@ -250,7 +251,8 @@ const (
 //     The scan says `messages`, the parser says `datagram`. On the peer-session
 //     reader that is the difference between the 8 MiB response budget and the
 //     strict 128 KiB one, so the line is decoded in full before anything looks
-//     at the real type — exactly the work §4.1 step 1 exists to prevent;
+//     at the real type — exactly the work docs/protocol/datagram.md §4.1 step 1
+//     exists to prevent;
 //   - `{"a":{"type":"messages"},"type":"datagram"}` — a NESTED key seen first.
 //     Same divergence, without a duplicate to notice;
 //   - `{"TYPE":"datagram"}` — encoding/json prefers an exact tag match but
@@ -515,12 +517,12 @@ type frameLineRead struct {
 // # Why the extension is a callback and not a second limit
 //
 // The gate has to run BETWEEN the two reads, because "admission before any
-// decoding" (§4.1 step 1) is worth nothing if the node has already read and
-// copied eight megabytes to find out what the line claimed to be. A caller
-// cannot pick the right limit up front — the answer depends on the claim,
-// which is inside the bytes it has not read yet — so the decision is handed
-// back to the caller at the one point where it is both informed and still
-// cheap.
+// decoding" (docs/protocol/datagram.md §4.1 step 1) is worth nothing if the
+// node has already read and copied eight megabytes to find out what the line
+// claimed to be. A caller cannot pick the right limit up front — the answer
+// depends on the claim, which is inside the bytes it has not read yet — so the
+// decision is handed back to the caller at the one point where it is both
+// informed and still cheap.
 func readFrameLineStaged(reader *bufio.Reader, softLimit int, extend frameLineExtension) (frameLineRead, error) {
 	limit := softLimit
 	// A nil extension is "no staging": the soft limit is final, and the gate

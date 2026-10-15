@@ -15,8 +15,9 @@ import (
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
-// datagram_handshake_test.go covers §9 lines 1125–1129 and the raw
-// advertised-capability contract of §2.2:
+// datagram_handshake_test.go covers the handshake declarations
+// (docs/protocol/datagram.md §6, §6.1) and the raw
+// advertised-capability contract of docs/protocol/datagram.md §2.3:
 //
 //   - the `dtypes` field IS the set: an absent one names no type, so the peer
 //     is an endpoint for none;
@@ -32,7 +33,7 @@ import (
 //     the typed capabilities untouched.
 
 // ---------------------------------------------------------------------------
-// Local advertisement (§6)
+// Local advertisement (docs/protocol/datagram.md §6)
 // ---------------------------------------------------------------------------
 
 // TestLocalDatagramAdvertise_SilentWithoutTheFlag pins the operator opt-out.
@@ -54,10 +55,10 @@ func TestLocalDatagramAdvertise_SilentWithoutTheFlag(t *testing.T) {
 	}
 }
 
-// TestLocalDatagramAdvertise_TransitOnlyOnFullNode pins the §6 split: the
-// transit capability is a promise to carry OTHER people's datagrams, and a
-// client node does not forward. Advertising it there would strand frames on a
-// node that never relays them.
+// TestLocalDatagramAdvertise_TransitOnlyOnFullNode pins the
+// docs/protocol/datagram.md §6 split: the transit capability is a promise to
+// carry OTHER people's datagrams, and a client node does not forward.
+// Advertising it there would strand frames on a node that never relays them.
 func TestLocalDatagramAdvertise_TransitOnlyOnFullNode(t *testing.T) {
 	t.Parallel()
 
@@ -81,7 +82,8 @@ func TestLocalDatagramAdvertise_TransitOnlyOnFullNode(t *testing.T) {
 	if capsContain(caps, domain.CapMeshDatagramTransitV1) {
 		t.Fatalf("client capabilities %v advertise transit", caps)
 	}
-	// The plane must not ride on the routing/relay capabilities (§6).
+	// The plane must not ride on the routing/relay capabilities
+	// (docs/protocol/datagram.md §6).
 	for _, capability := range localCapabilities(false, datagramAdvertise{Endpoint: true, Transit: true}) {
 		if capability == domain.CapMeshRoutingV3 {
 			t.Fatal("the datagram advertise pulled in a routing capability: the two planes must stay independent")
@@ -90,18 +92,19 @@ func TestLocalDatagramAdvertise_TransitOnlyOnFullNode(t *testing.T) {
 }
 
 // TestNodeWithAnEmptyRegistryAdvertisesTheEnvelopeAndDeclaresTheEmptySet is
-// the amendment of §6 / §6.1 on the emit side.
+// the amendment of docs/protocol/datagram.md §6 and §6.1 on the emit side.
 //
-// mesh_datagram_v1 states exactly one thing (§6): this node understands the
-// envelope and accepts a datagram addressed to it instead of answering
-// unknown_command and closing. That is true with an empty registry, so it is
-// advertised with an empty registry — and `dtypes` makes the OTHER statement,
-// honestly, as an explicitly EMPTY set (§6.1): no handler for any type at all.
+// mesh_datagram_v1 states exactly one thing (docs/protocol/datagram.md §6):
+// this node understands the envelope and accepts a datagram addressed to it
+// instead of answering unknown_command and closing. That is true with an empty
+// registry, so it is advertised with an empty registry — and `dtypes` makes the
+// OTHER statement, honestly, as an explicitly EMPTY set
+// (docs/protocol/datagram.md §6.1): no handler for any type at all.
 //
 // Withholding the capability instead was not conservative but fatal: the
 // candidate filter demands mesh_datagram_v1 from EVERY candidate, transit
-// included (§2.2 rule 2), so a network of PR-0 nodes could carry nothing at
-// all.
+// included (docs/protocol/datagram.md §6), so a network of PR-0 nodes could
+// carry nothing at all.
 func TestNodeWithAnEmptyRegistryAdvertisesTheEnvelopeAndDeclaresTheEmptySet(t *testing.T) {
 	t.Parallel()
 
@@ -178,9 +181,9 @@ func newDatagramServiceWithTypes(t *testing.T, nodeType domain.NodeType) *Servic
 
 // fixtureDatagramTypeModes is the kit the fixtures register. It is a FIXTURE
 // and nothing more: no set of names is implied by anything on the wire — a peer
-// is an endpoint for exactly what it listed (§6.1). The four names are kept
-// because they cover all three modes plus the request/response pairing the
-// registry validates.
+// is an endpoint for exactly what it listed (docs/protocol/datagram.md §6.1).
+// The four names are kept because they cover all three modes plus the
+// request/response pairing the registry validates.
 //
 // It is NOT the whole registry. A production node registers its own types
 // (identity discovery, dm_control) before any fixture runs, and three of these
@@ -243,9 +246,10 @@ func registerDatagramType(
 		AnswersTo: answersTo,
 		Classes:   []domain.DatagramClass{domain.DatagramClassControl},
 		Payload:   datagram.PayloadSchema{Name: dtype.String(), Version: 1},
-		// The baseline kit authenticates its sender inside the payload (§7), so
-		// these types are served on every direction. Stating it is what keeps
-		// them reachable on a node that only dials out.
+		// The baseline kit authenticates its sender inside the payload
+		// (docs/protocol/datagram.md §7), so these types are served on every
+		// direction. Stating it is what keeps them reachable on a node that
+		// only dials out.
 		SenderProof: datagram.SenderProvenInPayload,
 		Handler: datagram.HandlerFunc(func(
 			context.Context, datagram.DeliveryContext, []byte,
@@ -286,14 +290,15 @@ func TestDatagramCapabilitiesParse(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// dtypes wire contract (§6.1, §9 lines 1125–1129)
+// dtypes wire contract (docs/protocol/datagram.md §6.1)
 // ---------------------------------------------------------------------------
 
 // TestHandshakeDTypes_AbsentDeclaresNothing is one half of the closed
 // contract: a missing field names no type, so the peer is an endpoint for
 // none. The wire still tells the absent field from an explicitly empty one —
 // that distinction is real and parsed — but the LAYER reads both the same way,
-// because §6.1 makes unproven support equal to no support.
+// because docs/protocol/datagram.md §6.1 makes unproven support equal to no
+// support.
 //
 // This replaces the draft rule under which an absent field meant a set of four
 // types: every v27 peer advertising mesh_datagram_v1 was then an endpoint for
@@ -364,10 +369,10 @@ func TestHandshakeDTypes_DuplicatesCollapse(t *testing.T) {
 }
 
 // TestHandshakeDTypes_BoundsBreachDeclaresNothing covers the two bounds and
-// the reaction §6.1 fixes for both: the field is ignored WHOLE — read as
-// absent, hence as no type at all — and the handshake is NOT torn down.
-// Refusing a connection over an extensible field would contradict the point of
-// the layer.
+// the reaction docs/protocol/datagram.md §6.1 fixes for both: the field is
+// ignored WHOLE — read as absent, hence as no type at all — and the handshake
+// is NOT torn down. Refusing a connection over an extensible field would
+// contradict the point of the layer.
 func TestHandshakeDTypes_BoundsBreachDeclaresNothing(t *testing.T) {
 	t.Parallel()
 
@@ -405,9 +410,9 @@ func TestHandshakeDTypes_BoundsBreachDeclaresNothing(t *testing.T) {
 
 // TestLocalDTypeStrings_AnEndpointAlwaysEmitsItsSet pins the emit side: an
 // endpoint sends the field for EVERY set it can have, because the field IS the
-// set (§6.1) and there is no set whose omission says the same thing. A node
-// that does not speak the envelope sends nothing, which is the one absent
-// form left.
+// set (docs/protocol/datagram.md §6.1) and there is no set whose omission says
+// the same thing. A node that does not speak the envelope sends nothing, which
+// is the one absent form left.
 //
 // The mutation this kills: reintroducing an "omit the field when the set
 // equals X" shortcut — the peer would then learn about none of these types
@@ -511,9 +516,10 @@ func TestHandshakeFramesCarryTheEmptySetOfAnEmptyRegistry(t *testing.T) {
 	}
 }
 
-// TestDTypesWireContract covers the four wire cases of §6.1 end to end —
-// emitted bytes, parsed frame, session declaration — because the contract is
-// closed and every one of the four is a different statement:
+// TestDTypesWireContract covers the four wire cases of
+// docs/protocol/datagram.md §6.1 end to end — emitted bytes, parsed frame,
+// session declaration — because the contract is closed and every one of the
+// four is a different statement:
 //
 //   - absent: the field was never sent, so no type is named;
 //   - empty: the field was sent and names no type — a different STATEMENT
@@ -618,7 +624,7 @@ func TestDTypesWireContract(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Raw advertised capability set (§2.2, §9 line 1126)
+// Raw advertised capability set (docs/protocol/datagram.md §2.3)
 // ---------------------------------------------------------------------------
 
 // TestRawCapabilitySet_KeepsUnknownName is the reason the raw set exists at
@@ -657,9 +663,10 @@ func TestRawCapabilitySet_KeepsUnknownName(t *testing.T) {
 }
 
 // TestRawCapabilitySet_BoundsBreachEmptiesTheWholeSet pins the all-or-nothing
-// reaction of §2.2. "Drop one name" and "drop the set" behave differently in
-// mixed implementations, so the spec picks one: the whole set goes, the
-// session survives, and the typed capabilities are not touched.
+// reaction of docs/protocol/datagram.md §2.3. "Drop one name" and "drop the
+// set" behave differently in mixed implementations, so the spec picks one: the
+// whole set goes, the session survives, and the typed capabilities are not
+// touched.
 func TestRawCapabilitySet_BoundsBreachEmptiesTheWholeSet(t *testing.T) {
 	t.Parallel()
 
@@ -834,7 +841,7 @@ func TestDeclarationsNotProvidedDoNotClobber(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Mixed network (§9 line 1129)
+// Mixed network (docs/protocol/datagram.md §6)
 // ---------------------------------------------------------------------------
 
 // TestMixedNetwork_LegacyPeerIsNotADatagramCandidate is the send-side half of
@@ -859,7 +866,8 @@ func TestMixedNetwork_LegacyPeerIsNotADatagramCandidate(t *testing.T) {
 	}
 
 	// An endpoint-only client is admitted as the LAST HOP but never as
-	// transit — the §6 split, read off a real handshake.
+	// transit — the docs/protocol/datagram.md §6 split, read off a real
+	// handshake.
 	endpointOnly := datagramAdvertisedCapabilities(declarationsFromHandshake(protocol.Frame{
 		Capabilities: []string{domain.CapMeshDatagramV1.String(), "mesh_datagram_durable_v1"},
 	}))

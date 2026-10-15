@@ -17,7 +17,7 @@ import (
 )
 
 // legacy_datagram_budget_test.go pins the datagram half of N1
-// (docs/refactoring/n1-legacy-residual.md §1): a legacy connection that names
+// (docs/protocol/network_security.md §13): a legacy connection that names
 // identity X — on an accepted connection by a relayable auth_session — is
 // charged and owned by what this node observed of the socket, never by X, and
 // it never reads as proven. Only a v2 session yields the proven-identity key.

@@ -10,9 +10,9 @@ import (
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
-// anonymity_claim_guard_test.go enforces the FIRST item of the §3 ban in
-// docs/refactoring/dht/21-anonymity-transport.md: until 21c has passed, no
-// build advertises a capability that claims an anonymous mode.
+// anonymity_claim_guard_test.go enforces the rule of
+// docs/protocol/overlay_role.md §1: until 21c has passed, no build advertises a
+// capability that claims an anonymous mode.
 //
 // The guard is a CLOSED SET over the advertisement this node really builds,
 // not a search for a forbidden name. A name that does not exist yet cannot be
@@ -75,7 +75,7 @@ func assertAdvertisedNames(t *testing.T, where string, names []string) {
 		}
 		if _, ok := allowed[capability]; !ok {
 			t.Fatalf("%s advertises %q, which is not in the reviewed set. "+
-				"A new capability must be checked against docs/refactoring/dht/21-anonymity-transport.md §3: "+
+				"A new capability must be checked against docs/protocol/overlay_role.md §1: "+
 				"no role claiming an anonymous mode may be advertised until 21c has passed. "+
 				"If the name is unrelated to anonymity, add it to advertisableCapabilities in the same "+
 				"change that adds it to capabilities.go", where, name)

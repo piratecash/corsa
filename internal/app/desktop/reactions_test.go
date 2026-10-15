@@ -1603,8 +1603,7 @@ func TestATapSurvivesTheWholeOverlayBeingDeferred(t *testing.T) {
 // about must not be shown as one whose app cannot receive reactions — nor as
 // offline, which no information does not mean — and a notice raised while the
 // contact's connection said so is taken back once that connection is gone
-// (docs/refactoring/n1-legacy-residual.md §3, owner decisions L-DC-1 and of
-// 2026-10-03).
+// (docs/ui.md, "Shared UI components"; docs/protocol/network_security.md §13).
 func TestNoCurrentInformationIsNotShownAsCannotReceive(t *testing.T) {
 	router := &recordingReactionRouter{
 		unsupportedPeers: map[domain.PeerIdentity]bool{},

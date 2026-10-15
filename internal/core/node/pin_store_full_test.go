@@ -9,11 +9,13 @@ import (
 	"github.com/piratecash/corsa/internal/core/domain"
 )
 
-// pin_store_full_test.go pins the owner's decision of 2026-10-03 on a full pin
-// store (С-5 clarified): existing protection is never lost, a NEW identity is
-// not promised a pin — and a v2 session whose mandatory pin could not be
-// stored is not established, fails with pin_store_full, and is not followed
-// by an automatic v1 fallback in the same attempt.
+// pin_store_full_test.go pins the behaviour of a full pin store
+// (docs/protocol/session_v2.md, "A full pin store"): existing protection is
+// never lost, because evicting a pin would reopen v1 for an identity that
+// proved v2; a NEW identity is not promised a pin — and a v2 session whose
+// mandatory pin could not be stored is not established, fails with
+// pin_store_full, and is not followed by an automatic v1 fallback in the same
+// attempt.
 
 // fillPinStore pins fake identities until the store is at its bound, and puts
 // them on disk.
@@ -47,7 +49,7 @@ func TestAFullPinStoreRefusesANewIdentityAndKeepsEveryExistingOne(t *testing.T) 
 		if err := store.noteProvenInbound(newcomer); !errors.Is(err, errPinStoreFull) {
 			t.Fatalf("attempt %d, accepted: err = %v, want pin_store_full", attempt, err)
 		}
-		if err := store.noteProvenOutbound(endpoint, newcomer, false); !errors.Is(err, errPinStoreFull) {
+		if _, err := store.noteProvenOutbound(endpoint, newcomer, endpointProtectionNone()); !errors.Is(err, errPinStoreFull) {
 			t.Fatalf("attempt %d, dialled: err = %v, want pin_store_full", attempt, err)
 		}
 		if store.identityPinned(newcomer) {
@@ -62,7 +64,7 @@ func TestAFullPinStoreRefusesANewIdentityAndKeepsEveryExistingOne(t *testing.T) 
 	if err := store.noteProvenInbound(honest); err != nil {
 		t.Fatalf("an identity pinned before the store filled up was refused: %v", err)
 	}
-	if err := store.noteProvenOutbound("198.51.100.10:64646", honest, false); err != nil {
+	if _, err := store.noteProvenOutbound("198.51.100.10:64646", honest, endpointProtectionNone()); err != nil {
 		t.Fatalf("a dial to an identity pinned before the store filled up was refused: %v", err)
 	}
 

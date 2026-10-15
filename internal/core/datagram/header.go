@@ -15,16 +15,17 @@ import (
 // It is a value copy with no payload and no mutable aliases: byte fields are
 // handed out as copies, so nothing downstream can reach back into the frame
 // whose transcript the layer has already built, or is about to build. Payload
-// is absent entirely — the timing rules of §2.2 are a function of the HEADER,
-// and a type that cannot express payload access cannot be talked into it by a
-// later change.
+// is absent entirely — the timing rules of docs/protocol/datagram.md §3.4 are a
+// function of the HEADER, and a type that cannot express payload access cannot
+// be talked into it by a later change.
 //
-// Reference: docs/protocol/datagram.md §2.1, §2.2, §3.3.
+// Reference: docs/protocol/datagram.md §2.1, §2.3, §3.4.
 
 // ErrHeaderNotSigned marks an attempt to build the header view from a frame
-// that carries no auth block. The view exists only on the routed plane (§2.1),
-// so it is constructible only there and every accessor on it is total — no
-// "auth may be missing" branch can leak into the timing arithmetic.
+// that carries no auth block. The view exists only on the routed plane
+// (docs/protocol/datagram.md §2.1), so it is constructible only there and every
+// accessor on it is total — no "auth may be missing" branch can leak into the
+// timing arithmetic.
 var ErrHeaderNotSigned = errors.New("datagram: the header view requires a routed frame with auth")
 
 // Header is the header of a routed datagram as the layer's timing and logging
@@ -80,10 +81,10 @@ func (h Header) Version() domain.DatagramVersion { return h.version }
 func (h Header) Mode() domain.DatagramMode { return h.mode }
 
 // Class returns the traffic class, which selects the queue residence and
-// write grace used by the deadline arithmetic (§4.2).
+// write grace used by the deadline arithmetic (docs/protocol/datagram.md §4.3).
 func (h Header) Class() domain.DatagramClass { return h.class }
 
-// Src returns the signer of a routed frame (§2.1.1).
+// Src returns the signer of a routed frame (docs/protocol/datagram.md §2.2).
 func (h Header) Src() domain.PeerIdentity { return h.src }
 
 // Dst returns the destination address.
@@ -101,9 +102,10 @@ func (h Header) DType() domain.DType { return h.dtype }
 // AuthVersion returns `auth.av`.
 func (h Header) AuthVersion() domain.AuthVersion { return h.authVersion }
 
-// AuthTime returns the SIGNED timestamp. Every window in §2.2 and §3.3 is
-// measured from it rather than from the moment of arrival, so a frame delayed
-// in transit does not occupy a replay slot longer than a prompt one.
+// AuthTime returns the SIGNED timestamp. Every window in
+// docs/protocol/datagram.md §3.4 is measured from it rather than from the
+// moment of arrival, so a frame delayed in transit does not occupy a replay
+// slot longer than a prompt one.
 func (h Header) AuthTime() time.Time { return h.authTime }
 
 // MaxTTL returns the signed hop budget the raw ttl is checked against.

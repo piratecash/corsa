@@ -8,8 +8,9 @@ import (
 	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 )
 
-// pipeline_request_test.go covers the request fork of §4.1 and the two-phase
-// reservation of §4.2 as the conveyor drives it.
+// pipeline_request_test.go covers the request fork of
+// docs/protocol/datagram.md §4.1 and the two-phase reservation of
+// docs/protocol/datagram.md §4.3 as the conveyor drives it.
 
 // requestFixture is origin → relay → target with a route only at the relay.
 type requestFixture struct {
@@ -26,7 +27,7 @@ func newRequestFixture(t *testing.T) *requestFixture {
 	return &requestFixture{net: net, origin: nodes[0], relay: nodes[1], target: nodes[2]}
 }
 
-// TestRequestAtDestinationAnswersWithoutReverseState is §9: a request with
+// TestRequestAtDestinationAnswersWithoutReverseState: a request with
 // dst == self reaches the handler and its answer goes back to the neighbour it
 // came from, with NO reverse record created — there is nowhere else to answer.
 func TestRequestAtDestinationAnswersWithoutReverseState(t *testing.T) {
@@ -58,13 +59,13 @@ func TestRequestAtDestinationAnswersWithoutReverseState(t *testing.T) {
 		t.Fatal("the answer must echo the request's label in dst")
 	}
 	if answer.frame.Src != fixture.target.id {
-		t.Fatal("the answer's src is the address the question was ADDRESSED TO (§2.1.1)")
+		t.Fatal("the answer's src is the address the question was ADDRESSED TO (docs/protocol/datagram.md §2.2)")
 	}
 	if answer.frame.Auth != nil {
-		t.Fatal("the request/response plane carries no auth (§2.1)")
+		t.Fatal("the request/response plane carries no auth (docs/protocol/datagram.md §2.1)")
 	}
 	if !answer.frame.RoutePolicy.IsNone() {
-		t.Fatal("route_policy is forbidden in a response (§2.1)")
+		t.Fatal("route_policy is forbidden in a response (docs/protocol/datagram.md §2.1)")
 	}
 	if answer.frame.TTL != ResponseTTL() {
 		t.Fatalf("answer ttl %d, want %d", answer.frame.TTL, ResponseTTL())
@@ -75,7 +76,7 @@ func TestRequestAtDestinationAnswersWithoutReverseState(t *testing.T) {
 	}
 }
 
-// TestAnswerOnlyOnAccepted is §9: `rejected` and `failed` are a silent drop of
+// TestAnswerOnlyOnAccepted: `rejected` and `failed` are a silent drop of
 // the request WITHOUT an answer — answering on a refusal would disguise it as
 // success.
 func TestAnswerOnlyOnAccepted(t *testing.T) {
@@ -130,8 +131,8 @@ func TestARequestWithNowhereToGoIsASilentDrop(t *testing.T) {
 	}
 }
 
-// TestRequestPlaneNeverTouchesTheRoutedReplayCache is the §4.1 separation of
-// the planes, in both directions.
+// TestRequestPlaneNeverTouchesTheRoutedReplayCache is the
+// docs/protocol/datagram.md §4.1 separation of the planes, in both directions.
 func TestRequestPlaneNeverTouchesTheRoutedReplayCache(t *testing.T) {
 	fixture := newRequestFixture(t)
 	registerType(t, fixture.target, requestType(dtypeQuery, acceptingHandler()))
@@ -149,9 +150,10 @@ func TestRequestPlaneNeverTouchesTheRoutedReplayCache(t *testing.T) {
 	}
 }
 
-// TestDownstreamIsFixedBeforePublication is §4.2 phase 3: the chosen candidate
-// is in the record before the frame is published, which is what lets a fast
-// answer arrive re-entrantly and still find its way home.
+// TestDownstreamIsFixedBeforePublication is docs/protocol/datagram.md §4.3
+// phase 3: the chosen candidate is in the record before the frame is published,
+// which is what lets a fast answer arrive re-entrantly and still find its way
+// home.
 func TestDownstreamIsFixedBeforePublication(t *testing.T) {
 	fixture := newRequestFixture(t)
 	label := newLabel(t, "phase3")
@@ -193,9 +195,9 @@ func TestDownstreamIsFixedBeforePublication(t *testing.T) {
 	}
 }
 
-// TestRepeatedRequestDoesNotRepointDownstream is §4.2 phase 2 at the conveyor
-// level, and it explains why: the answer to the FIRST forward would otherwise
-// lose its way back.
+// TestRepeatedRequestDoesNotRepointDownstream is docs/protocol/datagram.md §4.3
+// phase 2 at the conveyor level, and it explains why: the answer to the FIRST
+// forward would otherwise lose its way back.
 func TestRepeatedRequestDoesNotRepointDownstream(t *testing.T) {
 	net := newFakeNetwork()
 	origin := newPipelineNode(t, net, nodeOpts{name: "origin"})
@@ -230,9 +232,10 @@ func TestRepeatedRequestDoesNotRepointDownstream(t *testing.T) {
 	}
 }
 
-// TestEnqueueFailureRewritesDownstreamThenRollsBack is §4.2 phase 4: a refused
-// queue means the frame never left towards that candidate, so downstream moves
-// to the next one — and when the candidates run out the slot goes entirely.
+// TestEnqueueFailureRewritesDownstreamThenRollsBack is
+// docs/protocol/datagram.md §4.3 phase 4: a refused queue means the frame never
+// left towards that candidate, so downstream moves to the next one — and when
+// the candidates run out the slot goes entirely.
 func TestEnqueueFailureRewritesDownstreamThenRollsBack(t *testing.T) {
 	net := newFakeNetwork()
 	origin := newPipelineNode(t, net, nodeOpts{name: "origin"})
@@ -333,8 +336,9 @@ func TestRequestTransitGateDropsBeforeTheReservation(t *testing.T) {
 	}
 }
 
-// TestLocalRequestTakesTheLocalUpstreamMarker is §4.2: our own request marks
-// the record with the LOCAL marker, not with our address.
+// TestLocalRequestTakesTheLocalUpstreamMarker is
+// docs/protocol/datagram.md §4.3: our own request marks the record with the
+// LOCAL marker, not with our address.
 func TestLocalRequestTakesTheLocalUpstreamMarker(t *testing.T) {
 	fixture := newRequestFixture(t)
 	registerType(t, fixture.target, requestType(dtypeQuery, acceptingHandler()))
@@ -362,10 +366,10 @@ func TestLocalRequestTakesTheLocalUpstreamMarker(t *testing.T) {
 }
 
 // TestRequestPlaneRunsTheSameLocalDeliveryGates closes the last of the three
-// planes for §9's "the authorization hook is called on local delivery in all
-// three modes", and it is the regression test behind the de-duplication of the
-// gate sequence: the routed plane, the local response resolver and this one
-// used to carry three copies of
+// planes for "the authorization hook is called on local delivery in all
+// three modes" (docs/protocol/datagram.md §7), and it is the regression test
+// behind the de-duplication of the gate sequence: the routed plane, the local
+// response resolver and this one used to carry three copies of
 //
 //	types.Lookup → observeUnknownDType → admitRegisteredFrame →
 //	NewDeliveryContext → authorizeLocalDelivery

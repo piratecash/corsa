@@ -753,7 +753,7 @@ may be reachable through routes. Availability and the outbox are separate
 questions: "reaction queued" may only be said when a reaction actually is in the
 queue (`QueuedReactionsFor`), never derived from availability. A connection's
 missing declaration is not remembered past that connection, so the notice is
-taken back when it closes (docs/refactoring/n1-legacy-residual.md §3).
+taken back when it closes.
 
 A peer's reactions arrive on the event-bus goroutine, which owns none of the
 window's state. It therefore raises one atomic flag and asks for a frame; the
@@ -2452,7 +2452,7 @@ Left и Right не уходят со своей строки: шаг по инд
 очереди» можно говорить только когда реакция действительно стоит в очереди
 (`QueuedReactionsFor`), а не выводить из доступности. Отсутствие объявления у
 соединения не помнится дольше самого соединения, поэтому надпись снимается,
-когда оно закрывается (docs/refactoring/n1-legacy-residual.md §3).
+когда оно закрывается.
 
 Реакции пира приходят в горутине шины событий, которой не принадлежит ничего из
 состояния окна. Поэтому она поднимает один атомарный флаг и просит кадр, а

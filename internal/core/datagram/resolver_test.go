@@ -15,15 +15,17 @@ import (
 )
 
 // resolver_test.go holds the scheduler fixtures shared by the M7 tests plus
-// the checks of the resolver's own value types: the §6.1 dtypes contract
-// and the wall-clock expiry shape of a route hint.
+// the checks of the resolver's own value types: the
+// docs/protocol/datagram.md §6.1 dtypes contract and the wall-clock expiry
+// shape of a route hint.
 
 const schedLocalVersion = domain.ProtocolVersion(27)
 
 // schedDType is a type no fixture declares unless it says so. Almost every
 // scheduler test uses it, because the interesting gate — the last-hop dtype
 // gate — has no set it waves through: a destination supports exactly the names
-// it declared (§6.1), so a type has to be put there deliberately.
+// it declared (docs/protocol/datagram.md §6.1), so a type has to be put there
+// deliberately.
 const schedDType = domain.DType("file_transfer")
 
 // ---------------------------------------------------------------------------
@@ -72,10 +74,10 @@ func (r *schedRouteResolver) setCached(dst domain.PeerIdentity, hints ...RouteHi
 
 // onEveryLookup stages a side effect that runs on every route lookup.
 //
-// It is the one point a test can act AFTER the early replay probe of §4.1 step 6
-// and BEFORE the branch that ends the frame at step 7 — which is exactly the
-// window a parallel instance of the same frame would take the reservation in.
-// Nothing in production installs one.
+// It is the one point a test can act AFTER the early replay probe of
+// docs/protocol/datagram.md §4.1 step 6 and BEFORE the branch that ends the
+// frame at step 7 — which is exactly the window a parallel instance of the same
+// frame would take the reservation in. Nothing in production installs one.
 func (r *schedRouteResolver) onEveryLookup(hook func()) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -233,7 +235,8 @@ func (d *schedDirectSession) LookupDirectSession(
 // It replaced a NextHopSender fake deliberately. The emitter is what the
 // production send path uses, so a test that drives it exercises the same walk
 // the node does — a second, test-only publication path is exactly how the
-// whole §4.3 vocabulary came to live in code production never called.
+// whole docs/protocol/datagram.md §4.4 vocabulary came to live in code
+// production never called.
 type schedEmitter struct {
 	mu     sync.Mutex
 	refuse map[domain.PeerIdentity]bool
@@ -283,7 +286,7 @@ func (e *schedEmitter) tried() []domain.PeerIdentity {
 
 // failHop is refuseHop under the name a test uses when it wants to talk about
 // the CAUSE rather than the fact: a write queue that would not take the frame
-// is a local failure either way (§4.3).
+// is a local failure either way (docs/protocol/datagram.md §4.4).
 func (e *schedEmitter) failHop(peer domain.PeerIdentity) { e.refuseHop(peer) }
 
 func (e *schedEmitter) reset() {
@@ -312,10 +315,10 @@ type schedFixtureOpts struct {
 // schedFixture is a WHOLE layer instance — pipeline included — not a bare
 // scheduler.
 //
-// That is the point of it: §4.3 has exactly two entry points into the layer,
-// Pipeline.SendLocal and Pipeline.HandleInbound, and a fixture that reached
-// past them into the scheduler could keep a whole vocabulary green while the
-// production path answered `no_route` to everything.
+// That is the point of it: docs/protocol/datagram.md §4.4 has exactly two entry
+// points into the layer, Pipeline.SendLocal and Pipeline.HandleInbound, and a
+// fixture that reached past them into the scheduler could keep a whole
+// vocabulary green while the production path answered `no_route` to everything.
 type schedFixture struct {
 	scheduler *Scheduler
 	pipeline  *Pipeline
@@ -427,8 +430,8 @@ func (f *schedFixture) advance(d time.Duration) {
 
 // declaredDTypesOf renders a fixture's dtype list as a handshake
 // declaration. No names at all is the ABSENT field — what a peer which never
-// sent `dtypes` states, and §6.1 reads it as naming no type at all. A fixture
-// that wants the EXPLICITLY EMPTY set builds it from
+// sent `dtypes` states, and docs/protocol/datagram.md §6.1 reads it as naming
+// no type at all. A fixture that wants the EXPLICITLY EMPTY set builds it from
 // domain.ParseDeclaredDTypes(nil) directly: the two forms name the same set,
 // but they are different statements about the peer and the wire keeps them
 // apart.
@@ -531,7 +534,7 @@ func (f *schedFixture) send(
 }
 
 // sendAvoiding is the same public path carrying the avoid_next_hop parameter
-// of §4.3 — the one a migration retry uses (§8).
+// of docs/protocol/datagram.md §4.4 — the one a migration retry uses.
 func (f *schedFixture) sendAvoiding(
 	t *testing.T,
 	dst domain.PeerIdentity,
@@ -547,7 +550,7 @@ func (f *schedFixture) sendAvoiding(
 
 // transit is the OTHER public entry: a frame somebody else signed, arriving
 // from a neighbour. Its refusals are silent drops, which is the asymmetry
-// §4.3 item 4 draws.
+// docs/protocol/datagram.md §4.4 item 4 draws.
 func (f *schedFixture) transit(
 	t *testing.T,
 	via domain.PeerIdentity,
@@ -578,17 +581,18 @@ func withDType(dtype domain.DType) func(*protocol.DatagramFrame) {
 }
 
 // ---------------------------------------------------------------------------
-// The §6.1 dtypes contract
+// The docs/protocol/datagram.md §6.1 dtypes contract
 // ---------------------------------------------------------------------------
 
 // TestDeclaredDTypesWithoutNamesSupportsNothing pins the rule that replaced the
 // implied baseline of the withdrawn draft: the declared field IS the set,
 // so a peer that listed no name is an endpoint for NO type.
 //
-// The four ways to arrive at "no names" are covered together because §6.1 gives
-// them one meaning and the layer must not grow a second: the field was never
-// sent, the session was never recorded (the zero value), the field was sent
-// empty, and the field breached its bounds and was therefore ignored whole.
+// The four ways to arrive at "no names" are covered together because
+// docs/protocol/datagram.md §6.1 gives them one meaning and the layer must not
+// grow a second: the field was never sent, the session was never recorded (the
+// zero value), the field was sent empty, and the field breached its bounds and
+// was therefore ignored whole.
 //
 // The mutation this kills: crediting an absent field with a set of types —
 // which is how every v27 peer advertising mesh_datagram_v1 came to count as an
@@ -634,7 +638,8 @@ func TestDeclaredDTypesWithoutNamesSupportsNothing(t *testing.T) {
 // TestDeclaredDTypesExplicitFieldIsTakenLiterally pins the sent field as the
 // SET it is declared to be: the names it carries are supported, everything
 // else is not — a name from the withdrawn baseline included. The field is the
-// only statement a peer makes about its handlers (§6.1).
+// only statement a peer makes about its handlers
+// (docs/protocol/datagram.md §6.1).
 func TestDeclaredDTypesExplicitFieldIsTakenLiterally(t *testing.T) {
 	t.Parallel()
 

@@ -11,7 +11,7 @@ import (
 )
 
 // reachability.go holds the two READ-ONLY surfaces of the layer: the
-// reachability probe and the route plan (§4.3).
+// reachability probe and the route plan (docs/protocol/datagram.md §4.4).
 //
 // They are a contract of the layer, not a convenience for the migration:
 // artifact owners build retries and diagnostics on them — the file manager
@@ -28,7 +28,7 @@ import (
 // does, so an action taken right after a route appears is not answered with
 // "unreachable" while the send would already work.
 //
-// Reference: docs/refactoring/datagram-transport.md §4.3, §6.1, §9.
+// Reference: docs/protocol/datagram.md §4.4, §6.1.
 
 // ErrInvalidQuery marks a read-only query describing a datagram that no real
 // send could build.
@@ -111,9 +111,9 @@ func (q ReachabilityQuery) gateFrame() protocol.DatagramFrame {
 // RoutePlanQueryOpts is the probe's input plus the policy.
 type RoutePlanQueryOpts struct {
 	ReachabilityQueryOpts
-	// RoutePolicy is `best` or `explore` (§4.3). The zero value is refused
-	// rather than defaulted, exactly as RoutedFrameOpts refuses it: "which
-	// policy did this answer describe" must not be a guess.
+	// RoutePolicy is `best` or `explore` (docs/protocol/datagram.md §4.4). The
+	// zero value is refused rather than defaulted, exactly as RoutedFrameOpts
+	// refuses it: "which policy did this answer describe" must not be a guess.
 	RoutePolicy domain.RoutePolicy
 }
 
@@ -121,12 +121,12 @@ type RoutePlanQueryOpts struct {
 // plan renders an order and the order depends on the policy.
 //
 // The policy changes neither the candidate SET nor the comparator: under
-// `explore` the plan deliberately shows the comparator order (§4.3), because
-// the rotation counter mutates on a send, a read-only plan must neither move
-// nor reserve it, and under concurrent sends "the next candidate" is not
-// defined in advance at all. What it changes is what the plan may PROMISE,
-// and the plan reports that itself rather than leaving a reader to guess —
-// see RoutePlan.FirstCandidateGuaranteed.
+// `explore` the plan deliberately shows the comparator order
+// (docs/protocol/datagram.md §4.4), because the rotation counter mutates on a
+// send, a read-only plan must neither move nor reserve it, and under concurrent
+// sends "the next candidate" is not defined in advance at all. What it changes
+// is what the plan may PROMISE, and the plan reports that itself rather than
+// leaving a reader to guess — see RoutePlan.FirstCandidateGuaranteed.
 type RoutePlanQuery struct {
 	reach  ReachabilityQuery
 	policy domain.RoutePolicy
@@ -174,7 +174,7 @@ type RoutePlanEntry struct {
 type RoutePlan struct {
 	entries []RoutePlanEntry
 	// policy is the route_policy the plan was built for. It is kept because
-	// it decides what element 0 means (§4.3).
+	// it decides what element 0 means (docs/protocol/datagram.md §4.4).
 	policy domain.RoutePolicy
 	// refusal is the gate verdict that emptied the plan, when a gate is what
 	// emptied it. An empty plan otherwise means the topology has nothing to
@@ -208,10 +208,10 @@ func (p RoutePlan) MissingCapability() (domain.CapabilityName, bool) {
 func (p RoutePlan) Policy() domain.RoutePolicy { return p.policy }
 
 // FirstCandidateGuaranteed reports whether element 0 is the hop a send would
-// really try first. §4.3 promises that only for `best`: under `explore` the
-// send rotates by a counter this read-only plan neither moves nor reads, so
-// the plan shows the comparator order and says out loud that the first
-// element is not a prediction.
+// really try first. docs/protocol/datagram.md §4.4 promises that only for
+// `best`: under `explore` the send rotates by a counter this read-only plan
+// neither moves nor reads, so the plan shows the comparator order and says out
+// loud that the first element is not a prediction.
 func (p RoutePlan) FirstCandidateGuaranteed() bool {
 	return p.policy != domain.RoutePolicyExplore
 }
@@ -223,7 +223,8 @@ func (p RoutePlan) Entries() []RoutePlanEntry {
 }
 
 // ReachabilityResult is the probe's answer, and it is a STRUCT rather than a
-// bool because §6.1 makes the two negatives mean opposite things.
+// bool because docs/protocol/datagram.md §6.1 makes the two negatives mean
+// opposite things.
 //
 // "A negative live answer cancels a positive cached confirmation and clears it
 // immediately" is a rule about SUPPORT: the peer told us in its handshake that
@@ -234,10 +235,10 @@ func (p RoutePlan) Entries() []RoutePlanEntry {
 // to guess would either implement the rule wrong or not at all.
 //
 // The reason is the SAME vocabulary a send returns, produced from the same
-// verdict, so the one-way guarantee of §4.3 is unchanged and strengthened:
-// "unreachable" still means a send at that moment would not have been queued,
-// and now it also names which of `no_route` and `rejected(reason)` it would
-// have been.
+// verdict, so the one-way guarantee of docs/protocol/datagram.md §4.4 is
+// unchanged and strengthened: "unreachable" still means a send at that moment
+// would not have been queued, and now it also names which of `no_route` and
+// `rejected(reason)` it would have been.
 type ReachabilityResult struct {
 	missing   domain.CapabilityName
 	reason    RejectionReason
@@ -257,10 +258,10 @@ func (r ReachabilityResult) Rejection() (RejectionReason, bool) {
 	return r.reason, true
 }
 
-// UnsupportedDType reports the one negative §6.1 calls a negative live answer
-// about SUPPORT: the destination is a live neighbour and its declared dtype
-// set does not contain this type. This — and only this — cancels a cached
-// (dtype, caps) confirmation immediately.
+// UnsupportedDType reports the one negative docs/protocol/datagram.md §6.1
+// calls a negative live answer about SUPPORT: the destination is a live
+// neighbour and its declared dtype set does not contain this type. This — and
+// only this — cancels a cached (dtype, caps) confirmation immediately.
 func (r ReachabilityResult) UnsupportedDType() bool {
 	return !r.reachable && r.reason == RejectionUnsupportedDType
 }
@@ -297,13 +298,15 @@ func (r ReachabilityResult) String() string {
 // through `no_route` alone would be a lie: a destination that never
 // declared the dtype must be called unreachable, and a send to it returns
 // `rejected`. The result carries WHICH of the two it would have been, because
-// §6.1 acts on one of them and must not act on the other.
+// docs/protocol/datagram.md §6.1 acts on one of them and must not act on the
+// other.
 //
 // A positive answer guarantees nothing. The probe is TOCTOU by
 // construction: the route may disappear between the two calls and no
 // read-only interface can fix that. It also proves nothing about the
 // remote endpoint's support for the type — that is a separate confirmation
-// (§6.1), which for a direct peer is exactly what the last-hop gate gives.
+// (docs/protocol/datagram.md §6.1), which for a direct peer is exactly what the
+// last-hop gate gives.
 //
 // The probe reserves nothing and spends no cryptographic budget: it walks
 // the same selection code the send does and stops before the enqueue.

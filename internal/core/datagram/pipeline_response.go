@@ -7,7 +7,8 @@ import (
 	"github.com/piratecash/corsa/internal/core/domain"
 )
 
-// pipeline_response.go is the response fork of §4.1 — steps 4 to 6.
+// pipeline_response.go is the response fork of docs/protocol/datagram.md §4.1 —
+// steps 4 to 6.
 //
 // A response is NOT routed by dst: it travels along stored state alone, which
 // is why "check deliverability before cryptography" would break this plane
@@ -31,10 +32,11 @@ import (
 // it, because a drop after it holds the slot until expires_at and loses the
 // genuine answer. What legitimately stays after the CAS is only the two
 // mutating steps themselves — the enqueue to the upstream and the resolver —
-// and it is their FAILURE, on either branch, that §4.2 keeps the record claimed
-// for. Their success frees it on either branch too.
+// and it is their FAILURE, on either branch, that
+// docs/protocol/datagram.md §4.3 keeps the record claimed for. Their success
+// frees it on either branch too.
 //
-// Reference: docs/protocol/datagram.md §4.1, §4.1.1, §4.2, §4.4.
+// Reference: docs/protocol/datagram.md §4.1, §4.2, §4.3.
 
 // handleResponse runs steps 4..6.
 func (p *Pipeline) handleResponse(ctx context.Context, arrival inboundFrame) InboundResult {
@@ -130,32 +132,33 @@ func probeRefusalReason(outcome ReverseProbeOutcome) DropReason {
 	return DropReverseRecordStale
 }
 
-// checkResponseTransport is every read-only invariant of §4.2 that BOTH
-// upstream kinds share, in one place so no branch can quietly skip one.
+// checkResponseTransport is every read-only invariant of
+// docs/protocol/datagram.md §4.3 that BOTH upstream kinds share, in one place
+// so no branch can quietly skip one.
 //
 // What lives here is decided by ONE question: could a node answer it while
 // knowing nothing about the application protocol the frame belongs to? The
 // return path, the echoed subject and the state of the slot are all facts about
 // THIS node's own reverse state and the bytes that arrived, so a transit node
-// judges them exactly as an endpoint does. The type-level pairing of §4.2 is not
-// one of them and is not here — it belongs to the endpoint alone
-// (deliverResponseLocally), because it is an opinion about somebody's protocol
-// and a relay holding an older opinion would drop the correct answer of a newer
-// one.
+// judges them exactly as an endpoint does. The type-level pairing of
+// docs/protocol/datagram.md §4.3 is not one of them and is not here — it
+// belongs to the endpoint alone (deliverResponseLocally), because it is an
+// opinion about somebody's protocol and a relay holding an older opinion would
+// drop the correct answer of a newer one.
 //
 // It is a FUNCTION and not a method for the same reason: a check with no
 // Pipeline to reach through has no registry, no clock and no store to consult,
 // so "transport-only" is a property the signature carries rather than a promise
 // the comment makes.
 //
-// The `ttl > 0` rule is not repeated here: the common part of §4.1 already
-// dropped a zero ttl on the RAW value, and a second check would be a second
-// opinion about the same field. The stricter forwarding rule — `ttl ≥ 2`,
-// because the decrement pays for the hop about to be made (§4.1.1 rule 4) — is
-// not here either, and deliberately so: it holds for the network branch alone,
-// while local delivery has no hop to pay for and answers a `ttl = 1` frame
-// perfectly well. Moving it here would drop legitimate answers at the
-// initiator.
+// The `ttl > 0` rule is not repeated here: the common part of
+// docs/protocol/datagram.md §4.1 already dropped a zero ttl on the RAW value,
+// and a second check would be a second opinion about the same field. The
+// stricter forwarding rule — `ttl ≥ 2`, because the decrement pays for the hop
+// about to be made (docs/protocol/datagram.md §4.2 rule 4) — is not here
+// either, and deliberately so: it holds for the network branch alone, while
+// local delivery has no hop to pay for and answers a `ttl = 1` frame perfectly
+// well. Moving it here would drop legitimate answers at the initiator.
 func checkResponseTransport(
 	arrival inboundFrame,
 	header DeliveryHeader,
@@ -176,8 +179,9 @@ func checkResponseTransport(
 		//
 		// `forwarded` is false only before the first candidate is fixed. That
 		// window is not a race with an in-flight answer — FixDownstream runs
-		// BEFORE the frame reaches the writer (§4.2 phase 3) — it is a record
-		// whose walk found no publishable candidate at all.
+		// BEFORE the frame reaches the writer (docs/protocol/datagram.md §4.3
+		// phase 3) — it is a record whose walk found no publishable candidate
+		// at all.
 		return DropReverseWrongDownstream
 	}
 	if subject, ok := header.Subject(); !ok || subject != record.Dst() {
@@ -191,8 +195,9 @@ func checkResponseTransport(
 	return DropReasonUnset
 }
 
-// pairingHolds is the type-level pairing check of §4.2, performed at the
-// ENDPOINT — the node whose own exchange the record is — and BEFORE the claim.
+// pairingHolds is the type-level pairing check of
+// docs/protocol/datagram.md §4.3, performed at the ENDPOINT — the node whose
+// own exchange the record is — and BEFORE the claim.
 //
 // It runs on the local branch ONLY, and that is the whole rule rather than an
 // optimisation. The pairing is an opinion about an application protocol, read
@@ -225,13 +230,13 @@ func (p *Pipeline) pairingHolds(answer domain.DType, record ReverseRecord) bool 
 // The clamp and the decrement are a refusal like the local gates are, so they
 // stand before the claim for the same reason: the record has one answer slot,
 // and an answer that will not be forwarded anyway must not eat it while the
-// real one is refused as "already claimed" (§4.2). They are pure
-// functions of the ARRIVING frame — nothing about them needs the claimed
-// state — which is what makes hoisting them possible at all.
+// real one is refused as "already claimed" (docs/protocol/datagram.md §4.3).
+// They are pure functions of the ARRIVING frame — nothing about them needs the
+// claimed state — which is what makes hoisting them possible at all.
 //
 // The enqueue below is the opposite case and the only drop left after the CAS:
-// it is the mutating step itself, so §4.2 keeps the record claimed until
-// expires_at on purpose.
+// it is the mutating step itself, so docs/protocol/datagram.md §4.3 keeps the
+// record claimed until expires_at on purpose.
 func (p *Pipeline) forwardResponse(
 	ctx context.Context,
 	arrival inboundFrame,
@@ -254,7 +259,7 @@ func (p *Pipeline) forwardResponse(
 		return dropped(DropReverseClaimLost, nil)
 	}
 	// A successful `forward` followed by a claim does NOT spend budget: only
-	// refused attempts do (§4.2).
+	// refused attempts do (docs/protocol/datagram.md §4.3).
 	p.reverse.RefundProbe(ticket)
 
 	// The hand-over is CHANNEL-PINNED, for the reason emitAnswer states: an
@@ -311,10 +316,11 @@ func (p *Pipeline) deliverResponseLocally(
 		return dropped(DropReverseClaimLost, nil)
 	}
 	// A successful `forward` followed by a claim does NOT spend budget: only
-	// refused attempts do (§4.2).
+	// refused attempts do (docs/protocol/datagram.md §4.3).
 	p.reverse.RefundProbe(ticket)
 
-	// No decrement and no enqueue: there is no hop to pay for (§4.1.1 rule 4).
+	// No decrement and no enqueue: there is no hop to pay for
+	// (docs/protocol/datagram.md §4.2 rule 4).
 	switch result := runHandler(ctx, admitted.entry.Handler(), admitted.delivery, arrival.frame.Payload); result.Outcome() {
 	case HandlerAccepted:
 		// The exchange is over: this node asked, this node was answered, and a

@@ -7,31 +7,34 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-// queue_emitter.go puts the weighted class queue of §5 ON THE REAL PATH.
+// queue_emitter.go puts the weighted class queue of
+// docs/protocol/datagram.md §5 ON THE REAL PATH.
 //
 // The queue itself decides an ORDER; until this file existed nothing produced
-// into it and nothing consumed from it outside its own unit tests, so §5's
-// promise — "bulk gets a guaranteed share under a constant control stream" —
-// held in the type and nowhere else: the pipeline published straight to
-// FrameEmitter, first come first served.
+// into it and nothing consumed from it outside its own unit tests, so
+// docs/protocol/datagram.md §5's promise — "bulk gets a guaranteed share under
+// a constant control stream" — held in the type and nowhere else: the pipeline
+// published straight to FrameEmitter, first come first served.
 //
 // The boundary is unchanged and deliberate: a frame leaves this queue when the
 // layer is ready to hand it to the writer, and everything after that — the
 // per-peer write queue, the deadline re-check and the write grace — belongs to
 // netcore, and none of it reports back: the ticket travels one way
 // (netcore/write_ticket.go). Per-PEER fairness is therefore still
-// not this queue's job; the only dimension §5 names here is between CLASSES.
+// not this queue's job; the only dimension docs/protocol/datagram.md §5 names
+// here is between CLASSES.
 //
-// Reference: docs/refactoring/datagram-transport.md §4.2, §5, §9.
+// Reference: docs/protocol/datagram.md §4.3, §5.
 
 // ClassQueueEmitter is the FrameEmitter the pipeline talks to when the layer
 // is wired with a class queue: Enqueue on the way in, the writer's emitter on
-// the way out, and the deficit round robin of §5 in between.
+// the way out, and the deficit round robin of docs/protocol/datagram.md §5 in
+// between.
 //
 // Its EmitTo answers the same question the direct emitter did — "did the queue
-// take it" — so the finality rule of §4.3 is untouched: a `queued` outcome
-// still means queued, and the frame may still be dropped later on send_until,
-// here or in the writer.
+// take it" — so the finality rule of docs/protocol/datagram.md §4.4 is
+// untouched: a `queued` outcome still means queued, and the frame may still be
+// dropped later on send_until, here or in the writer.
 type ClassQueueEmitter struct {
 	queue   *WeightedQueue
 	out     FrameEmitter
@@ -49,7 +52,7 @@ type dropSink interface {
 // needs three collaborators and a forgotten one must be a constructor error,
 // not a nil dereference on the pump goroutine (CLAUDE.md).
 type ClassQueueEmitterConfig struct {
-	// Queue is the deficit round robin of §5.
+	// Queue is the deficit round robin of docs/protocol/datagram.md §5.
 	Queue *WeightedQueue
 	// Out is the writer's emitter.
 	Out FrameEmitter
@@ -72,9 +75,9 @@ func NewClassQueueEmitter(cfg ClassQueueEmitterConfig) (*ClassQueueEmitter, erro
 // EmitTo places the frame in its class lane.
 //
 // The size is taken from the line the layer already serialized rather than
-// measured again: §5 accounts in serialized bytes, and a second serialization
-// of the same frame is the duplicated work the OutboundFrame contract exists
-// to remove.
+// measured again: docs/protocol/datagram.md §5 accounts in serialized bytes,
+// and a second serialization of the same frame is the duplicated work the
+// OutboundFrame contract exists to remove.
 func (e *ClassQueueEmitter) EmitTo(_ context.Context, out OutboundFrame) bool {
 	return e.queue.Enqueue(QueuedFrame{
 		SendUntil: out.SendUntil,
@@ -109,8 +112,8 @@ func (e *ClassQueueEmitter) Drain(ctx context.Context) int {
 			// A crash is its OWN reason, not a shade of refusal: a refusal is
 			// ordinary backpressure — the session died between the enqueue and
 			// the dequeue — while a crash is a defect in the adapter that an
-			// operator has to go and fix. Counted, not just logged, because §10
-			// requires a drop to be observable by reason and a log line is not
+			// operator has to go and fix. Counted, not just logged, because a
+			// drop has to be observable by reason and a log line is not
 			// a counter.
 			if e.metrics != nil {
 				e.metrics.ObserveDrop(outcome.reason())

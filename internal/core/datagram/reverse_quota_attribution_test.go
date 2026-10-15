@@ -11,7 +11,7 @@ import (
 // measurement step: a shared quota must say WHO it turned away, not only how
 // full it was.
 //
-// Reference: docs/refactoring/dht/13-measurements.md §2.
+// Reference: docs/rpc/datagram.md (fetchDatagramSummary, `reverse`).
 
 // tightReverseCaps is a reverse-limits seam with a quota small enough to make
 // it bind in a test.

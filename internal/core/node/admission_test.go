@@ -958,9 +958,10 @@ func TestCommandLimitExemptionRefusesDecoyTopLevelTypes(t *testing.T) {
 	authenticated := registerDatagramCommandConn(t, svc, domain.ConnID(8831), true)
 
 	// The third exempt class needs a real frame rather than a fixture literal.
-	// A genuine datagram must keep its exemption: the layer's §5 budget REPLACES
-	// the command limiter for this plane, and a datagram left inside the limiter
-	// would be throttled to a control-plane rate its bulk chunks never fit.
+	// A genuine datagram must keep its exemption: the layer's
+	// docs/protocol/datagram.md §5 budget REPLACES the command limiter for this
+	// plane, and a datagram left inside the limiter would be throttled to a
+	// control-plane rate its bulk chunks never fit.
 	if !svc.frameLineExemptFromCommandLimit(authenticated, mustDatagramLine(t, newNodeDatagram(t, nil))) {
 		t.Fatal("a real datagram lost its exemption although the layer charges its own budget")
 	}

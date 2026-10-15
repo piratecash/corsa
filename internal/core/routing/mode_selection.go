@@ -51,7 +51,7 @@ import (
 // localRefusals at localRefusalDTypeCap — a neighbour-controlled string as the
 // key of a map this node grows is a memory defect wearing a metric's clothes.
 //
-// Reference: docs/refactoring/dht/05-rollout-metrics.md.
+// Reference: docs/rpc/routing.md (fetchRouteSummary, `mode_selection`).
 
 // AnnounceOperation names the send that performed a mode selection.
 type AnnounceOperation uint8

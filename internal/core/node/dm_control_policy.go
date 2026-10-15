@@ -47,8 +47,8 @@ type refusalKey struct {
 //
 // For an identity that requires v2 (pinned, or with a live v2 connection) only
 // its v2 connections count: a legacy connection that merely names it cannot
-// make it "unable to receive reactions" (docs/refactoring/n1-legacy-residual.md
-// §3). The caller must hold no domain mutex.
+// make it "unable to receive reactions" (docs/protocol/network_security.md §13).
+// The caller must hold no domain mutex.
 func (s *Service) ReactionsSupportOf(peer domain.PeerIdentity) domain.ReactionsSupport {
 	if s == nil || peer.IsZero() {
 		return domain.ReactionsSupportUnknown

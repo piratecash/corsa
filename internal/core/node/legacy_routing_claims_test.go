@@ -20,10 +20,10 @@ import (
 )
 
 // legacy_routing_claims_test.go pins the routing half of N1
-// (docs/refactoring/n1-legacy-residual.md §2): once identity X has proved
-// itself over v2 to this node, a legacy connection that merely names X — an
-// impostor that connected before the proof — changes nothing about the routes
-// via X, by any frame, while X's v2 session is alive.
+// (docs/routing.md, "Legacy claims of an identity that proved v2"): once
+// identity X has proved itself over v2 to this node, a legacy connection that
+// merely names X — an impostor that connected before the proof — changes
+// nothing about the routes via X, by any frame, while X's v2 session is alive.
 
 var routingTwinsCaps = []domain.Capability{
 	domain.CapMeshRoutingV1, domain.CapMeshRoutingV2, domain.CapMeshRoutingV3, domain.CapMeshRelayV1,

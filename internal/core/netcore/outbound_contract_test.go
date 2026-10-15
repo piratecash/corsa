@@ -281,12 +281,12 @@ func TestOneTicketServesEveryConnectionItIsAttachedTo(t *testing.T) {
 	}
 }
 
-// TestSendTrackedExpiredSendUntilNeverReachesSocket pins the §4.2 send
-// deadline, which is the ONE guarantee that survives on this path: the writer
-// re-checks SendUntil immediately BEFORE the socket write, so a frame that
-// expired while it waited is never handed to the socket at all — and, because
-// an expired frame is not a link failure, the connection keeps serving the
-// frames behind it.
+// TestSendTrackedExpiredSendUntilNeverReachesSocket pins the
+// docs/protocol/datagram.md §3.4 send deadline, which is the ONE guarantee that
+// survives on this path: the writer re-checks SendUntil immediately BEFORE the
+// socket write, so a frame that expired while it waited is never handed to the
+// socket at all — and, because an expired frame is not a link failure, the
+// connection keeps serving the frames behind it.
 //
 // It is asserted on the socket and not on a notification: the writes the
 // connection actually performed are the only place "was it written" is a fact
@@ -322,7 +322,7 @@ func TestSendTrackedExpiredSendUntilNeverReachesSocket(t *testing.T) {
 	}
 }
 
-// TestWriteFailureShutsTheWholeConnectionQueue is the §9 contract for the
+// TestWriteFailureShutsTheWholeConnectionQueue is the contract for the
 // LOWER queue: a frame cut mid-write tears the connection down, nothing queued
 // behind it is ever handed to the socket, and a producer arriving afterwards is
 // refused instead of being told its frame was accepted.
@@ -365,10 +365,10 @@ func TestWriteFailureShutsTheWholeConnectionQueue(t *testing.T) {
 	pc.Close()
 }
 
-// TestWriteGraceBoundsSocketWriteAndTearsDownConnection pins the §4.2
-// write-grace contract: the grace — not the connection default — bounds the
-// socket write of a tracked frame, and a write that does not finish inside
-// it aborts ambiguous and kills the connection.
+// TestWriteGraceBoundsSocketWriteAndTearsDownConnection pins the
+// docs/protocol/datagram.md §4.3 write-grace contract: the grace — not the
+// connection default — bounds the socket write of a tracked frame, and a write
+// that does not finish inside it aborts ambiguous and kills the connection.
 func TestWriteGraceBoundsSocketWriteAndTearsDownConnection(t *testing.T) {
 	t.Parallel()
 	conn := newGatedConn()

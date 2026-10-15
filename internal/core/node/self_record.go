@@ -129,8 +129,8 @@ func selfRecordMatchesSpec(stored protocol.IdentityRecordBody, owner *identity.I
 
 // declaredDTypeSetsEqual compares two declarations as SETS plus the
 // declaration kind: absent and explicitly-empty name the same types but are
-// different statements (§6.1), and flipping between them is a content
-// change worth a new seq.
+// different statements (docs/protocol/datagram.md §6.1), and flipping between
+// them is a content change worth a new seq.
 func declaredDTypeSetsEqual(a, b domain.DeclaredDTypeSet) bool {
 	if a.Declaration() != b.Declaration() {
 		return false

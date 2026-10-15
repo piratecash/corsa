@@ -100,7 +100,7 @@ func (s *Service) admitServiceDialWelcome(dial serviceDial, address domain.PeerA
 		return err
 	}
 	if !proven {
-		if err := s.refuseLegacyIdentity(welcome.Address); err != nil {
+		if err := s.refuseLegacyWelcome(address, domain.PeerIdentityFromWire(welcome.Address)); err != nil {
 			log.Warn().Err(err).Str("peer", string(address)).Msg(dial.event("v1_refused_identity_pinned_to_v2"))
 			return err
 		}

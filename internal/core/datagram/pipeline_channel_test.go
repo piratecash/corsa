@@ -186,8 +186,8 @@ func TestForeignCodeSeesTheAuthorityOfTheNeighbourItIsToldAbout(t *testing.T) {
 	}, requestFrame(t, requestOpts{label: newLabel(t, "authorize-claimed"), dst: node.id})), InboundDelivered)
 	seen.requireClaimed(t, victim, attackerChannel)
 
-	// The HANDLER is the second seam of §7 that receives the value, and it sees
-	// the same thing: a claim marked as one.
+	// The HANDLER is the second seam of docs/protocol/datagram.md §7 that
+	// receives the value, and it sees the same thing: a claim marked as one.
 	endpoint := newPipelineNode(t, net, nodeOpts{name: "endpoint"})
 	handler := acceptingHandler()
 	local := requestType(dtypeCached, handler)
@@ -261,10 +261,11 @@ func (w *ingressWitness) requireClaimed(t *testing.T, want domain.PeerIdentity, 
 //
 // The inference it replaces was "the type declares an Authorizer, therefore it
 // depends on knowing who the neighbour is". That is false in both directions:
-// §7 describes a sender authenticated by a signature INSIDE the payload, and
-// such a type has an Authorizer that never touches IncomingPeer and must keep
-// working on every session this node dialled — while a type with no Authorizer
-// at all can perfectly well build its handler on the neighbour's name.
+// docs/protocol/datagram.md §7 describes a sender authenticated by a signature
+// INSIDE the payload, and such a type has an Authorizer that never touches
+// IncomingPeer and must keep working on every session this node dialled — while
+// a type with no Authorizer at all can perfectly well build its handler on the
+// neighbour's name.
 //
 // The mutations this kills:
 //
@@ -294,8 +295,8 @@ func TestSenderProofIsDeclaredByTheTypeAndNotInferredFromItsHooks(t *testing.T) 
 	declared := requestType(dtypeCached, payloadAuthenticated)
 	declared.SenderProof = SenderProvenInPayload
 	declared.Authorizer = AuthorizerFunc(func(context.Context, DeliveryContext, []byte) AuthorizationDecision {
-		// The shape §7 describes: the decision is taken on the payload, and the
-		// neighbour's name is never read.
+		// The shape docs/protocol/datagram.md §7 describes: the decision is
+		// taken on the payload, and the neighbour's name is never read.
 		return Accept()
 	})
 	registerType(t, node, declared)
