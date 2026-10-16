@@ -3995,7 +3995,7 @@ func TestSendNoticeToPeer_BootstrapRecordsOutboundSuccess(t *testing.T) {
 	}()
 
 	peerAddr := domain.PeerAddress(ln.Addr().String())
-	markOldNode(svc, peerAddr)
+	asLegacyOnlyDialler(svc)
 	svc.sendNoticeToPeer(peerAddr, time.Minute, "bootstrap-ciphertext")
 
 	select {
@@ -4103,7 +4103,7 @@ func TestSendNoticeToPeer_SelfIdentityNotice_AppliesCooldown(t *testing.T) {
 	}()
 
 	peerAddr := domain.PeerAddress(ln.Addr().String())
-	markOldNode(svc, peerAddr)
+	asLegacyOnlyDialler(svc)
 	svc.sendNoticeToPeer(peerAddr, time.Minute, "self-identity-ciphertext")
 
 	select {
@@ -4203,7 +4203,7 @@ func TestSendNoticeToPeer_SelfIdentityWelcome_AppliesCooldown(t *testing.T) {
 	}()
 
 	peerAddr := domain.PeerAddress(ln.Addr().String())
-	markOldNode(svc, peerAddr)
+	asLegacyOnlyDialler(svc)
 	svc.sendNoticeToPeer(peerAddr, time.Minute, "self-welcome-ciphertext")
 
 	select {

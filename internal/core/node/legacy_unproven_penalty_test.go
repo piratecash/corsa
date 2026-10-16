@@ -17,11 +17,11 @@ import (
 	"github.com/piratecash/corsa/internal/core/sessionv2/sessionv2test"
 )
 
-// legacy_unproven_penalty_test.go pins N1 (session-security-v2 С-9): a legacy
-// (v1) session never proves the identity it names, so nothing it does may
-// raise punitive or budget state against that identity. Every test here plays
-// the same attack — a peer on a legacy session names the victim's identity
-// and misbehaves — and then asks two questions:
+// legacy_unproven_penalty_test.go pins that an unproven identity arms no
+// penalty: a legacy (v1) session never proves the identity it names, so nothing
+// it does may raise punitive or budget state against that identity. Every test
+// here plays the same attack — a peer on a legacy session names the victim's
+// identity and misbehaves — and then asks two questions:
 //
 //   - is the VICTIM, arriving over a connection of its own, still served?
 //   - is the ATTACKER still stopped? Moving the key must not move the

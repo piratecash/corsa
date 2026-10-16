@@ -683,14 +683,16 @@ const syncHandshakeTimeout = 1500 * time.Millisecond
 // writeDeadlineFor(Outbound) returns this value; inbound uses connWriteTimeout.
 const sessionWriteTimeout = 3 * time.Second
 
-// inboundReadTimeout is the maximum time an inbound connection may remain
-// idle (no complete frame received) before the server closes it. This
-// prevents Slowloris-style attacks where a peer opens a connection and
-// trickles data to hold the connection slot indefinitely.
+// inboundReadTimeout bounds an inbound frame from its first byte to its end,
+// and every wait of an inbound connection that has not become a session yet
+// (its first byte, each handshake frame). This prevents Slowloris-style
+// attacks where a peer opens a connection and trickles data, or stalls its
+// handshake, to hold the connection slot indefinitely.
 //
-// Legitimate peers send heartbeat pings every 30 seconds. A 120-second
-// timeout allows for 4 missed heartbeats before disconnection, which is
-// generous even on high-latency links.
+// It is NOT the idle bound of an established session: that one waits for the
+// peer's heartbeat and is inboundSessionIdleTimeout (session_liveness.go).
+// Every released build (v28 … v30) applies this value per frame, session or
+// not, which is why this build's dialler pings well inside it.
 const inboundReadTimeout = 120 * time.Second
 
 // NOTE: relay-specific frame validation (ID, recipient, topic checks) is

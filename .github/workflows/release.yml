@@ -5,13 +5,41 @@ on:
     tags:
       - "v*"
 
+# No workflow-level env or defaults: they would reach the admission job and
+# change what the gate runs (internal/release/admission checks this).
 permissions:
   contents: read
 
 jobs:
+  # The release gate (docs/release.md). Every other job needs it directly,
+  # so a refusal stops the builds and the artifact uploads as well as the
+  # GitHub release. internal/release/admission tests this wiring: no `if` or
+  # continue-on-error here or on gated jobs, no write token and no step but
+  # checkout, setup-go and the exact gate command.
+  admission:
+    name: Release admission
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Full history: the gate compares the tagged tree with the final
+          # candidate commit named in the manifest.
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Check release admission
+        run: make release-admission RELEASE_TAG="${GITHUB_REF_NAME:?}"
+
   lint:
     name: Lint
     runs-on: ubuntu-latest
+    needs: admission
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -49,7 +77,9 @@ jobs:
   build-linux:
     name: Build (linux)
     runs-on: ubuntu-latest
-    needs: lint
+    needs:
+      - admission
+      - lint
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -116,7 +146,9 @@ jobs:
   build-platforms:
     name: Build (${{ matrix.name }})
     runs-on: ${{ matrix.runs_on }}
-    needs: lint
+    needs:
+      - admission
+      - lint
     strategy:
       fail-fast: false
       matrix:
@@ -189,6 +221,7 @@ jobs:
     name: Create Release
     runs-on: ubuntu-latest
     needs:
+      - admission
       - build-linux
       - build-platforms
     permissions:
@@ -207,25 +240,20 @@ jobs:
           mkdir -p dist
           find release-artifacts -type f -exec cp {} dist/ \;
 
-      - name: Resolve release notes
-        id: release_notes
+      # The admission gate required this file, as a regular file, for the
+      # build's version, and the tag equals that version; it is the release
+      # body, never generated notes.
+      - name: Check release notes
         shell: bash
         run: |
-          tag="${GITHUB_REF_NAME}"
-          notes_file="docs/release-notes/RELEASE-${tag}.md"
-
-          if [ -f "${notes_file}" ]; then
-            echo "use_body_path=true" >> "${GITHUB_OUTPUT}"
-            echo "body_path=${notes_file}" >> "${GITHUB_OUTPUT}"
-            echo "Found release notes: ${notes_file}"
-          else
-            echo "use_body_path=false" >> "${GITHUB_OUTPUT}"
-            echo "No release notes file found for ${tag}; falling back to generated notes."
+          notes_file="docs/release-notes/RELEASE-${GITHUB_REF_NAME}.md"
+          if [ ! -f "${notes_file}" ] || [ -L "${notes_file}" ]; then
+            echo "release notes ${notes_file} missing or not a regular file" >&2
+            exit 1
           fi
 
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*
-          body_path: ${{ steps.release_notes.outputs.use_body_path == 'true' && steps.release_notes.outputs.body_path || '' }}
-          generate_release_notes: ${{ steps.release_notes.outputs.use_body_path != 'true' }}
+          body_path: docs/release-notes/RELEASE-${{ github.ref_name }}.md

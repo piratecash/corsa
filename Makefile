@@ -256,6 +256,16 @@ build-desktop-windows-arm64: build-dirs
 check-android-minsdk:
 	@[ "$(ANDROID_MINSDK)" -ge 21 ] || { echo "ANDROID_MINSDK=$(ANDROID_MINSDK) is below 21: getNoBackupFilesDir (identity backup exclusion) requires API 21+"; exit 1; }
 
+# release-admission is the release gate (docs/release.md): it refuses unless
+# the build may be published under packaging/release-admission.json. The
+# release workflow runs it before any job that builds or uploads, and the
+# release-signed Android targets depend on it, because their output is a
+# store artifact whichever machine builds it. RELEASE_TAG (the workflow
+# passes the pushed tag) must name the build's version.
+.PHONY: release-admission
+release-admission:
+	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) $(GO) run ./internal/tools/releaseadmission $(if $(RELEASE_TAG),-tag "$(RELEASE_TAG)")
+
 # check-android-keystore gates the release targets: release artifacts must not
 # leave the build unsigned or use Gradle's development certificate.
 .PHONY: check-android-keystore
@@ -315,7 +325,7 @@ build-android-debug: build-dirs check-android-minsdk android-extra-jars
 # Keep ONE release keystore for the app's lifetime — Android updates are
 # only accepted from the same signing key.
 .PHONY: build-android-release
-build-android-release: build-dirs check-android-minsdk check-android-keystore android-extra-jars
+build-android-release: release-admission build-dirs check-android-minsdk check-android-keystore android-extra-jars
 	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) env -u ANDROID_KEYSTORE_PASS -u ANDROID_KEYSTORE_PASS_FILE $(GOGIO) -target android -buildmode archive -minsdk $(ANDROID_MINSDK) -targetsdk $(ANDROID_TARGETSDK) -appid $(ANDROID_APPID) $(GOGIO_EXTRA_FLAGS) -o $(ANDROID_GIO_ARCHIVE) ./cmd/corsa-android
 	cd $(ANDROID_GRADLE_DIR) && env -u ANDROID_KEYSTORE_PASS -u ANDROID_KEYSTORE_PASS_FILE $(ANDROID_GRADLE) :app:assembleRelease $(ANDROID_GRADLE_ARGS)
 	cp $(ANDROID_GRADLE_DIR)/app/build/outputs/apk/release/app-release-unsigned.apk $(DIST_DIR)/corsa-android-release.apk
@@ -332,7 +342,7 @@ build-android-release: build-dirs check-android-minsdk check-android-keystore an
 # with the release key, password via environment
 # (-storepass:env). jarsigner needs the key alias — ANDROID_KEY_ALIAS.
 .PHONY: build-android-aab
-build-android-aab: build-dirs check-android-minsdk check-android-keystore android-extra-jars
+build-android-aab: release-admission build-dirs check-android-minsdk check-android-keystore android-extra-jars
 	@[ -n "$$ANDROID_KEY_ALIAS" ] || { echo "ANDROID_KEY_ALIAS is not set (jarsigner needs the key alias for AAB signing)"; exit 1; }
 	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) env -u ANDROID_KEYSTORE_PASS -u ANDROID_KEYSTORE_PASS_FILE $(GOGIO) -target android -buildmode archive -minsdk $(ANDROID_MINSDK) -targetsdk $(ANDROID_TARGETSDK) -appid $(ANDROID_APPID) $(GOGIO_EXTRA_FLAGS) -o $(ANDROID_GIO_ARCHIVE) ./cmd/corsa-android
 	cd $(ANDROID_GRADLE_DIR) && env -u ANDROID_KEYSTORE_PASS -u ANDROID_KEYSTORE_PASS_FILE $(ANDROID_GRADLE) :app:bundleRelease $(ANDROID_GRADLE_ARGS)

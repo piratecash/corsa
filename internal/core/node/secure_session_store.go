@@ -361,15 +361,32 @@ type secureSessionStore struct {
 	generalBindings  int
 	protectedByPool  map[domain.ProtectedBindingPool]int
 	protectedByGiver map[domain.PeerIdentity]int
-	// unreadable: the file exists but could not be read. Fail-closed:
-	// every identity and every endpoint is treated as protected, so v1 is
-	// refused while v2 keeps working, until an operator repairs the file.
+	// unreadable: the store's content is not this process's to trust — the
+	// file exists but could not be read, or the node refused to start over
+	// the store (refusal). Fail-closed: every identity and every endpoint
+	// is treated as protected, so v1 is refused, and nothing is written
+	// over what could not be read.
 	unreadable bool
-	// locationUnsafe: the location audit at load found the file or a
-	// directory on the way to it changeable by someone other than this
-	// user or root, or could not tell. Set once while the store is built,
-	// before it is shared; read under mu with the other figures.
+	// locationUnsafe: the location audit at load found the store, its
+	// marker or a directory on the way to either changeable by someone
+	// other than this user or root, or could not tell — a refusal. Set
+	// once while the store is built, before it is shared; read under mu
+	// with the other figures.
 	locationUnsafe bool
+	// refusal is why the node must not start over this store; nil when it
+	// may. Set once while the store is built, before it is shared, and
+	// never changed.
+	refusal *PinStoreRefusalError
+	// markerPath is the pin store marker next to the identity; "" when the
+	// node keeps none. storeAbs is the store file's absolute path, the one
+	// the marker records. Both are set while the store is built.
+	markerPath string
+	storeAbs   string
+	// markerWritten: a marker vouching for this store is on disk, or the
+	// node keeps none. Set while the store is built; afterwards read and
+	// written under writeMu only — the first write of the store writes the
+	// marker after it while it is false (writeSnapshot).
+	markerWritten bool
 	// changes counts every change, written the count the last successful
 	// write covered: a gap is protection that is in memory only.
 	changes, written uint64
@@ -402,12 +419,16 @@ type secureSessionStore struct {
 	// refused v1 answer from the same address (errLegacyRefusedBackoff).
 	v1DialsHeld uint64
 	// dialsHeldV2Retry counts dials refused before any socket by an
-	// address's v2 retry backoff (errV2RetryHeld).
+	// address's v2 retry backoff (errV2RetryHeld) or by its wait for room in
+	// a full pin store (errPinRoomAwaited).
 	dialsHeldV2Retry uint64
 
 	writeMu sync.Mutex
 	// writeFile puts the encoded store on disk; writeToDisk outside tests.
 	writeFile func(raw []byte) error
+	// writeMarker puts the encoded marker on disk; writePinStoreMarker at
+	// markerPath outside tests.
+	writeMarker func(raw []byte) error
 }
 
 // secureSessionStorePath is where the store lives: the configured path, or
@@ -422,16 +443,55 @@ func secureSessionStorePath(cfg config.Node) string {
 	return filepath.Join(filepath.Dir(cfg.PeersStatePath), "secure-sessions-"+config.PortSuffix(cfg.ListenAddress)+".json")
 }
 
-// loadSecureSessionStore reads the store before the node accepts or dials.
-func loadSecureSessionStore(path string, clock *trustedclock.Clock) *secureSessionStore {
-	return loadSecureSessionStoreWith(path, clock, log.Logger)
+// secureSessionStoreOptions is what a store is opened from.
+type secureSessionStoreOptions struct {
+	// path is the store file; "" keeps the store in memory only.
+	path string
+	// markerPath is the pin store marker (pinStoreMarkerPath); "" — the
+	// node keeps none.
+	markerPath string
+	clock      *trustedclock.Clock
+	logger     zerolog.Logger
+	// audit judges the location of the store and of the marker;
+	// secretfile.AuditLocation outside tests.
+	audit func(path string) error
 }
 
-// loadSecureSessionStoreWith is loadSecureSessionStore writing to logger: the
-// load itself logs (an unsafe location, an unreadable file), so a test that
-// pins those lines needs its logger in place before the first one.
-func loadSecureSessionStoreWith(path string, clock *trustedclock.Clock, logger zerolog.Logger) *secureSessionStore {
-	store := &secureSessionStore{
+// openSecureSessionStore reads the store before the node accepts or dials,
+// and decides whether the node may start over it: the store and its marker
+// must sit where nobody but this user or root can change them, and a store
+// the marker says was kept must be there and readable
+// (startFromDisk). A store the node must not start over keeps its refusal
+// for startupRefusal and is fail-closed meanwhile — every peer is treated as
+// pinned and nothing is written — so even a caller that ignored the refusal
+// would neither let v1 through nor overwrite the evidence.
+func openSecureSessionStore(opts secureSessionStoreOptions) *secureSessionStore {
+	store := newSecureSessionStore(opts.clock, opts.logger)
+	if opts.path == "" {
+		// Memory only: nothing to write, so no snapshot is ever taken, and
+		// no location to audit or marker to keep — unless a marker says
+		// this node kept its pins on disk, when memory would be an empty
+		// start.
+		store.markerWritten = true
+		store.logClockGuard()
+		if marker := readPinStoreMarker(opts.markerPath); marker.state == markerIntact || marker.state == markerDamaged {
+			store.refuse(refuseStoreNotConfigured(opts.markerPath, marker.store))
+		}
+		return store
+	}
+	store.writeFile = store.writeToDisk
+	store.dir, store.name = filepath.Dir(opts.path), filepath.Base(opts.path)
+	store.markerPath = opts.markerPath
+	store.writeMarker = func(raw []byte) error { return writePinStoreMarker(opts.markerPath, raw, opts.audit) }
+	store.logClockGuard()
+	if refusal := store.startFromDisk(opts); refusal != nil {
+		store.refuse(refusal)
+	}
+	return store
+}
+
+func newSecureSessionStore(clock *trustedclock.Clock, logger zerolog.Logger) *secureSessionStore {
+	return &secureSessionStore{
 		clock:             clock,
 		logger:            logger,
 		identities:        make(map[domain.PeerIdentity]time.Time),
@@ -442,53 +502,137 @@ func loadSecureSessionStoreWith(path string, clock *trustedclock.Clock, logger z
 		protectedByGiver:  make(map[domain.PeerIdentity]int),
 		protectedRefusals: make(map[domain.ProtectedBindingRefusalReason]uint64),
 	}
-	if path == "" {
-		// Memory only: nothing to write, so no snapshot is ever taken.
-		store.logClockGuard()
-		return store
-	}
-	store.writeFile = store.writeToDisk
-	store.dir, store.name = filepath.Dir(path), filepath.Base(path)
-	store.logClockGuard()
-	store.auditLocation(path)
-	if err := store.load(); err != nil {
-		store.unreadable = true
-		store.logger.Error().Err(err).Str("store", store.name).Msg("secure_session_store_unreadable_v1_refused_for_every_peer")
-	}
-	return store
 }
 
-// auditLocation checks once, at load, that nobody but this user or root can
-// change the store file or any directory on the way to it
-// (secretfile.AuditLocation — owner and mode bits on POSIX, the file's DACL
-// on Windows; extended ACLs are not seen). A violation, or a location that
-// could not be inspected, is a loud warning and the pin_store_unsafe flag —
-// and nothing more: the store loads and writes as before. The node does not
-// refuse to start over it, so a node whose data directory is a 0777 volume
-// keeps its peers.
-//
-// The warning names the component by its role and the store by its file
-// name, never by path: the log line is enough to find the directory, and
-// the node's filesystem layout is not something its log has to carry.
-func (s *secureSessionStore) auditLocation(path string) {
-	err := secretfile.AuditLocation(path)
-	if err == nil {
+// startFromDisk audits both locations, reads the marker and the store, and
+// acts on what they say together (decidePinStoreStartup). The audit comes
+// first: what an unsafe location holds is not read at all.
+func (s *secureSessionStore) startFromDisk(opts secureSessionStoreOptions) *PinStoreRefusalError {
+	if refusal := auditPinStoreLocations(opts); refusal != nil {
+		return refusal
+	}
+	storeAbs, err := filepath.Abs(opts.path)
+	if err != nil {
+		return refuseUnverifiableLocation(pinStoreRoleStore, opts.path, secretfile.StripPath(err))
+	}
+	s.storeAbs = storeAbs
+	marker := readPinStoreMarker(opts.markerPath)
+	file, loadErr := s.load()
+	switch decidePinStoreStartup(marker, file, storeAbs) {
+	case startupFirst:
+		// The marker comes with the first write of the store, never before
+		// it: a crash in between would otherwise read as a lost store.
+		s.markerWritten = marker.state == markerNotKept
+		s.warnBesideOtherNodes(opts.markerPath)
+		return nil
+	case startupKept:
+		s.markerWritten = true
+		return nil
+	case startupMarkKept:
+		return s.markKeptStore(marker)
+	case startupLost:
+		return refuseStoreMissing(opts.path, opts.markerPath, marker.store)
+	default:
+		return refuseStoreUnreadable(opts.path, opts.markerPath, loadErr)
+	}
+}
+
+// warnBesideOtherNodes says loudly that this first start is a NEW node next
+// to nodes that kept pins in the same directory — with the default paths, a
+// port not used before. That is allowed: a new identity starts with no trust
+// history and loses nobody's pins. But an operator who meant to move an
+// existing node to this port has just started a different one, and must
+// hear it now rather than find out from peers that no longer know the node.
+// Their files are not touched; the line names markers by file name only.
+func (s *secureSessionStore) warnBesideOtherNodes(markerPath string) {
+	others := otherNodeMarkers(markerPath)
+	if len(others) == 0 {
 		return
 	}
-	s.locationUnsafe = true
-	var unsafe *secretfile.UnsafeLocationError
-	if errors.As(err, &unsafe) {
-		s.logger.Warn().Str("store", s.name).
-			Str("component", unsafe.Component.String()).
+	s.logger.Warn().Str("store", s.name).
+		Int("other_markers", len(others)).
+		Strs("markers", others).
+		Str("note", "this is a new node with a new identity and no pins; to move an existing node to another port, see docs/protocol/session_v2.md, \"Moving a node to another port\"").
+		Msg("pin_store_new_node_beside_other_nodes")
+}
+
+// auditPinStoreLocations judges the store's location and then the marker's;
+// the first one that fails is the refusal. A location the audit could not
+// inspect is not taken for a safe one.
+func auditPinStoreLocations(opts secureSessionStoreOptions) *PinStoreRefusalError {
+	files := []struct {
+		role pinStoreFileRole
+		path string
+	}{{pinStoreRoleStore, opts.path}, {pinStoreRoleMarker, opts.markerPath}}
+	for _, file := range files {
+		if file.path == "" {
+			continue
+		}
+		err := opts.audit(file.path)
+		if err == nil {
+			continue
+		}
+		var unsafe *secretfile.UnsafeLocationError
+		if errors.As(err, &unsafe) {
+			return refuseUnsafeLocation(file.role, file.path, unsafe)
+		}
+		return refuseUnverifiableLocation(file.role, file.path, err)
+	}
+	return nil
+}
+
+// markKeptStore writes the marker for a store that loaded without one that
+// vouches for it. The store is what protects and it is kept as it is; a
+// marker that cannot be written is a refusal, since without it a later loss
+// of this store would read as a first start. A marker recording another path
+// that still holds a store is a refusal too: the store was copied, and
+// which copy is current is the operator's call. Called while the store is
+// built, before it is shared.
+func (s *secureSessionStore) markKeptStore(marker pinStoreMarker) *PinStoreRefusalError {
+	if marker.state == markerIntact && anotherStoreRemains(*marker.store, s.storeAbs) {
+		return refuseTwoStores(s.storeAbs, *marker.store, s.markerPath)
+	}
+	raw, err := encodePinStoreMarker(s.storeAbs)
+	if err == nil {
+		err = s.writeMarker(raw)
+	}
+	if err != nil {
+		return refuseMarkerUnwritable(s.markerPath, err)
+	}
+	s.markerWritten = true
+	s.logger.Warn().Str("store", s.name).Str("reason", markerRewriteReason(marker)).
+		Msg("pin_store_marker_written")
+	return nil
+}
+
+// refuse makes the store fail-closed for the life of the process and says
+// why, once. The line names the store by its file name and the violation by
+// the component's role, never by path: the path is in the refusal itself,
+// which goes to the process starting the node and nowhere else.
+func (s *secureSessionStore) refuse(refusal *PinStoreRefusalError) {
+	s.refusal = refusal
+	s.unreadable = true
+	s.locationUnsafe = refusal.Reason == domain.PinStoreRefusalLocationUnsafe ||
+		refusal.Reason == domain.PinStoreRefusalLocationUnverifiable
+	event := s.logger.Error().Str("store", s.name).Str("reason", string(refusal.Reason))
+	if unsafe, found := refusal.unsafeLocation(); found {
+		event = event.Str("component", unsafe.Component.String()).
 			Str("violation", string(unsafe.Violation)).
 			Str("owner", unsafe.Owner).
-			Str("mode", unsafe.Mode.String()).
-			Str("fix", "make the file 0600 and owned by the node's user, and every directory above it writable by nobody but that user or root").
-			Msg("pin_store_unsafe")
-		return
+			Str("mode", unsafe.Mode.String())
 	}
-	s.logger.Warn().Err(err).Str("store", s.name).Str("violation", "unverifiable").
-		Msg("pin_store_unsafe")
+	// Every cause is pathless: the audit's, secretfile's and the decoder's
+	// errors name no file.
+	event.Err(refusal.cause).Msg("pin_store_refused")
+}
+
+// startupRefusal is why the node must not start over this store, or nil.
+// Set once while the store is built, before it is shared.
+func (s *secureSessionStore) startupRefusal() error {
+	if s.refusal == nil {
+		return nil
+	}
+	return s.refusal
 }
 
 // now is the store's trusted time in UTC, so the file does not depend on the
@@ -681,13 +825,15 @@ func derivedFromOf(record endpointBindingRecord) (*domain.CanonicalEndpoint, err
 	return &name, nil
 }
 
-func (s *secureSessionStore) load() error {
+// load reads the store file into the empty store and says what it found: no
+// file, a file loaded, or one that cannot be read (with why).
+func (s *secureSessionStore) load() (pinStoreFileState, error) {
 	dir, err := secretfile.Open(s.dir)
 	if errors.Is(err, fs.ErrNotExist) {
-		return nil
+		return storeFileAbsent, nil
 	}
 	if err != nil {
-		return err
+		return storeFileUnreadable, err
 	}
 	defer func() { _ = dir.Close() }()
 	// A crash between a temp and its rename leaves the temp behind, up to
@@ -696,19 +842,22 @@ func (s *secureSessionStore) load() error {
 	sweepStaleSecretTemps(dir)
 	raw, err := dir.ReadFile(s.name)
 	if errors.Is(err, fs.ErrNotExist) {
-		return nil
+		return storeFileAbsent, nil
 	}
 	if err != nil {
-		return fmt.Errorf("read: %w", secretfile.StripPath(err))
+		return storeFileUnreadable, fmt.Errorf("read: %w", secretfile.StripPath(err))
 	}
 	var file secureSessionFile
 	if err := json.Unmarshal(raw, &file); err != nil {
-		return fmt.Errorf("decode: %w", err)
+		return storeFileUnreadable, fmt.Errorf("decode: %w", err)
 	}
 	if file.Format != secureSessionStoreFormat {
-		return fmt.Errorf("unknown format %d", file.Format)
+		return storeFileUnreadable, fmt.Errorf("unknown format %d", file.Format)
 	}
-	return s.loadFile(file)
+	if err := s.loadFile(file); err != nil {
+		return storeFileUnreadable, err
+	}
+	return storeFileLoaded, nil
 }
 
 // loadFile puts what a decoded file holds into the empty store. Nothing else
@@ -1025,11 +1174,19 @@ func (s *secureSessionStore) noteLegacyDialHeld() {
 }
 
 // noteDialHeldByV2Retry counts one dial refused before any socket by its
-// address's v2 retry backoff.
+// address's v2 retry backoff or its wait for pin room.
 func (s *secureSessionStore) noteDialHeldByV2Retry() {
 	s.mu.Lock()
 	s.dialsHeldV2Retry++
 	s.mu.Unlock()
+}
+
+// pinStoreFull reports whether a NEW identity would be refused a pin now
+// (errPinStoreFull). The dialler asks it to learn whether room has freed.
+func (s *secureSessionStore) pinStoreFull() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.identities) >= maxPinnedIdentities
 }
 
 // identityPinned reports whether a v1 session naming id must be refused.
@@ -1948,6 +2105,12 @@ func (s *secureSessionStore) snapshotLocked() secureSessionFile {
 
 // writeSnapshot encodes file and puts it on disk, logging a failure. Caller
 // holds writeMu and not mu.
+//
+// The store lands first and its marker after it, only while none vouches for
+// it yet (pin_store_marker.go): a crash between the two leaves a store the
+// next start writes the marker for, never a marker without a store. A change
+// is reported written only once both are on disk — a marker that failed is
+// a failed write, retried with the next one.
 func (s *secureSessionStore) writeSnapshot(file secureSessionFile) error {
 	raw, err := json.Marshal(file)
 	if err == nil {
@@ -1957,6 +2120,27 @@ func (s *secureSessionStore) writeSnapshot(file secureSessionFile) error {
 		s.logger.Error().Err(err).Str("store", s.name).Msg(writeFailureMessage(err))
 		return fmt.Errorf("secure session store: %w", err)
 	}
+	if err := s.writeMarkerOnce(); err != nil {
+		s.logger.Error().Err(err).Str("store", s.name).Msg("pin_store_marker_write_failed")
+		return fmt.Errorf("secure session store marker: %w", err)
+	}
+	return nil
+}
+
+// writeMarkerOnce writes the marker for this store unless one is on disk
+// already. Caller holds writeMu.
+func (s *secureSessionStore) writeMarkerOnce() error {
+	if s.markerWritten {
+		return nil
+	}
+	raw, err := encodePinStoreMarker(s.storeAbs)
+	if err != nil {
+		return err
+	}
+	if err := s.writeMarker(raw); err != nil {
+		return err
+	}
+	s.markerWritten = true
 	return nil
 }
 
@@ -2022,10 +2206,19 @@ func (s *Service) flushSecureSessionRenewals(moment renewalFlushMoment) {
 }
 
 // SecureSessionStoreStats is the v2 downgrade-protection store as diagnostics
-// see it; a node without v2 state reports the zero value.
+// see it, with the operator's TLS-first switch and the dials it opened with
+// the probe; a node without v2 state reports the zero value, and one without
+// a store (v1 only) the switch alone.
 func (s *Service) SecureSessionStoreStats() domain.SecureSessionStoreStats {
-	if s.secureSessions == nil || s.secureSessions.store == nil {
+	if s.secureSessions == nil {
 		return domain.SecureSessionStoreStats{}
 	}
-	return s.secureSessions.store.stats()
+	var stats domain.SecureSessionStoreStats
+	if s.secureSessions.store != nil {
+		stats = s.secureSessions.store.stats()
+	}
+	stats.TLSFirstDisabled = s.secureSessions.tlsFirstDisabled
+	stats.DialsOpenedByProbe = s.secureSessions.dialsOpenedByProbe.Load()
+	stats.V1RefusalsAfterV2Welcome = s.secureSessions.v1RefusalsAfterV2Welcome.Load()
+	return stats
 }

@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -137,7 +136,7 @@ func TestAV2SessionResetsTheLegacyRefusalBackoff(t *testing.T) {
 	for range 3 {
 		marks.noteLegacyRefused(address)
 	}
-	marks.clearLegacyRefusal(address)
+	marks.noteOutboundV2(address)
 	if marks.legacyHeld(address) {
 		t.Fatal("the hold survived a v2 session on the address")
 	}
@@ -225,7 +224,7 @@ func TestTheLegacyRefusalHoldWithholdsOnlyTheV1Fallback(t *testing.T) {
 		address := domain.PeerAddress("198.51.100.7:64646")
 		svc.secureSessions.marks.noteLegacyRefused(address)
 		svc.secureSessions.marks.clearV2Retry(address)
-		svc.secureSessions.marks.noteV1(address)
+		svc.secureSessions.marks.noteLegacyObserved(address)
 		sockets, err := dialThroughV1Answerer(t, svc, address)
 		if !errors.Is(err, errLegacyRefusedBackoff) {
 			t.Fatalf("err = %v, want errLegacyRefusedBackoff", err)
@@ -265,32 +264,35 @@ func TestTheLegacyRefusalHoldWithholdsOnlyTheV1Fallback(t *testing.T) {
 		}
 	})
 
-	t.Run("known v1 address, not held: v1 as before", func(t *testing.T) {
+	// Without a hold an address seen as an old node gets the TLS attempt
+	// first and then the probe; the probe decides afresh, and an error line
+	// is no welcome.
+	t.Run("known v1 address, not held: TLS, then the probe", func(t *testing.T) {
 		t.Parallel()
 		svc := newLegacyRefusalService(t)
 		address := domain.PeerAddress("198.51.100.7:64646")
-		svc.secureSessions.marks.noteV1(address)
+		svc.secureSessions.marks.noteLegacyObserved(address)
 		sockets, err := dialThroughV1Answerer(t, svc, address)
-		if err != nil {
-			t.Fatalf("err = %v, want the v1 transport", err)
+		if !errors.Is(err, errLegacyProbeErrorFrame) {
+			t.Fatalf("err = %v, want the probe's error-frame refusal", err)
 		}
-		if len(sockets) != 1 || sockets[0].wrote {
-			t.Fatalf("sockets = %+v, want the one v1 dial and no ClientHello", sockets)
+		if len(sockets) != 2 || sockets[0].byte != sessionv2.TLSRecordHandshake || sockets[1].byte != '{' {
+			t.Fatalf("sockets = %+v, want the ClientHello, then the probe", sockets)
 		}
 	})
 }
 
-// A refusal forgets the address's v1 mark: the v1 answer behind it may have
+// A refusal forgets the address's legacy_observed: the old answer behind it may have
 // been forged by whoever forged the refused one, and the next dial must try
 // v2 first.
-func TestALegacyRefusalForgetsTheV1MarkOfItsAddress(t *testing.T) {
+func TestALegacyRefusalForgetsLegacyObservedOfItsAddress(t *testing.T) {
 	t.Parallel()
 	marks := newSessionAddressMarks(newStoreClock().read)
 	address := domain.PeerAddress("198.51.100.7:64646")
-	marks.noteV1(address)
+	marks.noteLegacyObserved(address)
 	marks.noteLegacyRefused(address)
-	if marks.v1Seen(address) {
-		t.Fatal("the refusal left the v1 mark in place: the next dial would skip v2")
+	if marks.legacyObserved(address) {
+		t.Fatal("the refusal left legacy_observed in place: the next dial would probe at once")
 	}
 }
 
@@ -310,7 +312,7 @@ func TestAForgedRefusalLeavesTheAddressACandidateForV2(t *testing.T) {
 	if err := svc.secureSessions.store.noteProvenInbound(pinned); err != nil {
 		t.Fatalf("pin: %v", err)
 	}
-	svc.secureSessions.marks.noteV1(address)
+	svc.secureSessions.marks.noteLegacyObserved(address)
 	refusal := svc.refuseLegacyWelcome(address, pinned)
 	if !errors.Is(refusal, errLegacyRefusedPinned) {
 		t.Fatalf("err = %v, want errLegacyRefusedPinned", refusal)
@@ -415,9 +417,9 @@ func TestADialledV2SessionEndsTheHoldOfItsAddress(t *testing.T) {
 		t.Fatal("a v2 session on the address left its legacy hold in place")
 	}
 	dialer.secureSessions.marks.mu.Lock()
-	_, remembered := dialer.secureSessions.marks.marks[target]
+	counted := dialer.secureSessions.marks.marks[target].counted()
 	dialer.secureSessions.marks.mu.Unlock()
-	if remembered {
+	if counted {
 		t.Fatal("a v2 session on the address left its refusal counts in place")
 	}
 }
@@ -528,22 +530,19 @@ func TestTheV2ProofSweepClosesALegacySessionWithoutChargingItsAddress(t *testing
 }
 
 // The legacy session path (openPeerSession, idle while the connection
-// manager runs) speaks v1 only: a welcome naming an identity that requires v2
-// is refused before anything is signed, and the address is held, not charged.
+// manager runs) speaks v1 only, and on a node that speaks v2 it opens v1 only
+// through the probe: an old release's answer naming an identity that requires
+// v2 is refused on the probe, before the full hello — nothing of this node's
+// identity is written, nothing signed — and the address is held, not charged.
 func TestTheLegacySessionPathRefusesAPinnedWelcome(t *testing.T) {
 	t.Parallel()
 	svc := newServiceWithBootstrapPeers(t, publicCandidatesOnly)
-	pinned := domain.PeerIdentity{0xa1}
+	pinnedOld := generateProbeIdentity(t)
+	pinned := domain.PeerIdentityFromWire(pinnedOld.Address)
 	if err := svc.secureSessions.store.noteProvenInbound(pinned); err != nil {
 		t.Fatalf("pin: %v", err)
 	}
-	welcome, err := protocol.MarshalFrameLine(protocol.Frame{
-		Type:                   "welcome",
-		Version:                config.ProtocolVersion,
-		MinimumProtocolVersion: config.MinimumProtocolVersion,
-		Address:                pinned.String(),
-		Challenge:              "corsa-pinned-welcome",
-	})
+	welcome, err := protocol.MarshalFrameLine(oldReleaseWelcome(t, pinnedOld, config.MinimumProtocolVersion))
 	if err != nil {
 		t.Fatalf("marshal welcome: %v", err)
 	}
@@ -579,8 +578,8 @@ func TestTheLegacySessionPathRefusesAPinnedWelcome(t *testing.T) {
 	if _, err := svc.openPeerSession(ctx, address); !errors.Is(err, errLegacyRefusedPinned) {
 		t.Fatalf("err = %v, want errLegacyRefusedPinned", err)
 	}
-	if line := <-afterWelcome; strings.Contains(line, "auth_session") {
-		t.Fatalf("the legacy path signed for a pinned identity: %q", line)
+	if line := <-afterWelcome; line != "" {
+		t.Fatalf("the legacy path wrote %q after the probe's answer named a pinned identity, want nothing", line)
 	}
 	if !svc.secureSessions.marks.legacyHeld(address) {
 		t.Fatal("the refusal did not hold the address")
@@ -651,15 +650,15 @@ func TestAFullMarkMapEvictsTheLeastRecentlyWrittenMarkWithoutAHold(t *testing.T)
 	marks.noteLegacyRefused(held)
 	clock.now = clock.now.Add(time.Second)
 	for i := range maxSessionAddressMarks - 1 {
-		marks.noteV1(boundEndpoint(i))
+		marks.noteLegacyObserved(boundEndpoint(i))
 		clock.now = clock.now.Add(time.Millisecond)
 	}
-	marks.noteV1("203.0.113.1:64646")
+	marks.noteLegacyObserved("203.0.113.1:64646")
 
-	if marks.v1Seen(boundEndpoint(0)) {
-		t.Fatal("the least recently written v1 mark was kept while the map was full")
+	if marks.legacyObserved(boundEndpoint(0)) {
+		t.Fatal("the least recently written legacy_observed mark was kept while the map was full")
 	}
-	if !marks.v1Seen(boundEndpoint(1)) || !marks.v1Seen("203.0.113.1:64646") {
+	if !marks.legacyObserved(boundEndpoint(1)) || !marks.legacyObserved("203.0.113.1:64646") {
 		t.Fatal("a fresher mark was dropped instead of the oldest")
 	}
 	if got := marks.noteLegacyRefused(held); got != 20*time.Minute {
@@ -670,7 +669,7 @@ func TestAFullMarkMapEvictsTheLeastRecentlyWrittenMarkWithoutAHold(t *testing.T)
 // A v1 answer during a hold must not mark the address as an old node again:
 // the refusal forgot the mark because the v1 answers there may be forged, and
 // a mark set now would send the next dial past v2 once the hold is over.
-func TestAV1AnswerDuringAHoldDoesNotReviveTheV1Mark(t *testing.T) {
+func TestAV1AnswerDuringAHoldDoesNotReviveLegacyObserved(t *testing.T) {
 	t.Parallel()
 	svc := newLegacyRefusalService(t)
 	address := domain.PeerAddress("198.51.100.7:64646")
@@ -679,21 +678,26 @@ func TestAV1AnswerDuringAHoldDoesNotReviveTheV1Mark(t *testing.T) {
 	if _, err := dialThroughV1Answerer(t, svc, address); !errors.Is(err, errLegacyRefusedBackoff) {
 		t.Fatalf("err = %v, want errLegacyRefusedBackoff", err)
 	}
-	if svc.secureSessions.marks.v1Seen(address) {
+	if svc.secureSessions.marks.legacyObserved(address) {
 		t.Fatal("a v1 answer during the hold marked the address as an old node again")
 	}
 }
 
-// A v1 dial that never got a welcome — the far end hung up on the hello, as
-// a v2 node that pinned this node does — forgets the v1 mark, so the next
-// dial tries v2 first instead of repeating a v1 dial that cannot succeed.
-func TestAV1DialWithoutAWelcomeForgetsTheV1Mark(t *testing.T) {
+// A v1 dial whose full hello never got a welcome — the far end answered the
+// probe like an old release and hung up on the full hello, as a node that
+// pinned this one does — forgets legacy_observed, so the next dial does not
+// repeat a v1 dial that cannot succeed.
+func TestAV1DialWithoutAWelcomeForgetsLegacyObserved(t *testing.T) {
 	t.Parallel()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
 	t.Cleanup(func() { _ = ln.Close() })
+	probeAnswer, err := protocol.MarshalFrameLine(oldReleaseWelcome(t, generateProbeIdentity(t), config.MinimumProtocolVersion))
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
 	go func() {
 		for {
 			conn, err := ln.Accept()
@@ -702,20 +706,34 @@ func TestAV1DialWithoutAWelcomeForgetsTheV1Mark(t *testing.T) {
 			}
 			go func() {
 				defer func() { _ = conn.Close() }()
-				_, _ = bufio.NewReader(conn).ReadString('\n')
+				reader := bufio.NewReaderSize(conn, 64<<10)
+				first, err := reader.Peek(1)
+				if err != nil {
+					return
+				}
+				if first[0] == sessionv2.TLSRecordHandshake {
+					_, _ = conn.Write(v1ErrorLine)
+					return
+				}
+				if _, err := reader.ReadString('\n'); err != nil {
+					return
+				}
+				if _, err := io.WriteString(conn, probeAnswer); err != nil {
+					return
+				}
+				_, _ = reader.ReadString('\n')
 			}()
 		}
 	}()
 	dialer, stop := startQuietNode(t, nil)
 	defer stop()
 	address := domain.PeerAddress(ln.Addr().String())
-	dialer.secureSessions.marks.noteV1(address)
 
 	if established, _ := dialPastTransport(t, dialer, address); established {
 		t.Fatal("a dial that got no welcome was established")
 	}
-	if dialer.secureSessions.marks.v1Seen(address) {
-		t.Fatal("the v1 mark survived a v1 dial that never got a welcome")
+	if dialer.secureSessions.marks.legacyObserved(address) {
+		t.Fatal("legacy_observed survived a v1 dial that never got a welcome")
 	}
 }
 
@@ -744,7 +762,9 @@ func TestARefusalAtRegistrationKeepsTheSetupFailures(t *testing.T) {
 // after 30 s, doubled per further such end, at most 30 min, and is not a
 // candidate meanwhile. It is not a penalty: score and failures stay as they
 // were. Driven for 30 minutes of virtual time by a dialler that tries every
-// second, the address sees a handful of sockets, not one every few seconds.
+// second, against an address whose every TLS attempt is answered with a v1
+// line and whose every probe with an old release naming the pinned identity,
+// the address sees a handful of sockets, not one every few seconds.
 func TestRepeatedRefusalsBoundTheDialsToAnAddress(t *testing.T) {
 	t.Parallel()
 	const endpoint = "1.2.3.4:64646"
@@ -752,10 +772,12 @@ func TestRepeatedRefusalsBoundTheDialsToAnAddress(t *testing.T) {
 	svc := newServiceWithBootstrapPeers(t, publicCandidatesOnly, endpoint)
 	clock := newStoreClock()
 	svc.secureSessions.marks = newSessionAddressMarks(clock.read)
-	pinned := domain.PeerIdentity{0xa1}
+	pinnedOld := generateProbeIdentity(t)
+	pinned := domain.PeerIdentityFromWire(pinnedOld.Address)
 	if err := svc.secureSessions.store.noteProvenInbound(pinned); err != nil {
 		t.Fatalf("pin: %v", err)
 	}
+	probe, full := oldNodeWelcomes(t, pinnedOld, config.MinimumProtocolVersion)
 	svc.onCMDialFailed(address, svc.refuseLegacyWelcome(address, pinned), false)
 
 	sockets, excluded := 0, 0
@@ -764,13 +786,9 @@ func TestRepeatedRefusalsBoundTheDialsToAnAddress(t *testing.T) {
 		if !candidatesContain(svc, address) {
 			excluded++
 		}
-		opened, err := dialThroughV1Answerer(t, svc, address)
-		sockets += len(opened)
-		if err == nil {
-			// The v1 fall back went through; the welcome on it names the
-			// pinned identity and is refused, as on a real dial.
-			err = svc.refuseLegacyWelcome(address, pinned)
-		}
+		peer := newScriptedPeer(oldNodeSocket(probe, full))
+		_, err := dialThrough(t, svc, address, domain.DialToAddress(), peer)
+		sockets += len(peer.sockets(t))
 		svc.onCMDialFailed(address, err, false)
 	}
 	if sockets > 8 || sockets < 3 {
@@ -795,7 +813,7 @@ func TestAV2SessionEndsTheV2RetryBackoff(t *testing.T) {
 	if !marks.v2RetryHeld(address) {
 		t.Fatal("precondition: a refusal did not start the v2 retry backoff")
 	}
-	marks.clearLegacyRefusal(address)
+	marks.noteOutboundV2(address)
 	if marks.v2RetryHeld(address) {
 		t.Fatal("a v2 session left the v2 retry backoff in place")
 	}

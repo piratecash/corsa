@@ -92,14 +92,27 @@ func failedDial(err error, count func(*secureSessionStore)) cmFailureKind {
 	}
 }
 
-// failedLegacyRefusal is a failedDial whose error is a refusal by pin. Such a
-// refusal is not charged to the address (no cooldown), so after replacing the
+// failedLegacyRefusal is a failedDial whose error is a refusal not charged to
+// the address — by pin, or for this node's full pin store. Such a refusal
+// brings no cooldown, so after replacing the
 // slot the manager picks the same peer again: its own reactions are done once
 // the replacement slot has made its first attempt.
 func failedLegacyRefusal(err error, count func(*secureSessionStore)) cmFailureKind {
 	kind := failedDial(err, count)
 	kind.done = func(_ reactionFixture, attempts int64) bool {
 		return attempts >= reconnectMaxRetries+2
+	}
+	return kind
+}
+
+// failedPacedDial is a failedDial whose error only paces the address: a
+// claimed incompatible version. The manager replaces the slot at once, and
+// the address stays out of the candidates while its v2 retry backoff runs, so
+// its own reactions are done after the first attempt.
+func failedPacedDial(err error) cmFailureKind {
+	kind := failedDial(err, func(*secureSessionStore) {})
+	kind.done = func(f reactionFixture, attempts int64) bool {
+		return attempts >= 1 && f.svc.connManager.SlotCount() == 0
 	}
 	return kind
 }
@@ -163,9 +176,9 @@ func cmFailureKinds() map[string]cmFailureKind {
 		"identity pinned to v2":   failedLegacyRefusal(fmt.Errorf("%w: contract", errLegacyRefusedPinned), (*secureSessionStore).noteIdentityRefusal),
 		"v1 dial held":            failedLegacyRefusal(fmt.Errorf("%w: contract", errLegacyRefusedBackoff), (*secureSessionStore).noteLegacyDialHeld),
 		"v2 retry held":           failedLegacyRefusal(fmt.Errorf("%w: contract", errV2RetryHeld), (*secureSessionStore).noteDialHeldByV2Retry),
-		"pin store full":          failedDial(errPinStoreFull, nothing),
+		"pin store full":          failedLegacyRefusal(errPinStoreFull, nothing),
 		"binding not written":     failedDial(fmt.Errorf("secure session store: %w", errors.New("disk full")), nothing),
-		"incompatible protocol":   failedDial(fmt.Errorf("%w: contract", errIncompatibleProtocol), nothing),
+		"incompatible protocol":   failedPacedDial(fmt.Errorf("%w: contract", errIncompatibleProtocol)),
 		"transport":               failedDial(fmt.Errorf("%w: contract", errPeerDialTransport), nothing),
 		"unclassified v2 failure": failedDial(errors.New("v2 handshake timeout"), nothing),
 		"session setup failed":    failedSetup(),
@@ -222,7 +235,7 @@ func TestTheConnectionManagersReactionToAFailedDialNeverUndoesProtection(t *test
 			if !store.identityPinned(id) {
 				t.Fatalf("after %d failures the reaction had dropped the identity pin", total)
 			}
-			if svc.secureSessions.marks.v1Seen(bound) {
+			if svc.secureSessions.marks.legacyObserved(bound) {
 				t.Fatalf("after %d failures the reaction had marked the endpoint as a v1 node", total)
 			}
 		})

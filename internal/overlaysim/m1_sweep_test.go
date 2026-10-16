@@ -17,6 +17,7 @@ package overlaysim
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -35,6 +36,30 @@ var sweepShapes = []shape{
 	{name: "10k×8", nodes: 10_000, degree: 8, budget: 16},
 	{name: "10k×64", nodes: 10_000, degree: 64, budget: 128},
 	{name: "64k×8", nodes: 64_000, degree: 8, budget: 16},
+}
+
+// fullDepthShapes are the forms of the full-depth experiment: the N of 1k×8 and 10k×8 with
+// d ≥ ⌈log₂N⌉ + 2, so that one contact per populated XOR level fits in the
+// table and the rest goes to the nearest nodes. B = 2d, as for every shape.
+//
+// 1k×16 is there because the candidate under evaluation is d = 16, B = 32
+// over the whole area up to 10k, and the full-depth experiment measured d = 16
+// only at 10k — at 1k it measured d = 12.
+//
+// ⚠️ Kept OUT of sweepShapes on purpose. That list is the fixed
+// measurement plan, and TestM1ConnectivitySweep intersects its verdict
+// over every shape in it: a form added there would silently change the
+// cross-shape result the published M1 numbers were read from.
+var fullDepthShapes = []shape{
+	{name: "1k×12", nodes: 1_000, degree: 12, budget: 24},
+	{name: "1k×16", nodes: 1_000, degree: 16, budget: 32},
+	{name: "10k×16", nodes: 10_000, degree: 16, budget: 32},
+}
+
+// comparisonShapes is every shape the policy comparison runs and the M2, M4 and
+// M3-a drivers accept by name: the plan in its order, then the full-depth forms.
+func comparisonShapes() []shape {
+	return slices.Concat(sweepShapes, fullDepthShapes)
 }
 
 // sweepSeeds are the independent draws. Five, because one graph is an anecdote

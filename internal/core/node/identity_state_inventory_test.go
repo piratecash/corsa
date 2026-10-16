@@ -176,6 +176,7 @@ var identityStateInventory = map[string]identityStateEntry{
 	"secureSessionStore.identities":       {identityFromV2Proof, "pinLocked from noteProvenInbound/noteProvenOutbound, or the store's own file"},
 	"secureSessionStore.protectedByGiver": {identityFromV2Proof, "the identity a dial proved and that gave the protection"},
 	"secureSessionFile.Identities":        {identityFromV2Proof, "the persisted form of secureSessionStore.identities"},
+	"provenIdentityPenalties.entries":     {identityFromV2Proof, "charged only from the proven identity of a loopback v2 session (chargeLoopbackViolation reads it from penaltySubjectOfCore); a legacy connection is condemned, never charged"},
 
 	// The routing input of legacy connections.
 	"unprovenRoutingWriters.at":       {identityUnprovenClaim, "noted for an unproven sender's claimed identity; taken at the proof by forgetUnprovenRoutingResidue"},

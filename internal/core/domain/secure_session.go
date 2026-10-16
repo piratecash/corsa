@@ -35,10 +35,12 @@ type SecureSessionStoreStats struct {
 	// the process started. A v2 attempt is never held.
 	V1DialsHeldByRefusalBackoff uint64
 	// DialsHeldByV2RetryBackoff counts dials refused before any socket
-	// because their address's v2 retry backoff ran: after a v2 attempt there
-	// ended without v2 (the v1 answer was refused or its fall back held),
-	// the next dial waits 30 s, doubled per further such end, at most 30
-	// min, since the process started. Pacing, not a penalty: score and
+	// because their address had to wait, since the process started: its v2
+	// retry backoff ran — after a v2 attempt there ended without v2 for a
+	// reason that says nothing against the address, the next dial waits
+	// 30 s, doubled per further such end, at most 30 min — or its last v2
+	// session was refused for this node's full pin store, which still has no
+	// room (at most 30 min, never doubled). Pacing, not a penalty: score and
 	// failures are untouched.
 	DialsHeldByV2RetryBackoff uint64
 	// ProtectedBindingsContact and ProtectedBindingsRelation are the
@@ -83,15 +85,20 @@ type SecureSessionStoreStats struct {
 	// created again; protected ones count against the protected bounds and
 	// never expire, ordinary ones expire 30 days after their last v2.
 	NonCanonicalBindings int
-	// Unreadable reports that the store file exists but could not be read:
-	// every peer is then treated as pinned and v1 is refused.
+	// Unreadable reports that the store's content is not trusted: the file
+	// exists but could not be read, or the node refused to start over the
+	// store (ErrPinStoreRefused). Every peer is then treated as pinned and
+	// v1 is refused, and nothing is written over the file.
 	Unreadable bool
-	// LocationUnsafe reports that the store's location failed the audit
-	// made when it was loaded: the file is a symlink or not this user's
-	// 0600 (on Windows, its DACL grants someone else), or a directory on
-	// the way to it may be written by someone other than this user or
-	// root, or could not be inspected. The node keeps working; the
-	// operator is told, in the log, which component and why.
+	// LocationUnsafe reports that the location audit made when the store
+	// was loaded failed for the store or its marker: a file is a symlink or
+	// not this user's 0600 (on Windows, its DACL grants someone else), or a
+	// directory on the way to it may be written by someone other than this
+	// user or root, or could not be inspected. Such a node refuses to start
+	// (ErrPinStoreRefused, PinStoreRefusalLocationUnsafe or
+	// PinStoreRefusalLocationUnverifiable), so a running node never reports
+	// it; the operator is told, by the refusal, which file, which component
+	// and how to fix it.
 	LocationUnsafe bool
 	// ClockJumpGuarded reports that the terms of ordinary bindings run on
 	// the trusted time: the wall clock at the start plus the time since on a
@@ -105,6 +112,18 @@ type SecureSessionStoreStats struct {
 	// ClockJumpActive reports that the wall clock is ahead of the trusted
 	// time right now, so the terms run on the trusted time instead.
 	ClockJumpActive bool
+	// TLSFirstDisabled reports that the operator switched TLS-first off
+	// (CORSA_V2_TLS_FIRST): a dial where v1 is not ruled out opens
+	// with the identity-less probe, without a ClientHello. Where v2 is
+	// required the dial still opens with TLS.
+	TLSFirstDisabled bool
+	// DialsOpenedByProbe counts the dials that opened with the probe
+	// because TLS-first is off, since the process started.
+	DialsOpenedByProbe uint64
+	// V1RefusalsAfterV2Welcome counts v1 answers refused on the TLS attempt
+	// that followed a correct v2 welcome to the probe — one of the two was
+	// forged — since the process started.
+	V1RefusalsAfterV2Welcome uint64
 }
 
 // ProtectedBindingPool is the pool of the bound on protected endpoint

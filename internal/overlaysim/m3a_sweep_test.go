@@ -49,10 +49,27 @@ import (
 // parameter set drift, and the one that drifts is the one nobody looks at.
 func m3aAgreedSweep() m3aProposal { return proposedSkewSweep() }
 
+// m3aShapeSelection is the forms of the sweep: the agreed one unless
+// M3A_SHAPES names others.
+func m3aShapeSelection() shapeSelection {
+	return shapeSelection{
+		Variable: "M3A_SHAPES",
+		Fallback: m3aAgreedSweep().Shapes,
+		Accepted: comparisonShapes(),
+	}
+}
+
+// m3aQuotaSelection is the quota of the sweep: the agreed one unless M3A_QUOTA
+// names another.
+func m3aQuotaSelection() quotaSelection {
+	return quotaSelection{Variable: "M3A_QUOTA", Fallback: m3aAgreedSweep().Quota}
+}
+
 // m3aSweepConfig is one point of it.
 type m3aSweepConfig struct {
 	Shape  shape
 	Seed   uint64
+	Quota  int
 	Share  float64
 	Policy policy
 	Load   skewWorkload
@@ -78,7 +95,7 @@ func (c m3aSweepConfig) setup() skewSetup {
 		Seed:           c.Seed,
 		ShuffleSeed:    sweep.ShuffleSeed,
 		RequestedShare: c.Share,
-		Quota:          sweep.Quota,
+		Quota:          c.Quota,
 		Policy:         c.Policy,
 		Guards:         sweep.Guards,
 		Workload:       c.Load,
@@ -136,7 +153,8 @@ func m3aSweepEnumeration(sweep m3aProposal) []m3aSweepConfig {
 				for _, share := range points {
 					for _, load := range sweep.Workloads {
 						configs = append(configs, m3aSweepConfig{
-							Shape: sh, Seed: seed, Share: share, Policy: selection, Load: load,
+							Shape: sh, Seed: seed, Quota: sweep.Quota, Share: share,
+							Policy: selection, Load: load,
 						})
 					}
 				}
@@ -188,7 +206,11 @@ func TestM3ASkewSweepOnTheCandidate(t *testing.T) {
 	}
 
 	selection := runSelectionFrom(t, "M3A")
+	// The agreed sweep with the run's forms and quota put in: the header below
+	// prints the sweep, so a run on another form or quota says so itself.
 	sweep := m3aAgreedSweep()
+	sweep.Shapes = m3aShapeSelection().fromEnvironment(t)
+	sweep.Quota = m3aQuotaSelection().fromEnvironment(t, sweep.Shapes)
 	configs := m3aSweepEnumeration(sweep)
 
 	keys := make([]runKey, 0, len(configs))

@@ -1199,6 +1199,12 @@ func (s *Service) sendNoticeToPeer(address domain.PeerAddress, ttl time.Duration
 	// not delivered by this path — a notice is not worth exceeding the limit,
 	// and the peer will learn the same fact from the next live connection.
 	//
+	// The socket is dialPeer's, like every other dial: an overlay address
+	// goes through the SOCKS5 proxy with its name resolved there, a proxy
+	// that cannot be reached ends the notice instead of a direct connection,
+	// and ctx — the node's run context bounded by the handshake budget —
+	// ends the dial with the socket closed and the budget unit returned.
+	//
 	// The session kind follows the transport policy of every dial
 	// (dialPeerTransport): v2 first, and no v1 for an endpoint bound to v2,
 	// so this fallback cannot become the side door that still hands out a
@@ -1207,28 +1213,36 @@ func (s *Service) sendNoticeToPeer(address domain.PeerAddress, ttl time.Duration
 	// still bytes on the wire.
 	ctx, cancel := context.WithTimeout(s.runCtx, syncHandshakeTimeout)
 	defer cancel()
-	transport, err := s.dialPeerTransport(ctx, address, domain.DialToAddress(), func(context.Context) (net.Conn, error) {
-		return s.dialAddressWithBudget(address, syncHandshakeTimeout)
+	transport, err := s.dialPeerTransport(ctx, address, domain.DialToAddress(), func(ctx context.Context) (net.Conn, error) {
+		return s.dialPeerWithBudget(ctx, address, syncHandshakeTimeout)
 	})
 	if err != nil {
 		serviceDialNotice.ioFailure().Err(err).Str("peer", string(address)).Msg(serviceDialNotice.event("dial_failed"))
+		s.reactToIncompatibleDial(address, err)
 		return
 	}
 	conn := transport.wire
 	defer func() { _ = conn.Close() }()
 
 	_ = conn.SetDeadline(time.Now().Add(syncHandshakeTimeout))
-	reader := bufio.NewReader(conn)
+	// The transport's reader: on a v1 connection the probe opened, it holds
+	// what the responder sent behind the probe's answer.
+	reader := transport.reader
 
 	welcome, ok := s.noticeDialWelcome(conn, reader, address, transport)
 	if !ok {
-		s.forgetV1MarkWithoutWelcome(address, transport)
+		s.forgetLegacyObservedWithoutWelcome(address, transport)
 		return
 	}
 	// One gate for both session kinds, before auth_session is signed and
-	// before anything is recorded as an outbound success: notice,
-	// non-welcome, v2 pin, floor, self identity (admitServiceDialWelcome);
-	// the v1 challenge is checked by authenticateServiceDial before it signs.
+	// before anything is recorded as an outbound success: the same welcome as
+	// the probe's answer on a v1 connection (refuseFullLegacyWelcome), then
+	// notice, non-welcome, v2 pin, floor, self identity
+	// (admitServiceDialWelcome); the v1 challenge is checked by
+	// authenticateServiceDial before it signs.
+	if err := s.refuseFullLegacyWelcome(address, transport, welcome); err != nil {
+		return
+	}
 	if err := s.admitServiceDialWelcome(serviceDialNotice, address, welcome, transport.proven != nil); err != nil {
 		return
 	}

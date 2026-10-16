@@ -155,7 +155,8 @@ func TestM3AEnumerationCoversTheGridAndKeepsLoadsAdjacent(t *testing.T) {
 func TestM3ARunKeyCarriesEveryInput(t *testing.T) {
 	t.Parallel()
 
-	base := m3aSweepConfig{Shape: sweepShapes[1], Seed: 1, Share: 0.25,
+	quota := m3aAgreedSweep().Quota
+	base := m3aSweepConfig{Shape: sweepShapes[1], Seed: 1, Quota: quota, Share: 0.25,
 		Policy: policyCandidateC1, Load: skewUniformTargets}
 	id := base.Key("v").ID()
 
@@ -163,11 +164,12 @@ func TestM3ARunKeyCarriesEveryInput(t *testing.T) {
 		name   string
 		config m3aSweepConfig
 	}{
-		{"share", m3aSweepConfig{Shape: sweepShapes[1], Seed: 1, Share: 0.30, Policy: policyCandidateC1, Load: skewUniformTargets}},
-		{"seed", m3aSweepConfig{Shape: sweepShapes[1], Seed: 2, Share: 0.25, Policy: policyCandidateC1, Load: skewUniformTargets}},
-		{"policy", m3aSweepConfig{Shape: sweepShapes[1], Seed: 1, Share: 0.25, Policy: policyInitiatedLimit, Load: skewUniformTargets}},
-		{"load", m3aSweepConfig{Shape: sweepShapes[1], Seed: 1, Share: 0.25, Policy: policyCandidateC1, Load: skewTargetsTheConfirmedGuard}},
-		{"shape", m3aSweepConfig{Shape: sweepShapes[0], Seed: 1, Share: 0.25, Policy: policyCandidateC1, Load: skewUniformTargets}},
+		{"share", m3aSweepConfig{Shape: sweepShapes[1], Seed: 1, Quota: quota, Share: 0.30, Policy: policyCandidateC1, Load: skewUniformTargets}},
+		{"seed", m3aSweepConfig{Shape: sweepShapes[1], Seed: 2, Quota: quota, Share: 0.25, Policy: policyCandidateC1, Load: skewUniformTargets}},
+		{"policy", m3aSweepConfig{Shape: sweepShapes[1], Seed: 1, Quota: quota, Share: 0.25, Policy: policyInitiatedLimit, Load: skewUniformTargets}},
+		{"load", m3aSweepConfig{Shape: sweepShapes[1], Seed: 1, Quota: quota, Share: 0.25, Policy: policyCandidateC1, Load: skewTargetsTheConfirmedGuard}},
+		{"shape", m3aSweepConfig{Shape: sweepShapes[0], Seed: 1, Quota: quota, Share: 0.25, Policy: policyCandidateC1, Load: skewUniformTargets}},
+		{"quota", m3aSweepConfig{Shape: sweepShapes[1], Seed: 1, Quota: quota + 1, Share: 0.25, Policy: policyCandidateC1, Load: skewUniformTargets}},
 	} {
 		if changed.config.Key("v").ID() == id {
 			t.Errorf("changing the %s left the identifier at %s", changed.name, id)
@@ -216,7 +218,7 @@ func TestM3AAStoredPointKeepsBothReadings(t *testing.T) {
 
 	// A cheap form: the property is about what the driver stores, not about the
 	// 10k network.
-	config := m3aSweepConfig{Shape: sweepShapes[0], Seed: 1, Share: 0.25,
+	config := m3aSweepConfig{Shape: sweepShapes[0], Seed: 1, Quota: m3aAgreedSweep().Quota, Share: 0.25,
 		Policy: policyCandidateC1, Load: skewTargetsTheConfirmedGuard}
 	run, err := runSkewPoint(config.setup())
 	if err != nil {

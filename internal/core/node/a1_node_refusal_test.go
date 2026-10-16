@@ -92,20 +92,23 @@ func TestInboundA1RelabelledAsAPinnedVictimIsRefused(t *testing.T) {
 }
 
 // Outbound A1: the node under test dials an old node, and the man in the
-// middle relabels its welcome as the pinned victim's. The node refuses the
-// welcome before signing auth_session, so it never proves itself to the
-// relay and the address keeps no binding as the victim. The pin was earned
-// over another path, and it alone blocks the legacy session with the victim;
-// the refusal costs the dialled address nothing.
+// middle relabels its welcomes with the pinned victim's whole public
+// identity, so they are self-consistent. The node refuses on the probe's
+// answer — before the full hello carries its own identity, and so before
+// auth_session — so it never proves itself to the relay and the address
+// keeps no binding as the victim. The pin was earned over another path, and
+// it alone blocks the legacy session with the victim; the refusal costs the
+// dialled address nothing.
 func TestOutboundA1RelabelledAsAPinnedVictimIsRefused(t *testing.T) {
 	t.Parallel()
 	for _, version := range releasedLegacyVersions() {
 		version := version
 		t.Run(versionName(version), func(t *testing.T) {
 			t.Parallel()
-			victim := domain.PeerIdentity{0xa1, 0xce}
+			victimKeys := generateProbeIdentity(t)
+			victim := domain.PeerIdentityFromWire(victimKeys.Address)
 			oldAddress := freeAddress(t)
-			newDialsOld := startImpersonatingProxy(t, oldAddress, oldPeerListens, version, victim)
+			newDialsOld := startIdentitySwappingProxy(t, oldAddress, oldPeerListens, version, victimKeys)
 
 			_, stopOld := startTestNodeWithSetup(t, config.Node{
 				ListenAddress:  oldAddress,
@@ -127,15 +130,21 @@ func TestOutboundA1RelabelledAsAPinnedVictimIsRefused(t *testing.T) {
 				t.Fatalf("v%d: dial ended established=%v err=%v, want errLegacyRefusedPinned", version, established, err)
 			}
 			assertVictimUntouched(t, dialer, victim, target, "outbound A1 v"+versionName(version))
-			// The refusal is at the welcome, before auth_session: the node put
-			// its v1 hello on the wire but never signed an auth_session, so the
-			// relay holds no signature of this node to carry anywhere as the
-			// victim. The proxy is drained first: until it has read everything
-			// the node wrote, an auth_session still in the socket buffer would
-			// go unseen and the check below would pass on a race.
+			// The refusal is at the probe's answer: the node put only the
+			// identity-less probe on the wire — no full hello, no
+			// auth_session — so the relay holds neither this node's identity
+			// nor a signature of it to carry anywhere as the victim. The
+			// proxy is drained first: until it has read everything the node
+			// wrote, a frame still in the socket buffer would go unseen and
+			// the checks below would pass on a race.
 			newDialsOld.drain(t)
 			if !newDialsOld.nodeSentFrame("hello") {
-				t.Fatalf("v%d: the node never sent a v1 hello — the dial did not reach the welcome", version)
+				t.Fatalf("v%d: the node never sent the probe — the dial did not reach the old node", version)
+			}
+			for i, identified := range newDialsOld.nodeHellos() {
+				if identified {
+					t.Fatalf("v%d: hello %d carried this node's identity after a relabelled pinned answer", version, i)
+				}
 			}
 			if newDialsOld.nodeSentFrame("auth_session") {
 				t.Fatalf("v%d: the node signed an auth_session after a relabelled pinned welcome", version)
@@ -174,9 +183,11 @@ func TestOutboundA1RelabelledAsAPinnedVictimIsRefused(t *testing.T) {
 func TestOutboundLegacyProceedsForAnUnpinnedRelabelledIdentity(t *testing.T) {
 	t.Parallel()
 	const version = config.MinimumProtocolVersion
-	unpinned := domain.PeerIdentity{0xbe, 0xef}
+	// The relabelling is self-consistent — the stranger's whole public
+	// identity — so the probe's answer and the full welcome agree.
+	unpinned := generateProbeIdentity(t)
 	oldAddress := freeAddress(t)
-	newDialsOld := startImpersonatingProxy(t, oldAddress, oldPeerListens, version, unpinned)
+	newDialsOld := startIdentitySwappingProxy(t, oldAddress, oldPeerListens, version, unpinned)
 
 	_, stopOld := startTestNodeWithSetup(t, config.Node{
 		ListenAddress:  oldAddress,

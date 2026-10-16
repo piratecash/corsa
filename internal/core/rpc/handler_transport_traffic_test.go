@@ -43,6 +43,7 @@ func TestFetchRouteSummaryReportsTransportTraffic(t *testing.T) {
 	}).Once()
 	provider.On("SessionKindStats").Return(domain.SessionKindStats{}).Once()
 	provider.On("ListenerRefusalStats").Return(domain.ListenerRefusalStats{}).Once()
+	provider.On("LoopbackInboundStats").Return(domain.LoopbackInboundStats{}).Once()
 
 	table := rpc.NewCommandTable()
 	rpc.RegisterRoutingCommands(table, provider)
@@ -110,6 +111,7 @@ func TestFetchRouteSummaryReportsThePinStore(t *testing.T) {
 	provider.On("TransportTrafficStats").Return(domain.TransportTrafficStats{}).Once()
 	provider.On("SessionKindStats").Return(domain.SessionKindStats{}).Once()
 	provider.On("ListenerRefusalStats").Return(domain.ListenerRefusalStats{}).Once()
+	provider.On("LoopbackInboundStats").Return(domain.LoopbackInboundStats{}).Once()
 	provider.On("SecureSessionStoreStats").Return(domain.SecureSessionStoreStats{
 		ReadAt:                              now,
 		PinnedIdentities:                    20000,
@@ -138,6 +140,9 @@ func TestFetchRouteSummaryReportsThePinStore(t *testing.T) {
 		ClockJumpGuarded:                    true,
 		ClockJumpsDetected:                  29,
 		ClockJumpActive:                     true,
+		TLSFirstDisabled:                    true,
+		DialsOpenedByProbe:                  31,
+		V1RefusalsAfterV2Welcome:            37,
 	}).Once()
 
 	table := rpc.NewCommandTable()
@@ -158,6 +163,9 @@ func TestFetchRouteSummaryReportsThePinStore(t *testing.T) {
 	}
 	if section["pin_store_full"] != true || section["store_unreadable"] != false || section["pin_store_unsafe"] != true {
 		t.Fatalf("flags = full %v, unreadable %v, unsafe %v", section["pin_store_full"], section["store_unreadable"], section["pin_store_unsafe"])
+	}
+	if section["v2_tls_first_disabled"] != true {
+		t.Fatalf("v2_tls_first_disabled = %v, want true", section["v2_tls_first_disabled"])
 	}
 	if section["clock_jump_guarded"] != true || section["clock_jump_active"] != true {
 		t.Fatalf("clock flags = guarded %v, active %v", section["clock_jump_guarded"], section["clock_jump_active"])
@@ -185,6 +193,8 @@ func TestFetchRouteSummaryReportsThePinStore(t *testing.T) {
 		"endpoint_bindings_skipped_not_canonical": "19",
 		"non_canonical_bindings":                  "23",
 		"clock_jumps_detected":                    "29",
+		"dials_opened_by_probe":                   "31",
+		"v1_refusals_after_v2_welcome":            "37",
 	} {
 		if got, _ := section[field].(json.Number); got.String() != want {
 			t.Fatalf("secure_sessions.%s = %v, want %s", field, section[field], want)

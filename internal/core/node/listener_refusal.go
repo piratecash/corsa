@@ -35,18 +35,22 @@ const (
 	refusalHandshakesNode
 	refusalHandshakesPerIP
 	refusalHandshakesLoopback
+	refusalLoopbackConnectionRate
+	refusalLoopbackConnections
 	listenerRefusalReasons
 )
 
 var listenerRefusalReasonNames = [listenerRefusalReasons]string{
-	refusalConnectionRate:     "conn-rate-limit",
-	refusalConnectionsPerIP:   "max-conn-per-ip",
-	refusalConnectionBudget:   "connection-budget",
-	refusalBlacklisted:        "blacklisted",
-	refusalInboundLimit:       "inbound-limit",
-	refusalHandshakesNode:     "handshakes-node-limit",
-	refusalHandshakesPerIP:    "handshakes-ip-limit",
-	refusalHandshakesLoopback: "handshakes-loopback-limit",
+	refusalConnectionRate:         "conn-rate-limit",
+	refusalConnectionsPerIP:       "max-conn-per-ip",
+	refusalConnectionBudget:       "connection-budget",
+	refusalBlacklisted:            "blacklisted",
+	refusalInboundLimit:           "inbound-limit",
+	refusalHandshakesNode:         "handshakes-node-limit",
+	refusalHandshakesPerIP:        "handshakes-ip-limit",
+	refusalHandshakesLoopback:     "handshakes-loopback-limit",
+	refusalLoopbackConnectionRate: "loopback-conn-rate-limit",
+	refusalLoopbackConnections:    "loopback-max-conn",
 }
 
 func (r listenerRefusalReason) String() string {
@@ -112,8 +116,11 @@ type listenerRefusals struct {
 	sourceMu        sync.Mutex
 	sendersBySource map[string]int
 
-	startedAt          time.Time
-	refused            [listenerRefusalReasons]atomic.Uint64
+	startedAt time.Time
+	refused   [listenerRefusalReasons]atomic.Uint64
+	// refusedLoopback is the part of refused that loopback sources took,
+	// read by the loopback inbound class's diagnostics.
+	refusedLoopback    [listenerRefusalReasons]atomic.Uint64
 	closedWithoutAlert atomic.Uint64
 }
 
@@ -133,8 +140,8 @@ func newListenerRefusals(bounds alertPoolBounds, startedAt time.Time) *listenerR
 // the connection is closed at once without it, which tells the peer no less
 // than the silent close it replaces.
 func (r *listenerRefusals) refuse(conn net.Conn, reason listenerRefusalReason) {
-	r.refused[reason].Add(1)
 	source := handshakeSourceOf(conn.RemoteAddr(), true)
+	r.count(reason, source)
 	if !r.takeSender(source) {
 		r.closedWithoutAlert.Add(1)
 		// The connection is refused either way; a close error has nobody
@@ -194,10 +201,23 @@ func (r *listenerRefusals) releaseSender(source handshakeSource) {
 // not something the dialler can read as a refusal. Counted like any refusal;
 // it never takes an alert sender.
 func (r *listenerRefusals) closeRefusedSecure(conn net.Conn, reason listenerRefusalReason) {
-	r.refused[reason].Add(1)
+	r.count(reason, handshakeSourceOf(conn.RemoteAddr(), true))
 	// The connection is refused either way; a close error has nobody to
 	// tell.
 	_ = conn.Close()
+}
+
+// count counts a refusal of source by reason.
+func (r *listenerRefusals) count(reason listenerRefusalReason, source handshakeSource) {
+	r.refused[reason].Add(1)
+	if source.loopback {
+		r.refusedLoopback[reason].Add(1)
+	}
+}
+
+// loopbackRefused is how many loopback connections reason refused. Lock-free.
+func (r *listenerRefusals) loopbackRefused(reason listenerRefusalReason) uint64 {
+	return r.refusedLoopback[reason].Load()
 }
 
 // wait returns once every alert sender has finished. Each finishes within
@@ -209,17 +229,19 @@ func (r *listenerRefusals) wait() {
 // stats reads the counters. Lock-free; reading resets nothing.
 func (r *listenerRefusals) stats(readAt time.Time) domain.ListenerRefusalStats {
 	return domain.ListenerRefusalStats{
-		StartedAt:          r.startedAt,
-		ReadAt:             readAt,
-		ConnectionRate:     r.refused[refusalConnectionRate].Load(),
-		ConnectionsPerIP:   r.refused[refusalConnectionsPerIP].Load(),
-		ConnectionBudget:   r.refused[refusalConnectionBudget].Load(),
-		Blacklisted:        r.refused[refusalBlacklisted].Load(),
-		InboundLimit:       r.refused[refusalInboundLimit].Load(),
-		HandshakesNode:     r.refused[refusalHandshakesNode].Load(),
-		HandshakesPerIP:    r.refused[refusalHandshakesPerIP].Load(),
-		HandshakesLoopback: r.refused[refusalHandshakesLoopback].Load(),
-		ClosedWithoutAlert: r.closedWithoutAlert.Load(),
+		StartedAt:              r.startedAt,
+		ReadAt:                 readAt,
+		ConnectionRate:         r.refused[refusalConnectionRate].Load(),
+		ConnectionsPerIP:       r.refused[refusalConnectionsPerIP].Load(),
+		ConnectionBudget:       r.refused[refusalConnectionBudget].Load(),
+		Blacklisted:            r.refused[refusalBlacklisted].Load(),
+		InboundLimit:           r.refused[refusalInboundLimit].Load(),
+		HandshakesNode:         r.refused[refusalHandshakesNode].Load(),
+		HandshakesPerIP:        r.refused[refusalHandshakesPerIP].Load(),
+		HandshakesLoopback:     r.refused[refusalHandshakesLoopback].Load(),
+		LoopbackConnectionRate: r.refused[refusalLoopbackConnectionRate].Load(),
+		LoopbackConnections:    r.refused[refusalLoopbackConnections].Load(),
+		ClosedWithoutAlert:     r.closedWithoutAlert.Load(),
 	}
 }
 

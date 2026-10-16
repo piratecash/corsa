@@ -10,9 +10,9 @@ All limits are tuned for legitimate P2P node behavior: persistent connections wi
 
 ### 1. Per-IP Connection Rate Limiting
 
-**File**: `internal/core/node/conn_limiter.go`
+**File**: `internal/core/node/conn_limiter.go`, `internal/core/node/accept_inbound.go`
 
-Every incoming TCP connection is checked against a per-IP fixed-window counter before any resources (goroutines, buffers, maps) are allocated. If an IP exceeds the configured rate, the connection is refused at the accept level: it gets the TLS refusal alert from a bounded pool of senders (or, with every sender busy, an immediate close), and the accept loop never waits for it — see `docs/protocol/session_v2.md`, "Listener refusals". The per-IP cap below, the shared connection budget and the blacklist refuse the same way.
+This section and the per-IP cap apply to an **external** source. A loopback source — the onion entry — is admitted by its own class instead: see §1a. Every incoming TCP connection from an external source is checked against a per-IP fixed-window counter before any resources (goroutines, buffers, maps) are allocated. If an IP exceeds the configured rate, the connection is refused at the accept level: it gets the TLS refusal alert from a bounded pool of senders (or, with every sender busy, an immediate close), and the accept loop never waits for it — see `docs/protocol/session_v2.md`, "Listener refusals". The per-IP cap below, the shared connection budget and the blacklist refuse the same way.
 
 The window opens at an IP's first attempt and lasts `defaultConnRateWindow`. Attempts inside it are counted, and every attempt past `defaultConnRateLimit` is refused. The first attempt once the window has run its full length (elapsed ≥ the window) opens a new window with a count of 1. This is a fixed window, not a sliding one: a sender can place up to twice the limit around a window boundary. Time is read only through a clock injected when the limiter is built — the wall clock in production — so window expiry is tested at exact instants.
 
@@ -24,15 +24,56 @@ The window opens at an IP's first attempt and lasts `defaultConnRateWindow`. Att
 | `defaultConnRateWindow` | 10 seconds | Detects burst floods while tolerating reconnection storms |
 | `maxConnPerIP` | 8 concurrent connections | Hard cap prevents slow-drip resource exhaustion |
 
+### 1a. Loopback Inbound Class
+
+**Files**: `internal/core/node/loopback_inbound.go`, `internal/core/node/identity_penalty.go`, `internal/core/node/accept_inbound.go`; the class type is `domain.InboundSourceClass`.
+
+Every inbound onion connection arrives from the local Tor daemon, so the listener sees it from loopback (`127.0.0.0/8`, `::1`, or the IPv4-mapped `::ffff:127.0.0.1`). Under the per-IP rules of §1 and the IP ban of §8 that one address stood for every onion peer at once: eight connections and ten new ones per ten seconds for the whole onion entry, and one misbehaving onion peer could get `127.0.0.1` banned for a day, cutting every other onion peer off. A loopback source is therefore admitted by a class of its own, for v2 and legacy connections alike:
+
+- **no per-IP rate, no per-IP cap, no IP score and no IP blacklist** for a loopback source. A ban entry for a loopback IP left by an earlier build is not consulted;
+- **budgets of the whole class**, never of one connection, so reconnecting opens nothing new;
+- **the node's own bounds apply on top**: the shared connection budget and the inbound limit, the node's bound of 64 v2 handshakes, the alert pool.
+
+| Bound | Value | Rationale |
+|-------|-------|-----------|
+| Connections held at once (`loopbackActiveBound`) | 64; on a node with an inbound capacity (`MaxIncomingPeers`, or the shared budget minus its outbound reserve, whichever is smaller) a quarter of it, at least 8, at most 64 | Eight times what the whole onion entry had before; the quarter is the share the class already holds of the node's handshakes (16 of 64), so loopback cannot take the whole inbound capacity from the clearnet entry. The floor of 8 is what the onion entry had under the per-IP cap, so a capacity below 32 never leaves it worse off; below 8 the node's own inbound bound is the one that refuses |
+| New connections (`loopbackMaxNewPerWindow` per `loopbackNewWindow`) | 100 per 10 s, over a **sliding** window | Ten times the per-IP rate the onion entry shared; about one reconnect of every held connection per window and a half. Sliding, unlike §1's fixed window, so no 10 s ever admits more than 100 — a fixed window lets twice the bound through across its boundary |
+| v2 handshakes in flight past their ClientHello record | 16 of the node's 64 | `inbound_handshakes.go`, `docs/protocol/session_v2.md`, "Listener refusals" |
+| Identities scored (`productionIdentityPenaltyPolicy`) | 4 096; at capacity the unbanned identity scored longest ago gives way — a ban is never lifted to make room; with every entry banned, the session whose charge cannot be recorded is closed | Each needs a full v2 handshake and a violation within the class rate: filling the store takes at least about seven minutes, for a few hundred kilobytes |
+
+**Status of the numbers: chosen, not measured. They are to be checked by measurement (the Tor measurement and the onion stand) before release.**
+
+A connection over a budget gets the TLS refusal alert like any listener refusal: `loopback-max-conn` for the connections held at once, `loopback-conn-rate-limit` for the rate. A slot is taken in the accept loop before any per-connection resource exists and is given back when the handler ends — on close, on a refusal further down (the shared budget, the handshake bounds) and on the node's shutdown.
+
+**Violations.** Loopback is not trust: authentication, pins and the refusal to downgrade apply to the class exactly as to an external source. What changes is who a violation is charged to (`addBanScore` → `chargeLoopbackViolation`):
+
+- **before a v2 proof** — a legacy connection, whatever identity its hello claims — the connection is condemned: its read loop ends it once the reply to the offending frame went out. Nothing else is charged; an identity a legacy hello claims proves nothing and is never scored;
+- **on a v2 session** the identity the session proved is scored, with the same increments, threshold (1000) and ban length (24 h) as an IP. Any session of a banned identity that commits a violation — the one that crossed the threshold, or another one open since before the ban — gets the `peer-banned` notice with reason `peer-ban` (not `blacklisted`: no IP is banned) and is condemned; every later loopback v2 session of that identity is closed as soon as it proves it. The identity ban applies to the loopback entry only — an external source is scored and banned by its IP as before. Expired bans and idle scores leave on the `bootstrapLoop` tick.
+
+The class is switched off together with the per-IP limits on a test or load-stand node: then it counts but refuses nothing, and a banned identity is not refused.
+
+**Limitation: the class is read from the source address.** The node has a single listener, so a local process on the same machine arrives from loopback exactly as the Tor daemon does and falls into the same class, sharing its budgets. A dedicated onion listener would let the class be read from the listener's configuration instead; the node has no such setting. Conversely, a Tor daemon in another container or on another host forwards onion connections from its own, non-loopback address: they are then one external source under §1 and §8 — eight connections, ten new per ten seconds, and an IP ban that cuts the whole onion entry off — and the class does not apply.
+
+**Residual risks, accepted.**
+
+- **One attacker can take the whole class.** Through Tor, with fresh legacy identities or none, one attacker can hold every slot and spend the whole rate of the class; honest onion peers are then refused until it stops. The clearnet entry does not suffer: the class is bounded inside the node's own bounds and its handshakes inside its share of them. Nothing inside the class tells one onion peer from another before a v2 proof.
+- **The identity ban does not stop a Sybil.** A fresh identity costs nothing, so the ban stops a peer that keeps its identity; one that changes it is bounded only by the class budgets.
+- **Onion-only node.** On a node whose inbound comes only through Tor the class bounds all of its inbound: with no inbound capacity set that is 64 connections and 100 new per 10 s, with one set a quarter of it (at least 8). Such a node needs a capacity of four times the onion connections it wants to hold.
+
+The class is reported by `fetchRouteSummary`, section `loopback_inbound` (`docs/rpc/routing.md`): its bounds, the connections held and the handshakes in flight now, what it admitted, and its refusals and closes by cause.
+
 ### 2. Inbound Read Deadline (Slowloris Protection)
 
-**File**: `internal/core/node/admission.go`, `internal/core/node/service.go`
+**File**: `internal/core/node/admission.go`, `internal/core/node/session_liveness.go`, `internal/core/node/service.go`
 
-Every frame read on an inbound connection has a deadline. If no complete frame arrives within the timeout, the connection is closed. This prevents Slowloris-style attacks where an attacker opens a connection and trickles data to hold the goroutine and connection slot indefinitely.
+Every frame read on an inbound connection has a deadline, and the deadline has two parts. The WAIT for the next frame ends at the first byte the socket delivers (for v2 the socket's bytes, not TLS records, so a record trickled byte by byte does not extend the wait); from that byte the FRAME must end within `inboundReadTimeout`. Before the connection is a session — the first byte, every handshake frame — the wait is `inboundReadTimeout` as well. Once it is a session (its heartbeat running) the wait is `inboundSessionIdleTimeout`, fitted to the peer's heartbeat. A missed deadline closes the connection. This prevents Slowloris-style attacks where an attacker opens a connection and trickles data, or stalls its handshake, to hold the goroutine and connection slot indefinitely, without cutting an idle session that carries nothing but heartbeats.
 
 | Parameter | Value | Rationale |
 |-----------|-------|-----------|
-| `inboundReadTimeout` | 120 seconds | Peers heartbeat every 30s; 4 missed beats before disconnect |
+| `inboundReadTimeout` | 120 seconds | A frame from its first byte to its end; every wait before the connection is a session. Unchanged from every released build |
+| `inboundSessionIdleTimeout` | 165 seconds (`heartbeatInterval` + `pongStallTimeout`) | The wait for the next frame of an established session. The slowest dialler — a released build (v28–v30) — pings at most 2 min 14 s apart; 31 s remain for delivery. The stale-inbound sweep (`evictStaleInboundConns`) uses the same threshold |
+
+The heartbeat schedule these bounds are fitted to: the dialler of a session pings every `diallerHeartbeatInterval` = 75 s plus a jitter of up to 14 s, the listener every `heartbeatInterval` = 2 min plus up to 14 s, and a ping unanswered for `pongStallTimeout` = 45 s ends the session on either side. The dialler pings more often because its pings are what the listener's read bound waits for, and every released build (v28–v30) still closes an inbound connection after 120 s without a whole frame: pings at most 89 s apart leave it 31 s for delivery. A peer that stops answering is dropped by the dialler within 75 s + 14 s + 45 s = 2 min 14 s and by the listener within 165 s.
 
 ### 3. Per-Connection Command Rate Limiting
 
@@ -213,7 +254,7 @@ Saturation is a backstop state, not an operating mode: it needs 1024 distinct en
 
 **Honest-peer cost.** A peer this node has not synced with in the last sixteen seconds meets a full bucket and its whole maximum-size reply is verified. A genuine network drop and reconnect costs nothing extra — the bucket is the remote's, not the connection's, and it kept refilling while the link was down. The one degradation an honest peer can suffer that is not its own doing is arriving while the registry is saturated: it then shares the tail bucket with whatever saturated it, so its first sync competes for one budget instead of owning one. It is degraded, never locked out, and the tail is not a membership: the newcomer stays untracked, so each of its charges either finds a free slot or re-runs the release pass, and it gets its own bucket on the first of its charges that finds a free slot or a tracked bucket full at that instant. A bucket that has gone sixteen seconds without a charge is always full, but another untracked key charging first may take the slot it frees, so while others compete for slots there is no fixed bound on how long the newcomer stays in the tail. What an honest peer cannot do is answer more than one 4096-entry sync per sixteen seconds; a second sync inside that window is verified up to the tokens available and the remainder arrives on the next pass (`contactsFrameForNetwork` samples randomly, so successive passes converge), logged as `contact_verification_budget_exhausted` / `sync_peer_contact_verification_budget_exhausted` rather than dropped silently.
 
-**Punishment, still, is the refusal.** There is no ledger to score against and no ban surface on an outbound dial (`addBanScore` keys on the IP of an ACCEPTED connection), so an exhausted budget is simply an unverified remainder; the count-cap violation on the session path keeps feeding the §5a ledger.
+**Punishment, still, is the refusal.** There is no ledger to score against and no ban surface on an outbound dial (`addBanScore` keys on an ACCEPTED connection: its IP, or for loopback the connection or the proven identity), so an exhausted budget is simply an unverified remainder; the count-cap violation on the session path keeps feeding the §5a ledger.
 
 **Residual risk: what the reconnect still buys.** The verification budget no longer resets on a reconnect. The §5a RAW budgets (bytes, frames, push bytes) and the violation ledger still do — they live on `peerSessionAdmission`, which is per session — and that is a deliberate difference in kind, not an oversight. Their reset is bounded by a cadence this node owns: it is the DIALER, the redial is gated by peer score and backoff, an admission teardown wraps `protocol.ErrRateLimited` (attributed to the PEER by `sessionCloseCauseFromError`, accounted for by the `disconnect_storm` quarantine), and every reconnect costs the attacker a full handshake. The verification budget had no such gate — its reset was bought with a wire field — which is why it is the one that moved. Making the byte budget per-IP as well was rejected on the sizing argument above: it is derived from a file-transfer stream, and several honest nodes behind one NAT address would then share it.
 
@@ -245,12 +286,12 @@ The HTTP Basic Authentication middleware tracks failed auth attempts per IP in a
 
 **File**: `internal/core/node/service.go`
 
-Cumulative ban scoring with automatic blacklisting. Different violations carry different point values. Once an IP reaches 1000 points, it is blacklisted for 24 hours.
+Cumulative ban scoring with automatic blacklisting of an **external** source. Different violations carry different point values. Once an IP reaches 1000 points, it is blacklisted for 24 hours. A loopback source is never scored by its IP: its violations close the connection or score the identity a v2 session proved (§1a).
 
 | Violation | Points | Effect |
 |-----------|--------|--------|
 | Invalid auth signature | 100 | 10 violations → blacklist |
-| Incompatible protocol version | 1000 | Immediate blacklist |
+| Incompatible protocol version | 250 | 4 violations → blacklist |
 | Command rate limit exceeded | 200 | 5 violations → blacklist |
 | Blacklist duration | 24 hours | Per-IP cooldown |
 
@@ -270,11 +311,17 @@ Cumulative ban scoring with automatic blacklisting. Different violations carry d
 
 ```mermaid
 graph TB
-    TCP["TCP Accept"] --> ConnRate["Per-IP Rate Limit<br/>(10/10s window)"]
+    TCP["TCP Accept"] --> Class{"source class"}
+    Class -->|external| ConnRate["Per-IP Rate Limit<br/>(10/10s window)"]
+    Class -->|loopback| LoopClass["Loopback Class<br/>(≤ 64 held, ≤ 100 new / 10 s sliding)"]
+    LoopClass -->|Reject| Drop1
+    LoopClass --> Budget
     ConnRate -->|Reject| Drop1["Close Connection"]
     ConnRate --> IPCap["Per-IP Conn Cap<br/>(max 8)"]
     IPCap -->|Reject| Drop2["Close Connection"]
-    IPCap --> Blacklist["IP Blacklist Check<br/>(ban score ≥ 1000)"]
+    IPCap --> Budget["Shared Connection Budget"]
+    Budget -->|Full| Drop2
+    Budget --> Blacklist["IP Blacklist Check<br/>(external only, ban score ≥ 1000)"]
     Blacklist -->|Banned| Drop3["Close Connection"]
     Blacklist --> GlobalCap["Global Conn Limit<br/>(MaxIncomingPeers)"]
     GlobalCap -->|Full| Drop4["Close Connection"]
@@ -303,7 +350,7 @@ graph TB
     style Parse fill:#66ff66
 ```
 
-**Diagram: Transport Layer Security Pipeline** (red ends the connection, amber drops one frame and keeps it)
+**Diagram: Transport Layer Security Pipeline, with the loopback inbound class beside the per-IP bounds** (red ends the connection, amber drops one frame and keeps it)
 
 ## Protocol-Level Security
 
@@ -389,7 +436,7 @@ The auth state of an accepted connection records what proved it (`connauth.Proof
 
 The responder's gate — no peer command before `auth_session` verifies — has an initiator-side mirror. Every outbound dial reads the responder's `welcome` and ends right there, with nothing but its `hello` written, when the `welcome`:
 
-- is below `MinimumProtocolVersion` — the dial is refused (`errIncompatibleProtocol`) and the responder takes the incompatible-version penalty (`penalizeOldProtocolPeer`), the same evidence and the same charge as on a peer session;
+- is below `MinimumProtocolVersion` — the dial is refused (`errIncompatibleProtocol`), with the same reaction as on a peer session (`reactToIncompatibleDial`): a version proven inside a v2 session takes the incompatible-version penalty (`penalizeOldProtocolPeer`); a claimed one — a v1 welcome before `auth_ok`, the answer to the probe — is recorded for diagnostics and only paces the address;
 - carries no `challenge` — refused with `auth-required` (`protocol.ErrAuthRequired`). Every responder at or above the floor challenges a node `hello`, so a responder that does not would serve nothing past the handshake anyway;
 - is an `error` frame, or not a `welcome` at all.
 
@@ -400,6 +447,8 @@ On the one-shot dials the gate runs once, on the `welcome` of either session kin
 Each outcome of the dial itself is logged once, as `<dial>_<outcome>` (`sync_peer_…`, `send_notice_…`). Refusals by the gate or by the responder are Warn on both dials. Socket failures (dial, hello write, welcome read and parse, auth write and read) are Warn on the recovery dial, which is scheduled for one missing key, and Debug on the notice dial, a best-effort fan-out with no retry behind it. The state changes a refusal causes are logged by their own owners in addition: the incompatible-version penalty (`peer_incompatible_version_penalty_accumulated` / `peer_banned_incompatible_protocol`, Info; Debug inside a running ban) and the self-identity cooldown (`self_identity_cooldown_applied`, Warn).
 
 The notice dial is not opened at all to an address the connection manager's candidate filter drops for a ban (`send_notice_skipped_banned`, Debug). The check is `PeerProvider.IsDialBanned`, which runs the filter's own ban checks through the same predicates: an IP-wide ban of the host (a running `bannedIPSet` entry — where the incompatible-version ban of any port is written — or a running ban of any other known port on that host, widened to the IP), a remote ban of the address (the peer told us it refuses our connections), the local setup-failure cooldown of the address, and a running ban of the address itself. The self-identity cooldown is the one ban that never widens — it names one alias of this node, not the host — so another port of that host is still dialled. The version lockout is not among these checks: it is evidence that this build is too old for the peer, not a ban of the peer, and it stays a gate of session dialling only. Whatever earned the ban would end the dial at the welcome again. A connection the peer already holds to us (authenticated inbound) is still used.
+
+**Only a proven version is penalised.** A version a frame nothing proves announces — the answer to the identity-less probe, a v1 welcome before `auth_ok`, an inbound v1 hello — can be written by a man in the middle in front of an honest node, with a version below the floor or a minimum far above this build's. Such a claim is recorded for diagnostics (`noteClaimedIncompatibleVersion`: last error, observed versions, client version) and, on dial, paces the next attempt to the address — a correct answer below this node's minimum with the endpoint's own old-version delay (30 s doubling to 6 h, [session_v2.md](session_v2.md)), anything else with the v2 retry backoff; it gives no score, no failure, no ban of the address or its IP, no version lockout of the identity known there and no `update_available` reporter. The inbound refusal keeps its per-connection notice and the transport-level `addBanScore`, which key the actual TCP source — its IP for an external source, the connection itself for loopback (§1a). Everything below applies to a version proven inside a v2 session.
 
 **The incompatible-version ban is a fixed window.** After `peerBanThresholdIncompatible / peerBanIncrementIncompatible` (4) observations `penalizeOldProtocolPeer` bans the address and its IP for `peerBanIncompatible` (24 h). While that ban runs, a further observation of the same peer updates only the diagnostics (last error, observed versions, client version, `LastIncompatibleVersionAt`): the attempt counter, score, failure streak, `BannedUntil` and the IP-wide `bannedIPSet` entry stay as they were. Callers can meet the banned peer again — the inbound hello handler until the IP blacklist catches it, the recovery dial (the `push_notice` fallback skips a banned address or host, see above, but the rule does not rely on any caller's gate) — and none of them brings new evidence; counting each one would slide the ban forward for as long as the old peer stays reachable. The rule therefore lives in the penalty itself, so it holds for every path, the inbound one included. Once the window is over, the next observation counts again and re-arms a full ban. "Inside the ban" is judged by the window recorded when the ban was armed (`peerHealth.IncompatibleBanUntil`), not by `BannedUntil`: the self-identity cooldown writes `BannedUntil` too, and a cooldown that lands after the incompatible-version ban ran out must not silence the next incompatible observation. The recorded window is not persisted; on load it is derived from the persisted evidence — a running `BannedUntil` whose last error is the incompatible version and whose attempt count reached the threshold. The derivation is inexact both ways, each by at most one window: a record whose last error a self-identity cooldown overwrote during the ban restores without a running incompatible-version ban, so after a restart its next incompatible observation re-arms the ban once; and a record whose `BannedUntil` a self-identity cooldown extended from T1 to T2 > T1, followed by an incompatible observation that put the last error back, restores the window as T2 — the IP-wide entry still expires at T1, and observations until T2 are not counted.
 
@@ -446,9 +495,9 @@ graph TB
 
 ### 1. Ограничение скорости соединений по IP
 
-**Файл**: `internal/core/node/conn_limiter.go`
+**Файл**: `internal/core/node/conn_limiter.go`, `internal/core/node/accept_inbound.go`
 
-Каждое входящее TCP-соединение проверяется по счётчику фиксированного окна для данного IP до выделения каких-либо ресурсов (горутин, буферов, карт). Если IP превышает настроенный лимит, соединение отвергается на уровне accept: оно получает TLS-alert отказа из ограниченного пула отправителей (а если все отправители заняты — немедленное закрытие), и цикл accept его никогда не ждёт — см. `docs/protocol/session_v2.md`, «Отказы слушателя». Так же отвергают предел на IP ниже, общий бюджет соединений и чёрный список.
+Этот раздел и предел на IP относятся к **внешнему** источнику. Источник на loopback — onion-вход — допускается своим классом: см. §1a. Каждое входящее TCP-соединение с внешнего источника проверяется по счётчику фиксированного окна для данного IP до выделения каких-либо ресурсов (горутин, буферов, карт). Если IP превышает настроенный лимит, соединение отвергается на уровне accept: оно получает TLS-alert отказа из ограниченного пула отправителей (а если все отправители заняты — немедленное закрытие), и цикл accept его никогда не ждёт — см. `docs/protocol/session_v2.md`, «Отказы слушателя». Так же отвергают предел на IP ниже, общий бюджет соединений и чёрный список.
 
 Окно открывается первой попыткой IP и длится `defaultConnRateWindow`. Попытки внутри окна считаются, и каждая попытка сверх `defaultConnRateLimit` отклоняется. Первая попытка после того, как окно отработало полную длину (прошло ≥ окна), открывает новое окно со счётчиком 1. Это фиксированное окно, а не скользящее: отправитель может уложить до двух лимитов вокруг границы окна. Время читается только через часы, переданные лимитеру при создании (в production — системные), поэтому истечение окна тестируется в точные моменты времени.
 
@@ -460,15 +509,56 @@ graph TB
 | `defaultConnRateWindow` | 10 секунд | Обнаруживает пакетные flood-атаки при допуске штормов переподключения |
 | `maxConnPerIP` | 8 одновременных | Жёсткий лимит предотвращает медленное исчерпание ресурсов |
 
+### 1a. Класс loopback-входа
+
+**Файлы**: `internal/core/node/loopback_inbound.go`, `internal/core/node/identity_penalty.go`, `internal/core/node/accept_inbound.go`; тип класса — `domain.InboundSourceClass`.
+
+Каждое входящее onion-соединение приходит от локального демона Tor, поэтому слушатель видит его с loopback (`127.0.0.0/8`, `::1` или отображённого из IPv4 `::ffff:127.0.0.1`). По правилам на IP из §1 и бану по IP из §8 этот один адрес представлял сразу всех onion-пиров: восемь соединений и десять новых за десять секунд на весь onion-вход, а один плохой onion-пир мог добиться бана `127.0.0.1` на сутки и отрезать всех остальных. Поэтому источник на loopback допускается своим классом — и для v2, и для legacy-соединений:
+
+- **ни частоты на IP, ни предела на IP, ни счёта бана по IP, ни чёрного списка IP** для источника на loopback. Запись бана для loopback-IP, оставленная прежней сборкой, не учитывается;
+- **бюджеты всего класса**, а не одного соединения, поэтому переподключение ничего нового не открывает;
+- **поверх действуют собственные пределы узла**: общий бюджет соединений и входящий лимит, предел узла в 64 рукопожатия v2, пул alert.
+
+| Предел | Значение | Обоснование |
+|--------|----------|-------------|
+| Одновременно удерживаемые соединения (`loopbackActiveBound`) | 64; на узле с заданной входящей ёмкостью (`MaxIncomingPeers` или общий бюджет за вычетом резерва исходящих — что меньше) — её четверть, не меньше 8 и не больше 64 | В восемь раз больше, чем было у всего onion-входа; четверть — та же доля, что класс уже держит от рукопожатий узла (16 из 64), чтобы loopback не отнял всю входящую ёмкость у clearnet-входа. Нижняя граница 8 — то, что onion-вход имел под пределом на IP, поэтому при ёмкости меньше 32 ему не становится хуже; ниже 8 отказывает уже собственный входящий предел узла |
+| Новые соединения (`loopbackMaxNewPerWindow` за `loopbackNewWindow`) | 100 за 10 с, в **скользящем** окне | В десять раз больше частоты на IP, которую делил onion-вход; примерно одно переподключение каждого удерживаемого соединения за полтора окна. Скользящее, в отличие от фиксированного окна §1, поэтому ни в какие 10 с не допускается больше 100 — фиксированное окно пропускает вдвое больше на своей границе |
+| Рукопожатия v2 в работе после целой записи ClientHello | 16 из 64 узла | `inbound_handshakes.go`, `docs/protocol/session_v2.md`, «Отказы слушателя» |
+| Identity со счётом (`productionIdentityPenaltyPolicy`) | 4 096; при заполнении уступает незабаненная identity, которой начисляли давнее всех, — бан ради места не снимается никогда; если забанены все записи, сессия, чьё начисление некуда записать, закрывается | Каждой нужно полное рукопожатие v2 и нарушение в пределах частоты класса: заполнение хранилища занимает не меньше примерно семи минут при нескольких сотнях килобайт памяти |
+
+**Статус чисел: выбраны, но не измерены. Их нужно проверить замерами (замер Tor и onion-стенд) перед выпуском.**
+
+Соединение сверх бюджета получает TLS-alert отказа, как любой отказ слушателя: `loopback-max-conn` для одновременно удерживаемых, `loopback-conn-rate-limit` для частоты. Слот берётся в цикле `accept`, до появления каких-либо ресурсов соединения, и возвращается при завершении обработчика — при закрытии, при отказе дальше по пути (общий бюджет, пределы рукопожатий) и при остановке узла.
+
+**Нарушения.** Loopback не означает доверия: аутентификация, pin и запрет понижения действуют для класса так же, как для внешнего источника. Меняется только то, кому начисляется нарушение (`addBanScore` → `chargeLoopbackViolation`):
+
+- **до v2-доказательства** — legacy-соединение, какую бы identity ни заявлял его hello, — соединение осуждается: цикл чтения завершает его после того, как ответ на кадр-нарушитель ушёл. Больше ничего не начисляется; identity, заявленная legacy-hello, ничего не доказывает и счёта не получает;
+- **на v2-сессии** счёт получает identity, доказанная сессией, с теми же приращениями, порогом (1000) и длительностью бана (24 ч), что и IP. Любая сессия забаненной identity, совершившая нарушение, — та, что перешла порог, или другая, открытая ещё до бана, — получает уведомление `peer-banned` с причиной `peer-ban` (не `blacklisted`: никакой IP не банится) и осуждается; каждая следующая v2-сессия этой identity через loopback закрывается сразу после доказательства. Бан identity действует только на loopback-входе — внешний источник по-прежнему считается и банится по IP. Истёкшие баны и простаивающие счета уходят на тике `bootstrapLoop`.
+
+На тестовом узле и узле нагрузочного стенда класс выключается вместе с ограничениями по IP: он тогда считает, но ничего не отвергает, а забаненная identity не отвергается.
+
+**Ограничение: класс определяется по адресу источника.** У узла один слушатель, поэтому локальный процесс на той же машине приходит с loopback ровно так же, как демон Tor, и попадает в тот же класс, деля его бюджеты. Выделенный onion-слушатель позволил бы определять класс по настройке слушателя; такой настройки у узла нет. И наоборот: демон Tor в другом контейнере или на другом хосте пересылает onion-соединения со своего, не loopback-адреса — тогда они один внешний источник по §1 и §8: восемь соединений, десять новых за десять секунд и бан IP, отрезающий весь onion-вход, — а класс не применяется.
+
+**Остаточные риски, принятые.**
+
+- **Один атакующий может занять весь класс.** Через Tor, со свежими legacy-identity или без них, один атакующий может удерживать все слоты и тратить всю частоту класса; честные onion-пиры тогда отвергаются, пока он не остановится. Clearnet-вход не страдает: класс ограничен внутри собственных пределов узла, а его рукопожатия — внутри своей доли. До v2-доказательства внутри класса один onion-пир неотличим от другого.
+- **Бан identity не останавливает Sybil.** Свежая identity ничего не стоит, поэтому бан останавливает пира, который держится своей identity; того, кто её меняет, ограничивают только бюджеты класса.
+- **Узел только с onion-входом.** На узле, чей вход идёт только через Tor, класс ограничивает весь его вход: без заданной входящей ёмкости — 64 соединения и 100 новых за 10 с, с заданной — её четверть (не меньше 8). Такому узлу нужна ёмкость вчетверо больше числа onion-соединений, которые он хочет держать.
+
+Класс показывается в `fetchRouteSummary`, раздел `loopback_inbound` (`docs/rpc/routing.md`): его пределы, удерживаемые сейчас соединения и рукопожатия в работе, сколько допущено, отказы и закрытия по причинам.
+
 ### 2. Дедлайн чтения входящих соединений (защита от Slowloris)
 
-**Файл**: `internal/core/node/admission.go`, `internal/core/node/service.go`
+**Файл**: `internal/core/node/admission.go`, `internal/core/node/session_liveness.go`, `internal/core/node/service.go`
 
-Каждое чтение фрейма на входящем соединении имеет таймаут. Если полный фрейм не получен в течение таймаута, соединение закрывается. Это предотвращает Slowloris-атаки, при которых атакующий открывает соединение и медленно отправляет данные, удерживая горутину и слот соединения бесконечно.
+Каждое чтение фрейма на входящем соединении имеет дедлайн, и он из двух частей. ОЖИДАНИЕ следующего фрейма заканчивается на первом байте, который отдал сокет (для v2 — байты сокета, а не записи TLS, поэтому запись, присылаемая по байту, ожидание не продлевает); с этого байта ФРЕЙМ обязан закончиться за `inboundReadTimeout`. Пока соединение не стало сессией — первый байт, каждый фрейм рукопожатия — ожидание тоже `inboundReadTimeout`. Когда оно сессия (запущен её heartbeat), ожидание — `inboundSessionIdleTimeout`, согласованный с heartbeat пира. Пропущенный дедлайн закрывает соединение. Это предотвращает Slowloris-атаки, при которых атакующий открывает соединение и медленно отправляет данные или затягивает рукопожатие, удерживая горутину и слот соединения бесконечно, и не рвёт простаивающую сессию, по которой идут только heartbeat.
 
 | Параметр | Значение | Обоснование |
 |----------|----------|-------------|
-| `inboundReadTimeout` | 120 секунд | Пиры шлют heartbeat каждые 30с; 4 пропущенных — отключение |
+| `inboundReadTimeout` | 120 секунд | Фрейм от первого байта до конца; каждое ожидание до того, как соединение стало сессией. Как во всех выпущенных сборках |
+| `inboundSessionIdleTimeout` | 165 секунд (`heartbeatInterval` + `pongStallTimeout`) | Ожидание следующего фрейма установленной сессии. Самый медленный инициатор — выпущенная сборка (v28–v30) — пингует не реже чем раз в 2 мин 14 с; на доставку остаётся 31 с. Тот же порог применяет выметание зависших входящих (`evictStaleInboundConns`) |
+
+Расписание heartbeat, с которым согласованы эти границы: инициатор сессии пингует каждые `diallerHeartbeatInterval` = 75 с плюс джиттер до 14 с, принимающая сторона — каждые `heartbeatInterval` = 2 мин плюс до 14 с, пинг без pong за `pongStallTimeout` = 45 с завершает сессию на любой стороне. Инициатор пингует чаще, потому что именно его пингов ждёт граница чтения принимающей стороны, а все выпущенные сборки (v28–v30) по-прежнему закрывают входящее соединение после 120 с без целого фрейма: пинги не реже чем раз в 89 с оставляют им 31 с на доставку. Переставший отвечать пир отключается инициатором за 75 с + 14 с + 45 с = 2 мин 14 с, принимающей стороной — за 165 с.
 
 ### 3. Ограничение скорости команд на соединение
 
@@ -646,7 +736,7 @@ Announce-плоскость использует `MaxFrameLine` независи
 
 **Цена для честного пира.** Пир, с которым узел не синхронизировался последние шестнадцать секунд, встречает полное ведро, и его ответ максимального размера проверяется целиком. Настоящий обрыв сети и реконнект не стоят ничего дополнительно: ведро принадлежит удалённой точке, а не соединению, и пополнялось, пока канал лежал. Единственная деградация честного пира не по его вине — прийти в момент, когда реестр насыщен: тогда он делит хвостовое ведро с тем, кто реестр насытил, и его первый синк конкурирует за один бюджет вместо того, чтобы владеть своим. Он деградирует, но не блокируется, а хвост — не членство: новичок остаётся неотслеживаемым, поэтому каждое его списание либо находит свободное место, либо заново запускает проход освобождения, и собственное ведро он получает на первом из своих списаний, которое застанет свободное место или отслеживаемое ведро, полное в этот момент. Ведро, проведшее шестнадцать секунд без списаний, всегда полно, но освобождённое им место может занять другой неотслеживаемый ключ, списавший раньше, поэтому, пока за места соревнуются другие, фиксированной границы того, сколько новичок пробудет в хвосте, нет. Честный пир не может лишь одного — отвечать больше чем одним синком на 4096 записей за шестнадцать секунд; второй синк в этом окне проверяется на доступные токены, а остаток приходит следующим проходом (`contactsFrameForNetwork` отдаёт случайную выборку, поэтому проходы сходятся), с записью `contact_verification_budget_exhausted` / `sync_peer_contact_verification_budget_exhausted`, а не молча.
 
-**Наказание — по-прежнему сам отказ.** Журнала для штрафа и ban-поверхности у исходящего дозвона нет (`addBanScore` ключуется по IP ПРИНЯТОГО соединения), поэтому исчерпанный бюджет — это просто непроверенный остаток; нарушение предела количества на пути сессии продолжает питать журнал §5a.
+**Наказание — по-прежнему сам отказ.** Журнала для штрафа и ban-поверхности у исходящего дозвона нет (`addBanScore` ключуется по ПРИНЯТОМУ соединению: его IP, а для loopback — самим соединением или доказанной identity), поэтому исчерпанный бюджет — это просто непроверенный остаток; нарушение предела количества на пути сессии продолжает питать журнал §5a.
 
 **Остаточный риск: что реконнект всё ещё покупает.** Бюджет проверок реконнектом больше не сбрасывается. СЫРЫЕ бюджеты §5a (байты, кадры, push-байты) и журнал нарушений — сбрасываются: они живут в `peerSessionAdmission`, то есть в сессии. Это сознательное различие по существу, а не недосмотр. Их сброс ограничен темпом, которым владеет сам узел: звонит ОН, перезвон гейтится peer score и backoff-ом, разрыв по допуску оборачивает `protocol.ErrRateLimited` (относится `sessionCloseCauseFromError` на ПИРА и учитывается карантином `disconnect_storm`), и каждый реконнект стоит атакующему полного рукопожатия. У бюджета проверок такого гейта не было — его сброс покупался полем с провода, — поэтому переехал именно он. Сделать байтовый бюджет тоже пер-IP отвергнуто по приведённому выше аргументу о размерности: он выведен из потока файловой передачи, и несколько честных узлов за одним NAT-адресом делили бы его.
 
@@ -674,12 +764,12 @@ Middleware HTTP Basic Auth отслеживает неудачные попыт�
 
 **Файл**: `internal/core/node/service.go`
 
-Кумулятивный скоринг банов с автоматическим внесением в чёрный список. Разные нарушения имеют разный вес. При достижении 1000 баллов IP блокируется на 24 часа.
+Кумулятивный скоринг банов с автоматическим внесением в чёрный список **внешнего** источника. Разные нарушения имеют разный вес. При достижении 1000 баллов IP блокируется на 24 часа. Источник на loopback по IP никогда не считается: его нарушения закрывают соединение или идут в счёт identity, доказанной v2-сессией (§1a).
 
 | Нарушение | Баллы | Эффект |
 |-----------|-------|--------|
 | Неверная подпись аутентификации | 100 | 10 нарушений → чёрный список |
-| Несовместимая версия протокола | 1000 | Немедленный чёрный список |
+| Несовместимая версия протокола | 250 | 4 нарушения → чёрный список |
 | Превышение лимита команд | 200 | 5 нарушений → чёрный список |
 | Длительность блокировки | 24 часа | Охлаждение по IP |
 
@@ -699,11 +789,17 @@ Middleware HTTP Basic Auth отслеживает неудачные попыт�
 
 ```mermaid
 graph TB
-    TCP["TCP Accept"] --> ConnRate["Лимит по IP<br/>(10/10с окно)"]
+    TCP["TCP Accept"] --> Class{"класс источника"}
+    Class -->|внешний| ConnRate["Лимит по IP<br/>(10/10с окно)"]
+    Class -->|loopback| LoopClass["Класс loopback<br/>(≤ 64 удерживаемых, ≤ 100 новых / 10 с, скользящее)"]
+    LoopClass -->|Отклонить| Drop1
+    LoopClass --> Budget
     ConnRate -->|Отклонить| Drop1["Закрыть соединение"]
     ConnRate --> IPCap["Лимит конн. по IP<br/>(макс 8)"]
     IPCap -->|Отклонить| Drop2["Закрыть соединение"]
-    IPCap --> Blacklist["Проверка чёрного списка<br/>(ban score ≥ 1000)"]
+    IPCap --> Budget["Общий бюджет соединений"]
+    Budget -->|Полон| Drop2
+    Budget --> Blacklist["Проверка чёрного списка<br/>(только внешний, ban score ≥ 1000)"]
     Blacklist -->|Заблокирован| Drop3["Закрыть соединение"]
     Blacklist --> GlobalCap["Глобальный лимит<br/>(MaxIncomingPeers)"]
     GlobalCap -->|Полон| Drop4["Закрыть соединение"]
@@ -732,7 +828,7 @@ graph TB
     style Parse fill:#66ff66
 ```
 
-**Диаграмма: Конвейер безопасности транспортного уровня** (красный закрывает соединение, янтарный дропает один кадр и сохраняет его)
+**Диаграмма: Конвейер безопасности транспортного уровня, с классом loopback-входа рядом с пределами по IP** (красный закрывает соединение, янтарный дропает один кадр и сохраняет его)
 
 ## Безопасность на уровне протокола
 
@@ -818,7 +914,7 @@ Auth-состояние принятого соединения хранит, ч
 
 У гейта ответчика — никаких peer-команд до проверки `auth_session` — есть зеркало на стороне инициатора. Каждый исходящий дозвон читает `welcome` ответчика и завершается на нём, записав только свой `hello`, когда `welcome`:
 
-- ниже `MinimumProtocolVersion` — дозвон отвергается (`errIncompatibleProtocol`), а ответчик получает штраф за несовместимую версию (`penalizeOldProtocolPeer`): то же свидетельство и тот же штраф, что и на peer-сессии;
+- ниже `MinimumProtocolVersion` — дозвон отвергается (`errIncompatibleProtocol`) с той же реакцией, что и на peer-сессии (`reactToIncompatibleDial`): версия, доказанная внутри сессии v2, получает штраф за несовместимую версию (`penalizeOldProtocolPeer`); заявленная — v1-welcome до `auth_ok`, ответ пробы — записывается в диагностику и только откладывает следующую попытку к адресу;
 - не несёт `challenge` — отказ с `auth-required` (`protocol.ErrAuthRequired`). Каждый ответчик не ниже пола выдаёт challenge на `hello` узла, поэтому ответчик без него всё равно не обслужил бы ничего дальше рукопожатия;
 - является фреймом `error` или вообще не `welcome`.
 
@@ -829,6 +925,8 @@ Auth-состояние принятого соединения хранит, ч
 Каждый исход самого дозвона логируется один раз, как `<dial>_<outcome>` (`sync_peer_…`, `send_notice_…`). Отказы гейта или ответчика — Warn на обоих дозвонах. Сбои сокета (дозвон, запись hello, чтение и разбор welcome, запись и чтение auth) — Warn на дозвоне восстановления, который запланирован ради одного недостающего ключа, и Debug на дозвоне уведомления — best-effort рассылке без повтора. Изменения состояния, к которым приводит отказ, логируют дополнительно их владельцы: штраф за несовместимую версию (`peer_incompatible_version_penalty_accumulated` / `peer_banned_incompatible_protocol`, Info; Debug внутри действующего бана) и кулдаун self-identity (`self_identity_cooldown_applied`, Warn).
 
 Дозвон уведомления вообще не открывается к адресу, который фильтр кандидатов менеджера соединений отбрасывает из-за бана (`send_notice_skipped_banned`, Debug). Проверка — `PeerProvider.IsDialBanned`, которая выполняет собственные проверки банов фильтра через те же предикаты: бан всего IP хоста (действующая запись `bannedIPSet` — туда пишется бан за несовместимую версию любого порта — либо действующий бан любого другого известного порта этого хоста, расширенный на IP), удалённый бан адреса (пир сообщил, что отказывает нам в соединениях), локальный cooldown адреса за неудачи установки сессии и действующий бан самого адреса. Self-identity cooldown — единственный бан, который никогда не расширяется: он называет один алиас этого узла, а не хост, — поэтому другой порт этого хоста по-прежнему набирается. Version lockout в эти проверки не входит: это свидетельство того, что эта сборка слишком стара для пира, а не бан пира, и он остаётся гейтом только дозвона сессий. Причина бана снова завершила бы дозвон на welcome. Соединение, которое пир уже держит к нам (аутентифицированное входящее), по-прежнему используется.
+
+**Штрафуется только доказанная версия.** Версию, которую объявляет кадр без доказательства, — ответ на пробу без identity, v1-welcome до `auth_ok`, входящий v1-hello — посредник может вписать перед честным узлом: ниже нижней границы или с минимумом намного выше версии этой сборки. Такое заявление записывается в диагностику (`noteClaimedIncompatibleVersion`: последняя ошибка, наблюдённые версии, версия клиента) и на дозвоне откладывает следующую попытку к адресу — корректный ответ ниже минимума этого узла собственной задержкой адреса за старую версию (30 с с удвоением до 6 ч, [session_v2.md](session_v2.md)), всё прочее отступом повторов v2; оно не даёт ни score, ни неудачи, ни бана адреса или его IP, ни version lockout для identity, известной там, ни репортёра `update_available`. Отказ на входе сохраняет своё уведомление на соединении и транспортный `addBanScore`, которые привязаны к настоящему TCP-источнику — к его IP для внешнего источника, к самому соединению для loopback (§1a). Всё, что ниже, относится к версии, доказанной внутри сессии v2.
 
 **Бан за несовместимую версию — фиксированное окно.** После `peerBanThresholdIncompatible / peerBanIncrementIncompatible` (4) наблюдений `penalizeOldProtocolPeer` банит адрес и его IP на `peerBanIncompatible` (24 ч). Пока этот бан действует, новое наблюдение того же пира обновляет только диагностику (последняя ошибка, наблюдённые версии, версия клиента, `LastIncompatibleVersionAt`): счётчик попыток, score, серия неудач, `BannedUntil` и запись бана IP в `bannedIPSet` не меняются. Вызыватели могут встретить забаненного пира снова — обработчик входящего hello, пока IP-blacklist его не поймал, дозвон восстановления (запасной путь `push_notice` пропускает забаненный адрес или хост, см. выше, но правило не опирается на гейт какого-либо вызывателя), — и ни один не приносит нового свидетельства; учёт каждого сдвигал бы бан вперёд, пока старый пир достижим. Поэтому правило живёт в самом штрафе и действует для всех путей, включая входящий. После окончания окна следующее наблюдение снова учитывается и заново взводит полный бан. «Внутри бана» определяется по окну, записанному при взведении бана (`peerHealth.IncompatibleBanUntil`), а не по `BannedUntil`: `BannedUntil` пишет и self-identity cooldown, и cooldown, наступивший после окончания бана за несовместимую версию, не должен глушить следующее наблюдение несовместимости. Записанное окно не персистится; при загрузке оно выводится из персистентных свидетельств — действующий `BannedUntil`, последняя ошибка которого — несовместимая версия, а счётчик попыток достиг порога. Вывод неточен в обе стороны, каждый раз не больше чем на одно окно: запись, чью последнюю ошибку во время бана перезаписал self-identity cooldown, восстанавливается без действующего бана за версию, поэтому после рестарта её следующее наблюдение несовместимости один раз заново взводит бан; а запись, чей `BannedUntil` self-identity cooldown продлил с T1 до T2 > T1, после чего наблюдение несовместимости вернуло последнюю ошибку, восстанавливает окно как T2 — запись бана IP всё равно истекает в T1, а наблюдения до T2 не учитываются.
 

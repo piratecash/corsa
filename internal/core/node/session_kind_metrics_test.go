@@ -3,6 +3,7 @@ package node
 import (
 	"bufio"
 	"context"
+	"errors"
 	"io"
 	"net"
 	"testing"
@@ -83,24 +84,44 @@ func TestSessionKindsCountLegacyWithAnOldPeerBothWays(t *testing.T) {
 // over v1 but claiming v2 (a stripped ALPN, or a man in the middle) — is
 // counted as legacy-at-claimed-v2, not as an old peer below the v2 version.
 // These are the sessions raising the minimum would cut off despite the claim.
+// Such a session arises on accept only: a dialler of this build reads a v2
+// welcome to its probe as a v2 hint and never opens v1 to it.
 func TestSessionKindsCountALegacyPeerClaimingV2(t *testing.T) {
+	t.Parallel()
+	listener, address, stopListener := listenerNode(t, withoutOwnDials(nil))
+	defer stopListener()
+	_, stopOld := dialerNode(t, address, asOldNode)
+	defer stopOld()
+
+	in := waitKinds(t, listener, "no inbound legacy session from the v2-claiming old node", func(s domain.SessionKindStats) bool {
+		return s.InboundLegacy > 0
+	})
+	if in.InboundV2 != 0 {
+		t.Fatalf("a v2 session was counted with a v1-only node: %+v", in)
+	}
+	if in.HellosBelowSecureVersion != 0 {
+		t.Fatalf("a peer announcing this build's version was counted as pre-v2: %d", in.HellosBelowSecureVersion)
+	}
+	if in.LegacyAtClaimedV2 == 0 {
+		t.Fatal("a legacy session with a peer claiming v2 was not counted as legacy-at-claimed-v2")
+	}
+}
+
+// The dialling side of the same peer: its answer to the probe announces v2,
+// so the dial ends as a v2 hint and no outbound legacy session is counted.
+func TestTheDiallerOpensNoLegacySessionToAPeerClaimingV2(t *testing.T) {
 	t.Parallel()
 	_, address, stopOld := listenerNode(t, withoutOwnDials(asOldNode))
 	defer stopOld()
-	dialer, stopDialer := dialerNode(t, address, nil)
+	dialer, stopDialer := startQuietNode(t, nil)
 	defer stopDialer()
 
-	out := waitKinds(t, dialer, "no legacy session with the v2-claiming old node", func(s domain.SessionKindStats) bool {
-		return s.OutboundLegacy > 0
-	})
-	if out.OutboundV2 != 0 {
-		t.Fatalf("a v2 session was counted with a v1-only node: %+v", out)
+	established, err := dialPastTransport(t, dialer, domain.PeerAddress(normalizeAddress(address)))
+	if established || !errors.Is(err, errLegacyProbeAnsweredV2) {
+		t.Fatalf("established=%v err=%v, want the probe's v2 hint", established, err)
 	}
-	if out.WelcomesBelowSecureVersion != 0 {
-		t.Fatalf("a peer announcing this build's version was counted as pre-v2: %d", out.WelcomesBelowSecureVersion)
-	}
-	if out.LegacyAtClaimedV2 == 0 {
-		t.Fatal("a legacy session with a peer claiming v2 was not counted as legacy-at-claimed-v2")
+	if out := dialer.SessionKindStats(); out.OutboundLegacy != 0 || out.LegacyAtClaimedV2 != 0 {
+		t.Fatalf("the dialler counted a legacy session with a peer claiming v2: %+v", out)
 	}
 }
 

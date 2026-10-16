@@ -45,6 +45,7 @@ func TestFetchRouteSummaryReportsSessionKinds(t *testing.T) {
 	}).Once()
 
 	provider.On("ListenerRefusalStats").Return(domain.ListenerRefusalStats{}).Once()
+	provider.On("LoopbackInboundStats").Return(domain.LoopbackInboundStats{}).Once()
 
 	section := routeSummarySection(t, provider, "session_kinds")
 

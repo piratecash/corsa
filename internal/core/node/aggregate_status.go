@@ -297,6 +297,9 @@ func (s *Service) aggregateStatusFrame() protocol.Frame {
 			IncompatibleVersionReporters: int(vpSnap.IncompatibleVersionReporters),
 			MaxObservedPeerBuild:         vpSnap.MaxObservedPeerBuild,
 			MaxObservedPeerVersion:       int(vpSnap.MaxObservedPeerVersion),
+
+			// Set once in NewService and immutable after: read without a lock.
+			V2TLSFirst: !s.tlsFirstDisabled(),
 		},
 	}
 }

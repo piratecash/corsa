@@ -31,8 +31,7 @@ func TestRawDialCallSitesAreAClosedSet(t *testing.T) {
 	// file → function that is allowed to dial raw, with the reason.
 	allowed := map[string]map[string]string{
 		"conn_budget_dial.go": {
-			"dialPeerWithBudget":    "the budgeted wrapper itself",
-			"dialAddressWithBudget": "the budgeted wrapper itself",
+			"dialPeerWithBudget": "the budgeted wrapper itself",
 		},
 		"session_secure.go": {
 			// openPeerSessionForCM's dial, moved here when the v2 session
@@ -83,7 +82,7 @@ func TestRawDialCallSitesAreAClosedSet(t *testing.T) {
 				}
 				t.Errorf("%s: %s calls %s directly.\n"+
 					"Every outbound socket must draw on the shared connection budget "+
-					"(dialPeerWithBudget / dialAddressWithBudget, conn_budget_dial.go), "+
+					"(dialPeerWithBudget, conn_budget_dial.go), "+
 					"otherwise the ceiling has a side door and the diagnostic cannot see the connection.\n"+
 					"If this call is genuinely already budgeted elsewhere, add it to the allow-list in "+
 					"this test together with the reason.",
@@ -133,26 +132,52 @@ func TestInboundReservationIsTakenInTheAcceptLoop(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse service.go: %v", err)
 	}
+	acceptFile, err := parser.ParseFile(fset, "accept_inbound.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse accept_inbound.go: %v", err)
+	}
 
 	var (
-		runBody      *ast.BlockStmt
+		loopBody     *ast.BlockStmt
+		acceptBody   *ast.BlockStmt
 		registerBody *ast.BlockStmt
 	)
-	for _, decl := range file.Decls {
+	for _, decl := range append(file.Decls, acceptFile.Decls...) {
 		fn, ok := decl.(*ast.FuncDecl)
 		if !ok || fn.Body == nil {
 			continue
 		}
 		switch fn.Name.Name {
 		case "Run":
-			runBody = fn.Body
+			loopBody = fn.Body
+		case "acceptInbound":
+			acceptBody = fn.Body
 		case "registerInboundConn":
 			registerBody = fn.Body
 		}
 	}
-	if runBody == nil || registerBody == nil {
-		t.Fatal("could not find Run and registerInboundConn in service.go")
+	if loopBody == nil || acceptBody == nil || registerBody == nil {
+		t.Fatal("could not find Run and registerInboundConn in service.go and acceptInbound in accept_inbound.go")
 	}
+	// The accept loop hands every accepted socket to acceptInbound, on the
+	// loop's own goroutine; acceptInbound is where the reservation and the
+	// handler goroutine must be, in that order.
+	callsAccept := false
+	ast.Inspect(loopBody, func(n ast.Node) bool {
+		if call, ok := n.(*ast.CallExpr); ok {
+			if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "acceptInbound" {
+				callsAccept = true
+			}
+		}
+		if _, isGo := n.(*ast.GoStmt); isGo {
+			return false
+		}
+		return true
+	})
+	if !callsAccept {
+		t.Fatal("the accept loop in Run does not hand accepted sockets to acceptInbound on its own goroutine")
+	}
+	runBody := acceptBody
 
 	reservePos := token.NoPos
 	ast.Inspect(runBody, func(n ast.Node) bool {

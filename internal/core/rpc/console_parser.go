@@ -64,6 +64,8 @@ var canonicalNames = map[string]string{
 	"listendpointbindings":   "listEndpointBindings",
 	"removeendpointbinding":  "removeEndpointBinding",
 	"demoteendpointbindings": "demoteEndpointBindings",
+	"listendpointdialdelays": "listEndpointDialDelays",
+	"retryendpointdial":      "retryEndpointDial",
 	// snake_case input (already lowercase) → canonical camelCase.
 	"get_peers":                "getPeers",
 	"fetch_peer_health":        "fetchPeerHealth",
@@ -560,6 +562,20 @@ func mapPositionalArgs(command string, args []string) (map[string]interface{}, e
 	case "removeendpointbinding":
 		if len(args) != 1 {
 			return nil, fmt.Errorf("removeEndpointBinding takes exactly one endpoint")
+		}
+		return map[string]interface{}{"endpoint": args[0]}, nil
+
+	// A retry by hand names exactly one endpoint, like a removal: the
+	// console never fills one in.
+	case "listendpointdialdelays":
+		if len(args) > 0 {
+			return nil, fmt.Errorf("listEndpointDialDelays takes no arguments")
+		}
+		return nil, nil
+
+	case "retryendpointdial":
+		if len(args) != 1 {
+			return nil, fmt.Errorf("retryEndpointDial takes exactly one endpoint")
 		}
 		return map[string]interface{}{"endpoint": args[0]}, nil
 

@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"os"
 	"path/filepath"
 )
 
@@ -46,8 +45,10 @@ var ErrDirectoryNotWritable = errors.New("secretfile: this process may not creat
 type LocationViolation string
 
 const (
-	// ViolationSymlink: the file is a symlink. The link, not the file,
-	// decides where the secret is read from.
+	// ViolationSymlink: the file is a symlink — on Windows, the file or a
+	// directory on the way is a reparse point that redirects its name, a
+	// junction included. The link, not the file, decides where the secret
+	// is read from.
 	ViolationSymlink LocationViolation = "symlink"
 	// ViolationNotRegularFile: the file is a directory, a device or another
 	// kind of entry that is not a regular file.
@@ -57,15 +58,25 @@ const (
 	// but the current user.
 	ViolationFileNotOwnerOnly LocationViolation = "file_not_owner_only"
 	// ViolationForeignOwner: owned by a user other than this process's. The
-	// file must be this user's; a directory may also be root's.
+	// file must be this user's; a directory may also be root's. On Windows
+	// the file may also be SYSTEM's or Administrators', a directory also
+	// TrustedInstaller's (audit_acl.go).
 	ViolationForeignOwner LocationViolation = "foreign_owner"
 	// ViolationWritableByOthers: a directory group- or world-writable
 	// without the sticky bit, so others may rename or replace what is in it.
+	// On Windows: a DACL entry lets an untrusted account delete the
+	// directory's children, delete or rename it, rewrite its DACL or take
+	// its ownership — or, on the directory holding the file, add entries to
+	// it (audit_acl.go).
 	ViolationWritableByOthers LocationViolation = "writable_by_others"
 	// ViolationStickyChildNotOwned: the entry sits in a sticky directory
 	// others may write (/tmp), which protects only entries this user owns,
 	// and this one is not.
 	ViolationStickyChildNotOwned LocationViolation = "sticky_child_not_owned"
+	// ViolationReparsePoint: on Windows, the file or a directory on the way
+	// is a reparse point of a kind the audit does not know, so it cannot
+	// tell whether it redirects the name (audit_acl.go, judgeReparseTag).
+	ViolationReparsePoint LocationViolation = "reparse_point"
 )
 
 // ComponentKind is the role of an audited component on the way to the file.
@@ -142,39 +153,13 @@ func (e *UnsafeLocationError) Is(target error) bool { return target == ErrUnsafe
 //
 // A file that does not exist yet is not a violation, and neither are
 // directories not created yet: the audit covers what exists. The parts that
-// differ by platform — the ancestor chain on POSIX, the DACL on Windows — are
-// in audit_posix.go and audit_windows.go.
+// differ by platform — owner and mode bits along the resolved chain on POSIX,
+// owners and DACLs up to the volume root on Windows — are in audit_posix.go
+// and audit_windows.go (with its judgement in audit_acl.go).
 func AuditLocation(path string) error {
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return fmt.Errorf("secretfile: audit: resolve the working directory: %w", stripPath(err))
 	}
 	return auditLocation(abs)
-}
-
-// inspectFile reads the file at path without following it. present is false
-// when there is no file yet; a symlink or a non-regular entry in its place is
-// the violation returned.
-func inspectFile(path string) (info fs.FileInfo, present bool, err error) {
-	info, err = os.Lstat(path)
-	switch {
-	case errors.Is(err, fs.ErrNotExist):
-		return nil, false, nil
-	case err != nil:
-		return nil, false, fmt.Errorf("secretfile: audit the file: %w", stripPath(err))
-	case info.Mode()&fs.ModeSymlink != 0:
-		return nil, false, &UnsafeLocationError{Component: fileComponent(), Violation: ViolationSymlink, Owner: ownerOf(info), Mode: info.Mode()}
-	case !info.Mode().IsRegular():
-		return nil, false, &UnsafeLocationError{Component: fileComponent(), Violation: ViolationNotRegularFile, Owner: ownerOf(info), Mode: info.Mode()}
-	}
-	return info, true, nil
-}
-
-// unsafeOrNil turns a judgement into an error without the typed-nil trap: a
-// nil *UnsafeLocationError returned as error is not a nil error.
-func unsafeOrNil(found *UnsafeLocationError) error {
-	if found == nil {
-		return nil
-	}
-	return found
 }

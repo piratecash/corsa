@@ -105,7 +105,7 @@ func (s *Service) admitServiceDialWelcome(dial serviceDial, address domain.PeerA
 			return err
 		}
 	}
-	if err := s.refuseIncompatibleWelcome(address, welcome); err != nil {
+	if err := s.refuseIncompatibleWelcome(address, welcome, versionEvidenceOf(proven)); err != nil {
 		log.Warn().Err(err).Str("peer", string(address)).Int("version", welcome.Version).Msg(dial.event("protocol_too_old"))
 		return err
 	}
@@ -156,24 +156,37 @@ func refuseNonWelcome(answer protocol.Frame) error {
 }
 
 // refuseIncompatibleWelcome ends a dial whose responder is below
-// MinimumProtocolVersion and charges the responder exactly as the session path
-// does: the evidence is the same welcome, so the health record must not depend
-// on which dial happened to read it. Inside a running incompatible-version ban
-// the charge does not accumulate (penalizeOldProtocolPeer), so a dial that
-// keeps meeting the peer cannot slide the ban.
+// MinimumProtocolVersion and reacts exactly as the session path does
+// (reactToIncompatibleDial): the evidence is the same welcome, so the health
+// record must not depend on which dial happened to read it. evidence says
+// what stands behind the welcome — the intro of a proven v2 session is
+// penalised, a v1 welcome before auth_ok is a claim and only paces the
+// address. Inside a running incompatible-version ban the charge does not
+// accumulate (penalizeOldProtocolPeer), so a dial that keeps meeting the peer
+// cannot slide the ban.
 //
 // Callers on the connection manager's dial worker must NOT use it: there the
-// penalty is applied once by onCMDialFailed from incompatibleProtocolError.
+// reaction runs once in onCMDialFailed from incompatibleProtocolError.
 //
-// Takes peerMu (and, via penalizeOldProtocolPeer, the domains nested under it),
-// so the caller holds no domain mutex.
-func (s *Service) refuseIncompatibleWelcome(address domain.PeerAddress, welcome protocol.Frame) error {
+// Takes peerMu (and the domains nested under it), so the caller holds no
+// domain mutex.
+func (s *Service) refuseIncompatibleWelcome(address domain.PeerAddress, welcome protocol.Frame, evidence versionEvidence) error {
 	err := validateProtocolHandshake(welcome)
 	if err == nil {
 		return nil
 	}
-	s.penalizeOldProtocolPeer(address, domain.ProtocolVersion(welcome.Version), domain.ProtocolVersion(welcome.MinimumProtocolVersion), domain.ClientVersion(welcome.ClientVersion))
-	return fmt.Errorf("%w: %v", errIncompatibleProtocol, err)
+	refusal := incompatibleVersionOf(welcome, evidence, err)
+	s.reactToIncompatibleDial(address, refusal)
+	return refusal
+}
+
+// versionEvidenceOf is what stands behind a welcome: the intro of a proven v2
+// session, or a v1 frame nothing proves.
+func versionEvidenceOf(proven bool) versionEvidence {
+	if proven {
+		return versionProven
+	}
+	return versionClaimed
 }
 
 // welcomeChallenge is the challenge of a v1 welcome. A welcome without one is

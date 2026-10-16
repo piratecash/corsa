@@ -385,13 +385,13 @@ Eviction cleans up all associated state (health, peer type, version, persisted m
 
 When internet drops, TCP sockets may linger for minutes due to OS-level retransmission timeouts — even after the heartbeat has declared the peer `stalled`. These zombie connections occupy a slot in `inboundConns` and block outbound dial attempts to the same host (because `connectedHostsLocked` would see the host as already connected).
 
-The `evictStaleInboundConns` sweep runs on every bootstrap tick (~2 s) and force-closes inbound TCP connections whose peer health state is `stalled`. This frees the host slot so the remote peer's retry loop can re-establish the connection. Additionally, `connectedHostsLocked` excludes stalled inbound connections when computing the set of connected hosts — allowing `peerDialCandidates` to attempt a fresh outbound connection to the same host without waiting for the zombie socket to time out.
+The `evictStaleInboundConns` sweep runs on every bootstrap tick (~2 s) and force-closes inbound TCP connections on which no frame has arrived for `inboundSessionIdleTimeout` (2 min 45 s, per-connection `lastActivity`; the read loop's own deadline for a session's next frame is the same bound). This frees the host slot so the remote peer's retry loop can re-establish the connection. Additionally, `connectedHostsLocked` excludes stalled inbound connections when computing the set of connected hosts — allowing `peerDialCandidates` to attempt a fresh outbound connection to the same host without waiting for the zombie socket to time out.
 
 Only an authenticated peer connection reserves its host: `connectedHostsLocked` counts an inbound connection once it is tracked, i.e. it completed authentication (v1 `auth_session` or v2 `session_proof`). A silent socket (a probe, a scanner), a hello without auth and an unfinished handshake do not block outbound dials to the host, because only the closing of a tracked connection emits the `InboundClosed` hint and the exclusion would otherwise last until the next periodic fill (30 s). See [routing.md](../routing.md), "Which connections reserve a host".
 
 Recovery timeline after internet outage:
 
-1. Heartbeat detects unresponsive peer within ~2 min 45 s (heartbeat interval + pong timeout)
+1. Heartbeat detects unresponsive peer within ~2 min 14 s on the dialler's side (75 s + 14 s jitter + 45 s pong timeout); the listener closes the session after 2 min 45 s without a frame (`inboundSessionIdleTimeout`)
 2. Peer health transitions to `stalled`
 3. Next bootstrap tick force-closes the zombie TCP socket and unblocks the host slot
 4. Remote peer's retry loop (or local outbound retry) re-establishes the connection
@@ -409,6 +409,12 @@ Peer addresses may be `.onion` hostnames (Tor hidden services). When `CORSA_PROX
 - the SOCKS5 handshake uses `ATYP=0x03` (domain name) so the proxy resolves the `.onion` address, not the local node
 - if no `CORSA_PROXY` is configured, `.onion` peer addresses are stored but excluded from dial candidates to avoid constant failed connection attempts
 - non-`.onion` addresses continue to use direct TCP connections regardless of proxy configuration
+- every outbound socket goes through this one rule — the connection manager's sessions, the `syncPeer` recovery dial and the `push_notice` fallback alike
+- whether a name is an overlay name is decided by its top-level domain alone (`.onion`, `.i2p`; any case; the trailing dot of a fully qualified name ignored), not by the validator above: such a name is never dialled or resolved locally. A valid one goes to the proxy in its canonical form; one the validator rejects (`www.<v3>.onion`, an onion name of the wrong length, `foo.i2p` that is not `.b32.i2p`) is refused before any socket. Such names reach a node from other peers, so this holds for addresses the node did not choose
+- the proxy is mandatory for an overlay address: when it cannot be reached the attempt ends with an error, never with a direct connection; an overlay address with no `CORSA_PROXY` is refused before any socket is opened
+- the dial's context bounds the SOCKS5 handshake too: a cancelled dial closes its socket at once instead of waiting for the proxy's answer until the timeout
+
+**Inbound onion connections.** The node's onion service forwards to its single listener, so every inbound onion connection arrives from loopback. Loopback sources are admitted by the loopback inbound class instead of the per-IP bounds: at most 64 connections held at once and 100 new ones in any 10 s for every loopback source together, 16 of the node's 64 v2 handshakes, and no IP ban — a violation closes the connection, or on a v2 session scores the identity it proved ([network_security.md](network_security.md), §1a; the numbers are to be checked by measurement before release). A local process on the same machine falls into the same class.
 
 ## Peer State Lifecycle Diagram
 
@@ -854,13 +860,13 @@ graph TB
 
 При потере интернета TCP-сокеты могут оставаться «живыми» минуты из-за тайм-аутов ретрансмиссии на уровне ОС — даже после того, как heartbeat объявил пир `stalled`. Эти зомби-соединения занимают слот в `inboundConns` и блокируют исходящие попытки подключения к тому же хосту (потому что `connectedHostsLocked` видит хост как уже подключённый).
 
-Очистка `evictStaleInboundConns` выполняется на каждом тике bootstrap (~2 с) и принудительно закрывает inbound TCP-соединения, чей peer health находится в состоянии `stalled`. Это освобождает слот хоста, чтобы retry-цикл удалённого пира мог восстановить соединение. Кроме того, `connectedHostsLocked` исключает зависшие inbound-соединения при вычислении набора подключённых хостов — позволяя `peerDialCandidates` попытаться установить новое исходящее соединение к тому же хосту, не дожидаясь тайм-аута зомби-сокета.
+Очистка `evictStaleInboundConns` выполняется на каждом тике bootstrap (~2 с) и принудительно закрывает inbound TCP-соединения, на которые не приходило ни одного фрейма `inboundSessionIdleTimeout` (2 мин 45 с, per-connection `lastActivity`; собственный дедлайн цикла чтения на следующий фрейм сессии — та же граница). Это освобождает слот хоста, чтобы retry-цикл удалённого пира мог восстановить соединение. Кроме того, `connectedHostsLocked` исключает зависшие inbound-соединения при вычислении набора подключённых хостов — позволяя `peerDialCandidates` попытаться установить новое исходящее соединение к тому же хосту, не дожидаясь тайм-аута зомби-сокета.
 
 Хост резервирует только аутентифицированное peer-соединение: `connectedHostsLocked` учитывает inbound-соединение, когда оно стало tracked, т.е. завершило аутентификацию (v1 `auth_session` или v2 `session_proof`). Молчащий сокет (проба, сканер), hello без auth и незавершённое рукопожатие не блокируют исходящие дозвоны к хосту: hint `InboundClosed` эмитит только закрытие tracked-соединения, и иначе исключение длилось бы до следующего периодического fill (30 с). См. [routing.md](../routing.md), «Какие соединения резервируют хост».
 
 Таймлайн восстановления после обрыва интернета:
 
-1. Heartbeat обнаруживает неотвечающий пир в течение ~2 мин 45 с (интервал heartbeat + тайм-аут pong)
+1. Heartbeat обнаруживает неотвечающий пир в течение ~2 мин 14 с на стороне инициатора (75 с + 14 с jitter + 45 с тайм-аут pong); принимающая сторона закрывает сессию после 2 мин 45 с без фрейма (`inboundSessionIdleTimeout`)
 2. Состояние здоровья пира переходит в `stalled`
 3. Следующий тик bootstrap принудительно закрывает зомби TCP-сокет и освобождает слот хоста
 4. Retry-цикл удалённого пира (или локальный исходящий retry) восстанавливает соединение
@@ -878,6 +884,12 @@ graph TB
 - SOCKS5 рукопожатие использует `ATYP=0x03` (доменное имя), чтобы прокси разрешал `.onion` адрес, а не локальная нода
 - если `CORSA_PROXY` не настроен, `.onion` адреса пиров сохраняются, но исключаются из кандидатов на подключение, чтобы избежать постоянных неудачных попыток
 - non-`.onion` адреса продолжают использовать прямые TCP-соединения вне зависимости от настройки прокси
+- это правило одно для всех исходящих сокетов — сессий менеджера соединений, дозвона восстановления `syncPeer` и запасного пути `push_notice`
+- является ли имя overlay-именем, решает только домен верхнего уровня (`.onion`, `.i2p`; без учёта регистра; завершающая точка полного имени отбрасывается), а не валидатор выше: такое имя никогда не набирается и не разрешается локально. Корректное уходит прокси в каноническом виде; отвергнутое валидатором (`www.<v3>.onion`, onion-имя неверной длины, `foo.i2p`, не являющееся `.b32.i2p`) отвергается до открытия сокета. Такие имена приходят к узлу от других пиров, поэтому это верно и для адресов, которые узел не выбирал
+- для overlay-адреса прокси обязателен: если он недоступен, попытка завершается ошибкой, а не прямым подключением; overlay-адрес без `CORSA_PROXY` отвергается до открытия сокета
+- контекст дозвона ограничивает и рукопожатие SOCKS5: отменённый дозвон сразу закрывает свой сокет, а не ждёт ответа прокси до таймаута
+
+**Входящие onion-соединения.** Onion-сервис узла пересылает на его единственный слушатель, поэтому каждое входящее onion-соединение приходит с loopback. Источники на loopback допускаются классом loopback-входа вместо пределов на IP: не больше 64 одновременно удерживаемых соединений и 100 новых за любые 10 с на все источники loopback вместе, 16 из 64 рукопожатий v2 узла и никакого бана по IP — нарушение закрывает соединение, а на v2-сессии идёт в счёт доказанной ею identity ([network_security.md](network_security.md), §1a; числа нужно проверить замерами перед выпуском). Локальный процесс на той же машине попадает в тот же класс.
 
 ## Диаграмма жизненного цикла состояния одноранговых узлов
 

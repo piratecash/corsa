@@ -68,32 +68,20 @@ func m2PairsFromEnvironment(t *testing.T) int {
 	return want
 }
 
-// m2ShapesFromEnvironment selects shapes by name, because one call of this
-// stand has a wall-clock ceiling and the sweep has to be cut somewhere the
-// report can name.
+// m2ShapeSelection selects shapes by name, because one call of this stand has
+// a wall-clock ceiling and the sweep has to be cut somewhere the report can
+// name. Unset, it runs the two d = 8 forms of the plan.
+func m2ShapeSelection() shapeSelection {
+	return shapeSelection{
+		Variable: "M2_SHAPES",
+		Fallback: []shape{sweepShapes[0], sweepShapes[1]},
+		Accepted: comparisonShapes(),
+	}
+}
+
 func m2ShapesFromEnvironment(t *testing.T) []shape {
 	t.Helper()
-
-	raw := strings.TrimSpace(os.Getenv("M2_SHAPES"))
-	if raw == "" {
-		return []shape{sweepShapes[0], sweepShapes[1]}
-	}
-
-	byName := map[string]shape{}
-	for _, sh := range sweepShapes {
-		byName[sh.name] = sh
-	}
-
-	selected := make([]shape, 0, len(sweepShapes))
-	for _, field := range strings.Split(raw, ",") {
-		name := strings.TrimSpace(field)
-		sh, known := byName[name]
-		if !known {
-			t.Fatalf("M2_SHAPES=%q names %q, which is not one of the sweep shapes", raw, name)
-		}
-		selected = append(selected, sh)
-	}
-	return selected
+	return m2ShapeSelection().fromEnvironment(t)
 }
 
 // m2Policies is the pair the measurement compares: the candidate and the base

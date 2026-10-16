@@ -173,7 +173,7 @@ After `auth_ok`, the peer is authenticated and normal protocol commands can begi
 
 ### ping / pong (either direction)
 
-Heartbeat command sent every 2 minutes on idle connections.
+Heartbeat command. Each side pings on its own schedule: the side that dialled the session every 75 s plus a jitter of up to 14 s, the side that accepted it every 2 min plus up to 14 s; a ping unanswered for 45 s ends the session. The listener waits up to 165 s for the next frame of a session, which covers the 2 min 14 s schedule of every released dialler (v28–v30); the dialler pings more often so that a released listener, which closes an inbound connection after 120 s without a whole frame, always has one. See network_security.md §2 for the read bounds.
 
 #### ping request
 
@@ -242,7 +242,7 @@ sequenceDiagram
 
 - **Initiator sends** `version` in `hello`
 - **Responder checks**: if `initiator.version < responder.minimum_protocol_version`, respond with `error` (code: `incompatible-protocol-version`) and close
-- **Initiator checks**: if `welcome.version < initiator.minimum_protocol_version`, the dial ends before `auth_session` and before any other command, and the responder's health record takes the incompatible-version penalty (`penalizeOldProtocolPeer`: score, accumulating ban, version evidence; inside a running ban only the evidence is updated, so repeated dials cannot slide it — see [network_security.md](network_security.md) §14). Every outbound dial of a node applies this check — the peer sessions and the one-shot service dials that never become sessions (the `syncPeer` recovery dial and the `push_notice` fallback in `sendNoticeToPeer`). The v2 `welcome` intro is checked the same way: the v2 handshake proves who the listener is, not that its version is served
+- **Initiator checks**: if `welcome.version < initiator.minimum_protocol_version`, the dial ends before `auth_session` and before any other command, and what the responder's record takes depends on what stands behind the version. A v1 `welcome` is read before `auth_ok`, so its version is only a claim — a man in the middle can write any version into it in front of an honest node: it is recorded for diagnostics and the next attempt to the address is paced, nothing more (no score, ban, IP ban, version lockout or update reporter). The intro of a v2 session is proven, and only it takes the incompatible-version penalty (`penalizeOldProtocolPeer`: score, accumulating ban, version evidence; inside a running ban only the evidence is updated, so repeated dials cannot slide it — see [network_security.md](network_security.md) §14). Every outbound dial of a node applies this check — the peer sessions and the one-shot service dials that never become sessions (the `syncPeer` recovery dial and the `push_notice` fallback in `sendNoticeToPeer`). The v2 `welcome` intro is checked the same way: the v2 handshake proves who the listener is, not that its version is served
 - **Connection succeeds** if `responder.version >= initiator.minimum_protocol_version`
 
 ### Authentication (node and desktop connections)
@@ -296,9 +296,8 @@ flag, and (c) the `advertise_port` field. The possible outcomes are:
   truth for the "is this peer reachable?" gate, so a frame that omits it
   (or carries a forward-compatible value the responder does not
   recognise) is treated as direct-only. Peer hellos always declare the
-  flag; the `client="desktop"` hello that `LocalRPCClient.OpenSessionAt`
-  sends when `DMCrypto.SyncDirectMessagesFromPeers` dials a peer omits
-  it, so this is a live outcome for current builds, not a legacy one.
+  flag; a client hello (`client="desktop"`) omits it, so this outcome is
+  part of the current protocol, not a legacy one.
 - `match` — observed IP is a world-routable IPv4/IPv6 address. Accepted
   as announceable. The persisted candidate is
   `<observed_ip>:<advertise_port>`, where `advertise_port` is the
@@ -733,7 +732,7 @@ stateDiagram-v2
 
 ### ping / pong (любое направление)
 
-Heartbeat-команда, отправляемая каждые 2 минуты на idle соединениях.
+Heartbeat-команда. Каждая сторона пингует по своему расписанию: инициатор сессии — каждые 75 с плюс джиттер до 14 с, принимающая сторона — каждые 2 мин плюс до 14 с; пинг без pong за 45 с завершает сессию. Принимающая сторона ждёт следующий фрейм сессии до 165 с, что покрывает расписание 2 мин 14 с любого выпущенного инициатора (v28–v30); инициатор пингует чаще, чтобы у выпущенной принимающей стороны, закрывающей входящее соединение после 120 с без целого фрейма, он всегда был. Границы чтения — network_security.md §2.
 
 #### Запрос ping
 
@@ -802,7 +801,7 @@ sequenceDiagram
 
 - **Инициатор отправляет** `version` в `hello`
 - **Ответчик проверяет**: если `initiator.version < responder.minimum_protocol_version`, отвечает `error` (код: `incompatible-protocol-version`) и закрывает соединение
-- **Инициатор проверяет**: если `welcome.version < initiator.minimum_protocol_version`, дозвон завершается до `auth_session` и до любой другой команды, а запись здоровья ответчика получает штраф за несовместимую версию (`penalizeOldProtocolPeer`: score, накопительный бан, свидетельство версии; внутри действующего бана обновляется только свидетельство, поэтому повторные дозвоны не сдвигают его — см. [network_security.md](network_security.md) §14). Эту проверку применяет каждый исходящий дозвон узла — peer-сессии и одноразовые служебные дозвоны, которые сессией не становятся (дозвон восстановления `syncPeer` и запасной путь `push_notice` в `sendNoticeToPeer`). Интро `welcome` сессии v2 проверяется так же: рукопожатие v2 доказывает, кто слушатель, но не то, что его версия обслуживается
+- **Инициатор проверяет**: если `welcome.version < initiator.minimum_protocol_version`, дозвон завершается до `auth_session` и до любой другой команды, а что получает запись ответчика, зависит от того, что стоит за версией. v1-`welcome` читается до `auth_ok`, поэтому его версия — лишь заявление: посредник может вписать в него любую версию перед честным узлом; она записывается в диагностику, а следующая попытка к адресу откладывается — и только (ни score, ни бана, ни бана IP, ни version lockout, ни репортёра обновления). Интро сессии v2 доказано, и только оно получает штраф за несовместимую версию (`penalizeOldProtocolPeer`: score, накопительный бан, свидетельство версии; внутри действующего бана обновляется только свидетельство, поэтому повторные дозвоны не сдвигают его — см. [network_security.md](network_security.md) §14). Эту проверку применяет каждый исходящий дозвон узла — peer-сессии и одноразовые служебные дозвоны, которые сессией не становятся (дозвон восстановления `syncPeer` и запасной путь `push_notice` в `sendNoticeToPeer`). Интро `welcome` сессии v2 проверяется так же: рукопожатие v2 доказывает, кто слушатель, но не то, что его версия обслуживается
 - **Соединение успешно** если `responder.version >= initiator.minimum_protocol_version`
 
 ### Аутентификация (node и desktop соединения)
@@ -856,10 +855,8 @@ sequenceDiagram
   истины для гейта «достижимость пира», поэтому фрейм, в котором флаг
   опущен (или несёт forward-совместимое значение, которого ответчик не
   знает), трактуется как direct-only. Peer hello всегда объявляет флаг;
-  hello с `client="desktop"`, который `LocalRPCClient.OpenSessionAt`
-  отправляет, когда `DMCrypto.SyncDirectMessagesFromPeers` дозванивается
-  до пира, его опускает, так что это живой исход для текущих сборок, а
-  не legacy.
+  клиентский hello (`client="desktop"`) его опускает, так что этот исход —
+  часть текущего протокола, а не legacy.
 - `match` — наблюдаемый IP является world-routable IPv4/IPv6 адресом.
   Принимается как announceable. Персистируемый кандидат —
   `<observed_ip>:<advertise_port>`, где `advertise_port` — self-reported

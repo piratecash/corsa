@@ -27,7 +27,6 @@ package node
 //     from one defer, so a newly added return site cannot leak frames.
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -218,12 +217,21 @@ func (s *Service) runPeerSession(ctx context.Context, address domain.PeerAddress
 			// A refusal that says nothing against the address
 			// (isUnchargedDialRefusal: a v1 answer refused by pin or
 			// binding, a held fall back or v2 retry, a listener's refusal,
-			// another owner than the dial named) is not a failure of the
+			// another owner than the dial named, a probe answered by a node
+			// that speaks v2) is not a failure of the
 			// address (onCMDialFailed): nothing is charged, and the loop
 			// stops — a refusal by pin already holds the fall back to v1
 			// at the address, and this path has no v2 to try instead.
 			if isUnchargedDialRefusal(err) {
 				log.Warn().Err(err).Str("peer", string(address)).Msg("peer_session_stopped_dial_refused_not_charged")
+				return
+			}
+			// Incompatible protocol — no point retrying until the peer
+			// upgrades. The reaction already ran where the version was
+			// read (reactToIncompatibleDial): a claimed version only paces
+			// the address and must not be charged here on top of it.
+			if errors.Is(err, errIncompatibleProtocol) {
+				log.Warn().Str("peer", string(address)).Msg("peer_session_stopped_incompatible_protocol")
 				return
 			}
 			// servePeerSession calls markPeerDisconnected before
@@ -242,15 +250,6 @@ func (s *Service) runPeerSession(ctx context.Context, address domain.PeerAddress
 				s.markPeerDisconnected(address, err)
 			}
 
-			// Incompatible protocol — no point retrying until the peer
-			// upgrades.  Exit the loop; peerDialCandidates will re-try
-			// this peer after cooldown expires (exponential backoff via
-			// ConsecutiveFailures) so it gets another chance eventually.
-			if errors.Is(err, errIncompatibleProtocol) {
-				log.Warn().Str("peer", string(address)).Msg("peer_session_stopped_incompatible_protocol")
-				return
-			}
-
 			select {
 			case <-ctx.Done():
 				return
@@ -266,15 +265,15 @@ func (s *Service) openPeerSession(ctx context.Context, address domain.PeerAddres
 	// Budgeted. This is the legacy session path (ensurePeerSessions), inert
 	// while the connection manager is wired — but a dial path that is dead
 	// today and unbudgeted tomorrow is how a ceiling quietly stops holding.
-	rawConn, err := s.dialPeerWithBudget(ctx, address, dialTimeout)
+	// It speaks v1 only, so on a node that speaks v2 it opens v1 only where
+	// the probe allows it (dialLegacyTransport), the full hello following on
+	// the probe's connection.
+	transport, err := s.dialLegacyTransport(ctx, address, s.budgetedSessionDialer(address))
 	if err != nil {
-		return false, fmt.Errorf("%w: %w", errPeerDialTransport, err)
+		s.reactToIncompatibleDial(address, err)
+		return false, err
 	}
-	conn, err := netcore.NewMeteredConn(rawConn, &s.transportTotals)
-	if err != nil {
-		_ = rawConn.Close()
-		return false, fmt.Errorf("meter peer session socket %s: %w", address, err)
-	}
+	rawConn, conn := transport.raw, transport.metered
 	var session *peerSession
 	defer func() {
 		s.accumulateSessionTraffic(address, conn)
@@ -297,12 +296,10 @@ func (s *Service) openPeerSession(ctx context.Context, address domain.PeerAddres
 	}()
 
 	_ = conn.SetDeadline(time.Now().Add(handshakeTimeout))
-	reader := bufio.NewReader(conn)
-	cid := s.allocateConnID("openPeerSession", address)
 	session = &peerSession{
 		address:      address,
 		peerIdentity: domain.PeerIdentity{},
-		connID:       cid,
+		connID:       transport.connID,
 		conn:         conn,
 		metered:      conn,
 		sendCh:       make(chan peerSendItem, peerSessionSendBuffer),
@@ -315,10 +312,14 @@ func (s *Service) openPeerSession(ctx context.Context, address domain.PeerAddres
 	if err := s.attachOutboundNetCore(session); err != nil {
 		return false, err
 	}
-	go s.readPeerSession(reader, session)
+	go s.readPeerSession(transport.reader, session)
 
 	welcome, err := s.peerSessionRequest(session, protocol.Frame{}, "welcome", true)
 	if err != nil {
+		s.forgetLegacyObservedWithoutWelcome(address, transport)
+		return false, err
+	}
+	if err := s.refuseFullLegacyWelcome(address, transport, welcome); err != nil {
 		return false, err
 	}
 	// This path speaks v1 only, so every welcome it reads is a v1 welcome:
@@ -328,7 +329,7 @@ func (s *Service) openPeerSession(ctx context.Context, address domain.PeerAddres
 		log.Warn().Err(err).Str("peer", string(address)).Msg("outbound_v1_refused_identity_pinned_to_v2")
 		return false, err
 	}
-	if err := s.refuseIncompatibleWelcome(address, welcome); err != nil {
+	if err := s.refuseIncompatibleWelcome(address, welcome, versionClaimed); err != nil {
 		log.Warn().Err(err).Str("peer", string(address)).Int("version", welcome.Version).Msg("outbound_peer_protocol_too_old")
 		return false, err
 	}
@@ -463,7 +464,8 @@ func (s *Service) servePeerSession(ctx context.Context, session *peerSession) er
 		}
 	}
 
-	pingTimer := time.NewTimer(nextHeartbeatDuration())
+	liveness := s.sessionLiveness()
+	pingTimer := time.NewTimer(liveness.diallerPingDelay())
 	defer pingTimer.Stop()
 
 	// writerDone signals that the managed writer goroutine has exited —
@@ -538,7 +540,7 @@ func (s *Service) servePeerSession(ctx context.Context, session *peerSession) er
 				s.retirePeerSession(session, err)
 				return err
 			}
-			pingTimer.Reset(nextHeartbeatDuration())
+			pingTimer.Reset(liveness.diallerPingDelay())
 		case item := <-session.sendCh:
 			outbound := item.Frame
 			// A tracked item always takes the managed writer path: it
@@ -1070,7 +1072,8 @@ func (s *Service) publishPeerDisconnected(address domain.PeerAddress, charge pee
 // ensures a stale dial (generation mismatch) is discarded with zero
 // externally visible mutations.
 func (s *Service) openPeerSessionForCM(ctx context.Context, address domain.PeerAddress) (*peerSession, error) {
-	// v2 first, v1 for an old node (session_secure.go). A transport error
+	// TLS first; v1 only on the connection of a probe that allowed it
+	// (session_dial_choice.go). A transport error
 	// comes back wrapped in errPeerDialTransport, so rollout telemetry still
 	// separates "never reached them" from a handshake refusal by type.
 	transport, err := s.dialPeerTransportForCM(ctx, address)
@@ -1102,7 +1105,9 @@ func (s *Service) openPeerSessionForCM(ctx context.Context, address domain.PeerA
 	enableTCPKeepAlive(rawConn)
 
 	_ = conn.SetDeadline(time.Now().Add(handshakeTimeout))
-	reader := bufio.NewReader(conn)
+	// The transport's reader: on a v1 connection the probe opened, it holds
+	// what the listener sent behind the probe's answer.
+	reader := transport.reader
 	session := &peerSession{
 		address:      address,
 		peerIdentity: domain.PeerIdentity{},
@@ -1147,7 +1152,10 @@ func (s *Service) openPeerSessionForCM(ctx context.Context, address domain.PeerA
 		welcome = transport.proven.Intro
 	} else if welcome, err = s.peerSessionRequest(session, protocol.Frame{}, "welcome", true); err != nil {
 		closeOnError()
-		s.forgetV1MarkWithoutWelcome(address, transport)
+		s.forgetLegacyObservedWithoutWelcome(address, transport)
+		return nil, err
+	} else if err := s.refuseFullLegacyWelcome(address, transport, welcome); err != nil {
+		closeOnError()
 		return nil, err
 	} else if err := s.refuseLegacyWelcome(address, domain.PeerIdentityFromWire(welcome.Address)); err != nil {
 		closeOnError()
@@ -1157,16 +1165,13 @@ func (s *Service) openPeerSessionForCM(ctx context.Context, address domain.PeerA
 	if err := validateProtocolHandshake(welcome); err != nil {
 		closeOnError()
 		log.Warn().Err(err).Str("peer", string(address)).Int("version", welcome.Version).Msg("outbound_peer_protocol_too_old")
-		// Do NOT call penalizeOldProtocolPeer here — the caller (CM dial worker)
-		// propagates the error to onCMDialFailed, which applies the penalty
-		// exactly once. The structured error carries confirmed version evidence
-		// so the penalty path can set lockouts and feed the reporter set.
-		return nil, &incompatibleProtocolError{
-			PeerVersion:   domain.ProtocolVersion(welcome.Version),
-			PeerMinimum:   domain.ProtocolVersion(welcome.MinimumProtocolVersion),
-			ClientVersion: welcome.ClientVersion,
-			Cause:         err,
-		}
+		// Do NOT react here — the caller (CM dial worker) propagates the
+		// error to onCMDialFailed, which reacts exactly once
+		// (reactToIncompatibleDial). The structured error carries the version
+		// evidence and what stands behind it: the intro of a proven v2
+		// session may set lockouts and feed the reporter set, a v1 welcome
+		// before auth_ok is a claim and only paces the address.
+		return nil, incompatibleVersionOf(welcome, versionEvidenceOf(transport.proven != nil), err)
 	}
 	// Self-loopback guard: if the welcome carries our own Ed25519
 	// identity we just dialled ourselves. Tear down the session
@@ -1854,23 +1859,12 @@ func (s *Service) onCMDialFailed(address domain.PeerAddress, err error, incompat
 		return
 	}
 	if incompatible {
-		// Extract confirmed version evidence from the structured error
-		// returned by openPeerSessionForCM. Without evidence, the penalty
-		// path still applies ban scoring but correctly skips the reporter
-		// set and persisted lockout (direction guard requires non-zero
-		// peerMinimum > local protocol version).
-		var peerVersion, peerMinimum domain.ProtocolVersion
-		var clientVersion domain.ClientVersion
-		var ipe *incompatibleProtocolError
-		if errors.As(err, &ipe) {
-			peerVersion = ipe.PeerVersion
-			peerMinimum = ipe.PeerMinimum
-			// On the CM path the handshake failed before
-			// onCMSessionEstablished could record the client version from
-			// the welcome, so the evidence carries it to the penalty.
-			clientVersion = domain.ClientVersion(ipe.ClientVersion)
-		}
-		s.penalizeOldProtocolPeer(address, peerVersion, peerMinimum, clientVersion)
+		// The structured error returned by openPeerSessionForCM carries the
+		// version evidence and what stands behind it. Only a version proven
+		// inside a v2 session is penalised; a claimed one — the probe's
+		// answer, a v1 welcome before auth_ok, or no structured evidence at
+		// all — only paces the address (reactToIncompatibleDial).
+		s.reactToIncompatibleDial(address, err)
 	} else {
 		s.markPeerDisconnected(address, err)
 	}

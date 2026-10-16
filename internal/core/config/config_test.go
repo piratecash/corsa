@@ -1065,3 +1065,49 @@ func containsName(names []string, name string) bool {
 	i := sort.SearchStrings(names, name)
 	return i < len(names) && names[i] == name
 }
+
+// TestV2TLSFirstFromEnv pins the operator's TLS-first switch: TLS-first is ON by
+// default — unset, empty, truthy or unrecognised — and only an explicit
+// falsey CORSA_V2_TLS_FIRST switches it off. The config field is named for
+// the deviation (DisableV2TLSFirst), so a struct-literal config.Node keeps
+// TLS-first on.
+func TestV2TLSFirstFromEnv(t *testing.T) {
+	for _, v := range []string{"", "  ", "1", "true", "yes", "on", "ON", "wat"} {
+		t.Setenv("CORSA_V2_TLS_FIRST", v)
+		if v2TLSFirstDisabledFromEnv() {
+			t.Fatalf("CORSA_V2_TLS_FIRST=%q: TLS-first switched off, want on", v)
+		}
+	}
+	for _, v := range []string{"0", "false", "no", "off", "OFF", " False "} {
+		t.Setenv("CORSA_V2_TLS_FIRST", v)
+		if !v2TLSFirstDisabledFromEnv() {
+			t.Fatalf("CORSA_V2_TLS_FIRST=%q: TLS-first still on, want off", v)
+		}
+		if !Default().Node.DisableV2TLSFirst {
+			t.Fatalf("CORSA_V2_TLS_FIRST=%q: Default().Node.DisableV2TLSFirst = false", v)
+		}
+	}
+	t.Setenv("CORSA_V2_TLS_FIRST", "")
+	if Default().Node.DisableV2TLSFirst {
+		t.Fatal("Default().Node.DisableV2TLSFirst = true, want TLS-first on by default")
+	}
+	if (Node{}).DisableV2TLSFirst {
+		t.Fatal("a literal config.Node switches TLS-first off")
+	}
+}
+
+// TestAnUnrecognisedV2TLSFirstValueIsReported pins that a value which is
+// neither falsey nor truthy keeps TLS-first on and is reported as
+// unrecognised, so the operator is warned that the switch did not take.
+func TestAnUnrecognisedV2TLSFirstValueIsReported(t *testing.T) {
+	for _, v := range []string{"wat", "of", "disable", "2"} {
+		if disabled, recognised := parseV2TLSFirst(v); disabled || recognised {
+			t.Fatalf("%q: disabled=%v recognised=%v, want TLS-first on and the value unrecognised", v, disabled, recognised)
+		}
+	}
+	for _, v := range []string{"", "  ", "1", "true", "yes", "on", "0", "false", "no", "off"} {
+		if _, recognised := parseV2TLSFirst(v); !recognised {
+			t.Fatalf("%q: reported as unrecognised", v)
+		}
+	}
+}

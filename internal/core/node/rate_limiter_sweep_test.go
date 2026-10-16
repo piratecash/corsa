@@ -28,6 +28,7 @@ func TestSweepIdleRateLimiters_ReclaimsEveryLimiterPastItsHorizon(t *testing.T) 
 		announceLimiter: newAnnounceRateLimiter(clock.now),
 		connLimiter:     newConnRateLimiter(clock.now),
 		cmdLimiter:      newCommandRateLimiter(clock.now),
+		loopbackInbound: newLoopbackInboundClass(productionLoopbackInboundBounds(0), productionIdentityPenaltyPolicy(), clock.now),
 	}
 	for name, horizon := range map[string]time.Duration{
 		"relay":    svc.relayLimiter.buckets.sweepAfter,

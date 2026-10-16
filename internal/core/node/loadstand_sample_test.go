@@ -148,8 +148,9 @@ type loadStandNodeSample struct {
 // loadStandNodeSource is where a node's sample is read from. The sample does
 // not care whether the node runs in this process: in-process it is the
 // Service itself (loadStandServiceSource); a stand whose nodes run as
-// separate processes — which the owner requires for acceptance measurements
-// (decision №36) — implements it over RPC (fetchRouteSummary,
+// separate processes — required for acceptance measurements, since only
+// processes with addresses in distinct source groups load a node the way a
+// real network does — implements it over RPC (fetchRouteSummary,
 // getResourceBreakdown, fetchDatagramSummary). Every method may therefore do
 // I/O, so each takes a context and can fail.
 //

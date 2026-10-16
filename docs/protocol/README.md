@@ -108,6 +108,7 @@ Environment variables:
 - `CORSA_IDENTITY_PATH` — path to identity key file
 - `CORSA_TRUST_STORE_PATH` — path to trust store
 - `CORSA_SECURE_SESSION_STORE_PATH` — downgrade protection of the secure session v2 (identities that proved v2, endpoints reached over it); default `secure-sessions-<port>.json` next to the peers file ([session_v2.md](session_v2.md))
+- `CORSA_V2_TLS_FIRST` — operator's TLS-first switch of the secure session v2, on unless explicitly falsey; off, a dial where v1 is not ruled out opens with the identity-less probe ([session_v2.md](session_v2.md), "Switching TLS-first off")
 - `CORSA_PEERS_PATH` — path to persisted peer list
 - `CORSA_PROXY` — SOCKS5 proxy for Tor/overlay networks
 - `CORSA_NODE_TYPE` — `full` (relay) or `client` (no relay)
@@ -276,6 +277,7 @@ Push and gossip are independent mechanisms that run in parallel. Push optimises 
 - `CORSA_IDENTITY_PATH` — путь к файлу identity key
 - `CORSA_TRUST_STORE_PATH` — путь к trust store
 - `CORSA_SECURE_SESSION_STORE_PATH` — защита от понижения защищённой сессии v2 (identity, доказавшие v2, и адреса, достигнутые по ней); по умолчанию `secure-sessions-<port>.json` рядом с файлом пиров ([session_v2.md](session_v2.md))
+- `CORSA_V2_TLS_FIRST` — выключатель оператора «TLS-первым» защищённой сессии v2, включён, пока значение явно не ложно; выключен — дозвон, где v1 не исключён, начинается с пробы без identity ([session_v2.md](session_v2.md), «Выключение TLS-первым»)
 - `CORSA_PEERS_PATH` — путь к персистированному списку пиров
 - `CORSA_PROXY` — SOCKS5-прокси для Tor/overlay сетей
 - `CORSA_NODE_TYPE` — `full` (relay) или `client` (без relay)

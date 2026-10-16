@@ -19,7 +19,7 @@ Per-command-group documentation for the CORSA RPC layer. For architecture overvi
 | [Metrics](metrics.md) | `fetchTrafficHistory` | [metrics.md](metrics.md) |
 | [Routing](routing.md) | `fetchRouteTable`, `fetchRouteSummary`, `fetchRouteLookup` | [routing.md](routing.md) |
 | [Datagram](datagram.md) | `fetchDatagramSummary`, `datagramReachable`, `explainDatagramRoute` | [datagram.md](datagram.md) |
-| [Secure Session](secure_session.md) | `listEndpointBindings`, `removeEndpointBinding`, `demoteEndpointBindings` (loopback only) | [secure_session.md](secure_session.md) |
+| [Secure Session](secure_session.md) | `listEndpointBindings`, `removeEndpointBinding`, `demoteEndpointBindings`, `listEndpointDialDelays`, `retryEndpointDial` (loopback only) | [secure_session.md](secure_session.md) |
 | [Diagnostic](diagnostic.md) | `recordPeerTrafficByConnID`, `recordPeerTrafficByIP`, `recordAllPeerTraffic`, `stopPeerTrafficRecording` | [diagnostic.md](diagnostic.md) |
 
 ### Universal Dispatch
@@ -73,7 +73,7 @@ This endpoint is only available when the server is created with a `NodeProvider`
 | [Метрики](metrics.md) | `fetchTrafficHistory` | [metrics.md](metrics.md) |
 | [Маршрутизация](routing.md) | `fetchRouteTable`, `fetchRouteSummary`, `fetchRouteLookup` | [routing.md](routing.md) |
 | [Датаграммы](datagram.md) | `fetchDatagramSummary`, `datagramReachable`, `explainDatagramRoute` | [datagram.md](datagram.md) |
-| [Защищённая сессия](secure_session.md) | `listEndpointBindings`, `removeEndpointBinding`, `demoteEndpointBindings` (только loopback) | [secure_session.md](secure_session.md) |
+| [Защищённая сессия](secure_session.md) | `listEndpointBindings`, `removeEndpointBinding`, `demoteEndpointBindings`, `listEndpointDialDelays`, `retryEndpointDial` (только loopback) | [secure_session.md](secure_session.md) |
 | [Диагностика](diagnostic.md) | `recordPeerTrafficByConnID`, `recordPeerTrafficByIP`, `recordAllPeerTraffic`, `stopPeerTrafficRecording` | [diagnostic.md](diagnostic.md) |
 
 ### Универсальная диспетчеризация

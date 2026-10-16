@@ -146,6 +146,42 @@ demoteEndpointBindings 192.0.2.1:64646 192.0.2.3:64646
 demoteEndpointBindings endpoints=192.0.2.1:64646,192.0.2.3:64646 confirm=<token>
 ```
 
+### listEndpointDialDelays
+
+The endpoints this node delays its dials to: an endpoint whose **correct** answer — to the identity-less probe, or a v1 welcome — claimed a protocol version below this node's minimum is held on its own, 30 s doubling per further such answer up to 6 h, so that a node that really is old is not redialled every few seconds ([session_v2.md](../protocol/session_v2.md)). No argument.
+
+```json
+[{"endpoint": "192.0.2.5:64646", "reason": "claimed_old_version", "claimed_version": 27, "steps": 3, "next_attempt_at": "2026-10-16T12:02:00Z"}]
+```
+
+| Field | |
+|---|---|
+| `reason` | `claimed_old_version` — the only reason today |
+| `claimed_version` | the version the latest answer announced; a claim, not a proof |
+| `steps` | how often the delay has grown since it last started over; the next one doubles on it |
+| `next_attempt_at` | when the next dial may go; past once the wait ran out, while the count still holds |
+
+The delay is in memory only. Only a successful outbound connection to the same endpoint — v2 proven, or v1 after `auth_ok` with the pin respected — resets it; `retryEndpointDial` ends the current wait and keeps the count; an inbound session of the same identity changes nothing.
+
+### retryEndpointDial
+
+Ends the current old-version wait of **one** endpoint after its peer was upgraded. It is one more attempt, not a reset: `steps` stays, so a peer that still claims an old version is delayed longer, not from 30 s again. The command dials nothing — the node's next dial there may go at once. It lifts nothing else: not the v2 retry backoff (`dials_held_by_v2_retry_backoff`), not the connection manager's cooldown, no pin, no endpoint binding, no other address's delay — a v1 answer from a bound endpoint stays a refused downgrade, and a pinned identity stays refused over v1. An endpoint without a delay is refused with a validation error.
+
+| Argument | Type |
+|---|---|
+| `endpoint` | host:port, required — exactly one |
+
+```json
+{"endpoint": "192.0.2.5:64646", "retried": true}
+```
+
+#### CLI / console
+
+```
+listEndpointDialDelays
+retryEndpointDial 192.0.2.5:64646
+```
+
 ---
 
 ## Русский
@@ -245,4 +281,40 @@ listEndpointBindings identity=<id> limit=50
 removeEndpointBinding 192.0.2.2:64646
 demoteEndpointBindings 192.0.2.1:64646 192.0.2.3:64646
 demoteEndpointBindings endpoints=192.0.2.1:64646,192.0.2.3:64646 confirm=<token>
+```
+
+### listEndpointDialDelays
+
+Адреса, дозвоны к которым узел задерживает: адрес, чей **корректный** ответ — на пробу без identity или v1-welcome — заявил версию протокола ниже минимума этого узла, задерживается сам по себе: 30 с, удвоение на каждый следующий такой ответ, до 6 ч, чтобы действительно старый узел не перезванивался каждые несколько секунд ([session_v2.md](../protocol/session_v2.md)). Аргументов нет.
+
+```json
+[{"endpoint": "192.0.2.5:64646", "reason": "claimed_old_version", "claimed_version": 27, "steps": 3, "next_attempt_at": "2026-10-16T12:02:00Z"}]
+```
+
+| Поле | |
+|---|---|
+| `reason` | `claimed_old_version` — сегодня единственная причина |
+| `claimed_version` | версия, которую объявил последний ответ; заявление, не доказательство |
+| `steps` | сколько раз задержка выросла с последнего сброса; следующая удвоится от него |
+| `next_attempt_at` | когда может пойти следующий дозвон; в прошлом, когда ожидание кончилось, а счёт ещё действует |
+
+Задержка живёт только в памяти. Сбрасывает её только успешное исходящее подключение к тому же адресу — доказанная v2 или v1 после `auth_ok` с соблюдением pin; `retryEndpointDial` заканчивает текущее ожидание и сохраняет счёт; входящая сессия той же identity ничего не меняет.
+
+### retryEndpointDial
+
+Заканчивает текущее ожидание задержки за старую версию **одного** адреса после обновления пира. Это ещё одна попытка, а не сброс: `steps` сохраняется, поэтому пир, всё ещё заявляющий старую версию, задерживается дольше, а не снова с 30 с. Команда ничего не набирает — следующий дозвон узла туда может пойти сразу. Больше ничего не снимает: ни отступ повторов v2 (`dials_held_by_v2_retry_backoff`), ни охлаждение менеджера соединений, ни pin, ни привязку адреса, ни задержки других адресов — ответ v1 от привязанного адреса остаётся отвергнутым понижением, а закреплённая identity — отвергнутой по v1. Адрес без задержки отклоняется ошибкой валидации.
+
+| Аргумент | Тип |
+|---|---|
+| `endpoint` | host:port, обязательный — ровно один |
+
+```json
+{"endpoint": "192.0.2.5:64646", "retried": true}
+```
+
+#### CLI / консоль
+
+```
+listEndpointDialDelays
+retryEndpointDial 192.0.2.5:64646
 ```

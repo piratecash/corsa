@@ -11,6 +11,8 @@ package overlaysim
 
 import (
 	"fmt"
+	"math"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -23,6 +25,196 @@ import (
 // below without anybody remembering to add it to each of them.
 var allPolicies = []policy{
 	policyBaseline, policyInitiatedLimit, policySecondPass, policyCandidateC1,
+}
+
+// --- the full-depth shapes sit beside the plan, not inside it ----------------
+
+// TestFullDepthShapesSitBesideThePlanNotInsideIt pins the full-depth forms and
+// the d = 16 candidate's: exactly three full-depth forms, B = 2d, deep enough
+// to reach every populated XOR level, and reachable by name from the M1
+// comparison and the M2 driver — while the measurement plan itself, whose
+// shapes TestM1ConnectivitySweep intersects its verdict over, stays as it was.
+//
+// ⚠️ The plan is pinned literally. A shape slipped into sweepShapes would not
+// fail any other test; it would quietly change the cross-shape verdict that
+// the published M1 results were read from.
+func TestFullDepthShapesSitBesideThePlanNotInsideIt(t *testing.T) {
+	plan := []shape{
+		{name: "1k×8", nodes: 1_000, degree: 8, budget: 16},
+		{name: "10k×8", nodes: 10_000, degree: 8, budget: 16},
+		{name: "10k×64", nodes: 10_000, degree: 64, budget: 128},
+		{name: "64k×8", nodes: 64_000, degree: 8, budget: 16},
+	}
+	fullDepth := []shape{
+		{name: "1k×12", nodes: 1_000, degree: 12, budget: 24},
+		{name: "1k×16", nodes: 1_000, degree: 16, budget: 32},
+		{name: "10k×16", nodes: 10_000, degree: 16, budget: 32},
+	}
+
+	if !slices.Equal(sweepShapes, plan) {
+		t.Fatalf("the measurement plan moved: sweepShapes = %v, want %v", sweepShapes, plan)
+	}
+	if !slices.Equal(fullDepthShapes, fullDepth) {
+		t.Fatalf("fullDepthShapes = %v, want exactly the full-depth forms and the d = 16 candidate's: %v",
+			fullDepthShapes, fullDepth)
+	}
+	for _, sh := range fullDepthShapes {
+		if sh.budget != 2*sh.degree {
+			t.Fatalf("%s: B = %d, the full-depth forms fix B = 2d = %d", sh.name, sh.budget, 2*sh.degree)
+		}
+		if levels := int(math.Ceil(math.Log2(float64(sh.nodes)))); sh.degree < levels+2 {
+			t.Fatalf("%s: d = %d is below ⌈log₂N⌉ + 2 = %d, so the table cannot reach every "+
+				"populated level and the experiment would not test what it claims", sh.name,
+				sh.degree, levels+2)
+		}
+		if slices.ContainsFunc(sweepShapes, func(planned shape) bool { return planned.name == sh.name }) {
+			t.Fatalf("%s is in the measurement plan: TestM1ConnectivitySweep would intersect "+
+				"its verdict over it", sh.name)
+		}
+	}
+
+	if got := comparisonShapes(); !slices.Equal(got, slices.Concat(plan, fullDepth)) {
+		t.Fatalf("comparisonShapes() = %v, want the plan in its order followed by the "+
+			"full-depth forms", got)
+	}
+
+	t.Run("M2_SHAPES names the full-depth forms", func(t *testing.T) {
+		t.Setenv("M2_SHAPES", "1k×12,1k×16,10k×16")
+		if got := m2ShapesFromEnvironment(t); !slices.Equal(got, fullDepth) {
+			t.Fatalf("M2_SHAPES=1k×12,1k×16,10k×16 selected %v", got)
+		}
+	})
+	t.Run("the M2 default is still the two d = 8 forms", func(t *testing.T) {
+		t.Setenv("M2_SHAPES", "")
+		if got := m2ShapesFromEnvironment(t); !slices.Equal(got, plan[:2]) {
+			t.Fatalf("unset M2_SHAPES selected %v, want %v", got, plan[:2])
+		}
+	})
+}
+
+// TestEveryDriverAcceptsExactlyTheShapesItIsAllowed pins, driver by driver,
+// which drivers measure the d = 16 candidate: M2/M5, M4 and M3-a take the
+// d = 16 forms by name, M6 does not (its grid is registered for d = 8 alone),
+// and every driver run with its variable unset measures exactly what it measured
+// before the forms existed.
+//
+// ⚠️ The refusal is the half that matters. One shared list of accepted names
+// would have opened M6 to the new forms as a side effect, and nothing else in
+// the package would have noticed.
+func TestEveryDriverAcceptsExactlyTheShapesItIsAllowed(t *testing.T) {
+	candidate := []shape{
+		{name: "1k×16", nodes: 1_000, degree: 16, budget: 32},
+		{name: "10k×16", nodes: 10_000, degree: 16, budget: 32},
+	}
+	tenK8 := []shape{{name: "10k×8", nodes: 10_000, degree: 8, budget: 16}}
+	smallPlan := []shape{
+		{name: "1k×8", nodes: 1_000, degree: 8, budget: 16},
+		{name: "10k×8", nodes: 10_000, degree: 8, budget: 16},
+	}
+
+	for _, driver := range []struct {
+		selection shapeSelection
+		fallback  []shape
+		takesD16  bool
+	}{
+		{m2ShapeSelection(), smallPlan, true},
+		{m4ShapeSelection(), tenK8, true},
+		{m3aShapeSelection(), tenK8, true},
+		{m6ShapeSelection(), smallPlan, false},
+	} {
+		name := driver.selection.Variable
+		t.Run(name+" unset keeps the old default", func(t *testing.T) {
+			got, err := driver.selection.parse("")
+			if err != nil {
+				t.Fatalf("%s unset: %v", name, err)
+			}
+			if !slices.Equal(got, driver.fallback) {
+				t.Fatalf("%s unset selected %v, want %v", name, got, driver.fallback)
+			}
+		})
+		t.Run(name+" on the d = 16 forms", func(t *testing.T) {
+			got, err := driver.selection.parse(" 1k×16 , 10k×16 ")
+			if !driver.takesD16 {
+				if err == nil {
+					t.Fatalf("%s accepted the d = 16 forms (%v) — this driver does not "+
+						"measure the d = 16 candidate", name, got)
+				}
+				if !strings.Contains(err.Error(), name) || !strings.Contains(err.Error(), "1k×16") {
+					t.Fatalf("%s: the refusal does not name the variable and the form: %v", name, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("%s refused the d = 16 forms: %v", name, err)
+			}
+			if !slices.Equal(got, candidate) {
+				t.Fatalf("%s=1k×16,10k×16 selected %v, want %v", name, got, candidate)
+			}
+		})
+		t.Run(name+" refuses a name nobody defined", func(t *testing.T) {
+			if got, err := driver.selection.parse("1k×14"); err == nil {
+				t.Fatalf("%s=1k×14 was accepted as %v — d = 12–14 is not a candidate to measure", name, got)
+			}
+		})
+	}
+}
+
+// TestSingleQuotaSelectionRunsOnlyWhatWasAsked covers the quota M4 and M3-a are
+// measured at. They run only after the neighbour-selection quota is fixed, and
+// the quota is a run input, so it is read from M4_QUOTA / M3A_QUOTA rather than
+// edited into the sources — which would change the stamp a second time.
+//
+// ⚠️ Same three outcomes as M1_QUOTAS: absent runs the default, malformed or
+// out of range is REFUSED. A quota the operator did not ask for must not run
+// as if they had.
+func TestSingleQuotaSelectionRunsOnlyWhatWasAsked(t *testing.T) {
+	d8 := []shape{{name: "10k×8", nodes: 10_000, degree: 8, budget: 16}}
+	d16 := []shape{{name: "10k×16", nodes: 10_000, degree: 16, budget: 32}}
+	both := slices.Concat(d8, d16)
+
+	for _, selection := range []quotaSelection{m4QuotaSelection(), m3aQuotaSelection()} {
+		name := selection.Variable
+		if selection.Fallback != 1 {
+			t.Fatalf("%s: the default quota is %d, the measured configuration is quota 1",
+				name, selection.Fallback)
+		}
+		for _, good := range []struct {
+			raw    string
+			shapes []shape
+			want   int
+		}{
+			{"", d16, 1},
+			{" 4 ", d16, 4},
+			{"16", d16, 16},
+			{"0", both, 0},
+			{"8", both, 8},
+		} {
+			got, err := selection.parse(good.raw, good.shapes)
+			if err != nil {
+				t.Fatalf("%s=%q on %v: %v", name, good.raw, good.shapes, err)
+			}
+			if got != good.want {
+				t.Fatalf("%s=%q on %v gave %d, want %d", name, good.raw, good.shapes, got, good.want)
+			}
+		}
+		for _, bad := range []struct {
+			raw    string
+			shapes []shape
+		}{
+			{"two", d16},
+			{"1,2", d16},
+			{"0-4", d16},
+			{"-1", d16},
+			{"17", d16},
+			{"9", both}, // within d = 16, beyond d = 8: a run over both may not clip one away
+		} {
+			if got, err := selection.parse(bad.raw, bad.shapes); err == nil {
+				t.Fatalf("%s=%q on %v was accepted as %d", name, bad.raw, bad.shapes, got)
+			} else if !strings.Contains(err.Error(), name) {
+				t.Fatalf("%s=%q: the refusal does not name the variable: %v", name, bad.raw, err)
+			}
+		}
+	}
 }
 
 // --- the quota grid is an instruction, not a suggestion ----------------------

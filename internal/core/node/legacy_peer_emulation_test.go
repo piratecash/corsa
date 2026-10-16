@@ -16,6 +16,8 @@ import (
 
 	"github.com/piratecash/corsa/internal/core/config"
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/identity"
+	"github.com/piratecash/corsa/internal/core/sessionv2"
 )
 
 // legacy_peer_emulation_test.go emulates a released build that speaks only
@@ -66,10 +68,25 @@ type legacyVersionProxy struct {
 	// node's own pubkey/boxkey/signature are left as they are; the node
 	// under test refuses on the identity before it ever checks them.
 	victimAddress string
+	// victim, when set, replaces the whole identity of every hello and
+	// welcome the old node sends — address, pubkey, box key and its
+	// signature, all public — so the relabelled frame is self-consistent and
+	// passes every check a v1 frame can be given without a proof.
+	victim *identity.Identity
+	// verbatim forwards the old node's frames untouched: the old node is a
+	// released binary that announces its own version (startRecordingProxy in
+	// release_interop_test.go, build tag interop).
+	verbatim bool
 
 	mu             sync.Mutex
 	conns          []net.Conn
 	nodeFrameTypes []string
+	// nodeHelloIdentified says, per hello the node under test sent, whether
+	// it carried an identity: the probe does not, the full hello does.
+	nodeHelloIdentified []bool
+	// nodeClientHellos is how many connections the node under test opened
+	// with a TLS ClientHello rather than a v1 line.
+	nodeClientHellos int
 	// stopped is set by close: a connection accepted just before the
 	// listener closed is then closed at once instead of escaping the
 	// close that already ran over conns.
@@ -82,27 +99,45 @@ type legacyVersionProxy struct {
 // announces once rewritten.
 func startLegacyVersionProxy(t *testing.T, target string, side oldPeerSide, version int) *legacyVersionProxy {
 	t.Helper()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("proxy listen: %v", err)
-	}
-	proxy := &legacyVersionProxy{listener: listener, target: target, side: side, version: version}
-	proxy.done.Add(1)
-	go proxy.acceptLoop()
-	t.Cleanup(proxy.close)
-	return proxy
+	return launchLegacyProxy(t, &legacyVersionProxy{target: target, side: side, version: version})
 }
 
 // startImpersonatingProxy is startLegacyVersionProxy that also relabels the
 // old node's hello/welcome as coming from victim.
 func startImpersonatingProxy(t *testing.T, target string, side oldPeerSide, version int, victim domain.PeerIdentity) *legacyVersionProxy {
 	t.Helper()
-	proxy := startLegacyVersionProxy(t, target, side, version)
-	proxy.victimAddress = victim.String()
+	return launchLegacyProxy(t, &legacyVersionProxy{target: target, side: side, version: version, victimAddress: victim.String()})
+}
+
+// startIdentitySwappingProxy is startLegacyVersionProxy that also relabels
+// the old node's hello/welcome with victim's whole public identity.
+func startIdentitySwappingProxy(t *testing.T, target string, side oldPeerSide, version int, victim *identity.Identity) *legacyVersionProxy {
+	t.Helper()
+	return launchLegacyProxy(t, &legacyVersionProxy{target: target, side: side, version: version, victim: victim})
+}
+
+// launchLegacyProxy starts a fully configured proxy. Every field is set before
+// the accept loop starts: a field written after it would race with the copy
+// goroutines that read it.
+func launchLegacyProxy(t *testing.T, proxy *legacyVersionProxy) *legacyVersionProxy {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("proxy listen: %v", err)
+	}
+	proxy.listener = listener
+	proxy.done.Add(1)
+	go proxy.acceptLoop()
+	t.Cleanup(proxy.close)
 	return proxy
 }
 
-var legacyAddressField = regexp.MustCompile(`"address":"[^"]*"`)
+var (
+	legacyAddressField = regexp.MustCompile(`"address":"[^"]*"`)
+	legacyPubKeyField  = regexp.MustCompile(`"pubkey":"[^"]*"`)
+	legacyBoxKeyField  = regexp.MustCompile(`"boxkey":"[^"]*"`)
+	legacyBoxSigField  = regexp.MustCompile(`"boxsig":"[^"]*"`)
+)
 
 func (p *legacyVersionProxy) address() string { return p.listener.Addr().String() }
 
@@ -217,9 +252,14 @@ func resetConn(conn net.Conn) {
 // wrapped in errProxyWrite; a read that ended returns the read error.
 func (p *legacyVersionProxy) copy(dst io.Writer, src io.Reader, rewrite, record bool) error {
 	reader := bufio.NewReader(src)
+	opening := true
 	for {
 		line, err := reader.ReadBytes('\n')
 		if len(line) > 0 {
+			if record && opening {
+				p.recordOpening(line)
+			}
+			opening = false
 			out := line
 			if rewrite {
 				out = p.announceOldVersion(line)
@@ -241,14 +281,52 @@ func (p *legacyVersionProxy) copy(dst io.Writer, src io.Reader, rewrite, record 
 // Non-JSON bytes (a TLS ClientHello) carry no type and are ignored.
 func (p *legacyVersionProxy) recordFrameType(line []byte) {
 	var head struct {
-		Type string `json:"type"`
+		Type    string `json:"type"`
+		Address string `json:"address"`
 	}
 	if json.Unmarshal(line, &head) != nil || head.Type == "" {
 		return
 	}
 	p.mu.Lock()
 	p.nodeFrameTypes = append(p.nodeFrameTypes, head.Type)
+	if head.Type == "hello" {
+		p.nodeHelloIdentified = append(p.nodeHelloIdentified, head.Address != "")
+	}
 	p.mu.Unlock()
+}
+
+// recordOpening remembers whether the node under test opened a connection
+// with a TLS ClientHello: its first byte is a handshake record, never JSON.
+func (p *legacyVersionProxy) recordOpening(line []byte) {
+	if line[0] != sessionv2.TLSRecordHandshake {
+		return
+	}
+	p.mu.Lock()
+	p.nodeClientHellos++
+	p.mu.Unlock()
+}
+
+// clientHellos is how many connections the node under test opened with a
+// TLS ClientHello so far.
+func (p *legacyVersionProxy) clientHellos() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.nodeClientHellos
+}
+
+// nodeHellos reports, per hello the node under test sent so far, whether it
+// carried an identity.
+func (p *legacyVersionProxy) nodeHellos() []bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]bool(nil), p.nodeHelloIdentified...)
+}
+
+// connections is how many connections the proxy has forwarded.
+func (p *legacyVersionProxy) connections() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.conns) / 2
 }
 
 // nodeSentFrame reports whether the node under test sent a frame of this type.
@@ -264,6 +342,9 @@ func (p *legacyVersionProxy) nodeSentFrame(frameType string) bool {
 }
 
 func (p *legacyVersionProxy) announceOldVersion(line []byte) []byte {
+	if p.verbatim {
+		return line
+	}
 	var head struct {
 		Type string `json:"type"`
 	}
@@ -274,6 +355,12 @@ func (p *legacyVersionProxy) announceOldVersion(line []byte) []byte {
 	line = bytes.Replace(line, current, []byte(fmt.Sprintf(`"version":%d`, p.version)), 1)
 	if p.victimAddress != "" {
 		line = legacyAddressField.ReplaceAll(line, []byte(fmt.Sprintf(`"address":%q`, p.victimAddress)))
+	}
+	if p.victim != nil {
+		line = legacyAddressField.ReplaceAll(line, []byte(fmt.Sprintf(`"address":%q`, p.victim.Address)))
+		line = legacyPubKeyField.ReplaceAll(line, []byte(fmt.Sprintf(`"pubkey":%q`, identity.PublicKeyBase64(p.victim.PublicKey))))
+		line = legacyBoxKeyField.ReplaceAll(line, []byte(fmt.Sprintf(`"boxkey":%q`, identity.BoxPublicKeyBase64(p.victim.BoxPublicKey))))
+		line = legacyBoxSigField.ReplaceAll(line, []byte(fmt.Sprintf(`"boxsig":%q`, identity.SignBoxKeyBinding(p.victim))))
 	}
 	return line
 }

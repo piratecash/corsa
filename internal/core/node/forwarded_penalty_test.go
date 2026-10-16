@@ -17,11 +17,12 @@ import (
 	"github.com/piratecash/corsa/internal/testutil/edforgery"
 )
 
-// forwarded_penalty_test.go pins owner decision №27 on the paths that are not
-// signature checks: content the immediate peer FORWARDS — a non-DM message of
-// some other author, a receipt for some other recipient — is refused in
-// silence. What this node does not know (the author's key, a subscription that
-// ended a moment ago) is this node's state, not the forwarder's violation.
+// forwarded_penalty_test.go pins, on the paths that are not signature checks,
+// that only the immediate peer's own fault is charged to it: content the
+// immediate peer FORWARDS — a non-DM message of some other author, a receipt
+// for some other recipient — is refused in silence. What this node does not
+// know (the author's key, a subscription that ended a moment ago) is this
+// node's state, not the forwarder's violation.
 
 // requireBanSurfaceLive proves the IP ban observable works on the routable
 // fixture, so a zero read elsewhere is a measurement and not a broken probe.

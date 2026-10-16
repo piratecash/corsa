@@ -58,7 +58,9 @@ func (c *budgetedConn) Close() error {
 
 // dialPeerWithBudget is dialPeer plus admission: it takes a unit of the shared
 // ceiling BEFORE the dial and hands it to the socket, so a refusal means no
-// socket is opened at all.
+// socket is opened at all. It is the only budgeted dial: going through
+// dialPeer, every auxiliary socket also honours the SOCKS5 proxy for overlay
+// addresses and ctx, and a failed or cancelled dial returns its unit at once.
 //
 // The returned conn releases the unit on Close. Callers that already close the
 // connection — directly or through a NetCore wrapper that owns it — need no
@@ -70,22 +72,6 @@ func (s *Service) dialPeerWithBudget(ctx context.Context, address domain.PeerAdd
 	}
 
 	conn, err := s.dialPeer(ctx, address, timeout)
-	if err != nil {
-		reservation.Release()
-		return nil, err
-	}
-	return &budgetedConn{Conn: conn, reservation: reservation}, nil
-}
-
-// dialAddressWithBudget is the same gate for the one path that bypasses
-// dialPeer entirely and calls the net package directly.
-func (s *Service) dialAddressWithBudget(address domain.PeerAddress, timeout time.Duration) (net.Conn, error) {
-	reservation, err := s.connBudget.Reserve(connbudget.DirectionAuxiliary)
-	if err != nil {
-		return nil, err
-	}
-
-	conn, err := net.DialTimeout("tcp", string(address), timeout)
 	if err != nil {
 		reservation.Release()
 		return nil, err

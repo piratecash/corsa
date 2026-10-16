@@ -226,6 +226,50 @@ func (_c *MockRoutingProvider_ListenerRefusalStats_Call) RunAndReturn(run func()
 	return _c
 }
 
+// LoopbackInboundStats provides a mock function for the type MockRoutingProvider
+func (_mock *MockRoutingProvider) LoopbackInboundStats() domain.LoopbackInboundStats {
+	ret := _mock.Called()
+
+	if len(ret) == 0 {
+		panic("no return value specified for LoopbackInboundStats")
+	}
+
+	var r0 domain.LoopbackInboundStats
+	if returnFunc, ok := ret.Get(0).(func() domain.LoopbackInboundStats); ok {
+		r0 = returnFunc()
+	} else {
+		r0 = ret.Get(0).(domain.LoopbackInboundStats)
+	}
+	return r0
+}
+
+// MockRoutingProvider_LoopbackInboundStats_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'LoopbackInboundStats'
+type MockRoutingProvider_LoopbackInboundStats_Call struct {
+	*mock.Call
+}
+
+// LoopbackInboundStats is a helper method to define mock.On call
+func (_e *MockRoutingProvider_Expecter) LoopbackInboundStats() *MockRoutingProvider_LoopbackInboundStats_Call {
+	return &MockRoutingProvider_LoopbackInboundStats_Call{Call: _e.mock.On("LoopbackInboundStats")}
+}
+
+func (_c *MockRoutingProvider_LoopbackInboundStats_Call) Run(run func()) *MockRoutingProvider_LoopbackInboundStats_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run()
+	})
+	return _c
+}
+
+func (_c *MockRoutingProvider_LoopbackInboundStats_Call) Return(loopbackInboundStats domain.LoopbackInboundStats) *MockRoutingProvider_LoopbackInboundStats_Call {
+	_c.Call.Return(loopbackInboundStats)
+	return _c
+}
+
+func (_c *MockRoutingProvider_LoopbackInboundStats_Call) RunAndReturn(run func() domain.LoopbackInboundStats) *MockRoutingProvider_LoopbackInboundStats_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // ModeSelectionStats provides a mock function for the type MockRoutingProvider
 func (_mock *MockRoutingProvider) ModeSelectionStats() routing.ModeSelectionStats {
 	ret := _mock.Called()

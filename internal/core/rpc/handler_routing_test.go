@@ -52,6 +52,7 @@ func newMockRoutingProvider(
 	m.On("TransportTrafficStats").Return(domain.TransportTrafficStats{}).Maybe()
 	m.On("SessionKindStats").Return(domain.SessionKindStats{}).Maybe()
 	m.On("ListenerRefusalStats").Return(domain.ListenerRefusalStats{}).Maybe()
+	m.On("LoopbackInboundStats").Return(domain.LoopbackInboundStats{}).Maybe()
 	m.On("SecureSessionStoreStats").Return(domain.SecureSessionStoreStats{}).Maybe()
 	// fetchRouteLookup reads HealthSnapshot (full per-pair tiers) for its
 	// Dead/cooldown filters + CompositeScore ranking, because the published
@@ -428,6 +429,7 @@ func TestFetchRouteSummary_OverloadEngagedCyclesSurfaced(t *testing.T) {
 	provider.On("TransportTrafficStats").Return(domain.TransportTrafficStats{}).Once()
 	provider.On("SessionKindStats").Return(domain.SessionKindStats{}).Once()
 	provider.On("ListenerRefusalStats").Return(domain.ListenerRefusalStats{}).Once()
+	provider.On("LoopbackInboundStats").Return(domain.LoopbackInboundStats{}).Once()
 
 	table := rpc.NewCommandTable()
 	rpc.RegisterRoutingCommands(table, provider)
@@ -493,6 +495,7 @@ func TestFetchRouteSummary_DigestStatsSurfaced(t *testing.T) {
 	provider.On("TransportTrafficStats").Return(domain.TransportTrafficStats{}).Once()
 	provider.On("SessionKindStats").Return(domain.SessionKindStats{}).Once()
 	provider.On("ListenerRefusalStats").Return(domain.ListenerRefusalStats{}).Once()
+	provider.On("LoopbackInboundStats").Return(domain.LoopbackInboundStats{}).Once()
 
 	table := rpc.NewCommandTable()
 	rpc.RegisterRoutingCommands(table, provider)
@@ -554,6 +557,7 @@ func TestFetchRouteSummary_JournalChurnSurfaced(t *testing.T) {
 	provider.On("TransportTrafficStats").Return(domain.TransportTrafficStats{}).Once()
 	provider.On("SessionKindStats").Return(domain.SessionKindStats{}).Once()
 	provider.On("ListenerRefusalStats").Return(domain.ListenerRefusalStats{}).Once()
+	provider.On("LoopbackInboundStats").Return(domain.LoopbackInboundStats{}).Once()
 
 	table := rpc.NewCommandTable()
 	rpc.RegisterRoutingCommands(table, provider)
@@ -1338,6 +1342,10 @@ func TestFetchRouteSummaryKeepsSubSecondPrecisionOnRolloutTimestamps(t *testing.
 		StartedAt: started,
 		ReadAt:    now,
 	}).Once()
+	provider.On("LoopbackInboundStats").Return(domain.LoopbackInboundStats{
+		StartedAt: started,
+		ReadAt:    now,
+	}).Once()
 
 	table := rpc.NewCommandTable()
 	rpc.RegisterRoutingCommands(table, provider)
@@ -1361,6 +1369,7 @@ func TestFetchRouteSummaryKeepsSubSecondPrecisionOnRolloutTimestamps(t *testing.
 		{"secure_sessions", "read_at"},
 		{"session_kinds", "read_at"},
 		{"listener_refusals", "read_at"},
+		{"loopback_inbound", "read_at"},
 	} {
 		section, ok := result[probe.section].(map[string]interface{})
 		if !ok {

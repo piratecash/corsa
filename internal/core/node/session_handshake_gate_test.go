@@ -118,6 +118,7 @@ func (script preAuthDatagramScript) run(ln net.Listener) error {
 // counts two frames instead of one.
 func TestOutboundSessionDatagramBeforeAuthOKIsOffThePlane(t *testing.T) {
 	svc := newDatagramSessionService(t)
+	asLegacyOnlyDialler(svc)
 
 	// The line the peer pipelines. mustDatagramLine already terminates it, which
 	// is what lets the script concatenate it with the frame that follows.

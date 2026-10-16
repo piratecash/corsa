@@ -11,7 +11,8 @@ import (
 
 // A verified auth_session admits the connection but proves nothing that may
 // be attributed to the identity: the signature names neither verifier nor
-// connection and can be relayed (N1, session-security-v2 С-9).
+// connection and can be relayed, so nothing punitive or budgetary may be
+// keyed on it.
 func TestVerifyAuthSessionProvesNoIdentity(t *testing.T) {
 	t.Parallel()
 	id, hello := testIdentityHello(t)

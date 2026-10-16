@@ -3,7 +3,10 @@ package node
 import (
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
+
+	"github.com/piratecash/corsa/internal/core/domain"
 )
 
 // inbound_handshakes.go bounds the inbound v2 handshakes a node runs at once
@@ -68,7 +71,7 @@ type handshakeSource struct {
 // handshakeSourceOf names the source of an accepted connection.
 func handshakeSourceOf(addr net.Addr, perIPLimits bool) handshakeSource {
 	ip := net.ParseIP(remoteIP(addr))
-	loopback := ip != nil && ip.IsLoopback()
+	loopback := inboundSourceClassOf(addr) == domain.InboundSourceLoopback
 	return handshakeSource{
 		group:     sourceGroupOf(ip, remoteIP(addr)),
 		perSource: perIPLimits && ip != nil && !loopback,
@@ -91,7 +94,8 @@ func sourceGroupOf(ip net.IP, raw string) string {
 
 // inboundHandshakes counts the inbound v2 handshakes in flight. Its own leaf
 // mutex: it is taken with no domain mutex held and nothing is called under
-// it.
+// it. loopbackGauge mirrors loopbackInFlight for the diagnostics, which read
+// it without the mutex.
 type inboundHandshakes struct {
 	bounds handshakeBounds
 
@@ -99,6 +103,8 @@ type inboundHandshakes struct {
 	inFlight         int
 	loopbackInFlight int
 	bySource         map[string]int
+
+	loopbackGauge atomic.Int64
 }
 
 func newInboundHandshakes(bounds handshakeBounds) *inboundHandshakes {
@@ -149,6 +155,7 @@ func (h *inboundHandshakes) enter(source handshakeSource) (func(), error) {
 	h.inFlight++
 	if source.loopback {
 		h.loopbackInFlight++
+		h.loopbackGauge.Store(int64(h.loopbackInFlight))
 	}
 	var once sync.Once
 	return func() { once.Do(func() { h.leave(source.loopback) }) }, nil
@@ -160,5 +167,12 @@ func (h *inboundHandshakes) leave(loopback bool) {
 	h.inFlight--
 	if loopback {
 		h.loopbackInFlight--
+		h.loopbackGauge.Store(int64(h.loopbackInFlight))
 	}
+}
+
+// loopbackRunning is the loopback handshakes past their ClientHello record
+// now. Lock-free.
+func (h *inboundHandshakes) loopbackRunning() int {
+	return int(h.loopbackGauge.Load())
 }

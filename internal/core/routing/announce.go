@@ -1121,8 +1121,7 @@ func (a *AnnounceLoop) Run(ctx context.Context) {
 	// trigger never touches the ticker, so the forced-full cadence
 	// is provably unchanged by the pacing window.
 	runTriggeredCycle := func() {
-		a.lastDeltaCycleAt = time.Time{}
-		a.announceToAllPeers(ctx)
+		a.announceTriggeredCycle(ctx)
 		lastTriggeredCycle = time.Now()
 	}
 
@@ -1163,6 +1162,14 @@ func (a *AnnounceLoop) Run(ctx context.Context) {
 			runTriggeredCycle()
 		}
 	}
+}
+
+// announceTriggeredCycle runs the cycle a trigger asks for. The delta
+// pacing stamp is cleared first because a trigger means the table changed
+// and the change must go out now, not wait for the next delta slot.
+func (a *AnnounceLoop) announceTriggeredCycle(ctx context.Context) {
+	a.lastDeltaCycleAt = time.Time{}
+	a.announceToAllPeers(ctx)
 }
 
 // TriggerUpdate requests an announcement cycle. Safe to call from any

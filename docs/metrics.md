@@ -99,11 +99,11 @@ The cumulative counters are atomics and the live gauge an immutable value behind
 
 The node also counts the connections its listener refuses before any session exists, by the bound that refused them, and the refusals that went out without the TLS refusal alert because every alert sender was busy (`internal/core/node/listener_refusal.go`; the refusal itself is described in `docs/protocol/session_v2.md`, "Listener refusals").
 
-- **point of measurement** — `listenerRefusals.refuse`, the one place a refused connection is answered: from the accept loop (connection rate, per-IP cap, connection budget) and from the connection handler (blacklist, inbound limit at registration, the per-source, node and loopback-share bounds on inbound v2 handshakes);
+- **point of measurement** — `listenerRefusals.refuse`, the one place a refused connection is answered: from the accept loop (connection rate and per-IP cap of an external source, the loopback class's rate and held-connections bound, connection budget) and from the connection handler (blacklist, inbound limit at registration, the per-source, node and loopback-share bounds on inbound v2 handshakes);
 - **`closed_without_alert`** — part of the per-bound counts, not in addition to them. It rises only when more refusals arrive at once than the pool of 256 alert senders, or one source's share of 8, can hold; the refusals happen either way;
 - **reset and pairing** — in memory only, never reset by reading; `started_at` is the node's start and `read_at` the moment of the loads, with the pairing rule of the transport block.
 
-The counters are atomics outside every domain mutex of `node.Service` (`docs/locking.md`); `fetchRouteSummary` serves them lock-free in its `listener_refusals` section (`docs/rpc/routing.md`).
+The counters are atomics outside every domain mutex of `node.Service` (`docs/locking.md`); `fetchRouteSummary` serves them lock-free in its `listener_refusals` section (`docs/rpc/routing.md`). The refusals of loopback sources are also counted apart and reported, with the loopback class's own closes for a violation or a banned identity, in the `loopback_inbound` section (`docs/protocol/network_security.md`, §1a).
 
 ### Datagram handler calls
 
@@ -275,11 +275,11 @@ graph TB
 
 Узел также считает соединения, которые его слушатель отверг до появления сессии, по ограничению, которое их отвергло, и отказы, ушедшие без TLS-alert отказа, потому что все отправители alert были заняты (`internal/core/node/listener_refusal.go`; сам отказ описан в `docs/protocol/session_v2.md`, «Отказы слушателя»).
 
-- **точка измерения** — `listenerRefusals.refuse`, единственное место, где отвергнутому соединению отвечают: из цикла `accept` (частота соединений, предел на IP, бюджет соединений) и из обработчика соединения (чёрный список, входящий лимит при регистрации, пределы входящих рукопожатий v2 на источник, на узел и доля loopback);
+- **точка измерения** — `listenerRefusals.refuse`, единственное место, где отвергнутому соединению отвечают: из цикла `accept` (частота соединений и предел на IP внешнего источника, частота и предел удерживаемых соединений класса loopback, бюджет соединений) и из обработчика соединения (чёрный список, входящий лимит при регистрации, пределы входящих рукопожатий v2 на источник, на узел и доля loopback);
 - **`closed_without_alert`** — входит в счётчики по ограничениям, а не прибавляется к ним. Растёт, только когда одновременно приходит больше отказов, чем вмещает пул из 256 отправителей alert или доля одного источника в 8; сами отказы происходят в любом случае;
 - **сброс и пары** — только в памяти, чтением не сбрасываются; `started_at` — старт узла, `read_at` — момент загрузки, правило пар — как у транспортного блока.
 
-Счётчики — atomic вне всех доменных мьютексов `node.Service` (`docs/locking.md`); `fetchRouteSummary` отдаёт их без блокировок в разделе `listener_refusals` (`docs/rpc/routing.md`).
+Счётчики — atomic вне всех доменных мьютексов `node.Service` (`docs/locking.md`); `fetchRouteSummary` отдаёт их без блокировок в разделе `listener_refusals` (`docs/rpc/routing.md`). Отказы источников на loopback считаются ещё и отдельно и вместе с собственными закрытиями класса loopback за нарушение или забаненную identity отдаются в разделе `loopback_inbound` (`docs/protocol/network_security.md`, §1a).
 
 ### Вызовы обработчиков датаграмм
 

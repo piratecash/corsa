@@ -148,8 +148,9 @@ peer's reputation to prevent cooldown bypass.
 5. Session enters `servePeerSession()`: initial one-time sync —
    `fetch_contacts` and flush pending frames always run, `get_peers` is
    sent conditionally via `shouldRequestPeers()` (skipped once aggregate
-   status is `Healthy`). Then steady-state with heartbeat pings every
-   ~2 min and event-driven push frames only (no periodic polling).
+   status is `Healthy`). Then steady-state with heartbeat pings (every
+   75 s from the dialler, every 2 min from the listener) and event-driven
+   push frames only (no periodic polling).
 
 **Inbound:**
 
@@ -212,7 +213,7 @@ sequenceDiagram
     S->>S: Verify signature
     alt Valid
         S->>S: Enter servePeerSession()
-        Note over C,S: Session active:<br/>heartbeat ~2 min,<br/>event-driven push only
+        Note over C,S: Session active:<br/>heartbeat 75 s (C) / 2 min (S),<br/>event-driven push only
     else Invalid
         S->>S: Ban points += 1000
         Note over S: 1000 pts → 24h IP ban
@@ -293,13 +294,18 @@ sequenceDiagram
 
 ### Health monitoring
 
-- **Heartbeat** — both sides of a connection independently send pings
-  every ~2 min (with jitter up to 15 s). Outbound sessions ping via
-  `servePeerSession`; inbound connections ping via `inboundHeartbeat`.
-  If no pong arrives within 45 s (`pongStallTimeout`), the peer is
-  declared stalled and the connection is torn down. This bidirectional
-  approach ensures each node has its own proof of liveness regardless of
-  who initiated the TCP connection.
+- **Heartbeat** — both sides of a connection independently send pings:
+  the dialler every 75 s (`diallerHeartbeatInterval`, via
+  `servePeerSession`), the listener every 2 min (`heartbeatInterval`, via
+  `inboundHeartbeat`), each with a jitter of up to 14 s. If no pong
+  arrives within 45 s (`pongStallTimeout`), the peer is declared stalled
+  and the connection is torn down. This bidirectional approach ensures
+  each node has its own proof of liveness regardless of who initiated the
+  TCP connection. The dialler pings more often because the listener's read
+  bound waits for its pings: a session's listener closes it after 165 s
+  without the first byte of a frame (`inboundSessionIdleTimeout`), a
+  released listener (v28–v30) after 120 s without a whole frame. See
+  [protocol/network_security.md](protocol/network_security.md) §2.
 - **Initial sync** — on connect only: `fetch_contacts` and flush pending
   frames always run; `get_peers` is sent conditionally via
   `shouldRequestPeers()` (skipped once the node is `Healthy`). No periodic
@@ -555,6 +561,9 @@ only — the node never auto-rewrites its advertise setting.
 
 **Tor support:** Setting `CORSA_PROXY=127.0.0.1:9050` routes connections through
 a SOCKS5 proxy, enabling `.onion` address resolution.
+Inbound onion connections arrive from loopback and are admitted by the loopback
+inbound class rather than the per-IP bounds, and loopback is never banned by its
+IP ([network_security.md](protocol/network_security.md), §1a).
 
 ### Trust model (TOFU)
 
@@ -935,7 +944,8 @@ sequenceDiagram
    синхронизация — `fetch_contacts` и flush pending-фреймов выполняются
    всегда, `get_peers` отправляется условно через `shouldRequestPeers()`
    (пропускается после достижения `Healthy`). Затем steady-state с
-   heartbeat-пингами каждые ~2 мин и только
+   heartbeat-пингами (инициатор — каждые 75 с, принимающая сторона —
+   каждые 2 мин) и только
    event-driven push-фреймами (без периодического polling).
 
 **Входящее:**
@@ -998,7 +1008,7 @@ sequenceDiagram
     S->>S: Проверка подписи
     alt Валидна
         S->>S: Переход в servePeerSession()
-        Note over C,S: Сессия активна:<br/>heartbeat ~2 мин,<br/>только event-driven push
+        Note over C,S: Сессия активна:<br/>heartbeat 75 с (C) / 2 мин (S),<br/>только event-driven push
     else Невалидна
         S->>S: Ban-баллы += 1000
         Note over S: 1000 баллов → бан IP 24ч
@@ -1079,13 +1089,19 @@ sequenceDiagram
 
 ### Мониторинг здоровья
 
-- **Heartbeat** — обе стороны соединения независимо шлют пинги каждые ~2 мин
-  (с jitter до 15 с). Исходящие сессии пингуют через `servePeerSession`;
-  входящие соединения — через `inboundHeartbeat`. Если pong не приходит
-  в течение 45 с (`pongStallTimeout`), peer объявляется зависшим и
-  соединение разрывается. Двусторонний подход гарантирует каждому узлу
-  независимое подтверждение liveness, вне зависимости от того, кто
-  инициировал TCP-соединение.
+- **Heartbeat** — обе стороны соединения независимо шлют пинги:
+  инициатор — каждые 75 с (`diallerHeartbeatInterval`, через
+  `servePeerSession`), принимающая сторона — каждые 2 мин
+  (`heartbeatInterval`, через `inboundHeartbeat`), обе с jitter до 14 с.
+  Если pong не приходит в течение 45 с (`pongStallTimeout`), peer
+  объявляется зависшим и соединение разрывается. Двусторонний подход
+  гарантирует каждому узлу независимое подтверждение liveness, вне
+  зависимости от того, кто инициировал TCP-соединение. Инициатор пингует
+  чаще, потому что его пингов ждёт граница чтения принимающей стороны:
+  она закрывает сессию после 165 с без первого байта фрейма
+  (`inboundSessionIdleTimeout`), выпущенная сборка (v28–v30) — после
+  120 с без целого фрейма. См.
+  [protocol/network_security.md](protocol/network_security.md) §2.
 - **Начальная синхронизация** — только при подключении: `fetch_contacts`
   и flush pending фреймов выполняются всегда; `get_peers` отправляется
   условно — решение принимает `shouldRequestPeers()` по текущему
@@ -1346,6 +1362,9 @@ Peer'ы классифицируются по доступным сетевым 
 
 **Поддержка Tor:** Установка `CORSA_PROXY=127.0.0.1:9050` направляет
 соединения через SOCKS5-прокси, обеспечивая резолв `.onion`-адресов.
+Входящие onion-соединения приходят с loopback и допускаются классом
+loopback-входа, а не пределами на IP, и loopback никогда не банится по IP
+([network_security.md](protocol/network_security.md), §1a).
 
 ### Trust model (TOFU)
 

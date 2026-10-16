@@ -8,10 +8,10 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// showDataDirUnavailable shows a modal error box: a -H windowsgui binary
-// has no console, and without it the app would just never appear.
-func showDataDirUnavailable(text string) error {
-	title, err := windows.UTF16PtrFromString(dataDirUnavailableTitle)
+// showStartupNotice shows a modal error box: a -H windowsgui binary has no
+// console, and without it the app would just never appear.
+func showStartupNotice(text string) error {
+	title, err := windows.UTF16PtrFromString(startupNoticeTitle)
 	if err != nil {
 		return fmt.Errorf("encode notice title: %w", err)
 	}

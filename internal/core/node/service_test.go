@@ -424,6 +424,8 @@ func TestV2NodeHandshakeRequiresSignedAuth(t *testing.T) {
 	}
 }
 
+// From an external source. Loopback is the onion entry and is never banned by
+// its IP: TestALoopbackLegacyViolatorLosesItsConnectionAndBansNobody.
 func TestV2InvalidAuthSignatureAccumulatesBanScore(t *testing.T) {
 	t.Parallel()
 
@@ -449,10 +451,7 @@ func TestV2InvalidAuthSignatureAccumulatesBanScore(t *testing.T) {
 	// the peer-banned notice would go unnoticed.
 	const attempts = 10
 	for i := 0; i < attempts; i++ {
-		conn, err := net.DialTimeout("tcp", svc.externalListenAddress(), 2*time.Second)
-		if err != nil {
-			t.Fatalf("dial attempt %d: %v", i, err)
-		}
+		conn := dialFromSource(t, svc, testExternalIP)
 		reader := bufio.NewReader(conn)
 		writeJSONFrame(t, conn, protocol.Frame{
 			Type:          "hello",
@@ -499,9 +498,9 @@ func TestV2InvalidAuthSignatureAccumulatesBanScore(t *testing.T) {
 		_ = conn.Close()
 	}
 
-	svc.peerMu.RLock()
-	entry := svc.bans["127.0.0.1"]
-	svc.peerMu.RUnlock()
+	svc.ipStateMu.RLock()
+	entry := svc.bans[testExternalIP]
+	svc.ipStateMu.RUnlock()
 	if entry.Score != 1000 {
 		t.Fatalf("expected ban score 1000, got %#v", entry)
 	}
@@ -7302,11 +7301,14 @@ func TestHeartbeatConstants(t *testing.T) {
 		t.Errorf("pongStallTimeout (%v) should be less than heartbeatInterval (%v)", pongStallTimeout, heartbeatInterval)
 	}
 
-	// nextHeartbeatDuration should return values in [heartbeatInterval, heartbeatInterval+15s).
+	// Every ping delay lies in [interval, interval+heartbeatMaxJitter].
+	liveness := productionLiveness()
 	for i := 0; i < 20; i++ {
-		d := nextHeartbeatDuration()
-		if d < heartbeatInterval || d >= heartbeatInterval+15*time.Second {
-			t.Errorf("nextHeartbeatDuration() = %v, want [%v, %v)", d, heartbeatInterval, heartbeatInterval+15*time.Second)
+		if d := liveness.listenerPingDelay(); d < liveness.listenerPingInterval || d > liveness.listenerPingInterval+heartbeatMaxJitter {
+			t.Errorf("listenerPingDelay() = %v, want [%v, %v]", d, liveness.listenerPingInterval, liveness.listenerPingInterval+heartbeatMaxJitter)
+		}
+		if d := liveness.diallerPingDelay(); d < liveness.diallerPingInterval || d > liveness.diallerPingInterval+heartbeatMaxJitter {
+			t.Errorf("diallerPingDelay() = %v, want [%v, %v]", d, liveness.diallerPingInterval, liveness.diallerPingInterval+heartbeatMaxJitter)
 		}
 	}
 }

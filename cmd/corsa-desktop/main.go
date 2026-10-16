@@ -26,6 +26,9 @@ func main() {
 
 	if err := desktop.Run(); err != nil {
 		log.Error().Err(err).Msg("corsa-desktop exited with error")
+		// The log line reaches a terminal only; a refusal the user has to
+		// act on is also shown where a GUI launch can see it.
+		reportPinStoreRefused(err)
 		cleanup()
 		os.Exit(1)
 	}

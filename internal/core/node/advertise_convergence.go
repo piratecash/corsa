@@ -38,10 +38,8 @@ const (
 	advertiseDecisionNonListener advertiseDecision = "non_listener"
 	// advertiseDecisionUndeclaredListener covers a hello whose listener
 	// flag is absent or carries anything but "0"/"1". Peer nodes always
-	// declare the flag; the hello a current desktop sends from
-	// LocalRPCClient.OpenSessionAt (client="desktop", dialled by
-	// DMCrypto.SyncDirectMessagesFromPeers) does not, so this is a live
-	// path for the current version, not a legacy one.
+	// declare the flag; a client hello (client="desktop") does not, so
+	// this is part of the current protocol, not a legacy path.
 	advertiseDecisionUndeclaredListener advertiseDecision = "undeclared_listener"
 	advertiseDecisionMatch              advertiseDecision = "match"
 	advertiseDecisionLocalException     advertiseDecision = "local_exception"

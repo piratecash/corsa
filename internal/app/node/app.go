@@ -50,6 +50,14 @@ func (a *App) Run(ctx context.Context) error {
 		Str("listen", a.service.ListenAddress()).
 		Msg("starting node")
 
+	// A node that must not start (an unsafe or lost pin store, an
+	// unusable connection budget) stops here, before the pprof and RPC
+	// listeners below: it is never reachable at all. The error names the
+	// path and the fix for the operator reading this process's output.
+	if err := a.service.StartupRefusal(); err != nil {
+		return fmt.Errorf("node refuses to start: %w", err)
+	}
+
 	// Opt-in pprof profiling server (CORSA_PPROF_ADDR). Off by default;
 	// loopback-only when set. See internal/core/debugserver. Empty addr
 	// is a no-op (nil error); a non-empty addr that fails to start

@@ -36,6 +36,12 @@ type ListenerRefusalStats struct {
 	// HandshakesLoopback counts v2 handshakes from a loopback source refused
 	// because loopback sources already ran their share of the node bound.
 	HandshakesLoopback uint64
+	// LoopbackConnectionRate counts loopback connections over the loopback
+	// class's rate of new connections.
+	LoopbackConnectionRate uint64
+	// LoopbackConnections counts loopback connections over the loopback
+	// class's bound on connections held at once.
+	LoopbackConnections uint64
 
 	// ClosedWithoutAlert counts refusals closed at once, without the alert,
 	// because every alert sender was busy, or the source's share of them. It

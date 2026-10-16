@@ -111,7 +111,7 @@ func TestANodeWithAFullPinStoreRefusesANewIdentitysSession(t *testing.T) {
 		t.Fatal("a session without a stored pin was established: the listener authenticated the newcomer")
 	}
 	// The listener speaks v2, so the newcomer can only go v1 towards it
-	// through a v1 mark set in reaction to the refusal; the v2 handshake
+	// through a legacy_observed set in reaction to the refusal; the v2 handshake
 	// itself ends without an error to fall back from. A mark set while the
 	// failed setup is handled is there by the time the failure is recorded,
 	// which is what the wait above waited for; a fallback that marked the
@@ -145,15 +145,18 @@ func TestADiallerWithAFullPinStoreDoesNotEstablishOrFallBack(t *testing.T) {
 	})
 	defer stopDialer()
 
-	// Refused twice by the connection manager's own attempts, the second
-	// after the manager reacted to the first: a fallback — inside an attempt
-	// or through a v1 mark its reaction set — shows as a mark or a session.
+	// Refused by the connection manager's own attempts, the later ones after
+	// the manager reacted to the first: a fallback — inside an attempt or
+	// through a legacy_observed its reaction set — shows as a mark or a session. A
+	// full pin store is this node's own limit, so after the first refusal the
+	// address waits for room (the store stays full here) and its next
+	// attempts are held before any socket, not refused again.
 	breached := func() bool {
 		_, v1 := marksOf(dialer)
 		return v1 > 0 || dialer.SessionOutcomeStats().Succeeded > 0
 	}
-	awaitRepeatedRefusal(t, "the pin_store_full refusal",
-		func() uint64 { return dialer.SecureSessionStoreStats().PinRefusalsStoreFull },
+	awaitRepeatedRefusal(t, "the pin_store_full refusal, then the wait for room",
+		refusalThenHolds(dialer, func(stats domain.SecureSessionStoreStats) uint64 { return stats.PinRefusalsStoreFull }),
 		breached)
 	if outcomes := dialer.SessionOutcomeStats(); outcomes.Succeeded > 0 {
 		t.Fatalf("the dialler established a session without a stored pin: %d of %d attempts succeeded", outcomes.Succeeded, outcomes.Attempts)

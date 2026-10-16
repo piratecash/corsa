@@ -5,7 +5,7 @@
 #
 # Heavy jobs on the owner's machine — the 13b load stand and the overlaysim
 # stage-1 campaign, whose 64k×8 jobs cannot be resumed — are MUTUALLY
-# EXCLUSIVE (owner's decision 2026-10-02). The exclusion is enforced BEFORE a
+# EXCLUSIVE. The exclusion is enforced BEFORE a
 # job starts: the memory guard stops a job after the fact, and for a job that
 # cannot be resumed that stop is the loss the rule exists to prevent.
 #

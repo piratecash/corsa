@@ -20,7 +20,8 @@ import (
 // THE OLD PEER IS AN EMULATION, NOT A RELEASED BINARY (see
 // legacy_peer_emulation_test.go): its reader is this build's v1 reader, which
 // is the same line reader the releases use. The run against the released
-// binaries themselves is a separate task.
+// binaries (release_interop_test.go, build tag interop) does not cover this
+// refusal.
 
 // refusedLegacyDial is how one refused dial of an old node ended: its error,
 // the outcome class the old node recorded, and what both sides charged.
@@ -35,13 +36,14 @@ type refusedLegacyDial struct {
 }
 
 // refuseAnOldDialler makes an old node of version dial a listener of this
-// build that refuses it by its per-IP cap; alertSenders 0 is the silent close
+// build that refuses it by the loopback class's bound on connections held at
+// once — the old node dials from loopback; alertSenders 0 is the silent close
 // of the releases before the alert.
 func refuseAnOldDialler(t *testing.T, version int, alertSenders int) refusedLegacyDial {
 	t.Helper()
 	listener := refusingNode(t, config.Node{}, func(svc *Service) {
 		svc.listenerRefusals = newListenerRefusals(alertPoolBounds{total: alertSenders, perSource: max(alertSenders, 1)}, svc.startedAt)
-		svc.inboundByIP["127.0.0.1"] = maxConnPerIP
+		svc.loopbackInbound = newLoopbackInboundClass(loopbackInboundBounds{maxActive: 0, maxNewPerWindow: 1, window: time.Hour}, productionIdentityPenaltyPolicy(), nil)
 	})
 	proxy := startLegacyVersionProxy(t, listener.cfg.ListenAddress, oldPeerDials, version)
 	old, stopOld := startQuietNode(t, asOldNode)
@@ -54,7 +56,7 @@ func refuseAnOldDialler(t *testing.T, version int, alertSenders int) refusedLega
 	proxy.drain(t)
 	// The listener's alert sender is done once the proxy saw both ends close.
 	waitForConditionMsg(t, 5*time.Second, "the listener never counted the refusal", func() bool {
-		return listener.ListenerRefusalStats().ConnectionsPerIP >= 1
+		return listener.ListenerRefusalStats().LoopbackConnections >= 1
 	})
 
 	old.ipStateMu.RLock()

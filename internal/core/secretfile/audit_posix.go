@@ -294,3 +294,30 @@ func describeDirectory(dir *Dir) string {
 	}
 	return fmt.Sprintf("owner %s, mode %s, process euid %d", owner, info.Mode(), os.Geteuid())
 }
+
+// unsafeOrNil turns a judgement into an error without the typed-nil trap: a
+// nil *UnsafeLocationError returned as error is not a nil error.
+func unsafeOrNil(found *UnsafeLocationError) error {
+	if found == nil {
+		return nil
+	}
+	return found
+}
+
+// inspectFile reads the file at path without following it. present is false
+// when there is no file yet; a symlink or a non-regular entry in its place is
+// the violation returned.
+func inspectFile(path string) (info fs.FileInfo, present bool, err error) {
+	info, err = os.Lstat(path)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return nil, false, nil
+	case err != nil:
+		return nil, false, fmt.Errorf("secretfile: audit the file: %w", stripPath(err))
+	case info.Mode()&fs.ModeSymlink != 0:
+		return nil, false, &UnsafeLocationError{Component: fileComponent(), Violation: ViolationSymlink, Owner: ownerOf(info), Mode: info.Mode()}
+	case !info.Mode().IsRegular():
+		return nil, false, &UnsafeLocationError{Component: fileComponent(), Violation: ViolationNotRegularFile, Owner: ownerOf(info), Mode: info.Mode()}
+	}
+	return info, true, nil
+}

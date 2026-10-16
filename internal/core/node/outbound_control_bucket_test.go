@@ -130,6 +130,7 @@ func mustFrameLine(t *testing.T, frame protocol.Frame) string {
 func TestOpenPeerSession_DropsTheControlFrameBucketItsSessionCharged(t *testing.T) {
 	t.Parallel()
 	svc := newTestService(t, config.NodeTypeFull)
+	asLegacyOnlyDialler(svc)
 	remote, err := identity.Generate()
 	if err != nil {
 		t.Fatalf("identity.Generate: %v", err)

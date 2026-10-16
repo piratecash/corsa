@@ -317,6 +317,7 @@ func TestTransportTrafficCountsLegacySessionDial(t *testing.T) {
 	t.Cleanup(func() { _ = raw.Close() })
 
 	svc := newTestService(t, config.NodeTypeFull)
+	asLegacyOnlyDialler(svc)
 	peerDone := make(chan error, 1)
 	go func() { peerDone <- serveWelcomeWithoutChallenge(ln) }()
 
@@ -390,7 +391,7 @@ func TestTransportTrafficCountsNoticeFallbackDial(t *testing.T) {
 	peerDone := make(chan error, 1)
 	go func() { peerDone <- serveAuthenticatedNotice(ln) }()
 
-	markOldNode(svc, domain.PeerAddress(raw.Addr().String()))
+	asLegacyOnlyDialler(svc)
 	svc.sendNoticeToPeer(domain.PeerAddress(raw.Addr().String()), time.Minute, "transport-ciphertext")
 
 	select {

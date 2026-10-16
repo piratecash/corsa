@@ -754,3 +754,61 @@ func TestADialRefusedByAListenerIsRecognisedAndOtherAlertsAreNot(t *testing.T) {
 		})
 	}
 }
+
+// What answered a failed dial is told apart by the first byte: a TLS
+// handshake record (0x16) is a listener that speaks TLS and then failed, any
+// TLS alert (0x15) — the refusal included — is a listener that speaks TLS and
+// said no. Neither is an old node, and neither is "nothing known": silence, a
+// reset and arbitrary bytes carry no such evidence and match neither. The
+// dialler reads the classes as unproven hints, so they must never overlap.
+func TestAFailedDialNamesTheTLSRecordThatAnsweredIt(t *testing.T) {
+	x := newNode(t)
+	handshakeFailure := []byte{0x15, 0x03, 0x03, 0x00, 0x02, 0x02, 0x28}
+	type classes struct{ tls, alerted, refused, v1 bool }
+	answered := func(answer []byte) func(net.Conn) {
+		return func(other net.Conn) {
+			buf := make([]byte, 1)
+			_, _ = other.Read(buf)
+			_, _ = other.Write(answer)
+			_ = other.Close()
+		}
+	}
+	for name, tc := range map[string]struct {
+		listener func(net.Conn)
+		want     classes
+	}{
+		"a TLS listener without ALPN": {func(lSide net.Conn) {
+			config := listenerConfig(newNode(t).certs)
+			config.NextProtos = nil
+			_ = tls.Server(lSide, config).Handshake()
+			_ = lSide.Close()
+		}, classes{tls: true}},
+		"the refusal alert":   {answered(RefusalAlert()), classes{alerted: true, refused: true}},
+		"a handshake_failure": {answered(handshakeFailure), classes{alerted: true}},
+		"a v1 line":           {answered([]byte(`{"type":"error","code":"invalid-json"}` + "\n")), classes{v1: true}},
+		"arbitrary bytes":     {answered([]byte("HTTP/1.1 400 Bad Request\r\n\r\n")), classes{}},
+		"a close without a byte": {func(other net.Conn) {
+			buf := make([]byte, 1)
+			_, _ = other.Read(buf)
+			_ = other.Close()
+		}, classes{}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			xSide, lSide := connPair(t)
+			go tc.listener(lSide)
+			got := (<-dialAsync(context.Background(), xSide, x, AnyPeer())).err
+			if got == nil {
+				t.Fatal("the dial succeeded")
+			}
+			have := classes{
+				tls:     errors.Is(got, ErrPeerSpeaksTLS),
+				alerted: errors.Is(got, ErrPeerAlerted),
+				refused: errors.Is(got, ErrRefusedByListener),
+				v1:      errors.Is(got, ErrPeerSpeaksV1),
+			}
+			if have != tc.want {
+				t.Fatalf("Dial answered by %s = %v; classes %+v, want %+v", name, got, have, tc.want)
+			}
+		})
+	}
+}

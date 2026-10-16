@@ -20,6 +20,7 @@ packages:
       DatagramProvider: {}
       DiagnosticProvider: {}
       EndpointBindingProvider: {}
+      EndpointDialDelayProvider: {}
   # --- Metrics collector ---
   github.com/piratecash/corsa/internal/core/metrics:
     config: *defaults
@@ -62,3 +63,22 @@ packages:
         unroll-variadic: true
     interfaces:
       Conn: {}
+  # --- Release admission gate ---
+  # ReleaseTree gets two mocks: a same-package _test.go one for the gate's
+  # internal tests (an importable mock would import admission back and form
+  # a cycle) and an importable one for the releaseadmission tool's tests.
+  # pkgname 'mocks' keeps the import from shadowing the admission package.
+  github.com/piratecash/corsa/internal/release/admission:
+    config:
+      structname: 'Mock{{.InterfaceName}}'
+      template: testify
+      template-data:
+        unroll-variadic: true
+    interfaces:
+      ReleaseTree:
+        configs:
+          - dir: '{{.InterfaceDir}}'
+            filename: 'mock_{{ .InterfaceName | snakecase }}_test.go'
+          - dir: '{{.InterfaceDir}}/mocks'
+            pkgname: 'mocks'
+            filename: '{{ .InterfaceName | snakecase }}.go'

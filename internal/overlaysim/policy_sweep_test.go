@@ -313,7 +313,7 @@ func TestM1PolicyComparison(t *testing.T) {
 		t.Skip("the policy comparison is a measurement, not a unit test")
 	}
 
-	for _, sh := range sweepShapes {
+	for _, sh := range comparisonShapes() {
 		t.Run(sh.name, func(t *testing.T) {
 			quotas, err := comparisonQuotas(sh)
 			if err != nil {

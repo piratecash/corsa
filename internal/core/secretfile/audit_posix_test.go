@@ -212,8 +212,6 @@ func TestJudgeChainSyntheticOwners(t *testing.T) {
 	}
 }
 
-func violationOf(v LocationViolation) *LocationViolation { return &v }
-
 // Two links naming each other never resolve. The audit must stop with its
 // own error, as the kernel stops with ELOOP, rather than walk forever or
 // report the location as safe.

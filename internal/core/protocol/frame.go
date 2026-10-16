@@ -406,6 +406,13 @@ type AggregateStatusFrame struct {
 	// MaxObservedPeerVersion is the highest protocol version among incompatible
 	// peers (runtime reporters + persisted lockouts). See domain.VersionPolicySnapshot.
 	MaxObservedPeerVersion int `json:"max_observed_peer_version,omitempty"`
+
+	// V2TLSFirst is the operator's TLS-first switch of the secure session v2
+	// (CORSA_V2_TLS_FIRST): true — the default — when every dial opens
+	// with TLS, false when a dial where v1 is not ruled out opens with the
+	// identity-less probe. Not omitempty: false is the state an operator
+	// must see, and an absent field would read as an older node.
+	V2TLSFirst bool `json:"v2_tls_first"`
 }
 
 // ResourceUsageFrame is the wire representation of the node's process

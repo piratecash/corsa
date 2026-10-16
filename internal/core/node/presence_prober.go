@@ -693,8 +693,9 @@ func (p *presenceProber) noteProbeOnWire(label domain.PeerIdentity, onWire chan 
 //
 // It is a MEMORY bound and never a correctness one, and the difference is the
 // whole point. The candidate walk is over one peer's connections, and that is
-// not eight: a single IP may hold up to maxConnPerIP inbound connections, one
-// identity can present several IPs, and an outbound session sits on top. So the
+// not eight: a single IP may hold up to maxConnPerIP inbound connections
+// (loopback, the onion entry, up to loopbackMaxActiveCeiling), one identity
+// can present several IPs, and an outbound session sits on top. So the
 // number here cannot be derived from a limit elsewhere and must not be trusted
 // as an upper bound on the walk.
 //

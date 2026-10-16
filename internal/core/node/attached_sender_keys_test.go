@@ -555,7 +555,7 @@ func TestSenderKeySyncFanoutRecoversFromOtherPeer(t *testing.T) {
 	go interleavedSyncPeerMockServer(t, ln, 0, nil, []protocol.ContactFrame{contact})
 
 	candidateAddr := domain.PeerAddress(ln.Addr().String())
-	markOldNode(svc, candidateAddr)
+	asLegacyOnlyDialler(svc)
 	svc.peerMu.Lock()
 	svc.sessions[candidateAddr] = &peerSession{address: candidateAddr}
 	svc.health[candidateAddr] = &peerHealth{Connected: true}

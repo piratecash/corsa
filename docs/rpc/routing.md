@@ -158,7 +158,10 @@ Response:
     "pin_store_unsafe": false,
     "clock_jump_guarded": true,
     "clock_jumps_detected": 0,
-    "clock_jump_active": false
+    "clock_jump_active": false,
+    "v2_tls_first_disabled": false,
+    "dials_opened_by_probe": 0,
+    "v1_refusals_after_v2_welcome": 0
   },
   "session_kinds": {
     "started_at": "2026-09-06T09:00:00.104512Z",
@@ -190,7 +193,34 @@ Response:
     "handshakes_node_limit": 0,
     "handshakes_ip_limit": 2,
     "handshakes_loopback_limit": 0,
+    "loopback_connection_rate": 0,
+    "loopback_active_limit": 1,
     "closed_without_alert": 0
+  },
+  "loopback_inbound": {
+    "started_at": "2026-09-06T09:00:00.104512Z",
+    "read_at": "2026-09-06T09:31:44.512905301Z",
+    "classified_by": "source_address",
+    "enforced": true,
+    "max_active": 64,
+    "max_new_per_window": 100,
+    "window_seconds": 10,
+    "max_handshakes": 16,
+    "active": 23,
+    "handshakes_in_flight": 1,
+    "admitted": 412,
+    "identities_scored": 2,
+    "identities_banned": 0,
+    "refusals": {
+      "connection_rate": 0,
+      "active_limit": 1,
+      "connection_budget": 0,
+      "inbound_limit": 0,
+      "handshakes_loopback_limit": 0,
+      "handshakes_node_limit": 0,
+      "violations_closed": 4,
+      "identity_banned": 0
+    }
   }
 }
 ```
@@ -200,8 +230,8 @@ Response:
 > their own `read_at` (counters) and `updated_at` (the census); a rate or a window computed against
 > `snapshot_at` is wrong by however long the table stood still.
 >
-> **Seven snapshots in one response are NOT one atomic snapshot.** `mode_selection`,
-> `session_outcomes`, `transport_traffic`, `secure_sessions`, `session_kinds` and `listener_refusals` are counters read at slightly different
+> **Eight snapshots in one response are NOT one atomic snapshot.** `mode_selection`,
+> `session_outcomes`, `transport_traffic`, `secure_sessions`, `session_kinds`, `listener_refusals` and `loopback_inbound` are counters read at slightly different
 > instants; `neighbours` is a gauge with its own `updated_at`, refreshed in the
 > background. Arithmetic across them assumes a simultaneity these timestamps do
 > not support.
@@ -322,13 +352,16 @@ whole network is in".
 | `secure_sessions.pin_refusals_pin_store_full` | uint64 | v2 sessions refused with `pin_store_full`, both directions, since the process started (in memory, reset on restart). |
 | `secure_sessions.v1_refusals_identity_pinned` | uint64 | v1 sessions refused because the identity they name requires v2 — pinned, or holding a live v2 connection — since the process started (in memory, reset on restart). Counted at every check: on accept at the `hello` and again at `auth_session`, on dial at the `welcome` and again right after an outbound v1 session is registered. The `hello` and `welcome` refusals come before anything is signed for that identity; the two re-checks come after the v1 `auth_session` signature and close the session instead. |
 | `secure_sessions.v1_refusals_endpoint_bound` | uint64 | v1 answers refused on dial because the endpoint that gave them is bound to v2 — a downgrade, not followed: the dial fails instead of falling back — since the process started (in memory, reset on restart). |
-| `secure_sessions.store_unreadable` | bool | The store file exists but could not be read: every peer is treated as pinned, v1 is refused, v2 keeps working until an operator repairs the file. |
-| `secure_sessions.pin_store_unsafe` | bool | The store's location failed the audit made when it was loaded: the file is a symlink or not owner-only, or a directory on the way to it may be written by someone other than the node's user or root, or the location could not be inspected ([session_v2.md](../protocol/session_v2.md)). The log line `pin_store_unsafe` names the component by its role and the violation. The node keeps working; the flag stays until a restart with a safe location. |
+| `secure_sessions.store_unreadable` | bool | The store's content is not trusted: the file exists but could not be read, or the node refused to start over its pin store ([session_v2.md](../protocol/session_v2.md), "Refusal to start"). Every peer is treated as pinned, v1 is refused and nothing is written over the file. Since such a node does not start, a running node reports `false`; the field stays for the shape of the answer. |
+| `secure_sessions.pin_store_unsafe` | bool | The location audit made when the store was loaded failed for the store or its marker: a file is a symlink or not owner-only, or a directory on the way to it may be written by someone other than the node's user or root, or the location could not be inspected ([session_v2.md](../protocol/session_v2.md)). Such a node refuses to start — the refusal names the path, the violation and the fix, to the process that starts the node, never over RPC — so a running node reports `false`; the field stays for the shape of the answer. |
 | `secure_sessions.clock_jump_guarded` | bool | The terms of ordinary bindings run on the trusted time: the wall clock at the start plus the time since on a clock that keeps running through sleep (`CLOCK_BOOTTIME` on Linux and Android, `CLOCK_MONOTONIC` on darwin, `GetTickCount64` on Windows; [session_v2.md](../protocol/session_v2.md), "The clock of the terms"). `false` on a platform without such a clock: the wall clock is then taken as it is, and a step forward ends ordinary bindings early. |
 | `secure_sessions.clock_jumps_detected` | uint64 | Times the wall clock was found more than one hour ahead of the trusted time — a forged NTP answer or an operator's step — each logged once as a `clock_jump_detected` warning. The excess was not counted toward any term. A wall clock that stays ahead is one jump; one that came back and jumps again is another. Since the process started (in memory, reset on restart); a step made before a restart is not seen. |
 | `secure_sessions.clock_jump_active` | bool | The wall clock is more than one hour ahead of the trusted time right now, so the terms run on the trusted time instead. If it stays true long after start-up, the node most likely started on a wrong clock (no battery-backed clock, NTP not yet synchronised): everything it stamps lags by that error and may end early after the next restart — check the clock and restart once it is right ([session_v2.md](../protocol/session_v2.md), "The clock of the terms"). A clock since boot that stopped answering also keeps it true. |
+| `secure_sessions.v2_tls_first_disabled` | bool | `true` when the operator switched TLS-first off (`CORSA_V2_TLS_FIRST`, `sdk.NodeConfig.V2TLSFirst`): a dial where v1 is not ruled out opens with the identity-less probe, without a ClientHello; a v2 welcome to it still leads to TLS in the same dial, whose failure allows no v1. Where v2 is required the dial still opens with TLS ([session_v2.md](../protocol/session_v2.md), "Switching TLS-first off"). Reported as set also on a node that speaks v1 only, where it changes no dial. |
+| `secure_sessions.dials_opened_by_probe` | uint64 | Dials that opened with the probe because TLS-first is off, since the process started (in memory, reset on restart). Zero while TLS-first is on. |
+| `secure_sessions.v1_refusals_after_v2_welcome` | uint64 | v1 answers refused on the TLS attempt that followed a correct v2 welcome to the probe — one of the two answers was forged — since the process started (in memory). Counted apart from `v1_refusals_endpoint_bound`; not charged to the address; the fall back to v1 there is held. |
 | `secure_sessions.v1_dials_held_by_refusal_backoff` | uint64 | Fall backs to v1 this node withheld after a v2 attempt answered with a v1 line, because an earlier v1 answer from the same address was refused (the two counters above) and the hold that follows such a refusal had not run out — 5 minutes, doubled per further refusal, at most 6 hours — since the process started (in memory, reset on restart). This hold withholds only the fall back to v1 and never delays a v2 attempt itself; the next v2 attempt is paced only by the address's v2 retry backoff (`dials_held_by_v2_retry_backoff` below). A refusal never lowers the address's score or puts it into the candidate cooldown. |
-| `secure_sessions.dials_held_by_v2_retry_backoff` | uint64 | Dials refused before any socket because their address's v2 retry backoff ran: after a v2 attempt there ended without v2 (the v1 answer was refused, or its fall back held), the next dial waits 30 s, doubled per further such end, at most 30 min; the address is not a candidate meanwhile. Pacing of the next v2 attempt, not the failure cooldown: score, failures and setup failures are untouched. Since the process started (in memory, reset on restart). |
+| `secure_sessions.dials_held_by_v2_retry_backoff` | uint64 | Dials refused before any socket because their address had to wait. Either its v2 retry backoff ran: after a v2 attempt there ended without v2 (the v1 answer was refused or its fall back held, the listener answered with TLS and the handshake then failed, another identity than the dial's proved itself, or the probe was answered by a node that speaks v2), the next dial waits 30 s, doubled per further such end, at most 30 min. Or its last v2 session was refused because this node's pin store is full (`pin_store_full`) and the store still has no room: that wait ends as soon as room frees, after 30 min at the latest, never doubled. The address is not a candidate meanwhile, and only a proven outbound v2 session to that address resets either. Pacing of the next v2 attempt, not the failure cooldown: score, failures and setup failures are untouched. Since the process started (in memory, reset on restart). |
 | `secure_sessions.protected_bindings_contact` / `.protected_bindings_relation` | int | Protected endpoint bindings in the contact pool (K) and the relation pool (R). The pool is fixed when a binding is created or raised. |
 | `secure_sessions.protected_capacity` | int | Bound on protected bindings of both pools together (32 768). |
 | `secure_sessions.protected_reserve_contact` | int | Places of `protected_capacity` only the contact pool may take (8 192): the relation pool holds at most `protected_capacity − protected_reserve_contact`. |
@@ -354,15 +387,39 @@ whole network is in".
 | `listener_refusals` | object | **Connections the listener refused before any session existed** ([session_v2.md](../protocol/session_v2.md), "Listener refusals"), by the bound that refused them. Every such refusal is answered with the TLS refusal alert, not a silent close, unless every alert sender was busy. Cumulative, in memory only, never reset by reading. Lock-free: the counters are atomics. Absent on a node from before this section: "metric unavailable", not zero. |
 | `listener_refusals.started_at` | string\|null | RFC 3339 (nanoseconds) start of the period — the node's start. A different `started_at` between two answers means the process restarted: discard the pair. |
 | `listener_refusals.read_at` | string\|null | RFC 3339 (nanoseconds) moment the counters were loaded. |
-| `listener_refusals.connection_rate` | uint64 | Connections over the per-IP connection rate (10 per 10 s). |
-| `listener_refusals.connections_per_ip` | uint64 | Connections over the per-IP cap on simultaneous connections (8). |
+| `listener_refusals.connection_rate` | uint64 | Connections from an external source over the per-IP connection rate (10 per 10 s). |
+| `listener_refusals.connections_per_ip` | uint64 | Connections from an external source over the per-IP cap on simultaneous connections (8). |
 | `listener_refusals.connection_budget` | uint64 | Connections the shared connection budget had no room for at accept: its inbound limit, total ceiling or outbound reserve. |
-| `listener_refusals.blacklisted` | uint64 | Connections from a blacklisted IP. |
+| `listener_refusals.blacklisted` | uint64 | Connections from a blacklisted external IP. A loopback source is never blacklisted. |
 | `listener_refusals.inbound_limit` | uint64 | Connections refused at registration by the inbound limit. The budget above holds the same bound from accept on, so this one stays at zero unless the two disagree. |
 | `listener_refusals.handshakes_node_limit` | uint64 | Inbound v2 handshakes refused, once their ClientHello record was whole, because the node already ran 64. |
 | `listener_refusals.handshakes_ip_limit` | uint64 | Inbound v2 handshakes refused at their first byte because their external source — an IPv4 address, or the /64 of an IPv6 one — already ran 4. |
 | `listener_refusals.handshakes_loopback_limit` | uint64 | Inbound v2 handshakes from a loopback source (the onion entry) refused because loopback sources already held their 16 of the node's 64. |
+| `listener_refusals.loopback_connection_rate` | uint64 | Loopback connections over the loopback class's rate of new connections (100 in any 10 s). |
+| `listener_refusals.loopback_active_limit` | uint64 | Loopback connections over the loopback class's bound on connections held at once (64, or a quarter of a configured inbound capacity, at least 8). |
 | `listener_refusals.closed_without_alert` | uint64 | Refusals closed at once without the alert because all 256 alert senders were busy, or the source's 8 of them were. Part of the counts above, not in addition to them. A steady rise means a flood larger than the pool; the refusals themselves still happen. |
+| `loopback_inbound` | object | **The loopback inbound class** ([network_security.md](../protocol/network_security.md), §1a): every loopback source — the onion entry, and any local process — admitted by budgets of the whole class instead of the per-IP bounds, never banned by its IP. Counters cumulative since `started_at`, in memory only, never reset by reading; `active` and `handshakes_in_flight` are gauges. Lock-free: atomics only. The bounds are chosen, not measured: to be checked by measurement before release. Absent on a node from before this section: "metric unavailable", not zero. |
+| `loopback_inbound.started_at` | string\|null | RFC 3339 (nanoseconds) start of the period — the node's start. |
+| `loopback_inbound.read_at` | string\|null | RFC 3339 (nanoseconds) moment the counters were loaded. |
+| `loopback_inbound.classified_by` | string | What the class is read from. Always `source_address`: the node has a single listener, so a local process falls into the class as the Tor daemon does. |
+| `loopback_inbound.enforced` | bool | `false` on a node whose per-IP limits are switched off (a test or load-stand node): the class then counts but refuses nothing, and a banned identity is not refused. |
+| `loopback_inbound.max_active` | int | Bound on loopback connections held at once, v2 and legacy together. |
+| `loopback_inbound.max_new_per_window` | int | Bound on loopback connections admitted within any window (sliding). |
+| `loopback_inbound.window_seconds` | int | The window of `max_new_per_window`. |
+| `loopback_inbound.max_handshakes` | int | Bound on loopback v2 handshakes in flight past their ClientHello record — the class's share of the node's 64. |
+| `loopback_inbound.active` | int | Loopback connections held now. |
+| `loopback_inbound.handshakes_in_flight` | int | Loopback v2 handshakes past their ClientHello record now. |
+| `loopback_inbound.admitted` | uint64 | Loopback connections admitted. |
+| `loopback_inbound.identities_scored` | int | Identities proven by a loopback v2 session with a penalty score now (at most 4 096). |
+| `loopback_inbound.identities_banned` | int | How many of them are banned, as of the last charge or sweep. |
+| `loopback_inbound.refusals.connection_rate` | uint64 | Loopback connections over `max_new_per_window`. |
+| `loopback_inbound.refusals.active_limit` | uint64 | Loopback connections over `max_active`. |
+| `loopback_inbound.refusals.connection_budget` | uint64 | Loopback connections the node's shared connection budget had no room for. |
+| `loopback_inbound.refusals.inbound_limit` | uint64 | Loopback connections refused at registration by the inbound limit. |
+| `loopback_inbound.refusals.handshakes_loopback_limit` | uint64 | Loopback v2 handshakes over `max_handshakes`. |
+| `loopback_inbound.refusals.handshakes_node_limit` | uint64 | Loopback v2 handshakes over the node's own bound of 64. |
+| `loopback_inbound.refusals.violations_closed` | uint64 | Loopback connections closed for a violation before any v2 proof — legacy connections; the identity they claim is never charged. Also a v2 session whose charge the store, full of banned identities, could not record. |
+| `loopback_inbound.refusals.identity_banned` | uint64 | Loopback v2 sessions closed for the identity they proved: any session of a banned identity that committed a violation, and every later one of a banned identity at its proof. |
 
 ### fetchRouteLookup
 
@@ -739,7 +796,10 @@ corsa-cli fetchRouteSummary
     "pin_store_unsafe": false,
     "clock_jump_guarded": true,
     "clock_jumps_detected": 0,
-    "clock_jump_active": false
+    "clock_jump_active": false,
+    "v2_tls_first_disabled": false,
+    "dials_opened_by_probe": 0,
+    "v1_refusals_after_v2_welcome": 0
   },
   "session_kinds": {
     "started_at": "2026-09-06T09:00:00.104512Z",
@@ -771,7 +831,34 @@ corsa-cli fetchRouteSummary
     "handshakes_node_limit": 0,
     "handshakes_ip_limit": 2,
     "handshakes_loopback_limit": 0,
+    "loopback_connection_rate": 0,
+    "loopback_active_limit": 1,
     "closed_without_alert": 0
+  },
+  "loopback_inbound": {
+    "started_at": "2026-09-06T09:00:00.104512Z",
+    "read_at": "2026-09-06T09:31:44.512905301Z",
+    "classified_by": "source_address",
+    "enforced": true,
+    "max_active": 64,
+    "max_new_per_window": 100,
+    "window_seconds": 10,
+    "max_handshakes": 16,
+    "active": 23,
+    "handshakes_in_flight": 1,
+    "admitted": 412,
+    "identities_scored": 2,
+    "identities_banned": 0,
+    "refusals": {
+      "connection_rate": 0,
+      "active_limit": 1,
+      "connection_budget": 0,
+      "inbound_limit": 0,
+      "handshakes_loopback_limit": 0,
+      "handshakes_node_limit": 0,
+      "violations_closed": 4,
+      "identity_banned": 0
+    }
   }
 }
 ```
@@ -781,8 +868,8 @@ corsa-cli fetchRouteSummary
 > (счётчики) и `updated_at` (перепись). Скорость или окно, посчитанные против `snapshot_at`, неверны
 > ровно на то время, что таблица простояла.
 >
-> **Семь снимков в одном ответе — не один атомарный снимок.** `mode_selection`,
-> `session_outcomes`, `transport_traffic`, `secure_sessions`, `session_kinds` и `listener_refusals` — счётчики, прочитанные в чуть разные моменты;
+> **Восемь снимков в одном ответе — не один атомарный снимок.** `mode_selection`,
+> `session_outcomes`, `transport_traffic`, `secure_sessions`, `session_kinds`, `listener_refusals` и `loopback_inbound` — счётчики, прочитанные в чуть разные моменты;
 > `neighbours` — гейдж с собственным `updated_at`, обновляемый фоново. Считать
 > арифметику между ними так, будто они сняты одновременно, эти отметки времени
 > не позволяют.
@@ -900,13 +987,16 @@ negotiated(O)    = Σ count где reason = negotiated / total(O)
 | `secure_sessions.pin_refusals_pin_store_full` | uint64 | Сессии v2, отклонённые с `pin_store_full`, в обоих направлениях, с запуска процесса (в памяти, сбрасывается при перезапуске). |
 | `secure_sessions.v1_refusals_identity_pinned` | uint64 | Сессии v1, отклонённые потому, что названная в них identity требует v2 — закреплена или держит живое v2-соединение, — с запуска процесса (в памяти, сбрасывается при перезапуске). Учитывается каждая проверка: на приёме — на `hello` и повторно на `auth_session`, при дозвоне — на `welcome` и повторно сразу после регистрации исходящей v1-сессии. Отказы на `hello` и `welcome` происходят до того, как для этой identity что-либо подписано; две повторные проверки идут после подписи v1 `auth_session` и вместо этого закрывают сессию. |
 | `secure_sessions.v1_refusals_endpoint_bound` | uint64 | Ответы v1, отклонённые при дозвоне потому, что давший их адрес привязан к v2, — понижение, за которым не следуют: дозвон завершается неудачей вместо отката, — с запуска процесса (в памяти, сбрасывается при перезапуске). |
-| `secure_sessions.store_unreadable` | bool | Файл хранилища есть, но не читается: все пиры считаются закреплёнными, v1 отвергается, v2 работает, пока оператор не исправит файл. |
-| `secure_sessions.pin_store_unsafe` | bool | Место хранилища не прошло проверку при загрузке: файл — symlink или доступен не только владельцу, либо каталог на пути к нему может писать кто-то кроме пользователя узла и root, либо место не удалось проверить ([session_v2.md](../protocol/session_v2.md)). Строка журнала `pin_store_unsafe` называет компонент по роли и нарушение. Узел продолжает работать; флаг держится до перезапуска с безопасным местом. |
+| `secure_sessions.store_unreadable` | bool | Содержимому хранилища нет доверия: файл есть, но не читается, или узел отказался стартовать из-за хранилища pin ([session_v2.md](../protocol/session_v2.md), «Отказ старта»). Все пиры считаются закреплёнными, v1 отвергается, поверх файла ничего не пишется. Такой узел не стартует, поэтому работающий узел показывает `false`; поле сохранено ради формы ответа. |
+| `secure_sessions.pin_store_unsafe` | bool | Проверка места при загрузке хранилища не пройдена для хранилища или его маркера: файл — symlink или доступен не только владельцу, либо каталог на пути к нему может писать кто-то кроме пользователя узла и root, либо место не удалось проверить ([session_v2.md](../protocol/session_v2.md)). Такой узел отказывается стартовать — отказ называет путь, нарушение и способ исправления процессу, запускающему узел, и никогда не уходит в RPC, — поэтому работающий узел показывает `false`; поле сохранено ради формы ответа. |
 | `secure_sessions.clock_jump_guarded` | bool | Сроки обычных привязок идут по доверенному времени: стеночное время на старте плюс прошедшее с тех пор по часам, идущим во время сна (`CLOCK_BOOTTIME` на Linux и Android, `CLOCK_MONOTONIC` на darwin, `GetTickCount64` на Windows; [session_v2.md](../protocol/session_v2.md), «Часы сроков»). `false` на платформе без таких часов: тогда стеночные часы берутся как есть, и перевод вперёд досрочно заканчивает обычные привязки. |
 | `secure_sessions.clock_jumps_detected` | uint64 | Сколько раз стеночные часы оказались больше чем на час впереди доверенного времени — подделанный ответ NTP или перевод оператором; каждый раз один раз пишется предупреждение `clock_jump_detected`. Избыток ни в какой срок не засчитан. Часы, которые остаются впереди, — один скачок; вернувшиеся и прыгнувшие снова — ещё один. С запуска процесса (в памяти, сбрасывается при перезапуске); перевод до рестарта не виден. |
 | `secure_sessions.clock_jump_active` | bool | Стеночные часы прямо сейчас больше чем на час впереди доверенного времени, и сроки идут по доверенному времени. Если он долго остаётся истинным после старта, узел, скорее всего, стартовал на неверных часах (нет часов с батарейкой, NTP ещё не синхронизирован): всё, что он отмечает, отстаёт на эту ошибку и после следующего рестарта может кончиться раньше, — проверьте часы и перезапустите узел, когда они верны ([session_v2.md](../protocol/session_v2.md), «Часы сроков»). Истинным его держат и часы с момента загрузки, переставшие отвечать. |
+| `secure_sessions.v2_tls_first_disabled` | bool | `true`, когда оператор выключил «TLS-первым» (`CORSA_V2_TLS_FIRST`, `sdk.NodeConfig.V2TLSFirst`): дозвон, где v1 не исключён, начинается с пробы без identity и без ClientHello; welcome v2 на неё всё равно ведёт к TLS в том же дозвоне, и неудача TLS v1 не разрешает. Где требуется v2, дозвон по-прежнему начинается с TLS ([session_v2.md](../protocol/session_v2.md), «Выключение TLS-первым»). Показывается как заданный и на узле, говорящем только на v1, где ни одного дозвона не меняет. |
+| `secure_sessions.dials_opened_by_probe` | uint64 | Дозвоны, начатые с пробы из-за выключенного «TLS-первым», с запуска процесса (в памяти, сбрасывается при перезапуске). Ноль, пока «TLS-первым» включён. |
+| `secure_sessions.v1_refusals_after_v2_welcome` | uint64 | Ответы v1, отвергнутые на попытке TLS, которая последовала за корректным welcome v2 на пробу, — один из двух ответов подделан, — с запуска процесса (в памяти). Считаются отдельно от `v1_refusals_endpoint_bound`; адресу в счёт не идут; откат на v1 к нему удерживается. |
 | `secure_sessions.v1_dials_held_by_refusal_backoff` | uint64 | Откаты на v1 после попытки v2, получившей ответ строкой v1, которые этот узел задержал, потому что прежний ответ v1 с того же адреса был отвергнут (два счётчика выше), а задержка после такого отказа ещё не истекла — 5 минут, удвоение на каждый следующий отказ, не больше 6 часов, — с запуска процесса (в памяти, сбрасывается при перезапуске). Эта задержка удерживает только откат на v1 и саму попытку v2 не задерживает; следующую попытку v2 откладывает только отступ повторов v2 этого адреса (`dials_held_by_v2_retry_backoff` ниже). Отказ не снижает рейтинг адреса и не ставит его в охлаждение кандидатов. |
-| `secure_sessions.dials_held_by_v2_retry_backoff` | uint64 | Дозвоны, отвергнутые до открытия сокета, потому что действовал отступ повторов v2 их адреса: после попытки v2, закончившейся там без v2 (ответ v1 отвергнут или откат задержан), следующий дозвон ждёт 30 с, удвоение на каждый следующий такой исход, не больше 30 мин; адрес на это время не кандидат. Темп следующей попытки v2, а не охлаждение за неудачи: рейтинг, неудачи и неудачи установки сессии не меняются. С запуска процесса (в памяти, сбрасывается при перезапуске). |
+| `secure_sessions.dials_held_by_v2_retry_backoff` | uint64 | Дозвоны, отвергнутые до открытия сокета, потому что их адрес должен был подождать. Либо действовал отступ повторов v2: после попытки v2, закончившейся там без v2 (ответ v1 отвергнут или откат задержан, слушатель ответил TLS и рукопожатие затем не удалось, доказала себя другая identity, чем ждал дозвон, или на пробу ответил узел, говорящий на v2), следующий дозвон ждёт 30 с, удвоение на каждый следующий такой исход, не больше 30 мин. Либо последняя сессия v2 с адресом отвергнута, потому что хранилище pin этого узла заполнено (`pin_store_full`), и места в нём всё ещё нет: такое ожидание кончается, как только место освободилось, не позже чем через 30 мин, без удвоения. Адрес на это время не кандидат, и сбрасывает то и другое только доказанная исходящая сессия v2 к этому адресу. Темп следующей попытки v2, а не охлаждение за неудачи: рейтинг, неудачи и неудачи установки сессии не меняются. С запуска процесса (в памяти, сбрасывается при перезапуске). |
 | `secure_sessions.protected_bindings_contact` / `.protected_bindings_relation` | int | Защищённые привязки адресов в пуле контактов (K) и в пуле отношений (R). Пул фиксируется при создании или повышении привязки. |
 | `secure_sessions.protected_capacity` | int | Предел защищённых привязок обоих пулов вместе (32 768). |
 | `secure_sessions.protected_reserve_contact` | int | Места из `protected_capacity`, которые может занять только пул контактов (8 192): у пула отношений не больше `protected_capacity − protected_reserve_contact`. |
@@ -932,15 +1022,39 @@ negotiated(O)    = Σ count где reason = negotiated / total(O)
 | `listener_refusals` | object | **Соединения, отвергнутые слушателем до появления сессии** ([session_v2.md](../protocol/session_v2.md), «Отказы слушателя»), по ограничению, которое их отвергло. Каждый такой отказ отвечает TLS-alert отказа, а не молчаливым закрытием, если только не заняты все отправители alert. Накопительно, только в памяти, чтением не сбрасывается. Без блокировок: счётчики atomic. У узла, выпущенного до этого раздела, его нет: «метрика недоступна», а не ноль. |
 | `listener_refusals.started_at` | string\|null | RFC 3339 (наносекунды) начало периода — старт узла. Другой `started_at` между двумя ответами означает рестарт процесса: такую пару отбрасывать. |
 | `listener_refusals.read_at` | string\|null | RFC 3339 (наносекунды) момент загрузки счётчиков. |
-| `listener_refusals.connection_rate` | uint64 | Соединения сверх частоты соединений на IP (10 за 10 с). |
-| `listener_refusals.connections_per_ip` | uint64 | Соединения сверх предела одновременных соединений на IP (8). |
+| `listener_refusals.connection_rate` | uint64 | Соединения с внешнего источника сверх частоты соединений на IP (10 за 10 с). |
+| `listener_refusals.connections_per_ip` | uint64 | Соединения с внешнего источника сверх предела одновременных соединений на IP (8). |
 | `listener_refusals.connection_budget` | uint64 | Соединения, которым при `accept` не хватило общего бюджета соединений: его входящего лимита, общего потолка или резерва исходящих. |
-| `listener_refusals.blacklisted` | uint64 | Соединения с IP из чёрного списка. |
+| `listener_refusals.blacklisted` | uint64 | Соединения с внешнего IP из чёрного списка. Источник на loopback в чёрный список не попадает. |
 | `listener_refusals.inbound_limit` | uint64 | Соединения, отвергнутые при регистрации по входящему лимиту. Бюджет выше держит тот же предел начиная с `accept`, поэтому этот счётчик остаётся нулём, пока они не разойдутся. |
 | `listener_refusals.handshakes_node_limit` | uint64 | Входящие рукопожатия v2, отвергнутые после получения целой записи ClientHello, потому что узел уже вёл 64. |
 | `listener_refusals.handshakes_ip_limit` | uint64 | Входящие рукопожатия v2, отвергнутые на первом байте, потому что с их внешнего источника — адреса IPv4 или /64 IPv6 — уже шло 4. |
 | `listener_refusals.handshakes_loopback_limit` | uint64 | Входящие рукопожатия v2 с источника на loopback (onion-вход), отвергнутые потому, что источники на loopback уже держали свои 16 из 64 узла. |
+| `listener_refusals.loopback_connection_rate` | uint64 | Соединения с loopback сверх частоты новых соединений класса loopback (100 за любые 10 с). |
+| `listener_refusals.loopback_active_limit` | uint64 | Соединения с loopback сверх предела одновременно удерживаемых соединений класса loopback (64 или четверть заданной входящей ёмкости, не меньше 8). |
 | `listener_refusals.closed_without_alert` | uint64 | Отказы, закрытые сразу без alert, потому что все 256 отправителей alert были заняты или были заняты 8 из них, доступные источнику. Входят в счётчики выше, а не прибавляются к ним. Устойчивый рост означает наплыв больше пула; сами отказы при этом происходят. |
+| `loopback_inbound` | object | **Класс loopback-входа** ([network_security.md](../protocol/network_security.md), §1a): все источники на loopback — onion-вход и любой локальный процесс — допускаются бюджетами всего класса вместо пределов на IP и никогда не банятся по IP. Счётчики накопительные с `started_at`, только в памяти, чтением не сбрасываются; `active` и `handshakes_in_flight` — гейджи. Без блокировок: только atomic. Пределы выбраны, но не измерены: их нужно проверить замерами перед выпуском. У узла, выпущенного до этого раздела, его нет: «метрика недоступна», а не ноль. |
+| `loopback_inbound.started_at` | string\|null | RFC 3339 (наносекунды) начало периода — старт узла. |
+| `loopback_inbound.read_at` | string\|null | RFC 3339 (наносекунды) момент загрузки счётчиков. |
+| `loopback_inbound.classified_by` | string | По чему определяется класс. Всегда `source_address`: у узла один слушатель, поэтому локальный процесс попадает в класс так же, как демон Tor. |
+| `loopback_inbound.enforced` | bool | `false` на узле с выключенными ограничениями по IP (тестовый узел или узел стенда): класс тогда считает, но ничего не отвергает, а забаненная identity не отвергается. |
+| `loopback_inbound.max_active` | int | Предел одновременно удерживаемых соединений с loopback, v2 и legacy вместе. |
+| `loopback_inbound.max_new_per_window` | int | Предел соединений с loopback, допущенных за любое окно (скользящее). |
+| `loopback_inbound.window_seconds` | int | Окно `max_new_per_window`. |
+| `loopback_inbound.max_handshakes` | int | Предел рукопожатий v2 с loopback в работе после целой записи ClientHello — доля класса от 64 узла. |
+| `loopback_inbound.active` | int | Соединения с loopback, удерживаемые сейчас. |
+| `loopback_inbound.handshakes_in_flight` | int | Рукопожатия v2 с loopback после целой записи ClientHello сейчас. |
+| `loopback_inbound.admitted` | uint64 | Допущенные соединения с loopback. |
+| `loopback_inbound.identities_scored` | int | Identity, доказанные v2-сессией через loopback и имеющие сейчас счёт штрафа (не больше 4 096). |
+| `loopback_inbound.identities_banned` | int | Сколько из них забанено, по состоянию на последнее начисление или очистку. |
+| `loopback_inbound.refusals.connection_rate` | uint64 | Соединения с loopback сверх `max_new_per_window`. |
+| `loopback_inbound.refusals.active_limit` | uint64 | Соединения с loopback сверх `max_active`. |
+| `loopback_inbound.refusals.connection_budget` | uint64 | Соединения с loopback, которым не хватило общего бюджета соединений узла. |
+| `loopback_inbound.refusals.inbound_limit` | uint64 | Соединения с loopback, отвергнутые при регистрации входящим лимитом. |
+| `loopback_inbound.refusals.handshakes_loopback_limit` | uint64 | Рукопожатия v2 с loopback сверх `max_handshakes`. |
+| `loopback_inbound.refusals.handshakes_node_limit` | uint64 | Рукопожатия v2 с loopback сверх собственного предела узла в 64. |
+| `loopback_inbound.refusals.violations_closed` | uint64 | Соединения с loopback, закрытые за нарушение до любого v2-доказательства, — legacy-соединения; заявленная ими identity штрафа не получает. А также v2-сессия, чьё начисление хранилище, заполненное забаненными identity, не смогло записать. |
+| `loopback_inbound.refusals.identity_banned` | uint64 | v2-сессии через loopback, закрытые из-за доказанной ими identity: любая сессия забаненной identity, совершившая нарушение, и каждая следующая сессия забаненной identity при доказательстве. |
 
 ### fetchRouteLookup
 

@@ -134,6 +134,9 @@ func stopLoadStandNodeForTest(t *testing.T, node *loadStandNode) {
 	t.Helper()
 
 	if err := node.Stop(withBudget(t, harnessGenerousBudget)); err != nil {
+		// A stop past its budget is rare and gone once it lets go: the
+		// stacks are the only record of what held Run open.
+		logGoroutinesOnStopOverrun(t, err)
 		t.Fatalf("Stop: %v", err)
 	}
 }

@@ -22,15 +22,19 @@ import (
 // asOldNode makes a test node behave like a build before v2: it neither
 // accepts nor dials v2 and serves every connection as v1.
 func asOldNode(svc *Service) {
-	svc.secureSessions = &secureSessions{mode: sessionv2.ModeLegacyOnly}
+	svc.secureSessions = &secureSessions{mode: sessionv2.ModeLegacyOnly, marks: newSessionAddressMarks(time.Now)}
 }
 
-// markOldNode records address as an old node, the state a node is in once
-// that address answered a v2 attempt with a v1 line. Tests whose peer is a
-// hand-written v1 server that accepts a single connection use it: the
-// fallback dial itself is pinned by TestANewNodeDiallingAnOldOneFallsBackToV1.
-func markOldNode(svc *Service, address domain.PeerAddress) {
-	svc.secureSessions.marks.noteV1(address)
+// asLegacyOnlyDialler makes svc dial v1 directly, as a build without v2
+// does, for a test whose peer is a hand-written v1 server. Such a server
+// answers a v1 hello at once, and it can answer neither a TLS attempt nor the
+// identity-less probe the way a released old node does; the test's subject is
+// the v1 exchange after the welcome, not how the session kind is chosen.
+// That choice — TLS, then the probe, then v1 on the probe's connection — is
+// pinned by session_dial_choice_test.go and run against an emulated old
+// release by TestDiallingAnOldReleaseGoesTLSThenProbeThenLegacy.
+func asLegacyOnlyDialler(svc *Service) {
+	asOldNode(svc)
 }
 
 // authenticatedInbound reports, for each authenticated inbound connection of
@@ -66,7 +70,7 @@ func marksOf(svc *Service) (bound, v1 int) {
 	marks.mu.Lock()
 	defer marks.mu.Unlock()
 	for _, mark := range marks.marks {
-		if mark.v1 != nil {
+		if mark.legacyObserved != nil {
 			v1++
 		}
 	}
@@ -110,11 +114,14 @@ func TestTwoNewNodesConnectOverV2(t *testing.T) {
 	}
 }
 
+// The old node announces an old release's version through the proxy: a v1
+// answer at this build's version is a v2 hint to the probe, not an old node.
 func TestANewNodeDiallingAnOldOneFallsBackToV1(t *testing.T) {
 	t.Parallel()
-	old, address, stopOld := listenerNode(t, asOldNode)
+	old, oldAddress, stopOld := listenerNode(t, asOldNode)
 	defer stopOld()
-	dialer, stopDialer := dialerNode(t, address, nil)
+	proxy := startLegacyVersionProxy(t, oldAddress, oldPeerListens, config.MinimumProtocolVersion)
+	dialer, stopDialer := dialerNode(t, proxy.address(), nil)
 	defer stopDialer()
 
 	waitForConditionMsg(t, 15*time.Second, "the new node never reached the old one over v1", func() bool {
@@ -161,7 +168,7 @@ func TestAnAddressThatSpokeV2IsNotDowngraded(t *testing.T) {
 // assertDowngradeRefused watches dialer's connection manager — dialling an
 // endpoint bound to v2 that an old node now answers — until it has refused
 // the downgrade twice, and checks that nothing gave way: no v1 session (the
-// old node never authenticated the dialler), no v1 mark, the binding still in
+// old node never authenticated the dialler), no legacy_observed, the binding still in
 // force. Two refusals because the manager reacts to a failed attempt before
 // it retries; a reaction that forgot the binding would let the retry follow
 // the v1 answer.
@@ -297,6 +304,17 @@ func dialPastTransport(t *testing.T, svc *Service, address domain.PeerAddress) (
 // connection the established session ran on.
 func dialSessionPastTransport(t *testing.T, svc *Service, address domain.PeerAddress) (domain.ConnID, bool, error) {
 	t.Helper()
+	session, err := dialEstablishedPastTransport(t, svc, address)
+	if err != nil {
+		return 0, false, err
+	}
+	return session.connID, true, nil
+}
+
+// dialEstablishedPastTransport is dialPastTransport that returns the
+// established — and already closed — session itself, or why there is none.
+func dialEstablishedPastTransport(t *testing.T, svc *Service, address domain.PeerAddress) (*peerSession, error) {
+	t.Helper()
 	deadline := time.Now().Add(15 * time.Second)
 	for {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -304,10 +322,10 @@ func dialSessionPastTransport(t *testing.T, svc *Service, address domain.PeerAdd
 		cancel()
 		if err == nil {
 			_ = result.Session.Close()
-			return result.Session.connID, true, nil
+			return result.Session, nil
 		}
 		if !errors.Is(err, errPeerDialTransport) {
-			return 0, false, err
+			return nil, err
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("no attempt on %s got past opening its socket (waited 15s): %v", address, err)
@@ -416,17 +434,19 @@ func TestEveryRefusedDowngradeIsCounted(t *testing.T) {
 	}
 }
 
-// The dialling side: an old node answering with a welcome that names a
-// pinned identity is not served over v1 — nothing is signed for it.
+// The dialling side: an old node answering the probe with a welcome that
+// names a pinned identity is not served over v1 — refused on the probe's
+// answer, before the full hello, so nothing is signed for it.
 func TestAPinnedIdentityIsRefusedInAV1Welcome(t *testing.T) {
 	t.Parallel()
 	var oldID domain.PeerIdentity
-	old, address, stopOld := listenerNode(t, withoutOwnDials(func(svc *Service) {
+	old, oldAddress, stopOld := listenerNode(t, withoutOwnDials(func(svc *Service) {
 		asOldNode(svc)
 		oldID = peerIdentityOf(t, svc)
 	}))
 	defer stopOld()
-	dialer, stopDialer := dialerNode(t, address, func(svc *Service) {
+	proxy := startLegacyVersionProxy(t, oldAddress, oldPeerListens, config.MinimumProtocolVersion)
+	dialer, stopDialer := dialerNode(t, proxy.address(), func(svc *Service) {
 		_ = svc.secureSessions.store.noteProvenInbound(oldID)
 	})
 	defer stopDialer()
@@ -453,7 +473,7 @@ func TestAPinnedIdentityIsRefusedInAV1Welcome(t *testing.T) {
 //
 // syncPeer closes its connection before it returns, so the session kind is
 // read from what the dial left behind — the dialler's endpoint binding, its
-// v1 marks and the listener's pin — never from a live connection, which is
+// legacy_observed marks and the listener's pin — never from a live connection, which is
 // gone or not depending on which goroutine ran first.
 func TestARecoverySyncToAV2PeerUsesV2(t *testing.T) {
 	t.Parallel()

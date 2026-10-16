@@ -203,6 +203,14 @@ type Service struct {
 	// domain mutex held and with nothing called under it. See
 	// docs/locking.md.
 	inboundHandshakes *inboundHandshakes
+	// loopbackInbound is the loopback inbound class (loopback_inbound.go):
+	// the connection budgets of every loopback source together, the
+	// connections it condemned for a violation and the penalties of the
+	// identities its v2 sessions proved. Assigned once by NewService and
+	// never replaced (a test swaps it only before Run); its own leaf mutexes,
+	// taken with no domain mutex held and with nothing called under them, and
+	// atomics for the diagnostics. See docs/locking.md.
+	loopbackInbound *loopbackInboundClass
 
 	// datagramMetrics counts every decision the datagram ingress makes
 	// (docs/rpc/datagram.md, fetchDatagramSummary). Deliberately OUTSIDE
@@ -252,11 +260,11 @@ type Service struct {
 	// TestAPanicDuringRunStartupStillJoinsTheLifecycleLoopsFirst pins.
 	faultDuringRunStartup func()
 
-	// heartbeatIntervalOverride replaces the inbound heartbeat's production
-	// schedule. Zero means nextHeartbeatDuration(); it exists so a test can
-	// enter the window where the heartbeat is INSIDE its ping send, which is
-	// the state the connection's join was added for.
-	heartbeatIntervalOverride time.Duration
+	// liveness is the heartbeat schedule and the inbound read bounds
+	// (session_liveness.go). NewService sets the production schedule; a test
+	// replaces it before Run to run the same contract on a compressed clock.
+	// Immutable once Run starts, so it is read without a lock.
+	liveness *livenessSchedule
 
 	// bootstrapTickOverride is a TEST-ONLY replacement for bootstrapLoop's
 	// two-second ticker, nil in production. The test sets it before
@@ -937,7 +945,7 @@ type Service struct {
 	// the domain split: it owns a leaf mutex, touched once per legacy routing
 	// frame where peerMu is hottest.
 	unprovenRouting                unprovenRoutingWriters
-	disableRateLimiting            bool          // test hook: skip per-IP rate limiting, connection caps, and blacklist checks
+	disableRateLimiting            bool          // test hook: skip per-IP rate limiting, connection caps, and blacklist checks, and the loopback class's budgets and identity-ban check (loopback_inbound.go)
 	markPeerStateIntervalTest      time.Duration // test hook: override markPeerStateInterval; -1 = always recompute (0 = use default)
 	routeWithdrawalGracePeriodTest time.Duration // test hook: override routeWithdrawalGracePeriod (negative = disable grace, run withdrawals synchronously like the pre-grace legacy path; zero = use production default)
 	drainDone                      func()        // test hook: called after drainPendingForIdentities completes; nil in production
@@ -1002,6 +1010,14 @@ type Service struct {
 	// written again, so it is immutable once the Service runs and takes part
 	// in no domain (docs/locking.md).
 	connectOnlyResolver *net.Resolver
+
+	// peerTCPDial opens every TCP socket of a peer dial (dialPeer): the
+	// direct one and the one to the SOCKS5 proxy. Set to dialTCPDirect in
+	// NewService; a test may replace it after NewService and before the
+	// Service is first used — the networkOverride discipline — and nothing
+	// writes it afterwards, so it is immutable once the Service runs and
+	// takes part in no domain (docs/locking.md).
+	peerTCPDial tcpDialFunc
 
 	// setupFailures tracks consecutive cm_session_setup_failed events per
 	// dial-target address. Above setupFailureBanThreshold the address is
@@ -2098,6 +2114,7 @@ func newService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus, netw
 		identity:         id,
 
 		connectOnlyResolver: net.DefaultResolver,
+		peerTCPDial:         dialTCPDirect,
 
 		// startedAt is captured at construction (not at Run()) so the
 		// uptime_seconds reported by getNodeStatus stays meaningful in
@@ -2160,6 +2177,7 @@ func newService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus, netw
 		identityRelaySessions:    make(map[domain.PeerIdentity]int),
 		pendingWithdrawals:       make(map[domain.PeerIdentity]*pendingWithdrawal),
 		presenceClock:            time.Now,
+		liveness:                 new(productionLiveness()),
 		presenceProjector:        newPresenceProjector(),
 		deliveryClock:            time.Now,
 		peerQuarantine:           make(map[penaltySubject]routeQuarantineEntry),
@@ -2254,7 +2272,7 @@ func newService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus, netw
 			return svc.isPeerRemoteBannedLocked(addr, time.Now().UTC())
 		},
 		SetupFailureBannedFn:   svc.IsSetupFailureBanned,
-		V2RetryHeldFn:          svc.v2RetryHeld,
+		DialHeldFn:             svc.dialHeld,
 		ConnectOnlyFn:          svc.connectOnlyTarget,
 		ListenAddr:             domain.ListenAddress(cfg.ListenAddress),
 		DefaultPort:            config.DefaultPeerPort,
@@ -2560,7 +2578,12 @@ func newService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus, netw
 	// and fetch_peer_health may be served before Run reaches any point it
 	// could publish the manager from. Run closes it.
 	svc.captureManager = svc.newCaptureManager()
-	svc.secureSessions = newSecureSessions(id, secureSessionStorePath(cfg), time.Now)
+	svc.secureSessions = newSecureSessions(id, secureSessionsOptions{
+		storePath:        secureSessionStorePath(cfg),
+		markerPath:       pinStoreMarkerPath(cfg),
+		clock:            time.Now,
+		tlsFirstDisabled: cfg.DisableV2TLSFirst,
+	})
 
 	svc.relayStates = newRelayStateStore()
 	svc.relayLimiter = newRelayRateLimiter(time.Now)
@@ -2568,6 +2591,9 @@ func newService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus, netw
 	svc.connLimiter = newConnRateLimiter(time.Now)
 	svc.listenerRefusals = newListenerRefusals(productionAlertPoolBounds(), svc.startedAt)
 	svc.inboundHandshakes = newInboundHandshakes(productionHandshakeBounds())
+	svc.loopbackInbound = newLoopbackInboundClass(
+		productionLoopbackInboundBounds(inboundCapacityOf(svc.connBudget.Snapshot())),
+		productionIdentityPenaltyPolicy(), time.Now)
 	svc.cmdLimiter = newCommandRateLimiter(time.Now)
 	svc.inboundByIP = make(map[string]int)
 
@@ -2754,11 +2780,10 @@ func (s *Service) Run(ctx context.Context) error {
 	defer runCancel()
 	ctx = s.runCtx
 
-	// A budget that cannot be honoured stops the node here. Starting with a
-	// silently disabled ceiling would be the worst of the two outcomes: the
-	// operator asked for a limit, and the node would run without one.
-	if s.connBudgetErr != nil {
-		return fmt.Errorf("connection budget: %w", s.connBudgetErr)
+	// What NewService found the node must not start with stops it here,
+	// before the first listener (StartupRefusal).
+	if err := s.StartupRefusal(); err != nil {
+		return err
 	}
 	// Serving would accept and dial real connections the override could not
 	// close (refuseRealConnectionUnderNetworkOverride).
@@ -2988,68 +3013,7 @@ func (s *Service) Run(ctx context.Context) error {
 			return fmt.Errorf("accept connection: %w", err)
 		}
 
-		// Per-IP connection rate limiting — reject before allocating any
-		// per-connection resources (goroutines, maps, buffers). Prevents
-		// SYN flood and connection exhaustion from a single source.
-		ip := remoteIP(conn.RemoteAddr())
-		if !s.disableRateLimiting && !s.connLimiter.allowConnect(ip) {
-			log.Warn().Str("ip", ip).Str("reason", refusalConnectionRate.String()).Msg("reject connection")
-			s.listenerRefusals.refuse(conn, refusalConnectionRate)
-			continue
-		}
-
-		// Per-IP concurrent connection cap — even within rate limits, no
-		// single IP should monopolize connection slots.
-		if !s.disableRateLimiting && !s.tryIncrementIPConn(ip) {
-			log.Warn().Str("ip", ip).Str("reason", refusalConnectionsPerIP.String()).Msg("reject connection")
-			s.listenerRefusals.refuse(conn, refusalConnectionsPerIP)
-			continue
-		}
-
-		// The shared ceiling is taken HERE, in the accept loop, before the
-		// handler goroutine exists.
-		//
-		// ⚠️ Review found reserving inside the handler was too late, and the
-		// gap is not theoretical: the handler blocks on peerMu, and while it
-		// waits this loop keeps accepting. Every socket in that queue is
-		// open, holds a descriptor, and is invisible to Budget.Used — so the
-		// node holds more connections than its ceiling while reporting that
-		// it does not. The per-IP caps do not close it either: they are
-		// per-IP, and the queue grows with the number of sources.
-		//
-		// Refusal is answered right here, which is also the cheapest possible
-		// point: no handler goroutine, no metered wrapper, no registry entry.
-		inboundReservation, budgetErr := s.connBudget.Reserve(connbudget.DirectionInbound)
-		if budgetErr != nil {
-			log.Warn().
-				Err(budgetErr).
-				Str("ip", ip).
-				Str("reason", refusalConnectionBudget.String()).
-				Msg("reject connection")
-			s.listenerRefusals.refuse(conn, refusalConnectionBudget)
-			s.decrementIPConn(ip)
-			continue
-		}
-
-		s.connWg.Add(1)
-		// lifecycle: joined by connWg, not runLoopsWg. A connection handler is
-		// per-CONNECTION rather than per-Run: it ends when its socket closes,
-		// and the teardown that owns it is the closeAllInboundConns +
-		// connWg.Wait defer above, which must run at its own point in the
-		// order. Tracking it in the lifecycle group as well would give one
-		// goroutine two owners.
-		go func(c net.Conn, cip string, reservation *connbudget.Reservation) {
-			defer s.connWg.Done()
-			defer crashlog.DeferRecover()
-			defer s.decrementIPConn(cip)
-			// Release covers every early exit of the handler — blacklist,
-			// registration refusal, a socket that says nothing. Once the
-			// connection is registered the entry owns the unit and releases
-			// it on unregister; Release is idempotent, so the two cannot
-			// double-free between them.
-			defer reservation.Release()
-			s.handleConn(c, reservation)
-		}(conn, ip, inboundReservation)
+		s.acceptInbound(conn)
 	}
 }
 
@@ -3282,8 +3246,12 @@ func (s *Service) handleConn(conn net.Conn, reservation *connbudget.Reservation)
 	// connection is registered anywhere (session_secure.go): a peer that
 	// fails its proof leaves no trace in the registry, NetCore or the auth
 	// state. wire is what the session's frames travel on — TLS for v2, the
-	// metered socket itself for v1.
-	wire, reader, proven, err := s.openInboundTransport(metered)
+	// metered socket itself for v1. Every byte either reads comes through
+	// frames, which is how the read loop tells an idle wait from a frame in
+	// progress.
+	liveness := s.sessionLiveness()
+	frames := newInboundFrameDeadline(metered, liveness.inboundFrameRead)
+	wire, reader, proven, err := s.openInboundTransport(metered, frames)
 	if refusal, refused := errors.AsType[*listenerRefusalError](err); refused {
 		log.Warn().Str("addr", conn.RemoteAddr().String()).Str("reason", refusal.reason.String()).Msg("reject connection")
 		s.listenerRefusals.refuse(metered, refusal.reason)
@@ -3361,14 +3329,21 @@ func (s *Service) handleConn(conn net.Conn, reservation *connbudget.Reservation)
 
 	connKey := conn.RemoteAddr().String()
 	defer s.cmdLimiter.removeConn(connKey)
+	loopbackSource := inboundSourceClassOf(conn.RemoteAddr()) == domain.InboundSourceLoopback
+	if loopbackSource {
+		s.loopbackInbound.track(connID)
+		defer s.loopbackInbound.forget(connID)
+	}
 	for {
-		// Set a read deadline before each frame read. This prevents
-		// Slowloris-style attacks where a peer opens a connection and
-		// sends data extremely slowly (or not at all) to hold the
-		// connection slot and goroutine indefinitely. Legitimate peers
-		// send heartbeat pings every 30s, so 120s is generous.
-		if tc, ok := conn.(interface{ SetReadDeadline(time.Time) error }); ok {
-			_ = tc.SetReadDeadline(time.Now().Add(inboundReadTimeout))
+		// Two bounds, so that neither a silent socket nor a trickled frame
+		// holds the connection slot and this goroutine for ever: the wait for
+		// the next frame — of a session, long enough for the dialler's
+		// heartbeat to arrive; before the session, the handshake's frame
+		// bound — and, once its first byte is in, the frame itself.
+		// session_liveness.go has the schedule the two are fitted to.
+		if err := frames.awaitFrame(liveness.inboundIdle(heartbeatStop != nil), reader.Buffered() > 0); err != nil {
+			s.endInboundReadLoop(connID, conn.RemoteAddr().String(), err)
+			return
 		}
 
 		line, err := s.readInboundCommandLine(reader, connID)
@@ -3411,6 +3386,13 @@ func (s *Service) handleConn(conn net.Conn, reservation *connbudget.Reservation)
 		// same one (see rawLineForDispatch for the full argument and for why
 		// the announce-plane types stay on the trimmed form).
 		if !s.handleCommand(connID, line) {
+			return
+		}
+		// A loopback connection that committed a violation is ended here,
+		// after the reply to the frame that committed it went out
+		// (chargeLoopbackViolation): loopback is never banned by its IP.
+		if loopbackSource && s.loopbackInbound.isCondemned(connID) {
+			log.Info().Uint64("conn_id", uint64(connID)).Str("addr", connKey).Msg("loopback_condemned_connection_closed")
 			return
 		}
 
@@ -3848,12 +3830,18 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, wire string) bool {
 			// it; from that moment handleConn silently closes all further TCP
 			// attempts from that IP for 24 hours.
 			s.addBanScore(connID, banIncrementIncompatibleVersion)
-			// Overlay-level penalty: accumulate incompatible-version
-			// penalty under the peer's canonical health key (ban triggers
-			// after repeated attempts, not immediately). The remote peer's
-			// version comes from the hello frame it just sent.
-			peerVer := domain.ProtocolVersion(frame.Version)
-			peerMin := domain.ProtocolVersion(frame.MinimumProtocolVersion)
+			// Overlay-level record under the peer's canonical health key.
+			// The version comes from the hello frame it just sent, which
+			// nothing proves: a man in the middle can rewrite an honest
+			// node's hello below the floor. So it is a claim — diagnostics
+			// only, no score, ban, IP ban, lockout or reporter
+			// (noteClaimedIncompatibleVersion); the transport-level
+			// addBanScore above keys the actual TCP source.
+			claim := incompatibleVersionClaim{
+				peerVersion:   domain.ProtocolVersion(frame.Version),
+				peerMinimum:   domain.ProtocolVersion(frame.MinimumProtocolVersion),
+				clientVersion: domain.ClientVersion(frame.ClientVersion),
+			}
 			// Build the health key from the verified TCP IP and the
 			// self-reported advertise_port — the same shape the accepted
 			// inbound path uses (rememberConnPeerAddr). The hello carries
@@ -3864,12 +3852,10 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, wire string) bool {
 			// on a non-default advertise_port.
 			// peerAddressFromInbound returns "" when the TCP host is not
 			// parseable as an IP, in which case there is no usable health
-			// key to penalise — the per-peer notice + IP-level addBanScore
+			// key to record — the per-peer notice + IP-level addBanScore
 			// above remain the operative signals on that degenerate edge.
 			if peerAddr := peerAddressFromInbound(addr, extractAdvertisePort(frame)); peerAddr != "" {
-				// On the inbound rejection path the hello frame is the only
-				// source of the client version the lockout records.
-				s.penalizeOldProtocolPeer(domain.PeerAddress(peerAddr), peerVer, peerMin, domain.ClientVersion(frame.ClientVersion))
+				s.noteClaimedIncompatibleVersion(domain.PeerAddress(peerAddr), claim)
 			}
 			return true
 		}
@@ -6159,9 +6145,14 @@ func (s *Service) recordObservedAddress(peerID domain.PeerIdentity, observedIP s
 // session at the moment the blacklist flips on (see addBanScore); raw
 // reconnects observed here get only the listener's refusal alert
 // (listener_refusal.go).
+//
+// A loopback source is never blacklisted: it is the whole onion entry, and
+// the loopback inbound class punishes the connection or the proven identity
+// instead (loopback_inbound.go). An entry for a loopback IP — left by an
+// earlier build — is not consulted; the ban purge drops it once it expires.
 func (s *Service) isBlacklistedConn(conn net.Conn) bool {
 	ip := remoteIP(conn.RemoteAddr())
-	if ip == "" {
+	if ip == "" || inboundSourceClassOf(conn.RemoteAddr()) == domain.InboundSourceLoopback {
 		return false
 	}
 	// ipStateMu, not s.peerMu: bans live in the IP/advertise domain.  Writer
@@ -6229,20 +6220,34 @@ func (s *Service) decrementIPConn(ip string) {
 	}
 }
 
+// addBanScore charges a violation on an inbound connection to whoever its
+// source class holds responsible: the source IP for an external source, the
+// connection or the proven identity for loopback (chargeLoopbackViolation).
 func (s *Service) addBanScore(id domain.ConnID, delta int) {
 	pc := s.netCoreForID(id)
 	if pc == nil || delta <= 0 {
 		return
 	}
-	host, _, err := net.SplitHostPort(pc.RemoteAddr())
+	switch inboundSourceClassOfRemote(pc.RemoteAddr()) {
+	case domain.InboundSourceLoopback:
+		s.chargeLoopbackViolation(id, pc, delta)
+	default:
+		s.addIPBanScore(id, pc.RemoteAddr(), delta)
+	}
+}
+
+// addIPBanScore adds delta to the ban score of an external connection's
+// source IP and blacklists the IP once the score reaches banThreshold.
+func (s *Service) addIPBanScore(id domain.ConnID, remoteAddr string, delta int) {
+	host, _, err := net.SplitHostPort(remoteAddr)
 	if err != nil || host == "" {
 		return
 	}
 	ip := host
 	// ipStateMu, not s.peerMu: bans live in the IP/advertise domain.
-	log.Trace().Str("site", "addBanScore").Str("phase", "lock_wait").Str("ip", ip).Uint64("conn_id", uint64(id)).Msg("ip_state_mu_writer")
+	log.Trace().Str("site", "addIPBanScore").Str("phase", "lock_wait").Str("ip", ip).Uint64("conn_id", uint64(id)).Msg("ip_state_mu_writer")
 	s.ipStateMu.Lock()
-	log.Trace().Str("site", "addBanScore").Str("phase", "lock_held").Str("ip", ip).Uint64("conn_id", uint64(id)).Msg("ip_state_mu_writer")
+	log.Trace().Str("site", "addIPBanScore").Str("phase", "lock_held").Str("ip", ip).Uint64("conn_id", uint64(id)).Msg("ip_state_mu_writer")
 	now := time.Now().UTC()
 	entry := s.bans[ip]
 	previouslyBlacklisted := !entry.Blacklisted.IsZero()
@@ -6254,7 +6259,7 @@ func (s *Service) addBanScore(id domain.ConnID, delta int) {
 	s.bans[ip] = entry
 	justBlacklisted := !previouslyBlacklisted && !entry.Blacklisted.IsZero()
 	s.ipStateMu.Unlock()
-	log.Trace().Str("site", "addBanScore").Str("phase", "lock_released").Str("ip", ip).Uint64("conn_id", uint64(id)).Msg("ip_state_mu_writer")
+	log.Trace().Str("site", "addIPBanScore").Str("phase", "lock_released").Str("ip", ip).Uint64("conn_id", uint64(id)).Msg("ip_state_mu_writer")
 	if !entry.Blacklisted.IsZero() {
 		log.Warn().Str("ip", ip).Int("score", entry.Score).Time("until", entry.Blacklisted).Msg("blacklist")
 	}
@@ -10619,9 +10624,12 @@ func isFireAndForgetFrame(frameType string) bool {
 	}
 }
 
-// heartbeatInterval is the base interval between ping/pong heartbeats.
-// Mirrors Bitcoin's 2-minute PING_INTERVAL to reduce idle chatter while
-// keeping the connection provably alive.
+// heartbeatInterval is the base interval between the pings of the side that
+// ACCEPTED a session (inboundHeartbeat), and the unit of the peer health
+// thresholds (computePeerStateAtLocked). Two minutes keeps idle chatter low
+// while the listener still proves the peer alive on its own; the dialler
+// pings more often (diallerHeartbeatInterval, session_liveness.go), because
+// its pings are what the listener's read bound waits for.
 const heartbeatInterval = 2 * time.Minute
 
 // pongStallTimeout is the maximum time to wait for a pong reply before

@@ -145,16 +145,18 @@ type PeerProviderConfig struct {
 	// the cooldown has elapsed.
 	SetupFailureBannedFn func(domain.PeerAddress) bool
 
-	// V2RetryHeldFn reports whether the address waits for its v2 retry
-	// backoff: a v2 attempt there ended without v2 — the address answered
-	// v1 and that answer was refused because the peer requires v2, or its
-	// fall back to v1 was held — and the next attempt is not due yet
-	// (session_secure.go). It is pacing, not a penalty: unlike the cooldown
+	// DialHeldFn reports whether the address waits for its next dial:
+	// its old-version delay runs (a correct answer there claimed a version
+	// below this node's minimum), its v2 retry backoff
+	// runs — an attempt there ended for a reason that says nothing against
+	// the address — or its last v2 session was refused for this node's full
+	// pin store, which has no room yet (session_address_marks.go). It holds
+	// in every mode, a v1-only node included. It is pacing, not a penalty: unlike the cooldown
 	// of 6f it reads no failure count and writes nothing into the address's
 	// health, score or setup failures, because such a refusal is this
 	// node's decision and a man in the middle can provoke it. Not part of
 	// IsDialBanned: it is not a ban. Returns false when the callback is nil.
-	V2RetryHeldFn func(domain.PeerAddress) bool
+	DialHeldFn func(domain.PeerAddress) bool
 
 	// ListenAddr is this node's own listen address (for self-filtering).
 	ListenAddr domain.ListenAddress
@@ -496,7 +498,7 @@ func (pp *PeerProvider) Candidates() []domain.CandidatePeer {
 		// 6c.4: skip addresses waiting for their v2 retry backoff. A dial
 		// would be refused before its socket, and picking the address
 		// would only occupy a slot.
-		if cfg.V2RetryHeldFn != nil && cfg.V2RetryHeldFn(kp.Address) {
+		if cfg.DialHeldFn != nil && cfg.DialHeldFn(kp.Address) {
 			continue
 		}
 

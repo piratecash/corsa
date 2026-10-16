@@ -248,7 +248,7 @@ func claimsOf(node *Service, id domain.PeerIdentity) (v2, legacy int) {
 	return v2, legacy
 }
 
-// The mandatory scenario of the owner's decision on N1: a legacy impostor of
+// The scenario an unproven legacy identity must not win: a legacy impostor of
 // X connects first; the real X then proves itself over v2; then X's v2
 // session closes. From the proof on, the impostor has no connection to this
 // node, so it neither keeps routing rights nor is a path for traffic meant

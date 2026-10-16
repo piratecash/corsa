@@ -9,6 +9,7 @@ import (
 	"github.com/piratecash/corsa/internal/core/config"
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/ebus"
+	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
 // ---------------------------------------------------------------------------
@@ -24,11 +25,53 @@ type incompatibleProtocolError struct {
 	PeerMinimum   domain.ProtocolVersion
 	ClientVersion string
 	Cause         error
+	// Evidence says what stands behind the versions; anything but
+	// versionProven is a claim.
+	Evidence versionEvidence
+	// CorrectAnswer reports that the refused frame was a correct answer: a
+	// welcome of this network that names a version, whose address is the
+	// fingerprint of its key and whose box key is signed by that key. A
+	// broken answer never starts the old-version delay: it claims nothing.
+	CorrectAnswer bool
 }
 
+// claimsOldVersion reports whether the refusal is a correct, unproven answer
+// that claimed a version below this node's minimum — the reason for the
+// endpoint's old-version delay.
+func (e *incompatibleProtocolError) claimsOldVersion() bool {
+	return e.Evidence != versionProven && e.CorrectAnswer && e.PeerVersion < domain.ProtocolVersion(config.MinimumProtocolVersion)
+}
+
+// versionEvidence is what stands behind a version a peer announced.
+type versionEvidence int
+
+const (
+	// versionClaimed: a frame no proof covers — the answer to the probe, a
+	// v1 welcome before auth_ok, a v1 hello. A man in the middle can write
+	// any version into it.
+	versionClaimed versionEvidence = iota + 1
+	// versionProven: the intro of a v2 session whose proof verified.
+	versionProven
+)
+
+// incompatibleVersionOf is the incompatible version frame announced, with
+// what stands behind it and why it was refused.
+func incompatibleVersionOf(frame protocol.Frame, evidence versionEvidence, cause error) *incompatibleProtocolError {
+	return &incompatibleProtocolError{
+		PeerVersion:   domain.ProtocolVersion(frame.Version),
+		PeerMinimum:   domain.ProtocolVersion(frame.MinimumProtocolVersion),
+		ClientVersion: frame.ClientVersion,
+		Cause:         cause,
+		Evidence:      evidence,
+		CorrectAnswer: legacyWelcomeCorrect(frame),
+	}
+}
+
+// Error names the versions only: the client version is whatever the remote
+// side wrote, and an error travels into logs.
 func (e *incompatibleProtocolError) Error() string {
-	return fmt.Sprintf("incompatible protocol version: peer=%d, min=%d, client=%q: %v",
-		e.PeerVersion, e.PeerMinimum, e.ClientVersion, e.Cause)
+	return fmt.Sprintf("incompatible protocol version: peer=%d, min=%d: %v",
+		e.PeerVersion, e.PeerMinimum, e.Cause)
 }
 
 func (e *incompatibleProtocolError) Unwrap() error {

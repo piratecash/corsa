@@ -24,9 +24,10 @@ import (
 //
 // THE OLD PEER IS AN EMULATION, NOT A RELEASED BINARY: it is this build in
 // v1-only mode (asOldNode) with the proxy rewriting its announced version. The
-// cross-binary run against the real v26–v30 releases is a separate task with
-// its own isolation; these tests check what
-// this build does with a peer that behaves and announces like an old one.
+// cross-binary run against the released binaries of v28–v30 is
+// release_interop_test.go (build tag interop, its own isolation); these tests
+// check what this build does with a peer that behaves and announces like an
+// old one.
 
 // legacyPair is a node of this build (new) wired to an emulated old node
 // (old) through two proxies: newDialsOld carries the new node's dials to the
@@ -43,6 +44,14 @@ type legacyPair struct {
 // relay.
 func startLegacyPair(t *testing.T, version int) legacyPair {
 	t.Helper()
+	return startLegacyPairWithSetup(t, version, nil, nil)
+}
+
+// startLegacyPairWithSetup is startLegacyPair with a pre-Run setup for each
+// node (startTestNodeWithSetup); the old node is made v1-only first, then
+// handed to oldSetup.
+func startLegacyPairWithSetup(t *testing.T, version int, newSetup, oldSetup func(*Service)) legacyPair {
+	t.Helper()
 	newAddress := freeAddress(t)
 	oldAddress := freeAddress(t)
 
@@ -53,14 +62,19 @@ func startLegacyPair(t *testing.T, version int) legacyPair {
 		ListenAddress:  oldAddress,
 		BootstrapPeers: []string{oldDialsNew.address()},
 		Type:           config.NodeTypeFull,
-	}, asOldNode)
+	}, func(svc *Service) {
+		asOldNode(svc)
+		if oldSetup != nil {
+			oldSetup(svc)
+		}
+	})
 	t.Cleanup(stopOld)
 
 	newNode, stopNew := startTestNodeWithSetup(t, config.Node{
 		ListenAddress:  newAddress,
 		BootstrapPeers: []string{newDialsOld.address()},
 		Type:           config.NodeTypeFull,
-	}, nil)
+	}, newSetup)
 	t.Cleanup(stopNew)
 
 	return legacyPair{
@@ -210,12 +224,13 @@ func TestReachingAnOldListenerOverV1DoesNotPenaliseTheAddress(t *testing.T) {
 }
 
 // Silence and RST in place of an answer: a listener that accepts the TCP
-// connection but never answers the v2 ClientHello, or resets it, is a plain v2
-// failure — not a v1 answer. The node does not fall back to v1 (only the `{`
-// first byte means "old node"), so it leaves no v1 mark and opens no legacy
-// session; it also binds the address to nothing. A man in the middle cannot
-// turn silence into a downgrade.
-func TestReachingASilentOrResettingListenerLeavesNoV1Mark(t *testing.T) {
+// connection but never answers the v2 ClientHello, or resets it, gives no
+// evidence either way. The probe that follows meets the same silence or
+// reset, and only a correct old answer to it would allow v1, so the node
+// leaves no legacy_observed and opens no legacy session; it also binds the
+// address to nothing. A man in the middle cannot turn silence into a
+// downgrade.
+func TestReachingASilentOrResettingListenerLeavesNoLegacyObserved(t *testing.T) {
 	t.Parallel()
 	cases := map[string]func(net.Conn){
 		"silence": func(conn net.Conn) { /* hold it open, answer nothing */ },
@@ -240,7 +255,7 @@ func TestReachingASilentOrResettingListenerLeavesNoV1Mark(t *testing.T) {
 				t.Fatalf("%s: a session was established with a listener that never spoke v2", name)
 			}
 			if _, v1 := marksOf(dialer); v1 != 0 {
-				t.Fatalf("%s: a v1 mark was set for a listener that only %s", name, name)
+				t.Fatalf("%s: legacy_observed was set for a listener that only %s", name, name)
 			}
 			if dialer.secureSessions.store.endpointRequiresV2(address) {
 				t.Fatalf("%s: the failed v2 attempt bound the address to v2", name)

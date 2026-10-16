@@ -8,17 +8,18 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math/rand/v2"
 	"net"
-	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 
 	"github.com/piratecash/corsa/internal/core/connauth"
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/netcore"
+	"github.com/piratecash/corsa/internal/core/secretfile"
 	"github.com/piratecash/corsa/internal/core/sessionv2"
 	"github.com/piratecash/corsa/internal/core/trustedclock"
 )
@@ -32,17 +33,19 @@ import (
 //     session_proof verified. Anything else is a v1 connection, handled as
 //     before.
 //   - Dialler — every path that opens a session (the connection manager,
-//     syncPeer, sendNoticeToPeer): v2 first. A peer that answers with a v1
-//     line is an old node: the address is marked as speaking v1 and dialled
-//     again over v1 — unless the endpoint is bound to v2
-//     (secure_session_store.go), in which case the answer is a downgrade and
-//     the dial fails. A v1 welcome naming a pinned identity is refused too.
-//     Such a refusal is not charged to the address; it holds the fall back to
-//     v1 at that address for a while (legacyRefusalHoldBase), and the next
-//     dials there start with v2 — a v2 attempt is never held. Every one of
-//     these paths dials an address; a dial "to X" (domain.DialIntent)
-//     expects X in the handshake and alone may protect the endpoint, and no
-//     path makes one yet.
+//     syncPeer, sendNoticeToPeer): a TLS attempt first; v1 only on a separate
+//     connection whose identity-less probe got a correct old-protocol answer
+//     naming an identity that does not require v2, the full hello following
+//     on that connection (session_dial_choice.go). Where v2 is required — an
+//     endpoint bound to v2 (secure_session_store.go) or proven by an outbound
+//     session (v2_strong), a dial "to X", a v2-only node — nothing leads to
+//     v1. A refusal of a v1 answer by pin or binding is not charged to the
+//     address; it holds the fall back to v1 at that address for a while
+//     (legacyRefusalHoldBase), and the next dials there start with v2 — a v2
+//     attempt is never held by it. Every path dials an address today; a dial
+//     "to X" (domain.DialIntent) expects X in the handshake and alone may
+//     protect the endpoint, and no path makes one yet. What the dialler
+//     remembers per address lives in session_address_marks.go.
 //   - Listener, v1: a hello naming a pinned identity is refused.
 //
 // Which of the two kinds a build may use follows from its version constants
@@ -50,47 +53,183 @@ import (
 
 // secureSessions is the per-node state of the v2 session. The pointer is set
 // once in NewService and never replaced; Local and the certificate source
-// are immutable or synchronise themselves, and the address marks own their
-// mutex. No domain mutex is taken for any of it.
+// are immutable or synchronise themselves, the dial timeouts and the
+// operator's TLS-first switch are set once with it, the address marks own
+// their mutex, and the probe-first counter is atomic. No domain mutex is
+// taken for any of it.
 type secureSessions struct {
 	mode         sessionv2.Mode
 	local        sessionv2.Local
 	certificates sessionv2.CertificateSource
 	store        *secureSessionStore
 	marks        *sessionAddressMarks
+	dialTimeouts sessionDialTimeouts
+	// tlsFirstDisabled is the operator's TLS-first switch
+	// (config.Node.DisableV2TLSFirst): a dial where v1 is not ruled out
+	// opens with the probe instead of a ClientHello (session_dial_choice.go).
+	// The zero value is TLS-first on.
+	tlsFirstDisabled bool
+	// dialsOpenedByProbe counts the dials that opened with the probe because
+	// of tlsFirstDisabled.
+	dialsOpenedByProbe atomic.Uint64
+	// v1RefusalsAfterV2Welcome counts errLegacyRefusedAfterV2Welcome.
+	v1RefusalsAfterV2Welcome atomic.Uint64
+	// refusal is why the node must not start although its store, if any,
+	// would let it: the v2 state of a build with the secure session could
+	// not be built, or a v1-only build finds a pin store on disk. nil when
+	// nothing here stands in the way. Set once with the state, never
+	// changed.
+	refusal *PinStoreRefusalError
 }
 
-// newSecureSessions builds the v2 state for a node. An identity that cannot
-// prove (nil in some test Services) leaves the node on v1: there is nothing
-// v2 could prove with. The store's terms run on the trusted time over clock
+// secureSessionsOptions is what a node's v2 state is built from besides its
+// identity.
+type secureSessionsOptions struct {
+	// storePath is the downgrade-protection store's file.
+	storePath string
+	// markerPath is the store's marker next to the identity
+	// (pinStoreMarkerPath).
+	markerPath string
+	// clock is the wall clock the certificates, the store's trusted time
+	// and the address marks read.
+	clock func() time.Time
+	// tlsFirstDisabled is config.Node.DisableV2TLSFirst.
+	tlsFirstDisabled bool
+}
+
+// newSecureSessions builds the v2 state for a node. A build with the secure
+// session whose v2 state cannot be built — an identity that cannot prove
+// (nil in some test Services), an unusable certificate source — is a
+// startup refusal, never a quiet fall back to v1 (unavailableSessions). The store's terms run on the trusted time over clock
 // and this machine's clock since boot, started here, so a wall clock set
-// forward while the node runs does not end ordinary bindings early.
-func newSecureSessions(id *identity.Identity, storePath string, clock func() time.Time) *secureSessions {
-	mode, err := configuredSessionMode()
+// forward while the node runs does not end ordinary bindings early. A
+// TLS-first switched off is said at Warn here, once, with the mode it lands
+// in.
+func newSecureSessions(id *identity.Identity, opts secureSessionsOptions) *secureSessions {
+	sessions := buildSecureSessions(id, opts, productionSecureSessionBuilders())
+	warnTLSFirstDisabled(log.Logger, sessions.tlsFirstDisabled, sessions.mode)
+	return sessions
+}
+
+// secureSessionBuilders are the two parts of the v2 state that can fail for
+// reasons outside the options: the mode this build's version constants give,
+// and the certificate source. Tests inject the failures.
+type secureSessionBuilders struct {
+	mode         func() (sessionv2.Mode, error)
+	certificates func(sessionv2.Clock) (sessionv2.CertificateSource, error)
+}
+
+func productionSecureSessionBuilders() secureSessionBuilders {
+	return secureSessionBuilders{mode: configuredSessionMode, certificates: sessionv2.NewCertificateSource}
+}
+
+func buildSecureSessions(id *identity.Identity, opts secureSessionsOptions, builders secureSessionBuilders) *secureSessions {
+	mode, err := builders.mode()
 	if err != nil {
-		log.Error().Err(err).Msg("secure_session_mode_invalid")
-		return &secureSessions{mode: sessionv2.ModeLegacyOnly}
+		return unavailableSessions(opts, fmt.Errorf("session mode: %w", err))
 	}
 	if mode == sessionv2.ModeLegacyOnly {
-		return &secureSessions{mode: mode}
+		return legacyOnlyBuildSessions(opts)
 	}
 	local, err := sessionv2.NewLocal(id, domain.NetworkID(networkName))
 	if err != nil {
-		log.Error().Err(err).Msg("secure_session_identity_unusable")
-		return &secureSessions{mode: sessionv2.ModeLegacyOnly}
+		return unavailableSessions(opts, fmt.Errorf("identity: %w", err))
 	}
-	certificates, err := sessionv2.NewCertificateSource(clock)
+	certificates, err := builders.certificates(opts.clock)
 	if err != nil {
-		log.Error().Err(err).Msg("secure_session_certificates_unusable")
-		return &secureSessions{mode: sessionv2.ModeLegacyOnly}
+		return unavailableSessions(opts, fmt.Errorf("certificate source: %w", err))
 	}
+	store := openSecureSessionStore(secureSessionStoreOptions{
+		path:       opts.storePath,
+		markerPath: opts.markerPath,
+		clock:      trustedclock.New(trustedclock.Sources{Wall: opts.clock, SinceBoot: trustedclock.SinceBoot}),
+		logger:     log.Logger,
+		audit:      secretfile.AuditLocation,
+	})
 	return &secureSessions{
-		mode:         mode,
-		local:        local,
-		certificates: certificates,
-		store:        loadSecureSessionStore(storePath, trustedclock.New(trustedclock.Sources{Wall: clock, SinceBoot: trustedclock.SinceBoot})),
-		marks:        newSessionAddressMarks(clock),
+		mode:             mode,
+		local:            local,
+		certificates:     certificates,
+		store:            store,
+		marks:            newSessionAddressMarks(opts.clock),
+		dialTimeouts:     defaultSessionDialTimeouts(),
+		tlsFirstDisabled: opts.tlsFirstDisabled,
 	}
+}
+
+// legacyOnlySessions is the state of a node that speaks v1 only. It keeps
+// the address marks all the same: the delays that pace redials after a
+// claimed version hold whatever the node speaks. The TLS-first switch is kept
+// too, so the node reports what the operator set; with nothing dialled over
+// TLS it changes no dial.
+func legacyOnlySessions(opts secureSessionsOptions) *secureSessions {
+	return &secureSessions{mode: sessionv2.ModeLegacyOnly, marks: newSessionAddressMarks(opts.clock), tlsFirstDisabled: opts.tlsFirstDisabled}
+}
+
+// legacyOnlyBuildSessions is the state of a build whose version constants
+// speak v1 only — a rollback to a build without the secure session. It
+// enforces no pin, so a pin store or a marker on disk is a refusal: the
+// pins would be ignored, not kept.
+func legacyOnlyBuildSessions(opts secureSessionsOptions) *secureSessions {
+	sessions := legacyOnlySessions(opts)
+	if found, present := pinStoreFileOnDisk(opts.storePath, opts.markerPath); present {
+		sessions.refusal = refuseLegacyOnlyBuild(found)
+		logSessionsRefusal(sessions.refusal)
+	}
+	return sessions
+}
+
+// unavailableSessions is the state of a build with the secure session whose
+// v2 state could not be built. It is a refusal, never a quiet fall back to
+// v1: on v1 alone not a single pin would be enforced. The state itself is the
+// v1-only one, which the refused node never runs.
+func unavailableSessions(opts secureSessionsOptions, cause error) *secureSessions {
+	sessions := legacyOnlySessions(opts)
+	sessions.refusal = refuseSecureSessionUnavailable(cause)
+	logSessionsRefusal(sessions.refusal)
+	return sessions
+}
+
+// logSessionsRefusal says once why the node will not start. The line carries
+// the reason and the cause, never a path.
+func logSessionsRefusal(refusal *PinStoreRefusalError) {
+	event := log.Error().Str("reason", string(refusal.Reason))
+	if refusal.Reason == domain.PinStoreRefusalSecureSessionUnavailable {
+		event = event.Err(refusal.cause)
+	}
+	event.Msg("pin_store_refused")
+}
+
+// startupRefusal is why the node must not start over its v2 state, or nil:
+// the state's own refusal first, then its store's.
+func (s *secureSessions) startupRefusal() error {
+	if s.refusal != nil {
+		return s.refusal
+	}
+	if s.store == nil {
+		return nil
+	}
+	return s.store.startupRefusal()
+}
+
+// warnTLSFirstDisabled says loudly that the operator switched TLS-first off:
+// the node then dials unpinned peers without first offering v2, which an
+// operator must be able to find in the log long after setting it.
+func warnTLSFirstDisabled(logger zerolog.Logger, disabled bool, mode sessionv2.Mode) {
+	if !disabled {
+		return
+	}
+	logger.Warn().
+		Str("session_mode", mode.String()).
+		Str("scope", "dials where v1 is not ruled out open with the identity-less probe instead of a ClientHello; a v2 welcome still leads to TLS, pinned identities and bound endpoints keep v2").
+		Str("restore", "unset CORSA_V2_TLS_FIRST (headless) or leave sdk.NodeConfig.V2TLSFirst nil").
+		Msg("secure_session_v2_tls_first_disabled")
+}
+
+// tlsFirstDisabled reports the operator's TLS-first switch; a struct-literal
+// test Service without v2 state has it on.
+func (s *Service) tlsFirstDisabled() bool {
+	return s.secureSessions != nil && s.secureSessions.tlsFirstDisabled
 }
 
 // refuseLegacyIdentity reports errLegacyRefusedPinned for a v1 session whose
@@ -130,13 +269,17 @@ var errV1RefusedV2Only = errors.New("secure session: a v1 connection on a v2-onl
 // frames travel on, a reader positioned at the first frame after the
 // handshake, and the proven peer for v2 (nil for v1). Nothing is registered
 // or applied here: a failed handshake leaves no trace.
-func (s *Service) openInboundTransport(metered *netcore.MeteredConn) (net.Conn, *bufio.Reader, *sessionv2.Peer, error) {
-	reader := bufio.NewReader(metered)
+//
+// source is the read side of metered every byte is read through — the
+// handshake's and, for v1, the frames' directly, for v2 under TLS — so the
+// read loop's frame bound sees the socket's bytes and not TLS's records.
+func (s *Service) openInboundTransport(metered *netcore.MeteredConn, source io.Reader) (net.Conn, *bufio.Reader, *sessionv2.Peer, error) {
+	reader := bufio.NewReader(source)
 	mode := s.sessionMode()
 	if mode == sessionv2.ModeLegacyOnly {
 		return metered, reader, nil, nil
 	}
-	if err := metered.SetReadDeadline(time.Now().Add(inboundReadTimeout)); err != nil {
+	if err := metered.SetReadDeadline(time.Now().Add(s.sessionLiveness().inboundIdle(false))); err != nil {
 		return nil, nil, nil, err
 	}
 	// The socket is not registered yet, so the registry's close-all at
@@ -164,6 +307,10 @@ func (s *Service) openInboundTransport(metered *netcore.MeteredConn) (net.Conn, 
 		return nil, nil, nil, err
 	}
 	if proof, proven := peer.Proof(); proven {
+		if err := s.refuseBannedLoopbackIdentity(metered.RemoteAddr(), proof); err != nil {
+			_ = conn.Close()
+			return nil, nil, nil, err
+		}
 		if err := s.onIdentityProvenV2(s.runCtx, proof); err != nil {
 			_ = conn.Close()
 			return nil, nil, nil, err
@@ -318,14 +465,16 @@ func (s *Service) acceptProvenInbound(connID domain.ConnID, peer sessionv2.Peer,
 // alert (sessionv2.ErrRefusedByListener): busy, not broken.
 var errV2RefusedByListener = errors.New("secure session: the listener refused the v2 dial")
 
-// errLegacyRefusedV2Bound is a v1 answer from an endpoint bound to v2: a
-// downgrade, refused rather than followed.
+// errLegacyRefusedV2Bound is a v1 answer where v2 is required — an endpoint
+// bound to v2 in the store or by a proven outbound session (v2_strong), or a
+// dial "to X": a downgrade, refused rather than followed.
 var errLegacyRefusedV2Bound = errors.New("secure session: v1 answer from an endpoint bound to v2")
 
 // errEndpointOwnerMismatch is a dial "to X" on which another identity proved
 // itself. The connection with that identity is not a connection with X: it
 // is closed before this node proves itself, nothing is pinned or bound for
-// it, and the address is not charged (isUnchargedDialRefusal).
+// it, the address is not charged (isUnchargedDialRefusal), and the next v2
+// attempt to the endpoint waits for its v2 retry backoff.
 var errEndpointOwnerMismatch = errors.New("secure session: the endpoint proved another identity than the one the dial was meant for")
 
 // dialledTransport is a dialled connection ready for a session: raw is the
@@ -340,6 +489,14 @@ type dialledTransport struct {
 	metered *netcore.MeteredConn
 	wire    net.Conn
 	proven  *sessionv2.Peer
+	// reader reads the session's frames from wire. On a connection the probe
+	// opened it already holds whatever the listener sent behind the probe's
+	// answer, so the caller must read through it, never through a new one.
+	reader *bufio.Reader
+	// probed is what the probe's answer on this connection named; nil for v2
+	// and for a node that runs no probe (ModeLegacyOnly). The full welcome
+	// must name the same (refuseFullLegacyWelcome).
+	probed *legacyProbeWelcome
 }
 
 // rawDialer opens one socket to the address being dialled; each caller
@@ -347,25 +504,12 @@ type dialledTransport struct {
 // reservation, the shared connection budget). dialPeerTransport meters it.
 type rawDialer func(ctx context.Context) (net.Conn, error)
 
-// dialPeerTransport opens the session kind the mode, the store and the
-// marks call for: v2 first; v1 for an address known to speak v1 and not
-// bound to v2; v1 after a v2 attempt answered with a v1 line — never after
-// one that failed otherwise, never for an endpoint bound to v2, and never
-// while the v1 dial to the address is held after a refused v1 answer.
-//
-// intent is whom the dial means to reach; a path that states none (the zero
-// DialIntent) is refused with domain.ErrDialIntentUnset before any socket. A
-// dial "to X" expects X in the v2
-// handshake: another identity proven there closes it with
-// errEndpointOwnerMismatch and records nothing; X proven there may protect
-// the endpoint (dialProtection). A v1 answer carries no proof, so on the v1
-// path the intent decides nothing here: whoever reads the v1 welcome checks
-// the identity it names.
-func (s *Service) dialPeerTransport(ctx context.Context, address domain.PeerAddress, intent domain.DialIntent, dialRaw rawDialer) (*dialledTransport, error) {
-	if !intent.Valid() {
-		return nil, fmt.Errorf("dial %s: %w", address, domain.ErrDialIntentUnset)
-	}
-	dial := func(ctx context.Context) (*dialledTransport, error) {
+// transportDial opens one metered socket to the address being dialled.
+type transportDial func(ctx context.Context) (*dialledTransport, error)
+
+// transportDialer meters each socket dialRaw opens to address.
+func (s *Service) transportDialer(address domain.PeerAddress, dialRaw rawDialer) transportDial {
+	return func(ctx context.Context) (*dialledTransport, error) {
 		raw, err := dialRaw(ctx)
 		if err != nil {
 			return nil, err
@@ -375,87 +519,115 @@ func (s *Service) dialPeerTransport(ctx context.Context, address domain.PeerAddr
 			_ = raw.Close()
 			return nil, fmt.Errorf("meter peer session socket %s: %w", address, err)
 		}
-		return &dialledTransport{connID: s.allocateConnID("dialPeerTransport", address), raw: raw, metered: metered, wire: metered}, nil
+		return &dialledTransport{
+			connID:  s.allocateConnID("dialPeerTransport", address),
+			raw:     raw,
+			metered: metered,
+			wire:    metered,
+			reader:  bufio.NewReader(metered),
+		}, nil
 	}
+}
+
+// dialPeerTransport opens the session kind the mode, the store and the
+// marks call for (session_dial_choice.go): a TLS attempt first; v1 only on a
+// separate connection whose identity-less probe got a correct old-protocol
+// answer naming an identity that does not require v2; never where v2 is
+// required, and never while the fall back to v1 at the address is held. With
+// TLS-first switched off by the operator, a dial where v1 is not ruled out
+// opens with that probe instead of the TLS attempt, and a v2 welcome to it
+// leads to a TLS attempt that no failure turns into v1 (dialOpenedByProbe).
+//
+// intent is whom the dial means to reach; a path that states none (the zero
+// DialIntent) is refused with domain.ErrDialIntentUnset before any socket. A
+// dial "to X" expects X in the v2 handshake: another identity proven there
+// closes it with errEndpointOwnerMismatch and records nothing; X proven there
+// may protect the endpoint (dialProtection). A dial "to X" requires v2: it
+// never probes.
+func (s *Service) dialPeerTransport(ctx context.Context, address domain.PeerAddress, intent domain.DialIntent, dialRaw rawDialer) (*dialledTransport, error) {
+	if !intent.Valid() {
+		return nil, fmt.Errorf("dial %s: %w", address, domain.ErrDialIntentUnset)
+	}
+	if err := s.refuseHeldDial(address); err != nil {
+		return nil, err
+	}
+	dial := s.transportDialer(address, dialRaw)
 	mode := s.sessionMode()
 	if mode == sessionv2.ModeLegacyOnly {
 		return dial(ctx)
 	}
-	if s.v2RetryHeld(address) {
-		s.secureSessions.store.noteDialHeldByV2Retry()
-		return nil, fmt.Errorf("%w: %s", errV2RetryHeld, address)
+	plan := s.planSessionDial(mode, address, intent)
+	if plan.opensWithProbe() {
+		return s.dialOpenedByProbe(ctx, address, intent, plan, dial)
 	}
-	plan := s.planSessionDial(mode, address)
-	if plan.v1Direct() {
-		return dial(ctx)
-	}
+	return s.dialV2(ctx, address, intent, plan, dial)
+}
+
+// dialV2 is one TLS attempt on a new connection, and what plan lets follow
+// its failure (afterFailedV2Attempt).
+func (s *Service) dialV2(ctx context.Context, address domain.PeerAddress, intent domain.DialIntent, plan sessionDialPlan, dial transportDial) (*dialledTransport, error) {
 	transport, err := dial(ctx)
 	if err != nil {
 		return nil, err
 	}
-	session, err := sessionv2.Dial(ctx, transport.metered, s.secureSessions.local, s.nodeHelloFrame(), expectedPeerOf(intent), sessionv2.DefaultTimeouts)
+	session, err := sessionv2.Dial(ctx, transport.metered, s.secureSessions.local, s.nodeHelloFrame(), expectedPeerOf(intent), s.secureSessions.dialTimeouts.forAddress(address).tls)
+	if err != nil {
+		attempt := failedV2Attempt{address: address, intent: intent, connID: transport.connID, plan: plan, err: err}
+		return s.afterFailedV2Attempt(ctx, attempt, dial)
+	}
+	return s.provenTransport(ctx, transport, session, address, intent)
+}
+
+// dialHeld reports whether the next dial to address waits — for its
+// old-version delay, its v2 retry backoff, or room in a full pin store that
+// refused its last v2 session. The candidate filter skips such an address.
+// It holds in every mode: a node that fell back to v1 only still paces the
+// redials a claimed version calls for. Takes only leaf mutexes.
+func (s *Service) dialHeld(address domain.PeerAddress) bool {
+	return s.heldDialReason(address) != nil
+}
+
+// dialMarks is the address marks, or nil for a struct-literal test Service
+// without them.
+func (s *Service) dialMarks() *sessionAddressMarks {
+	if s.secureSessions == nil {
+		return nil
+	}
+	return s.secureSessions.marks
+}
+
+// heldDialReason is why the next dial to address must wait, or nil.
+func (s *Service) heldDialReason(address domain.PeerAddress) error {
+	marks := s.dialMarks()
+	if marks == nil {
+		return nil
+	}
+	store := s.secureSessions.store
 	switch {
-	case err == nil:
-		return s.provenTransport(ctx, transport, session, address, intent)
-	case errors.Is(err, sessionv2.ErrPeerMismatch):
-		return nil, s.noteEndpointOwnerMismatch(address, intent, transport.connID, err)
-	case errors.Is(err, sessionv2.ErrRefusedByListener):
-		return nil, s.noteV2RefusedByListener(address, err)
-	case !errors.Is(err, sessionv2.ErrPeerSpeaksV1):
-		return nil, err
-	case mode == sessionv2.ModeV2Only:
-		return nil, fmt.Errorf("%w: %w", errV1RefusedV2Only, err)
-	case plan.required:
-		s.secureSessions.store.noteEndpointRefusal()
-		hold := s.secureSessions.marks.noteLegacyRefused(address)
-		log.Warn().Str("peer", string(address)).Dur("legacy_hold", hold).Msg("secure_session_downgrade_refused")
-		return nil, fmt.Errorf("%w: %w", errLegacyRefusedV2Bound, err)
-	}
-	if plan.held {
-		// No v1 mark: the refusal that started the hold forgot it because
-		// the v1 answers here may be forged, and a mark set now would send
-		// the next dial past v2 once the hold is over.
-		return nil, s.holdLegacyFallback(address, err)
-	}
-	log.Info().Str("peer", string(address)).Msg("secure_session_peer_speaks_v1")
-	s.secureSessions.marks.noteV1(address)
-	return dial(ctx)
-}
-
-// sessionDialPlan is what the store and the marks say about the next dial to
-// one address, for a node that speaks v2.
-type sessionDialPlan struct {
-	// required: only v2 may be used — a v2-only node, or an endpoint bound
-	// to v2.
-	required bool
-	// v1Known: the address answered as an old node recently.
-	v1Known bool
-	// held: a v1 answer from the address was refused and its hold runs.
-	held bool
-}
-
-func (s *Service) planSessionDial(mode sessionv2.Mode, address domain.PeerAddress) sessionDialPlan {
-	return sessionDialPlan{
-		required: mode == sessionv2.ModeV2Only || s.secureSessions.store.endpointRequiresV2(address),
-		v1Known:  s.secureSessions.marks.v1Seen(address),
-		held:     s.secureSessions.marks.legacyHeld(address),
+	case marks.oldVersionHeld(address):
+		return errOldVersionAwaited
+	case marks.v2RetryHeld(address):
+		return errV2RetryHeld
+	case marks.awaitsPinRoom(address) && store != nil && store.pinStoreFull():
+		return errPinRoomAwaited
+	default:
+		return nil
 	}
 }
 
-// v1Direct: the dial goes straight to v1, without a v2 attempt first. A hold
-// cancels it: the v1 answer that earned the address its v1 mark may have been
-// forged by the same man in the middle whose v1 welcome was refused, and
-// skipping v2 on its word would keep v2 away from the address — so a held
-// address is dialled v2 first and only the fall back to v1 is held.
-func (p sessionDialPlan) v1Direct() bool { return !p.required && p.v1Known && !p.held }
-
-// v2RetryHeld reports whether the next dial to address waits for its v2
-// retry backoff. Takes only leaf mutexes.
-func (s *Service) v2RetryHeld(address domain.PeerAddress) bool {
-	if s.sessionMode() == sessionv2.ModeLegacyOnly {
-		return false
+// refuseHeldDial refuses, before any socket, a dial that must wait. The v2
+// retry backoff and the wait for pin room are counted together
+// (SecureSessionStoreStats.DialsHeldByV2Retry); the old-version delay is
+// shown per endpoint by listEndpointDialDelays.
+func (s *Service) refuseHeldDial(address domain.PeerAddress) error {
+	reason := s.heldDialReason(address)
+	if reason == nil {
+		return nil
 	}
-	return s.secureSessions.marks.v2RetryHeld(address)
+	if store := s.secureSessions.store; store != nil && !errors.Is(reason, errOldVersionAwaited) {
+		store.noteDialHeldByV2Retry()
+	}
+	return fmt.Errorf("%w: %s", reason, address)
 }
 
 // holdLegacyFallback refuses the fall back to v1 after attempt, a v2 attempt
@@ -469,31 +641,32 @@ func (s *Service) holdLegacyFallback(address domain.PeerAddress, attempt error) 
 
 // noteV2RefusedByListener answers a v2 attempt at address that the listener
 // refused with its alert: the node there speaks v2 and is busy, not broken.
-// The address is not charged and gets no v1 mark; the next attempt waits for
-// the v2 retry backoff, spread by a jitter so that the diallers one busy
-// listener refused together do not come back together.
+// The address is not charged; the next attempt waits for the v2 retry
+// backoff, spread by a jitter so that the diallers one busy listener refused
+// together do not come back together.
 func (s *Service) noteV2RefusedByListener(address domain.PeerAddress, attempt error) error {
 	retry := s.secureSessions.marks.noteListenerRefused(address)
 	log.Debug().Str("peer", string(address)).Dur("v2_retry", retry).Msg("secure_session_v2_refused_by_listener")
 	return fmt.Errorf("%w: %w", errV2RefusedByListener, attempt)
 }
 
-// forgetV1MarkWithoutWelcome forgets the v1 mark of address after a v1 dial
-// there got no welcome. An address that answered v1 once and now hangs up on
-// a v1 hello — a v2 node that pinned this node does exactly that — would
-// otherwise be dialled over v1 again and again for the rest of the mark; the
-// next dial tries v2 first. transport is the dial's; a v2 one carries no mark.
-func (s *Service) forgetV1MarkWithoutWelcome(address domain.PeerAddress, transport *dialledTransport) {
+// forgetLegacyObservedWithoutWelcome forgets legacy_observed of address
+// after a v1 dial there got no welcome. An address that answered the probe
+// once and now hangs up on the full hello — a v2 node that pinned this node
+// does exactly that — would otherwise be probed first again and again for
+// the rest of the mark; the next dial tries v2 first. transport is the
+// dial's; a v2 one carries no mark.
+func (s *Service) forgetLegacyObservedWithoutWelcome(address domain.PeerAddress, transport *dialledTransport) {
 	if transport.proven != nil || s.sessionMode() == sessionv2.ModeLegacyOnly {
 		return
 	}
-	s.secureSessions.marks.forgetV1(address)
+	s.secureSessions.marks.forgetLegacyObserved(address)
 }
 
 // refuseLegacyWelcome is refuseLegacyIdentity for a v1 welcome naming claimed
-// that this node received on a dial to address: a refusal also starts the
-// hold of the fall back to v1 at that address. The caller must hold no domain
-// mutex.
+// that this node received on a dial to address — the probe's answer or the
+// full welcome: a refusal also starts the hold of the fall back to v1 at that
+// address. The caller must hold no domain mutex.
 func (s *Service) refuseLegacyWelcome(address domain.PeerAddress, claimed domain.PeerIdentity) error {
 	err := s.refuseLegacyIdentity(claimed)
 	if err == nil {
@@ -504,21 +677,45 @@ func (s *Service) refuseLegacyWelcome(address domain.PeerAddress, claimed domain
 	return err
 }
 
-// isUnchargedDialRefusal reports whether a dial ended on a decision that says
-// nothing against the address: this node refused a v1 answer from a peer that
-// requires v2, held the fall back to v1 after such a refusal, or held the dial
-// itself on the v2 retry backoff those refusals start — the man in the middle
-// that forged the answer can repeat it at will; the listener refused the v2
-// attempt with its alert — busy; or a dial "to X" met another identity on the
-// address, which may simply have changed hands. None of them is charged to
-// the address.
+// unchargedDialOutcomes are the dial outcomes that say nothing against the
+// address. This node refused a v1 answer from a peer that requires v2, held
+// the fall back to v1 after such a refusal, or held the dial itself on the
+// v2 retry backoff those refusals start — the man in the middle that forged
+// the answer can repeat it at will; the listener refused the v2 attempt with
+// its alert — busy; a dial "to X" met another identity on the address, which
+// may simply have changed hands; the probe was answered by a node that speaks
+// v2, whose TLS attempt failed — a hint, forgeable like the rest — or by
+// nobody in time, which a man in the middle can arrange as easily; a v1 line
+// answered the TLS attempt that followed a v2 welcome to the probe — one of
+// the two forged; this
+// node's own pin store had no room for the proven peer's pin, or the dial
+// waited for that room — this node's limit, not the peer's fault; or this node
+// could not even start its v2 attempt; or the dial waited for the endpoint's
+// old-version delay. None of them is charged to the address.
+var unchargedDialOutcomes = []error{
+	errV2RefusedByListener,
+	errLegacyRefusedPinned,
+	errLegacyRefusedV2Bound,
+	errLegacyRefusedBackoff,
+	errV2RetryHeld,
+	errEndpointOwnerMismatch,
+	errLegacyProbeAnsweredV2,
+	errLegacyRefusedAfterV2Welcome,
+	errLegacyProbeTimeout,
+	errPinStoreFull,
+	errPinRoomAwaited,
+	errV2DialLocalFailure,
+	errOldVersionAwaited,
+}
+
+// isUnchargedDialRefusal reports whether err is one of unchargedDialOutcomes.
 func isUnchargedDialRefusal(err error) bool {
-	return errors.Is(err, errV2RefusedByListener) ||
-		errors.Is(err, errLegacyRefusedPinned) ||
-		errors.Is(err, errLegacyRefusedV2Bound) ||
-		errors.Is(err, errLegacyRefusedBackoff) ||
-		errors.Is(err, errV2RetryHeld) ||
-		errors.Is(err, errEndpointOwnerMismatch)
+	for _, refusal := range unchargedDialOutcomes {
+		if errors.Is(err, refusal) {
+			return true
+		}
+	}
+	return false
 }
 
 // dialPeerTransportForCM is the connection manager's dial: its socket is paid
@@ -527,6 +724,18 @@ func (s *Service) dialPeerTransportForCM(ctx context.Context, address domain.Pee
 	return s.dialPeerTransport(ctx, address, domain.DialToAddress(), func(ctx context.Context) (net.Conn, error) {
 		return s.dialPeerRawForCM(ctx, address)
 	})
+}
+
+// budgetedSessionDialer dials address for a session on the shared connection
+// budget; a socket that could not be opened is errPeerDialTransport.
+func (s *Service) budgetedSessionDialer(address domain.PeerAddress) rawDialer {
+	return func(ctx context.Context) (net.Conn, error) {
+		raw, err := s.dialPeerWithBudget(ctx, address, dialTimeout)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %w", errPeerDialTransport, err)
+		}
+		return raw, nil
+	}
 }
 
 func (s *Service) dialPeerRawForCM(ctx context.Context, address domain.PeerAddress) (net.Conn, error) {
@@ -542,9 +751,12 @@ func (s *Service) dialPeerRawForCM(ctx context.Context, address domain.PeerAddre
 // protection the dial's intent asks for (dialProtection) — for a name dialled
 // direct, the address the socket reached too, as an ordinary derived key. A
 // protection that could not be written fails the dial: the session is not
-// established on it. Once it is written, the legacy connections naming the
-// same identity are closed and their routing residue forgotten
-// (onIdentityProvenV2), before this session is registered.
+// established on it; a pin refused because the store is full makes the next
+// dial to the address wait for room. Once it is written, the legacy
+// connections naming the same identity are closed and their routing residue
+// forgotten (onIdentityProvenV2), before this session is registered. Only
+// then is the address marked v2_strong and its backoffs reset: a proof whose
+// protection did not land proves nothing this node keeps.
 func (s *Service) provenTransport(ctx context.Context, transport *dialledTransport, session sessionv2.ProvenSession, address domain.PeerAddress, intent domain.DialIntent) (*dialledTransport, error) {
 	wire, err := session.Conn()
 	if err != nil {
@@ -560,7 +772,7 @@ func (s *Service) provenTransport(ctx context.Context, transport *dialledTranspo
 	s.secureSessions.store.logOwnerChange(peer.Identity, result, transport.connID)
 	if err != nil {
 		_ = wire.Close()
-		return nil, err
+		return nil, s.notePinNotStored(address, err)
 	}
 	if proof, proven := peer.Proof(); proven {
 		if err := s.onIdentityProvenV2(ctx, proof); err != nil {
@@ -568,9 +780,21 @@ func (s *Service) provenTransport(ctx context.Context, transport *dialledTranspo
 			return nil, err
 		}
 	}
-	s.secureSessions.marks.clearLegacyRefusal(address)
-	transport.wire, transport.proven = wire, &peer
+	s.secureSessions.marks.noteOutboundV2(address)
+	transport.wire, transport.proven, transport.reader = wire, &peer, bufio.NewReader(wire)
 	return transport, nil
+}
+
+// notePinNotStored passes on why the protection of a proven outbound session
+// was not stored. A full pin store is this node's own limit: the next dial to
+// the address waits until the store has room, pinRoomWaitMax at most.
+func (s *Service) notePinNotStored(address domain.PeerAddress, err error) error {
+	if !errors.Is(err, errPinStoreFull) {
+		return err
+	}
+	wait := s.secureSessions.marks.notePinStoreFull(address)
+	log.Debug().Str("peer", string(address)).Dur("pin_room_wait_max", wait).Msg("secure_session_dial_waits_for_pin_room")
+	return err
 }
 
 // expectedPeerOf is what the v2 handshake of a dial with intent expects: X for
@@ -604,9 +828,10 @@ func (s *Service) dialProtection(intent domain.DialIntent, proven domain.PeerIde
 // noteEndpointOwnerMismatch answers a dial "to X" on which another identity
 // proved itself: the dial fails with errEndpointOwnerMismatch, the endpoint's
 // binding stays as it is, and the mismatch is journalled with the endpoint, X,
-// the identity proven instead and the dial's connection. Nothing else is
-// recorded: the address may have changed hands, which says nothing against
-// it.
+// the identity proven instead and the dial's connection. The address is not
+// charged — it may have changed hands, which says nothing against it — but
+// the next v2 attempt to it waits for its v2 retry backoff: redialling at
+// once would meet the same identity.
 func (s *Service) noteEndpointOwnerMismatch(address domain.PeerAddress, intent domain.DialIntent, connID domain.ConnID, attempt error) error {
 	expected, _ := intent.Target()
 	mismatch := endpointOwnerMismatch{address: address, expected: expected, connID: connID}
@@ -615,314 +840,7 @@ func (s *Service) noteEndpointOwnerMismatch(address domain.PeerAddress, intent d
 		mismatch.proven = &proven.Proven
 	}
 	s.secureSessions.store.logOwnerMismatch(mismatch)
+	retry := s.secureSessions.marks.noteV2Unanswered(address)
+	log.Debug().Str("peer", string(address)).Dur("v2_retry", retry).Msg("secure_session_owner_mismatch_paced")
 	return fmt.Errorf("%w: %w", errEndpointOwnerMismatch, attempt)
-}
-
-// --- address marks ---
-
-const (
-	// v1SeenMark lets the next dials to an old node start with v1 instead of
-	// paying for a refused TLS attempt each time. It never overrides an
-	// endpoint bound to v2, nor a hold.
-	v1SeenMark = 24 * time.Hour
-	// legacyRefusalHoldBase and legacyRefusalHoldMax bound the hold of the
-	// fall back to v1 at an address whose v1 answer was refused because the
-	// peer requires v2: 5 minutes after the first refusal, doubled after each
-	// further one, at most 6 hours. A man in the middle can provoke such a
-	// refusal at will, so it costs the address nothing but this hold — no
-	// failure, no score, no cooldown — and the hold never delays a v2
-	// attempt.
-	legacyRefusalHoldBase = 5 * time.Minute
-	legacyRefusalHoldMax  = 6 * time.Hour
-	// v2RetryBase and v2RetryMax bound the v2 retry backoff: after a v2
-	// attempt that ended without v2 — the address answered v1 and the v1
-	// answer was refused or held — the next dial to the address waits 30 s,
-	// doubled per further such end, at most 30 min. The connection manager's
-	// own retry backoff still applies; the later of the two wins, because a
-	// dial inside this backoff is refused before any socket. It is the
-	// pacing of the next v2 attempt, not a penalty: score, failures and
-	// setup failures are untouched, and a v2 session resets it.
-	v2RetryBase = 30 * time.Second
-	v2RetryMax  = 30 * time.Minute
-	// maxSessionAddressMarks bounds the marks: addresses come from peer
-	// exchange, so the map must not grow with what others tell us.
-	maxSessionAddressMarks = 16384
-)
-
-// errLegacyRefusedBackoff is a fall back to v1 withheld because an earlier v1
-// answer from the same address was refused (errLegacyRefusedPinned,
-// errLegacyRefusedV2Bound) and the hold has not run out yet.
-var errLegacyRefusedBackoff = errors.New("secure session: v1 fall back held after a refused v1 answer from this address")
-
-// errV2RetryHeld is a dial refused before any socket because the address's v2
-// retry backoff runs.
-var errV2RetryHeld = errors.New("secure session: dial held by the v2 retry backoff of this address")
-
-// sessionAddressMark is what the dialler remembers about one address.
-type sessionAddressMark struct {
-	// v1 is the address's recent v1 answer; nil when none is on record.
-	v1 *v1Mark
-	// legacyHold is the backoff after a refused v1 answer; nil when no such
-	// refusal is on record since the last v2 session on the address.
-	legacyHold *legacyRefusalHold
-	// v2Retry is the backoff of the next v2 attempt; nil when no attempt
-	// ended without v2 since the last v2 session on the address.
-	v2Retry *v2RetryBackoff
-	// touched is the last time the mark was written: when the map is full,
-	// the least recently written mark goes first.
-	touched time.Time
-}
-
-// v1Mark: the address answered as an old node; until then the next dial
-// starts with v1.
-type v1Mark struct {
-	until time.Time
-}
-
-// legacyRefusalHold is the backoff of the fall back to v1 at one address.
-type legacyRefusalHold struct {
-	until time.Time
-	// refusals since the last v2 session on the address; the next hold is
-	// legacyRefusalHoldBase doubled refusals-1 times.
-	refusals int
-}
-
-// v2RetryBackoff is the backoff of the next v2 attempt to one address.
-type v2RetryBackoff struct {
-	until time.Time
-	// unanswered v2 attempts since the last v2 session on the address; the
-	// next wait is v2RetryBase doubled unanswered-1 times.
-	unanswered int
-}
-
-// counted reports whether the mark carries a count that only a v2 session
-// may forget: its next backoff doubles on it.
-func (m sessionAddressMark) counted() bool {
-	return m.legacyHold != nil || m.v2Retry != nil
-}
-
-// forgettableAt reports whether the mark says nothing any more at now. A
-// hold whose time ran out still carries its count — the next one doubles on
-// it — so only a v2 session forgets it.
-func (m sessionAddressMark) forgettableAt(now time.Time) bool {
-	return (m.v1 == nil || !now.Before(m.v1.until)) && !m.counted()
-}
-
-// doubledBackoff is base doubled count-1 times, at most ceiling.
-func doubledBackoff(base, ceiling time.Duration, count int) time.Duration {
-	wait := base
-	for i := 1; i < count && wait < ceiling; i++ {
-		wait *= 2
-	}
-	return min(wait, ceiling)
-}
-
-// legacyRefusalHoldFor is the hold after the given number of consecutive
-// refusals.
-func legacyRefusalHoldFor(refusals int) time.Duration {
-	return doubledBackoff(legacyRefusalHoldBase, legacyRefusalHoldMax, refusals)
-}
-
-// sessionAddressMarks remember, per address, what the dialler learnt about
-// the session kind it may use there. Its own mutex is a leaf: nothing is
-// called under it.
-type sessionAddressMarks struct {
-	clock func() time.Time
-	// jitter returns a random wait in [0, upTo); set once at construction.
-	jitter func(upTo time.Duration) time.Duration
-
-	mu    sync.Mutex
-	marks map[domain.PeerAddress]sessionAddressMark
-}
-
-func newSessionAddressMarks(clock func() time.Time) *sessionAddressMarks {
-	return &sessionAddressMarks{clock: clock, jitter: randomWait, marks: make(map[domain.PeerAddress]sessionAddressMark)}
-}
-
-func (m *sessionAddressMarks) noteV1(address domain.PeerAddress) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	now := m.clock()
-	mark := m.markForUpdateLocked(address, now)
-	mark.v1 = &v1Mark{until: now.Add(v1SeenMark)}
-	m.storeLocked(address, mark, now)
-}
-
-func (m *sessionAddressMarks) v1Seen(address domain.PeerAddress) bool {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	mark := m.marks[address].v1
-	return mark != nil && m.clock().Before(mark.until)
-}
-
-// forgetV1 drops the v1 mark of address, so its next dial starts with v2.
-func (m *sessionAddressMarks) forgetV1(address domain.PeerAddress) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	mark, present := m.marks[address]
-	if !present || mark.v1 == nil {
-		return
-	}
-	mark.v1 = nil
-	m.storeLocked(address, mark, m.clock())
-}
-
-// noteLegacyRefused starts the next, longer hold of the fall back to v1 at
-// address and returns its length. It also forgets the address's v1 mark: the
-// v1 answer behind it may have been forged by whoever forged the refused
-// one, and the next dial must try v2 first. It also moves the v2 retry
-// backoff on (see below for why).
-func (m *sessionAddressMarks) noteLegacyRefused(address domain.PeerAddress) time.Duration {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	now := m.clock()
-	mark := m.markForUpdateLocked(address, now)
-	refusals := 1
-	if mark.legacyHold != nil {
-		refusals = mark.legacyHold.refusals + 1
-	}
-	hold := legacyRefusalHoldFor(refusals)
-	mark.v1 = nil
-	mark.legacyHold = &legacyRefusalHold{until: now.Add(hold), refusals: refusals}
-	// The hold above only stops the fall back to v1; it does not delay v2.
-	// The refusal is not charged to the address (isUnchargedDialRefusal:
-	// whoever forged the v1 answer can repeat it at will), so nothing else
-	// slows the connection manager down, and without pacing the refused
-	// address would be redialled every few seconds for good. The v2 retry
-	// backoff paces it instead; a dial it holds is not charged either, so
-	// it touches neither the address's score nor its failure counts.
-	mark.v2Retry = nextV2Retry(mark.v2Retry, now)
-	m.storeLocked(address, mark, now)
-	return hold
-}
-
-// randomWait is a uniformly random wait in [0, upTo), or zero for a bound
-// that leaves no room.
-func randomWait(upTo time.Duration) time.Duration {
-	if upTo <= 0 {
-		return 0
-	}
-	return rand.N(upTo)
-}
-
-// noteListenerRefused moves the v2 retry backoff of address on after the
-// listener there refused a v2 attempt with its alert, with a jitter of up to
-// half the wait on top, and returns the wait it now imposes. The v1 mark is
-// left as it is: the refusal says nothing about v1.
-func (m *sessionAddressMarks) noteListenerRefused(address domain.PeerAddress) time.Duration {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	now := m.clock()
-	mark := m.markForUpdateLocked(address, now)
-	mark.v2Retry = nextV2Retry(mark.v2Retry, now)
-	mark.v2Retry.until = mark.v2Retry.until.Add(m.jitter(mark.v2Retry.until.Sub(now) / 2))
-	m.storeLocked(address, mark, now)
-	return mark.v2Retry.until.Sub(now)
-}
-
-// noteV2Unanswered moves the v2 retry backoff of address on after a v2
-// attempt there ended without v2, and returns the wait it now imposes.
-func (m *sessionAddressMarks) noteV2Unanswered(address domain.PeerAddress) time.Duration {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	now := m.clock()
-	mark := m.markForUpdateLocked(address, now)
-	mark.v2Retry = nextV2Retry(mark.v2Retry, now)
-	m.storeLocked(address, mark, now)
-	return mark.v2Retry.until.Sub(now)
-}
-
-func nextV2Retry(previous *v2RetryBackoff, now time.Time) *v2RetryBackoff {
-	unanswered := 1
-	if previous != nil {
-		unanswered = previous.unanswered + 1
-	}
-	return &v2RetryBackoff{until: now.Add(doubledBackoff(v2RetryBase, v2RetryMax, unanswered)), unanswered: unanswered}
-}
-
-// legacyHeld reports whether the fall back to v1 at address is held now.
-func (m *sessionAddressMarks) legacyHeld(address domain.PeerAddress) bool {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	hold := m.marks[address].legacyHold
-	return hold != nil && m.clock().Before(hold.until)
-}
-
-// v2RetryHeld reports whether the next dial to address must wait for its v2
-// retry backoff.
-func (m *sessionAddressMarks) v2RetryHeld(address domain.PeerAddress) bool {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	retry := m.marks[address].v2Retry
-	return retry != nil && m.clock().Before(retry.until)
-}
-
-// clearLegacyRefusal forgets the refusals and the unanswered v2 attempts of
-// address once a v2 session on it succeeded: the next ones start the
-// backoffs over.
-func (m *sessionAddressMarks) clearLegacyRefusal(address domain.PeerAddress) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	mark, present := m.marks[address]
-	if !present || !mark.counted() {
-		return
-	}
-	mark.legacyHold, mark.v2Retry = nil, nil
-	m.storeLocked(address, mark, m.clock())
-}
-
-// storeLocked writes mark back, or drops it when it says nothing any more.
-// Caller holds m.mu.
-func (m *sessionAddressMarks) storeLocked(address domain.PeerAddress, mark sessionAddressMark, now time.Time) {
-	if mark.forgettableAt(now) {
-		delete(m.marks, address)
-		return
-	}
-	mark.touched = now
-	m.marks[address] = mark
-}
-
-// markForUpdateLocked returns the mark of address, making room for it first
-// when it is new and the map is at its bound. What goes, in this order: a
-// mark that says nothing any more; the least recently written mark without a
-// count; the least recently written mark of all. The last choice loses a
-// count, so that address's backoffs start over at their first step —
-// accepted, it takes 16 384 fresher marks. One pass, made only when the map
-// is full. Caller holds m.mu.
-func (m *sessionAddressMarks) markForUpdateLocked(address domain.PeerAddress, now time.Time) sessionAddressMark {
-	mark, present := m.marks[address]
-	if present || len(m.marks) < maxSessionAddressMarks {
-		return mark
-	}
-	var oldest, oldestUncounted markCandidate
-	for candidate, other := range m.marks {
-		if other.forgettableAt(now) {
-			delete(m.marks, candidate)
-			return mark
-		}
-		oldest.consider(candidate, other.touched)
-		if !other.counted() {
-			oldestUncounted.consider(candidate, other.touched)
-		}
-	}
-	if oldestUncounted.found {
-		delete(m.marks, oldestUncounted.address)
-		return mark
-	}
-	delete(m.marks, oldest.address)
-	return mark
-}
-
-// markCandidate is the least recently written mark seen so far in a scan.
-type markCandidate struct {
-	found   bool
-	address domain.PeerAddress
-	touched time.Time
-}
-
-func (c *markCandidate) consider(address domain.PeerAddress, touched time.Time) {
-	if c.found && !touched.Before(c.touched) {
-		return
-	}
-	c.found, c.address, c.touched = true, address, touched
 }

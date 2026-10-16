@@ -39,7 +39,6 @@ var ErrReplyToNotFound = errors.New("reply_to message not found in conversation"
 //   - encryption and send (SendDirectMessage)
 //   - inbound decryption (DecryptIncomingMessage)
 //   - contact bootstrap during decryption (fetchContactsForDecrypt)
-//   - on-demand per-peer message sync (SyncDirectMessagesFromPeers)
 //   - header-only contact import (importIncomingDMHeaderContacts)
 //
 // Dependencies are narrow and explicit: it uses the LocalRPCClient for node
@@ -706,104 +705,6 @@ func sanitizedRetryOf(raw string) domain.MessageID {
 		return ""
 	}
 	return retryOf
-}
-
-// SyncDirectMessagesFromPeers walks a list of peer addresses, pulls any
-// DM IDs the local store does not have yet, and imports them under the
-// supplied counterparty identity. Used by the sidebar sync trigger when the
-// user clicks "fetch history".
-func (d *DMCrypto) SyncDirectMessagesFromPeers(ctx context.Context, peerAddresses []string, counterparty string) (int, error) {
-	counterparty = strings.TrimSpace(counterparty)
-	if counterparty == "" {
-		return 0, fmt.Errorf("counterparty is required")
-	}
-
-	imported := 0
-	seenIDs := make(map[string]struct{})
-	var firstErr error
-	me := d.id.Address
-
-	for _, peerAddress := range peerAddresses {
-		peerAddress = strings.TrimSpace(peerAddress)
-		if peerAddress == "" || peerAddress == d.rpc.LocalAddress() {
-			continue
-		}
-
-		remoteConn, remoteReader, _, err := d.rpc.OpenSessionAt(ctx, peerAddress, "desktop")
-		if err != nil {
-			if firstErr == nil {
-				firstErr = err
-			}
-			continue
-		}
-
-		idsFrame, err := d.rpc.RequestFrame(remoteConn, remoteReader, protocol.Frame{
-			Type:  "fetch_message_ids",
-			Topic: "dm",
-		})
-		if err != nil {
-			_ = remoteConn.Close()
-			if firstErr == nil {
-				firstErr = err
-			}
-			continue
-		}
-
-		for _, id := range idsFrame.IDs {
-			if _, ok := seenIDs[id]; ok {
-				continue
-			}
-			seenIDs[id] = struct{}{}
-
-			messageFrame, err := d.rpc.RequestFrame(remoteConn, remoteReader, protocol.Frame{
-				Type:  "fetch_message",
-				Topic: "dm",
-				ID:    id,
-			})
-			if err != nil {
-				if firstErr == nil {
-					firstErr = err
-				}
-				continue
-			}
-			if messageFrame.Item == nil {
-				continue
-			}
-
-			item := messageFrame.Item
-			if !isConversationMessage(*item, me, counterparty) {
-				continue
-			}
-
-			reply, err := d.rpc.LocalRequestFrameCtx(ctx, protocol.Frame{
-				Type:       "import_message",
-				Topic:      "dm",
-				ID:         item.ID,
-				Address:    item.Sender,
-				Recipient:  item.Recipient,
-				Flag:       item.Flag,
-				CreatedAt:  item.CreatedAt,
-				TTLSeconds: item.TTLSeconds,
-				Body:       item.Body,
-			})
-			if err != nil {
-				if firstErr == nil {
-					firstErr = err
-				}
-				continue
-			}
-			if reply.Type == "message_stored" {
-				imported++
-			}
-		}
-
-		_ = remoteConn.Close()
-	}
-
-	if imported == 0 && firstErr != nil {
-		return 0, firstErr
-	}
-	return imported, nil
 }
 
 // FetchConversation loads the full chat history for a single peer from the

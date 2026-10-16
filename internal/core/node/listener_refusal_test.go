@@ -371,6 +371,19 @@ func refusingNode(t *testing.T, cfg config.Node, setup func(*Service)) *Service 
 	return svc
 }
 
+// externalDialAndRead is dialAndRead from an external source, handed to svc's
+// accept path by dialFromSource.
+func externalDialAndRead(t *testing.T, svc *Service) []byte {
+	t.Helper()
+	conn := dialFromSource(t, svc, testExternalIP)
+	_, _ = conn.Write(v1HelloBytes)
+	got, err := readAnswer(t, conn, 5*time.Second)
+	if err != nil {
+		t.Fatalf("read the refusal: %q then %v, want the alert and an orderly end", got, err)
+	}
+	return got
+}
+
 // dialAndRead connects to address, sends a v1 hello the listener will not
 // read, and returns everything the listener answers until it ends the
 // connection.
@@ -389,18 +402,21 @@ func dialAndRead(t *testing.T, address string) []byte {
 	return got
 }
 
-// All five paths on which the listener used to close silently answer with
-// exactly the alert, each counted under its own bound.
+// Every path on which the listener used to close silently, and the two bounds
+// of the loopback class, answer with exactly the alert, each counted under its
+// own bound.
 func TestEveryListenerRefusalPutsExactlyTheAlertOnTheWire(t *testing.T) {
 	t.Parallel()
 	alert := sessionv2.RefusalAlert()
 
+	// The per-IP bounds and the blacklist apply to an external source; the
+	// connection is handed to the accept path from one (dialFromSource).
 	t.Run("connection rate", func(t *testing.T) {
 		t.Parallel()
 		svc := refusingNode(t, config.Node{}, func(svc *Service) {
-			svc.connLimiter.windows["127.0.0.1"] = &connWindow{count: defaultConnRateLimit, windowStart: time.Now()}
+			svc.connLimiter.windows[testExternalIP] = &connWindow{count: defaultConnRateLimit, windowStart: time.Now()}
 		})
-		if got := dialAndRead(t, svc.cfg.ListenAddress); !bytes.Equal(got, alert) {
+		if got := externalDialAndRead(t, svc); !bytes.Equal(got, alert) {
 			t.Fatalf("on the wire: % x, want % x", got, alert)
 		}
 		if stats := svc.ListenerRefusalStats(); stats.ConnectionRate != 1 {
@@ -411,9 +427,9 @@ func TestEveryListenerRefusalPutsExactlyTheAlertOnTheWire(t *testing.T) {
 	t.Run("connections per IP", func(t *testing.T) {
 		t.Parallel()
 		svc := refusingNode(t, config.Node{}, func(svc *Service) {
-			svc.inboundByIP["127.0.0.1"] = maxConnPerIP
+			svc.inboundByIP[testExternalIP] = maxConnPerIP
 		})
-		if got := dialAndRead(t, svc.cfg.ListenAddress); !bytes.Equal(got, alert) {
+		if got := externalDialAndRead(t, svc); !bytes.Equal(got, alert) {
 			t.Fatalf("on the wire: % x, want % x", got, alert)
 		}
 		if stats := svc.ListenerRefusalStats(); stats.ConnectionsPerIP != 1 {
@@ -421,9 +437,45 @@ func TestEveryListenerRefusalPutsExactlyTheAlertOnTheWire(t *testing.T) {
 		}
 	})
 
+	t.Run("loopback connection rate", func(t *testing.T) {
+		t.Parallel()
+		svc := refusingNode(t, config.Node{}, func(svc *Service) {
+			svc.loopbackInbound = newLoopbackInboundClass(loopbackInboundBounds{maxActive: 1, maxNewPerWindow: 1, window: time.Hour}, productionIdentityPenaltyPolicy(), nil)
+			release, refusal := svc.loopbackInbound.admit(true)
+			if refusal != nil {
+				t.Fatalf("fixture: %v", refusal)
+			}
+			release()
+		})
+		if got := dialAndRead(t, svc.cfg.ListenAddress); !bytes.Equal(got, alert) {
+			t.Fatalf("on the wire: % x, want % x", got, alert)
+		}
+		if stats := svc.ListenerRefusalStats(); stats.LoopbackConnectionRate != 1 {
+			t.Fatalf("stats = %+v, want one loopback rate refusal", stats)
+		}
+	})
+
+	t.Run("loopback connections held", func(t *testing.T) {
+		t.Parallel()
+		svc := refusingNode(t, config.Node{}, func(svc *Service) {
+			svc.loopbackInbound = newLoopbackInboundClass(loopbackInboundBounds{maxActive: 0, maxNewPerWindow: 1, window: time.Hour}, productionIdentityPenaltyPolicy(), nil)
+		})
+		if got := dialAndRead(t, svc.cfg.ListenAddress); !bytes.Equal(got, alert) {
+			t.Fatalf("on the wire: % x, want % x", got, alert)
+		}
+		if stats := svc.ListenerRefusalStats(); stats.LoopbackConnections != 1 {
+			t.Fatalf("stats = %+v, want one loopback held-connections refusal", stats)
+		}
+	})
+
+	// From loopback: the node's budget of one inbound connection is below
+	// what the class's share of it would allow, so the class is given its
+	// full bounds and the budget is the bound that refuses.
 	t.Run("connection budget", func(t *testing.T) {
 		t.Parallel()
-		svc := refusingNode(t, config.Node{MaxIncomingPeers: 1}, func(*Service) {})
+		svc := refusingNode(t, config.Node{MaxIncomingPeers: 1}, func(svc *Service) {
+			svc.loopbackInbound = newLoopbackInboundClass(productionLoopbackInboundBounds(0), productionIdentityPenaltyPolicy(), nil)
+		})
 		holder, err := net.Dial("tcp", svc.cfg.ListenAddress)
 		if err != nil {
 			t.Fatalf("dial the budget holder: %v", err)
@@ -438,14 +490,17 @@ func TestEveryListenerRefusalPutsExactlyTheAlertOnTheWire(t *testing.T) {
 		if stats := svc.ListenerRefusalStats(); stats.ConnectionBudget != 1 {
 			t.Fatalf("stats = %+v, want one budget refusal", stats)
 		}
+		if refusals := svc.LoopbackInboundStats().Refusals; refusals.ConnectionBudget != 1 {
+			t.Fatalf("loopback refusals = %+v, want the budget refusal counted for the class", refusals)
+		}
 	})
 
 	t.Run("blacklist", func(t *testing.T) {
 		t.Parallel()
 		svc := refusingNode(t, config.Node{}, func(svc *Service) {
-			svc.bans["127.0.0.1"] = banEntry{Blacklisted: time.Now().UTC().Add(time.Hour)}
+			svc.bans[testExternalIP] = banEntry{Blacklisted: time.Now().UTC().Add(time.Hour)}
 		})
-		if got := dialAndRead(t, svc.cfg.ListenAddress); !bytes.Equal(got, alert) {
+		if got := externalDialAndRead(t, svc); !bytes.Equal(got, alert) {
 			t.Fatalf("on the wire: % x, want % x", got, alert)
 		}
 		if stats := svc.ListenerRefusalStats(); stats.Blacklisted != 1 {
@@ -502,8 +557,16 @@ func TestAFloodOfRefusalsTenTimesThePoolKeepsTheListenerServing(t *testing.T) {
 	clock := &steppedClock{now: time.Now()}
 	listener := refusingNode(t, config.Node{}, func(svc *Service) {
 		svc.listenerRefusals = newListenerRefusals(alertPoolBounds{total: pool, perSource: 10 * pool}, svc.startedAt)
-		svc.connLimiter = newConnRateLimiter(clock.Now)
-		svc.inboundByIP["127.0.0.1"] = maxConnPerIP
+		svc.loopbackInbound = newLoopbackInboundClass(productionLoopbackInboundBounds(0), productionIdentityPenaltyPolicy(), clock.Now)
+		// The loopback class has admitted its whole rate within the window:
+		// every connection of the flood is over it.
+		for range loopbackMaxNewPerWindow {
+			release, refusal := svc.loopbackInbound.admit(true)
+			if refusal != nil {
+				t.Fatalf("fixture: filling the loopback rate: %v", refusal)
+			}
+			release()
+		}
 	})
 
 	flood := make([]net.Conn, 0, 10*pool)
@@ -530,19 +593,15 @@ func TestAFloodOfRefusalsTenTimesThePoolKeepsTheListenerServing(t *testing.T) {
 		t.Fatalf("answering %d refused connections took %v: the accept loop waited for alert senders", 10*pool, spent)
 	}
 	stats := listener.ListenerRefusalStats()
-	if refused := stats.ConnectionRate + stats.ConnectionsPerIP; refused != 10*pool {
+	if refused := stats.LoopbackConnectionRate; refused != 10*pool {
 		t.Fatalf("refused %d, want %d: %+v", refused, 10*pool, stats)
 	}
 	if stats.ClosedWithoutAlert < 10*pool-2*pool {
 		t.Fatalf("ClosedWithoutAlert = %d of %d: the alert pool of %d grew", stats.ClosedWithoutAlert, 10*pool, pool)
 	}
 
-	// The flood's cause is gone: the rate window has run out and the per-IP
-	// count the fixture held is released.
-	clock.Advance(defaultConnRateWindow)
-	listener.ipStateMu.Lock()
-	delete(listener.inboundByIP, "127.0.0.1")
-	listener.ipStateMu.Unlock()
+	// The flood's cause is gone: the loopback rate window has run out.
+	clock.Advance(loopbackNewWindow)
 	dialer, stopDialer := startQuietNode(t, nil)
 	t.Cleanup(stopDialer)
 	if established, err := dialPastTransport(t, dialer, domain.PeerAddress(listener.cfg.ListenAddress)); !established {
@@ -856,7 +915,7 @@ func TestThePerSourceBoundOfV2Handshakes(t *testing.T) {
 }
 
 // A dialler refused by a busy listener's alert is not charged for it: the
-// address keeps its score and failure count, gets no v1 mark, and its next v2
+// address keeps its score and failure count, gets no legacy_observed, and its next v2
 // attempt waits for the v2 retry backoff instead of following at once.
 func TestAListenerRefusalIsNotChargedAndHoldsTheNextV2Attempt(t *testing.T) {
 	t.Parallel()
@@ -884,10 +943,10 @@ func TestAListenerRefusalIsNotChargedAndHoldsTheNextV2Attempt(t *testing.T) {
 	if setup != nil && setup.Consecutive > 0 {
 		t.Fatalf("the refusal was counted as a setup failure: %+v", *setup)
 	}
-	if dialer.secureSessions.marks.v1Seen(address) {
+	if dialer.secureSessions.marks.legacyObserved(address) {
 		t.Fatal("a TLS refusal marked the address as an old node")
 	}
-	if !dialer.v2RetryHeld(address) {
+	if !dialer.dialHeld(address) {
 		t.Fatal("the next v2 attempt is not held: a busy listener would be redialled at once")
 	}
 	if _, err := dialPastTransport(t, dialer, address); !errors.Is(err, errV2RetryHeld) {
@@ -938,8 +997,11 @@ func TestTheListenerRefusalWaitIsTheV2BackoffPlusABoundedJitter(t *testing.T) {
 	if asked[0] != v2RetryBase/2 {
 		t.Fatalf("jitter bound = %v, want half the backoff %v", asked[0], v2RetryBase/2)
 	}
-	var wait time.Duration
+	// Each refusal comes once the wait before it ran out: a refusal inside a
+	// running wait does not step it.
+	wait := first
 	for range 20 {
+		now = now.Add(wait)
 		wait = marks.noteListenerRefused(address)
 		if wait >= v2RetryMax+v2RetryMax/2 {
 			t.Fatalf("wait = %v, want under the ceiling plus half of it (%v): the jitter accumulates", wait, v2RetryMax+v2RetryMax/2)

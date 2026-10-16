@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"net"
 	"testing"
 	"time"
 
@@ -59,11 +58,9 @@ func TestHelloWithSmallOrderKeyIsRefusedWithBan(t *testing.T) {
 	svc, stop := startTestNodeWithoutDials(t, config.Node{ListenAddress: freeAddress(t)})
 	defer stop()
 
-	conn, err := net.DialTimeout("tcp", svc.externalListenAddress(), 2*time.Second)
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-	defer func() { _ = conn.Close() }()
+	// From an external source, whose IP the ban score keys; loopback is
+	// never scored by its IP (loopback_inbound.go).
+	conn := dialFromSource(t, svc, testExternalIP)
 	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
 	reader := bufio.NewReader(conn)
 
@@ -81,7 +78,7 @@ func TestHelloWithSmallOrderKeyIsRefusedWithBan(t *testing.T) {
 	if reply.Type != "error" || reply.Code != protocol.ErrCodeInvalidAuthSignature {
 		t.Fatalf("hello with a small-order key: got %#v, want error %s", reply, protocol.ErrCodeInvalidAuthSignature)
 	}
-	if got := banScoreForIP(svc, "127.0.0.1"); got != banIncrementInvalidSig {
+	if got := banScoreForIP(svc, testExternalIP); got != banIncrementInvalidSig {
 		t.Fatalf("ban score = %d, want %d: the key is the peer's own", got, banIncrementInvalidSig)
 	}
 }
@@ -98,11 +95,9 @@ func TestHelloWithHonestKeyIsUnaffected(t *testing.T) {
 		t.Fatalf("identity.Generate: %v", err)
 	}
 
-	conn, err := net.DialTimeout("tcp", svc.externalListenAddress(), 2*time.Second)
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-	defer func() { _ = conn.Close() }()
+	// From an external source, whose IP the ban score keys; loopback is
+	// never scored by its IP (loopback_inbound.go).
+	conn := dialFromSource(t, svc, testExternalIP)
 	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
 	reader := bufio.NewReader(conn)
 
@@ -128,7 +123,7 @@ func TestHelloWithHonestKeyIsUnaffected(t *testing.T) {
 	if authOK := readJSONTestFrame(t, reader); authOK.Type != "auth_ok" {
 		t.Fatalf("expected auth_ok, got %#v", authOK)
 	}
-	if got := banScoreForIP(svc, "127.0.0.1"); got != 0 {
+	if got := banScoreForIP(svc, testExternalIP); got != 0 {
 		t.Fatalf("ban score = %d for an honest handshake", got)
 	}
 }

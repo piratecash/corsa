@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/config"
+	"github.com/piratecash/corsa/internal/core/protocol"
 
 	"github.com/rs/zerolog/log"
 )
@@ -175,6 +176,21 @@ func (c *Client) execInto(command string, args map[string]interface{}, out inter
 		return fmt.Errorf("parse %s response: %w", command, err)
 	}
 	return nil
+}
+
+// FetchAggregateStatus runs fetchAggregateStatus and returns the node's
+// aggregate status, v2_tls_first included. An answer without the status
+// object is an error, not a zero status: the zero value would read as an
+// offline node with TLS-first switched off.
+func (c *Client) FetchAggregateStatus() (protocol.AggregateStatusFrame, error) {
+	var frame protocol.Frame
+	if err := c.execInto("fetchAggregateStatus", nil, &frame); err != nil {
+		return protocol.AggregateStatusFrame{}, err
+	}
+	if frame.AggregateStatus == nil {
+		return protocol.AggregateStatusFrame{}, fmt.Errorf("fetchAggregateStatus: answer of type %q carries no aggregate_status", frame.Type)
+	}
+	return *frame.AggregateStatus, nil
 }
 
 // postRaw sends a POST request and returns the raw response body and status code.

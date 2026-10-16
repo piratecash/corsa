@@ -734,6 +734,18 @@ func detailSuffix(claim m6Claim) string {
 
 // --- the run ------------------------------------------------------------------------
 
+// m6ShapeSelection is the forms of the M6 grid. Only the measurement plan is
+// accepted: M6 does not take the full-depth forms, since the grid registered
+// for d = 8 would have to be registered anew before any other form could enter
+// it.
+func m6ShapeSelection() shapeSelection {
+	return shapeSelection{
+		Variable: "M6_SHAPES",
+		Fallback: []shape{sweepShapes[0], sweepShapes[1]},
+		Accepted: sweepShapes,
+	}
+}
+
 // TestM6BucketFillingAndRecoveryOnTheCandidate is the sweep.
 func TestM6BucketFillingAndRecoveryOnTheCandidate(t *testing.T) {
 	if testing.Short() {
@@ -741,7 +753,7 @@ func TestM6BucketFillingAndRecoveryOnTheCandidate(t *testing.T) {
 	}
 
 	selection := runSelectionFrom(t, "M6")
-	shapes := shapesNamed(t, "M6_SHAPES", []shape{sweepShapes[0], sweepShapes[1]})
+	shapes := m6ShapeSelection().fromEnvironment(t)
 	configs := m6SweepEnumeration(shapes, sweepSeeds)
 
 	keys := make([]runKey, 0, len(configs))

@@ -245,6 +245,13 @@ func NewWithContext(ctx context.Context, cfg Config) (*Runtime, error) {
 	}
 
 	nodeService := corsanode.NewService(internalCfg.Node, id, eventBus)
+	// A node that must not start (an unsafe or lost pin store, an unusable
+	// connection budget) fails New, before the RPC server exists: errors.Is
+	// ErrPinStoreRefused, with the path and the fix for the operator.
+	if err := nodeService.StartupRefusal(); err != nil {
+		abandonRuntime(eventBus, database, cancelSubscriptions, cancelCommands)
+		return nil, fmt.Errorf("node refuses to start: %w", err)
+	}
 	client := service.NewDesktopClient(internalCfg.App, internalCfg.Node, id, nodeService, database)
 	// Best-effort, exactly as on desktop: the backfill only seeds facts for
 	// peers the user already messaged, and failing it degrades Sybil

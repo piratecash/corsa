@@ -84,22 +84,14 @@ func newV2WireSender(t *testing.T) (*routingmocks.MockPeerSender, *v2WireRecorde
 	return m, rec
 }
 
-// runOneCycle runs a single AnnounceLoop cycle by triggering an update,
-// waiting for the per-peer goroutines to finish, and cancelling. It is the
-// shared fixture for the mode-selection tests below — every test exercises
-// the loop's single-cycle behaviour and inspects which wire method ran.
+// runOneCycle runs a single triggered AnnounceLoop cycle to completion. It is
+// the shared fixture for the mode-selection tests below — every test exercises
+// the loop's single-cycle behaviour and inspects which wire method ran. The
+// cycle runs synchronously: starting Run and sleeping left the assertions
+// racing the cycle, and under a loaded machine they lost.
 func runOneCycle(t *testing.T, loop *routing.AnnounceLoop) {
 	t.Helper()
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() {
-		loop.Run(ctx)
-		close(done)
-	}()
-	loop.TriggerUpdate()
-	time.Sleep(50 * time.Millisecond)
-	cancel()
-	<-done
+	loop.AnnounceTriggeredCycleForTest(context.Background())
 }
 
 // caps returns a routing.PeerCapability slice for the given domain values.

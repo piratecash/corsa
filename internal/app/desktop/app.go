@@ -113,25 +113,6 @@ func Run() error {
 
 	eventBus := ebus.New()
 
-	// Opt-in pprof profiling server (CORSA_PPROF_ADDR). Off by default;
-	// loopback-only when set. See internal/core/debugserver. Empty addr
-	// is a no-op (nil error); a non-empty addr that fails to start
-	// (invalid / non-loopback / port in use) is fatal — the operator
-	// explicitly asked for profiling, so silently continuing without it
-	// would leave them debugging against a server that never came up.
-	pprofShutdown, err := debugserver.Start(cfg.Node.PprofAddr)
-	if err != nil {
-		return fmt.Errorf("pprof debug server (CORSA_PPROF_ADDR=%q): %w", cfg.Node.PprofAddr, err)
-	}
-	defer func() {
-		if uiOwnsShutdown {
-			return
-		}
-		sctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		_ = pprofShutdown(sctx)
-	}()
-
 	// The shared state database opens before any service exists: an
 	// unreadable, foreign or unmigratable file must stop the process here,
 	// while nothing has started writing, rather than surface later as
@@ -162,6 +143,33 @@ func Run() error {
 	}()
 
 	nodeService := node.NewService(cfg.Node, id, eventBus)
+	// A node that must not start (an unsafe or lost pin store, an unusable
+	// connection budget) stops the app here, before any listener — pprof
+	// included — and before the window: corsa-desktop shows the error, which names the path and
+	// the fix, as its startup notice (cmd/corsa-desktop).
+	if err := nodeService.StartupRefusal(); err != nil {
+		return fmt.Errorf("node refuses to start: %w", err)
+	}
+
+	// Opt-in pprof profiling server (CORSA_PPROF_ADDR). Off by default;
+	// loopback-only when set. See internal/core/debugserver. Empty addr
+	// is a no-op (nil error); a non-empty addr that fails to start
+	// (invalid / non-loopback / port in use) is fatal — the operator
+	// explicitly asked for profiling, so silently continuing without it
+	// would leave them debugging against a server that never came up.
+	pprofShutdown, err := debugserver.Start(cfg.Node.PprofAddr)
+	if err != nil {
+		return fmt.Errorf("pprof debug server (CORSA_PPROF_ADDR=%q): %w", cfg.Node.PprofAddr, err)
+	}
+	defer func() {
+		if uiOwnsShutdown {
+			return
+		}
+		sctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = pprofShutdown(sctx)
+	}()
+
 	runtime := NewNodeRuntime(nodeService)
 
 	client := service.NewDesktopClient(cfg.App, cfg.Node, id, nodeService, database)

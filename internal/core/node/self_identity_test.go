@@ -631,6 +631,7 @@ func TestTryApplySelfIdentityCooldown_NilError_Miss(t *testing.T) {
 //     dial gate suppresses further attempts for the ban window.
 func TestRunPeerSession_SelfIdentity_AppliesCooldownAndExits(t *testing.T) {
 	svc := newTestService(t, config.NodeTypeFull)
+	asLegacyOnlyDialler(svc)
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

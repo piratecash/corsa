@@ -34,7 +34,7 @@ import (
 func TestM4EnumerationIsTheAgreedGrid(t *testing.T) {
 	t.Parallel()
 
-	configs := m4SweepEnumeration([]shape{m4SweepShape()})
+	configs := m4SweepEnumeration([]shape{m4SweepShape()}, m4SweepQuota)
 
 	if got, want := len(configs), 3*len(sweepSeeds)*len(m4SweepPolicies); got != want {
 		t.Fatalf("the enumeration holds %d configurations, want %d = 3 loads × %d seeds × %d rules",
@@ -130,18 +130,19 @@ func TestM4TheDegenerateLoadCarriesItsOwnGuardModel(t *testing.T) {
 func TestM4RunKeyCarriesEveryInput(t *testing.T) {
 	t.Parallel()
 
-	base := m4SweepConfig{Shape: m4SweepShape(), Seed: 1, Policy: policyCandidateC1, Load: m4LoadUniform}
+	base := m4SweepConfig{Shape: m4SweepShape(), Seed: 1, Quota: m4SweepQuota, Policy: policyCandidateC1, Load: m4LoadUniform}
 	id := base.Key("v").ID()
 
 	for _, changed := range []struct {
 		name   string
 		config m4SweepConfig
 	}{
-		{"shape", m4SweepConfig{Shape: sweepShapes[0], Seed: 1, Policy: policyCandidateC1, Load: m4LoadUniform}},
-		{"seed", m4SweepConfig{Shape: m4SweepShape(), Seed: 2, Policy: policyCandidateC1, Load: m4LoadUniform}},
-		{"policy", m4SweepConfig{Shape: m4SweepShape(), Seed: 1, Policy: policyInitiatedLimit, Load: m4LoadUniform}},
-		{"load", m4SweepConfig{Shape: m4SweepShape(), Seed: 1, Policy: policyCandidateC1, Load: m4LoadPopular}},
-		{"load (k=1)", m4SweepConfig{Shape: m4SweepShape(), Seed: 1, Policy: policyCandidateC1, Load: m4LoadMainContactInSet}},
+		{"shape", m4SweepConfig{Shape: sweepShapes[0], Seed: 1, Quota: m4SweepQuota, Policy: policyCandidateC1, Load: m4LoadUniform}},
+		{"seed", m4SweepConfig{Shape: m4SweepShape(), Seed: 2, Quota: m4SweepQuota, Policy: policyCandidateC1, Load: m4LoadUniform}},
+		{"policy", m4SweepConfig{Shape: m4SweepShape(), Seed: 1, Quota: m4SweepQuota, Policy: policyInitiatedLimit, Load: m4LoadUniform}},
+		{"load", m4SweepConfig{Shape: m4SweepShape(), Seed: 1, Quota: m4SweepQuota, Policy: policyCandidateC1, Load: m4LoadPopular}},
+		{"load (k=1)", m4SweepConfig{Shape: m4SweepShape(), Seed: 1, Quota: m4SweepQuota, Policy: policyCandidateC1, Load: m4LoadMainContactInSet}},
+		{"quota", m4SweepConfig{Shape: m4SweepShape(), Seed: 1, Quota: m4SweepQuota + 1, Policy: policyCandidateC1, Load: m4LoadUniform}},
 	} {
 		if changed.config.Key("v").ID() == id {
 			t.Errorf("changing the %s left the identifier at %s: the two runs would share a file "+
@@ -159,7 +160,7 @@ func TestM4RunKeyCarriesEveryInput(t *testing.T) {
 		}
 	}
 	// And the popular load's head, which nothing else records.
-	popular := m4SweepConfig{Shape: m4SweepShape(), Seed: 1, Policy: policyCandidateC1, Load: m4LoadPopular}
+	popular := m4SweepConfig{Shape: m4SweepShape(), Seed: 1, Quota: m4SweepQuota, Policy: policyCandidateC1, Load: m4LoadPopular}
 	for _, want := range []string{"head_size", "head_share"} {
 		if _, ok := popular.Key("v").Param(want); !ok {
 			t.Errorf("the popular-contacts key does not carry %s: the head is the shape of the "+
@@ -169,7 +170,7 @@ func TestM4RunKeyCarriesEveryInput(t *testing.T) {
 
 	if err := requireDistinctKeys(func() []runKey {
 		keys := make([]runKey, 0, 30)
-		for _, config := range m4SweepEnumeration([]shape{m4SweepShape()}) {
+		for _, config := range m4SweepEnumeration([]shape{m4SweepShape()}, m4SweepQuota) {
 			keys = append(keys, config.Key("v"))
 		}
 		return keys
@@ -185,7 +186,7 @@ func TestM4AConfigurationReportsBothPopulationsOverTheSameRequests(t *testing.T)
 	t.Parallel()
 
 	// A cheap form: the property is about the loop, not about the network.
-	config := m4SweepConfig{Shape: sweepShapes[0], Seed: 1, Policy: policyCandidateC1, Load: m4LoadUniform}
+	config := m4SweepConfig{Shape: sweepShapes[0], Seed: 1, Quota: m4SweepQuota, Policy: policyCandidateC1, Load: m4LoadUniform}
 	g := buildGraph(config.Shape, config.Seed, m4SweepQuota, config.Policy)
 
 	run, err := measureM4Configuration(g, config)
@@ -218,7 +219,7 @@ func TestM4AConfigurationReportsBothPopulationsOverTheSameRequests(t *testing.T)
 	// target inside the set, the confirmed reading and the whole-set reading are
 	// forced apart only when the set holds an unconfirmed spare — under k = 3 it
 	// does.
-	forced := m4SweepConfig{Shape: sweepShapes[0], Seed: 1, Policy: policyCandidateC1,
+	forced := m4SweepConfig{Shape: sweepShapes[0], Seed: 1, Quota: m4SweepQuota, Policy: policyCandidateC1,
 		Load: m4LoadMainContactInSet}
 	degenerate, err := measureM4Configuration(g, forced)
 	if err != nil {
@@ -263,7 +264,7 @@ func TestM4TheMeasurementDoesNotTouchTheGuardSets(t *testing.T) {
 	}
 
 	if _, err := measureM4Configuration(g, m4SweepConfig{
-		Shape: sh, Seed: 1, Policy: policyCandidateC1, Load: m4LoadUniform,
+		Shape: sh, Seed: 1, Quota: m4SweepQuota, Policy: policyCandidateC1, Load: m4LoadUniform,
 	}); err != nil {
 		t.Fatalf("measuring: %v", err)
 	}
@@ -288,7 +289,7 @@ func TestM4TheSetsDigestSeesTheComposition(t *testing.T) {
 
 	same := func(graph *graph) string {
 		run, err := measureM4Configuration(graph, m4SweepConfig{
-			Shape: sh, Seed: 1, Policy: policyCandidateC1, Load: m4LoadUniform,
+			Shape: sh, Seed: 1, Quota: m4SweepQuota, Policy: policyCandidateC1, Load: m4LoadUniform,
 		})
 		if err != nil {
 			t.Fatalf("measuring: %v", err)

@@ -234,6 +234,7 @@ func TestOnCMDialFailed_FallbackAlias_LockoutCarriesClientVersion(t *testing.T) 
 		PeerMinimum:   higherMin,
 		ClientVersion: "corsa/9.9.9-alias",
 		Cause:         fmt.Errorf("protocol version too old"),
+		Evidence:      versionProven,
 	}, true)
 
 	svc.peerMu.RLock()

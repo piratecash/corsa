@@ -151,6 +151,28 @@ func awaitOnlyHello(t *testing.T, done <-chan recordedDial) {
 	}
 }
 
+// assertIncompatibleWelcomeRecordedAsClaim checks the record a v1 welcome
+// below the floor leaves: it is read before auth_ok, so it is a claim — the
+// diagnostics are written, nothing is charged.
+func assertIncompatibleWelcomeRecordedAsClaim(t *testing.T, svc *Service, address domain.PeerAddress) {
+	t.Helper()
+	svc.peerMu.RLock()
+	defer svc.peerMu.RUnlock()
+	health := svc.health[svc.resolveHealthAddress(address)]
+	if health == nil {
+		t.Fatal("no health record: a welcome below the floor was not recorded")
+	}
+	if health.LastErrorCode != protocol.ErrCodeIncompatibleProtocol {
+		t.Fatalf("LastErrorCode = %q, want %q", health.LastErrorCode, protocol.ErrCodeIncompatibleProtocol)
+	}
+	if health.IncompatibleVersionAttempts != 0 || health.Score != 0 || !health.BannedUntil.IsZero() {
+		t.Fatalf("a claimed version was charged: %+v", *health)
+	}
+	if want := domain.ProtocolVersion(config.MinimumProtocolVersion - 1); health.ObservedPeerVersion != want {
+		t.Fatalf("ObservedPeerVersion = %d, want %d", health.ObservedPeerVersion, want)
+	}
+}
+
 func assertIncompatibleWelcomePenalised(t *testing.T, svc *Service, address domain.PeerAddress) {
 	t.Helper()
 	svc.peerMu.RLock()
@@ -179,7 +201,7 @@ func syncPeerAgainstWelcome(t *testing.T, welcome func(*identity.Identity) proto
 	ln, address := listenForDialWelcome(t)
 	done := serveRecordedDial(ln, welcome(newDialWelcomeResponder(t)))
 
-	markOldNode(svc, address)
+	asLegacyOnlyDialler(svc)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	// requestPeers=true: neither get_peers nor fetch_contacts may follow.
@@ -196,10 +218,10 @@ func TestSyncPeer_WelcomeWithoutChallenge_SendsOnlyHello(t *testing.T) {
 	syncPeerAgainstWelcome(t, welcomeWithoutChallenge)
 }
 
-func TestSyncPeer_WelcomeBelowFloor_SendsOnlyHelloAndPenalises(t *testing.T) {
+func TestSyncPeer_WelcomeBelowFloor_SendsOnlyHelloAndRecordsAClaim(t *testing.T) {
 	t.Parallel()
 	svc, address := syncPeerAgainstWelcome(t, welcomeBelowFloor)
-	assertIncompatibleWelcomePenalised(t, svc, address)
+	assertIncompatibleWelcomeRecordedAsClaim(t, svc, address)
 }
 
 func TestSyncPeer_ErrorInPlaceOfWelcome_SendsOnlyHello(t *testing.T) {
@@ -220,7 +242,7 @@ func noticeDialAgainstWelcome(t *testing.T, welcome func(*identity.Identity) pro
 	ln, address := listenForDialWelcome(t)
 	done := serveRecordedDial(ln, welcome(newDialWelcomeResponder(t)))
 
-	markOldNode(svc, address)
+	asLegacyOnlyDialler(svc)
 	svc.sendNoticeToPeer(address, time.Minute, "gated-notice-ciphertext")
 	awaitOnlyHello(t, done)
 	assertNotRecordedAsOutboundSuccess(t, svc, address)
@@ -232,10 +254,10 @@ func TestSendNoticeToPeer_WelcomeWithoutChallenge_SendsOnlyHello(t *testing.T) {
 	noticeDialAgainstWelcome(t, welcomeWithoutChallenge)
 }
 
-func TestSendNoticeToPeer_WelcomeBelowFloor_SendsOnlyHelloAndPenalises(t *testing.T) {
+func TestSendNoticeToPeer_WelcomeBelowFloor_SendsOnlyHelloAndRecordsAClaim(t *testing.T) {
 	t.Parallel()
 	svc, address := noticeDialAgainstWelcome(t, welcomeBelowFloor)
-	assertIncompatibleWelcomePenalised(t, svc, address)
+	assertIncompatibleWelcomeRecordedAsClaim(t, svc, address)
 }
 
 // TestAdmitServiceDialWelcome_RefusesWithTypedErrors pins what the shared
@@ -269,13 +291,14 @@ func TestAdmitServiceDialWelcome_RefusesWithTypedErrors(t *testing.T) {
 			want:    func(err error) bool { return err == nil },
 		},
 		{
-			name:        "v1 welcome below the floor",
-			welcome:     func(*Service) protocol.Frame { return welcomeBelowFloor(responder) },
-			want:        func(err error) bool { return errors.Is(err, errIncompatibleProtocol) },
-			wantPenalty: true,
+			// A v1 welcome before auth_ok is a claim: refused, but nothing
+			// a man in the middle could write into it is charged.
+			name:    "v1 welcome below the floor",
+			welcome: func(*Service) protocol.Frame { return welcomeBelowFloor(responder) },
+			want:    func(err error) bool { return errors.Is(err, errIncompatibleProtocol) },
 		},
 		{
-			// The floor outranks the challenge: the responder is charged
+			// The floor outranks the challenge: the welcome is refused
 			// whether or not it challenged.
 			name: "v1 welcome below the floor without a challenge",
 			welcome: func(*Service) protocol.Frame {
@@ -283,8 +306,7 @@ func TestAdmitServiceDialWelcome_RefusesWithTypedErrors(t *testing.T) {
 				welcome.Challenge = ""
 				return welcome
 			},
-			want:        func(err error) bool { return errors.Is(err, errIncompatibleProtocol) },
-			wantPenalty: true,
+			want: func(err error) bool { return errors.Is(err, errIncompatibleProtocol) },
 		},
 		{
 			// Security property: a v1 welcome naming an identity pinned to
@@ -520,7 +542,7 @@ func TestSyncPeer_AuthRefused_NotRecordedAsOutboundSuccess(t *testing.T) {
 	ln, address := listenForDialWelcome(t)
 	done := serveRecordedDialAnsweringAuth(ln, currentWelcome(newDialWelcomeResponder(t)), refusedAuth)
 
-	markOldNode(svc, address)
+	asLegacyOnlyDialler(svc)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if imported := svc.syncPeer(ctx, address, true); imported != 0 {
@@ -536,7 +558,7 @@ func TestSendNoticeToPeer_AuthRefused_NotRecordedAsOutboundSuccess(t *testing.T)
 	ln, address := listenForDialWelcome(t)
 	done := serveRecordedDialAnsweringAuth(ln, currentWelcome(newDialWelcomeResponder(t)), refusedAuth)
 
-	markOldNode(svc, address)
+	asLegacyOnlyDialler(svc)
 	svc.sendNoticeToPeer(address, time.Minute, "gated-notice-ciphertext")
 	awaitHelloAndAuthOnly(t, done)
 	assertNotRecordedAsOutboundSuccess(t, svc, address)
@@ -618,7 +640,7 @@ func TestSendNoticeToPeer_FramesAheadOfAuthOK_StillDeliversTheNotice(t *testing.
 		done <- result{received, err}
 	}()
 
-	markOldNode(svc, address)
+	asLegacyOnlyDialler(svc)
 	svc.sendNoticeToPeer(address, time.Minute, "burst-notice-ciphertext")
 	select {
 	case got := <-done:
@@ -649,7 +671,7 @@ func TestSendNoticeToPeer_AddressUnderBan_IsNotDialled(t *testing.T) {
 	svc.peerMu.Lock()
 	svc.ensurePeerHealthLocked(address).BannedUntil = time.Now().Add(time.Hour)
 	svc.peerMu.Unlock()
-	markOldNode(svc, address)
+	asLegacyOnlyDialler(svc)
 	svc.sendNoticeToPeer(address, time.Minute, "banned-notice-ciphertext")
 
 	if traffic := svc.TransportTrafficStats(); traffic.BytesSent != 0 || traffic.BytesReceived != 0 {
@@ -693,7 +715,7 @@ func TestSendNoticeToPeer_HostBannedForIncompatibleVersion_IsNotDialled(t *testi
 	})
 
 	banSiblingPortForIncompatibleVersion(t, svc, address)
-	markOldNode(svc, address)
+	asLegacyOnlyDialler(svc)
 	svc.sendNoticeToPeer(address, time.Minute, "ip-banned-notice-ciphertext")
 
 	if traffic := svc.TransportTrafficStats(); traffic.BytesSent != 0 || traffic.BytesReceived != 0 {
@@ -718,7 +740,7 @@ func TestSendNoticeToPeer_SiblingOfSelfIdentityAlias_IsStillDialled(t *testing.T
 	alias := domain.PeerAddress(net.JoinHostPort(host, "1"))
 	svc.peerProvider.Add(alias, domain.PeerSourceAnnounce)
 	svc.applySelfIdentityCooldown(alias, svc.newSelfIdentityError(alias))
-	markOldNode(svc, address)
+	asLegacyOnlyDialler(svc)
 	svc.sendNoticeToPeer(address, time.Minute, "self-alias-sibling-ciphertext")
 
 	if traffic := svc.TransportTrafficStats(); traffic.BytesSent == 0 {
@@ -778,7 +800,7 @@ func TestSendNoticeToPeer_HostWithBannedKnownSiblingPort_IsNotDialled(t *testing
 		t.Fatal("fixture: the host must have no bannedIPSet entry")
 	}
 
-	markOldNode(svc, address)
+	asLegacyOnlyDialler(svc)
 	svc.sendNoticeToPeer(address, time.Minute, "sibling-banned-ciphertext")
 
 	if traffic := svc.TransportTrafficStats(); traffic.BytesSent != 0 || traffic.BytesReceived != 0 {

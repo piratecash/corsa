@@ -52,10 +52,17 @@ func (s *Service) peerHealthFrame() protocol.Frame {
 	}
 }
 
+// peerSweepInterval is the tick of bootstrapLoop, which also runs the
+// periodic sweeps — evictStaleInboundConns among them. A dead inbound session
+// whose read deadline did not end it is closed by the sweep at most one tick
+// after its idle bound, so the tick is part of how long such a session may be
+// held.
+const peerSweepInterval = 2 * time.Second
+
 func (s *Service) bootstrapLoop(ctx context.Context) {
 	ticks := s.bootstrapTickOverride
 	if ticks == nil {
-		ticker := time.NewTicker(2 * time.Second)
+		ticker := time.NewTicker(peerSweepInterval)
 		defer ticker.Stop()
 		ticks = ticker.C
 	}
@@ -144,6 +151,10 @@ func (s *Service) sweepIdleRateLimiters() {
 	s.relayLimiter.sweepIdle()
 	s.connLimiter.sweepIdle()
 	s.cmdLimiter.sweepIdle()
+	// The loopback class's identity scores: expired bans and idle scores.
+	// Their capacity bounds the store anyway; the sweep is what lets an
+	// expired ban leave the banned gauge without a charge or a check.
+	s.loopbackInbound.identities.sweep()
 	if s.announceLimiter != nil {
 		// Phase 4 13.7: drop per-peer announce buckets for
 		// identities idle past the cleanup horizon. The
@@ -1078,7 +1089,7 @@ func (s *Service) connectedHostsLocked() ConnectedHosts {
 	// Outbound NetCores are not walked here — they are already represented
 	// via s.upstream above.
 	now := time.Now().UTC()
-	stallThreshold := heartbeatInterval + pongStallTimeout
+	stallThreshold := s.sessionLiveness().inboundSessionIdle
 	s.forEachTrackedInboundConnLocked(func(info connInfo) bool {
 		if !info.lastActivity.IsZero() && now.Sub(info.lastActivity) >= stallThreshold {
 			return true
@@ -1419,12 +1430,15 @@ func (s *Service) syncPeer(ctx context.Context, address domain.PeerAddress, requ
 	})
 	if err != nil {
 		log.Warn().Err(err).Str("peer", string(address)).Msg(serviceDialSyncPeer.event("dial_failed"))
+		s.reactToIncompatibleDial(address, err)
 		return 0
 	}
 	conn := transport.wire
 
 	_ = conn.SetDeadline(time.Now().Add(syncHandshakeTimeout))
-	reader := bufio.NewReader(conn)
+	// The transport's reader: on a v1 connection the probe opened, it holds
+	// what the responder sent behind the probe's answer.
+	reader := transport.reader
 
 	// Per-read idle-deadline refresh for the filtered reply reads
 	// (readSyncReply): each successfully arriving frame proves the peer
@@ -1463,14 +1477,19 @@ func (s *Service) syncPeer(ctx context.Context, address domain.PeerAddress, requ
 	// version implements it yet.
 	welcome, ok := s.syncPeerWelcome(pc, reader, address, transport)
 	if !ok {
-		s.forgetV1MarkWithoutWelcome(address, transport)
+		s.forgetLegacyObservedWithoutWelcome(address, transport)
 		return 0
 	}
 	// One gate for both session kinds, before auth_session is signed and
-	// before learnIdentityFromWelcome runs: notice, non-welcome, v2 pin, floor,
-	// self identity (admitServiceDialWelcome); the v1 challenge is checked by
-	// authenticateServiceDial before it signs. `defer pc.Close()` above tears
-	// the dial down through the NetCore wrapper.
+	// before learnIdentityFromWelcome runs: the same welcome as the probe's
+	// answer on a v1 connection (refuseFullLegacyWelcome), then notice,
+	// non-welcome, v2 pin, floor, self identity (admitServiceDialWelcome); the
+	// v1 challenge is checked by authenticateServiceDial before it signs.
+	// `defer pc.Close()` above tears the dial down through the NetCore
+	// wrapper.
+	if err := s.refuseFullLegacyWelcome(address, transport, welcome); err != nil {
+		return 0
+	}
 	if err := s.admitServiceDialWelcome(serviceDialSyncPeer, address, welcome, transport.proven != nil); err != nil {
 		return 0
 	}
@@ -1646,7 +1665,14 @@ func (s *Service) syncPeer(ctx context.Context, address domain.PeerAddress, requ
 // the IP is unparseable, nothing is written — auth itself is still
 // considered OK by the caller.
 func (s *Service) recordOutboundAuthSuccess(peerAddress domain.PeerAddress, remoteAddr string) {
-	if peerAddress == "" || remoteAddr == "" {
+	if peerAddress == "" {
+		return
+	}
+	// An outbound connection to the endpoint succeeded — v2 proven, or v1
+	// after auth_ok with the pin checked before the full hello — so its
+	// old-version delay is over.
+	s.forgetOldVersionDelay(peerAddress)
+	if remoteAddr == "" {
 		return
 	}
 	// dialedIP is the canonical IP form derived from the raw RemoteAddr().
@@ -3099,12 +3125,12 @@ func (s *Service) peerSessionRequest(session *peerSession, frame protocol.Frame,
 		return protocol.Frame{}, fmt.Errorf("peerSessionRequest: send failed: %s", st.String())
 	}
 
-	// Use a longer read deadline for ping so that the heartbeat timeout
-	// (pongStallTimeout) governs stall detection instead of the generic
+	// Use a longer read deadline for ping so that the heartbeat's pong
+	// stall bound governs stall detection instead of the generic
 	// peerRequestTimeout.
 	readTimeout := peerRequestTimeout
 	if frame.Type == "ping" {
-		readTimeout = pongStallTimeout
+		readTimeout = s.sessionLiveness().pongStall
 	}
 	_ = session.conn.SetReadDeadline(time.Now().Add(readTimeout))
 
@@ -4614,7 +4640,9 @@ func (s *Service) hasOutboundSessionForInbound(address domain.PeerAddress) bool 
 }
 
 // penalizeOldProtocolPeer applies a score penalty and accumulates ban score
-// for a peer whose protocol version is below MinimumProtocolVersion. The
+// for a peer whose protocol version — PROVEN inside a v2 session; a claimed
+// one goes to noteClaimedIncompatibleVersion instead — is below
+// MinimumProtocolVersion. The
 // penalty increments towards the ban threshold — on the 4th incompatible
 // attempt the peer gets banned for peerBanIncompatible (24 h). While that ban
 // runs, further observations update the diagnostics only: the window is fixed
@@ -4633,28 +4661,8 @@ func (s *Service) penalizeOldProtocolPeer(address domain.PeerAddress, peerVersio
 	log.Trace().Str("site", "penalizeOldProtocolPeer").Str("phase", "lock_held").Str("address", string(address)).Msg("peer_mu_writer")
 	address = s.resolveHealthAddress(address)
 	health := s.ensurePeerHealthLocked(address)
-	if trimmed := strings.TrimSpace(string(clientVersion)); trimmed != "" {
-		s.peerVersions[address] = trimmed
-	}
-
-	// Machine-readable error codes. A pre-handshake incompatible reject
-	// supersedes any prior post-handshake disconnect code — keeping an old
-	// LastDisconnectCode (e.g. "frame-too-large") alongside the new
-	// LastErrorCode ("incompatible-protocol-version") creates a mixed
-	// diagnostic snapshot that misrepresents the peer's current state.
 	now := time.Now().UTC()
-	health.LastErrorCode = protocol.ErrCodeIncompatibleProtocol
-	health.LastError = "protocol version too old"
-	health.LastDisconnectCode = ""
-	health.LastIncompatibleVersionAt = now
-
-	// Store observed version evidence for diagnostics.
-	if peerVersion > 0 {
-		health.ObservedPeerVersion = peerVersion
-	}
-	if peerMinimum > 0 {
-		health.ObservedPeerMinimumVersion = peerMinimum
-	}
+	s.recordIncompatibleVersionLocked(address, health, incompatibleVersionClaim{peerVersion: peerVersion, peerMinimum: peerMinimum, clientVersion: clientVersion}, "protocol version too old", now)
 
 	if incompatibleBanActiveLocked(health, now) {
 		log.Debug().
@@ -4708,6 +4716,62 @@ func (s *Service) penalizeOldProtocolPeer(address domain.PeerAddress, peerVersio
 	s.deliveryMu.RUnlock()
 	s.peerMu.Unlock()
 	log.Trace().Str("site", "penalizeOldProtocolPeer").Str("phase", "lock_released").Str("address", string(address)).Msg("peer_mu_writer")
+}
+
+// incompatibleVersionClaim is the version evidence a refused frame carried.
+// Zero fields are "not announced".
+type incompatibleVersionClaim struct {
+	peerVersion   domain.ProtocolVersion
+	peerMinimum   domain.ProtocolVersion
+	clientVersion domain.ClientVersion
+}
+
+// recordIncompatibleVersionLocked writes what a refused frame announced into
+// the peer's diagnostics: the client version under the health key, the error
+// codes, and the observed versions. Machine-readable error codes: a
+// pre-handshake incompatible reject supersedes any prior post-handshake
+// disconnect code — keeping an old LastDisconnectCode (e.g.
+// "frame-too-large") alongside the new LastErrorCode
+// ("incompatible-protocol-version") creates a mixed diagnostic snapshot that
+// misrepresents the peer's current state. Caller holds s.peerMu (write);
+// address is already the health key.
+func (s *Service) recordIncompatibleVersionLocked(address domain.PeerAddress, health *peerHealth, claim incompatibleVersionClaim, reason string, now time.Time) {
+	if trimmed := strings.TrimSpace(string(claim.clientVersion)); trimmed != "" {
+		s.peerVersions[address] = trimmed
+	}
+	health.LastErrorCode = protocol.ErrCodeIncompatibleProtocol
+	health.LastError = reason
+	health.LastDisconnectCode = ""
+	health.LastIncompatibleVersionAt = now
+	if claim.peerVersion > 0 {
+		health.ObservedPeerVersion = claim.peerVersion
+	}
+	if claim.peerMinimum > 0 {
+		health.ObservedPeerMinimumVersion = claim.peerMinimum
+	}
+}
+
+// noteClaimedIncompatibleVersion records an incompatible version a peer only
+// CLAIMED — the probe's answer, a v1 welcome before auth_ok, a v1 hello — as
+// diagnostics, and nothing more: no score, no failure, no ban of the address
+// or its IP, no version lockout of the identity known there, no
+// update_available reporter. A man in the middle can write any version into
+// such a frame in front of an honest node, and all of those would punish that
+// node; only a version proven inside a v2 session reaches
+// penalizeOldProtocolPeer. The dial paths pace the address on top
+// (reactToIncompatibleDial).
+func (s *Service) noteClaimedIncompatibleVersion(address domain.PeerAddress, claim incompatibleVersionClaim) {
+	s.peerMu.Lock()
+	address = s.resolveHealthAddress(address)
+	health := s.ensurePeerHealthLocked(address)
+	s.recordIncompatibleVersionLocked(address, health, claim, "protocol version incompatible (unproven claim)", time.Now().UTC())
+	// emitPeerHealthDeltaLocked reads s.pending (delivery-domain, under
+	// s.deliveryMu). Canonical order s.peerMu OUTER → s.deliveryMu INNER.
+	s.deliveryMu.RLock()
+	s.emitPeerHealthDeltaLocked(health)
+	s.deliveryMu.RUnlock()
+	s.peerMu.Unlock()
+	log.Debug().Str("peer", string(address)).Int("version", int(claim.peerVersion)).Int("minimum", int(claim.peerMinimum)).Msg("peer_incompatible_version_claimed")
 }
 
 // incompatibleBanActiveLocked reports whether the ban penalizeOldProtocolPeer
@@ -6218,32 +6282,14 @@ func (s *Service) activePeerSession(address domain.PeerAddress) (*peerSession, b
 	return session, true
 }
 
-// heartbeatDuration is the interval this Service pings inbound peers at, with
-// the production schedule standing in for the zero override.
-//
-// It is a field rather than the bare function for the same reason the datagram
-// maintenance cadence is: the JOIN this loop now takes part in cannot be
-// observed by a test that has to wait out a thirty-second first tick, and a
-// contract nobody can enter is a contract nobody checks.
-func (s *Service) heartbeatDuration() time.Duration {
-	if s.heartbeatIntervalOverride > 0 {
-		return s.heartbeatIntervalOverride
-	}
-	return nextHeartbeatDuration()
-}
-
-func nextHeartbeatDuration() time.Duration {
-	jitter := time.Duration(time.Now().UTC().UnixNano()%15) * time.Second
-	return heartbeatInterval + jitter
-}
-
 // inboundHeartbeat periodically pings an inbound peer to independently verify
 // liveness. The pong reply is handled by handleCommand which calls markPeerRead.
 // If the peer does not respond within pongStallTimeout after a ping, the
 // connection is closed — same semantics as outbound session heartbeats.
 func (s *Service) inboundHeartbeat(id domain.ConnID, address domain.PeerAddress, stop <-chan struct{}) {
 	defer crashlog.DeferRecover()
-	timer := time.NewTimer(s.heartbeatDuration())
+	liveness := s.sessionLiveness()
+	timer := time.NewTimer(liveness.listenerPingDelay())
 	defer timer.Stop()
 
 	for {
@@ -6261,7 +6307,7 @@ func (s *Service) inboundHeartbeat(id domain.ConnID, address domain.PeerAddress,
 			_ = s.sendFrameViaNetwork(s.runCtx, id, pingFrame)
 			s.markPeerWrite(address, pingFrame)
 
-			// Record the time we sent the ping and wait for pongStallTimeout.
+			// Record the time we sent the ping and wait for the pong stall bound.
 			// If LastPongAt has not advanced past our ping time by then,
 			// the peer is unresponsive — close the connection.
 			sentAt := time.Now().UTC()
@@ -6269,7 +6315,7 @@ func (s *Service) inboundHeartbeat(id domain.ConnID, address domain.PeerAddress,
 			select {
 			case <-stop:
 				return
-			case <-time.After(pongStallTimeout):
+			case <-time.After(liveness.pongStall):
 			}
 
 			s.peerMu.RLock()
@@ -6291,13 +6337,15 @@ func (s *Service) inboundHeartbeat(id domain.ConnID, address domain.PeerAddress,
 				return
 			}
 
-			timer.Reset(nextHeartbeatDuration())
+			timer.Reset(liveness.listenerPingDelay())
 		}
 	}
 }
 
 // evictStaleInboundConns force-closes inbound TCP connections that have
-// not received any frame for longer than heartbeatInterval + pongStallTimeout.
+// not received any frame for longer than the inbound session idle bound
+// (inboundSessionIdleTimeout) — the same bound the read loop's deadline
+// applies, so the sweep and the deadline agree on when a session is dead.
 // When internet drops, the underlying TCP socket may linger in the OS for
 // much longer than the heartbeat timeout (TCP retransmission timeouts).
 // These zombie connections occupy a slot in s.conns and block outbound
@@ -6311,7 +6359,7 @@ func (s *Service) inboundHeartbeat(id domain.ConnID, address domain.PeerAddress,
 // unrelated outbound session going stale.
 func (s *Service) evictStaleInboundConns() {
 	now := time.Now().UTC()
-	stallThreshold := heartbeatInterval + pongStallTimeout
+	stallThreshold := s.sessionLiveness().inboundSessionIdle
 
 	type staleEntry struct {
 		id     domain.ConnID

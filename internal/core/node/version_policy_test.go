@@ -1731,6 +1731,7 @@ func TestCMDialFailed_PropagatesVersionEvidence(t *testing.T) {
 		PeerVersion: higherMin,
 		PeerMinimum: higherMin,
 		Cause:       fmt.Errorf("protocol version too old"),
+		Evidence:    versionProven,
 	}
 
 	svc.onCMDialFailed(addr, cmErr, true)
@@ -2000,6 +2001,7 @@ func TestCMDialFailed_PersistsObservedClientVersion(t *testing.T) {
 		PeerMinimum:   higherMin,
 		ClientVersion: "corsa/1.2.3-beta",
 		Cause:         fmt.Errorf("protocol version too old"),
+		Evidence:      versionProven,
 	}
 
 	svc.onCMDialFailed(addr, cmErr, true)
@@ -2996,6 +2998,7 @@ func TestOutboundIncompatibleReject_HealthSnapshotComplete(t *testing.T) {
 		PeerMinimum:   higherMin,
 		ClientVersion: "corsa/2.0.0-rc1",
 		Cause:         fmt.Errorf("protocol version too old"),
+		Evidence:      versionProven,
 	}
 	svc.onCMDialFailed(addr, cmErr, true)
 
@@ -3350,6 +3353,7 @@ func TestClientVersion_SurvivesRestartViaLockout(t *testing.T) {
 		PeerMinimum:   higherMin,
 		ClientVersion: "corsa/2.0.0-rc1",
 		Cause:         fmt.Errorf("protocol version too old"),
+		Evidence:      versionProven,
 	}
 	svc.onCMDialFailed(addr, cmErr, true)
 

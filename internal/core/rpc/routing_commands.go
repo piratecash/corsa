@@ -451,6 +451,9 @@ func routeSummaryHandler(rp RoutingProvider) CommandHandler {
 			"clock_jump_guarded":                      pinStore.ClockJumpGuarded,
 			"clock_jumps_detected":                    pinStore.ClockJumpsDetected,
 			"clock_jump_active":                       pinStore.ClockJumpActive,
+			"v2_tls_first_disabled":                   pinStore.TLSFirstDisabled,
+			"dials_opened_by_probe":                   pinStore.DialsOpenedByProbe,
+			"v1_refusals_after_v2_welcome":            pinStore.V1RefusalsAfterV2Welcome,
 		}
 
 		// Sessions by kind (docs/protocol/session_v2.md): cumulative since
@@ -486,6 +489,8 @@ func routeSummaryHandler(rp RoutingProvider) CommandHandler {
 			"handshakes_node_limit":     refusals.HandshakesNode,
 			"handshakes_ip_limit":       refusals.HandshakesPerIP,
 			"handshakes_loopback_limit": refusals.HandshakesLoopback,
+			"loopback_connection_rate":  refusals.LoopbackConnectionRate,
+			"loopback_active_limit":     refusals.LoopbackConnections,
 			"closed_without_alert":      refusals.ClosedWithoutAlert,
 		}
 
@@ -508,7 +513,44 @@ func routeSummaryHandler(rp RoutingProvider) CommandHandler {
 			"secure_sessions":      secureSessions,
 			"session_kinds":        sessionKinds,
 			"listener_refusals":    listenerRefusals,
+			"loopback_inbound":     loopbackInboundJSON(rp.LoopbackInboundStats()),
 		})
+	}
+}
+
+// loopbackInboundClassifiedBy names what the loopback class is read from.
+// The node has a single listener, so it is the source address: the local Tor
+// daemon and any other local process fall into the class alike.
+const loopbackInboundClassifiedBy = "source_address"
+
+// loopbackInboundJSON projects the loopback inbound class
+// (docs/protocol/network_security.md, "Loopback inbound class"). The counters
+// are cumulative since started_at and never reset by reading.
+func loopbackInboundJSON(stats domain.LoopbackInboundStats) map[string]interface{} {
+	return map[string]interface{}{
+		"started_at":           formatOptionalTime(stats.StartedAt),
+		"read_at":              formatOptionalTime(stats.ReadAt),
+		"classified_by":        loopbackInboundClassifiedBy,
+		"enforced":             stats.Bounds.Enforced,
+		"max_active":           stats.Bounds.MaxActive,
+		"max_new_per_window":   stats.Bounds.MaxNewPerWindow,
+		"window_seconds":       int64(stats.Bounds.Window / time.Second),
+		"max_handshakes":       stats.Bounds.MaxHandshakes,
+		"active":               stats.Active,
+		"handshakes_in_flight": stats.HandshakesInFlight,
+		"admitted":             stats.Admitted,
+		"identities_scored":    stats.IdentitiesScored,
+		"identities_banned":    stats.IdentitiesBanned,
+		"refusals": map[string]interface{}{
+			"connection_rate":           stats.Refusals.ConnectionRate,
+			"active_limit":              stats.Refusals.ActiveLimit,
+			"connection_budget":         stats.Refusals.ConnectionBudget,
+			"inbound_limit":             stats.Refusals.InboundLimit,
+			"handshakes_loopback_limit": stats.Refusals.HandshakesLoopback,
+			"handshakes_node_limit":     stats.Refusals.HandshakesNode,
+			"violations_closed":         stats.Refusals.ViolationsClosed,
+			"identity_banned":           stats.Refusals.IdentityBanned,
+		},
 	}
 }
 

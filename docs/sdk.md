@@ -154,6 +154,13 @@ creates a new identity file if one does not exist yet.
 
 If neither `PrivateKey` nor a valid `IdentityPath` is provided, `sdk.New()` returns an error.
 
+`sdk.New()` also fails, before its RPC server or node exist, when the node must not start over its
+v2 pin store: the store, its marker (`<IdentityPath>.pin-store-marker.json`, kept next to the
+identity path even when the key is given inline) or a directory above them can be changed by
+someone other than the process's user or root, or a store the marker says was kept is missing or
+unreadable. The error matches `errors.Is(err, sdk.ErrPinStoreRefused)` and names the path and the
+fix ([protocol/session_v2.md](protocol/session_v2.md), "Refusal to start").
+
 `NodeConfig.PrivateKey` is tagged `json:"-"` and redacted by `NodeConfig.String` /
 `GoString`, so marshalling or printing a `Config` — into a support bundle, a crash
 report, a settings file — cannot publish the signing key. `RPCConfig.Password` is
@@ -223,6 +230,25 @@ cfg.Node.StateDBPath = "/var/lib/corsa-bot/state.db"
 Nothing is copied from the default location into an explicit one — an empty
 file there is a deliberately new database.
 
+### TLS-first switch
+
+`NodeConfig.V2TLSFirst` is the operator's TLS-first switch of the secure session v2.
+`nil` (the default) keeps TLS-first on: every dial opens with TLS. A pointer to
+`false` switches it off: a dial where v1 is not ruled out — an unpinned identity
+at an endpoint nothing binds — opens with the identity-less probe and no
+ClientHello; a v2 welcome to the probe still leads to TLS in the same dial, and
+a failure of that TLS attempt allows no v1. Pinned identities, bound endpoints
+and dials "to X" keep v2 either way. The switch does not get around a block of
+TLS to a node of v31 or later. The SDK never
+reads `CORSA_V2_TLS_FIRST`; this field is the only source of the value for an
+embedded runtime. See [session_v2.md](protocol/session_v2.md), "Switching
+TLS-first off".
+
+```go
+off := false
+cfg.Node.V2TLSFirst = &off
+```
+
 ### Идентификация
 
 SDK никогда не создаёт identity автоматически. Каждый потребитель должен
@@ -247,6 +273,13 @@ cfg.Node.IdentityPath = "/path/to/identity.json"
 создаёт новый файл identity, если его ещё нет.
 
 Если ни `PrivateKey`, ни валидный `IdentityPath` не указаны, `sdk.New()` возвращает ошибку.
+
+`sdk.New()` также завершается ошибкой — до создания RPC-сервера и узла, — если узлу нельзя стартовать
+из-за хранилища pin v2: хранилище, его маркер (`<IdentityPath>.pin-store-marker.json`, лежит рядом с
+путём identity, даже когда ключ передан напрямую) или каталог над ними может изменить кто-то кроме
+пользователя процесса и root, либо хранилища, о котором говорит маркер, нет или оно не читается.
+Ошибка проходит `errors.Is(err, sdk.ErrPinStoreRefused)` и называет путь и способ исправления
+([protocol/session_v2.md](protocol/session_v2.md), «Отказ старта»).
 
 `NodeConfig.PrivateKey` помечен `json:"-"` и редактируется в `NodeConfig.String` /
 `GoString`, поэтому маршалинг или печать `Config` — в support-архив, в отчёт о
@@ -564,6 +597,24 @@ cfg.Node.StateDBPath = "/var/lib/corsa-bot/state.db"
 
 Из расположения по умолчанию в явное ничего не копируется — пустой файл там
 означает осознанно новую базу.
+
+### Выключатель «TLS-первым»
+
+`NodeConfig.V2TLSFirst` — выключатель оператора «TLS-первым» защищённой сессии v2.
+`nil` (по умолчанию) оставляет «TLS-первым» включённым: каждый дозвон начинается
+с TLS. Указатель на `false` выключает его: дозвон, где v1 не исключён, —
+непрошитая identity на адресе, который ничем не привязан, — начинается с пробы
+без identity и без ClientHello; welcome v2 на пробу всё равно ведёт к TLS в том
+же дозвоне, а неудача этой попытки TLS v1 не разрешает. Закреплённые identity,
+привязанные адреса и дозвоны «к X» сохраняют v2 в любом случае. Выключатель не
+обходит блокировку TLS к узлу v31 и новее. SDK никогда не читает `CORSA_V2_TLS_FIRST`; для встроенного runtime это
+поле — единственный источник значения. См. [session_v2.md](protocol/session_v2.md),
+«Выключение TLS-первым».
+
+```go
+off := false
+cfg.Node.V2TLSFirst = &off
+```
 
 ### Быстрый старт
 

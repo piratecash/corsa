@@ -38,6 +38,7 @@ import (
 	"fmt"
 	"hash"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -53,7 +54,9 @@ func m4SweepShape() shape { return sweepShapes[1] }
 
 // m4SweepQuota is the quota the base configuration is measured at, and it is
 // the same 1 the M3-a proposal names (§5.5.5). Quota changes the graph, so it
-// is a parameter of the run key.
+// is a parameter of the run key. M4_QUOTA overrules it for one run
+// (m4QuotaSelection) — the neighbour-selection quota is chosen from the
+// M1/M2 results, after this code is stamped.
 const m4SweepQuota = 1
 
 // m4SweepRequesters is how many nodes have their first-hop rule measured, and
@@ -147,6 +150,7 @@ var m4SweepPolicies = []policy{policyCandidateC1, policyInitiatedLimit}
 type m4SweepConfig struct {
 	Shape  shape
 	Seed   uint64
+	Quota  int
 	Policy policy
 	Load   m4SweepLoad
 }
@@ -165,7 +169,7 @@ func (c m4SweepConfig) Key(sources string) runKey {
 		{Name: "budget_B", Value: fmt.Sprint(c.Shape.budget)},
 		{Name: "seed", Value: fmt.Sprint(c.Seed)},
 		{Name: "policy", Value: c.Policy.String()},
-		{Name: "quota", Value: fmt.Sprint(m4SweepQuota)},
+		{Name: "quota", Value: fmt.Sprint(c.Quota)},
 		{Name: "load", Value: c.Load.String()},
 		{Name: "guard_set_size_k", Value: fmt.Sprint(model.SetSize)},
 		{Name: "guard_confirmed_prefix", Value: fmt.Sprint(model.ConfirmedPrefix)},
@@ -195,7 +199,7 @@ func (c m4SweepConfig) Key(sources string) runKey {
 // change without the identifiers staying put — they are derived from the
 // parameters, not from the position, so reordering costs nothing but a re-cut of
 // the batch.
-func m4SweepEnumeration(shapes []shape) []m4SweepConfig {
+func m4SweepEnumeration(shapes []shape, quota int) []m4SweepConfig {
 	configs := make([]m4SweepConfig, 0, len(shapes)*len(m4SweepPolicies)*len(sweepSeeds)*3)
 	for _, sh := range shapes {
 		for _, selection := range m4SweepPolicies {
@@ -204,7 +208,7 @@ func m4SweepEnumeration(shapes []shape) []m4SweepConfig {
 					m4LoadUniform, m4LoadPopular, m4LoadMainContactInSet,
 				} {
 					configs = append(configs, m4SweepConfig{
-						Shape: sh, Seed: seed, Policy: selection, Load: load,
+						Shape: sh, Seed: seed, Quota: quota, Policy: selection, Load: load,
 					})
 				}
 			}
@@ -318,11 +322,16 @@ func measureM4Configuration(g *graph, config m4SweepConfig) (m4AggregateRun, err
 	return run, nil
 }
 
-// m4ShapesFromEnvironment selects the forms, because one call of this stand has
-// a wall-clock ceiling and a sweep has to be cut somewhere the report can name.
-func m4ShapesFromEnvironment(t *testing.T) []shape {
-	t.Helper()
-	return shapesNamed(t, "M4_SHAPES", []shape{m4SweepShape()})
+// m4ShapeSelection selects the forms, because one call of this stand has a
+// wall-clock ceiling and a sweep has to be cut somewhere the report can name.
+func m4ShapeSelection() shapeSelection {
+	return shapeSelection{Variable: "M4_SHAPES", Fallback: []shape{m4SweepShape()}, Accepted: comparisonShapes()}
+}
+
+// m4QuotaSelection is the quota of the run: m4SweepQuota unless M4_QUOTA names
+// another.
+func m4QuotaSelection() quotaSelection {
+	return quotaSelection{Variable: "M4_QUOTA", Fallback: m4SweepQuota}
 }
 
 // TestM4FirstHopRefusalsOnTheCandidate is the run.
@@ -332,7 +341,9 @@ func TestM4FirstHopRefusalsOnTheCandidate(t *testing.T) {
 	}
 
 	selection := runSelectionFrom(t, "M4")
-	configs := m4SweepEnumeration(m4ShapesFromEnvironment(t))
+	shapes := m4ShapeSelection().fromEnvironment(t)
+	quota := m4QuotaSelection().fromEnvironment(t, shapes)
+	configs := m4SweepEnumeration(shapes, quota)
 
 	keys := make([]runKey, 0, len(configs))
 	for _, config := range configs {
@@ -352,7 +363,7 @@ func TestM4FirstHopRefusalsOnTheCandidate(t *testing.T) {
 		"21-anonymity-transport.md §4.3.4″.3, §4.3.4″.6\n\n")
 	fmt.Fprintf(&out, "inputs\n")
 	fmt.Fprintf(&out, "  quota %d, seeds %v, rules %v — the candidate first, its base on identical "+
-		"inputs\n", m4SweepQuota, sweepSeeds, m4SweepPolicies)
+		"inputs\n", quota, sweepSeeds, m4SweepPolicies)
 	fmt.Fprintf(&out, "  %d requesters per run, sampled with seed %d independently of construction "+
 		"order; %d requests per requester\n",
 		m4SweepRequesters, m4SweepRequesterSeed, m4SweepGuards().Requests)
@@ -376,8 +387,9 @@ func TestM4FirstHopRefusalsOnTheCandidate(t *testing.T) {
 
 	runSweep(t, selection, keys, &out, func(index int, _ runKey) ([]string, string, error) {
 		config := configs[index]
-		if want := graphCacheKey(config.Shape, config.Seed, config.Policy); cachedFor != want {
-			cachedGraph = buildGraph(config.Shape, config.Seed, m4SweepQuota, config.Policy)
+		want := fmt.Sprintf("%s/q%d", graphCacheKey(config.Shape, config.Seed, config.Policy), config.Quota)
+		if cachedFor != want {
+			cachedGraph = buildGraph(config.Shape, config.Seed, config.Quota, config.Policy)
 			cachedFor = want
 		}
 		run, err := measureM4Configuration(cachedGraph, config)
@@ -428,29 +440,96 @@ func graphCacheKey(sh shape, seed uint64, selection policy) string {
 	return fmt.Sprintf("%s/%d/%s", sh.name, seed, selection)
 }
 
-// shapesNamed reads a comma-separated list of sweep shapes from an environment
-// variable. A name the sweep does not know is FATAL: an operator who asked for
-// one form and silently got another cannot tell from the report, which is
-// correct about a run nobody ordered.
-func shapesNamed(t *testing.T, variable string, fallback []shape) []shape {
-	t.Helper()
+// shapeSelection is how a driver takes its forms from the environment: the
+// variable it reads, what it runs when the variable is unset, and the forms it
+// accepts by name.
+//
+// ⚠️ Accepted is per driver ON PURPOSE. Only M2/M5, M4 and M3-a may take the
+// full-depth forms; M6 may not, since its grid is registered for d = 8 alone.
+// One list shared by every driver would have opened M6 to them as a side
+// effect.
+type shapeSelection struct {
+	Variable string
+	Fallback []shape
+	Accepted []shape
+}
 
-	raw := strings.TrimSpace(os.Getenv(variable))
+// parse is the rule itself, apart from the environment and from t.Fatal, so
+// that a refusal can be tested. A name the driver does not accept is an ERROR:
+// an operator who asked for one form and silently got another cannot tell from
+// the report, which is correct about a run nobody ordered.
+func (s shapeSelection) parse(raw string) ([]shape, error) {
+	raw = strings.TrimSpace(raw)
 	if raw == "" {
-		return fallback
+		return s.Fallback, nil
 	}
-	byName := map[string]shape{}
-	for _, sh := range sweepShapes {
+	byName := make(map[string]shape, len(s.Accepted))
+	names := make([]string, 0, len(s.Accepted))
+	for _, sh := range s.Accepted {
 		byName[sh.name] = sh
+		names = append(names, sh.name)
 	}
-	selected := make([]shape, 0, len(sweepShapes))
+	selected := make([]shape, 0, len(s.Accepted))
 	for _, field := range strings.Split(raw, ",") {
 		name := strings.TrimSpace(field)
 		sh, known := byName[name]
 		if !known {
-			t.Fatalf("%s=%q names %q, which is not one of the sweep shapes", variable, raw, name)
+			return nil, fmt.Errorf("%s=%q names %q, which is not one of the shapes this driver "+
+				"accepts (%s)", s.Variable, raw, name, strings.Join(names, ", "))
 		}
 		selected = append(selected, sh)
 	}
-	return selected
+	return selected, nil
+}
+
+func (s shapeSelection) fromEnvironment(t *testing.T) []shape {
+	t.Helper()
+	shapes, err := s.parse(os.Getenv(s.Variable))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return shapes
+}
+
+// quotaSelection is how a driver that measures at ONE quota takes it from the
+// environment.
+//
+// ⚠️ It exists because M4 and M3-a run only after the neighbour-selection quota
+// is fixed from the M1/M2 results, and the quota is an input of the run, not of
+// the code. Editing it into the sources would change the stamp a second time.
+type quotaSelection struct {
+	Variable string
+	Fallback int
+}
+
+// parse refuses everything that is not ONE quota within 0..d of EVERY shape of
+// the run. Clipping one shape out of a run, as M1_QUOTAS may clip a range, is
+// not possible here: the run has one quota, so a shape it does not fit would
+// silently drop out of the measurement.
+func (q quotaSelection) parse(raw string, shapes []shape) (int, error) {
+	raw = strings.TrimSpace(raw)
+	quota := q.Fallback
+	if raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil {
+			return 0, fmt.Errorf("%s=%q is not one quota", q.Variable, raw)
+		}
+		quota = parsed
+	}
+	for _, sh := range shapes {
+		if quota < 0 || quota > sh.degree {
+			return 0, fmt.Errorf("%s: quota %d is not within 0..%d of shape %s",
+				q.Variable, quota, sh.degree, sh.name)
+		}
+	}
+	return quota, nil
+}
+
+func (q quotaSelection) fromEnvironment(t *testing.T, shapes []shape) int {
+	t.Helper()
+	quota, err := q.parse(os.Getenv(q.Variable), shapes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return quota
 }

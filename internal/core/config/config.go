@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rs/zerolog/log"
+
 	"github.com/piratecash/corsa/internal/core/appdata"
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/protocol"
@@ -171,6 +173,25 @@ type Node struct {
 	// so onboarding is unaffected. ENABLED by default; CORSA_PROBE_BACKOFF is a
 	// kill-switch (set falsey to restore the flat 60/122/182s timeline).
 	ProbeBackoffEnabled bool
+
+	// DisableV2TLSFirst is the operator's TLS-first switch for the secure
+	// session v2 (docs/protocol/session_v2.md, "Switching TLS-first off"). The
+	// zero value — TLS-first ON — is the default, so a struct-literal
+	// config.Node keeps it on. Set, a dial where v1 is not ruled out — an
+	// endpoint nothing binds, without v2_strong, dialled by address — opens
+	// with the identity-less probe instead of a ClientHello; a v2 welcome to
+	// that probe still leads to TLS in the same dial, whose failure allows no
+	// v1, since the endpoint has shown it speaks v2. A pinned identity at such
+	// an endpoint is probed too: the identity is known only from the probe's
+	// answer, which is refused before this node's identity goes on the wire,
+	// and the hold that refusal starts makes the next dial there open with TLS.
+	// Where v2 is required before any answer — a bound endpoint, v2_strong, a
+	// dial "to X", a v2-only node — nothing changes. A manual measure, not an
+	// automatic rollback:
+	// the listener keeps accepting v2. Env: CORSA_V2_TLS_FIRST (falsey
+	// switches TLS-first off); the SDK reads no environment and has its own
+	// field (sdk.NodeConfig.V2TLSFirst).
+	DisableV2TLSFirst bool
 
 	// PoisonBatchEnabled makes poison-reverse fan-out use the batched
 	// route_poison_v2 frame (one frame per peer carrying the whole lost-identity
@@ -628,6 +649,7 @@ func Default() Config {
 	transitForwardOnce := transitForwardOnceFromEnv()
 	poisonBatchEnabled := poisonBatchEnabledFromEnv()
 	probeBackoffEnabled := probeBackoffEnabledFromEnv()
+	disableV2TLSFirst := v2TLSFirstDisabledFromEnv()
 
 	return Config{
 		App: App{
@@ -670,6 +692,7 @@ func Default() Config {
 			TransitForwardOnce:         transitForwardOnce,
 			PoisonBatchEnabled:         poisonBatchEnabled,
 			ProbeBackoffEnabled:        probeBackoffEnabled,
+			DisableV2TLSFirst:          disableV2TLSFirst,
 			MaxNextHopsPerOrigin:       maxNextHopsPerOrigin,
 			MaxSeqAdvancePerWindow:     maxSeqAdvancePerWindow,
 			SeqAdvanceWindow:           seqAdvanceWindow,
@@ -1244,6 +1267,39 @@ func probeBackoffEnabledFromEnv() bool {
 		return false
 	default:
 		return true
+	}
+}
+
+// v2TLSFirstDisabledFromEnv reads CORSA_V2_TLS_FIRST, the operator's
+// TLS-first switch. TLS-first stays ON unless the variable is explicitly falsey: an
+// unset, empty or unrecognised value must not quietly take the ClientHello
+// off every dial.
+//
+// An unrecognised value is said at Warn: an operator who meant to switch
+// TLS-first off and mistyped the value would otherwise find out only from
+// the dials.
+func v2TLSFirstDisabledFromEnv() bool {
+	raw := os.Getenv("CORSA_V2_TLS_FIRST")
+	disabled, recognised := parseV2TLSFirst(raw)
+	if !recognised {
+		log.Warn().Str("variable", "CORSA_V2_TLS_FIRST").Str("value", raw).
+			Str("accepted", "0, false, no, off to switch TLS-first off; 1, true, yes, on or unset to keep it on").
+			Msg("config_value_unrecognised_tls_first_kept_on")
+	}
+	return disabled
+}
+
+// parseV2TLSFirst reads a CORSA_V2_TLS_FIRST value: whether it switches
+// TLS-first off, and whether the value was recognised at all. An unset or
+// empty value is recognised as the default.
+func parseV2TLSFirst(raw string) (disabled, recognised bool) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "0", "false", "no", "off":
+		return true, true
+	case "", "1", "true", "yes", "on":
+		return false, true
+	default:
+		return false, false
 	}
 }
 

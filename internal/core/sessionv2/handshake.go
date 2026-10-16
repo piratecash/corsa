@@ -37,21 +37,36 @@ var (
 	ErrPeerMismatch    = errors.New("sessionv2: the peer proved another identity than the one dialled")
 	ErrInvalidArgument = errors.New("sessionv2: invalid handshake argument")
 	// ErrPeerSpeaksV1 is a dial answered the way an old node answers a
-	// ClientHello: with a v1 JSON line, first byte '{'. It is the only
-	// refusal a caller may follow with a v1 dial — and only when nothing
-	// pins the peer to v2. A TLS alert (0x15) is a TLS refusal, and any other
-	// byte is not a v1 node: both are plain v2 failures.
+	// ClientHello: with a v1 JSON line, first byte '{'. A man in the middle
+	// writes the same line, so it proves nothing: it is no reason to speak
+	// v1, only no reason against a separate identity-less probe where
+	// nothing requires v2. A TLS alert (0x15, ErrPeerAlerted) and a
+	// handshake record that then failed (0x16, ErrPeerSpeaksTLS) are TLS
+	// answers, never followed by a probe at once.
 	ErrPeerSpeaksV1 = errors.New("sessionv2: the peer answered without TLS")
 	// ErrRefusedByListener is a dial answered with RefusalAlert before any
 	// other byte: a listener of this protocol that speaks TLS and refused the
 	// connection by one of its bounds — busy, not broken. Any other alert is
 	// an ordinary v2 failure.
 	ErrRefusedByListener = errors.New("sessionv2: the listener refused the connection")
+	// ErrPeerSpeaksTLS is a dial whose answer began with a TLS handshake
+	// record (0x16) and that failed afterwards: the listener speaks TLS, so
+	// the failure is a v2 failure — a bad certificate, a proof that does not
+	// verify, another identity — and never a reason to try v1.
+	ErrPeerSpeaksTLS = errors.New("sessionv2: the peer answered with TLS and the handshake failed")
+	// ErrPeerAlerted is a dial whose answer began with a TLS alert record
+	// (0x15), RefusalAlert included: a listener that speaks TLS and said no.
+	ErrPeerAlerted = errors.New("sessionv2: the peer answered with a TLS alert")
 )
 
 // TLSRecordHandshake is the first byte of every TLS connection: the record
 // type of the ClientHello. A listener tells v2 from v1 by it.
 const TLSRecordHandshake = 0x16
+
+// TLSRecordAlert is the record type of a TLS alert, the first byte of
+// RefusalAlert. A dialler that reads it first — to a ClientHello or to a v1
+// probe — has met a listener that speaks TLS.
+const TLSRecordAlert = 0x15
 
 // refusalAlertLen is the length of RefusalAlert.
 const refusalAlertLen = 7
@@ -65,7 +80,7 @@ const refusalAlertLen = 7
 // gives it. A fresh slice on every call: no caller can change the bytes
 // another one sends.
 func RefusalAlert() []byte {
-	return []byte{0x15, 0x03, 0x03, 0x00, 0x02, 0x02, 0x50}
+	return []byte{TLSRecordAlert, 0x03, 0x03, 0x00, 0x02, 0x02, 0x50}
 }
 
 // V1FrameStart is the first byte of every v1 frame: a JSON object.
@@ -227,15 +242,21 @@ func Dial(ctx context.Context, raw net.Conn, local Local, hello protocol.Frame, 
 	case first.answeredWithV1():
 		return ProvenSession{}, errors.Join(ErrPeerSpeaksV1, err)
 	case first.answeredWithRefusal():
-		return ProvenSession{}, errors.Join(ErrRefusedByListener, err)
+		return ProvenSession{}, errors.Join(ErrRefusedByListener, ErrPeerAlerted, err)
+	case first.answeredWith(TLSRecordAlert):
+		return ProvenSession{}, errors.Join(ErrPeerAlerted, err)
+	case first.answeredWith(TLSRecordHandshake):
+		return ProvenSession{}, errors.Join(ErrPeerSpeaksTLS, err)
 	}
 	return session, err
 }
 
 // firstByteConn remembers the first bytes the peer sent, so a failed dial can
-// tell "a v1 node answered" (a JSON line) and "a listener refused" (exactly
-// RefusalAlert) from everything else — another alert, other bytes, a
-// timeout, a reset. Only the first is a reason to speak v1.
+// tell "a v1 node answered" (a JSON line), "a listener refused" (exactly
+// RefusalAlert), "a TLS listener said no" (any alert) and "a TLS listener
+// failed later" (a handshake record) from everything else — other bytes, a
+// timeout, a reset. None of them proves anything: the dialler reads them as
+// hints for its next attempt (docs/protocol/session_v2.md).
 type firstByteConn struct {
 	net.Conn
 	mu sync.Mutex
@@ -261,9 +282,14 @@ func (c *firstByteConn) Read(b []byte) (int, error) {
 func (c *firstByteConn) NetConn() net.Conn { return c.Conn }
 
 func (c *firstByteConn) answeredWithV1() bool {
+	return c.answeredWith(V1FrameStart)
+}
+
+// answeredWith reports whether the peer's first byte was first.
+func (c *firstByteConn) answeredWith(first byte) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return len(c.head) > 0 && c.head[0] == V1FrameStart
+	return len(c.head) > 0 && c.head[0] == first
 }
 
 func (c *firstByteConn) answeredWithRefusal() bool {

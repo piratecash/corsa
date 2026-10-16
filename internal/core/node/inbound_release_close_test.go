@@ -161,14 +161,14 @@ func TestUnregisterInboundConnReleasesTheCoreWhenTheNetworkCannotCloseIt(t *test
 // connection's writer must have returned too.
 //
 // The window is held open by parking Run's own goroutine in the accept loop:
-// the test holds svc.connLimiter.mu and makes a second connection, so Run
-// blocks in allowConnect until the test lets go. Run reaches its drain only
+// the test holds svc.loopbackInbound.mu and makes a second connection from
+// loopback, so Run blocks in the class's admit until the test lets go. Run reaches its drain only
 // after the accept loop returns, so while it is parked there the handler of
 // the first connection runs its teardown with nothing else closing its core.
 // The goroutine dump is the witness that Run is parked rather than about to
-// lock. allowConnect has no other production caller, and the match names this
-// node's limiter by its receiver pointer, followed by the separator before the
-// ip argument so one pointer cannot match as a hex prefix of another; a
+// lock. admit has no other production caller, and the match names this
+// node's class by its receiver pointer, followed by the separator before the
+// next argument so one pointer cannot match as a hex prefix of another; a
 // parallel test's node parked the same way cannot stand in for it.
 func TestAnInboundConnThatEndsDuringShutdownDoesNotLeakItsWriter(t *testing.T) {
 	t.Parallel()
@@ -185,8 +185,9 @@ func TestAnInboundConnThatEndsDuringShutdownDoesNotLeakItsWriter(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	svc := NewService(cfg, id, nil)
-	// Rate limiting stays on: it is what makes the accept loop take
-	// connLimiter.mu, the lock the test parks Run on.
+	// Admission of a loopback source always takes loopbackInbound.mu, the
+	// lock the test parks Run on; the handler's teardown takes none of it
+	// before it unregisters the connection.
 	svc.markPeerStateIntervalTest = -1
 	_, stopNode := startTestService(t, ctx, cancel, svc)
 	var stopOnce sync.Once
@@ -212,17 +213,17 @@ func TestAnInboundConnThatEndsDuringShutdownDoesNotLeakItsWriter(t *testing.T) {
 		t.Fatal("fixture: the writer returned before the scenario began")
 	}
 
-	svc.connLimiter.mu.Lock()
+	svc.loopbackInbound.mu.Lock()
 	var releaseOnce sync.Once
-	releaseAcceptLoop := func() { releaseOnce.Do(svc.connLimiter.mu.Unlock) }
+	releaseAcceptLoop := func() { releaseOnce.Do(svc.loopbackInbound.mu.Unlock) }
 	defer releaseAcceptLoop()
 	second, err := net.Dial("tcp", cfg.ListenAddress)
 	if err != nil {
 		t.Fatalf("dial the second conn: %v", err)
 	}
 	t.Cleanup(func() { _ = second.Close() })
-	waitFor(t, 10*time.Second, "Run parked in allowConnect", func() bool {
-		return goroutineParkedOn(waitReasonMutexLock, fmt.Sprintf("(*connRateLimiter).allowConnect(%p,", svc.connLimiter))
+	waitFor(t, 10*time.Second, "Run parked in the loopback class's admit", func() bool {
+		return goroutineParkedOn(waitReasonMutexLock, fmt.Sprintf("(*loopbackInboundClass).admit(%p,", svc.loopbackInbound))
 	})
 
 	cancel()

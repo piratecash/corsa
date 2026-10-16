@@ -279,7 +279,8 @@ func (t *CommandTable) AllNames() []string {
 // node mode — those commands are registered as unavailable (503, hidden from help).
 //
 // If node additionally implements RoutingProvider, ConnectionDiagnosticProvider,
-// CaptureProvider, DatagramProvider or EndpointBindingProvider, the
+// CaptureProvider, DatagramProvider, EndpointBindingProvider or
+// EndpointDialDelayProvider, the
 // corresponding command groups are registered; otherwise they become 503.
 //
 // All commands use camelCase names. Snake_case aliases are registered for
@@ -327,6 +328,12 @@ func RegisterAllCommands(t *CommandTable, node NodeProvider, chatlog ChatlogProv
 		ep = e
 	}
 	RegisterEndpointBindingCommands(t, ep)
+
+	var dd EndpointDialDelayProvider
+	if d, ok := node.(EndpointDialDelayProvider); ok {
+		dd = d
+	}
+	RegisterEndpointDialDelayCommands(t, dd)
 
 	registerSnakeCaseAliases(t)
 }

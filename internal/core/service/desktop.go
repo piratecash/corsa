@@ -926,12 +926,6 @@ func (c *DesktopClient) DecryptIncomingControlMessage(event protocol.LocalChange
 	return c.dm.DecryptIncomingControlMessage(event)
 }
 
-// SyncDirectMessagesFromPeers pulls DM IDs from remote peers and imports
-// any that the local store does not have yet.
-func (c *DesktopClient) SyncDirectMessagesFromPeers(ctx context.Context, peerAddresses []string, counterparty string) (int, error) {
-	return c.dm.SyncDirectMessagesFromPeers(ctx, peerAddresses, counterparty)
-}
-
 // FetchConversation loads the full chat history for a single peer.
 func (c *DesktopClient) FetchConversation(ctx context.Context, peerAddress domain.PeerIdentity) ([]DirectMessage, error) {
 	return c.dm.FetchConversation(ctx, peerAddress)

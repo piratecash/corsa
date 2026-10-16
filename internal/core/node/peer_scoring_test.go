@@ -472,10 +472,15 @@ func TestFlushPeerStateRetryOnWriteFailure(t *testing.T) {
 	}
 	badPath := filepath.Join(badDir, "peers.json")
 
+	// The pin store would default to the peers file's directory, and a
+	// node refuses to start over a pin store whose location cannot be
+	// inspected; it gets a directory of its own, so only the peers file
+	// fails.
 	svc, stop := startTestNodeWithoutDials(t, config.Node{
-		ListenAddress:  address,
-		BootstrapPeers: []string{"10.0.0.1:64646"},
-		PeersStatePath: badPath,
+		ListenAddress:          address,
+		BootstrapPeers:         []string{"10.0.0.1:64646"},
+		PeersStatePath:         badPath,
+		SecureSessionStorePath: filepath.Join(t.TempDir(), "secure-sessions.json"),
 	})
 	defer stop()
 

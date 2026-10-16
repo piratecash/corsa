@@ -115,6 +115,24 @@ type EndpointBindingProvider interface {
 	DemoteEndpointBindings(ctx context.Context, endpoints []domain.PeerAddress, token domain.EndpointBindingSelectionToken) (domain.EndpointBindingDemotionResult, error)
 }
 
+// EndpointDialDelayProvider is the operator's view of the per-endpoint dial
+// delays (docs/rpc/secure_session.md): the endpoints
+// held because their correct answer claimed a version below this node's
+// minimum, and the retry of one of them by hand. Every command over it is
+// TransportLoopbackOnly. A node that does not implement it gets the commands
+// registered as unavailable.
+type EndpointDialDelayProvider interface {
+	// ListEndpointDialDelays is every endpoint the node holds a delay for,
+	// with its reason, the claimed version and the time of the next attempt.
+	ListEndpointDialDelays(ctx context.Context) ([]domain.EndpointDialDelay, error)
+
+	// RetryEndpointDial lifts the delay of endpoint alone, so its next dial
+	// may go at once. It lifts no pin and no endpoint binding: a downgrade
+	// stays refused. An endpoint without a delay is refused with
+	// domain.ErrEndpointDialDelayNotFound.
+	RetryEndpointDial(ctx context.Context, endpoint domain.PeerAddress) error
+}
+
 // ChatlogProvider abstracts access to chatlog operations.
 // Only available when desktop client is present.
 type ChatlogProvider interface {
@@ -258,6 +276,13 @@ type RoutingProvider interface {
 	// alert sender was busy — cumulative since the process started
 	// (docs/protocol/session_v2.md). Lock-free — the counters are atomics.
 	ListenerRefusalStats() domain.ListenerRefusalStats
+
+	// LoopbackInboundStats returns the state of the loopback inbound class —
+	// the onion entry, and any local process, as the listener sees them: its
+	// bounds, the connections it holds, and what it refused or closed by
+	// cause, cumulative since the process started
+	// (docs/protocol/network_security.md). Lock-free — atomics only.
+	LoopbackInboundStats() domain.LoopbackInboundStats
 
 	// HealthSnapshot returns a deep copy of every tracked
 	// RouteHealthState (Phase 2). Used by the fetchRouteHealth RPC and,

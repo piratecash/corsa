@@ -329,8 +329,10 @@ Failure mode when the ack does not land:
 
 Window bound: from ack-drop to `handleConn` defer firing. Usually
 short because the dialler closes promptly on its own
-`peerRequestTimeout`. Worst case is one inbound read deadline
-(`120s` `inboundReadTimeout`) on the failing socket. If the outbound
+`peerRequestTimeout`. Worst case is one inbound read deadline on the
+failing socket — the authenticated connection is a session by then, so
+the idle bound `inboundSessionIdleTimeout` (165 s) applies, not the
+120 s handshake bound `inboundReadTimeout`. If the outbound
 buffer never drains, the heartbeat path (`inboundHeartbeat`) evicts
 us on its own schedule. A failed `auth_ok` is logged at WARN with
 `conn_id` for forensics.
@@ -711,8 +713,10 @@ Failure mode когда ack не доходит:
 
 Window bound: от ack-drop до срабатывания defer в `handleConn`.
 Обычно короткий — dialler закрывает promptly по своему
-`peerRequestTimeout`. Worst case — один inbound read deadline
-(`120s` `inboundReadTimeout`) на залипшем сокете. Если outbound
+`peerRequestTimeout`. Worst case — один inbound read deadline на
+залипшем сокете: аутентифицированное соединение к этому моменту уже
+сессия, поэтому действует граница простоя `inboundSessionIdleTimeout`
+(165 с), а не граница рукопожатия `inboundReadTimeout` (120 с). Если outbound
 buffer никогда не дренируется, heartbeat-путь (`inboundHeartbeat`)
 эвиктит нас по своему расписанию. Failed `auth_ok` логируется на
 WARN с `conn_id` для forensics.

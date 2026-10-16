@@ -1,0 +1,155 @@
+{
+  "schema": 1,
+  "activation_protocol_version": 31,
+  "release_decision": null,
+  "conditions": [
+    {
+      "id": "crypto_review",
+      "condition": "Independent cryptographic review of the secure session: the identity proof over the TLS exporter, the exporter label and context, domain separation, role binding and the published test vectors.",
+      "executor": "external_expert",
+      "check": "The reviewer examines the commit to be released, not a design draft, and reports findings by severity; every critical finding is fixed and re-reviewed.",
+      "evidence": null,
+      "status": "not_done"
+    },
+    {
+      "id": "tor_phase_measurement",
+      "condition": "Measure the handshake phases (first byte, TLS completed, identity proof) over Tor: inbound through an onion service and inbound on the clearnet listener from a dialler behind a Tor exit.",
+      "executor": "developer",
+      "check": "Phase timings are measured on the candidate build under the documented method; the phase deadlines are kept or raised according to the result, and the change is in the candidate.",
+      "evidence": null,
+      "status": "not_done"
+    },
+    {
+      "id": "first_contact_latency",
+      "condition": "Measure the latency of the first connection on real old releases and over Tor, and choose the TLS probe timeout from the measurement; no value, including 30 s, counts as approved before it.",
+      "executor": "developer",
+      "check": "Measurement report (method, releases, Tor paths, distribution of first-connection times); the chosen timeout and its derivation are in the candidate and in the session documentation.",
+      "evidence": null,
+      "status": "not_done"
+    },
+    {
+      "id": "compat_real_releases",
+      "condition": "Compatibility tests against real published releases with protocol 28, 29 and 30, in both directions.",
+      "executor": "developer",
+      "check": "Isolated run (own data directories and test identities, external network denied and verified): new to old and old to new, message delivery both ways, and legacy refused for identities and endpoints that already require the secure session. The report lists release tags, commits, binary origin and hashes, commands and results.",
+      "evidence": {
+        "report": "internal/core/node/release_interop_test.go (build tag interop) against v1.0.64, v2.1.67, v2.2.68, v2.3.69 and v2.4.70, both directions, all green; how to run it: docs/protocol/session_v2.md. Not coverable: a message sent by the old node itself (the headless release has no sending command). Done once the test is committed and the run is repeated on that commit.",
+        "commit": null
+      },
+      "status": "partial"
+    },
+    {
+      "id": "load_run_on_candidate",
+      "condition": "Load run on the final candidate: handshake CPU under churn, pin store write cost and memory, compared with the same bench on the previous release.",
+      "executor": "developer",
+      "check": "The run follows the agreed bench profile and is separately authorised; baseline and candidate share the bench configuration; the report names versions, commits and figures.",
+      "evidence": null,
+      "status": "not_done"
+    },
+    {
+      "id": "probe_per_contract",
+      "condition": "TLS first by default. Only after a failed TLS attempt, and only where legacy is still allowed (including with the TLS-first switch off), an unknown peer is sent a separate identity-less hello probe; legacy follows only from a well-formed answer of the old protocol to that probe, never from a TLS error, a timeout or the first byte alone. A failed identity, signature or session-binding check ends the attempt without fallback. Identities and endpoints that already require the secure session get neither a probe nor legacy. The probe answer is an unconfirmed hint and proves no identity. The remaining risk is stated in the session contract: an on-path attacker can still hold a pair that has never proved the secure session in legacy at first contact. Retry back-off is per endpoint and is reset only by a successful outbound secure session to that endpoint that proved the expected identity, when one is set; an inbound session does not reset it.",
+      "executor": "developer",
+      "check": "Integration tests: probe after a failed TLS attempt, forged answers, dropped TLS handshake, reconnect after restart, no probe or legacy for pinned identities and endpoints in either switch position; back-off: an inbound session of X does not reset the delays of its addresses A and B, an outbound session to A proving the expected identity resets only A; the same scenarios repeated against real old releases.",
+      "evidence": null,
+      "status": "not_done"
+    },
+    {
+      "id": "tls_first_switch",
+      "condition": "Manual switch for TLS-first dialling of peers that have never proved the secure session: configuration field, SDK field, startup warning, metric and status field; peers that proved it keep the secure session.",
+      "executor": "developer",
+      "check": "Tests show that with the switch off unpinned peers are dialled with the legacy hello, version hints do not trigger an upgrade, and pinned peers and endpoints still use the secure session.",
+      "evidence": null,
+      "status": "not_done"
+    },
+    {
+      "id": "pin_store_marker",
+      "condition": "A marker next to the identity tells a first start from the loss of a pin store that was in use. Once the store has been used, its absence, damage, or a changed port or override path is an explicit startup error with recovery or migration instructions — never a silent empty store that allows legacy. The write order of store and marker is defined so that a crash between them is detected, and existing pins are kept.",
+      "executor": "developer",
+      "check": "Tests: first start, restart, lost file, damaged file, changed port, changed override path, crash between the store and marker writes; existing pins survive; the session contract names the real file and the marker's role.",
+      "evidence": null,
+      "status": "not_done"
+    },
+    {
+      "id": "unsafe_pin_store_refusal",
+      "condition": "Before any network listener opens, the node refuses to start when the pin store file, its directory or the marker is owned by someone other than the node's user (or root) or can be changed by anyone else, or when a link substitutes any of them. The error names the path (locally, never over RPC), the exact cause and the fix, including Docker and the process UID/GID. Permissions of a shared volume are not changed automatically, pins are not deleted, and the node does not fall back to legacy or a temporary store. A pin store that cannot be loaded keeps the node fail-closed.",
+      "executor": "developer",
+      "check": "Integration tests on the release build: safe and unsafe directory, wrong owner, writable by others, substitution through links, restart with existing pins, damaged store; the criteria are stated explicitly (not only mode 0777); Docker documentation describes a protected subdirectory for the node's user; the Windows location audit covers the same cases (owners and DACLs of the file, the marker and every directory up to the volume root, reparse points on the way) and its tests under the windows build tag are executed on a real Windows host before the release; the release notes carry the migration instructions.",
+      "evidence": {
+        "report": "Partial: the location audit with a startup warning and the pin_store_unsafe flag, and the fail-closed state for an unreadable store; since then the marker and the refusal to start before listening are implemented (internal/core/node/pin_store_marker.go, pin_store_refusal.go, startup_refusal.go) and await a check on a candidate commit.",
+        "commit": "7ee6c6576273f9f93f46c3817591ab10c1df92fa"
+      },
+      "status": "partial"
+    },
+    {
+      "id": "dial_paths_unified",
+      "condition": "The unused raw legacy dial chain (OpenSessionAt) is removed after its callers and public API are checked, with a compatible wrapper over the common secure dial if external consumers use it. Push notices go through the common connection path: SOCKS/Tor, secure session and pin requirements, connection limits, timeouts and cancellation. When a proxy is required, its failure ends the attempt with an error and no direct connection; addresses reached through Tor are never resolved by local DNS.",
+      "executor": "developer",
+      "check": "Tests: the proxy is used, no direct fallback, no local DNS lookup for Tor addresses, legacy refused for a pinned identity or endpoint, resources released on cancellation; the earlier report of notices bypassing the proxy is closed with these results attached.",
+      "evidence": null,
+      "status": "not_done"
+    },
+    {
+      "id": "loopback_inbound_class",
+      "condition": "Loopback inbound connections (IPv4 and IPv6; classified by listener when Tor has a dedicated one) form a class of their own for both the secure session and legacy: outside the per-IP limit and IP bans, with explicit numeric budgets for active connections, new connections per interval and concurrent handshakes, under the node-wide limits. Loopback is not trusted: authentication, pins and the downgrade ban apply; before proof violations count against the connection, after proof against the proved identity, never against a claimed legacy identity.",
+      "executor": "developer",
+      "check": "Tests: one offender does not ban other localhost peers; reconnects do not bypass the class budgets; close and cancellation free the slots. The numeric budgets are stated and checked by measurement before the release.",
+      "evidence": null,
+      "status": "not_done"
+    },
+    {
+      "id": "self_record_min_session",
+      "condition": "The node's own identity record carries the minimum session version, and the node sends it to neighbours when a session is set up.",
+      "executor": "developer",
+      "check": "Unit test of the record gate and an integration test of the record exchange on the candidate.",
+      "evidence": null,
+      "status": "not_done"
+    },
+    {
+      "id": "owner_session_choices",
+      "condition": "Owner decisions on the session design choices still open for this release: operator removal of pins. The other choices are decided: the handshake scheme and signed transcript are confirmed, the pin store keeps its file and gains a marker, loopback gets its own class, an unsafe pin store refuses startup, and the pin quotas keep existing pins without eviction.",
+      "executor": "owner",
+      "check": "Each choice has a recorded owner decision, and the code matches it (conformance of each decided choice is checked under its own condition).",
+      "evidence": {
+        "report": "Decided by the owner on 2026-10-16: every choice the condition names as decided, with the pin quota refinement of 2026-10-03; operator removal of pins is still open.",
+        "commit": null
+      },
+      "status": "partial"
+    },
+    {
+      "id": "owner_release_shape",
+      "condition": "Owner decision whether the secure session ships in a release of its own or together with the overlay role.",
+      "executor": "owner",
+      "check": "Recorded owner decision.",
+      "evidence": {
+        "report": "Owner decision of 2026-10-16: the secure session ships in a release of its own after the admission conditions; the overlay role activates in the following release, after the network observation.",
+        "commit": null
+      },
+      "status": "done"
+    },
+    {
+      "id": "network_observation_plan",
+      "condition": "The period and the success criteria of observing the release in the live network are fixed and approved before the release; the overlay role activates only in a following release, after that observation.",
+      "executor": "owner",
+      "check": "The owner approves the observation plan (period, metrics, thresholds, what stops the next activation) before the tag.",
+      "evidence": null,
+      "status": "not_done"
+    },
+    {
+      "id": "final_candidate_checks",
+      "condition": "All checks above, and the full test suite, pass on the final release candidate; any change after a check re-runs the affected checks.",
+      "executor": "developer",
+      "check": "Build, tests and lint green on the candidate commit; the integration tests for new to new and a mixed network pass on it; the reports above name this commit; the evidence names the full 40-character commit, which stays reachable from the tag; after it only the manifest, this version's release notes and the test pinning the manifest change (the gate checks this).",
+      "evidence": null,
+      "status": "not_done"
+    },
+    {
+      "id": "release_notes",
+      "condition": "Release notes at docs/release-notes/RELEASE-v<version>.md (a regular file, published as the release body) that do not claim the relayed-proof attack closed for the whole network; that state that a node with an unsafe pin store refuses to start and how to migrate (including Docker), that a rollback is possible only to a build that speaks the secure session, and how the TLS-first switch works.",
+      "executor": "owner",
+      "check": "The owner approves the release notes file committed for the tag.",
+      "evidence": null,
+      "status": "not_done"
+    }
+  ]
+}

@@ -903,7 +903,10 @@ func TestTheInboundHeartbeatIsJoinedNotMerelyStopped(t *testing.T) {
 	t.Cleanup(release)
 
 	svc.runCtx = context.Background()
-	svc.heartbeatIntervalOverride = time.Millisecond
+	liveness := productionLiveness()
+	liveness.listenerPingInterval = time.Millisecond
+	liveness.maxPingJitter = 0
+	svc.liveness = &liveness
 
 	// Exactly the shape handleConn uses: a stop channel plus the wait group its
 	// teardown blocks on.

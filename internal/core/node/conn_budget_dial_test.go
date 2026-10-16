@@ -25,9 +25,10 @@ import (
 func budgetTestService(t *testing.T, budget *connbudget.Budget) *Service {
 	t.Helper()
 	return &Service{
-		cfg:        config.Node{},
-		identity:   &identity.Identity{Address: "self"},
-		connBudget: budget,
+		peerTCPDial: dialTCPDirect,
+		cfg:         config.Node{},
+		identity:    &identity.Identity{Address: "self"},
+		connBudget:  budget,
 	}
 }
 
@@ -75,10 +76,10 @@ func TestAuxiliaryDialIsRefusedWhenTheCeilingIsFull(t *testing.T) {
 		t.Fatalf("error = %v, want ErrTotalExhausted", err)
 	}
 
-	conn, err = svc.dialAddressWithBudget(address, time.Second)
+	conn, err = svc.dialPeerWithBudget(context.Background(), address, time.Second)
 	if err == nil {
 		_ = conn.Close()
-		t.Fatal("dialAddressWithBudget opened a socket with the ceiling exhausted")
+		t.Fatal("a second dialPeerWithBudget opened a socket with the ceiling exhausted")
 	}
 	if !errors.Is(err, connbudget.ErrTotalExhausted) {
 		t.Fatalf("error = %v, want ErrTotalExhausted", err)
@@ -106,9 +107,9 @@ func TestAuxiliaryDialAccountsAndReturnsCapacity(t *testing.T) {
 		t.Fatalf("auxiliary usage while the socket is open = %d, want 1", snap.Auxiliary)
 	}
 
-	second, err := svc.dialAddressWithBudget(address, time.Second)
+	second, err := svc.dialPeerWithBudget(context.Background(), address, time.Second)
 	if err != nil {
-		t.Fatalf("dialAddressWithBudget: %v", err)
+		t.Fatalf("second dialPeerWithBudget: %v", err)
 	}
 	if snap := budget.Snapshot(); snap.Auxiliary != 2 {
 		t.Fatalf("auxiliary usage with two sockets open = %d, want 2", snap.Auxiliary)
@@ -149,7 +150,7 @@ func TestAuxiliaryDialReleasesOnDialFailure(t *testing.T) {
 	if _, err := svc.dialPeerWithBudget(context.Background(), dead, 500*time.Millisecond); err == nil {
 		t.Fatal("expected the dial to fail")
 	}
-	if _, err := svc.dialAddressWithBudget(dead, 500*time.Millisecond); err == nil {
+	if _, err := svc.dialPeerWithBudget(context.Background(), dead, 500*time.Millisecond); err == nil {
 		t.Fatal("expected the dial to fail")
 	}
 
@@ -212,7 +213,7 @@ func TestAuxiliaryDialWorksWithTheCeilingOffAndSlotsFull(t *testing.T) {
 	}
 	defer func() { _ = conn.Close() }()
 
-	notice, err := svc.dialAddressWithBudget(address, time.Second)
+	notice, err := svc.dialPeerWithBudget(context.Background(), address, time.Second)
 	if err != nil {
 		t.Fatalf("notice fallback refused with the ceiling OFF: %v", err)
 	}
@@ -222,7 +223,7 @@ func TestAuxiliaryDialWorksWithTheCeilingOffAndSlotsFull(t *testing.T) {
 	// is no auxiliary cap at all — the previous policy — and a test that
 	// stayed under the default would pass whether or not that holds.
 	for i := 0; i < config.DefaultAuxiliaryConnections+2; i++ {
-		extra, err := svc.dialAddressWithBudget(address, time.Second)
+		extra, err := svc.dialPeerWithBudget(context.Background(), address, time.Second)
 		if err != nil {
 			t.Fatalf("auxiliary dial %d refused with the ceiling OFF: %v — "+
 				"a disabled budget must not impose an auxiliary cap", i, err)

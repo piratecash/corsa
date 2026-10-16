@@ -414,14 +414,6 @@ func pendingMessagesFromFrame(frame protocol.Frame) []PendingMessage {
 	return out
 }
 
-// isConversationMessage reports whether message belongs to the bidirectional
-// thread between self and counterparty. Used during on-demand peer sync to
-// filter out unrelated messages that happen to live on the remote node.
-func isConversationMessage(message protocol.MessageFrame, self, counterparty string) bool {
-	return (message.Sender == self && message.Recipient == counterparty) ||
-		(message.Sender == counterparty && message.Recipient == self)
-}
-
 // incomingContactsToTrust inspects a batch of already-decrypted incoming
 // DirectMessages and returns the subset of their senders that should be
 // promoted into the trust store. Senders already trusted, or whose network

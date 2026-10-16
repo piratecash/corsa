@@ -28,6 +28,7 @@ Main docs:
 - encryption: [docs/encryption.md](docs/encryption.md)
 - **privacy: [docs/privacy.md](docs/privacy.md)** — keeping your keys and history off an unencrypted disk: `CORSA_DATA_DIR` and encrypted containers, swap, hibernation
 - donate: [docs/donate.md](docs/donate.md)
+- releases and the release admission gate: [docs/release.md](docs/release.md)
 
 Desktop localization:
 
@@ -115,6 +116,7 @@ For public or VPS nodes, the practical network settings are:
 - `CORSA_DATA_DIR` — directory for all node-local files (identity keys, history, contacts, downloads, crash logs). Must already exist: the node refuses to start rather than create it, so a directory inside an unmounted encrypted container is never recreated on the plain disk. See [docs/privacy.md](docs/privacy.md)
 - `CORSA_TRUST_STORE_PATH` — local pinned-contact trust database
 - `CORSA_SECURE_SESSION_STORE_PATH` — downgrade protection of the secure session v2; default `secure-sessions-<port>.json` next to the peers file
+- `CORSA_V2_TLS_FIRST` — operator switch of the secure session v2; TLS-first is on unless the value is `0`, `false`, `no` or `off`. Off, a dial to an unpinned peer at an endpoint nothing binds opens with the identity-less probe instead of a ClientHello (a v2 welcome still leads to TLS; no way around a TLS block for v31 nodes); pinned identities and bound endpoints keep v2. Warned at start and shown as `v2_tls_first` in `fetchAggregateStatus`
 - `CORSA_NODE_TYPE` — `full` or `client`
 - `CORSA_MAX_OUTGOING_PEERS` — max outbound peer sessions, default `8`
 - `CORSA_CONNECT_ONLY` — pin all outbound dialing to a single peer. Accepts an IP, an overlay address (`.onion` / `.b32.i2p`), or a DNS hostname, with or without a port (a bare host gets the default peer port); a DNS hostname is resolved once to an IP at pin time. The node drops every other outbound connection and (re)dials only this address; **incoming connections are unaffected**. Empty (default) means no restriction. This is a startup seed only — the runtime `connectOnly` RPC command can change the target or clear it. A self-pin is rejected, and the handshake self-identity guard still prevents connecting to our own identity.
@@ -192,21 +194,34 @@ docker run -d -p 64646:64646 \
   --restart unless-stopped \
   -e CORSA_LISTEN_ADDRESS=:64646 \
   -e CORSA_BOOTSTRAP_PEERS=65.108.204.190:64646 \
-  -v corsa-data:/home/corsa/.corsa \
+  -v corsa-data:/home/corsa/.corsacore \
   corsa-node
 ```
 
 For host bind mount usage, prepare the directory for `uid=10001` first:
 
 ```bash
-mkdir -p .corsa
-sudo chown -R 10001:10001 .corsa
+mkdir -p .corsacore
+sudo chown -R 10001:10001 .corsacore
 docker run -d -p 64646:64646 \
   --name corsa-node \
   --restart unless-stopped \
   -e CORSA_LISTEN_ADDRESS=:64646 \
   -e CORSA_BOOTSTRAP_PEERS=65.108.204.190:64646 \
-  -v $(pwd)/.corsa:/home/corsa/.corsa \
+  -v $(pwd)/.corsacore:/home/corsa/.corsacore \
+  corsa-node
+```
+
+**Permissions of the data directory.** The node refuses to start when its v2 pin store (`secure-sessions-<port>.json`), the store's marker next to the identity, or any directory above either can be changed by someone other than the node's user or root: a symlink in place of the file, a file that is not the user's `0600`, a directory that is group- or world-writable without the sticky bit, an owner that is another user. The error names the path, the violation, the process's uid and gid and the fix; the node changes no permissions itself and deletes nothing ([docs/protocol/session_v2.md](docs/protocol/session_v2.md), "Refusal to start"). Do not mount a `0777` volume. Either `chown` the volume to `uid=10001` as above, or, for a volume other users must write too, make it sticky and give the node its own subdirectory:
+
+```bash
+sudo chmod 1777 /srv/shared
+sudo install -d -o 10001 -g 10001 -m 0700 /srv/shared/corsa
+docker run -d -p 64646:64646 \
+  --name corsa-node \
+  --restart unless-stopped \
+  -e CORSA_DATA_DIR=/home/corsa/data/corsa \
+  -v /srv/shared:/home/corsa/data \
   corsa-node
 ```
 
@@ -252,6 +267,7 @@ Source: [pirate.cash/en/donate](https://pirate.cash/en/donate/)
 - шифрование: [docs/encryption.md](docs/encryption.md)
 - **приватность: [docs/privacy.md](docs/privacy.md)** — как не держать ключи и историю на незашифрованном диске: `CORSA_DATA_DIR` и зашифрованные контейнеры, подкачка, гибернация
 - донаты: [docs/donate.md](docs/donate.md)
+- выпуски и гейт допуска выпуска: [docs/release.md](docs/release.md)
 
 Локализация desktop-клиента:
 
@@ -335,6 +351,7 @@ CORSA_LISTEN_ADDRESS=127.0.0.1:64647 CORSA_ADVERTISE_PORT=64647 CORSA_BOOTSTRAP_
 - `CORSA_DATA_DIR` — папка для всех локальных файлов узла (ключи identity, история, контакты, загрузки, crash-логи). Должна уже существовать: узел скорее откажется запускаться, чем создаст её, — так папка внутри несмонтированного зашифрованного контейнера никогда не пересоздаётся на открытом диске. См. [docs/privacy.md](docs/privacy.md)
 - `CORSA_TRUST_STORE_PATH` — локальная база pinned-контактов
 - `CORSA_SECURE_SESSION_STORE_PATH` — защита от понижения защищённой сессии v2; по умолчанию `secure-sessions-<port>.json` рядом с файлом пиров
+- `CORSA_V2_TLS_FIRST` — выключатель оператора защищённой сессии v2; «TLS-первым» включён, если значение не `0`, `false`, `no` или `off`. Выключен — дозвон к непрошитому пиру на непривязанном адресе начинается с пробы без identity вместо ClientHello (welcome v2 всё равно ведёт к TLS; блокировку TLS к узлам v31 это не обходит); закреплённые identity и привязанные адреса сохраняют v2. Предупреждение на старте и `v2_tls_first` в `fetchAggregateStatus`
 - `CORSA_NODE_TYPE` — `full` или `client`
 - `CORSA_MAX_OUTGOING_PEERS` — максимум исходящих peer-session, по умолчанию `8`
 - `CORSA_MAX_INCOMING_PEERS` — опциональный лимит на входящие peer-соединения; `0` означает без app-level лимита
@@ -409,21 +426,34 @@ docker run -d -p 64646:64646 \
   --restart unless-stopped \
   -e CORSA_LISTEN_ADDRESS=:64646 \
   -e CORSA_BOOTSTRAP_PEERS=65.108.204.190:64646 \
-  -v corsa-data:/home/corsa/.corsa \
+  -v corsa-data:/home/corsa/.corsacore \
   corsa-node
 ```
 
 Для использования bind mount с хоста сначала подготовь каталог под `uid=10001`:
 
 ```bash
-mkdir -p .corsa
-sudo chown -R 10001:10001 .corsa
+mkdir -p .corsacore
+sudo chown -R 10001:10001 .corsacore
 docker run -d -p 64646:64646 \
   --name corsa-node \
   --restart unless-stopped \
   -e CORSA_LISTEN_ADDRESS=:64646 \
   -e CORSA_BOOTSTRAP_PEERS=65.108.204.190:64646 \
-  -v $(pwd)/.corsa:/home/corsa/.corsa \
+  -v $(pwd)/.corsacore:/home/corsa/.corsacore \
+  corsa-node
+```
+
+**Права каталога данных.** Узел отказывается стартовать, если его хранилище pin v2 (`secure-sessions-<port>.json`), маркер хранилища рядом с identity или любой каталог над ними может изменить кто-то кроме пользователя узла и root: symlink вместо файла, файл не `0600` пользователя узла, каталог с записью для группы или всех без sticky-бита, владелец — другой пользователь. Ошибка называет путь, нарушение, uid и gid процесса и способ исправления; сам узел права не меняет и ничего не удаляет ([docs/protocol/session_v2.md](docs/protocol/session_v2.md), «Отказ старта»). Не монтируй том `0777`. Либо сделай `chown` тома на `uid=10001`, как выше, либо, если в том должны писать и другие пользователи, сделай его sticky и выдели узлу собственный подкаталог:
+
+```bash
+sudo chmod 1777 /srv/shared
+sudo install -d -o 10001 -g 10001 -m 0700 /srv/shared/corsa
+docker run -d -p 64646:64646 \
+  --name corsa-node \
+  --restart unless-stopped \
+  -e CORSA_DATA_DIR=/home/corsa/data/corsa \
+  -v /srv/shared:/home/corsa/data \
   corsa-node
 ```
 
