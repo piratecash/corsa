@@ -278,8 +278,9 @@ func (t *CommandTable) AllNames() []string {
 // Pass nil for chatlog, dmRouter, or metricsProvider to simulate standalone
 // node mode — those commands are registered as unavailable (503, hidden from help).
 //
-// If node additionally implements RoutingProvider or ConnectionDiagnosticProvider,
-// the corresponding command groups are registered; otherwise they become 503.
+// If node additionally implements RoutingProvider, ConnectionDiagnosticProvider,
+// CaptureProvider, DatagramProvider or EndpointBindingProvider, the
+// corresponding command groups are registered; otherwise they become 503.
 //
 // All commands use camelCase names. Snake_case aliases are registered for
 // backward compatibility and will be removed after 2 releases.
@@ -320,6 +321,12 @@ func RegisterAllCommands(t *CommandTable, node NodeProvider, chatlog ChatlogProv
 		dp = d
 	}
 	RegisterDatagramCommands(t, dp)
+
+	var ep EndpointBindingProvider
+	if e, ok := node.(EndpointBindingProvider); ok {
+		ep = e
+	}
+	RegisterEndpointBindingCommands(t, ep)
 
 	registerSnakeCaseAliases(t)
 }

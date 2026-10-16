@@ -19,8 +19,15 @@
 //     when it CREATES the file, so an existing 0644 target — or a symlink —
 //     silently keeps its own terms.
 //
-// The guarantee: the bytes exist only in a fresh, owner-only file that no
-// other name refers to, and appear at the target through an atomic rename.
+// The guarantee: the bytes exist only in a fresh file that no other name
+// refers to, owner-only as far as its mode bits (POSIX) or its DACL (Windows)
+// go, and appear at the target through an atomic rename.
+//
+// Known limit, macOS: a file created 0600 still inherits the extended ACL
+// entries of its directory (an "everyone allow read,file_inherit" entry
+// survives O_EXCL|0600), and nothing here reads or clears ACLs, so on such a
+// directory the file is NOT owner-only from its creation. AuditLocation does
+// not see ACLs either (audit_posix.go).
 package secretfile
 
 import (
@@ -131,6 +138,12 @@ func (d *Dir) Write(name string, payload []byte) error {
 	}
 
 	file, tmp, err := d.createTemp()
+	if errors.Is(err, fs.ErrPermission) {
+		// The first write is where a directory this process may not write
+		// into shows up; say so, with its owner and mode, instead of a bare
+		// "permission denied" the operator has to reconstruct.
+		return fmt.Errorf("%w (%s): %w", ErrDirectoryNotWritable, describeDirectory(d), err)
+	}
 	if err != nil {
 		return err
 	}

@@ -1,6 +1,7 @@
 package sessionv2
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/tls"
@@ -355,10 +356,10 @@ func TestTheDialerRefusesWhatTheContractRefuses(t *testing.T) {
 		script func(*tls.Conn, []byte)
 		want   error
 	}{
-		"a small-order key forging every signature (#17)": {AnyPeer(), func(c *tls.Conn, e []byte) {
+		"a small-order key forging every signature": {AnyPeer(), func(c *tls.Conn, e []byte) {
 			writeLines(c, frameLine(t, smallOrder), forgedProof)
 		}, identity.ErrPublicKeySmallOrder},
-		"a v2 field removed (#7)": {AnyPeer(), func(c *tls.Conn, e []byte) {
+		"a v2 field removed": {AnyPeer(), func(c *tls.Conn, e []byte) {
 			writeLines(c, frameLine(t, withoutBoxSig), proofLine(t, b.id.PrivateKey, RoleListener, e))
 		}, ErrIntro},
 		"v1 challenge in a v2 intro": {AnyPeer(), func(c *tls.Conn, e []byte) {
@@ -370,21 +371,21 @@ func TestTheDialerRefusesWhatTheContractRefuses(t *testing.T) {
 		"the dialer's frame type": {AnyPeer(), func(c *tls.Conn, e []byte) {
 			writeLines(c, frameLine(t, asHello), proofLine(t, b.id.PrivateKey, RoleListener, e))
 		}, ErrIntro},
-		"another frame before the proof (#4.4)": {AnyPeer(), func(c *tls.Conn, e []byte) {
+		"another frame before the proof": {AnyPeer(), func(c *tls.Conn, e []byte) {
 			writeLines(c, frameLine(t, welcomeOf(t, b)), []byte(`{"type":"ping"}`))
 		}, ErrProofFrame},
-		"the proof in the dialer's role — reflection (#9)": {AnyPeer(), func(c *tls.Conn, e []byte) {
+		"the proof in the dialer's role — reflection": {AnyPeer(), func(c *tls.Conn, e []byte) {
 			writeLines(c, frameLine(t, welcomeOf(t, b)), proofLine(t, b.id.PrivateKey, RoleDialer, e))
 		}, ErrProofInvalid},
-		"a proof over another exporter (#8)": {AnyPeer(), func(c *tls.Conn, e []byte) {
+		"a proof over another exporter": {AnyPeer(), func(c *tls.Conn, e []byte) {
 			writeLines(c, frameLine(t, welcomeOf(t, b)), proofLine(t, b.id.PrivateKey, RoleListener, byteRun(0x55, ExporterLength)))
 		}, ErrProofInvalid},
-		// KCI (#18): M holds X's own key and claims to be B. Knowing the
+		// KCI: M holds X's own key and claims to be B. Knowing the
 		// dialer's key lets M sign only as X — never as B.
-		"key compromise impersonation (#18)": {ExpectPeer(b.peer), func(c *tls.Conn, e []byte) {
+		"key compromise impersonation": {ExpectPeer(b.peer), func(c *tls.Conn, e []byte) {
 			writeLines(c, frameLine(t, welcomeOf(t, b)), proofLine(t, x.id.PrivateKey, RoleListener, e))
 		}, ErrProofInvalid},
-		"self-connection (#17)": {AnyPeer(), func(c *tls.Conn, e []byte) {
+		"self-connection": {AnyPeer(), func(c *tls.Conn, e []byte) {
 			writeLines(c, frameLine(t, welcomeOf(t, x)), proofLine(t, x.id.PrivateKey, RoleListener, e))
 		}, ErrSelfConnection},
 		"someone other than the dialled identity": {ExpectPeer(newNode(t).peer), func(c *tls.Conn, e []byte) {
@@ -400,7 +401,23 @@ func TestTheDialerRefusesWhatTheContractRefuses(t *testing.T) {
 	}
 }
 
-// #6: no ALPN on either side is not v2, whatever else the handshake does.
+// A dial "to X" that meets another identity names the identity it met, so the
+// dialler can journal both sides of the mismatch without parsing a message.
+func TestAPeerMismatchNamesTheIdentityProven(t *testing.T) {
+	x, b := newNode(t), newNode(t)
+	err := dialScripted(t, x, ExpectPeer(newNode(t).peer), func(c *tls.Conn, e []byte) {
+		writeLines(c, frameLine(t, welcomeOf(t, b)), proofLine(t, b.id.PrivateKey, RoleListener, e))
+	})
+	var mismatch *PeerMismatchError
+	if !errors.As(err, &mismatch) || mismatch.Proven != b.peer {
+		t.Fatalf("Dial = %v, want a *PeerMismatchError naming %s", err, b.peer)
+	}
+	if !errors.Is(err, ErrPeerMismatch) {
+		t.Fatalf("Dial = %v, want it to match ErrPeerMismatch", err)
+	}
+}
+
+// No ALPN on either side is not v2, whatever else the handshake does.
 func TestNoALPNIsNotV2(t *testing.T) {
 	ctx := context.Background()
 	x, b := newNode(t), newNode(t)
@@ -458,7 +475,7 @@ func (c *tamperConn) Write(b []byte) (int, error) {
 	return c.Conn.Write(b)
 }
 
-// #10: an altered or replayed record after the handshake breaks the session.
+// An altered or replayed record after the handshake breaks the session.
 func TestAnAlteredOrReplayedRecordBreaksTheSession(t *testing.T) {
 	for _, mode := range []string{"flip", "duplicate"} {
 		t.Run(mode, func(t *testing.T) {
@@ -498,7 +515,7 @@ func TestAnAlteredOrReplayedRecordBreaksTheSession(t *testing.T) {
 	}
 }
 
-// #30: past the record budget a write is refused instead of sent, and the
+// Past the record budget a write is refused instead of sent, and the
 // caller re-establishes the session.
 func TestWritesPastTheRecordBudgetAreRefused(t *testing.T) {
 	ctx := context.Background()
@@ -610,8 +627,9 @@ func TestADialAnsweredByV1IsRecognisedAndSilenceIsNot(t *testing.T) {
 	// is a TLS refusal (a v2 failure), and arbitrary bytes are not a v1 node:
 	// neither may become ErrPeerSpeaksV1.
 	for name, answer := range map[string][]byte{
-		"TLS alert":       {0x15, 0x03, 0x03, 0x00, 0x02, 0x02, 0x50},
-		"arbitrary bytes": []byte("HTTP/1.1 400 Bad Request\r\n\r\n"),
+		"TLS alert":            {0x15, 0x03, 0x03, 0x00, 0x02, 0x02, 0x50},
+		"a listener's refusal": RefusalAlert(),
+		"arbitrary bytes":      []byte("HTTP/1.1 400 Bad Request\r\n\r\n"),
 	} {
 		t.Run(name, func(t *testing.T) {
 			xSide, other := connPair(t)
@@ -677,5 +695,62 @@ func TestClosingASessionSendsNoCloseNotify(t *testing.T) {
 	}
 	if after := bSide.read.Load(); after != before {
 		t.Fatalf("closing sent %d bytes after the last frame, want none", after-before)
+	}
+}
+
+// The refusal a listener sends is the one record the contract names, byte for
+// byte, and no caller can change what the next one sends.
+func TestTheRefusalAlertIsAFatalInternalErrorRecord(t *testing.T) {
+	want := []byte{0x15, 0x03, 0x03, 0x00, 0x02, 0x02, 0x50}
+	first := RefusalAlert()
+	if !bytes.Equal(first, want) {
+		t.Fatalf("RefusalAlert = % x, want % x", first, want)
+	}
+	first[0] = 0x16
+	if again := RefusalAlert(); !bytes.Equal(again, want) {
+		t.Fatalf("a caller changed the next alert: % x", again)
+	}
+}
+
+// A listener's refusal is told apart from every other answer: it is the one
+// that says "busy", and only the exact refusal record says it — another
+// alert, or the refusal after other bytes, is an ordinary v2 failure.
+func TestADialRefusedByAListenerIsRecognisedAndOtherAlertsAreNot(t *testing.T) {
+	x := newNode(t)
+	handshakeFailure := []byte{0x15, 0x03, 0x03, 0x00, 0x02, 0x02, 0x28}
+	for name, tc := range map[string]struct {
+		answer  []byte
+		refused bool
+	}{
+		"the refusal alert":      {RefusalAlert(), true},
+		"a handshake_failure":    {handshakeFailure, false},
+		"a v1 line":              {[]byte(`{"type":"error","code":"invalid-json"}` + "\n"), false},
+		"the alert in two reads": {RefusalAlert(), true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			xSide, other := connPair(t)
+			go func() {
+				buf := make([]byte, 1)
+				_, _ = other.Read(buf)
+				if name == "the alert in two reads" {
+					_, _ = other.Write(tc.answer[:3])
+					time.Sleep(20 * time.Millisecond)
+					_, _ = other.Write(tc.answer[3:])
+				} else {
+					_, _ = other.Write(tc.answer)
+				}
+				_ = other.Close()
+			}()
+			got := <-dialAsync(context.Background(), xSide, x, AnyPeer())
+			if got.err == nil {
+				t.Fatal("the dial succeeded")
+			}
+			if refused := errors.Is(got.err, ErrRefusedByListener); refused != tc.refused {
+				t.Fatalf("Dial answered with %s = %v; ErrRefusedByListener = %v, want %v", name, got.err, refused, tc.refused)
+			}
+			if tc.refused && errors.Is(got.err, ErrPeerSpeaksV1) {
+				t.Fatalf("a listener's refusal read as an old node: %v", got.err)
+			}
+		})
 	}
 }

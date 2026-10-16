@@ -137,44 +137,84 @@ func (p *legacyVersionProxy) acceptLoop() {
 	}
 }
 
+// errProxyWrite marks a copy that ended because the destination refused a
+// write, as opposed to the source ending its stream.
+var errProxyWrite = errors.New("proxy: write to the destination failed")
+
 // forwardFromDialer carries what the dialling side sends. When the dialler is
 // the old node (oldPeerDials) its frames are rewritten; when it is the node
 // under test (oldPeerListens) its frame types are recorded.
+//
+// It never closes the dialler's connection: only forwardFromListener does,
+// once the listener ended. An old listener answers the first line of a
+// ClientHello and closes while the dialler is still writing the rest of it,
+// so the write toward the listener fails before the answer has crossed the
+// proxy; closing the dialler here would hand it a FIN in place of the answer
+// the old node did send.
 func (p *legacyVersionProxy) forwardFromDialer(from, to net.Conn) {
 	defer p.done.Done()
 	err := p.copy(to, from, p.side == oldPeerDials, p.side == oldPeerListens)
-	closeLikeThePeer(to, from, err)
+	switch {
+	case errors.Is(err, errProxyWrite):
+		// The listener stopped reading. What the dialler still writes is
+		// consumed, so the close forwardFromListener makes is decided by
+		// the listener's own end and not by bytes left unread in the proxy.
+		_, _ = io.Copy(io.Discard, from)
+	case errors.Is(err, syscall.ECONNRESET):
+		resetConn(to)
+	default:
+		// The dialler finished writing; the listener sees the EOF and may
+		// still answer.
+		if tcp, ok := to.(*net.TCPConn); ok {
+			_ = tcp.CloseWrite()
+		}
+	}
 }
 
 // forwardFromListener carries what the listening side sends. When the listener
 // is the old node (oldPeerListens) its frames are rewritten; when it is the
-// node under test (oldPeerDials) its frame types are recorded.
+// node under test (oldPeerDials) its frame types are recorded. It reads the
+// listener to its end before closing both connections, so everything the
+// listener wrote reaches the dialler first.
 func (p *legacyVersionProxy) forwardFromListener(from, to net.Conn) {
 	defer p.done.Done()
 	err := p.copy(to, from, p.side == oldPeerListens, p.side == oldPeerDials)
+	if errors.Is(err, errProxyWrite) {
+		// The dialler is gone; the listener's end is still waited for, so
+		// the close below mirrors how the listener ended.
+		_, err = io.Copy(io.Discard, from)
+	}
 	closeLikeThePeer(to, from, err)
 }
 
-// closeLikeThePeer ends both connections once one side ended. A side that
-// reset its connection is answered with a reset, not a FIN: an old listener
-// closes a ClientHello connection with the unread rest of the ClientHello in
-// its buffer, which resets it, and the dialler must see what it would see
-// without the proxy.
+// closeLikeThePeer ends both connections once the listener ended. A listener
+// that reset its connection is answered with a reset, not a FIN: an old
+// listener closes a ClientHello connection with the unread rest of the
+// ClientHello in its buffer, which resets it, and the dialler must see what it
+// would see without the proxy.
 func closeLikeThePeer(to, from net.Conn, err error) {
 	if errors.Is(err, syscall.ECONNRESET) {
-		if tcp, ok := to.(*net.TCPConn); ok {
-			_ = tcp.SetLinger(0)
-		}
+		resetConn(to)
+	} else {
+		_ = to.Close()
 	}
-	_ = to.Close()
 	_ = from.Close()
+}
+
+// resetConn closes conn with a reset instead of a FIN.
+func resetConn(conn net.Conn) {
+	if tcp, ok := conn.(*net.TCPConn); ok {
+		_ = tcp.SetLinger(0)
+	}
+	_ = conn.Close()
 }
 
 // copy forwards bytes line by line. When rewrite is set, the version (and, for
 // an impersonating proxy, the address) of a hello/welcome is replaced; nothing
 // else is touched and v1 hello/welcome are not signed. When record is set, the
 // frame type of each JSON line is remembered — this is how a test reads what
-// the node under test actually put on the wire.
+// the node under test actually put on the wire. A failed write is returned
+// wrapped in errProxyWrite; a read that ended returns the read error.
 func (p *legacyVersionProxy) copy(dst io.Writer, src io.Reader, rewrite, record bool) error {
 	reader := bufio.NewReader(src)
 	for {
@@ -188,7 +228,7 @@ func (p *legacyVersionProxy) copy(dst io.Writer, src io.Reader, rewrite, record 
 				p.recordFrameType(line)
 			}
 			if _, werr := dst.Write(out); werr != nil {
-				return werr
+				return fmt.Errorf("%w: %w", errProxyWrite, werr)
 			}
 		}
 		if err != nil {

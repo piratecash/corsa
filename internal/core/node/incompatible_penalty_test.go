@@ -152,7 +152,7 @@ func TestPenalizeOldProtocolPeer_InsideItsBan_StillRecordsVersionPolicyEvidence(
 	peerID := domaintest.ID("peer-ban-policy")
 	svc := &Service{
 		persistedMeta: map[domain.PeerAddress]*peerEntry{address: {Address: address}},
-		peerIDs:       map[domain.PeerAddress]domain.PeerIdentity{address: peerID},
+		peerIDs:       addressIdentities{address: claimedAddressIdentity(peerID)},
 		peerBuilds:    make(map[domain.PeerAddress]int),
 		peerVersions:  make(map[domain.PeerAddress]string),
 		health:        make(map[domain.PeerAddress]*peerHealth),
@@ -221,7 +221,7 @@ func TestOnCMDialFailed_FallbackAlias_LockoutCarriesClientVersion(t *testing.T) 
 	higherMin := domain.ProtocolVersion(config.ProtocolVersion) + 1
 	svc := &Service{
 		persistedMeta: map[domain.PeerAddress]*peerEntry{primary: {Address: primary}},
-		peerIDs:       map[domain.PeerAddress]domain.PeerIdentity{primary: domaintest.ID("peer-alias-aaa")},
+		peerIDs:       addressIdentities{primary: claimedAddressIdentity(domaintest.ID("peer-alias-aaa"))},
 		peerBuilds:    make(map[domain.PeerAddress]int),
 		peerVersions:  make(map[domain.PeerAddress]string),
 		health:        make(map[domain.PeerAddress]*peerHealth),

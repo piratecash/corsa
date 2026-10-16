@@ -2,17 +2,44 @@ package node
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/trustedclock"
 )
 
-type storeClock struct{ now time.Time }
+// storeClock is a device's two clocks under a store in a test. Moving now is
+// time going by, awake or asleep, which both clocks see; stepWall is somebody
+// setting the wall clock, which the clock since boot does not see.
+type storeClock struct {
+	now time.Time
+	// stepped is how far the wall clock was set by hand.
+	stepped time.Duration
+}
+
+// storeClockBoot is when the device under every storeClock booted.
+var storeClockBoot = time.Unix(1780000000, 0).Add(-72 * time.Hour)
 
 func (c *storeClock) read() time.Time { return c.now }
+
+func (c *storeClock) sinceBoot() (time.Duration, error) {
+	return c.now.Sub(storeClockBoot) - c.stepped, nil
+}
+
+func (c *storeClock) stepWall(by time.Duration) {
+	c.now = c.now.Add(by)
+	c.stepped += by
+}
+
+// trusted is the trusted time of a process started now on these clocks:
+// each store loaded with it is a fresh start.
+func (c *storeClock) trusted() *trustedclock.Clock {
+	return trustedclock.New(trustedclock.Sources{Wall: c.read, SinceBoot: c.sinceBoot})
+}
 
 func newStoreClock() *storeClock { return &storeClock{now: time.Unix(1780000000, 0)} }
 
@@ -22,12 +49,12 @@ func TestTheDowngradeProtectionSurvivesARestart(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "secure-sessions-64646.json")
 	endpoint, id := domain.PeerAddress("192.0.2.1:64646"), domain.PeerIdentity{7}
 
-	first := loadSecureSessionStore(path, clock.read)
-	if _, err := first.noteProvenOutbound(endpoint, id, endpointProtectionNone()); err != nil {
+	first := loadSecureSessionStore(path, clock.trusted())
+	if _, err := first.noteProvenOutbound(dialledAt(endpoint), id, endpointProtectionNone()); err != nil {
 		t.Fatalf("note: %v", err)
 	}
 
-	restarted := loadSecureSessionStore(path, clock.read)
+	restarted := loadSecureSessionStore(path, clock.trusted())
 	if !restarted.identityPinned(id) || !restarted.endpointRequiresV2(endpoint) {
 		t.Fatal("the protection was lost across a restart")
 	}
@@ -40,7 +67,7 @@ func TestTheDowngradeProtectionSurvivesARestart(t *testing.T) {
 // attacker with fresh identities must not be able to push an honest pin out.
 func TestAFullStoreRefusesNewPinsAndKeepsTheOld(t *testing.T) {
 	t.Parallel()
-	store := loadSecureSessionStore("", newStoreClock().read)
+	store := loadSecureSessionStore("", newStoreClock().trusted())
 	for i := range maxPinnedIdentities {
 		_ = store.noteProvenInbound(domain.PeerIdentity{byte(i), byte(i >> 8), byte(i >> 16), 1})
 	}
@@ -53,11 +80,13 @@ func TestAFullStoreRefusesNewPinsAndKeepsTheOld(t *testing.T) {
 		t.Fatal("a pin was added past the bound")
 	}
 
+	// Spread over 256 source groups, so the daily quota of new bindings per
+	// group is not what stops the fill.
 	for i := range maxGeneralBindings {
-		_, _ = store.noteProvenOutbound(domain.PeerAddress("192.0.2.1:"+string(rune('a'+i%26))+string(rune(i))), honest, endpointProtectionNone())
+		_, _ = store.noteProvenOutbound(dialledAt(domain.PeerAddress(fmt.Sprintf("10.%d.%d.1:64646", byte(i), byte(i>>8)))), honest, endpointProtectionNone())
 	}
-	first := domain.PeerAddress("192.0.2.1:a\x00")
-	_, _ = store.noteProvenOutbound("198.51.100.1:64646", honest, endpointProtectionNone())
+	first := domain.PeerAddress("10.0.0.1:64646")
+	_, _ = store.noteProvenOutbound(dialledAt("198.51.100.1:64646"), honest, endpointProtectionNone())
 	if !store.endpointRequiresV2(first) {
 		t.Fatal("a live endpoint binding was dropped to make room")
 	}
@@ -71,9 +100,9 @@ func TestAFullStoreRefusesNewPinsAndKeepsTheOld(t *testing.T) {
 func TestAnEndpointBindingExpiresAndAnIdentityPinDoesNot(t *testing.T) {
 	t.Parallel()
 	clock := newStoreClock()
-	store := loadSecureSessionStore("", clock.read)
+	store := loadSecureSessionStore("", clock.trusted())
 	endpoint, id := domain.PeerAddress("192.0.2.1:64646"), domain.PeerIdentity{7}
-	_, _ = store.noteProvenOutbound(endpoint, id, endpointProtectionNone())
+	_, _ = store.noteProvenOutbound(dialledAt(endpoint), id, endpointProtectionNone())
 
 	clock.now = clock.now.Add(endpointBindingTTL - time.Second)
 	if !store.endpointRequiresV2(endpoint) {
@@ -96,7 +125,7 @@ func TestAnUnreadableStoreRefusesV1ForEveryPeer(t *testing.T) {
 	if err := os.WriteFile(path, []byte("not json"), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	store := loadSecureSessionStore(path, newStoreClock().read)
+	store := loadSecureSessionStore(path, newStoreClock().trusted())
 	if !store.identityPinned(domain.PeerIdentity{9}) || !store.endpointRequiresV2("192.0.2.9:64646") {
 		t.Fatal("an unreadable store opened v1 instead of refusing it")
 	}
@@ -114,7 +143,7 @@ func TestAFailedWriteIsReportedAndRetriedUntilItLands(t *testing.T) {
 	t.Parallel()
 	clock := newStoreClock()
 	path := filepath.Join(t.TempDir(), "secure-sessions-64646.json")
-	store := loadSecureSessionStore(path, clock.read)
+	store := loadSecureSessionStore(path, clock.trusted())
 	id := domain.PeerIdentity{5}
 	diskFull := errors.New("disk full")
 	store.writeFile = func([]byte) error { return diskFull }
@@ -131,7 +160,7 @@ func TestAFailedWriteIsReportedAndRetriedUntilItLands(t *testing.T) {
 	if err := store.noteProvenInbound(id); err != nil {
 		t.Fatalf("retry: %v", err)
 	}
-	if !loadSecureSessionStore(path, clock.read).identityPinned(id) {
+	if !loadSecureSessionStore(path, clock.trusted()).identityPinned(id) {
 		t.Fatal("the pin that failed to write was never written: a restart loses it")
 	}
 }
@@ -142,10 +171,10 @@ func TestAFailedWriteIsReportedAndRetriedUntilItLands(t *testing.T) {
 func TestAProtectedBindingDoesNotExpire(t *testing.T) {
 	t.Parallel()
 	clock := newStoreClock()
-	store := loadSecureSessionStore("", clock.read)
+	store := loadSecureSessionStore("", clock.trusted())
 	contactEndpoint, otherEndpoint := domain.PeerAddress("192.0.2.1:64646"), domain.PeerAddress("192.0.2.2:64646")
-	_, _ = store.noteProvenOutbound(contactEndpoint, domain.PeerIdentity{7}, endpointProtectionWanted(domain.ProtectedBindingPoolContact))
-	_, _ = store.noteProvenOutbound(otherEndpoint, domain.PeerIdentity{8}, endpointProtectionNone())
+	_, _ = store.noteProvenOutbound(dialledAt(contactEndpoint), domain.PeerIdentity{7}, endpointProtectionWanted(domain.ProtectedBindingPoolContact))
+	_, _ = store.noteProvenOutbound(dialledAt(otherEndpoint), domain.PeerIdentity{8}, endpointProtectionNone())
 
 	clock.now = clock.now.Add(endpointBindingTTL + 24*time.Hour)
 	if !store.endpointRequiresV2(contactEndpoint) {
@@ -155,7 +184,7 @@ func TestAProtectedBindingDoesNotExpire(t *testing.T) {
 		t.Fatal("an ordinary binding outlived its 30 days")
 	}
 	// A later ordinary note on the protected endpoint never lowers it.
-	_, _ = store.noteProvenOutbound(contactEndpoint, domain.PeerIdentity{9}, endpointProtectionNone())
+	_, _ = store.noteProvenOutbound(dialledAt(contactEndpoint), domain.PeerIdentity{9}, endpointProtectionNone())
 	clock.now = clock.now.Add(endpointBindingTTL + 24*time.Hour)
 	if !store.endpointRequiresV2(contactEndpoint) {
 		t.Fatal("a protected binding was lowered to an expiring one")

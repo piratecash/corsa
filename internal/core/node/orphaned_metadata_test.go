@@ -26,7 +26,7 @@ import (
 func newMetadataFixture() *Service {
 	return &Service{
 		peerTypes:               make(map[domain.PeerAddress]domain.NodeType),
-		peerIDs:                 make(map[domain.PeerAddress]domain.PeerIdentity),
+		peerIDs:                 make(addressIdentities),
 		peerVersions:            make(map[domain.PeerAddress]string),
 		peerBuilds:              make(map[domain.PeerAddress]int),
 		observedIPHistoryByPeer: make(map[domain.PeerAddress][]domain.PeerIP),
@@ -39,7 +39,7 @@ func newMetadataFixture() *Service {
 
 func seedMetadata(svc *Service, addr domain.PeerAddress) {
 	svc.peerTypes[addr] = domain.NodeTypeUnknown
-	svc.peerIDs[addr] = domain.PeerIdentityFromWire("aa00000000000000000000000000000000000001")
+	svc.peerIDs[addr] = claimedAddressIdentity(domain.PeerIdentityFromWire("aa00000000000000000000000000000000000001"))
 	svc.peerVersions[addr] = "1.0.47"
 	svc.peerBuilds[addr] = 1860000
 	svc.observedIPHistoryByPeer[addr] = []domain.PeerIP{domain.PeerIPFromAddr(netip.MustParseAddr("203.0.113.7"))}

@@ -143,7 +143,8 @@ nobody has written yet:
   proves the directory it opened IS the entry it named — "inside the root" is
   not "where I meant", and a link `identity-backups` → `.` stays inside while
   redirecting every write onto the data directory's own files.
-- The file is owner-only **at creation**, never by a step afterwards.
+- The file is owner-only **at creation** (on macOS subject to the ACL limit
+  below), never by a step afterwards.
   Restricting after the create leaves a window in which the file exists under
   the parent directory's terms, and a handle another process obtained in that
   window keeps its access — a later DACL change does not revoke access already
@@ -153,6 +154,26 @@ nobody has written yet:
   atomically with the create and relative to the pinned directory handle. That
   code is isolated in `create_windows.go` and covered by DACL tests under a
   `windows` build tag, because compiling it proves only that the types line up.
+- The writer cannot vouch for the directories above the file, so
+  `secretfile.AuditLocation` is a separate, explicit audit: the file is not a
+  symlink and is owner-only (POSIX: this user's, mode 0600; Windows: every
+  allow entry of its DACL names the current user), and on POSIX every
+  directory and link on the way to it, up to `/`, is this user's or root's
+  and is not group- or world-writable without the sticky bit — a sticky
+  directory such as `/tmp` only when the entry inside it is this user's. It
+  names components by role, never by path, and decides nothing: the caller
+  chooses the reaction (the downgrade-protection store warns and flags
+  `pin_store_unsafe`, [protocol/session_v2.md](protocol/session_v2.md)). A
+  write into a directory this process may not create files in fails with
+  `secretfile.ErrDirectoryNotWritable`, naming the directory's owner and mode.
+- Known limits. On POSIX "owner-only" means owner and mode bits: extended
+  ACLs are neither cleared by the writer nor read by the audit. On macOS a
+  file created 0600 still inherits its directory's inheritable ACL entries
+  (`everyone allow read,file_inherit` survives `O_EXCL|0600`), so there the
+  file is owner-only from creation only in a directory without such entries,
+  and ACL grants on ancestors (`add_file`, `delete_child`) are not seen. On
+  Windows the audit judges the file's DACL but not its owner, who can always
+  rewrite the DACL, and does not judge the ancestor directories.
 - The signing key exists outside `identity.Identity` in exactly one place —
   `datagram.RoutedFrameBuilder`, which is handed the raw `ed25519.PrivateKey`
   so the signing path does not depend on the identity type. Identity's
@@ -558,7 +579,8 @@ eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff   y = p + 1, п
   каталог — это названная запись: «внутри root» не значит «там, где я хотел»,
   и ссылка `identity-backups` → `.` остаётся внутри, перенаправляя все записи
   на собственные файлы data-каталога.
-- Файл становится owner-only **в момент создания**, а не отдельным шагом
+- Файл становится owner-only **в момент создания** (на macOS — с оговоркой
+  про ACL ниже), а не отдельным шагом
   после. Ограничение после создания оставляет окно, в котором файл существует
   на условиях родительского каталога, и дескриптор, полученный чужим процессом
   в этом окне, сохраняет доступ: смена DACL уже выданный доступ не отзывает, а
@@ -568,6 +590,27 @@ eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff   y = p + 1, п
   относительно закреплённого дескриптора каталога. Этот код изолирован в
   `create_windows.go` и покрыт тестами DACL под build-тегом `windows`, потому
   что компиляция доказывает только совпадение типов.
+- За каталоги над файлом писатель поручиться не может, поэтому
+  `secretfile.AuditLocation` — отдельная явная проверка: файл не symlink и
+  доступен только владельцу (POSIX: принадлежит этому пользователю, режим
+  0600; Windows: каждая разрешающая запись его DACL называет текущего
+  пользователя), а на POSIX каждый каталог и ссылка на пути к нему до `/`
+  принадлежат этому пользователю или root и не доступны на запись группе или
+  всем без sticky-бита — sticky-каталог вроде `/tmp` допустим, только если
+  запись в нём принадлежит этому пользователю. Компоненты называются по роли,
+  без пути, и проверка ничего не решает: реакцию выбирает вызывающий
+  (хранилище защиты от понижения предупреждает и выставляет
+  `pin_store_unsafe`, [protocol/session_v2.md](protocol/session_v2.md)).
+  Запись в каталог, где процессу нельзя создавать файлы, завершается
+  `secretfile.ErrDirectoryNotWritable` с владельцем и режимом каталога.
+- Известные ограничения. На POSIX «только владелец» означает владельца и
+  биты режима: расширенные ACL писатель не снимает, а проверка не читает. На
+  macOS файл, созданный с 0600, всё равно наследует наследуемые записи ACL
+  каталога (`everyone allow read,file_inherit` переживает `O_EXCL|0600`),
+  поэтому owner-only с момента создания он только в каталоге без таких
+  записей, а права ACL на предках (`add_file`, `delete_child`) не видны. На
+  Windows проверка оценивает DACL файла, но не его владельца, который всегда
+  может переписать DACL, и не оценивает каталоги-предки.
 - Ключ подписи живёт вне `identity.Identity` ровно в одном месте —
   `datagram.RoutedFrameBuilder`, которому передаётся сырой
   `ed25519.PrivateKey`, чтобы путь подписи не зависел от типа identity.

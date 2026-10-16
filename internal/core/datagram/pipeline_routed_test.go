@@ -790,7 +790,7 @@ func TestLocallyCreatedFrameRunsTheSameCycle(t *testing.T) {
 	frame := signedRouted(t, routedOpts{
 		private: private, src: signer, dst: dst, now: origin.clock(),
 	})
-	outcome := origin.pipeline.SendLocal(context.Background(), LocalSendOpts{Frame: frame})
+	outcome := origin.pipeline.SendLocal(context.Background(), testSender, LocalSendOpts{Frame: frame})
 	if outcome.Kind() != SendQueued {
 		t.Fatalf("SendLocal: %s (%v)", outcome, outcome.Err())
 	}
@@ -818,7 +818,7 @@ func TestLocalSendNoRouteDoesNotReserve(t *testing.T) {
 	private, signer := newSigner(t)
 	origin := newPipelineNode(t, net, nodeOpts{id: signer})
 
-	outcome := origin.pipeline.SendLocal(context.Background(), LocalSendOpts{
+	outcome := origin.pipeline.SendLocal(context.Background(), testSender, LocalSendOpts{
 		Frame: signedRouted(t, routedOpts{
 			private: private, src: signer, dst: domaintest.ID("unreachable"), now: origin.clock(),
 		}),

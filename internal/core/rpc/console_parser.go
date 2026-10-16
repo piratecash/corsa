@@ -13,54 +13,57 @@ import (
 //
 // Commands absent from this map (e.g., "help", "ping") are already lowercase-canonical.
 var canonicalNames = map[string]string{
-	"getpeers":              "getPeers",
-	"fetchpeerhealth":       "fetchPeerHealth",
-	"fetchnetworkstats":     "fetchNetworkStats",
-	"addpeer":               "addPeer",
-	"connectonly":           "connectOnly",
-	"fetchreachableids":     "fetchReachableIds",
-	"resolveidentity":       "resolveIdentity",
-	"resolveidentitystatus": "resolveIdentityStatus",
-	"identitybackup":        "identityBackup",
-	"identityrestore":       "identityRestore",
-	"fetchrelaystatus":      "fetchRelayStatus",
-	"fetchidentities":       "fetchIdentities",
-	"fetchcontacts":         "fetchContacts",
-	"fetchtrustedcontacts":  "fetchTrustedContacts",
-	"deletetrustedcontact":  "deleteTrustedContact",
-	"importcontacts":        "importContacts",
-	"fetchmessages":         "fetchMessages",
-	"fetchmessageids":       "fetchMessageIds",
-	"fetchmessage":          "fetchMessage",
-	"fetchinbox":            "fetchInbox",
-	"fetchpendingmessages":  "fetchPendingMessages",
-	"fetchdeliveryreceipts": "fetchDeliveryReceipts",
-	"fetchdmheaders":        "fetchDmHeaders",
-	"senddm":                "sendDm",
-	"sendmessage":           "sendMessage",
-	"importmessage":         "importMessage",
-	"senddeliveryreceipt":   "sendDeliveryReceipt",
-	"sendfileannounce":      "sendFileAnnounce",
-	"fetchfiletransfers":    "fetchFileTransfers",
-	"fetchallfiletransfers": "fetchAllFileTransfers",
-	"fetchfilemapping":      "fetchFileMapping",
-	"retryfilechunk":        "retryFileChunk",
-	"startfiledownload":     "startFileDownload",
-	"cancelfiledownload":    "cancelFileDownload",
-	"restartfiledownload":   "restartFileDownload",
-	"explainfileroute":      "explainFileRoute",
-	"fetchchatlog":          "fetchChatlog",
-	"fetchchatlogpreviews":  "fetchChatlogPreviews",
-	"fetchconversations":    "fetchConversations",
-	"fetchnotices":          "fetchNotices",
-	"publishnotice":         "publishNotice",
-	"fetchtraffichistory":   "fetchTrafficHistory",
-	"fetchroutetable":       "fetchRouteTable",
-	"fetchroutesummary":     "fetchRouteSummary",
-	"fetchroutelookup":      "fetchRouteLookup",
-	"fetchdatagramsummary":  "fetchDatagramSummary",
-	"datagramreachable":     "datagramReachable",
-	"explaindatagramroute":  "explainDatagramRoute",
+	"getpeers":               "getPeers",
+	"fetchpeerhealth":        "fetchPeerHealth",
+	"fetchnetworkstats":      "fetchNetworkStats",
+	"addpeer":                "addPeer",
+	"connectonly":            "connectOnly",
+	"fetchreachableids":      "fetchReachableIds",
+	"resolveidentity":        "resolveIdentity",
+	"resolveidentitystatus":  "resolveIdentityStatus",
+	"identitybackup":         "identityBackup",
+	"identityrestore":        "identityRestore",
+	"fetchrelaystatus":       "fetchRelayStatus",
+	"fetchidentities":        "fetchIdentities",
+	"fetchcontacts":          "fetchContacts",
+	"fetchtrustedcontacts":   "fetchTrustedContacts",
+	"deletetrustedcontact":   "deleteTrustedContact",
+	"importcontacts":         "importContacts",
+	"fetchmessages":          "fetchMessages",
+	"fetchmessageids":        "fetchMessageIds",
+	"fetchmessage":           "fetchMessage",
+	"fetchinbox":             "fetchInbox",
+	"fetchpendingmessages":   "fetchPendingMessages",
+	"fetchdeliveryreceipts":  "fetchDeliveryReceipts",
+	"fetchdmheaders":         "fetchDmHeaders",
+	"senddm":                 "sendDm",
+	"sendmessage":            "sendMessage",
+	"importmessage":          "importMessage",
+	"senddeliveryreceipt":    "sendDeliveryReceipt",
+	"sendfileannounce":       "sendFileAnnounce",
+	"fetchfiletransfers":     "fetchFileTransfers",
+	"fetchallfiletransfers":  "fetchAllFileTransfers",
+	"fetchfilemapping":       "fetchFileMapping",
+	"retryfilechunk":         "retryFileChunk",
+	"startfiledownload":      "startFileDownload",
+	"cancelfiledownload":     "cancelFileDownload",
+	"restartfiledownload":    "restartFileDownload",
+	"explainfileroute":       "explainFileRoute",
+	"fetchchatlog":           "fetchChatlog",
+	"fetchchatlogpreviews":   "fetchChatlogPreviews",
+	"fetchconversations":     "fetchConversations",
+	"fetchnotices":           "fetchNotices",
+	"publishnotice":          "publishNotice",
+	"fetchtraffichistory":    "fetchTrafficHistory",
+	"fetchroutetable":        "fetchRouteTable",
+	"fetchroutesummary":      "fetchRouteSummary",
+	"fetchroutelookup":       "fetchRouteLookup",
+	"fetchdatagramsummary":   "fetchDatagramSummary",
+	"datagramreachable":      "datagramReachable",
+	"explaindatagramroute":   "explainDatagramRoute",
+	"listendpointbindings":   "listEndpointBindings",
+	"removeendpointbinding":  "removeEndpointBinding",
+	"demoteendpointbindings": "demoteEndpointBindings",
 	// snake_case input (already lowercase) → canonical camelCase.
 	"get_peers":                "getPeers",
 	"fetch_peer_health":        "fetchPeerHealth",
@@ -543,6 +546,32 @@ func mapPositionalArgs(command string, args []string) (map[string]interface{}, e
 			"dtype":        stringArgOrDefault(args, 1, ""),
 			"route_policy": stringArgOrDefault(args, 2, ""),
 		}, nil
+
+	// The binding commands lower downgrade protection one named endpoint at
+	// a time, so the console never fills an endpoint in: a removal takes
+	// exactly one, a dry run of a demotion at least one. The confirmation
+	// and the list's filters go by key=value, where each is named.
+	case "listendpointbindings":
+		if len(args) > 0 {
+			return nil, fmt.Errorf("listEndpointBindings takes key=value filters: identity=, endpoint=, after=, limit=")
+		}
+		return nil, nil
+
+	case "removeendpointbinding":
+		if len(args) != 1 {
+			return nil, fmt.Errorf("removeEndpointBinding takes exactly one endpoint")
+		}
+		return map[string]interface{}{"endpoint": args[0]}, nil
+
+	case "demoteendpointbindings":
+		if len(args) < 1 {
+			return nil, fmt.Errorf("demoteEndpointBindings requires the endpoints to demote")
+		}
+		endpoints := make([]interface{}, 0, len(args))
+		for _, endpoint := range args {
+			endpoints = append(endpoints, endpoint)
+		}
+		return map[string]interface{}{"endpoints": endpoints}, nil
 	}
 
 	// Unknown command — pass through with no args, let CommandTable handle the error

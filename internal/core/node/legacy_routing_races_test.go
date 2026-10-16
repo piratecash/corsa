@@ -11,6 +11,7 @@ import (
 	"github.com/piratecash/corsa/internal/core/routing"
 	"github.com/piratecash/corsa/internal/core/sessionv2"
 	"github.com/piratecash/corsa/internal/core/sessionv2/sessionv2test"
+	"github.com/piratecash/corsa/internal/core/trustedclock"
 )
 
 // legacy_routing_races_test.go pins three orderings a review found between a
@@ -24,7 +25,7 @@ func unpinnedRoutingNode(t *testing.T) (*Service, sessionv2.Peer, *peerSession) 
 	svc := newLegacyPenaltyService(t)
 	svc.secureSessions = &secureSessions{
 		mode:  sessionv2.ModeTransition,
-		store: loadSecureSessionStore("", time.Now),
+		store: loadSecureSessionStore("", trustedclock.NewSystem()),
 		marks: newSessionAddressMarks(time.Now),
 	}
 	peer, _ := sessionv2test.NewProvenPeer(t)

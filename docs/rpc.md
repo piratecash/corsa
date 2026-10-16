@@ -24,7 +24,7 @@ The gate lives in one place — `Server.execute`, which every HTTP entry point (
 
 Non-default policies appear in `help` output as `"transport": "loopback_only"`, and the field decodes back through `TransportPolicy.UnmarshalJSON` — both names and, for older payloads, the numeric form. The pair matters more than it looks: `help` returns one array, so a policy that encodes but does not decode fails the WHOLE command list for every client that reads it into `[]CommandInfo`, `rpc.Client.FetchCommands` included.
 
-`identityBackup` and `identityRestore` are the two commands that carry `TransportLoopbackOnly` today: both move BOTH private keys across a file boundary on the node's machine. Their arguments are backup NAMES, not paths — see [identity-lookup.md §5](protocol/identity-lookup.md).
+Five commands carry `TransportLoopbackOnly` today. `identityBackup` and `identityRestore` move BOTH private keys across a file boundary on the node's machine; their arguments are backup NAMES, not paths — see [identity-lookup.md §5](protocol/identity-lookup.md). `listEndpointBindings`, `removeEndpointBinding` and `demoteEndpointBindings` show the node's graph of endpoints and the identities proven on them, and lower the downgrade protection of the endpoints they name — see [rpc/secure_session.md](rpc/secure_session.md). They keep the policy also on a node that registers them as unavailable, so a remote caller is refused before a `503` tells it the command exists there.
 
 ### Interaction Diagram
 
@@ -354,6 +354,7 @@ Per-command documentation is in the [rpc/](rpc/) folder. See [rpc/README.md](rpc
 | [Mesh](rpc/mesh.md) | `fetchRelayStatus` | [rpc/mesh.md](rpc/mesh.md) |
 | [Metrics](rpc/metrics.md) | `fetchTrafficHistory` | [rpc/metrics.md](rpc/metrics.md) |
 | [Routing](rpc/routing.md) | `fetchRouteTable`, `fetchRouteSummary`, `fetchRouteLookup` | [rpc/routing.md](rpc/routing.md) |
+| [Secure Session](rpc/secure_session.md) | `listEndpointBindings`, `removeEndpointBinding`, `demoteEndpointBindings` (loopback only) | [rpc/secure_session.md](rpc/secure_session.md) |
 ### corsa-cli
 
 Thin console client for the RPC server. No local command table — positional arguments are parsed via the shared `ParseConsoleInput`, which normalizes command names to canonical camelCase before sending `{command, args}` to `POST /rpc/v1/exec`. The server is the single source of truth. `corsa-cli help` fetches the command list from the server. Both camelCase and snake_case input are accepted (normalization is transparent).
@@ -521,7 +522,7 @@ HTTP RPC сервер по умолчанию слушает `127.0.0.1:46464`. 
 
 Ненулевые политики видны в выводе `help` как `"transport": "loopback_only"`, и поле декодируется обратно через `TransportPolicy.UnmarshalJSON` — по именам и, для старых payload-ов, в числовой форме. Пара важнее, чем кажется: `help` возвращает ОДИН массив, поэтому политика, которая кодируется, но не декодируется, роняет разбор ВСЕГО списка команд у любого клиента, читающего его в `[]CommandInfo`, включая `rpc.Client.FetchCommands`.
 
-Сегодня `TransportLoopbackOnly` несут две команды — `identityBackup` и `identityRestore`: обе переносят ОБА приватных ключа через файловую границу на машине узла. Их аргумент — ИМЯ бэкапа, а не путь; см. [identity-lookup.md §5](protocol/identity-lookup.md).
+Сегодня `TransportLoopbackOnly` несут пять команд. `identityBackup` и `identityRestore` переносят ОБА приватных ключа через файловую границу на машине узла; их аргумент — ИМЯ бэкапа, а не путь, см. [identity-lookup.md §5](protocol/identity-lookup.md). `listEndpointBindings`, `removeEndpointBinding` и `demoteEndpointBindings` показывают граф «адрес ↔ доказанная на нём identity» и понижают защиту от понижения названных адресов — см. [rpc/secure_session.md](rpc/secure_session.md). Политика сохраняется и на узле, где они зарегистрированы недоступными, поэтому удалённый вызов получает отказ раньше, чем `503` сообщит ему, что команда там есть.
 
 ### Диаграмма взаимодействия
 
@@ -851,6 +852,7 @@ Mode-gated команды регистрируются через `RegisterUnava
 | [Mesh](rpc/mesh.md) | `fetchRelayStatus` | [rpc/mesh.md](rpc/mesh.md) |
 | [Метрики](rpc/metrics.md) | `fetchTrafficHistory` | [rpc/metrics.md](rpc/metrics.md) |
 | [Маршрутизация](rpc/routing.md) | `fetchRouteTable`, `fetchRouteSummary`, `fetchRouteLookup` | [rpc/routing.md](rpc/routing.md) |
+| [Защищённая сессия](rpc/secure_session.md) | `listEndpointBindings`, `removeEndpointBinding`, `demoteEndpointBindings` (только loopback) | [rpc/secure_session.md](rpc/secure_session.md) |
 ### corsa-cli
 
 Тонкий консольный клиент RPC сервера. Без локальной таблицы команд — позиционные аргументы разбираются через общий `ParseConsoleInput`, который нормализует имена команд в каноническое camelCase перед отправкой `{command, args}` в `POST /rpc/v1/exec`. Сервер является единственным источником истины. `corsa-cli help` получает список команд с сервера. Принимается как camelCase, так и snake_case ввод (нормализация прозрачна).

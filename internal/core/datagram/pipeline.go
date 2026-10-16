@@ -83,6 +83,9 @@ type metricsSink interface {
 	// one rejected candidate and not a failed delivery. See the method on
 	// Metrics for why the unit matters.
 	ObserveSendRefusal(reason RejectionReason, missing domain.CapabilityName)
+	// ObserveLocalSend counts one SendLocal call by the subsystem that made
+	// it, with the outcome the call returned (local_senders.go).
+	ObserveLocalSend(sender LocalSender, outcome SendOutcome)
 }
 
 // OutboundFrame is everything the writer needs about one frame the layer is
@@ -537,6 +540,14 @@ func handled(outcome InboundOutcome) InboundResult {
 type PipelineConfig struct {
 	// Clock is the injectable time source, following the package convention.
 	Clock func() time.Time
+	// Monotonic is the source of DURATIONS — today the handler wall time of
+	// handler_stats.go — and of nothing else. Its readings are only ever
+	// subtracted from each other, so they must carry Go's monotonic clock:
+	// Clock is free to be a wall reading (the node's strips the monotonic
+	// part with UTC()), and a wall-clock step under NTP would then make a
+	// call look negative or an hour long. Optional; defaults to time.Now,
+	// which carries one.
+	Monotonic func() time.Time
 	// Types is the ENDPOINT registry of docs/protocol/datagram.md §7: the
 	// handlers and authorizers of the types this node implements. It decides
 	// local delivery and nothing about transit.
@@ -601,6 +612,7 @@ type PipelineConfig struct {
 // single lock being held across a handler or a socket write.
 type Pipeline struct {
 	clock      func() time.Time
+	monotonic  func() time.Time
 	types      *TypeRegistry
 	replay     *BaseReplayCache
 	reverse    *ReverseTable
@@ -648,6 +660,10 @@ func NewPipeline(cfg PipelineConfig) (*Pipeline, error) {
 	if clock == nil {
 		clock = time.Now
 	}
+	monotonic := cfg.Monotonic
+	if monotonic == nil {
+		monotonic = time.Now
+	}
 	emitter := cfg.Emitter
 	var outbound *ClassQueueEmitter
 	if cfg.Queue != nil {
@@ -679,6 +695,7 @@ func NewPipeline(cfg PipelineConfig) (*Pipeline, error) {
 
 	return &Pipeline{
 		clock:      clock,
+		monotonic:  monotonic,
 		types:      cfg.Types,
 		replay:     cfg.ReplayCache,
 		reverse:    cfg.Reverse,
@@ -1276,8 +1293,13 @@ type LocalSendOpts struct {
 // The one thing that IS different is the ttl: the origin does not decrement
 // (docs/protocol/datagram.md §4.2 rule 4), so the first hop receives the full
 // budget.
-func (p *Pipeline) SendLocal(ctx context.Context, opts LocalSendOpts) SendOutcome {
-	return p.sendLocal(ctx, opts)
+//
+// sender names the subsystem of this node the frame belongs to. It is a
+// positional argument rather than a field of opts because it is required on
+// every call: a forgotten sender does not compile. LocalSenderUnset is refused
+// as `failed` with ErrLocalSenderUnset, before any route is looked at.
+func (p *Pipeline) SendLocal(ctx context.Context, sender LocalSender, opts LocalSendOpts) SendOutcome {
+	return p.sendLocal(ctx, sender, opts)
 }
 
 // sendLocal is the single local-send body.
@@ -1287,7 +1309,22 @@ func (p *Pipeline) SendLocal(ctx context.Context, opts LocalSendOpts) SendOutcom
 // there is no pass and no state a restart could leave unfinished: the layer's
 // whole memory is an in-memory cache that starts empty and is correct from the
 // first frame.
-func (p *Pipeline) sendLocal(ctx context.Context, opts LocalSendOpts) SendOutcome {
+//
+// It is also the ONE place a local send is counted by its sender
+// (local_senders.go): once per call, from the outcome the call returned.
+func (p *Pipeline) sendLocal(ctx context.Context, sender LocalSender, opts LocalSendOpts) SendOutcome {
+	outcome := p.placeLocal(ctx, sender, opts)
+	if p.metrics != nil {
+		p.metrics.ObserveLocalSend(sender, outcome)
+	}
+	return outcome
+}
+
+// placeLocal picks the plane of a local frame.
+func (p *Pipeline) placeLocal(ctx context.Context, sender LocalSender, opts LocalSendOpts) SendOutcome {
+	if !sender.Valid() {
+		return failedOutcome(true, ErrLocalSenderUnset)
+	}
 	switch opts.Frame.Mode {
 	case domain.DatagramModeRouted:
 		return p.sendLocalRouted(ctx, opts)
@@ -1296,7 +1333,7 @@ func (p *Pipeline) sendLocal(ctx context.Context, opts LocalSendOpts) SendOutcom
 	default:
 		// A response is never created by a caller: it is produced by the
 		// pipeline itself, out of reverse state that only the pipeline holds.
-		return localRefusal()
+		return localRefusal(rejectedByMode)
 	}
 }
 
@@ -1318,7 +1355,7 @@ func (p *Pipeline) sendLocalRouted(ctx context.Context, opts LocalSendOpts) Send
 	if decision.Outcome() == DeadlinesExpired {
 		// The clamped send window is already behind now: nothing is enqueued
 		// at all, exactly as docs/protocol/datagram.md §3.4 requires.
-		return localRefusal()
+		return localRefusal(rejectedByExpiry)
 	}
 	transcript, err := protocol.BuildDatagramTranscript(frame, p.network)
 	if err != nil {
@@ -1337,7 +1374,8 @@ func (p *Pipeline) sendLocalRouted(ctx context.Context, opts LocalSendOpts) Send
 
 // localRefusal is a policy refusal of a locally created frame. `rejected`
 // means "repeating without changed conditions is pointless", which is exactly
-// what a frame the layer will not carry deserves.
-func localRefusal() SendOutcome {
-	return SendOutcome{kind: SendRejected, local: true}
+// what a frame the layer will not carry deserves. cause names the branch, for
+// the per-sender attribution.
+func localRefusal(cause rejectionCause) SendOutcome {
+	return SendOutcome{kind: SendRejected, cause: cause, local: true}
 }

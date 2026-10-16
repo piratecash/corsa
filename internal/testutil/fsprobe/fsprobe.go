@@ -46,3 +46,25 @@ func RequireSymlinks(t *testing.T) {
 		t.Skipf("fsprobe: this filesystem does not keep symlinks as links, so the test cannot run")
 	}
 }
+
+// RequireWriteRefused skips the test only when this process can still create
+// a file in dir after the test took its write permission away.
+//
+// Whether a permission change binds the process is a property of the run, not
+// of the platform: root (CAP_DAC_OVERRIDE) and an elevated Windows token with
+// backup privileges write through it. A test of the "cannot write" path must
+// therefore measure that the write really is refused before asserting what
+// the code does about it.
+func RequireWriteRefused(t *testing.T, dir string) {
+	t.Helper()
+	probe := filepath.Join(dir, "fsprobe-write")
+	file, err := os.OpenFile(probe, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return
+	}
+	_ = file.Close()
+	if err := os.Remove(probe); err != nil {
+		t.Fatalf("fsprobe: remove probe file: %v", err)
+	}
+	t.Skipf("fsprobe: this process still writes into a directory it was denied writing to, so the test cannot run")
+}

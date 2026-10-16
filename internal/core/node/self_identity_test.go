@@ -159,7 +159,7 @@ func TestLearnIdentityFromWelcome_SelfIdentity_SkipsIngest(t *testing.T) {
 	boxSigsBefore, boxSigsHad := svc.boxSigs[selfAddr]
 	svc.knowledgeMu.RUnlock()
 
-	svc.learnIdentityFromWelcome(welcome, "198.51.100.7:64646")
+	svc.learnIdentityFromWelcome(welcome, "198.51.100.7:64646", domain.PeerIdentityClaimed)
 
 	svc.knowledgeMu.RLock()
 	defer svc.knowledgeMu.RUnlock()

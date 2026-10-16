@@ -150,7 +150,15 @@ Response:
     "protected_refusals_per_identity": 0,
     "protected_refusals_pool_r_full": 0,
     "protected_refusals_store_full": 0,
-    "store_unreadable": false
+    "general_creations_per_group_per_day": 64,
+    "general_refusals_source_group_quota": 0,
+    "endpoint_bindings_skipped_not_canonical": 0,
+    "non_canonical_bindings": 0,
+    "store_unreadable": false,
+    "pin_store_unsafe": false,
+    "clock_jump_guarded": true,
+    "clock_jumps_detected": 0,
+    "clock_jump_active": false
   },
   "session_kinds": {
     "started_at": "2026-09-06T09:00:00.104512Z",
@@ -170,6 +178,19 @@ Response:
       "outbound_v2": {"sessions": 4, "identities": 4},
       "outbound_legacy": {"sessions": 1, "identities": 1}
     }
+  },
+  "listener_refusals": {
+    "started_at": "2026-09-06T09:00:00.104512Z",
+    "read_at": "2026-09-06T09:31:44.512905117Z",
+    "connection_rate": 41,
+    "connections_per_ip": 12,
+    "connection_budget": 0,
+    "blacklisted": 3,
+    "inbound_limit": 0,
+    "handshakes_node_limit": 0,
+    "handshakes_ip_limit": 2,
+    "handshakes_loopback_limit": 0,
+    "closed_without_alert": 0
   }
 }
 ```
@@ -179,8 +200,8 @@ Response:
 > their own `read_at` (counters) and `updated_at` (the census); a rate or a window computed against
 > `snapshot_at` is wrong by however long the table stood still.
 >
-> **Six snapshots in one response are NOT one atomic snapshot.** `mode_selection`,
-> `session_outcomes`, `transport_traffic`, `secure_sessions` and `session_kinds` are counters read at slightly different
+> **Seven snapshots in one response are NOT one atomic snapshot.** `mode_selection`,
+> `session_outcomes`, `transport_traffic`, `secure_sessions`, `session_kinds` and `listener_refusals` are counters read at slightly different
 > instants; `neighbours` is a gauge with its own `updated_at`, refreshed in the
 > background. Arithmetic across them assumes a simultaneity these timestamps do
 > not support.
@@ -302,6 +323,10 @@ whole network is in".
 | `secure_sessions.v1_refusals_identity_pinned` | uint64 | v1 sessions refused because the identity they name requires v2 — pinned, or holding a live v2 connection — since the process started (in memory, reset on restart). Counted at every check: on accept at the `hello` and again at `auth_session`, on dial at the `welcome` and again right after an outbound v1 session is registered. The `hello` and `welcome` refusals come before anything is signed for that identity; the two re-checks come after the v1 `auth_session` signature and close the session instead. |
 | `secure_sessions.v1_refusals_endpoint_bound` | uint64 | v1 answers refused on dial because the endpoint that gave them is bound to v2 — a downgrade, not followed: the dial fails instead of falling back — since the process started (in memory, reset on restart). |
 | `secure_sessions.store_unreadable` | bool | The store file exists but could not be read: every peer is treated as pinned, v1 is refused, v2 keeps working until an operator repairs the file. |
+| `secure_sessions.pin_store_unsafe` | bool | The store's location failed the audit made when it was loaded: the file is a symlink or not owner-only, or a directory on the way to it may be written by someone other than the node's user or root, or the location could not be inspected ([session_v2.md](../protocol/session_v2.md)). The log line `pin_store_unsafe` names the component by its role and the violation. The node keeps working; the flag stays until a restart with a safe location. |
+| `secure_sessions.clock_jump_guarded` | bool | The terms of ordinary bindings run on the trusted time: the wall clock at the start plus the time since on a clock that keeps running through sleep (`CLOCK_BOOTTIME` on Linux and Android, `CLOCK_MONOTONIC` on darwin, `GetTickCount64` on Windows; [session_v2.md](../protocol/session_v2.md), "The clock of the terms"). `false` on a platform without such a clock: the wall clock is then taken as it is, and a step forward ends ordinary bindings early. |
+| `secure_sessions.clock_jumps_detected` | uint64 | Times the wall clock was found more than one hour ahead of the trusted time — a forged NTP answer or an operator's step — each logged once as a `clock_jump_detected` warning. The excess was not counted toward any term. A wall clock that stays ahead is one jump; one that came back and jumps again is another. Since the process started (in memory, reset on restart); a step made before a restart is not seen. |
+| `secure_sessions.clock_jump_active` | bool | The wall clock is more than one hour ahead of the trusted time right now, so the terms run on the trusted time instead. If it stays true long after start-up, the node most likely started on a wrong clock (no battery-backed clock, NTP not yet synchronised): everything it stamps lags by that error and may end early after the next restart — check the clock and restart once it is right ([session_v2.md](../protocol/session_v2.md), "The clock of the terms"). A clock since boot that stopped answering also keeps it true. |
 | `secure_sessions.v1_dials_held_by_refusal_backoff` | uint64 | Fall backs to v1 this node withheld after a v2 attempt answered with a v1 line, because an earlier v1 answer from the same address was refused (the two counters above) and the hold that follows such a refusal had not run out — 5 minutes, doubled per further refusal, at most 6 hours — since the process started (in memory, reset on restart). This hold withholds only the fall back to v1 and never delays a v2 attempt itself; the next v2 attempt is paced only by the address's v2 retry backoff (`dials_held_by_v2_retry_backoff` below). A refusal never lowers the address's score or puts it into the candidate cooldown. |
 | `secure_sessions.dials_held_by_v2_retry_backoff` | uint64 | Dials refused before any socket because their address's v2 retry backoff ran: after a v2 attempt there ended without v2 (the v1 answer was refused, or its fall back held), the next dial waits 30 s, doubled per further such end, at most 30 min; the address is not a candidate meanwhile. Pacing of the next v2 attempt, not the failure cooldown: score, failures and setup failures are untouched. Since the process started (in memory, reset on restart). |
 | `secure_sessions.protected_bindings_contact` / `.protected_bindings_relation` | int | Protected endpoint bindings in the contact pool (K) and the relation pool (R). The pool is fixed when a binding is created or raised. |
@@ -310,6 +335,10 @@ whole network is in".
 | `secure_sessions.protected_per_identity_capacity` | int | Bound on the protected bindings one identity gives (4). |
 | `secure_sessions.general_bindings` / `.general_capacity` | int | Ordinary bindings (30 days from the last v2 session) and their bound (16 384), apart from the protected ones. |
 | `secure_sessions.protected_refusals_per_identity` / `.protected_refusals_pool_r_full` / `.protected_refusals_store_full` | uint64 | Protected bindings refused at a bound, by reason, once per binding, since the process started (in memory, reset on restart). A refusal for a new owner of an endpoint (`owner_changed`) is not a bound and is not counted here. Nothing existing is removed or lowered for a refusal; the endpoint may have got an ordinary binding instead. Each refusal is also logged as `protected_binding_limit_reached`. |
+| `secure_sessions.general_creations_per_group_per_day` | int | The bound on NEW ordinary bindings one source group may create in any 24 hours (64). A source group is the IPv4 `/16` or IPv6 `/32` of the endpoint's address — for a name, of the address the dial reached — all of loopback as one group, `tor` for onion and `i2p` for i2p endpoints ([protocol/session_v2.md](../protocol/session_v2.md), "Endpoint keys and source groups"). |
+| `secure_sessions.general_refusals_source_group_quota` | uint64 | New ordinary bindings refused because their source group created 64 in the last 24 hours, since the process started (in memory, reset on restart; the creations themselves are kept in the store file). The session stands on its identity pin; existing bindings of the group are renewed and change owner as before. The first refusal in a group is logged as `endpoint_binding_refused_source_group_quota`. |
+| `secure_sessions.endpoint_bindings_skipped_not_canonical` | uint64 | Proven outbound v2 sessions whose dialled address has no canonical form — a numeric name such as `127.1` or `2130706433`, a non-ASCII name, an onion subdomain or v2 name, a host over 253 bytes — so their endpoint got no binding, since the process started (in memory). The identity was pinned and the session stood. Each is logged as `endpoint_binding_skipped_not_canonical`. |
+| `secure_sessions.non_canonical_bindings` | int | Bindings read from the store file under an address with no canonical form — written by an earlier build under the raw address it dialled — kept as they were for comparison with that exact address only: never renewed, raised or created again; protected ones count against the protected bounds and never expire, ordinary ones count against the ordinary bound and expire 30 days after their last v2. |
 | `session_kinds` | object | **Sessions by kind** ([session_v2.md](../protocol/session_v2.md), "Measuring the legacy share"). How many sessions this node authenticated as secure sessions v2 and how many as legacy v1, per direction, and how many of them had a peer announcing a protocol version below 31 — the figures the switch-off of the legacy path is decided by. A session is counted once: on accept when the v2 `session_proof` or the v1 `auth_session` verifies; on dial when the ConnectionManager session is published — after its setup succeeded and the pin let it through, so a dialled session whose setup failed, whose slot was evicted during the setup, or that the pin refused is not counted. The dialling side counts its ConnectionManager peer sessions only, not the one-shot recovery and notice dials; a listener cannot tell such a dial from a session and counts it as inbound. Cumulative, in memory only, never reset by reading. Lock-free: the counters are atomics. Each count is this node's own sample, not an estimate of the network. **The cumulative counts count sessions, not peers, and are gameable:** one peer opening many sessions runs them up. The switch-off decision weighs `legacy_at_claimed_v2`, the distinct-identity `live` gauge below, and out-of-band release-adoption data — never the cumulative counts alone. |
 | `session_kinds.started_at` | string\|null | RFC 3339 (nanoseconds) start of the period — the node's start. A different `started_at` between two answers means the process restarted: discard the pair. |
 | `session_kinds.read_at` | string\|null | RFC 3339 (nanoseconds) moment the counters were loaded. The sessions authenticated between two readings with the same `started_at` are the differences of the counts. |
@@ -322,6 +351,18 @@ whole network is in".
 | `session_kinds.live.ready` | bool | `false` until the first walk; tells "not measured yet" from "measured, no sessions". |
 | `session_kinds.live.updated_at` | string\|null | RFC 3339 (nanoseconds) of the last walk. |
 | `session_kinds.live.inbound_v2` / `.inbound_legacy` / `.outbound_v2` / `.outbound_legacy` | object | `{"sessions", "identities"}`: live sessions in the bucket and the DISTINCT identities behind them. `identities` never exceeds `sessions` (and so is bounded by the connection count) — two sessions to one peer are two sessions and one identity. This is the reading to weigh for the switch-off. |
+| `listener_refusals` | object | **Connections the listener refused before any session existed** ([session_v2.md](../protocol/session_v2.md), "Listener refusals"), by the bound that refused them. Every such refusal is answered with the TLS refusal alert, not a silent close, unless every alert sender was busy. Cumulative, in memory only, never reset by reading. Lock-free: the counters are atomics. Absent on a node from before this section: "metric unavailable", not zero. |
+| `listener_refusals.started_at` | string\|null | RFC 3339 (nanoseconds) start of the period — the node's start. A different `started_at` between two answers means the process restarted: discard the pair. |
+| `listener_refusals.read_at` | string\|null | RFC 3339 (nanoseconds) moment the counters were loaded. |
+| `listener_refusals.connection_rate` | uint64 | Connections over the per-IP connection rate (10 per 10 s). |
+| `listener_refusals.connections_per_ip` | uint64 | Connections over the per-IP cap on simultaneous connections (8). |
+| `listener_refusals.connection_budget` | uint64 | Connections the shared connection budget had no room for at accept: its inbound limit, total ceiling or outbound reserve. |
+| `listener_refusals.blacklisted` | uint64 | Connections from a blacklisted IP. |
+| `listener_refusals.inbound_limit` | uint64 | Connections refused at registration by the inbound limit. The budget above holds the same bound from accept on, so this one stays at zero unless the two disagree. |
+| `listener_refusals.handshakes_node_limit` | uint64 | Inbound v2 handshakes refused, once their ClientHello record was whole, because the node already ran 64. |
+| `listener_refusals.handshakes_ip_limit` | uint64 | Inbound v2 handshakes refused at their first byte because their external source — an IPv4 address, or the /64 of an IPv6 one — already ran 4. |
+| `listener_refusals.handshakes_loopback_limit` | uint64 | Inbound v2 handshakes from a loopback source (the onion entry) refused because loopback sources already held their 16 of the node's 64. |
+| `listener_refusals.closed_without_alert` | uint64 | Refusals closed at once without the alert because all 256 alert senders were busy, or the source's 8 of them were. Part of the counts above, not in addition to them. A steady rise means a flood larger than the pool; the refusals themselves still happen. |
 
 ### fetchRouteLookup
 
@@ -690,7 +731,15 @@ corsa-cli fetchRouteSummary
     "protected_refusals_per_identity": 0,
     "protected_refusals_pool_r_full": 0,
     "protected_refusals_store_full": 0,
-    "store_unreadable": false
+    "general_creations_per_group_per_day": 64,
+    "general_refusals_source_group_quota": 0,
+    "endpoint_bindings_skipped_not_canonical": 0,
+    "non_canonical_bindings": 0,
+    "store_unreadable": false,
+    "pin_store_unsafe": false,
+    "clock_jump_guarded": true,
+    "clock_jumps_detected": 0,
+    "clock_jump_active": false
   },
   "session_kinds": {
     "started_at": "2026-09-06T09:00:00.104512Z",
@@ -710,6 +759,19 @@ corsa-cli fetchRouteSummary
       "outbound_v2": {"sessions": 4, "identities": 4},
       "outbound_legacy": {"sessions": 1, "identities": 1}
     }
+  },
+  "listener_refusals": {
+    "started_at": "2026-09-06T09:00:00.104512Z",
+    "read_at": "2026-09-06T09:31:44.512905117Z",
+    "connection_rate": 41,
+    "connections_per_ip": 12,
+    "connection_budget": 0,
+    "blacklisted": 3,
+    "inbound_limit": 0,
+    "handshakes_node_limit": 0,
+    "handshakes_ip_limit": 2,
+    "handshakes_loopback_limit": 0,
+    "closed_without_alert": 0
   }
 }
 ```
@@ -719,8 +781,8 @@ corsa-cli fetchRouteSummary
 > (счётчики) и `updated_at` (перепись). Скорость или окно, посчитанные против `snapshot_at`, неверны
 > ровно на то время, что таблица простояла.
 >
-> **Шесть снимков в одном ответе — не один атомарный снимок.** `mode_selection`,
-> `session_outcomes`, `transport_traffic`, `secure_sessions` и `session_kinds` — счётчики, прочитанные в чуть разные моменты;
+> **Семь снимков в одном ответе — не один атомарный снимок.** `mode_selection`,
+> `session_outcomes`, `transport_traffic`, `secure_sessions`, `session_kinds` и `listener_refusals` — счётчики, прочитанные в чуть разные моменты;
 > `neighbours` — гейдж с собственным `updated_at`, обновляемый фоново. Считать
 > арифметику между ними так, будто они сняты одновременно, эти отметки времени
 > не позволяют.
@@ -839,6 +901,10 @@ negotiated(O)    = Σ count где reason = negotiated / total(O)
 | `secure_sessions.v1_refusals_identity_pinned` | uint64 | Сессии v1, отклонённые потому, что названная в них identity требует v2 — закреплена или держит живое v2-соединение, — с запуска процесса (в памяти, сбрасывается при перезапуске). Учитывается каждая проверка: на приёме — на `hello` и повторно на `auth_session`, при дозвоне — на `welcome` и повторно сразу после регистрации исходящей v1-сессии. Отказы на `hello` и `welcome` происходят до того, как для этой identity что-либо подписано; две повторные проверки идут после подписи v1 `auth_session` и вместо этого закрывают сессию. |
 | `secure_sessions.v1_refusals_endpoint_bound` | uint64 | Ответы v1, отклонённые при дозвоне потому, что давший их адрес привязан к v2, — понижение, за которым не следуют: дозвон завершается неудачей вместо отката, — с запуска процесса (в памяти, сбрасывается при перезапуске). |
 | `secure_sessions.store_unreadable` | bool | Файл хранилища есть, но не читается: все пиры считаются закреплёнными, v1 отвергается, v2 работает, пока оператор не исправит файл. |
+| `secure_sessions.pin_store_unsafe` | bool | Место хранилища не прошло проверку при загрузке: файл — symlink или доступен не только владельцу, либо каталог на пути к нему может писать кто-то кроме пользователя узла и root, либо место не удалось проверить ([session_v2.md](../protocol/session_v2.md)). Строка журнала `pin_store_unsafe` называет компонент по роли и нарушение. Узел продолжает работать; флаг держится до перезапуска с безопасным местом. |
+| `secure_sessions.clock_jump_guarded` | bool | Сроки обычных привязок идут по доверенному времени: стеночное время на старте плюс прошедшее с тех пор по часам, идущим во время сна (`CLOCK_BOOTTIME` на Linux и Android, `CLOCK_MONOTONIC` на darwin, `GetTickCount64` на Windows; [session_v2.md](../protocol/session_v2.md), «Часы сроков»). `false` на платформе без таких часов: тогда стеночные часы берутся как есть, и перевод вперёд досрочно заканчивает обычные привязки. |
+| `secure_sessions.clock_jumps_detected` | uint64 | Сколько раз стеночные часы оказались больше чем на час впереди доверенного времени — подделанный ответ NTP или перевод оператором; каждый раз один раз пишется предупреждение `clock_jump_detected`. Избыток ни в какой срок не засчитан. Часы, которые остаются впереди, — один скачок; вернувшиеся и прыгнувшие снова — ещё один. С запуска процесса (в памяти, сбрасывается при перезапуске); перевод до рестарта не виден. |
+| `secure_sessions.clock_jump_active` | bool | Стеночные часы прямо сейчас больше чем на час впереди доверенного времени, и сроки идут по доверенному времени. Если он долго остаётся истинным после старта, узел, скорее всего, стартовал на неверных часах (нет часов с батарейкой, NTP ещё не синхронизирован): всё, что он отмечает, отстаёт на эту ошибку и после следующего рестарта может кончиться раньше, — проверьте часы и перезапустите узел, когда они верны ([session_v2.md](../protocol/session_v2.md), «Часы сроков»). Истинным его держат и часы с момента загрузки, переставшие отвечать. |
 | `secure_sessions.v1_dials_held_by_refusal_backoff` | uint64 | Откаты на v1 после попытки v2, получившей ответ строкой v1, которые этот узел задержал, потому что прежний ответ v1 с того же адреса был отвергнут (два счётчика выше), а задержка после такого отказа ещё не истекла — 5 минут, удвоение на каждый следующий отказ, не больше 6 часов, — с запуска процесса (в памяти, сбрасывается при перезапуске). Эта задержка удерживает только откат на v1 и саму попытку v2 не задерживает; следующую попытку v2 откладывает только отступ повторов v2 этого адреса (`dials_held_by_v2_retry_backoff` ниже). Отказ не снижает рейтинг адреса и не ставит его в охлаждение кандидатов. |
 | `secure_sessions.dials_held_by_v2_retry_backoff` | uint64 | Дозвоны, отвергнутые до открытия сокета, потому что действовал отступ повторов v2 их адреса: после попытки v2, закончившейся там без v2 (ответ v1 отвергнут или откат задержан), следующий дозвон ждёт 30 с, удвоение на каждый следующий такой исход, не больше 30 мин; адрес на это время не кандидат. Темп следующей попытки v2, а не охлаждение за неудачи: рейтинг, неудачи и неудачи установки сессии не меняются. С запуска процесса (в памяти, сбрасывается при перезапуске). |
 | `secure_sessions.protected_bindings_contact` / `.protected_bindings_relation` | int | Защищённые привязки адресов в пуле контактов (K) и в пуле отношений (R). Пул фиксируется при создании или повышении привязки. |
@@ -847,6 +913,10 @@ negotiated(O)    = Σ count где reason = negotiated / total(O)
 | `secure_sessions.protected_per_identity_capacity` | int | Предел защищённых привязок, которые даёт одна identity (4). |
 | `secure_sessions.general_bindings` / `.general_capacity` | int | Обычные привязки (30 суток с последней сессии v2) и их предел (16 384), отдельно от защищённых. |
 | `secure_sessions.protected_refusals_per_identity` / `.protected_refusals_pool_r_full` / `.protected_refusals_store_full` | uint64 | Защищённые привязки, в которых отказано на пределе, по причинам, один раз на привязку, с запуска процесса (в памяти, сбрасывается при перезапуске). Отказ новому владельцу адреса (`owner_changed`) — не предел и здесь не считается. Ради отказа ничего существующего не удаляется и не понижается; адрес мог вместо этого получить обычную привязку. Каждый отказ также пишется в журнал как `protected_binding_limit_reached`. |
+| `secure_sessions.general_creations_per_group_per_day` | int | Предел НОВЫХ обычных привязок, которые одна группа источника может создать за любые 24 часа (64). Группа источника — `/16` IPv4 или `/32` IPv6 адреса привязки (у имени — адреса, до которого дошёл дозвон), весь loopback — одна группа, `tor` для onion и `i2p` для адресов i2p ([protocol/session_v2.md](../protocol/session_v2.md), «Ключи адресов и группы источника»). |
+| `secure_sessions.general_refusals_source_group_quota` | uint64 | Новые обычные привязки, в которых отказано, потому что их группа источника уже создала 64 за последние 24 часа, с запуска процесса (в памяти, сбрасывается при перезапуске; сами создания хранятся в файле хранилища). Сессия держится на pin своей identity; существующие привязки группы продлеваются и меняют владельца как прежде. Первый отказ в группе пишется в журнал как `endpoint_binding_refused_source_group_quota`. |
+| `secure_sessions.endpoint_bindings_skipped_not_canonical` | uint64 | Исходящие сессии v2, чей набранный адрес не имеет канонической формы — числовое имя вроде `127.1` или `2130706433`, не-ASCII имя, поддомен onion или имя onion v2, хост длиннее 253 байт, — поэтому их адрес не получил привязки, с запуска процесса (в памяти). Identity закреплена, сессия установлена. Каждый случай пишется в журнал как `endpoint_binding_skipped_not_canonical`. |
+| `secure_sessions.non_canonical_bindings` | int | Привязки из файла хранилища под адресом без канонической формы — записанные прежней сборкой под сырым набранным адресом, — сохранённые как были только для сравнения с этим точным адресом: не продлеваются, не повышаются и не создаются заново; защищённые учитываются в пределах защищённых и не истекают, обычные учитываются в пределе обычных и истекают через 30 суток после последней сессии v2. |
 | `session_kinds` | object | **Сессии по видам** ([session_v2.md](../protocol/session_v2.md), «Измерение доли legacy»). Сколько сессий этот узел аутентифицировал как защищённые сессии v2 и сколько как legacy v1, по направлениям, и у скольких из них пир объявил версию протокола ниже 31, — величины, по которым решается отключение legacy-пути. Сессия учитывается один раз: на приёме — когда проходит проверку v2 `session_proof` или v1 `auth_session`; при дозвоне — когда сессия менеджера соединений публикуется, то есть после успешной настройки и пропуска pin-ом, поэтому исходящая сессия, чья настройка упала, чей слот вытеснен во время настройки или которую отверг pin, не учитывается. Дозванивающаяся сторона считает только свои сессии менеджера соединений с пирами, без одноразовых recovery- и notice-дозвонов; слушатель не отличает такой дозвон от сессии и считает его входящим. Накопительно, только в памяти, чтением не сбрасывается. Без блокировок: счётчики atomic. Каждое число — собственная выборка этого узла, а не оценка сети. **Накопительные счётчики считают сессии, а не пиров, и накручиваются:** один пир, открывающий много сессий, их поднимает. Решение об отключении взвешивает `legacy_at_claimed_v2`, срез различных identity `live` ниже и внешние данные о принятии релизов — но не накопительные счётчики сами по себе. |
 | `session_kinds.started_at` | string\|null | RFC 3339 (наносекунды) начало периода — старт узла. Другой `started_at` между двумя ответами означает рестарт процесса: такую пару отбрасывать. |
 | `session_kinds.read_at` | string\|null | RFC 3339 (наносекунды) момент загрузки счётчиков. Сессии, аутентифицированные между двумя чтениями с одинаковым `started_at`, — разности счётчиков. |
@@ -859,6 +929,18 @@ negotiated(O)    = Σ count где reason = negotiated / total(O)
 | `session_kinds.live.ready` | bool | `false` до первого обхода; отличает «ещё не измерено» от «измерено, сессий нет». |
 | `session_kinds.live.updated_at` | string\|null | RFC 3339 (наносекунды) последнего обхода. |
 | `session_kinds.live.inbound_v2` / `.inbound_legacy` / `.outbound_v2` / `.outbound_legacy` | object | `{"sessions", "identities"}`: живые сессии в корзине и РАЗЛИЧНЫЕ identity за ними. `identities` не превышает `sessions` (и потому ограничено числом соединений) — две сессии к одному пиру это две сессии и одна identity. Это и есть величина, которую взвешивают для отключения. |
+| `listener_refusals` | object | **Соединения, отвергнутые слушателем до появления сессии** ([session_v2.md](../protocol/session_v2.md), «Отказы слушателя»), по ограничению, которое их отвергло. Каждый такой отказ отвечает TLS-alert отказа, а не молчаливым закрытием, если только не заняты все отправители alert. Накопительно, только в памяти, чтением не сбрасывается. Без блокировок: счётчики atomic. У узла, выпущенного до этого раздела, его нет: «метрика недоступна», а не ноль. |
+| `listener_refusals.started_at` | string\|null | RFC 3339 (наносекунды) начало периода — старт узла. Другой `started_at` между двумя ответами означает рестарт процесса: такую пару отбрасывать. |
+| `listener_refusals.read_at` | string\|null | RFC 3339 (наносекунды) момент загрузки счётчиков. |
+| `listener_refusals.connection_rate` | uint64 | Соединения сверх частоты соединений на IP (10 за 10 с). |
+| `listener_refusals.connections_per_ip` | uint64 | Соединения сверх предела одновременных соединений на IP (8). |
+| `listener_refusals.connection_budget` | uint64 | Соединения, которым при `accept` не хватило общего бюджета соединений: его входящего лимита, общего потолка или резерва исходящих. |
+| `listener_refusals.blacklisted` | uint64 | Соединения с IP из чёрного списка. |
+| `listener_refusals.inbound_limit` | uint64 | Соединения, отвергнутые при регистрации по входящему лимиту. Бюджет выше держит тот же предел начиная с `accept`, поэтому этот счётчик остаётся нулём, пока они не разойдутся. |
+| `listener_refusals.handshakes_node_limit` | uint64 | Входящие рукопожатия v2, отвергнутые после получения целой записи ClientHello, потому что узел уже вёл 64. |
+| `listener_refusals.handshakes_ip_limit` | uint64 | Входящие рукопожатия v2, отвергнутые на первом байте, потому что с их внешнего источника — адреса IPv4 или /64 IPv6 — уже шло 4. |
+| `listener_refusals.handshakes_loopback_limit` | uint64 | Входящие рукопожатия v2 с источника на loopback (onion-вход), отвергнутые потому, что источники на loopback уже держали свои 16 из 64 узла. |
+| `listener_refusals.closed_without_alert` | uint64 | Отказы, закрытые сразу без alert, потому что все 256 отправителей alert были заняты или были заняты 8 из них, доступные источнику. Входят в счётчики выше, а не прибавляются к ним. Устойчивый рост означает наплыв больше пула; сами отказы при этом происходят. |
 
 ### fetchRouteLookup
 

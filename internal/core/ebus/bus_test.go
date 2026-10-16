@@ -196,7 +196,9 @@ func TestUnsubscribeAsync(t *testing.T) {
 	defer b.Shutdown()
 
 	var count atomic.Int32
-	done := make(chan struct{})
+	// Buffered: the handler signals without blocking and may run before the
+	// test reaches its receive; an unbuffered send would then be dropped.
+	done := make(chan struct{}, 1)
 
 	id := b.Subscribe("unsub.async", func() {
 		count.Add(1)

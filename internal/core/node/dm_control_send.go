@@ -775,7 +775,7 @@ func (d *dmControlSender) dispatchFrame(
 	if d.dispatch != nil {
 		return d.dispatch(ctx, frame)
 	}
-	outcome := layer.pipeline.SendLocal(ctx, datagram.LocalSendOpts{
+	outcome := layer.pipeline.SendLocal(ctx, datagram.LocalSenderDMControl, datagram.LocalSendOpts{
 		Frame: frame,
 		Avoid: datagram.NoAvoidedNextHop(),
 	})

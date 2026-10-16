@@ -186,6 +186,24 @@ type Service struct {
 	// the hot read takes no domain mutex. nil before the first walk.
 	liveSessionKinds atomic.Pointer[domain.LiveSessionKinds]
 
+	// listenerRefusals answers and counts the connections the listener
+	// refuses before any session exists (listener_refusal.go): a bounded pool
+	// of alert senders and a counter per refusing bound. OUTSIDE the
+	// seven-domain mutex scheme: assigned once by NewService and never
+	// replaced (a test swaps it only before Run); atomics, a channel
+	// semaphore and a per-source share under a leaf mutex of its own, so the
+	// accept loop uses it without any domain mutex. Its alert senders are
+	// joined by Run's teardown right after connWg. See docs/locking.md.
+	listenerRefusals *listenerRefusals
+	// inboundHandshakes bounds the inbound v2 handshakes in flight, per
+	// external source from the first byte and per node (with a loopback
+	// share) from the whole ClientHello record (inbound_handshakes.go).
+	// Assigned once by NewService and never replaced (a test or the load
+	// stand swaps it only before Run); its own leaf mutex, taken with no
+	// domain mutex held and with nothing called under it. See
+	// docs/locking.md.
+	inboundHandshakes *inboundHandshakes
+
 	// datagramMetrics counts every decision the datagram ingress makes
 	// (docs/rpc/datagram.md, fetchDatagramSummary). Deliberately OUTSIDE
 	// the seven-domain mutex scheme: the pointer is assigned once by
@@ -683,8 +701,13 @@ type Service struct {
 	// outbound mirror). Address-only callers (no conn available, e.g.
 	// peer_exchange) update only the map; by-conn readers must tolerate an
 	// empty NetCore.Identity() and fall back to the map.
+	//
+	// peerIDs keeps each identity with its origin (addressIdentities): a
+	// claim never replaces what v2 recorded, and the claims of an identity
+	// are forgotten once it proves itself over v2
+	// (forgetClaimedAddressesOf).
 	peerTypes         map[domain.PeerAddress]domain.NodeType
-	peerIDs           map[domain.PeerAddress]domain.PeerIdentity
+	peerIDs           addressIdentities
 	peerVersions      map[domain.PeerAddress]string
 	peerBuilds        map[domain.PeerAddress]int
 	inboundHealthRefs map[domain.PeerAddress]int // resolved overlay address → active inbound connection count
@@ -752,7 +775,7 @@ type Service struct {
 	// TestConnRegistry_RegisterSyncsSecondaryIndex in
 	// conn_registry_lifecycle_test.go.
 	connIDByNetConn map[net.Conn]netcore.ConnID
-	connIDCounter   uint64 // monotonic counter for connection IDs (protected by mu)
+	connIDCounter   uint64 // monotonic counter for connection IDs (protected by peerMu)
 	bans            map[string]banEntry
 	listener        net.Listener
 	lastSync        time.Time
@@ -2039,10 +2062,10 @@ func newService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus, netw
 	// Restore the address-to-identity binding alongside peer health. Without
 	// this, PeerHealth.PeerID becomes empty after restart until the next
 	// handshake and cannot serve as last-online fallback evidence.
-	restoredPeerIDs := make(map[domain.PeerAddress]domain.PeerIdentity)
+	restoredPeerIDs := make(addressIdentities)
 	for addr, entry := range persistedByAddr {
 		if !entry.Identity.IsZero() {
-			restoredPeerIDs[addr] = entry.Identity
+			restoredPeerIDs[addr] = addressIdentity{identity: entry.Identity, origin: restoredIdentityOrigin(entry.IdentityOrigin)}
 		}
 	}
 
@@ -2543,6 +2566,8 @@ func newService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus, netw
 	svc.relayLimiter = newRelayRateLimiter(time.Now)
 	svc.announceLimiter = newAnnounceRateLimiter(time.Now)
 	svc.connLimiter = newConnRateLimiter(time.Now)
+	svc.listenerRefusals = newListenerRefusals(productionAlertPoolBounds(), svc.startedAt)
+	svc.inboundHandshakes = newInboundHandshakes(productionHandshakeBounds())
 	svc.cmdLimiter = newCommandRateLimiter(time.Now)
 	svc.inboundByIP = make(map[string]int)
 
@@ -2854,6 +2879,10 @@ func (s *Service) Run(ctx context.Context) error {
 		s.closeAllInboundConns()
 		log.Info().Msg("waiting for inbound connections to finish")
 		s.connWg.Wait()
+		// After connWg: the handlers are the last that refuse connections, so
+		// no alert sender can start once this wait begins. Each one ends
+		// within its write and drain bounds.
+		s.listenerRefusals.wait()
 	}()
 
 	// Start ConnectionManager event loop (Stage 3).
@@ -2964,16 +2993,16 @@ func (s *Service) Run(ctx context.Context) error {
 		// SYN flood and connection exhaustion from a single source.
 		ip := remoteIP(conn.RemoteAddr())
 		if !s.disableRateLimiting && !s.connLimiter.allowConnect(ip) {
-			log.Warn().Str("ip", ip).Str("reason", "conn-rate-limit").Msg("reject connection")
-			_ = conn.Close()
+			log.Warn().Str("ip", ip).Str("reason", refusalConnectionRate.String()).Msg("reject connection")
+			s.listenerRefusals.refuse(conn, refusalConnectionRate)
 			continue
 		}
 
 		// Per-IP concurrent connection cap — even within rate limits, no
 		// single IP should monopolize connection slots.
 		if !s.disableRateLimiting && !s.tryIncrementIPConn(ip) {
-			log.Warn().Str("ip", ip).Str("reason", "max-conn-per-ip").Msg("reject connection")
-			_ = conn.Close()
+			log.Warn().Str("ip", ip).Str("reason", refusalConnectionsPerIP.String()).Msg("reject connection")
+			s.listenerRefusals.refuse(conn, refusalConnectionsPerIP)
 			continue
 		}
 
@@ -2988,16 +3017,16 @@ func (s *Service) Run(ctx context.Context) error {
 		// it does not. The per-IP caps do not close it either: they are
 		// per-IP, and the queue grows with the number of sources.
 		//
-		// Refusal closes the socket right here, which is also the cheapest
-		// possible point: no goroutine, no metered wrapper, no registry entry.
+		// Refusal is answered right here, which is also the cheapest possible
+		// point: no handler goroutine, no metered wrapper, no registry entry.
 		inboundReservation, budgetErr := s.connBudget.Reserve(connbudget.DirectionInbound)
 		if budgetErr != nil {
 			log.Warn().
 				Err(budgetErr).
 				Str("ip", ip).
-				Str("reason", "connection-budget").
+				Str("reason", refusalConnectionBudget.String()).
 				Msg("reject connection")
-			_ = conn.Close()
+			s.listenerRefusals.refuse(conn, refusalConnectionBudget)
 			s.decrementIPConn(ip)
 			continue
 		}
@@ -3236,13 +3265,11 @@ func (s *Service) handleConn(conn net.Conn, reservation *connbudget.Reservation)
 	if !s.disableRateLimiting && s.isBlacklistedConn(conn) {
 		// The peer-banned notice was already delivered on the session
 		// that tripped the blacklist (see addBanScore), so a raw
-		// reconnect from the same IP is closed silently. No managed
-		// writer is available at this point (pre-registration) and we
-		// must not reintroduce a raw conn.Write path here — the
-		// dialler-side gate 6c.2 is already armed from the first notice
-		// and will suppress further retries until the remote ban window
-		// elapses.
-		_ = conn.Close()
+		// reconnect from the same IP gets only the listener's refusal
+		// alert — no frame: the dialler-side gate 6c.2 is already armed
+		// from the first notice and will suppress further retries until
+		// the remote ban window elapses.
+		s.listenerRefusals.refuse(conn, refusalBlacklisted)
 		return
 	}
 	metered, err := netcore.NewMeteredConn(conn, &s.transportTotals)
@@ -3257,6 +3284,11 @@ func (s *Service) handleConn(conn net.Conn, reservation *connbudget.Reservation)
 	// state. wire is what the session's frames travel on — TLS for v2, the
 	// metered socket itself for v1.
 	wire, reader, proven, err := s.openInboundTransport(metered)
+	if refusal, refused := errors.AsType[*listenerRefusalError](err); refused {
+		log.Warn().Str("addr", conn.RemoteAddr().String()).Str("reason", refusal.reason.String()).Msg("reject connection")
+		s.listenerRefusals.refuse(metered, refusal.reason)
+		return
+	}
 	if err != nil {
 		log.Info().Err(err).Str("addr", conn.RemoteAddr().String()).Msg("reject connection: session handshake failed")
 		_ = metered.Close()
@@ -3267,7 +3299,7 @@ func (s *Service) handleConn(conn net.Conn, reservation *connbudget.Reservation)
 	}
 	if err := s.registerInboundConn(wire, reservation); err != nil {
 		log.Warn().Err(err).Str("addr", conn.RemoteAddr().String()).Msg("reject connection")
-		_ = wire.Close()
+		s.closeUnregisteredInbound(wire, proven != nil, err)
 		return
 	}
 	// Resolve ConnID once at the entry boundary — after a successful
@@ -3895,11 +3927,19 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, wire string) bool {
 			}
 			// An identity that proved v2 is never served over v1: this hello
 			// may be a man in the middle who stripped TLS to collect a
-			// relayable v1 proof. Refused without a penalty — the claim is
-			// unproven, so it may not be the named peer at all.
+			// relayable v1 proof. Refused without a penalty here — the claim
+			// is unproven, so it may not be the named peer at all. The dialler
+			// is told so in the peer-banned notice every release since v28
+			// honours: without it an old dialler would redial at once, and
+			// every redial is refused the same way. The dialler does pay: it
+			// skips this address for its default window (24 h on v28–v30),
+			// even if it is upgraded meanwhile. No until, because a short one
+			// read against the dialler's clock is fragile when the clocks
+			// disagree, and the dialler's default is the window it knows.
 			if err := s.refuseLegacyIdentity(domain.PeerIdentityFromWire(frame.Address)); err != nil {
 				accepted = false
 				log.Warn().Err(err).Uint64("conn_id", uint64(connID)).Str("addr", addr).Msg("inbound_v1_refused_identity_pinned_to_v2")
+				s.emitPeerBannedNoticeByID(connID, time.Time{}, protocol.PeerBannedReasonPeerBan)
 				return false
 			}
 			authState, err := connauth.PrepareAuth(frame)
@@ -5370,6 +5410,10 @@ func (s *Service) handleAuthSession(
 	// counts, leaves no window (v2_identity_claims.go).
 	if err := s.refuseLegacyIdentity(domain.PeerIdentityFromWire(verified.Hello.Address)); err != nil {
 		log.Warn().Err(err).Uint64("conn_id", uint64(id)).Msg("inbound_v1_refused_identity_proved_v2_during_auth")
+		// The same refusal as at the hello, so the same notice: an old
+		// dialler meets it again on every redial. It goes out before the
+		// error reply, on the still-open connection.
+		s.emitPeerBannedNoticeByID(id, time.Time{}, protocol.PeerBannedReasonPeerBan)
 		return protocol.Frame{Type: "error", Code: protocol.ErrCodeAuthRequired, Error: "identity requires a secure session"}, false, nil, connectFullSync{}
 	}
 
@@ -5394,7 +5438,7 @@ func (s *Service) completeInboundAuth(id domain.ConnID, verified *connauth.State
 	remoteAddr := s.Network().RemoteAddr(id)
 	log.Trace().Uint64("conn_id", uint64(id)).Str("remote_addr", remoteAddr).Str("hello_listener", verified.Hello.Listener).Str("peer_identity", verified.Hello.Address).Msg("handle_auth_session_verified")
 
-	s.learnPeerFromFrame(remoteAddr, verified.Hello)
+	s.learnPeerFromFrame(remoteAddr, verified.Hello, identityOriginOf(proven))
 	log.Trace().Uint64("conn_id", uint64(id)).Msg("handle_auth_session_after_learn")
 
 	helloSub := s.registerHelloRoute(id, verified.Hello)
@@ -5445,7 +5489,8 @@ func (s *Service) completeInboundAuth(id domain.ConnID, verified *connauth.State
 		if s.hasOutboundSessionForInbound(addr) {
 			log.Info().Str("peer", string(addr)).Msg("duplicate_inbound_auth_session_allowed")
 		}
-		s.addPeerID(addr, domain.PeerIdentityFromWire(verified.Hello.Address))
+		_, proven := verified.ProvenIdentity()
+		s.addPeerID(addr, addressIdentity{identity: domain.PeerIdentityFromWire(verified.Hello.Address), origin: identityOriginOf(proven)})
 		log.Trace().Uint64("conn_id", uint64(id)).Str("inbound_addr", string(addr)).Msg("handle_auth_session_track_begin")
 		fullSync = s.trackInboundConnect(id, addr, domain.PeerIdentityFromWire(verified.Hello.Address))
 		log.Trace().Uint64("conn_id", uint64(id)).Str("inbound_addr", string(addr)).Msg("handle_auth_session_track_end")
@@ -5864,7 +5909,7 @@ func (s *Service) trackInboundDisconnectWithPresenceEvidence(id domain.ConnID, a
 	}
 	resolved := s.resolveHealthAddress(address)
 	if peerIdentity.IsZero() {
-		peerIdentity = s.peerIDs[resolved]
+		peerIdentity = s.peerIDs.identityOf(resolved)
 	}
 	var last bool
 	if wasTracked && s.inboundHealthRefs[resolved] > 0 {
@@ -6112,7 +6157,8 @@ func (s *Service) recordObservedAddress(peerID domain.PeerIdentity, observedIP s
 // network-level RemoteAddr() of the raw socket is meaningful. The
 // peer-banned notice that informs the dialler is emitted on the original
 // session at the moment the blacklist flips on (see addBanScore); raw
-// reconnects observed here are closed silently.
+// reconnects observed here get only the listener's refusal alert
+// (listener_refusal.go).
 func (s *Service) isBlacklistedConn(conn net.Conn) bool {
 	ip := remoteIP(conn.RemoteAddr())
 	if ip == "" {
@@ -9588,7 +9634,10 @@ func listenerFlag(enabled bool) string {
 	return "0"
 }
 
-func (s *Service) learnIdentityFromWelcome(frame protocol.Frame, dialAddress domain.PeerAddress) {
+// learnIdentityFromWelcome learns what a welcome received on a dial to
+// dialAddress says about the peer. origin is what stands behind
+// frame.Address: the dial proved it over v2, or the v1 welcome only claims it.
+func (s *Service) learnIdentityFromWelcome(frame protocol.Frame, dialAddress domain.PeerAddress, origin domain.PeerIdentityOrigin) {
 	// Self-loopback guard: if the welcome carries our own Ed25519
 	// address the remote is actually us reflected back — silently
 	// skip the learning pass so we do not re-ingest our own listen
@@ -9612,7 +9661,7 @@ func (s *Service) learnIdentityFromWelcome(frame protocol.Frame, dialAddress dom
 		if normalizedAddr, ok := s.normalizePeerAddress(dialAddress, dialAddress); ok {
 			s.promotePeerAddress(normalizedAddr)
 			s.rememberPeerType(normalizedAddr, frame.NodeType)
-			s.addPeerID(normalizedAddr, domain.PeerIdentityFromWire(frame.Address))
+			s.addPeerID(normalizedAddr, addressIdentity{identity: domain.PeerIdentityFromWire(frame.Address), origin: origin})
 			s.addPeerVersion(normalizedAddr, frame.ClientVersion)
 			s.addPeerBuild(normalizedAddr, frame.ClientBuild)
 		}

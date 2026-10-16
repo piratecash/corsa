@@ -42,6 +42,7 @@ func TestFetchRouteSummaryReportsTransportTraffic(t *testing.T) {
 		BytesReceived: received,
 	}).Once()
 	provider.On("SessionKindStats").Return(domain.SessionKindStats{}).Once()
+	provider.On("ListenerRefusalStats").Return(domain.ListenerRefusalStats{}).Once()
 
 	table := rpc.NewCommandTable()
 	rpc.RegisterRoutingCommands(table, provider)
@@ -108,26 +109,35 @@ func TestFetchRouteSummaryReportsThePinStore(t *testing.T) {
 	provider.On("NeighbourComposition").Return(domain.NeighbourComposition{}).Once()
 	provider.On("TransportTrafficStats").Return(domain.TransportTrafficStats{}).Once()
 	provider.On("SessionKindStats").Return(domain.SessionKindStats{}).Once()
+	provider.On("ListenerRefusalStats").Return(domain.ListenerRefusalStats{}).Once()
 	provider.On("SecureSessionStoreStats").Return(domain.SecureSessionStoreStats{
-		ReadAt:                       now,
-		PinnedIdentities:             20000,
-		PinCapacity:                  20000,
-		Full:                         true,
-		PinRefusalsStoreFull:         7,
-		V1RefusalsIdentityPinned:     3,
-		V1RefusalsEndpointBound:      5,
-		V1DialsHeldByRefusalBackoff:  11,
-		DialsHeldByV2RetryBackoff:    13,
-		ProtectedBindingsContact:     8192,
-		ProtectedBindingsRelation:    24576,
-		ProtectedCapacity:            32768,
-		ProtectedReserveContact:      8192,
-		ProtectedPerIdentityCapacity: 4,
-		GeneralBindings:              100,
-		GeneralCapacity:              16384,
-		ProtectedRefusalsPerIdentity: 1,
-		ProtectedRefusalsPoolRFull:   2,
-		ProtectedRefusalsStoreFull:   3,
+		ReadAt:                              now,
+		PinnedIdentities:                    20000,
+		PinCapacity:                         20000,
+		Full:                                true,
+		PinRefusalsStoreFull:                7,
+		V1RefusalsIdentityPinned:            3,
+		V1RefusalsEndpointBound:             5,
+		V1DialsHeldByRefusalBackoff:         11,
+		DialsHeldByV2RetryBackoff:           13,
+		ProtectedBindingsContact:            8192,
+		ProtectedBindingsRelation:           24576,
+		ProtectedCapacity:                   32768,
+		ProtectedReserveContact:             8192,
+		ProtectedPerIdentityCapacity:        4,
+		GeneralBindings:                     100,
+		GeneralCapacity:                     16384,
+		ProtectedRefusalsPerIdentity:        1,
+		ProtectedRefusalsPoolRFull:          2,
+		ProtectedRefusalsStoreFull:          3,
+		GeneralCreationsPerGroupPerDay:      64,
+		GeneralRefusalsSourceGroupQuota:     17,
+		EndpointBindingsSkippedNotCanonical: 19,
+		NonCanonicalBindings:                23,
+		LocationUnsafe:                      true,
+		ClockJumpGuarded:                    true,
+		ClockJumpsDetected:                  29,
+		ClockJumpActive:                     true,
 	}).Once()
 
 	table := rpc.NewCommandTable()
@@ -146,27 +156,35 @@ func TestFetchRouteSummaryReportsThePinStore(t *testing.T) {
 	if !ok {
 		t.Fatalf("secure_sessions is not a JSON object: %T (%v)", result["secure_sessions"], result["secure_sessions"])
 	}
-	if section["pin_store_full"] != true || section["store_unreadable"] != false {
-		t.Fatalf("flags = full %v, unreadable %v", section["pin_store_full"], section["store_unreadable"])
+	if section["pin_store_full"] != true || section["store_unreadable"] != false || section["pin_store_unsafe"] != true {
+		t.Fatalf("flags = full %v, unreadable %v, unsafe %v", section["pin_store_full"], section["store_unreadable"], section["pin_store_unsafe"])
+	}
+	if section["clock_jump_guarded"] != true || section["clock_jump_active"] != true {
+		t.Fatalf("clock flags = guarded %v, active %v", section["clock_jump_guarded"], section["clock_jump_active"])
 	}
 	for field, want := range map[string]string{
-		"pinned_identities":                "20000",
-		"pin_capacity":                     "20000",
-		"pin_refusals_pin_store_full":      "7",
-		"v1_refusals_identity_pinned":      "3",
-		"v1_refusals_endpoint_bound":       "5",
-		"v1_dials_held_by_refusal_backoff": "11",
-		"dials_held_by_v2_retry_backoff":   "13",
-		"protected_bindings_contact":       "8192",
-		"protected_bindings_relation":      "24576",
-		"protected_capacity":               "32768",
-		"protected_reserve_contact":        "8192",
-		"protected_per_identity_capacity":  "4",
-		"general_bindings":                 "100",
-		"general_capacity":                 "16384",
-		"protected_refusals_per_identity":  "1",
-		"protected_refusals_pool_r_full":   "2",
-		"protected_refusals_store_full":    "3",
+		"pinned_identities":                       "20000",
+		"pin_capacity":                            "20000",
+		"pin_refusals_pin_store_full":             "7",
+		"v1_refusals_identity_pinned":             "3",
+		"v1_refusals_endpoint_bound":              "5",
+		"v1_dials_held_by_refusal_backoff":        "11",
+		"dials_held_by_v2_retry_backoff":          "13",
+		"protected_bindings_contact":              "8192",
+		"protected_bindings_relation":             "24576",
+		"protected_capacity":                      "32768",
+		"protected_reserve_contact":               "8192",
+		"protected_per_identity_capacity":         "4",
+		"general_bindings":                        "100",
+		"general_capacity":                        "16384",
+		"protected_refusals_per_identity":         "1",
+		"protected_refusals_pool_r_full":          "2",
+		"protected_refusals_store_full":           "3",
+		"general_creations_per_group_per_day":     "64",
+		"general_refusals_source_group_quota":     "17",
+		"endpoint_bindings_skipped_not_canonical": "19",
+		"non_canonical_bindings":                  "23",
+		"clock_jumps_detected":                    "29",
 	} {
 		if got, _ := section[field].(json.Number); got.String() != want {
 			t.Fatalf("secure_sessions.%s = %v, want %s", field, section[field], want)

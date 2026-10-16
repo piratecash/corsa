@@ -44,7 +44,7 @@ func newSyncTestService() *Service {
 		peers:         []transport.Peer{},
 		known:         newBoundedKnownIdentities(maxKnownIdentities),
 		peerTypes:     make(map[domain.PeerAddress]domain.NodeType),
-		peerIDs:       make(map[domain.PeerAddress]domain.PeerIdentity),
+		peerIDs:       make(addressIdentities),
 		persistedMeta: make(map[domain.PeerAddress]*peerEntry),
 		dialOrigin:    make(map[domain.PeerAddress]domain.PeerAddress),
 		bannedIPSet:   make(map[string]domain.BannedIPEntry),

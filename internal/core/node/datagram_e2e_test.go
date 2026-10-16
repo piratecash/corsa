@@ -164,7 +164,7 @@ func sendDatagramTo(t *testing.T, svc *Service, dst domain.PeerIdentity, payload
 	if err != nil {
 		t.Fatalf("SignDatagram: %v", err)
 	}
-	return svc.datagramLayer().pipeline.SendLocal(context.Background(), datagram.LocalSendOpts{Frame: signed})
+	return svc.datagramLayer().pipeline.SendLocal(context.Background(), datagram.LocalSenderDMControl, datagram.LocalSendOpts{Frame: signed})
 }
 
 // waitForDatagram waits for the sink to receive the expected payload.

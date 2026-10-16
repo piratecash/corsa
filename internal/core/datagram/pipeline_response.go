@@ -321,7 +321,7 @@ func (p *Pipeline) deliverResponseLocally(
 
 	// No decrement and no enqueue: there is no hop to pay for
 	// (docs/protocol/datagram.md §4.2 rule 4).
-	switch result := runHandler(ctx, admitted.entry.Handler(), admitted.delivery, arrival.frame.Payload); result.Outcome() {
+	switch result := p.runHandler(ctx, admitted.entry, admitted.delivery, arrival.frame.Payload); result.Outcome() {
 	case HandlerAccepted:
 		// The exchange is over: this node asked, this node was answered, and a
 		// record kept past that point holds a slot of the LocalUpstream bucket

@@ -1472,7 +1472,7 @@ func TestRoutingTargetsPreferBestHealthySessions(t *testing.T) {
 		sessions:  map[domain.PeerAddress]*peerSession{},
 		health:    map[domain.PeerAddress]*peerHealth{},
 		peerTypes: map[domain.PeerAddress]domain.NodeType{},
-		peerIDs:   map[domain.PeerAddress]domain.PeerIdentity{},
+		peerIDs:   addressIdentities{},
 	}
 
 	now := time.Now().UTC()
@@ -1511,7 +1511,7 @@ func TestRoutingTargetsIncludeNonSessionPeers(t *testing.T) {
 		sessions:  map[domain.PeerAddress]*peerSession{},
 		health:    map[domain.PeerAddress]*peerHealth{},
 		peerTypes: map[domain.PeerAddress]domain.NodeType{},
-		peerIDs:   map[domain.PeerAddress]domain.PeerIdentity{},
+		peerIDs:   addressIdentities{},
 	}
 
 	now := time.Now().UTC()
@@ -1552,7 +1552,7 @@ func TestRoutingTargetsSessionOnlyWhenAllPeersHaveSessions(t *testing.T) {
 		sessions:  map[domain.PeerAddress]*peerSession{},
 		health:    map[domain.PeerAddress]*peerHealth{},
 		peerTypes: map[domain.PeerAddress]domain.NodeType{},
-		peerIDs:   map[domain.PeerAddress]domain.PeerIdentity{},
+		peerIDs:   addressIdentities{},
 	}
 
 	now := time.Now().UTC()
@@ -1582,7 +1582,7 @@ func TestRoutingTargetsSkipClientRelayUnlessRecipientMatches(t *testing.T) {
 		sessions:  map[domain.PeerAddress]*peerSession{},
 		health:    map[domain.PeerAddress]*peerHealth{},
 		peerTypes: map[domain.PeerAddress]domain.NodeType{},
-		peerIDs:   map[domain.PeerAddress]domain.PeerIdentity{},
+		peerIDs:   addressIdentities{},
 	}
 
 	now := time.Now().UTC()
@@ -1592,7 +1592,7 @@ func TestRoutingTargetsSkipClientRelayUnlessRecipientMatches(t *testing.T) {
 	svc.health[domain.PeerAddress("client:1")] = &peerHealth{Address: domain.PeerAddress("client:1"), Connected: true, State: peerStateHealthy, LastUsefulReceiveAt: now}
 	svc.peerTypes[domain.PeerAddress("full:1")] = domain.NodeTypeFull
 	svc.peerTypes[domain.PeerAddress("client:1")] = domain.NodeTypeClient
-	svc.peerIDs[domain.PeerAddress("client:1")] = domaintest.ID("client-id")
+	svc.peerIDs[domain.PeerAddress("client:1")] = claimedAddressIdentity(domaintest.ID("client-id"))
 
 	globalTargets := svc.routingTargetsForMessage(protocol.Envelope{
 		Topic:     "global",
@@ -3645,7 +3645,7 @@ func TestNewServiceRestoresPeerIdentityFromPeerState(t *testing.T) {
 		AllowPrivatePeers: true,
 	}, id, nil)
 
-	if got := svc.peerIDs[peerAddress]; got != peerIdentity {
+	if got := svc.peerIDs.identityOf(peerAddress); got != peerIdentity {
 		t.Fatalf("restored peer identity = %s, want %s", got, peerIdentity)
 	}
 }
@@ -3668,7 +3668,7 @@ func TestFlushPeerStatePersistsRuntimePeerIdentity(t *testing.T) {
 		TrustStorePath:    filepath.Join(dir, "trust.json"),
 		AllowPrivatePeers: true,
 	}, id, nil)
-	svc.addPeerID(peerAddress, peerIdentity)
+	svc.addPeerID(peerAddress, claimedAddressIdentity(peerIdentity))
 	svc.peerMu.RLock()
 	dirty := svc.peerStateDirty
 	svc.peerMu.RUnlock()
@@ -4446,7 +4446,7 @@ func TestEvictOrphanedHealthEntries(t *testing.T) {
 		LastConnectedAt:    staleTime.Add(-time.Minute),
 		LastDisconnectedAt: staleTime,
 	}
-	svc.peerIDs[orphanAddr] = domaintest.ID("orphan-identity")
+	svc.peerIDs[orphanAddr] = claimedAddressIdentity(domaintest.ID("orphan-identity"))
 	svc.peerTypes[orphanAddr] = "full"
 
 	// Recent orphan: not in s.peers, but disconnected only 1 minute ago — should survive.
@@ -5230,7 +5230,7 @@ func TestMarkPeerDisconnectedClearsObservedAddress(t *testing.T) {
 	// and register the peerID mapping so markPeerDisconnected can find it.
 	svc.recordObservedAddress(domain.PeerIdentityFromWire(peerID.Address), "203.0.113.50")
 	svc.peerMu.Lock()
-	svc.peerIDs[peerAddr] = domain.PeerIdentityFromWire(peerID.Address)
+	svc.peerIDs[peerAddr] = claimedAddressIdentity(domain.PeerIdentityFromWire(peerID.Address))
 	svc.peerMu.Unlock()
 
 	svc.peerMu.RLock()
@@ -5266,7 +5266,7 @@ func TestMarkPeerDisconnectedClearsObservedAddressViaFallback(t *testing.T) {
 	// as the real code does when a fallback connection succeeds.
 	svc.peerMu.Lock()
 	svc.dialOrigin[fallbackAddr] = primaryAddr
-	svc.peerIDs[primaryAddr] = domain.PeerIdentityFromWire(peerID.Address)
+	svc.peerIDs[primaryAddr] = claimedAddressIdentity(domain.PeerIdentityFromWire(peerID.Address))
 	svc.peerMu.Unlock()
 
 	// Disconnect using fallback address — resolveHealthAddress maps to primary,
@@ -8157,7 +8157,7 @@ func TestTrackInboundDisconnect_PrefersNetCoreIdentity(t *testing.T) {
 	if e := svc.testConnEntry(connA); e != nil && e.core != nil {
 		e.core.SetIdentity(netcoreIdentity)
 	}
-	svc.peerIDs[peer] = mapIdentity
+	svc.peerIDs[peer] = claimedAddressIdentity(mapIdentity)
 	svc.peerMu.Unlock()
 
 	idA, _ := svc.connIDFor(connA)
@@ -8206,7 +8206,7 @@ func TestTrackInboundDisconnect_FallsBackToPeerIDsMap(t *testing.T) {
 	// the persistence cache so the fallback path is exercised.
 	mapIdentity := domaintest.ID("fallback-map-identity")
 	svc.peerMu.Lock()
-	svc.peerIDs[peer] = mapIdentity
+	svc.peerIDs[peer] = claimedAddressIdentity(mapIdentity)
 	svc.peerMu.Unlock()
 
 	idA, _ := svc.connIDFor(connA)

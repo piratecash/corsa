@@ -95,6 +95,41 @@ Beside the bytes, the node counts its authenticated peer sessions by kind — se
 
 The cumulative counters are atomics and the live gauge an immutable value behind an `atomic.Pointer`, all outside every domain mutex of `node.Service` (`docs/locking.md`); `fetchRouteSummary` serves them lock-free in its `session_kinds` section (`docs/rpc/routing.md`).
 
+### Listener refusals
+
+The node also counts the connections its listener refuses before any session exists, by the bound that refused them, and the refusals that went out without the TLS refusal alert because every alert sender was busy (`internal/core/node/listener_refusal.go`; the refusal itself is described in `docs/protocol/session_v2.md`, "Listener refusals").
+
+- **point of measurement** — `listenerRefusals.refuse`, the one place a refused connection is answered: from the accept loop (connection rate, per-IP cap, connection budget) and from the connection handler (blacklist, inbound limit at registration, the per-source, node and loopback-share bounds on inbound v2 handshakes);
+- **`closed_without_alert`** — part of the per-bound counts, not in addition to them. It rises only when more refusals arrive at once than the pool of 256 alert senders, or one source's share of 8, can hold; the refusals happen either way;
+- **reset and pairing** — in memory only, never reset by reading; `started_at` is the node's start and `read_at` the moment of the loads, with the pairing rule of the transport block.
+
+The counters are atomics outside every domain mutex of `node.Service` (`docs/locking.md`); `fetchRouteSummary` serves them lock-free in its `listener_refusals` section (`docs/rpc/routing.md`).
+
+### Datagram handler calls
+
+The datagram plane counts what its type handlers did, per registered dtype and mode (`internal/core/datagram/handler_stats.go`), and serves it in the `handlers` section of `fetchDatagramSummary` (`docs/rpc/datagram.md`).
+
+- **point of measurement** — `Pipeline.runHandler`, the one wrapper through which the routed, request and response planes call a handler, after every gate and once the handler returned or panicked. A frame dropped earlier, an unknown dtype and a transit frame never reach it, so nothing here repeats `DropsByReason`, `UnknownDType` or `Forwarded`;
+- **units** — `calls`, `accepted`, `rejected`, `failed` and `panics` are calls (`panics` is a subset of `failed`); `wall_ns` is **elapsed time** in nanoseconds from entering the handler to leaving it, measured on Go's monotonic clock (an injectable duration source, separate from the pipeline's wall clock), so an NTP step does not distort it; on a panic it stops before the crash report is written. It is **not CPU time**: it includes lock waits and I/O inside the handler;
+- **keys** — only registered dtypes and the modes they declare; nothing from the wire becomes a key;
+- **relation to `metrics.ByMode`** — the same calls cut by type, never summed with them (the exact equalities are listed in `docs/rpc/datagram.md`);
+- **reset and pairing** — in memory only, never reset by reading; `started_at` is the node's start and `read_at` the moment of the loads, with the pairing rule of the transport block.
+
+### Local send attribution
+
+Every datagram this node originates is charged to the subsystem that sent it — `identity_resolver`, `presence_prober`, `identity_discovery`, `dm_control`, or `unattributed` for a call that named none (`internal/core/datagram/local_senders.go`), served in the `local_senders` section of `fetchDatagramSummary`.
+
+- **point of measurement** — `Pipeline.sendLocal`, the one body of `SendLocal`, once per call from the outcome it returned. The sender is a required positional argument of `SendLocal`, and a guard test pins which constant each calling file passes;
+- **units** — sends. `attempts == queued + no_route + failed + rejected`, and `rejected` is split by cause into `gate_refused`, `quota_capped`, `slot_busy`, `expired` and `other_rejected`;
+- **relation to other counters** — `quota_capped` is the same event as the reverse table's `LocalRefusals` (by dtype), `gate_refused` the local share of `metrics.SendRefusals` (which also counts transit); they are other cuts, never added to these. A queued send is not a delivered one, and no bytes are counted here;
+- **reset and pairing** — as above.
+
+Both blocks are atomics — in the registry entries and in `datagram.Metrics` — outside every domain mutex of `node.Service` (`docs/locking.md`); the summary reads them lock-free.
+
+### Resource breakdown coverage
+
+`getResourceBreakdown` (`docs/rpc/system.md`) reports one line per value of the subsystem enum, and a guard test walks the enum itself — every value exactly once — rather than a list kept beside it. File-transfer state (the `fileMu` domain) has no subsystem and is NOT in the breakdown; this is a written exclusion with its reason, and the guard fails if the exclusion is dropped while file state is still unreported, or kept once a line reports it. The aggregate-status domain (`statusMu`, small fixed records plus a self-pruning reporter set) and the gossip-pool lock (`gossipPoolMu`, which owns no state) are listed as exclusions too; whether every domain must be reported or excluded is not checked. The breakdown's figures are a lower bound of memory held, not bytes on the wire, and are never added to or compared with the transport totals.
+
 ### TrafficHistory Ring Buffer
 
 The ring buffer stores up to 3600 samples (1 hour at 1 sample/second). Each sample contains:
@@ -235,6 +270,41 @@ graph TB
 - **сброс и пары** — только в памяти, чтением не сбрасываются; `started_at` — старт узла, `read_at` — момент загрузки, правило пар — как у транспортного блока.
 
 Накопительные счётчики — atomic, живой срез — неизменяемое значение за `atomic.Pointer`, и всё это вне доменных мьютексов `node.Service` (`docs/locking.md`); `fetchRouteSummary` отдаёт их без блокировок в разделе `session_kinds` (`docs/rpc/routing.md`).
+
+### Отказы слушателя
+
+Узел также считает соединения, которые его слушатель отверг до появления сессии, по ограничению, которое их отвергло, и отказы, ушедшие без TLS-alert отказа, потому что все отправители alert были заняты (`internal/core/node/listener_refusal.go`; сам отказ описан в `docs/protocol/session_v2.md`, «Отказы слушателя»).
+
+- **точка измерения** — `listenerRefusals.refuse`, единственное место, где отвергнутому соединению отвечают: из цикла `accept` (частота соединений, предел на IP, бюджет соединений) и из обработчика соединения (чёрный список, входящий лимит при регистрации, пределы входящих рукопожатий v2 на источник, на узел и доля loopback);
+- **`closed_without_alert`** — входит в счётчики по ограничениям, а не прибавляется к ним. Растёт, только когда одновременно приходит больше отказов, чем вмещает пул из 256 отправителей alert или доля одного источника в 8; сами отказы происходят в любом случае;
+- **сброс и пары** — только в памяти, чтением не сбрасываются; `started_at` — старт узла, `read_at` — момент загрузки, правило пар — как у транспортного блока.
+
+Счётчики — atomic вне всех доменных мьютексов `node.Service` (`docs/locking.md`); `fetchRouteSummary` отдаёт их без блокировок в разделе `listener_refusals` (`docs/rpc/routing.md`).
+
+### Вызовы обработчиков датаграмм
+
+Плоскость датаграмм считает, что сделали обработчики типов, по зарегистрированному dtype и режиму (`internal/core/datagram/handler_stats.go`), и отдаёт это в разделе `handlers` команды `fetchDatagramSummary` (`docs/rpc/datagram.md`).
+
+- **точка измерения** — `Pipeline.runHandler`, единственная обёртка, через которую обработчик вызывают плоскости routed, request и response, — после всех гейтов, когда обработчик вернулся или упал с паникой. Кадр, отброшенный раньше, неизвестный dtype и транзитный кадр до неё не доходят, поэтому здесь не повторяются `DropsByReason`, `UnknownDType` и `Forwarded`;
+- **единицы** — `calls`, `accepted`, `rejected`, `failed` и `panics` — вызовы (`panics` — подмножество `failed`); `wall_ns` — **прошедшее время** в наносекундах от входа в обработчик до выхода по монотонным часам Go (инжектируемый источник длительностей, отдельный от настенных часов конвейера), поэтому шаг NTP его не искажает; при панике отсчёт останавливается до записи crash-report. Это **не CPU**: сюда входят ожидание блокировок и I/O внутри обработчика;
+- **ключи** — только зарегистрированные dtype и объявленные ими режимы; ничто с провода ключом не становится;
+- **связь с `metrics.ByMode`** — те же вызовы в разрезе по типу, с ними не складываются (точные равенства перечислены в `docs/rpc/datagram.md`);
+- **сброс и пары** — только в памяти, чтением не сбрасываются; `started_at` — старт узла, `read_at` — момент загрузки, правило пар — как у транспортного блока.
+
+### Атрибуция локальных отправок
+
+Каждая датаграмма, созданная этим узлом, приписывается подсистеме, которая её отправила, — `identity_resolver`, `presence_prober`, `identity_discovery`, `dm_control` или `unattributed` для вызова без отправителя (`internal/core/datagram/local_senders.go`); отдаётся в разделе `local_senders` команды `fetchDatagramSummary`.
+
+- **точка измерения** — `Pipeline.sendLocal`, единственное тело `SendLocal`, один раз на вызов по возвращённому исходу. Отправитель — обязательный позиционный аргумент `SendLocal`, а тест-сторож закрепляет, какую константу передаёт каждый вызывающий файл;
+- **единицы** — отправки. `attempts == queued + no_route + failed + rejected`, а `rejected` раскладывается по причине на `gate_refused`, `quota_capped`, `slot_busy`, `expired` и `other_rejected`;
+- **связь с другими счётчиками** — `quota_capped` — те же события, что `LocalRefusals` reverse-таблицы (по dtype), `gate_refused` — локальная доля `metrics.SendRefusals` (там же и транзит); это другие разрезы, с этими не складываются. Поставленная в очередь отправка не равна доставленной, байты здесь не считаются;
+- **сброс и пары** — как выше.
+
+Оба блока — atomic (в записях реестра и в `datagram.Metrics`) вне всех доменных мьютексов `node.Service` (`docs/locking.md`); сводка читает их без блокировок.
+
+### Полнота разбивки ресурсов
+
+`getResourceBreakdown` (`docs/rpc/system.md`) даёт по строке на каждое значение перечисления подсистем, а тест-сторож обходит само перечисление — каждое значение ровно один раз, — а не список рядом с ним. Состояние передачи файлов (домен `fileMu`) подсистемы не имеет и в разбивку НЕ входит; это записанное исключение с причиной, и сторож падает, если исключение убрали, а файлы по-прежнему не учитываются, или оставили, когда их начала учитывать какая-то строка. Домен агрегированного статуса (`statusMu`: небольшие записи и самоочищающееся множество репортёров) и блокировка пула gossip (`gossipPoolMu`, состояния не владеет) тоже записаны исключениями; то, что каждый домен обязан быть либо учтён, либо исключён, не проверяется. Цифры разбивки — нижняя оценка удерживаемой памяти, а не байты по сети; с транспортными итогами они не складываются и не сравниваются.
 
 ### Кольцевой буфер TrafficHistory
 

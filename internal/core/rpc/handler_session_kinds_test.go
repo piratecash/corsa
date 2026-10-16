@@ -44,6 +44,8 @@ func TestFetchRouteSummaryReportsSessionKinds(t *testing.T) {
 		},
 	}).Once()
 
+	provider.On("ListenerRefusalStats").Return(domain.ListenerRefusalStats{}).Once()
+
 	section := routeSummarySection(t, provider, "session_kinds")
 
 	for field, want := range map[string]string{

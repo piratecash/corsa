@@ -42,11 +42,31 @@ var (
 	// pins the peer to v2. A TLS alert (0x15) is a TLS refusal, and any other
 	// byte is not a v1 node: both are plain v2 failures.
 	ErrPeerSpeaksV1 = errors.New("sessionv2: the peer answered without TLS")
+	// ErrRefusedByListener is a dial answered with RefusalAlert before any
+	// other byte: a listener of this protocol that speaks TLS and refused the
+	// connection by one of its bounds — busy, not broken. Any other alert is
+	// an ordinary v2 failure.
+	ErrRefusedByListener = errors.New("sessionv2: the listener refused the connection")
 )
 
 // TLSRecordHandshake is the first byte of every TLS connection: the record
 // type of the ClientHello. A listener tells v2 from v1 by it.
 const TLSRecordHandshake = 0x16
+
+// refusalAlertLen is the length of RefusalAlert.
+const refusalAlertLen = 7
+
+// RefusalAlert is the record a listener answers a connection it refuses
+// with, whatever the connection was going to speak: a complete TLS alert
+// record — type 0x15, version 0x0303, length 2, level fatal (2), description
+// internal_error (80). A dialler of this build reads its first byte as a TLS
+// refusal, not as an old node (ErrPeerSpeaksV1); an old v1 dialler reads
+// seven bytes without a newline and then EOF, exactly what a silent close
+// gives it. A fresh slice on every call: no caller can change the bytes
+// another one sends.
+func RefusalAlert() []byte {
+	return []byte{0x15, 0x03, 0x03, 0x00, 0x02, 0x02, 0x50}
+}
 
 // V1FrameStart is the first byte of every v1 frame: a JSON object.
 const V1FrameStart = '{'
@@ -122,6 +142,18 @@ func (l Local) stamp(intro protocol.Frame, role Role) (protocol.Frame, error) {
 	return intro, nil
 }
 
+// PeerMismatchError is ErrPeerMismatch with the identity the peer proved, for
+// a caller that journals the mismatch. It matches ErrPeerMismatch.
+type PeerMismatchError struct {
+	Proven domain.PeerIdentity
+}
+
+func (e *PeerMismatchError) Error() string {
+	return ErrPeerMismatch.Error() + ": proved " + e.Proven.String()
+}
+
+func (e *PeerMismatchError) Unwrap() error { return ErrPeerMismatch }
+
 // ExpectedPeer is whom the caller meant to reach. The expectation exists
 // only when the caller names a peer (sending to X, opening contact X); an
 // address dial expects nobody and accepts whoever proves itself.
@@ -189,28 +221,35 @@ func Dial(ctx context.Context, raw net.Conn, local Local, hello protocol.Frame, 
 	first := &firstByteConn{Conn: raw}
 	conn := tls.Client(first, dialerConfig())
 	session, err := establish(ctx, conn, local, intro, RoleDialer, expect, timeouts, collectHooks(options))
-	if err != nil && first.answeredWithV1() {
+	switch {
+	case err == nil:
+		return session, nil
+	case first.answeredWithV1():
 		return ProvenSession{}, errors.Join(ErrPeerSpeaksV1, err)
+	case first.answeredWithRefusal():
+		return ProvenSession{}, errors.Join(ErrRefusedByListener, err)
 	}
 	return session, err
 }
 
-// firstByteConn remembers the first byte the peer sent, so a failed dial can
-// tell "a v1 node answered" (a JSON line) from everything else — a TLS
-// alert, other bytes, a timeout, a reset. Only the first is a reason to
-// speak v1.
+// firstByteConn remembers the first bytes the peer sent, so a failed dial can
+// tell "a v1 node answered" (a JSON line) and "a listener refused" (exactly
+// RefusalAlert) from everything else — another alert, other bytes, a
+// timeout, a reset. Only the first is a reason to speak v1.
 type firstByteConn struct {
 	net.Conn
-	mu    sync.Mutex
-	first []byte
+	mu sync.Mutex
+	// head is at most len(RefusalAlert()) bytes: the first byte decides v1,
+	// the whole record decides a refusal.
+	head []byte
 }
 
 func (c *firstByteConn) Read(b []byte) (int, error) {
 	n, err := c.Conn.Read(b)
 	if n > 0 {
 		c.mu.Lock()
-		if c.first == nil {
-			c.first = []byte{b[0]}
+		if room := refusalAlertLen - len(c.head); room > 0 {
+			c.head = append(c.head, b[:min(n, room)]...)
 		}
 		c.mu.Unlock()
 	}
@@ -224,7 +263,13 @@ func (c *firstByteConn) NetConn() net.Conn { return c.Conn }
 func (c *firstByteConn) answeredWithV1() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.first != nil && c.first[0] == V1FrameStart
+	return len(c.head) > 0 && c.head[0] == V1FrameStart
+}
+
+func (c *firstByteConn) answeredWithRefusal() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return bytes.Equal(c.head, RefusalAlert())
 }
 
 // Accept runs the listener side over raw, which the caller has accepted.
@@ -416,7 +461,7 @@ func receiveProvenPeer(conn *tls.Conn, local Local, role Role, expect ExpectedPe
 		return Peer{}, ErrSelfConnection
 	}
 	if expect.named && peerID != expect.identity {
-		return Peer{}, fmt.Errorf("%w: proved %s", ErrPeerMismatch, peerID)
+		return Peer{}, &PeerMismatchError{Proven: peerID}
 	}
 	return Peer{Identity: peerID, PublicKey: key, Intro: intro, proof: ProvenIdentity{id: peerID}}, nil
 }

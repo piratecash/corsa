@@ -188,7 +188,7 @@ func (s *Service) rebuildPeerHealthSnapshot() {
 	for _, health := range s.health {
 		rec := peerHealthRecord{
 			health:               *health,
-			peerID:               s.peerIDs[health.Address],
+			peerID:               s.peerIDs.identityOf(health.Address),
 			clientVersion:        s.peerVersions[health.Address],
 			clientBuild:          s.peerBuilds[health.Address],
 			pendingCount:         len(s.pending[health.Address]),
@@ -225,7 +225,7 @@ func (s *Service) rebuildPeerHealthSnapshot() {
 		}
 		ilr := inboundLiveRecord{
 			address:        addr,
-			peerID:         s.peerIDs[addr],
+			peerID:         s.peerIDs.identityOf(addr),
 			clientVersion:  s.peerVersions[addr],
 			clientBuild:    s.peerBuilds[addr],
 			capabilities:   s.peerCapabilitiesFromIndexLocked(addr, inboundCapsByAddr),

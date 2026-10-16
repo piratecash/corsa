@@ -396,7 +396,7 @@ func TestLearnIdentityFromWelcome_CompleteValidKeySet_IsLearned(t *testing.T) {
 		PubKey:  identity.PublicKeyBase64(responder.PublicKey),
 		BoxKey:  identity.BoxPublicKeyBase64(responder.BoxPublicKey),
 		BoxSig:  identity.SignBoxKeyBinding(responder),
-	}, "198.51.100.7:64646")
+	}, "198.51.100.7:64646", domain.PeerIdentityClaimed)
 
 	if pubKey, boxKey, boxSig := learnedWireKeys(svc, responder.Address); !pubKey || !boxKey || !boxSig {
 		t.Fatalf("a complete, binding-valid key set was not learned: pubkey=%v boxkey=%v boxsig=%v", pubKey, boxKey, boxSig)
@@ -413,7 +413,7 @@ func TestLearnIdentityFromWelcome_PubKeyWithoutBoxPair_LearnsNothing(t *testing.
 		Type:    "welcome",
 		Address: responder.Address,
 		PubKey:  identity.PublicKeyBase64(responder.PublicKey),
-	}, "198.51.100.7:64646")
+	}, "198.51.100.7:64646", domain.PeerIdentityClaimed)
 
 	if pubKey, boxKey, boxSig := learnedWireKeys(svc, responder.Address); pubKey || boxKey || boxSig {
 		t.Fatalf("a key set without a box pair was learned: pubkey=%v boxkey=%v boxsig=%v", pubKey, boxKey, boxSig)
@@ -433,7 +433,7 @@ func TestLearnIdentityFromWelcome_BoxBindingInvalid_LearnsNothing(t *testing.T) 
 		PubKey:  identity.PublicKeyBase64(responder.PublicKey),
 		BoxKey:  identity.BoxPublicKeyBase64(responder.BoxPublicKey),
 		BoxSig:  identity.SignBoxKeyBinding(stranger),
-	}, "198.51.100.7:64646")
+	}, "198.51.100.7:64646", domain.PeerIdentityClaimed)
 
 	if pubKey, boxKey, boxSig := learnedWireKeys(svc, responder.Address); pubKey || boxKey || boxSig {
 		t.Fatalf("a key set with an invalid box binding was learned: pubkey=%v boxkey=%v boxsig=%v", pubKey, boxKey, boxSig)

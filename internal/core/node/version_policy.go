@@ -208,7 +208,7 @@ func (s *Service) recomputeVersionPolicyLocked(now time.Time) {
 		if build > maxBuild {
 			maxBuild = build
 		}
-		peerID := s.peerIDs[addr]
+		peerID := s.peerIDs.identityOf(addr)
 		if peerID.IsZero() {
 			continue
 		}
@@ -383,7 +383,7 @@ func (s *Service) setVersionLockoutLocked(
 		return
 	}
 	now := time.Now().UTC()
-	peerID := s.peerIDs[address]
+	peerID := s.peerIDs.identityOf(address)
 	lockout := domain.VersionLockoutSnapshot{
 		ObservedProtocolVersion:        peerVersion,
 		ObservedMinimumProtocolVersion: peerMinimum,
@@ -422,7 +422,7 @@ func (s *Service) setVersionLockoutLocked(
 	// ObservedClientVersion and MaxObservedPeerVersion.
 	if !peerID.IsZero() {
 		for otherAddr, otherID := range s.peerIDs {
-			if otherAddr == address || otherID != peerID {
+			if otherAddr == address || otherID.identity != peerID {
 				continue
 			}
 			otherEntry, ok := s.persistedMeta[otherAddr]

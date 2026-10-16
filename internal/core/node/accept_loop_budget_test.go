@@ -1,6 +1,7 @@
 package node
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"net"
@@ -11,6 +12,7 @@ import (
 	"github.com/piratecash/corsa/internal/core/config"
 	"github.com/piratecash/corsa/internal/core/config/configtest"
 	"github.com/piratecash/corsa/internal/core/identity"
+	"github.com/piratecash/corsa/internal/core/sessionv2"
 )
 
 // accept_loop_budget_test.go drives the REAL accept loop.
@@ -76,22 +78,22 @@ func runningBudgetNode(t *testing.T, total int) (*Service, string, context.Cance
 	}
 }
 
-// serverClosedUs reports whether the peer closed the connection, which is how a
-// budget refusal looks from the outside: no bytes, immediate EOF. An accepted
-// connection whose handler is blocked stays open and the read times out
-// instead.
+// serverClosedUs reports whether the peer ended the connection, which is how a
+// budget refusal looks from the outside: the listener's refusal alert (or
+// nothing, when every alert sender was busy) and then the end of the
+// connection. Any other bytes are a broken refusal. An accepted connection
+// whose handler is blocked stays open and the read times out instead.
 func serverClosedUs(t *testing.T, conn net.Conn) bool {
 	t.Helper()
 	_ = conn.SetReadDeadline(time.Now().Add(400 * time.Millisecond))
-	buf := make([]byte, 1)
-	_, err := conn.Read(buf)
-	if err == nil {
-		return false
+	got, err := io.ReadAll(conn)
+	if len(got) != 0 && !bytes.Equal(got, sessionv2.RefusalAlert()) {
+		t.Fatalf("a refused connection read % x, want the refusal alert or nothing", got)
 	}
 	if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 		return false
 	}
-	return err == io.EOF || err != nil
+	return true
 }
 
 // TestAcceptLoopClosesWhatTheBudgetRefuses is the end-to-end version: a real

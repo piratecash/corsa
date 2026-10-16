@@ -59,7 +59,7 @@ func (s *Service) initMaps() {
 	s.upstream = make(map[domain.PeerAddress]struct{})
 	s.health = make(map[domain.PeerAddress]*peerHealth)
 	s.peerTypes = make(map[domain.PeerAddress]domain.NodeType)
-	s.peerIDs = make(map[domain.PeerAddress]domain.PeerIdentity)
+	s.peerIDs = make(addressIdentities)
 	s.peerVersions = make(map[domain.PeerAddress]string)
 	s.peerBuilds = make(map[domain.PeerAddress]int)
 	s.pubKeys = make(map[string]string)

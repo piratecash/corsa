@@ -19,6 +19,7 @@ packages:
       CaptureProvider: {}
       DatagramProvider: {}
       DiagnosticProvider: {}
+      EndpointBindingProvider: {}
   # --- Metrics collector ---
   github.com/piratecash/corsa/internal/core/metrics:
     config: *defaults

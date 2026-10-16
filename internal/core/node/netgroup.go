@@ -2,6 +2,7 @@ package node
 
 import (
 	"net"
+	"net/netip"
 	"sort"
 	"strings"
 
@@ -111,10 +112,11 @@ func subnetGroupKey(host string) string {
 	if ip == nil || isNonRoutableIP(ip) {
 		return ""
 	}
-	if v4 := ip.To4(); v4 != nil {
-		return v4.Mask(net.CIDRMask(subnetGroupBitsIPv4, 32)).String() + "/24"
+	addr, ok := netip.AddrFromSlice(ip)
+	if !ok {
+		return ""
 	}
-	return ip.Mask(net.CIDRMask(subnetGroupBitsIPv6, 128)).String() + "/64"
+	return addressGroupPrefix(addr, subnetGroupBitsIPv4, subnetGroupBitsIPv6).String()
 }
 
 // computeReachableGroups builds the set of NetGroups a node can reach

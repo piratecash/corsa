@@ -32,3 +32,24 @@ func assertOwnerOnly(t *testing.T, what, path string) {
 		t.Fatalf("%s: permissions = %o, want %o", what, perm, want)
 	}
 }
+
+// grantOthersRead is the POSIX half of "make this file readable by somebody
+// other than its owner" — the opposite of assertOwnerOnly, with a Windows
+// counterpart of the same signature, so the audit's behavioural tests widen a
+// file without a platform branch.
+func grantOthersRead(t *testing.T, path string) {
+	t.Helper()
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatalf("widen file: %v", err)
+	}
+}
+
+// denyOwnerWrites is the POSIX half of "this process may no longer create
+// files in dir". The mode is restored on cleanup so t.TempDir can remove it.
+func denyOwnerWrites(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatalf("deny writes: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+}

@@ -418,7 +418,7 @@ func (s *Service) evictStalePeers() {
 			if !lastSuccess.IsZero() && now.Sub(lastSuccess) > peerEvictStaleWindow {
 				delete(s.health, peer.Address)
 				delete(s.peerTypes, peer.Address)
-				if id := s.peerIDs[peer.Address]; !id.IsZero() {
+				if id := s.peerIDs.identityOf(peer.Address); !id.IsZero() {
 					evictIdentities = append(evictIdentities, id)
 				}
 				delete(s.peerIDs, peer.Address)
@@ -511,8 +511,8 @@ func (s *Service) orphanedIdentitiesLocked(ids []domain.PeerIdentity) []domain.P
 		return nil
 	}
 	live := make(map[domain.PeerIdentity]struct{}, len(s.peerIDs))
-	for _, id := range s.peerIDs {
-		live[id] = struct{}{}
+	for _, recorded := range s.peerIDs {
+		live[recorded.identity] = struct{}{}
 	}
 	orphaned := ids[:0]
 	for _, id := range ids {
@@ -612,7 +612,7 @@ func (s *Service) evictOrphanedHealthEntries() {
 		}
 		delete(s.health, addr)
 		delete(s.peerTypes, addr)
-		if id := s.peerIDs[addr]; !id.IsZero() {
+		if id := s.peerIDs.identityOf(addr); !id.IsZero() {
 			evictIdentities = append(evictIdentities, id)
 		}
 		delete(s.peerIDs, addr)
@@ -783,7 +783,7 @@ func (s *Service) evictOrphanedPeerMetadata() {
 			continue
 		}
 		delete(s.peerTypes, addr)
-		if id := s.peerIDs[addr]; !id.IsZero() {
+		if id := s.peerIDs.identityOf(addr); !id.IsZero() {
 			evictIdentities = append(evictIdentities, id)
 		}
 		delete(s.peerIDs, addr)
@@ -891,19 +891,20 @@ func (s *Service) buildPeerEntriesLocked(providerSnap map[domain.PeerAddress]kno
 		} else {
 			// New peer discovered at runtime — derive from live state.
 			entry = peerEntry{
-				Address:  peer.Address,
-				Identity: s.peerIDs[peer.Address],
-				NodeType: s.peerTypes[peer.Address],
-				Network:  classifyAddress(peer.Address),
-				Source:   peer.Source,
-				AddedAt:  &now,
+				Address:        peer.Address,
+				Identity:       s.peerIDs[peer.Address].identity,
+				IdentityOrigin: s.peerIDs[peer.Address].origin,
+				NodeType:       s.peerTypes[peer.Address],
+				Network:        classifyAddress(peer.Address),
+				Source:         peer.Source,
+				AddedAt:        &now,
 			}
 			// Store so that subsequent flushes are stable.
 			clone := entry
 			s.persistedMeta[peer.Address] = &clone
 		}
-		if identity := s.peerIDs[peer.Address]; !identity.IsZero() {
-			entry.Identity = identity
+		if recorded, ok := s.peerIDs[peer.Address]; ok {
+			entry.Identity, entry.IdentityOrigin = recorded.identity, recorded.origin
 		}
 		if health := s.health[peer.Address]; health != nil {
 			if !health.LastConnectedAt.IsZero() {
@@ -1270,15 +1271,17 @@ func (s *Service) syncReplySkipBudgetFor() int {
 const syncReplyDrainCap = 10 * time.Second
 
 // syncRecoveryTimeout bounds one whole background sender-key recovery
-// dial: TCP dial + hello/welcome/auth (each read individually bounded
-// by the syncHandshakeTimeout idle deadline) + up to two
-// syncReplyDrainCap reply drains. It is the ctx budget
+// dial: TCP dial + the v2 handshake (TLS and session_proof phases,
+// sessionv2.DefaultTimeouts, up to 8 s) or hello/welcome/auth (each read
+// individually bounded by the syncHandshakeTimeout idle deadline) + up to
+// two syncReplyDrainCap reply drains — 29.5 s at most, so 30 s leaves a
+// healthy drain on a slow v2 path uncancelled. It is the ctx budget
 // syncSenderKeys attaches to its fresh-dial fallback; readSyncReply
 // observes the ctx per iteration and the deadline-refresh closure
 // clamps to the ctx deadline, so a cancelled or expired ctx actually
 // stops the socket reads instead of being out-lived by the sliding
 // deadline.
-const syncRecoveryTimeout = 25 * time.Second
+const syncRecoveryTimeout = 30 * time.Second
 
 // readSyncReply reads frames from a syncPeer bootstrap connection until
 // one with the wanted type — or a terminal "error" frame — arrives,
@@ -1411,7 +1414,7 @@ func (s *Service) syncPeer(ctx context.Context, address domain.PeerAddress, requ
 	// Metered for the node-wide transport totals only. This dial never becomes
 	// a session, so its bytes stay out of the per-peer health totals, exactly
 	// as before; what it must not do is cross the wire uncounted.
-	transport, err := s.dialPeerTransport(ctx, address, func(ctx context.Context) (net.Conn, error) {
+	transport, err := s.dialPeerTransport(ctx, address, domain.DialToAddress(), func(ctx context.Context) (net.Conn, error) {
 		return s.dialPeerWithBudget(ctx, address, syncHandshakeTimeout)
 	})
 	if err != nil {
@@ -1491,7 +1494,7 @@ func (s *Service) syncPeer(ctx context.Context, address domain.PeerAddress, requ
 	// RemoteAddr() is the same "host:port" form that the managed-session path
 	// feeds in, so both paths project onto persistedMeta through one writer.
 	s.recordOutboundAuthSuccess(address, pc.RemoteAddr())
-	s.learnIdentityFromWelcome(welcome, address)
+	s.learnIdentityFromWelcome(welcome, address, identityOriginOf(transport.proven != nil))
 	s.peerMu.RLock()
 	syncHealthKey := s.resolveHealthAddress(address)
 	s.peerMu.RUnlock()
@@ -1773,7 +1776,9 @@ func scorePeerTargetLocked(health *peerHealth) int64 {
 	return stateWeight*1_000_000_000_000 + recency - int64(health.ConsecutiveFailures*1000) - int64(len(health.LastError))
 }
 
-func (s *Service) learnPeerFromFrame(observedAddr string, frame protocol.Frame) {
+// origin is what stands behind frame.Address: the session it arrived on
+// proved it over v2, or it is only claimed.
+func (s *Service) learnPeerFromFrame(observedAddr string, frame protocol.Frame, origin domain.PeerIdentityOrigin) {
 	if listenerEnabledFromFrame(frame) {
 		// The only authoritative port is frame.AdvertisePort and the
 		// only authoritative host is the observed TCP host. Synthesising
@@ -1789,7 +1794,7 @@ func (s *Service) learnPeerFromFrame(observedAddr string, frame protocol.Frame) 
 			if normalizedAddr, ok := s.normalizePeerAddress(domain.PeerAddress(observedAddr), domain.PeerAddress(advertised)); ok {
 				s.promotePeerAddress(normalizedAddr)
 				s.rememberPeerType(normalizedAddr, frame.NodeType)
-				s.addPeerID(normalizedAddr, domain.PeerIdentityFromWire(frame.Address))
+				s.addPeerID(normalizedAddr, addressIdentity{identity: domain.PeerIdentityFromWire(frame.Address), origin: origin})
 				s.addPeerVersion(normalizedAddr, frame.ClientVersion)
 				s.addPeerBuild(normalizedAddr, frame.ClientBuild)
 			}
@@ -2188,7 +2193,7 @@ func (s *Service) recordAddedPeer(peerAddress domain.PeerAddress, mode addPeerMo
 		// of the same identity (see setVersionLockoutLocked), so clearing must
 		// also be identity-wide. Otherwise sibling addresses remain suppressed
 		// and can keep the lockout-based update signal alive unexpectedly.
-		peerID := s.peerIDs[peerAddress]
+		peerID := s.peerIDs.identityOf(peerAddress)
 		if pm := s.persistedMeta[peerAddress]; pm != nil {
 			if pm.VersionLockout.IsActive() {
 				log.Info().
@@ -2221,7 +2226,7 @@ func (s *Service) recordAddedPeer(peerAddress domain.PeerAddress, mode addPeerMo
 			// peerMu → ipStateMu.
 			s.ipStateMu.Lock()
 			for otherAddr, otherID := range s.peerIDs {
-				if otherAddr == peerAddress || otherID != peerID {
+				if otherAddr == peerAddress || otherID.identity != peerID {
 					continue
 				}
 				if otherEntry, ok := s.persistedMeta[otherAddr]; ok && otherEntry.VersionLockout.IsActive() {
@@ -2476,8 +2481,8 @@ func (s *Service) addPeerAddress(address domain.PeerAddress, nodeType string, pe
 			// (bootstrap config, manual add, direct hello/welcome). Allowing
 			// any network-discovered path to retag it would let senders
 			// downgrade a "full" peer to "client" and break routing.
-			if !peerID.IsZero() {
-				s.peerIDs[address] = peerID
+			if !peerID.IsZero() && s.recordAddressIdentityLocked(address, claimedAddressIdentity(peerID)) {
+				s.notePersistedIdentityLocked(address)
 			}
 			s.peerMu.Unlock()
 			log.Trace().Str("site", "addPeerAddress").Str("phase", "lock_released_exists").Str("address", string(address)).Msg("peer_mu_writer")
@@ -2499,7 +2504,7 @@ func (s *Service) addPeerAddress(address domain.PeerAddress, nodeType string, pe
 		s.peerTypes[address] = peerType
 	}
 	if !peerID.IsZero() {
-		s.peerIDs[address] = peerID
+		s.recordAddressIdentityLocked(address, claimedAddressIdentity(peerID))
 	}
 	// Eagerly populate persistedMeta so that AddedAt is available for
 	// eviction decisions immediately, without waiting for a flush cycle.
@@ -2583,27 +2588,33 @@ func (s *Service) findKnownPeerByIPLocked(address domain.PeerAddress) (domain.Pe
 	return "", false
 }
 
-// addPeerID associates a peer identity (fingerprint) with a dial address.
-// Safe to call multiple times; empty values are ignored.
-func (s *Service) addPeerID(address domain.PeerAddress, peerID domain.PeerIdentity) {
-	if address == "" || peerID.IsZero() {
+// addPeerID records the identity of address with its origin. A claim never
+// replaces what v2 recorded (addressIdentities.record).
+func (s *Service) addPeerID(address domain.PeerAddress, recorded addressIdentity) {
+	if address == "" || recorded.identity.IsZero() {
 		return
 	}
 	log.Trace().Str("site", "addPeerID").Str("phase", "lock_wait").Str("address", string(address)).Msg("peer_mu_writer")
 	s.peerMu.Lock()
 	log.Trace().Str("site", "addPeerID").Str("phase", "lock_held").Str("address", string(address)).Msg("peer_mu_writer")
-	if s.peerIDs[address] != peerID {
-		s.peerIDs[address] = peerID
-		if persisted := s.persistedMeta[address]; persisted != nil {
-			persisted.Identity = peerID
-		}
-		// The binding now belongs to peers.json v3. Let bootstrapLoop
-		// debounce the full snapshot/write instead of waiting for the periodic
-		// catch-all; reconnects with the same identity do not re-mark it.
-		s.peerStateDirty = true
+	if s.recordAddressIdentityLocked(address, recorded) {
+		s.notePersistedIdentityLocked(address)
 	}
 	s.peerMu.Unlock()
 	log.Trace().Str("site", "addPeerID").Str("phase", "lock_released").Str("address", string(address)).Msg("peer_mu_writer")
+}
+
+// notePersistedIdentityLocked copies the identity recorded for address into its
+// persisted metadata and marks peers.json for the next write. The binding now
+// belongs to peers.json v3: bootstrapLoop debounces the full snapshot instead
+// of waiting for the periodic catch-all, and reconnects with the same
+// identity do not re-mark it. Caller holds peerMu (write).
+func (s *Service) notePersistedIdentityLocked(address domain.PeerAddress) {
+	recorded := s.peerIDs[address]
+	if persisted := s.persistedMeta[address]; persisted != nil {
+		persisted.Identity, persisted.IdentityOrigin = recorded.identity, recorded.origin
+	}
+	s.peerStateDirty = true
 }
 
 func (s *Service) addPeerVersion(address domain.PeerAddress, clientVersion string) {
@@ -4668,7 +4679,7 @@ func (s *Service) penalizeOldProtocolPeer(address domain.PeerAddress, peerVersio
 	//                otherwise old peers connecting to us would incorrectly
 	//                trigger the "you need to upgrade" signal.
 	if peerMinimum > domain.ProtocolVersion(config.ProtocolVersion) {
-		peerID := s.peerIDs[address]
+		peerID := s.peerIDs.identityOf(address)
 		// statusMu guards s.versionPolicy for both
 		// recordIncompatibleObservationLocked and the trailing
 		// recomputeVersionPolicyLocked. Acquired INNERMOST per canonical
@@ -4979,6 +4990,19 @@ func (s *Service) nextConnIDLocked() domain.ConnID {
 	return domain.ConnID(s.connIDCounter)
 }
 
+// allocateConnID names an outbound socket dialled to address. Takes peerMu
+// for the counter alone; the caller holds no domain mutex. site names the
+// dial path in the lock trace.
+func (s *Service) allocateConnID(site string, address domain.PeerAddress) domain.ConnID {
+	log.Trace().Str("site", site+"_nextCID").Str("phase", "lock_wait").Str("address", string(address)).Msg("peer_mu_writer")
+	s.peerMu.Lock()
+	log.Trace().Str("site", site+"_nextCID").Str("phase", "lock_held").Str("address", string(address)).Msg("peer_mu_writer")
+	cid := s.nextConnIDLocked()
+	s.peerMu.Unlock()
+	log.Trace().Str("site", site+"_nextCID").Str("phase", "lock_released").Str("address", string(address)).Msg("peer_mu_writer")
+	return cid
+}
+
 // inboundConnIDsLocked returns the connection IDs for all active inbound
 // connections that declared the given overlay address in their hello frame.
 // Reads peer-domain inbound-conn state — caller MUST hold s.peerMu
@@ -5139,7 +5163,7 @@ func (s *Service) emitPeerHealthDeltaLocked(health *peerHealth) {
 	pendingCount := len(s.pending[health.Address])
 	delta := ebus.PeerHealthDelta{
 		Address:             health.Address,
-		PeerID:              s.peerIDs[health.Address],
+		PeerID:              s.peerIDs.identityOf(health.Address),
 		Direction:           health.Direction,
 		ClientVersion:       s.peerVersions[health.Address],
 		ClientBuild:         s.peerBuilds[health.Address],

@@ -12,7 +12,7 @@ All limits are tuned for legitimate P2P node behavior: persistent connections wi
 
 **File**: `internal/core/node/conn_limiter.go`
 
-Every incoming TCP connection is checked against a per-IP fixed-window counter before any resources (goroutines, buffers, maps) are allocated. If an IP exceeds the configured rate, the connection is closed immediately at the accept level.
+Every incoming TCP connection is checked against a per-IP fixed-window counter before any resources (goroutines, buffers, maps) are allocated. If an IP exceeds the configured rate, the connection is refused at the accept level: it gets the TLS refusal alert from a bounded pool of senders (or, with every sender busy, an immediate close), and the accept loop never waits for it — see `docs/protocol/session_v2.md`, "Listener refusals". The per-IP cap below, the shared connection budget and the blacklist refuse the same way.
 
 The window opens at an IP's first attempt and lasts `defaultConnRateWindow`. Attempts inside it are counted, and every attempt past `defaultConnRateLimit` is refused. The first attempt once the window has run its full length (elapsed ≥ the window) opens a new window with a count of 1. This is a fixed window, not a sliding one: a sender can place up to twice the limit around a window boundary. Time is read only through a clock injected when the limiter is built — the wall clock in production — so window expiry is tested at exact instants.
 
@@ -448,7 +448,7 @@ graph TB
 
 **Файл**: `internal/core/node/conn_limiter.go`
 
-Каждое входящее TCP-соединение проверяется по счётчику фиксированного окна для данного IP до выделения каких-либо ресурсов (горутин, буферов, карт). Если IP превышает настроенный лимит, соединение закрывается немедленно на уровне accept.
+Каждое входящее TCP-соединение проверяется по счётчику фиксированного окна для данного IP до выделения каких-либо ресурсов (горутин, буферов, карт). Если IP превышает настроенный лимит, соединение отвергается на уровне accept: оно получает TLS-alert отказа из ограниченного пула отправителей (а если все отправители заняты — немедленное закрытие), и цикл accept его никогда не ждёт — см. `docs/protocol/session_v2.md`, «Отказы слушателя». Так же отвергают предел на IP ниже, общий бюджет соединений и чёрный список.
 
 Окно открывается первой попыткой IP и длится `defaultConnRateWindow`. Попытки внутри окна считаются, и каждая попытка сверх `defaultConnRateLimit` отклоняется. Первая попытка после того, как окно отработало полную длину (прошло ≥ окна), открывает новое окно со счётчиком 1. Это фиксированное окно, а не скользящее: отправитель может уложить до двух лимитов вокруг границы окна. Время читается только через часы, переданные лимитеру при создании (в production — системные), поэтому истечение окна тестируется в точные моменты времени.
 

@@ -42,7 +42,7 @@ func newSyncPeerTestService(t *testing.T, aggregateStatus domain.NetworkStatus) 
 		pubKeys:       make(map[string]string),
 		boxSigs:       make(map[string]string),
 		peerTypes:     make(map[domain.PeerAddress]domain.NodeType),
-		peerIDs:       make(map[domain.PeerAddress]domain.PeerIdentity),
+		peerIDs:       make(addressIdentities),
 		peerVersions:  make(map[domain.PeerAddress]string),
 		peerBuilds:    make(map[domain.PeerAddress]int),
 		persistedMeta: make(map[domain.PeerAddress]*peerEntry),

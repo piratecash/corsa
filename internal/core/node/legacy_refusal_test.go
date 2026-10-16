@@ -28,7 +28,9 @@ import (
 // it is not a failure of the address, so it must not lower the address's
 // rating, put it into the candidate cooldown, or count as a setup failure.
 // Otherwise the man in the middle would push the address out of rotation and
-// keep v2 away from it.
+// keep v2 away from it. A dial "to X" that met another identity on the
+// address (errEndpointOwnerMismatch) is not charged either: the address may
+// have changed hands, and the dial only learnt it is not X's now.
 
 func newLegacyRefusalService(t *testing.T) *Service {
 	t.Helper()
@@ -43,14 +45,15 @@ func newLegacyRefusalService(t *testing.T) *Service {
 	return svc
 }
 
-// outboundLegacyRefusals are the refusals of the dialling side: the two that
-// meet a peer requiring v2, and the one the refusal backoff makes in their
-// stead while it holds the address.
-func outboundLegacyRefusals() map[string]error {
+// unchargedDialRefusals are the refusals of the dialling side: the two that
+// meet a peer requiring v2, the one the refusal backoff makes in their stead
+// while it holds the address, and a dial "to X" that met another identity.
+func unchargedDialRefusals() map[string]error {
 	return map[string]error{
-		"identity pinned to v2":   fmt.Errorf("%w: test", errLegacyRefusedPinned),
-		"endpoint bound to v2":    fmt.Errorf("%w: test", errLegacyRefusedV2Bound),
-		"held by refusal backoff": fmt.Errorf("%w: test", errLegacyRefusedBackoff),
+		"identity pinned to v2":        fmt.Errorf("%w: test", errLegacyRefusedPinned),
+		"endpoint bound to v2":         fmt.Errorf("%w: test", errLegacyRefusedV2Bound),
+		"held by refusal backoff":      fmt.Errorf("%w: test", errLegacyRefusedBackoff),
+		"another owner than the named": fmt.Errorf("%w: test", errEndpointOwnerMismatch),
 	}
 }
 
@@ -59,7 +62,7 @@ func outboundLegacyRefusals() map[string]error {
 // no setup failure, no route quarantine.
 func TestAnOutboundLegacyRefusalIsNotAFailureOfTheAddress(t *testing.T) {
 	t.Parallel()
-	for name, refusal := range outboundLegacyRefusals() {
+	for name, refusal := range unchargedDialRefusals() {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			svc := newLegacyRefusalService(t)
@@ -194,7 +197,7 @@ func dialThroughV1Answerer(t *testing.T, svc *Service, address domain.PeerAddres
 	answerer := &v1Answerer{}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	transport, err := svc.dialPeerTransport(ctx, address, answerer.dialer())
+	transport, err := svc.dialPeerTransport(ctx, address, domain.DialToAddress(), answerer.dialer())
 	if transport != nil {
 		_ = transport.wire.Close()
 	}
@@ -251,7 +254,7 @@ func TestTheLegacyRefusalHoldWithholdsOnlyTheV1Fallback(t *testing.T) {
 		t.Parallel()
 		svc := newLegacyRefusalService(t)
 		address := domain.PeerAddress("198.51.100.7:64646")
-		if _, err := svc.secureSessions.store.noteProvenOutbound(address, domain.PeerIdentity{1}, endpointProtectionNone()); err != nil {
+		if _, err := svc.secureSessions.store.noteProvenOutbound(dialledAt(address), domain.PeerIdentity{1}, endpointProtectionNone()); err != nil {
 			t.Fatalf("bind: %v", err)
 		}
 		svc.secureSessions.marks.noteLegacyRefused(address)
@@ -340,7 +343,7 @@ func TestEveryOutboundLegacyRefusalHoldsItsAddressAndIsCountedApart(t *testing.T
 		t.Parallel()
 		svc := newLegacyRefusalService(t)
 		address := domain.PeerAddress("198.51.100.7:64646")
-		if _, err := svc.secureSessions.store.noteProvenOutbound(address, domain.PeerIdentity{1}, endpointProtectionNone()); err != nil {
+		if _, err := svc.secureSessions.store.noteProvenOutbound(dialledAt(address), domain.PeerIdentity{1}, endpointProtectionNone()); err != nil {
 			t.Fatalf("bind: %v", err)
 		}
 		if _, err := dialThroughV1Answerer(t, svc, address); !errors.Is(err, errLegacyRefusedV2Bound) {

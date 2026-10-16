@@ -17,6 +17,7 @@ import (
 	"github.com/piratecash/corsa/internal/core/routing"
 	"github.com/piratecash/corsa/internal/core/sessionv2"
 	"github.com/piratecash/corsa/internal/core/sessionv2/sessionv2test"
+	"github.com/piratecash/corsa/internal/core/trustedclock"
 )
 
 // legacy_routing_claims_test.go pins the routing half of N1
@@ -45,7 +46,7 @@ func pinIdentity(t *testing.T, svc *Service, id domain.PeerIdentity) {
 	t.Helper()
 	svc.secureSessions = &secureSessions{
 		mode:  sessionv2.ModeTransition,
-		store: loadSecureSessionStore("", time.Now),
+		store: loadSecureSessionStore("", trustedclock.NewSystem()),
 		marks: newSessionAddressMarks(time.Now),
 	}
 	if err := svc.secureSessions.store.noteProvenInbound(id); err != nil {
@@ -379,7 +380,7 @@ func TestAV2ProofForgetsWhatALegacyClaimWroteBeforeIt(t *testing.T) {
 	svc := newLegacyPenaltyService(t)
 	svc.secureSessions = &secureSessions{
 		mode:  sessionv2.ModeTransition,
-		store: loadSecureSessionStore("", time.Now),
+		store: loadSecureSessionStore("", trustedclock.NewSystem()),
 		marks: newSessionAddressMarks(time.Now),
 	}
 	peer, _ := sessionv2test.NewProvenPeer(t)

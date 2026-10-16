@@ -151,6 +151,32 @@ func (c *Client) exec(command string, args map[string]interface{}) (map[string]i
 	return result, nil
 }
 
+// execInto sends a command via /rpc/v1/exec and decodes its answer into out,
+// the DTO the command's handler encoded.
+func (c *Client) execInto(command string, args map[string]interface{}, out interface{}) error {
+	reqBody := map[string]interface{}{"command": command}
+	if args != nil {
+		reqBody["args"] = args
+	}
+	raw, statusCode, err := c.postRaw("/rpc/v1/exec", reqBody)
+	if err != nil {
+		return err
+	}
+	if statusCode >= 400 {
+		var errResp map[string]interface{}
+		if jsonErr := json.Unmarshal(raw, &errResp); jsonErr == nil {
+			if errMsg, ok := errResp["error"].(string); ok {
+				return fmt.Errorf("rpc error: %s", errMsg)
+			}
+		}
+		return fmt.Errorf("rpc error: status %d", statusCode)
+	}
+	if err := json.Unmarshal(raw, out); err != nil {
+		return fmt.Errorf("parse %s response: %w", command, err)
+	}
+	return nil
+}
+
 // postRaw sends a POST request and returns the raw response body and status code.
 func (c *Client) postRaw(path string, body map[string]interface{}) ([]byte, int, error) {
 	var bodyReader io.Reader

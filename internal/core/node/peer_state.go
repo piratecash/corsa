@@ -12,18 +12,22 @@ import (
 )
 
 type peerEntry struct {
-	Address             domain.PeerAddress  `json:"address"`
-	Identity            domain.PeerIdentity `json:"identity,omitzero"`
-	NodeType            domain.NodeType     `json:"node_type,omitempty"`
-	Network             domain.NetGroup     `json:"network,omitempty"` // network group classification for this address
-	LastConnectedAt     *time.Time          `json:"last_connected_at,omitempty"`
-	LastDisconnectedAt  *time.Time          `json:"last_disconnected_at,omitempty"`
-	ConsecutiveFailures int                 `json:"consecutive_failures"`
-	LastError           string              `json:"last_error,omitempty"`
-	Source              domain.PeerSource   `json:"source"`                 // bootstrap, peer_exchange, manual, announce
-	AddedAt             *time.Time          `json:"added_at,omitempty"`     // first time this address was seen
-	Score               int                 `json:"score"`                  // higher = better; decays on failure, grows on success
-	BannedUntil         *time.Time          `json:"banned_until,omitempty"` // peer is not dialled until this time expires
+	Address  domain.PeerAddress  `json:"address"`
+	Identity domain.PeerIdentity `json:"identity,omitzero"`
+	// IdentityOrigin is what stands behind Identity; absent with it. A file
+	// an earlier build wrote has no origin, and its identities are read as
+	// claimed (restoredIdentityOrigin): nothing there says v2 proved them.
+	IdentityOrigin      domain.PeerIdentityOrigin `json:"identity_origin,omitempty"`
+	NodeType            domain.NodeType           `json:"node_type,omitempty"`
+	Network             domain.NetGroup           `json:"network,omitempty"` // network group classification for this address
+	LastConnectedAt     *time.Time                `json:"last_connected_at,omitempty"`
+	LastDisconnectedAt  *time.Time                `json:"last_disconnected_at,omitempty"`
+	ConsecutiveFailures int                       `json:"consecutive_failures"`
+	LastError           string                    `json:"last_error,omitempty"`
+	Source              domain.PeerSource         `json:"source"`                 // bootstrap, peer_exchange, manual, announce
+	AddedAt             *time.Time                `json:"added_at,omitempty"`     // first time this address was seen
+	Score               int                       `json:"score"`                  // higher = better; decays on failure, grows on success
+	BannedUntil         *time.Time                `json:"banned_until,omitempty"` // peer is not dialled until this time expires
 
 	// Machine-readable version diagnostics — persisted so the operator-visible
 	// peerHealthFrames() snapshot retains the exact evidence that created a

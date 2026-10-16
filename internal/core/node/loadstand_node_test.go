@@ -50,9 +50,12 @@ var (
 )
 
 // loadStandStartBudget bounds how long Start waits for the node to be ready.
-// It is wider than startTestService's 3 s because the stand starts nodes on a
-// machine it is loading on purpose.
-const loadStandStartBudget = 10 * time.Second
+// It is a hang guard, not a start-up deadline, and the same one ordinary
+// tests use (nodeReadinessHangGuard): readiness is read from the node's own
+// state, which a healthy start publishes within milliseconds even on a
+// machine the stand loads on purpose, so only a node that never gets there
+// runs into it.
+const loadStandStartBudget = nodeReadinessHangGuard
 
 // loadStandProfileLabel is the pprof label key the goroutines of a node carry.
 const loadStandProfileLabel = "node"
@@ -133,18 +136,29 @@ type loadStandHooks struct {
 	// counts all of them, so any threshold would trip on the stand's size
 	// rather than on one node's backlog.
 	OverloadGoroutineThreshold *int
+	// InboundHandshakes, when set, replaces the node's bounds on inbound v2
+	// handshakes; nil keeps production's. On a loopback stand every peer is
+	// a loopback source, so the loopback share of the node bound — there to
+	// keep the onion entry from taking all of it — would cap the stand's
+	// own dials and measure its topology instead of a node.
+	InboundHandshakes *handshakeBounds
 }
 
 // loadStandLoopbackHooks are the departures a many-node loopback stand needs.
 // MarkPeerStateInterval and the overload threshold are production's values,
-// stated so that a change to either default is a change to this function.
+// stated so that a change to either default is a change to this function; the
+// inbound handshake bounds are production's with the loopback share lifted
+// to the node bound, because every peer of a loopback stand is loopback.
 func loadStandLoopbackHooks() loadStandHooks {
 	gateDisabled := 0
+	handshakes := productionHandshakeBounds()
+	handshakes.loopback = handshakes.node
 	return loadStandHooks{
 		DisableRateLimiting:        true,
 		AllowPrivatePeers:          true,
 		MarkPeerStateInterval:      0,
 		OverloadGoroutineThreshold: &gateDisabled,
+		InboundHandshakes:          &handshakes,
 	}
 }
 
@@ -158,6 +172,9 @@ func (h loadStandHooks) applyToConfig(cfg *config.Node) {
 func (h loadStandHooks) applyToService(svc *Service) {
 	svc.disableRateLimiting = h.DisableRateLimiting
 	svc.markPeerStateIntervalTest = h.MarkPeerStateInterval
+	if h.InboundHandshakes != nil {
+		svc.inboundHandshakes = newInboundHandshakes(*h.InboundHandshakes)
+	}
 }
 
 // loadStandNodeOpts are a node's optional settings; the always-required ones
@@ -450,8 +467,8 @@ func (n *loadStandNode) CheckBanFree(now time.Time, policy loadStandBanPolicy) e
 //
 // Start returns once the incarnation is ready in the sense of
 // runningTestService.AwaitReady — for EVERY role, Run has finished its
-// start-up (bootstrap priming, hot-read snapshots), and a full node accepts
-// connections on its own listener. A Start that fails after Run was launched
+// start-up (bootstrap priming, hot-read snapshots), and for a full node Run
+// has bound its own listener. A Start that fails after Run was launched
 // leaves the incarnation in place, because only Stop can tell when it is
 // gone.
 //

@@ -6,8 +6,15 @@ import "os"
 
 // create_posix.go is the POSIX half of the two platform primitives. Both are
 // one line of intent here, because the mode bits mean what they say: a file
-// created 0600 IS owner-only, from the instant it exists, with no separate
-// permission step and therefore no window between creation and protection.
+// created 0600 has owner-only mode bits from the instant it exists, with no
+// separate permission step and therefore no window between creation and
+// protection.
+//
+// Mode bits are not the whole answer on macOS: inheritable entries of the
+// directory's extended ACL are applied to the new file regardless of the
+// mode, so there the file is owner-only only if the directory carries no such
+// entries. That is a known, unfixed limit of this writer (see the package
+// comment).
 //
 // The Windows half needs the NT API to get the same guarantee — see
 // create_windows.go.

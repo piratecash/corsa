@@ -11,6 +11,10 @@ import (
 // totals, so the socket is refused instead of carried uncounted.
 var ErrNilTransportTotals = errors.New("netcore: metered connection without transport totals")
 
+// ErrNoHalfClose is returned by MeteredConn.CloseWrite when the socket
+// underneath cannot close only its write side.
+var ErrNoHalfClose = errors.New("netcore: the connection cannot half-close")
+
 // MeteredConn wraps a net.Conn and transparently counts bytes
 // read from and written to the underlying connection.
 // All counters are safe for concurrent access via atomic operations.
@@ -55,6 +59,17 @@ func (m *MeteredConn) Write(p []byte) (int, error) {
 		m.totals.addSent(n)
 	}
 	return n, err
+}
+
+// CloseWrite half-closes the socket underneath, so a listener can send its
+// last bytes and a FIN while it still reads what the peer had already sent.
+// A socket that cannot half-close is reported, not closed.
+func (m *MeteredConn) CloseWrite() error {
+	halfCloser, ok := m.Conn.(interface{ CloseWrite() error })
+	if !ok {
+		return ErrNoHalfClose
+	}
+	return halfCloser.CloseWrite()
 }
 
 // BytesRead returns the total number of bytes read from this connection.

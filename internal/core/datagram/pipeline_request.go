@@ -310,7 +310,7 @@ func (p *Pipeline) sendLocalRequest(ctx context.Context, opts LocalSendOpts) Sen
 	})
 	slot, reserved := reservation.Slot()
 	if !reserved {
-		return localRefusal()
+		return localRefusal(reverseRefusalCause(reservation.Outcome()))
 	}
 
 	placed := p.scheduler.dispatch(ctx, job, selection, p.requestPublisher(slot, frame, sendDeadlineFor(now)))

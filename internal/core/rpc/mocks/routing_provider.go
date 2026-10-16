@@ -182,6 +182,50 @@ func (_c *MockRoutingProvider_JournalCauseStats_Call) RunAndReturn(run func() ma
 	return _c
 }
 
+// ListenerRefusalStats provides a mock function for the type MockRoutingProvider
+func (_mock *MockRoutingProvider) ListenerRefusalStats() domain.ListenerRefusalStats {
+	ret := _mock.Called()
+
+	if len(ret) == 0 {
+		panic("no return value specified for ListenerRefusalStats")
+	}
+
+	var r0 domain.ListenerRefusalStats
+	if returnFunc, ok := ret.Get(0).(func() domain.ListenerRefusalStats); ok {
+		r0 = returnFunc()
+	} else {
+		r0 = ret.Get(0).(domain.ListenerRefusalStats)
+	}
+	return r0
+}
+
+// MockRoutingProvider_ListenerRefusalStats_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'ListenerRefusalStats'
+type MockRoutingProvider_ListenerRefusalStats_Call struct {
+	*mock.Call
+}
+
+// ListenerRefusalStats is a helper method to define mock.On call
+func (_e *MockRoutingProvider_Expecter) ListenerRefusalStats() *MockRoutingProvider_ListenerRefusalStats_Call {
+	return &MockRoutingProvider_ListenerRefusalStats_Call{Call: _e.mock.On("ListenerRefusalStats")}
+}
+
+func (_c *MockRoutingProvider_ListenerRefusalStats_Call) Run(run func()) *MockRoutingProvider_ListenerRefusalStats_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run()
+	})
+	return _c
+}
+
+func (_c *MockRoutingProvider_ListenerRefusalStats_Call) Return(listenerRefusalStats domain.ListenerRefusalStats) *MockRoutingProvider_ListenerRefusalStats_Call {
+	_c.Call.Return(listenerRefusalStats)
+	return _c
+}
+
+func (_c *MockRoutingProvider_ListenerRefusalStats_Call) RunAndReturn(run func() domain.ListenerRefusalStats) *MockRoutingProvider_ListenerRefusalStats_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // ModeSelectionStats provides a mock function for the type MockRoutingProvider
 func (_mock *MockRoutingProvider) ModeSelectionStats() routing.ModeSelectionStats {
 	ret := _mock.Called()

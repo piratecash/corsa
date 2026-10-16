@@ -65,7 +65,11 @@ func (e *datagramError) Error() string { return "datagram: " + e.msg }
 //	  "queue":     { ... },               // weighted class queue depths
 //	  "replay":    { "Counters": {...}, "Held": 0 }, // anti-replay cache
 //	  "reverse":   { "Held": 0, "LocalSlots": 0, "LocalRefusals": {} }, // request quota
-//	  "limits":    { ... }                // the docs/protocol/datagram.md §5 numbers in force
+//	  "limits":    { ... },               // the docs/protocol/datagram.md §5 numbers in force
+//	  "handlers":  { "by_dtype": { "get_identity": { "request": {"calls": 0, ...} } },
+//	                 "started_at": "...", "read_at": "..." },        // per-type handler calls
+//	  "local_senders": { "by_sender": { "identity_resolver": {"attempts": 0, ...},
+//	                     "unattributed": {...} }, "started_at": "...", "read_at": "..." }
 //	}
 //
 // Every key CollectDiagnostics fills must appear here. That is not a style
@@ -80,9 +84,15 @@ func (s *Service) FetchDatagramSummary() (json.RawMessage, error) {
 		return nil, errDatagramNotEnabled
 	}
 
-	diagnostics := datagram.CollectDiagnostics(
-		layer.limits, layer.metrics, layer.admission, layer.queue, layer.replayCache, layer.reverse,
-	)
+	diagnostics := datagram.CollectDiagnostics(datagram.DiagnosticsSources{
+		Limits:    layer.limits,
+		Metrics:   layer.metrics,
+		Admission: layer.admission,
+		Queue:     layer.queue,
+		Replay:    layer.replayCache,
+		Reverse:   layer.reverse,
+		Types:     layer.types,
+	})
 
 	summary := map[string]any{
 		"enabled":  true,
@@ -100,6 +110,8 @@ func (s *Service) FetchDatagramSummary() (json.RawMessage, error) {
 		"replay":            diagnostics.Replay,
 		"reverse":           diagnostics.Reverse,
 		"limits":            diagnostics.Limits,
+		"handlers":          diagnostics.Handlers,
+		"local_senders":     diagnostics.LocalSenders,
 	}
 	data, err := json.Marshal(summary)
 	if err != nil {

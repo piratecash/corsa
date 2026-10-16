@@ -215,12 +215,15 @@ func (s *Service) runPeerSession(ctx context.Context, address domain.PeerAddress
 				log.Warn().Str("peer", string(address)).Msg("peer_session_stopped_self_identity")
 				return
 			}
-			// A refusal by pin is this node's decision, not a failure of
-			// the address (onCMDialFailed): nothing is charged, and the
-			// loop stops — the refusal already holds the fall back to v1
+			// A refusal that says nothing against the address
+			// (isUnchargedDialRefusal: a v1 answer refused by pin or
+			// binding, a held fall back or v2 retry, a listener's refusal,
+			// another owner than the dial named) is not a failure of the
+			// address (onCMDialFailed): nothing is charged, and the loop
+			// stops — a refusal by pin already holds the fall back to v1
 			// at the address, and this path has no v2 to try instead.
-			if isOutboundLegacyRefusal(err) {
-				log.Warn().Err(err).Str("peer", string(address)).Msg("peer_session_stopped_legacy_refused")
+			if isUnchargedDialRefusal(err) {
+				log.Warn().Err(err).Str("peer", string(address)).Msg("peer_session_stopped_dial_refused_not_charged")
 				return
 			}
 			// servePeerSession calls markPeerDisconnected before
@@ -295,12 +298,7 @@ func (s *Service) openPeerSession(ctx context.Context, address domain.PeerAddres
 
 	_ = conn.SetDeadline(time.Now().Add(handshakeTimeout))
 	reader := bufio.NewReader(conn)
-	log.Trace().Str("site", "openPeerSession_nextCID").Str("phase", "lock_wait").Str("address", string(address)).Msg("peer_mu_writer")
-	s.peerMu.Lock()
-	log.Trace().Str("site", "openPeerSession_nextCID").Str("phase", "lock_held").Str("address", string(address)).Msg("peer_mu_writer")
-	cid := s.nextConnIDLocked()
-	s.peerMu.Unlock()
-	log.Trace().Str("site", "openPeerSession_nextCID").Str("phase", "lock_released").Str("address", string(address)).Msg("peer_mu_writer")
+	cid := s.allocateConnID("openPeerSession", address)
 	session = &peerSession{
 		address:      address,
 		peerIdentity: domain.PeerIdentity{},
@@ -359,7 +357,8 @@ func (s *Service) openPeerSession(ctx context.Context, address domain.PeerAddres
 	s.peerMu.Lock()
 	applyWelcomeMetadata(session, welcome, s.cfg.EnableMeshRoutingV3, advertise)
 	s.peerMu.Unlock()
-	s.learnIdentityFromWelcome(welcome, address)
+	_, proven := session.provenIdentity()
+	s.learnIdentityFromWelcome(welcome, address, identityOriginOf(proven))
 	// learnIdentityFromWelcome stores version/build keyed by the dial
 	// address (the only trusted host:port for the outbound side).
 	// Mirror them under the health-tracking key resolveHealthAddress
@@ -369,7 +368,7 @@ func (s *Service) openPeerSession(ctx context.Context, address domain.PeerAddres
 	s.peerMu.RLock()
 	healthKey := s.resolveHealthAddress(address)
 	s.peerMu.RUnlock()
-	s.addPeerID(healthKey, session.peerIdentity)
+	s.addPeerID(healthKey, addressIdentity{identity: session.peerIdentity, origin: identityOriginOf(proven)})
 	s.addPeerVersion(healthKey, welcome.ClientVersion)
 	s.addPeerBuild(healthKey, welcome.ClientBuild)
 	if err := s.authenticatePeerSession(session, welcome); err != nil {
@@ -762,7 +761,7 @@ func (s *Service) markPeerConnected(address domain.PeerAddress, direction domain
 
 	address = s.resolveHealthAddress(address)
 	health := s.ensurePeerHealthLocked(address)
-	peerID := s.peerIDs[address]
+	peerID := s.peerIDs.identityOf(address)
 	now := time.Now().UTC()
 	health.Connected = true
 	health.Direction = direction
@@ -819,7 +818,7 @@ func (s *Service) markPeerConnected(address domain.PeerAddress, direction domain
 	// the same identity — mirrors setVersionLockoutLocked propagation.
 	if !peerID.IsZero() {
 		for otherAddr, otherID := range s.peerIDs {
-			if otherAddr == address || otherID != peerID {
+			if otherAddr == address || otherID.identity != peerID {
 				continue
 			}
 			if otherEntry, ok := s.persistedMeta[otherAddr]; ok && otherEntry.VersionLockout.IsActive() {
@@ -1022,7 +1021,7 @@ func (s *Service) publishPeerDisconnected(address domain.PeerAddress, charge pee
 	s.updatePeerStateLocked(health, peerStateReconnecting)
 	health.LastDisconnectedAt = now
 	charge.applyLocked(health)
-	peerID := s.peerIDs[address]
+	peerID := s.peerIDs.identityOf(address)
 	if !peerID.IsZero() {
 		// observedAddrs is IP/advertise-domain state; nest s.ipStateMu
 		// inside the already-held s.peerMu per the canonical peerMu →
@@ -1104,16 +1103,10 @@ func (s *Service) openPeerSessionForCM(ctx context.Context, address domain.PeerA
 
 	_ = conn.SetDeadline(time.Now().Add(handshakeTimeout))
 	reader := bufio.NewReader(conn)
-	log.Trace().Str("site", "openPeerSessionForCM_nextCID").Str("phase", "lock_wait").Str("address", string(address)).Msg("peer_mu_writer")
-	s.peerMu.Lock()
-	log.Trace().Str("site", "openPeerSessionForCM_nextCID").Str("phase", "lock_held").Str("address", string(address)).Msg("peer_mu_writer")
-	cid := s.nextConnIDLocked()
-	s.peerMu.Unlock()
-	log.Trace().Str("site", "openPeerSessionForCM_nextCID").Str("phase", "lock_released").Str("address", string(address)).Msg("peer_mu_writer")
 	session := &peerSession{
 		address:      address,
 		peerIdentity: domain.PeerIdentity{},
-		connID:       cid,
+		connID:       transport.connID,
 		proven:       transport.proven,
 		conn:         conn,
 		metered:      metered,
@@ -1280,11 +1273,12 @@ func (s *Service) onCMSessionEstablished(info SessionInfo) {
 	// peer and buildPeerExchangeResponse() does not advertise it during
 	// setup; Slots() reports it only as Initializing.
 	if wm := session.welcomeMeta; wm != nil {
-		s.learnIdentityFromWelcome(wm.welcome, dialAddress)
+		_, proven := session.provenIdentity()
+		s.learnIdentityFromWelcome(wm.welcome, dialAddress, identityOriginOf(proven))
 		s.peerMu.RLock()
 		healthKey := s.resolveHealthAddress(dialAddress)
 		s.peerMu.RUnlock()
-		s.addPeerID(healthKey, session.peerIdentity)
+		s.addPeerID(healthKey, addressIdentity{identity: session.peerIdentity, origin: identityOriginOf(proven)})
 		s.addPeerVersion(healthKey, wm.clientVersion)
 		s.addPeerBuild(healthKey, wm.clientBuild)
 		s.recordObservedAddress(session.peerIdentity, wm.observedAddress)
@@ -1548,7 +1542,7 @@ func (s *Service) publishAndServeCMSession(session *peerSession, slotAddress dom
 	// already registered. Checking AFTER registering leaves no window: a
 	// proof that came first is seen here, one that comes later sweeps
 	// this session. A refused session is withdrawn before anything is
-	// published for it, and charged to nobody (isOutboundLegacyRefusal).
+	// published for it, and charged to nobody (isUnchargedDialRefusal).
 	_, proven := session.provenIdentity()
 	if !proven {
 		if err := s.refuseLegacyWelcome(dialAddress, session.peerIdentity); err != nil {
@@ -1846,14 +1840,17 @@ func (s *Service) onCMDialFailed(address domain.PeerAddress, err error, incompat
 	if s.tryApplySelfIdentityCooldown(address, err) {
 		return
 	}
-	// A v1 answer refused because the peer requires v2 — or the v1 dial
-	// held after such a refusal — is this node's decision, and a man in the
-	// middle can provoke it at will. Charging the address for it would let
-	// him push the address out of rotation and keep v2 away from it, so the
-	// only consequence is the hold of the v1 dial, set where the refusal was
-	// made; the refusal counters are kept by the store.
-	if isOutboundLegacyRefusal(err) {
-		log.Debug().Err(err).Str("peer", string(address)).Msg("cm_dial_refused_legacy_not_charged")
+	// A refusal that says nothing against the address
+	// (isUnchargedDialRefusal) is not charged. A v1 answer refused because
+	// the peer requires v2 — or the v1 dial held after such a refusal — is
+	// this node's decision, and a man in the middle can provoke it at will:
+	// charging the address would let him push it out of rotation and keep
+	// v2 away from it, so the only consequence is the hold of the v1 dial,
+	// set where the refusal was made; the refusal counters are kept by the
+	// store. A busy listener and an endpoint that changed hands say nothing
+	// against the address either.
+	if isUnchargedDialRefusal(err) {
+		log.Debug().Err(err).Str("peer", string(address)).Msg("cm_dial_refused_not_charged")
 		return
 	}
 	if incompatible {

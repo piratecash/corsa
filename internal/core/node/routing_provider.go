@@ -74,8 +74,8 @@ func (s *Service) PeerTransport(peerIdentity domain.PeerIdentity) (address domai
 	defer s.peerMu.RUnlock()
 
 	var bestAddr domain.PeerAddress
-	for addr, id := range s.peerIDs {
-		if id != peerIdentity {
+	for addr, recorded := range s.peerIDs {
+		if recorded.identity != peerIdentity {
 			continue
 		}
 		resolved := s.resolveHealthAddress(addr)

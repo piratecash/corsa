@@ -59,7 +59,7 @@ func TestRingOfHonestNodesDiesByTTL(t *testing.T) {
 		ring := ringTopology(t, net, size, dst)
 
 		private, signer := newSigner(t)
-		outcome := ring[0].pipeline.SendLocal(context.Background(), LocalSendOpts{
+		outcome := ring[0].pipeline.SendLocal(context.Background(), testSender, LocalSendOpts{
 			Frame: signedRouted(t, routedOpts{
 				private: private, src: signer, dst: dst, now: ring[0].clock(),
 			}),
@@ -101,7 +101,7 @@ func TestRingOfHonestNodesDiesByTTL(t *testing.T) {
 		origin := ring[0]
 
 		private, signer := newSigner(t)
-		outcome := origin.pipeline.SendLocal(context.Background(), LocalSendOpts{
+		outcome := origin.pipeline.SendLocal(context.Background(), testSender, LocalSendOpts{
 			Frame: signedRouted(t, routedOpts{
 				private: private, src: signer, dst: dst, now: origin.clock(),
 			}),

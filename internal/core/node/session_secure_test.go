@@ -12,6 +12,7 @@ import (
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/netcore"
 	"github.com/piratecash/corsa/internal/core/sessionv2"
+	"github.com/piratecash/corsa/internal/core/trustedclock"
 )
 
 // session_secure_test.go pins how two nodes pick their session kind:
@@ -148,7 +149,7 @@ func TestAnAddressThatSpokeV2IsNotDowngraded(t *testing.T) {
 	defer stopOld()
 	bound := domain.PeerAddress(normalizeAddress(address))
 	dialer, stopDialer := dialerNode(t, address, func(svc *Service) {
-		if _, err := svc.secureSessions.store.noteProvenOutbound(bound, domain.PeerIdentity{1}, endpointProtectionNone()); err != nil {
+		if _, err := svc.secureSessions.store.noteProvenOutbound(dialledAt(bound), domain.PeerIdentity{1}, endpointProtectionNone()); err != nil {
 			t.Fatalf("bind: %v", err)
 		}
 	})
@@ -288,6 +289,14 @@ func startQuietNode(t *testing.T, setup func(*Service)) (*Service, func()) {
 // everything the attempt did, including a v1 fallback inside it.
 func dialPastTransport(t *testing.T, svc *Service, address domain.PeerAddress) (bool, error) {
 	t.Helper()
+	_, established, err := dialSessionPastTransport(t, svc, address)
+	return established, err
+}
+
+// dialSessionPastTransport is dialPastTransport that also names the
+// connection the established session ran on.
+func dialSessionPastTransport(t *testing.T, svc *Service, address domain.PeerAddress) (domain.ConnID, bool, error) {
+	t.Helper()
 	deadline := time.Now().Add(15 * time.Second)
 	for {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -295,10 +304,10 @@ func dialPastTransport(t *testing.T, svc *Service, address domain.PeerAddress) (
 		cancel()
 		if err == nil {
 			_ = result.Session.Close()
-			return true, nil
+			return result.Session.connID, true, nil
 		}
 		if !errors.Is(err, errPeerDialTransport) {
-			return false, err
+			return 0, false, err
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("no attempt on %s got past opening its socket (waited 15s): %v", address, err)
@@ -388,7 +397,7 @@ func TestEveryRefusedDowngradeIsCounted(t *testing.T) {
 	defer stopOld()
 	bound := domain.PeerAddress(normalizeAddress(address))
 	dialer, stopDialer := startQuietNode(t, func(svc *Service) {
-		if _, err := svc.secureSessions.store.noteProvenOutbound(bound, domain.PeerIdentity{1}, endpointProtectionNone()); err != nil {
+		if _, err := svc.secureSessions.store.noteProvenOutbound(dialledAt(bound), domain.PeerIdentity{1}, endpointProtectionNone()); err != nil {
 			t.Fatalf("bind: %v", err)
 		}
 	})
@@ -484,6 +493,23 @@ func TestARecoverySyncToAV2PeerUsesV2(t *testing.T) {
 	}
 }
 
+// The budget of one recovery dial covers everything that dial may
+// legitimately spend once it speaks v2: opening the socket, the TLS phase and
+// the session_proof phase of the v2 handshake, and the two reply drains that
+// follow. A budget below that sum cancels a healthy recovery mid-drain on a
+// slow path, and the sender key it was fetching is not recovered.
+func TestTheRecoveryBudgetCoversAV2DialAndBothDrains(t *testing.T) {
+	t.Parallel()
+	needed := syncHandshakeTimeout + sessionv2.DefaultTimeouts.TLS + sessionv2.DefaultTimeouts.Proof + 2*syncReplyDrainCap
+	if syncRecoveryTimeout < needed {
+		t.Fatalf("syncRecoveryTimeout = %v, below the %v a v2 recovery dial may need (dial %v + TLS %v + proof %v + two drains of %v)",
+			syncRecoveryTimeout, needed, syncHandshakeTimeout, sessionv2.DefaultTimeouts.TLS, sessionv2.DefaultTimeouts.Proof, syncReplyDrainCap)
+	}
+	if syncRecoveryTimeout != 30*time.Second {
+		t.Fatalf("syncRecoveryTimeout = %v, want the documented 30s", syncRecoveryTimeout)
+	}
+}
+
 // A recovery dial to an endpoint bound to v2 that now answers like an old
 // node fails instead of falling back.
 func TestARecoverySyncToABoundEndpointIsNotDowngraded(t *testing.T) {
@@ -492,7 +518,7 @@ func TestARecoverySyncToABoundEndpointIsNotDowngraded(t *testing.T) {
 	defer stopOld()
 	bound := domain.PeerAddress(normalizeAddress(address))
 	dialer, stopDialer := startTestNodeWithSetup(t, config.Node{ListenAddress: freeAddress(t), BootstrapPeers: []string{}, Type: domain.NodeTypeFull}, func(svc *Service) {
-		if _, err := svc.secureSessions.store.noteProvenOutbound(bound, domain.PeerIdentity{1}, endpointProtectionNone()); err != nil {
+		if _, err := svc.secureSessions.store.noteProvenOutbound(dialledAt(bound), domain.PeerIdentity{1}, endpointProtectionNone()); err != nil {
 			t.Fatalf("bind: %v", err)
 		}
 	})
@@ -548,7 +574,7 @@ func nodeAuthenticatedIdentity(node *Service, id domain.PeerIdentity) bool {
 	node.peerMu.RLock()
 	defer node.peerMu.RUnlock()
 	for _, recorded := range node.peerIDs {
-		if recorded == id {
+		if recorded.identity == id {
 			return true
 		}
 	}
@@ -590,7 +616,7 @@ func TestAV2SessionWaitsForItsPinToBeWritten(t *testing.T) {
 		v2, _ := authenticatedInbound(listener)
 		return v2 > 0
 	})
-	reloaded := loadSecureSessionStore(secureSessionStorePath(listener.cfg), time.Now)
+	reloaded := loadSecureSessionStore(secureSessionStorePath(listener.cfg), trustedclock.NewSystem())
 	if !reloaded.identityPinned(peerIdentityOf(t, dialer)) {
 		t.Fatal("the pin of the established session is not on disk: a restart would forget it")
 	}
@@ -606,8 +632,8 @@ func TestAContactEndpointRefusesASubstituteIdentityAfterThirtyDays(t *testing.T)
 	bound := domain.PeerAddress(normalizeAddress(address))
 	dialer, stopDialer := dialerNode(t, address, func(svc *Service) {
 		clock := newStoreClock()
-		store := loadSecureSessionStore("", clock.read)
-		if _, err := store.noteProvenOutbound(bound, domain.PeerIdentity{7}, endpointProtectionWanted(domain.ProtectedBindingPoolContact)); err != nil {
+		store := loadSecureSessionStore("", clock.trusted())
+		if _, err := store.noteProvenOutbound(dialledAt(bound), domain.PeerIdentity{7}, endpointProtectionWanted(domain.ProtectedBindingPoolContact)); err != nil {
 			t.Fatalf("bind: %v", err)
 		}
 		clock.now = clock.now.Add(endpointBindingTTL + 24*time.Hour)
@@ -691,8 +717,20 @@ func TestADialledV2SessionWaitsForItsBindingToBeWritten(t *testing.T) {
 	if established, err := dialPastTransport(t, dialer, target); !established {
 		t.Fatalf("no dialled session after the disk recovered: %v", err)
 	}
-	reloaded := loadSecureSessionStore(secureSessionStorePath(dialer.cfg), time.Now)
+	reloaded := loadSecureSessionStore(secureSessionStorePath(dialer.cfg), trustedclock.NewSystem())
 	if !reloaded.endpointRequiresV2(target) {
 		t.Fatal("the binding of the established session is not on disk")
 	}
+}
+
+// clearV2Retry forgets the v2 retry backoff of address alone.
+func (m *sessionAddressMarks) clearV2Retry(address domain.PeerAddress) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	mark, present := m.marks[address]
+	if !present || mark.v2Retry == nil {
+		return
+	}
+	mark.v2Retry = nil
+	m.storeLocked(address, mark, m.clock())
 }

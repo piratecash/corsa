@@ -500,6 +500,9 @@ type RegisteredType struct {
 	dtype       domain.DType
 	payload     PayloadSchema
 	senderProof SenderProofPolicy
+	// stats is this type's handler accounting (handler_stats.go). A pointer
+	// so every copy of the entry the pipeline takes charges the same counters.
+	stats *handlerStats
 }
 
 // DType returns the registered name.
@@ -649,6 +652,7 @@ func (r *TypeRegistry) Register(registration TypeRegistration) error {
 		dtype:       dtype,
 		payload:     registration.Payload,
 		senderProof: senderProof,
+		stats:       &handlerStats{},
 	}
 	r.entries.Store(&next)
 	return nil

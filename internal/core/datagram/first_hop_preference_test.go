@@ -123,7 +123,7 @@ func TestASendReallyLeavesThroughThePreferredHop(t *testing.T) {
 	}
 
 	for i := 0; i < 5; i++ {
-		outcome := fixture.pipeline.SendLocal(context.Background(), LocalSendOpts{
+		outcome := fixture.pipeline.SendLocal(context.Background(), testSender, LocalSendOpts{
 			Frame:    fixture.frame(t, fixture.signer, fixture.local, dst),
 			FirstHop: PreferFirstHops(guard),
 		})

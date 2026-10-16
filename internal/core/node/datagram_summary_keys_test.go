@@ -45,7 +45,7 @@ func TestDatagramSummaryRendersEveryCollectedBlock(t *testing.T) {
 
 	diagnostics := reflect.TypeOf(datagram.Diagnostics{})
 	for i := range diagnostics.NumField() {
-		key := strings.ToLower(diagnostics.Field(i).Name)
+		key := summaryKeyOf(diagnostics.Field(i).Name)
 		if _, present := rendered[key]; !present {
 			t.Fatalf("datagram.Diagnostics has field %s but the summary has no %q key: the block is collected on every call and thrown away, while the docs promise it",
 				diagnostics.Field(i).Name, key)
@@ -146,5 +146,73 @@ func TestDatagramSummaryBoundsTheCounterPeriod(t *testing.T) {
 		t.Fatalf("metrics.ReadAt does not parse as RFC3339Nano: %v", err)
 	} else if parsed.Nanosecond() == 0 && !strings.Contains(precision.Metrics.ReadAt, ".") {
 		t.Fatalf("metrics.ReadAt has no sub-second part: %q", precision.Metrics.ReadAt)
+	}
+}
+
+// summaryKeyOf is the summary key a Diagnostics field renders under: its name
+// in snake case, so LocalSenders is `local_senders` and Metrics is `metrics`.
+func summaryKeyOf(field string) string {
+	var key strings.Builder
+	for i, r := range field {
+		if i > 0 && r >= 'A' && r <= 'Z' {
+			key.WriteByte('_')
+		}
+		key.WriteRune(r)
+	}
+	return strings.ToLower(key.String())
+}
+
+// TestDatagramSummaryCarriesHandlerAndSenderAttribution pins the two
+// attribution blocks in the shape an operator parses: the handler rows of
+// every registered type, every local sender plus the unattributed row, and
+// the period stamps both need for the pair-of-readings rule.
+func TestDatagramSummaryCarriesHandlerAndSenderAttribution(t *testing.T) {
+	t.Parallel()
+
+	svc := newDatagramLayerServiceOfType(t, domain.NodeTypeFull)
+	raw, err := svc.FetchDatagramSummary()
+	if err != nil {
+		t.Fatalf("FetchDatagramSummary: %v", err)
+	}
+
+	var summary struct {
+		Handlers struct {
+			ByDType   map[string]map[string]datagram.HandlerCounts `json:"by_dtype"`
+			StartedAt *time.Time                                   `json:"started_at"`
+			ReadAt    *time.Time                                   `json:"read_at"`
+		} `json:"handlers"`
+		LocalSenders struct {
+			BySender  map[string]datagram.LocalSendCounts `json:"by_sender"`
+			StartedAt *time.Time                          `json:"started_at"`
+			ReadAt    *time.Time                          `json:"read_at"`
+		} `json:"local_senders"`
+	}
+	if err := json.Unmarshal(raw, &summary); err != nil {
+		t.Fatalf("unmarshal summary: %v", err)
+	}
+
+	for _, dtype := range svc.datagramLayer().types.DTypes() {
+		if _, ok := summary.Handlers.ByDType[dtype.String()]; !ok {
+			t.Fatalf("registered dtype %s has no handler row: %s", dtype, raw)
+		}
+	}
+	for _, sender := range datagram.LocalSenders() {
+		if _, ok := summary.LocalSenders.BySender[sender.String()]; !ok {
+			t.Fatalf("sender %s has no row: %s", sender, raw)
+		}
+	}
+	if _, ok := summary.LocalSenders.BySender["unattributed"]; !ok {
+		t.Fatalf("no unattributed row: %s", raw)
+	}
+	for name, stamps := range map[string][2]*time.Time{
+		"handlers":      {summary.Handlers.StartedAt, summary.Handlers.ReadAt},
+		"local_senders": {summary.LocalSenders.StartedAt, summary.LocalSenders.ReadAt},
+	} {
+		if stamps[0] == nil || stamps[1] == nil {
+			t.Fatalf("%s carries no period stamps: %s", name, raw)
+		}
+		if !stamps[0].Equal(svc.startedAt) {
+			t.Fatalf("%s.started_at = %s, want the node start %s", name, stamps[0], svc.startedAt)
+		}
 	}
 }

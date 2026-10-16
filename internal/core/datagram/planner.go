@@ -296,7 +296,10 @@ type SendOutcome struct {
 	missing   domain.CapabilityName
 	kind      SendOutcomeKind
 	reason    RejectionReason
-	local     bool
+	// cause is which branch produced a SendRejected outcome
+	// (local_senders.go). Package-internal: callers read Rejection().
+	cause rejectionCause
+	local bool
 }
 
 // Attempted returns the next hops this send really offered the frame to, in
@@ -336,6 +339,7 @@ func noRouteOutcome(local bool) SendOutcome {
 func rejectedOutcome(local bool, refused refusal) SendOutcome {
 	return SendOutcome{
 		kind:    SendRejected,
+		cause:   rejectedByGate,
 		reason:  refused.reason,
 		missing: refused.missing,
 		local:   local,

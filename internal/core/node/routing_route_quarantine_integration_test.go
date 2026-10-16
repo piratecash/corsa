@@ -329,7 +329,7 @@ func TestQuarantine_RoutingTargetsForMessageDropsQuarantinedTransit(t *testing.T
 
 	svc := &Service{
 		sessions:              map[domain.PeerAddress]*peerSession{},
-		peerIDs:               map[domain.PeerAddress]domain.PeerIdentity{},
+		peerIDs:               addressIdentities{},
 		health:                map[domain.PeerAddress]*peerHealth{},
 		peerQuarantine:        map[penaltySubject]routeQuarantineEntry{},
 		peerDisconnectHistory: map[penaltySubject][]time.Time{},
@@ -342,8 +342,8 @@ func TestQuarantine_RoutingTargetsForMessageDropsQuarantinedTransit(t *testing.T
 		peerIdentity: cleanID,
 		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapMeshRoutingV1},
 	}
-	svc.peerIDs[quarantinedAddr] = quarantinedID
-	svc.peerIDs[cleanAddr] = cleanID
+	svc.peerIDs[quarantinedAddr] = claimedAddressIdentity(quarantinedID)
+	svc.peerIDs[cleanAddr] = claimedAddressIdentity(cleanID)
 	svc.health[quarantinedAddr] = &peerHealth{Address: quarantinedAddr, Connected: true}
 	svc.health[cleanAddr] = &peerHealth{Address: cleanAddr, Connected: true}
 
@@ -387,7 +387,7 @@ func TestQuarantine_RoutingTargetsForMessageAllowsRecipientEvenIfQuarantined(t *
 
 	svc := &Service{
 		sessions:              map[domain.PeerAddress]*peerSession{},
-		peerIDs:               map[domain.PeerAddress]domain.PeerIdentity{},
+		peerIDs:               addressIdentities{},
 		health:                map[domain.PeerAddress]*peerHealth{},
 		peerQuarantine:        map[penaltySubject]routeQuarantineEntry{},
 		peerDisconnectHistory: map[penaltySubject][]time.Time{},
@@ -396,7 +396,7 @@ func TestQuarantine_RoutingTargetsForMessageAllowsRecipientEvenIfQuarantined(t *
 		peerIdentity: quarantinedID,
 		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapMeshRoutingV1},
 	}
-	svc.peerIDs[quarantinedAddr] = quarantinedID
+	svc.peerIDs[quarantinedAddr] = claimedAddressIdentity(quarantinedID)
 	svc.health[quarantinedAddr] = &peerHealth{Address: quarantinedAddr, Connected: true}
 
 	svc.peerMu.Lock()

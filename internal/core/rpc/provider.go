@@ -89,6 +89,32 @@ type NodeProvider interface {
 	ExplainFileRoute(dst domain.PeerIdentity) (json.RawMessage, error)
 }
 
+// EndpointBindingProvider is the operator's hand on the endpoint bindings of
+// the v2 downgrade protection (docs/protocol/session_v2.md, "Operator actions
+// on endpoint bindings"): the list, the addressed removal of an ordinary
+// binding and the two-step demotion of selected protected bindings. Every
+// command over it is TransportLoopbackOnly. A node that does not implement it
+// gets the commands registered as unavailable.
+type EndpointBindingProvider interface {
+	// ListEndpointBindings is one page of the live bindings the query keeps,
+	// in key order.
+	ListEndpointBindings(ctx context.Context, query domain.EndpointBindingQuery) (domain.EndpointBindingPage, error)
+
+	// RemoveEndpointBinding removes the ordinary binding endpoint names; a
+	// protected one is refused with domain.ErrEndpointBindingProtected.
+	RemoveEndpointBinding(ctx context.Context, endpoint domain.PeerAddress) (domain.EndpointBindingRemoval, error)
+
+	// PlanEndpointBindingDemotion is the dry run of a demotion of the
+	// selected protected bindings: what each becomes, the consequence and
+	// the token that confirms exactly this selection. It changes nothing.
+	PlanEndpointBindingDemotion(ctx context.Context, endpoints []domain.PeerAddress) (domain.EndpointBindingDemotionPlan, error)
+
+	// DemoteEndpointBindings moves the selected protected bindings to the
+	// ordinary tier when token is the dry run's token of this selection as
+	// it is now — all in one version of the store file, or none.
+	DemoteEndpointBindings(ctx context.Context, endpoints []domain.PeerAddress, token domain.EndpointBindingSelectionToken) (domain.EndpointBindingDemotionResult, error)
+}
+
 // ChatlogProvider abstracts access to chatlog operations.
 // Only available when desktop client is present.
 type ChatlogProvider interface {
@@ -225,6 +251,13 @@ type RoutingProvider interface {
 	// is decided by (docs/protocol/session_v2.md). Lock-free — the counters
 	// are atomics.
 	SessionKindStats() domain.SessionKindStats
+
+	// ListenerRefusalStats returns how many accepted connections the listener
+	// refused before any session existed, by the bound that refused them, and
+	// how many of those went out without the TLS refusal alert because every
+	// alert sender was busy — cumulative since the process started
+	// (docs/protocol/session_v2.md). Lock-free — the counters are atomics.
+	ListenerRefusalStats() domain.ListenerRefusalStats
 
 	// HealthSnapshot returns a deep copy of every tracked
 	// RouteHealthState (Phase 2). Used by the fetchRouteHealth RPC and,

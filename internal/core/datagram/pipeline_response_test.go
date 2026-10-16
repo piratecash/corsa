@@ -622,7 +622,7 @@ func newLocalResponseFixture(t *testing.T, label Label) *localResponseFixture {
 	net := newFakeNetwork()
 	nodes := lineTopology(t, net, 2)
 	fixture := &localResponseFixture{net: net, origin: nodes[0], relay: nodes[1], target: nodes[2], label: label}
-	outcome := fixture.origin.pipeline.SendLocal(context.Background(), LocalSendOpts{
+	outcome := fixture.origin.pipeline.SendLocal(context.Background(), testSender, LocalSendOpts{
 		Frame: requestFrame(t, requestOpts{label: label, dst: fixture.target.id}),
 	})
 	if outcome.Kind() != SendQueued {
@@ -775,7 +775,7 @@ func TestAnsweredLocalRequestsDoNotFillThePerUpstreamQuota(t *testing.T) {
 	// asked and answered in full before the next one starts.
 	for i := 0; i <= defaultReversePerUpstreamCap; i++ {
 		label := newLabel(t, "exchange-"+strconv.Itoa(i))
-		outcome := origin.pipeline.SendLocal(context.Background(), LocalSendOpts{
+		outcome := origin.pipeline.SendLocal(context.Background(), testSender, LocalSendOpts{
 			Frame: requestFrame(t, requestOpts{label: label, dst: target.id}),
 		})
 		if outcome.Kind() != SendQueued {
@@ -853,7 +853,7 @@ func TestAuthorizationHookRunsOnAllThreePlanes(t *testing.T) {
 	link(node, target, false, false)
 	route(node, target.id, target.id, 1)
 	label := newLabel(t, "hook-response")
-	if outcome := node.pipeline.SendLocal(context.Background(), LocalSendOpts{
+	if outcome := node.pipeline.SendLocal(context.Background(), testSender, LocalSendOpts{
 		Frame: requestFrame(t, requestOpts{label: label, dst: target.id}),
 	}); outcome.Kind() != SendQueued {
 		t.Fatalf("SendLocal: %s", outcome)

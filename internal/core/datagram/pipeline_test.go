@@ -89,6 +89,13 @@ func (n *fakeNetwork) refuseQueue(peer domain.PeerIdentity) {
 	n.refuse[peer] = true
 }
 
+// acceptQueue undoes refuseQueue.
+func (n *fakeNetwork) acceptQueue(peer domain.PeerIdentity) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	delete(n.refuse, peer)
+}
+
 func (n *fakeNetwork) register(node *pipelineNode) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -200,6 +207,14 @@ func (m *recordingMetrics) ObserveSendRefusal(reason RejectionReason, missing do
 	defer m.mu.Unlock()
 	m.refusals = append(m.refusals, sendRefusalRecord{reason: reason, missing: missing})
 }
+
+// testSender is the sender a test names when the test is not about
+// attribution: SendLocal requires one, and which one is irrelevant there.
+const testSender = LocalSenderIdentityResolver
+
+// ObserveLocalSend is a no-op in the fixture: a test about local-send
+// attribution builds its node with real Metrics (nodeOpts.metrics).
+func (m *recordingMetrics) ObserveLocalSend(LocalSender, SendOutcome) {}
 
 // ObserveDrop counts the outbound refusals that never entered the conveyor —
 // the post-dequeue drop of ClassQueueEmitter. The fixture keeps them in their
@@ -336,6 +351,13 @@ type nodeOpts struct {
 	advertised []string
 	// cryptoBudget caps the verification budget; zero means unlimited.
 	cryptoBudget int
+	// metrics, when set, is the counter set the pipeline counts into instead
+	// of the recording fake — for a test that reads the published snapshot.
+	// The reverse table keeps the fake either way.
+	metrics *Metrics
+	// monotonic, when set, is the pipeline's duration source; zero means the
+	// fixture clock, so a test that moves that clock moves durations too.
+	monotonic func() time.Time
 }
 
 func newPipelineNode(t *testing.T, net *fakeNetwork, opts nodeOpts) *pipelineNode {
@@ -384,15 +406,24 @@ func newPipelineNode(t *testing.T, net *fakeNetwork, opts nodeOpts) *pipelineNod
 			advertised = append(advertised, CapabilityDatagramTransitV1.String())
 		}
 	}
+	var sink metricsSink = node.metrics
+	if opts.metrics != nil {
+		sink = opts.metrics
+	}
+	monotonic := opts.monotonic
+	if monotonic == nil {
+		monotonic = node.clock
+	}
 	pipeline, err := NewPipeline(PipelineConfig{
 		Clock:       node.clock,
+		Monotonic:   monotonic,
 		Types:       node.types,
 		ReplayCache: node.replay,
 		Reverse:     node.reverse,
 		Scheduler:   node.scheduler,
 		Emitter:     nodeEmitter{net: net, from: id, sender: node},
 		Crypto:      node.crypto,
-		Metrics:     node.metrics,
+		Metrics:     sink,
 		Advertised:  NewAdvertisedCapabilities(advertised),
 		Network:     testNetwork,
 		LocalID:     id,

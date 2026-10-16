@@ -90,6 +90,31 @@ var (
 	connWriterSlotBytes   = netcore.WriterQueueSlotBytes()
 )
 
+// breakdownExcludedDomains names Service mutexes whose state ResourceBreakdown
+// deliberately does NOT report, each with the reason.
+//
+// Why a written list rather than an omission: the coverage guard walks the
+// ResourceSubsystem enum, so a domain without a subsystem is invisible to it,
+// and a breakdown that silently skips a domain answers "nobody holds it" for
+// exactly the growth that happens there. An exclusion that is written down can
+// be argued with and removed; a silence cannot.
+//
+// What the guard test enforces is narrower than "every mutex is accounted
+// for": each entry must name a real sync.RWMutex field of Service, carry a
+// reason and not be read by resource_breakdown.go, and fileMu specifically
+// must be either listed here or reported. The other entries are not demanded:
+// the test only keeps them well-formed, so they document an omission rather
+// than prove that every domain is covered.
+var breakdownExcludedDomains = map[string]string{
+	"fileMu": "file transfer state (file store, transfer manager, file router) has no subsystem of its own; " +
+		"counting it under another line would mis-attribute its growth",
+	"statusMu": "aggregate status and version policy: two snapshots and timestamps plus the per-identity " +
+		"set of incompatible-version reporters, which the policy prunes itself; small next to every reported " +
+		"line, so it does not get a line of its own",
+	"gossipPoolMu": "owns no state: it orders gossip job enqueues against the shutdown drain, and the job " +
+		"queues behind it are fixed-capacity channels",
+}
+
 // ResourceBreakdown reports which subsystem holds what, right now.
 //
 // It is a pure read: no domain mutex is held across another, nothing is

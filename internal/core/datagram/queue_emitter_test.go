@@ -77,7 +77,7 @@ func TestBulkKeepsItsShareThroughTheLayersOwnPath(t *testing.T) {
 	route(node, dst, hop.id, 2)
 
 	send := func(class domain.DatagramClass, payload []byte) {
-		outcome := node.pipeline.SendLocal(context.Background(), LocalSendOpts{
+		outcome := node.pipeline.SendLocal(context.Background(), testSender, LocalSendOpts{
 			Frame: signedRouted(t, routedOpts{
 				private: private, src: signer, dst: dst, now: node.clock(),
 				class: class, payload: payload,
@@ -174,7 +174,7 @@ func TestQueuedEmissionCarriesTheClassAndTheDeadline(t *testing.T) {
 		private: private, src: signer, dst: dst, now: node.clock(),
 		class: domain.DatagramClassBulk, payload: []byte("chunk"),
 	})
-	if outcome := node.pipeline.SendLocal(context.Background(), LocalSendOpts{Frame: frame}); outcome.Kind() != SendQueued {
+	if outcome := node.pipeline.SendLocal(context.Background(), testSender, LocalSendOpts{Frame: frame}); outcome.Kind() != SendQueued {
 		t.Fatalf("outcome = %s", outcome)
 	}
 	emitter, _ := node.pipeline.OutboundQueue()

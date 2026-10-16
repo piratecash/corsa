@@ -987,7 +987,7 @@ func (s *Service) routingTargetsFiltered(allow func(address domain.PeerAddress, 
 			sessionSeen[primaryAddr] = struct{}{}
 		}
 		peerType := s.peerTypeForAddressLocked(primaryAddr)
-		peerID := s.peerIDs[primaryAddr]
+		peerID := s.peerIDs.identityOf(primaryAddr)
 		if !allow(address, peerType, peerID, now) {
 			continue
 		}
@@ -1043,7 +1043,7 @@ func (s *Service) routingTargetsFiltered(allow func(address domain.PeerAddress, 
 			// needs to consult s.peerQuarantine, which is also guarded
 			// by peerMu. Holding RLock through Phase 2 avoids both a
 			// recursive-RLock path AND the small TOCTOU between phases.
-			if !allow(peer.Address, s.peerTypeForAddressLocked(peer.Address), s.peerIDs[peer.Address], now) {
+			if !allow(peer.Address, s.peerTypeForAddressLocked(peer.Address), s.peerIDs.identityOf(peer.Address), now) {
 				continue
 			}
 			pendingPeers = append(pendingPeers, peer.Address)
@@ -1207,7 +1207,7 @@ func (s *Service) sendNoticeToPeer(address domain.PeerAddress, ttl time.Duration
 	// still bytes on the wire.
 	ctx, cancel := context.WithTimeout(s.runCtx, syncHandshakeTimeout)
 	defer cancel()
-	transport, err := s.dialPeerTransport(ctx, address, func(context.Context) (net.Conn, error) {
+	transport, err := s.dialPeerTransport(ctx, address, domain.DialToAddress(), func(context.Context) (net.Conn, error) {
 		return s.dialAddressWithBudget(address, syncHandshakeTimeout)
 	})
 	if err != nil {

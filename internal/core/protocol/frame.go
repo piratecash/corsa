@@ -555,12 +555,15 @@ const (
 	// transition and rides out on the still-open ConnID so the dialler
 	// learns the ban window before teardown.
 	PeerBannedReasonBlacklisted PeerBannedReason = "blacklisted"
-	// PeerBannedReasonPeerBan is a per-peer timed ban (peerEntry.BannedUntil).
-	// Reserved for a future emission path: an inbound connect-time reject
-	// against an already-banned peer address, gated on auth since the
-	// overlay address is attacker-controlled until then. Dialers must
-	// accept and record the window on receipt today so a forthcoming
-	// server rollout does not require a concurrent client rollout.
+	// PeerBannedReasonPeerBan is a per-peer refusal the dialler records
+	// against the address it dialled, never against the IP. Emitted on an
+	// incompatible hello, and without Until on a v1 hello (or auth_session)
+	// naming an identity that proved itself over v2. The responder charges
+	// nothing for the latter — the claim is unproven — but the dialler does
+	// suppress the address for its default window (24 h on v28–v30 builds),
+	// and an upgrade of the dialler does not lift it before the window ends.
+	// Until is left out because a short window read against the dialler's
+	// clock is fragile when the two clocks disagree.
 	PeerBannedReasonPeerBan PeerBannedReason = "peer-ban"
 	// PeerBannedReasonSelfIdentity is emitted when the responder detects
 	// that the inbound hello carries the responder's own Ed25519

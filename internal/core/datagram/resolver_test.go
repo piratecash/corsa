@@ -542,7 +542,7 @@ func (f *schedFixture) sendAvoiding(
 	mutators ...func(*protocol.DatagramFrame),
 ) SendOutcome {
 	t.Helper()
-	return f.pipeline.SendLocal(context.Background(), LocalSendOpts{
+	return f.pipeline.SendLocal(context.Background(), testSender, LocalSendOpts{
 		Frame: f.frame(t, f.signer, f.local, dst, mutators...),
 		Avoid: avoid,
 	})

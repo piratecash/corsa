@@ -493,7 +493,7 @@ func TestDatagramProbeAgreesWithSendOnUnchangedTable(t *testing.T) {
 	}
 	send := func() datagram.SendOutcome {
 		frame := newServiceDatagram(t, svc, peer, dtype, domain.RoutePolicyBest)
-		return svc.datagramLayer().pipeline.SendLocal(context.Background(), datagram.LocalSendOpts{Frame: frame})
+		return svc.datagramLayer().pipeline.SendLocal(context.Background(), datagram.LocalSenderDMControl, datagram.LocalSendOpts{Frame: frame})
 	}
 
 	// No neighbour, no route: the probe must say unreachable and the send

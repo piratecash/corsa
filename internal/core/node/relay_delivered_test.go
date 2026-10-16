@@ -53,7 +53,7 @@ func TestExcludeNextHopFromGossip(t *testing.T) {
 	b := domain.PeerAddress("b")
 	c := domain.PeerAddress("c")
 	idA, idB, idC := identHex("a"), identHex("b"), identHex("c")
-	svc := &Service{peerIDs: map[domain.PeerAddress]domain.PeerIdentity{a: idA, b: idB, c: idC}}
+	svc := &Service{peerIDs: addressIdentities{a: claimedAddressIdentity(idA), b: claimedAddressIdentity(idB), c: claimedAddressIdentity(idC)}}
 
 	// By identity: next-hop identity idB → drop b, keep a and c.
 	got := svc.excludeNextHopFromGossip([]domain.PeerAddress{a, b, c}, idB, b)
@@ -70,8 +70,8 @@ func TestExcludeNextHopFromGossip(t *testing.T) {
 	// is the plain peer; identity match drops it where a raw/canonical address
 	// compare would miss (P3 regression).
 	rid := identHex("d")
-	inboundSvc := &Service{peerIDs: map[domain.PeerAddress]domain.PeerIdentity{
-		"remote:7777": rid, "other:7777": identHex("e"),
+	inboundSvc := &Service{peerIDs: addressIdentities{
+		"remote:7777": claimedAddressIdentity(rid), "other:7777": claimedAddressIdentity(identHex("e")),
 	}}
 	gotIn := inboundSvc.excludeNextHopFromGossip([]domain.PeerAddress{"remote:7777", "other:7777"}, rid, "inbound:remote")
 	if len(gotIn) != 1 || gotIn[0] != "other:7777" {
@@ -133,7 +133,7 @@ func TestFilterGossipTargetsExcludesAckedPeer(t *testing.T) {
 	identA := identHex("a")
 	identB := identHex("b")
 	svc := &Service{
-		peerIDs: map[domain.PeerAddress]domain.PeerIdentity{pA: identA, pB: identB},
+		peerIDs: addressIdentities{pA: claimedAddressIdentity(identA), pB: claimedAddressIdentity(identB)},
 	}
 
 	env := protocol.Envelope{ID: "m1", Hops: 5}

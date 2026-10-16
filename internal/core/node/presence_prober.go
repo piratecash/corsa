@@ -461,7 +461,7 @@ func (p *presenceProber) sendProbe(ctx context.Context, target domain.PeerIdenti
 	// policy, deliberately spreading across first hops, and it must not be the
 	// default for a stream of frames all asking about the same contact.
 	preferred := p.svc.preferredFirstHops()
-	outcome := layer.pipeline.SendLocal(ctx, datagram.LocalSendOpts{Frame: frame, FirstHop: preferred})
+	outcome := layer.pipeline.SendLocal(ctx, datagram.LocalSenderPresenceProber, datagram.LocalSendOpts{Frame: frame, FirstHop: preferred})
 	if outcome.Kind() != datagram.SendQueued {
 		// Nothing reached the network, so nothing was asked. Dropping the
 		// attempt rather than letting it time out is the difference between

@@ -417,30 +417,40 @@ func routeSummaryHandler(rp RoutingProvider) CommandHandler {
 		// The v2 downgrade-protection store (docs/protocol/session_v2.md):
 		// when it is full, a v2 session of an identity not pinned yet is
 		// refused with pin_store_full — pinned identities keep being served —
-		// and a protected endpoint binding refused at a bound is counted by
-		// reason; this is where an operator sees both without reading logs.
+		// a protected endpoint binding refused at a bound is counted by
+		// reason, and a new ordinary binding refused by its source group's
+		// daily quota is counted too; this is where an operator sees them
+		// without reading logs.
 		pinStore := rp.SecureSessionStoreStats()
 		secureSessions := map[string]interface{}{
-			"read_at":                          formatOptionalTime(pinStore.ReadAt),
-			"pinned_identities":                pinStore.PinnedIdentities,
-			"pin_capacity":                     pinStore.PinCapacity,
-			"pin_store_full":                   pinStore.Full,
-			"pin_refusals_pin_store_full":      pinStore.PinRefusalsStoreFull,
-			"v1_refusals_identity_pinned":      pinStore.V1RefusalsIdentityPinned,
-			"v1_refusals_endpoint_bound":       pinStore.V1RefusalsEndpointBound,
-			"v1_dials_held_by_refusal_backoff": pinStore.V1DialsHeldByRefusalBackoff,
-			"dials_held_by_v2_retry_backoff":   pinStore.DialsHeldByV2RetryBackoff,
-			"protected_bindings_contact":       pinStore.ProtectedBindingsContact,
-			"protected_bindings_relation":      pinStore.ProtectedBindingsRelation,
-			"protected_capacity":               pinStore.ProtectedCapacity,
-			"protected_reserve_contact":        pinStore.ProtectedReserveContact,
-			"protected_per_identity_capacity":  pinStore.ProtectedPerIdentityCapacity,
-			"general_bindings":                 pinStore.GeneralBindings,
-			"general_capacity":                 pinStore.GeneralCapacity,
-			"protected_refusals_per_identity":  pinStore.ProtectedRefusalsPerIdentity,
-			"protected_refusals_pool_r_full":   pinStore.ProtectedRefusalsPoolRFull,
-			"protected_refusals_store_full":    pinStore.ProtectedRefusalsStoreFull,
-			"store_unreadable":                 pinStore.Unreadable,
+			"read_at":                                 formatOptionalTime(pinStore.ReadAt),
+			"pinned_identities":                       pinStore.PinnedIdentities,
+			"pin_capacity":                            pinStore.PinCapacity,
+			"pin_store_full":                          pinStore.Full,
+			"pin_refusals_pin_store_full":             pinStore.PinRefusalsStoreFull,
+			"v1_refusals_identity_pinned":             pinStore.V1RefusalsIdentityPinned,
+			"v1_refusals_endpoint_bound":              pinStore.V1RefusalsEndpointBound,
+			"v1_dials_held_by_refusal_backoff":        pinStore.V1DialsHeldByRefusalBackoff,
+			"dials_held_by_v2_retry_backoff":          pinStore.DialsHeldByV2RetryBackoff,
+			"protected_bindings_contact":              pinStore.ProtectedBindingsContact,
+			"protected_bindings_relation":             pinStore.ProtectedBindingsRelation,
+			"protected_capacity":                      pinStore.ProtectedCapacity,
+			"protected_reserve_contact":               pinStore.ProtectedReserveContact,
+			"protected_per_identity_capacity":         pinStore.ProtectedPerIdentityCapacity,
+			"general_bindings":                        pinStore.GeneralBindings,
+			"general_capacity":                        pinStore.GeneralCapacity,
+			"protected_refusals_per_identity":         pinStore.ProtectedRefusalsPerIdentity,
+			"protected_refusals_pool_r_full":          pinStore.ProtectedRefusalsPoolRFull,
+			"protected_refusals_store_full":           pinStore.ProtectedRefusalsStoreFull,
+			"general_creations_per_group_per_day":     pinStore.GeneralCreationsPerGroupPerDay,
+			"general_refusals_source_group_quota":     pinStore.GeneralRefusalsSourceGroupQuota,
+			"endpoint_bindings_skipped_not_canonical": pinStore.EndpointBindingsSkippedNotCanonical,
+			"non_canonical_bindings":                  pinStore.NonCanonicalBindings,
+			"store_unreadable":                        pinStore.Unreadable,
+			"pin_store_unsafe":                        pinStore.LocationUnsafe,
+			"clock_jump_guarded":                      pinStore.ClockJumpGuarded,
+			"clock_jumps_detected":                    pinStore.ClockJumpsDetected,
+			"clock_jump_active":                       pinStore.ClockJumpActive,
 		}
 
 		// Sessions by kind (docs/protocol/session_v2.md): cumulative since
@@ -461,6 +471,24 @@ func routeSummaryHandler(rp RoutingProvider) CommandHandler {
 			"live":                          liveSessionKindsJSON(kinds.Live),
 		}
 
+		// Listener refusals (docs/protocol/session_v2.md): cumulative since
+		// started_at, never reset by reading. closed_without_alert is part
+		// of the per-bound counts, not in addition to them.
+		refusals := rp.ListenerRefusalStats()
+		listenerRefusals := map[string]interface{}{
+			"started_at":                formatOptionalTime(refusals.StartedAt),
+			"read_at":                   formatOptionalTime(refusals.ReadAt),
+			"connection_rate":           refusals.ConnectionRate,
+			"connections_per_ip":        refusals.ConnectionsPerIP,
+			"connection_budget":         refusals.ConnectionBudget,
+			"blacklisted":               refusals.Blacklisted,
+			"inbound_limit":             refusals.InboundLimit,
+			"handshakes_node_limit":     refusals.HandshakesNode,
+			"handshakes_ip_limit":       refusals.HandshakesPerIP,
+			"handshakes_loopback_limit": refusals.HandshakesLoopback,
+			"closed_without_alert":      refusals.ClosedWithoutAlert,
+		}
+
 		return jsonResponse(map[string]interface{}{
 			"snapshot_at":          snapTime.UTC().Format(time.RFC3339),
 			"total_entries":        snap.TotalEntries,
@@ -479,6 +507,7 @@ func routeSummaryHandler(rp RoutingProvider) CommandHandler {
 			"transport_traffic":    transportTraffic,
 			"secure_sessions":      secureSessions,
 			"session_kinds":        sessionKinds,
+			"listener_refusals":    listenerRefusals,
 		})
 	}
 }

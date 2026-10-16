@@ -64,9 +64,47 @@ type SecureSessionStoreStats struct {
 	ProtectedRefusalsPerIdentity uint64
 	ProtectedRefusalsPoolRFull   uint64
 	ProtectedRefusalsStoreFull   uint64
+	// GeneralCreationsPerGroupPerDay bounds the NEW ordinary bindings one
+	// source group (SourceGroup) may create in any 24 hours.
+	// GeneralRefusalsSourceGroupQuota counts new ordinary bindings refused
+	// by that bound since the process started; existing bindings in the
+	// group are renewed and change owner as before.
+	GeneralCreationsPerGroupPerDay  int
+	GeneralRefusalsSourceGroupQuota uint64
+	// EndpointBindingsSkippedNotCanonical counts proven outbound v2
+	// sessions whose dialled address had no canonical form (a numeric or
+	// non-ASCII name, say), so their endpoint got no binding; the identity
+	// was pinned and the session stood. Since the process started.
+	EndpointBindingsSkippedNotCanonical uint64
+	// NonCanonicalBindings is how many bindings read from the store file sit
+	// under an address with no canonical form — written by an earlier build
+	// under the raw address it dialled. They are kept as they were, for
+	// comparison with that exact address only: never renewed, raised or
+	// created again; protected ones count against the protected bounds and
+	// never expire, ordinary ones expire 30 days after their last v2.
+	NonCanonicalBindings int
 	// Unreadable reports that the store file exists but could not be read:
 	// every peer is then treated as pinned and v1 is refused.
 	Unreadable bool
+	// LocationUnsafe reports that the store's location failed the audit
+	// made when it was loaded: the file is a symlink or not this user's
+	// 0600 (on Windows, its DACL grants someone else), or a directory on
+	// the way to it may be written by someone other than this user or
+	// root, or could not be inspected. The node keeps working; the
+	// operator is told, in the log, which component and why.
+	LocationUnsafe bool
+	// ClockJumpGuarded reports that the terms of ordinary bindings run on
+	// the trusted time: the wall clock at the start plus the time since on a
+	// clock that keeps running through sleep. Without such a clock on the
+	// platform it is false and the wall clock is taken as it is.
+	ClockJumpGuarded bool
+	// ClockJumpsDetected counts the times since the process started that
+	// the wall clock was found more than an hour ahead of the trusted time
+	// (clock_jump_detected); the excess was not counted toward any term.
+	ClockJumpsDetected uint64
+	// ClockJumpActive reports that the wall clock is ahead of the trusted
+	// time right now, so the terms run on the trusted time instead.
+	ClockJumpActive bool
 }
 
 // ProtectedBindingPool is the pool of the bound on protected endpoint
@@ -111,6 +149,11 @@ const (
 	// never raises an ordinary binding to protected; the same identity
 	// proven there again can.
 	ProtectedBindingRefusedOwnerChanged ProtectedBindingRefusalReason = "owner_changed"
+	// ProtectedBindingRefusedDerivedKey: not a bound. The endpoint is the
+	// address a name dialled direct reached, bound beside the name; such a
+	// key stays ordinary for good, since the address behind a name is the
+	// provider's fact, not part of the identity.
+	ProtectedBindingRefusedDerivedKey ProtectedBindingRefusalReason = "derived_key"
 )
 
 // ProtectedBindingRefused is a protected endpoint binding refused — at a bound,

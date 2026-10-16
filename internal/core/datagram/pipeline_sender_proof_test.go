@@ -187,7 +187,7 @@ func TestADialedSessionCannotBorrowAnIdentityOnTheResponsePlane(t *testing.T) {
 
 	openExchange := func(seed string) Label {
 		label := newLabel(t, seed)
-		if outcome := node.pipeline.SendLocal(context.Background(), LocalSendOpts{
+		if outcome := node.pipeline.SendLocal(context.Background(), testSender, LocalSendOpts{
 			Frame: requestFrame(t, requestOpts{label: label, dst: target.id}),
 		}); outcome.Kind() != SendQueued {
 			t.Fatalf("SendLocal(%s): %s", seed, outcome)

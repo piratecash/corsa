@@ -184,7 +184,7 @@ func TestTheConnectionManagersReactionToAFailedDialNeverUndoesProtection(t *test
 			peer, _ := sessionv2test.NewProvenPeer(t)
 			f := reactionFixture{svc: svc, bound: domain.PeerAddress(endpoint), peer: peer}
 			bound, id := f.bound, peer.Identity
-			if _, err := store.noteProvenOutbound(bound, id, endpointProtectionNone()); err != nil {
+			if _, err := store.noteProvenOutbound(dialledAt(bound), id, endpointProtectionNone()); err != nil {
 				t.Fatalf("bind: %v", err)
 			}
 

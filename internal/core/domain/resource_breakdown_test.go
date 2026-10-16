@@ -153,3 +153,57 @@ func TestSubsystemNamesAreStable(t *testing.T) {
 		t.Fatal("the zero subsystem must not be valid: an unassigned gauge belongs to nobody")
 	}
 }
+
+// TestResourceSubsystemBoundEnclosesEveryNamedValue pins the enumeration bound
+// the coverage guard in the node walks.
+//
+// The node test can only be as complete as the range it iterates, so the range
+// itself is asserted here: every value below the bound has a name and is
+// valid, the bound and the zero value are not, and no named value lives past
+// the bound. The last clause is what catches a constant appended AFTER the
+// bound — it would carry a name, fail Valid, and drop out of every walk
+// without a single other test noticing.
+func TestResourceSubsystemBoundEnclosesEveryNamedValue(t *testing.T) {
+	t.Parallel()
+
+	for subsystem := ResourceSubsystemUnset + 1; subsystem < resourceSubsystemBound; subsystem++ {
+		if _, named := resourceSubsystemNames[subsystem]; !named {
+			t.Fatalf("ResourceSubsystem(%d) lies below the bound but has no name", subsystem)
+		}
+		if !subsystem.Valid() {
+			t.Fatalf("%s lies below the bound but is not valid", subsystem)
+		}
+	}
+	if resourceSubsystemBound.Valid() {
+		t.Fatal("the bound is a marker, not a subsystem")
+	}
+	if ResourceSubsystemUnset.Valid() {
+		t.Fatal("the zero subsystem must not be valid")
+	}
+	for subsystem, name := range resourceSubsystemNames {
+		if subsystem == ResourceSubsystemUnset {
+			continue
+		}
+		if !subsystem.Valid() {
+			t.Fatalf("%q is named but not valid: a constant declared past the bound is invisible to every walk over the enum",
+				name)
+		}
+	}
+}
+
+// TestResourceSubsystemsListsTheWholeRange keeps the exported walk and the
+// bound in step: the node's coverage guard iterates ResourceSubsystems, so a
+// list that stopped short would turn the guard into a check of a subset.
+func TestResourceSubsystemsListsTheWholeRange(t *testing.T) {
+	t.Parallel()
+
+	listed := ResourceSubsystems()
+	if len(listed) != int(resourceSubsystemBound)-1 {
+		t.Fatalf("ResourceSubsystems() has %d entries, the bound encloses %d", len(listed), int(resourceSubsystemBound)-1)
+	}
+	for i, subsystem := range listed {
+		if want := ResourceSubsystem(i + 1); subsystem != want {
+			t.Fatalf("ResourceSubsystems()[%d] = %s, want %s", i, subsystem, want)
+		}
+	}
+}

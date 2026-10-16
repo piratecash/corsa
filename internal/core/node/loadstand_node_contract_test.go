@@ -341,11 +341,13 @@ func testLoadStandNodeRejectsInvalidArguments(t *testing.T) {
 // never as a fixed set the harness decides on its own.
 func testLoadStandNodeAppliesDeclaredHooks(t *testing.T) {
 	threshold := 5000
+	bounds := handshakeBounds{node: 7, loopback: 5, perSource: 3}
 	declared := loadStandHooks{
 		DisableRateLimiting:        true,
 		AllowPrivatePeers:          true,
 		MarkPeerStateInterval:      250 * time.Millisecond,
 		OverloadGoroutineThreshold: &threshold,
+		InboundHandshakes:          &bounds,
 	}
 	hooked := newEdgeNodeForTest(t, "hooked", loadStandNodeOpts{Hooks: declared})
 	production := newEdgeNodeForTest(t, "production", loadStandNodeOpts{})
@@ -360,12 +362,18 @@ func testLoadStandNodeAppliesDeclaredHooks(t *testing.T) {
 	if !hookedSvc.cfg.AllowPrivatePeers {
 		t.Error("hooked: AllowPrivatePeers not applied")
 	}
+	if got := hookedSvc.inboundHandshakes.bounds; got != bounds {
+		t.Errorf("hooked: inbound handshake bounds = %+v, want %+v", got, bounds)
+	}
 	if hookedSvc.cfg.OverloadGoroutineThreshold != threshold || !hookedSvc.overloadMonitor.enabled.Load() {
 		t.Errorf("hooked: overload threshold = %d, gate enabled = %v; want %d and enabled",
 			hookedSvc.cfg.OverloadGoroutineThreshold, hookedSvc.overloadMonitor.enabled.Load(), threshold)
 	}
 
 	productionSvc := runningServiceForTest(t, production)
+	if got := productionSvc.inboundHandshakes.bounds; got != productionHandshakeBounds() {
+		t.Errorf("zero hooks: inbound handshake bounds = %+v, want production's", got)
+	}
 	if productionSvc.disableRateLimiting || productionSvc.markPeerStateIntervalTest != 0 || productionSvc.cfg.AllowPrivatePeers {
 		t.Errorf("zero hooks: disableRateLimiting = %v, markPeerStateIntervalTest = %s, AllowPrivatePeers = %v; want production values",
 			productionSvc.disableRateLimiting, productionSvc.markPeerStateIntervalTest, productionSvc.cfg.AllowPrivatePeers)
@@ -385,6 +393,9 @@ func testLoadStandNodeAppliesDeclaredHooks(t *testing.T) {
 	if !loopback.DisableRateLimiting || !loopback.AllowPrivatePeers || loopback.MarkPeerStateInterval != 0 ||
 		loopback.OverloadGoroutineThreshold == nil || *loopback.OverloadGoroutineThreshold != 0 {
 		t.Errorf("loadStandLoopbackHooks() = %+v, want rate limiting off, private peers on, production throttle, overload gate explicitly off", loopback)
+	}
+	if want := (handshakeBounds{node: productionHandshakeBounds().node, loopback: productionHandshakeBounds().node, perSource: productionHandshakeBounds().perSource}); loopback.InboundHandshakes == nil || *loopback.InboundHandshakes != want {
+		t.Errorf("loadStandLoopbackHooks() inbound handshakes = %v, want production's with the loopback share lifted to the node bound %+v", loopback.InboundHandshakes, want)
 	}
 }
 

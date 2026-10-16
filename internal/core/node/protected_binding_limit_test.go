@@ -18,6 +18,7 @@ import (
 
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/secretfile"
+	"github.com/piratecash/corsa/internal/core/trustedclock"
 )
 
 // protected_binding_limit_test.go pins the bound of protected endpoint
@@ -47,7 +48,7 @@ func boundEndpoint(i int) domain.PeerAddress {
 func fillProtected(t *testing.T, store *secureSessionStore, pool domain.ProtectedBindingPool, first, count int) {
 	t.Helper()
 	for i := first; i < first+count; i++ {
-		result, err := store.noteProvenOutbound(boundEndpoint(i), boundIdentity(i/maxProtectedPerIdentity), endpointProtectionWanted(pool))
+		result, err := store.noteProvenOutbound(dialledAt(boundEndpoint(i)), boundIdentity(i/maxProtectedPerIdentity), endpointProtectionWanted(pool))
 		if err != nil || result.tier != bindingTierProtected {
 			t.Fatalf("fill %s #%d: tier %v, refused %v, err %v", pool, i, result.tier, result.refused, err)
 		}
@@ -62,12 +63,26 @@ func refusalReason(result endpointBindingResult) domain.ProtectedBindingRefusalR
 	return result.refused.Reason
 }
 
-// bindingOf is the binding of address as the store holds it.
+// bindingOf is the binding of address as the store holds it, under its
+// canonical key; an address without one has none.
 func bindingOf(store *secureSessionStore, address domain.PeerAddress) (endpointBinding, bool) {
+	endpoint, err := canonicalEndpoint(address)
+	if err != nil {
+		return endpointBinding{}, false
+	}
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	binding, bound := store.endpoints[address]
+	binding, bound := store.endpoints[endpoint]
 	return binding, bound
+}
+
+// insertSeededLocked puts binding under the canonical key of address, in the
+// source group the store gives that address. Caller holds store.mu.
+func insertSeededLocked(t *testing.T, store *secureSessionStore, address domain.PeerAddress, binding endpointBinding) {
+	t.Helper()
+	endpoint := mustCanonical(t, address)
+	binding.group = endpointSourceGroup(endpoint, nil)
+	store.insertBindingLocked(endpoint, binding)
 }
 
 // protectedRecords is every protected binding of the store with its owner,
@@ -76,9 +91,9 @@ func protectedRecords(store *secureSessionStore) map[domain.PeerAddress]bindingP
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	records := make(map[domain.PeerAddress]bindingProtection)
-	for address, binding := range store.endpoints {
+	for endpoint, binding := range store.endpoints {
 		if binding.protection != nil {
-			records[address] = *binding.protection
+			records[endpoint.Address()] = *binding.protection
 		}
 	}
 	return records
@@ -156,11 +171,11 @@ func TestTheProtectedBindingBoundsMatchTheDocumentedLimits(t *testing.T) {
 // still gets protection out of the reserve.
 func TestTheContactReserveHoldsWhenTheRelationPoolIsFull(t *testing.T) {
 	t.Parallel()
-	store := loadSecureSessionStore("", newStoreClock().read)
+	store := loadSecureSessionStore("", newStoreClock().trusted())
 	fillProtected(t, store, domain.ProtectedBindingPoolRelation, 0, maxProtectedBindings-protectedReserveContact)
 
 	relation, contact := domain.PeerIdentity{0xc1}, domain.PeerIdentity{0xc2}
-	result, err := store.noteProvenOutbound("198.51.100.1:64646", relation, endpointProtectionWanted(domain.ProtectedBindingPoolRelation))
+	result, err := store.noteProvenOutbound(dialledAt("198.51.100.1:64646"), relation, endpointProtectionWanted(domain.ProtectedBindingPoolRelation))
 	if err != nil {
 		t.Fatalf("a refused protection failed the session: %v", err)
 	}
@@ -171,7 +186,7 @@ func TestTheContactReserveHoldsWhenTheRelationPoolIsFull(t *testing.T) {
 		t.Fatalf("pool_r_full refusals counted = %d, want 1", got)
 	}
 
-	result, err = store.noteProvenOutbound("198.51.100.2:64646", contact, endpointProtectionWanted(domain.ProtectedBindingPoolContact))
+	result, err = store.noteProvenOutbound(dialledAt("198.51.100.2:64646"), contact, endpointProtectionWanted(domain.ProtectedBindingPoolContact))
 	if err != nil || result.tier != bindingTierProtected || result.refused != nil {
 		t.Fatalf("new contact: tier %v, refusal %q, err %v; want protected from the reserve", result.tier, refusalReason(result), err)
 	}
@@ -190,16 +205,16 @@ func TestTheTotalAndThePerIdentityBoundsRefuseNewProtection(t *testing.T) {
 
 	t.Run("total", func(t *testing.T) {
 		t.Parallel()
-		store := loadSecureSessionStore("", newStoreClock().read)
+		store := loadSecureSessionStore("", newStoreClock().trusted())
 		fillProtected(t, store, domain.ProtectedBindingPoolRelation, 0, maxProtectedBindings/2)
 		fillProtected(t, store, domain.ProtectedBindingPoolContact, maxProtectedBindings/2, maxProtectedBindings/2)
 		before := protectedRecords(store)
 
-		result, _ := store.noteProvenOutbound("198.51.100.1:64646", domain.PeerIdentity{0xc1}, endpointProtectionWanted(domain.ProtectedBindingPoolContact))
+		result, _ := store.noteProvenOutbound(dialledAt("198.51.100.1:64646"), domain.PeerIdentity{0xc1}, endpointProtectionWanted(domain.ProtectedBindingPoolContact))
 		if refusalReason(result) != domain.ProtectedBindingRefusedStoreFull {
 			t.Fatalf("new contact at the total bound: refusal %q, want store_full", refusalReason(result))
 		}
-		result, _ = store.noteProvenOutbound("198.51.100.2:64646", domain.PeerIdentity{0xc2}, endpointProtectionWanted(domain.ProtectedBindingPoolRelation))
+		result, _ = store.noteProvenOutbound(dialledAt("198.51.100.2:64646"), domain.PeerIdentity{0xc2}, endpointProtectionWanted(domain.ProtectedBindingPoolRelation))
 		if refusalReason(result) != domain.ProtectedBindingRefusedPoolRFull {
 			t.Fatalf("new relation at the total bound: refusal %q, want pool_r_full", refusalReason(result))
 		}
@@ -211,16 +226,16 @@ func TestTheTotalAndThePerIdentityBoundsRefuseNewProtection(t *testing.T) {
 
 	t.Run("per identity", func(t *testing.T) {
 		t.Parallel()
-		store := loadSecureSessionStore("", newStoreClock().read)
+		store := loadSecureSessionStore("", newStoreClock().trusted())
 		giver := domain.PeerIdentity{0xc3}
 		for i := range maxProtectedPerIdentity {
-			result, _ := store.noteProvenOutbound(boundEndpoint(i), giver, endpointProtectionWanted(domain.ProtectedBindingPoolContact))
+			result, _ := store.noteProvenOutbound(dialledAt(boundEndpoint(i)), giver, endpointProtectionWanted(domain.ProtectedBindingPoolContact))
 			if result.tier != bindingTierProtected {
 				t.Fatalf("endpoint %d of the identity: tier %v, want protected", i, result.tier)
 			}
 		}
 		before := protectedRecords(store)
-		result, _ := store.noteProvenOutbound(boundEndpoint(maxProtectedPerIdentity), giver, endpointProtectionWanted(domain.ProtectedBindingPoolContact))
+		result, _ := store.noteProvenOutbound(dialledAt(boundEndpoint(maxProtectedPerIdentity)), giver, endpointProtectionWanted(domain.ProtectedBindingPoolContact))
 		if refusalReason(result) != domain.ProtectedBindingRefusedPerIdentity || result.tier != bindingTierGeneral {
 			t.Fatalf("fifth endpoint: tier %v, refusal %q; want general, per_identity", result.tier, refusalReason(result))
 		}
@@ -240,13 +255,13 @@ func TestTheTotalAndThePerIdentityBoundsRefuseNewProtection(t *testing.T) {
 // its pool.
 func TestThePoolOfAProtectedBindingIsFixedAtCreation(t *testing.T) {
 	t.Parallel()
-	store := loadSecureSessionStore("", newStoreClock().read)
+	store := loadSecureSessionStore("", newStoreClock().trusted())
 	contactEndpoint, relationEndpoint := domain.PeerAddress("198.51.100.1:64646"), domain.PeerAddress("198.51.100.2:64646")
 	contact, relation := domain.PeerIdentity{0xc1}, domain.PeerIdentity{0xc2}
-	if result, _ := store.noteProvenOutbound(contactEndpoint, contact, endpointProtectionWanted(domain.ProtectedBindingPoolContact)); result.tier != bindingTierProtected {
+	if result, _ := store.noteProvenOutbound(dialledAt(contactEndpoint), contact, endpointProtectionWanted(domain.ProtectedBindingPoolContact)); result.tier != bindingTierProtected {
 		t.Fatal("precondition: the contact binding is not protected")
 	}
-	if result, _ := store.noteProvenOutbound(relationEndpoint, relation, endpointProtectionWanted(domain.ProtectedBindingPoolRelation)); result.tier != bindingTierProtected {
+	if result, _ := store.noteProvenOutbound(dialledAt(relationEndpoint), relation, endpointProtectionWanted(domain.ProtectedBindingPoolRelation)); result.tier != bindingTierProtected {
 		t.Fatal("precondition: the relation binding is not protected")
 	}
 
@@ -257,8 +272,8 @@ func TestThePoolOfAProtectedBindingIsFixedAtCreation(t *testing.T) {
 		"the relation no longer R":  endpointProtectionNone(),
 		"the contact required as R": endpointProtectionRequired(domain.ProtectedBindingPoolRelation),
 	} {
-		_, _ = store.noteProvenOutbound(contactEndpoint, contact, protection)
-		_, _ = store.noteProvenOutbound(relationEndpoint, relation, protection)
+		_, _ = store.noteProvenOutbound(dialledAt(contactEndpoint), contact, protection)
+		_, _ = store.noteProvenOutbound(dialledAt(relationEndpoint), relation, protection)
 		got := protectedRecords(store)
 		if got[contactEndpoint].pool != domain.ProtectedBindingPoolContact || got[relationEndpoint].pool != domain.ProtectedBindingPoolRelation {
 			t.Fatalf("after %s: pools K→%q, R→%q; want them unchanged", name, got[contactEndpoint].pool, got[relationEndpoint].pool)
@@ -273,9 +288,9 @@ func TestThePoolOfAProtectedBindingIsFixedAtCreation(t *testing.T) {
 	// relation tried: R stays at its pool.
 	fillProtected(t, store, domain.ProtectedBindingPoolRelation, 0, maxProtectedBindings-protectedReserveContact-1)
 	for i := range maxProtectedBindings - protectedReserveContact - 1 {
-		_, _ = store.noteProvenOutbound(boundEndpoint(i), boundIdentity(i/maxProtectedPerIdentity), endpointProtectionWanted(domain.ProtectedBindingPoolContact))
+		_, _ = store.noteProvenOutbound(dialledAt(boundEndpoint(i)), boundIdentity(i/maxProtectedPerIdentity), endpointProtectionWanted(domain.ProtectedBindingPoolContact))
 	}
-	result, _ := store.noteProvenOutbound("198.51.100.3:64646", domain.PeerIdentity{0xc4}, endpointProtectionWanted(domain.ProtectedBindingPoolRelation))
+	result, _ := store.noteProvenOutbound(dialledAt("198.51.100.3:64646"), domain.PeerIdentity{0xc4}, endpointProtectionWanted(domain.ProtectedBindingPoolRelation))
 	if refusalReason(result) != domain.ProtectedBindingRefusedPoolRFull {
 		t.Fatalf("a relation past the pool: refusal %q, want pool_r_full", refusalReason(result))
 	}
@@ -290,19 +305,19 @@ func TestThePoolOfAProtectedBindingIsFixedAtCreation(t *testing.T) {
 // address over cannot turn an ordinary binding into one that never expires.
 func TestAChangeOfOwnerNeverRaisesTheTier(t *testing.T) {
 	t.Parallel()
-	store := loadSecureSessionStore("", newStoreClock().read)
+	store := loadSecureSessionStore("", newStoreClock().trusted())
 	endpoint := domain.PeerAddress("198.51.100.1:64646")
 	stranger, contact := domain.PeerIdentity{0xc1}, domain.PeerIdentity{0xc2}
-	if result, _ := store.noteProvenOutbound(endpoint, stranger, endpointProtectionNone()); result.tier != bindingTierGeneral {
+	if result, _ := store.noteProvenOutbound(dialledAt(endpoint), stranger, endpointProtectionNone()); result.tier != bindingTierGeneral {
 		t.Fatalf("precondition: tier %v, want general", result.tier)
 	}
-	if result, _ := store.noteProvenOutbound(endpoint, contact, endpointProtectionWanted(domain.ProtectedBindingPoolContact)); result.tier != bindingTierGeneral {
+	if result, _ := store.noteProvenOutbound(dialledAt(endpoint), contact, endpointProtectionWanted(domain.ProtectedBindingPoolContact)); result.tier != bindingTierGeneral {
 		t.Fatalf("a new owner raised the tier: %v", result.tier)
 	}
 	if binding, _ := bindingOf(store, endpoint); binding.identity != contact {
 		t.Fatalf("the owner was not updated: %s", binding.identity)
 	}
-	if result, _ := store.noteProvenOutbound(endpoint, contact, endpointProtectionWanted(domain.ProtectedBindingPoolContact)); result.tier != bindingTierProtected {
+	if result, _ := store.noteProvenOutbound(dialledAt(endpoint), contact, endpointProtectionWanted(domain.ProtectedBindingPoolContact)); result.tier != bindingTierProtected {
 		t.Fatalf("the same owner proven again did not raise the tier: %v", result.tier)
 	}
 	assertTallies(t, store)
@@ -342,7 +357,7 @@ func TestConcurrentProtectedBindingsTakeTheLastPlaceOnce(t *testing.T) {
 		"one identity": {
 			prepare: func(t *testing.T, store *secureSessionStore) {
 				for i := range maxProtectedPerIdentity - 1 {
-					_, _ = store.noteProvenOutbound(boundEndpoint(i), domain.PeerIdentity{0xd1}, endpointProtectionWanted(domain.ProtectedBindingPoolContact))
+					_, _ = store.noteProvenOutbound(dialledAt(boundEndpoint(i)), domain.PeerIdentity{0xd1}, endpointProtectionWanted(domain.ProtectedBindingPoolContact))
 				}
 			},
 			contender: func(i int) (domain.PeerAddress, domain.PeerIdentity, endpointProtection) {
@@ -354,7 +369,7 @@ func TestConcurrentProtectedBindingsTakeTheLastPlaceOnce(t *testing.T) {
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			store := loadSecureSessionStore("", newStoreClock().read)
+			store := loadSecureSessionStore("", newStoreClock().trusted())
 			tc.prepare(t, store)
 
 			var protected, refusedRightly, other atomic.Int32
@@ -366,7 +381,7 @@ func TestConcurrentProtectedBindingsTakeTheLastPlaceOnce(t *testing.T) {
 					defer done.Done()
 					start.Wait()
 					address, id, protection := tc.contender(i)
-					result, err := store.noteProvenOutbound(address, id, protection)
+					result, err := store.noteProvenOutbound(dialledAt(address), id, protection)
 					switch {
 					case err == nil && result.tier == bindingTierProtected:
 						protected.Add(1)
@@ -409,13 +424,13 @@ func TestAProtectedStoreAtItsBoundSurvivesARestart(t *testing.T) {
 	t.Parallel()
 	clock := newStoreClock()
 	path := filepath.Join(t.TempDir(), "secure-sessions-64646.json")
-	store := loadSecureSessionStore("", clock.read)
+	store := loadSecureSessionStore("", clock.trusted())
 	fillProtected(t, store, domain.ProtectedBindingPoolContact, 0, protectedReserveContact)
 	fillProtected(t, store, domain.ProtectedBindingPoolRelation, protectedReserveContact, maxProtectedBindings-protectedReserveContact)
 	diskBacked(t, store, path)
 	before := protectedRecords(store)
 
-	restarted := loadSecureSessionStore(path, clock.read)
+	restarted := loadSecureSessionStore(path, clock.trusted())
 	if restarted.unreadable {
 		t.Fatal("the full store could not be read back")
 	}
@@ -423,11 +438,11 @@ func TestAProtectedStoreAtItsBoundSurvivesARestart(t *testing.T) {
 		t.Fatalf("the restart changed the protected bindings: %d before, %d after", len(before), len(after))
 	}
 	assertTallies(t, restarted)
-	result, _ := restarted.noteProvenOutbound("198.51.100.1:64646", domain.PeerIdentity{0xc1}, endpointProtectionWanted(domain.ProtectedBindingPoolContact))
+	result, _ := restarted.noteProvenOutbound(dialledAt("198.51.100.1:64646"), domain.PeerIdentity{0xc1}, endpointProtectionWanted(domain.ProtectedBindingPoolContact))
 	if refusalReason(result) != domain.ProtectedBindingRefusedStoreFull {
 		t.Fatalf("after the restart a new contact: refusal %q, want store_full", refusalReason(result))
 	}
-	result, _ = restarted.noteProvenOutbound("198.51.100.2:64646", domain.PeerIdentity{0xc2}, endpointProtectionWanted(domain.ProtectedBindingPoolRelation))
+	result, _ = restarted.noteProvenOutbound(dialledAt("198.51.100.2:64646"), domain.PeerIdentity{0xc2}, endpointProtectionWanted(domain.ProtectedBindingPoolRelation))
 	if refusalReason(result) != domain.ProtectedBindingRefusedPoolRFull {
 		t.Fatalf("after the restart a new relation: refusal %q, want pool_r_full", refusalReason(result))
 	}
@@ -443,7 +458,7 @@ func TestAProtectedBindingWithoutAPoolLoadsAsAContacts(t *testing.T) {
 	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	store := loadSecureSessionStore(path, newStoreClock().read)
+	store := loadSecureSessionStore(path, newStoreClock().trusted())
 	if store.unreadable {
 		t.Fatal("a protected binding without a pool made the store unreadable")
 	}
@@ -470,7 +485,7 @@ func TestAProtectedBindingRecordThatContradictsItselfFailsClosed(t *testing.T) {
 			if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
 				t.Fatalf("write: %v", err)
 			}
-			if store := loadSecureSessionStore(path, newStoreClock().read); !store.unreadable {
+			if store := loadSecureSessionStore(path, newStoreClock().trusted()); !store.unreadable {
 				t.Fatal("a damaged binding record was accepted")
 			}
 		})
@@ -485,13 +500,13 @@ func TestNoPathLowersOrRemovesAProtectedBinding(t *testing.T) {
 	t.Parallel()
 	clock := newStoreClock()
 	path := filepath.Join(t.TempDir(), "secure-sessions-64646.json")
-	store := loadSecureSessionStore("", clock.read)
+	store := loadSecureSessionStore("", clock.trusted())
 	contact := domain.PeerIdentity{0xc1}
 	var endpoints []domain.PeerAddress
 	for i := range maxProtectedPerIdentity {
 		endpoint := domain.PeerAddress(fmt.Sprintf("198.51.100.%d:64646", i))
 		endpoints = append(endpoints, endpoint)
-		if result, _ := store.noteProvenOutbound(endpoint, contact, endpointProtectionWanted(domain.ProtectedBindingPoolContact)); result.tier != bindingTierProtected {
+		if result, _ := store.noteProvenOutbound(dialledAt(endpoint), contact, endpointProtectionWanted(domain.ProtectedBindingPoolContact)); result.tier != bindingTierProtected {
 			t.Fatalf("precondition: endpoint %d not protected", i)
 		}
 	}
@@ -500,24 +515,24 @@ func TestNoPathLowersOrRemovesAProtectedBinding(t *testing.T) {
 	before := protectedRecords(store)
 
 	// The bound reached: more contacts and relations.
-	_, _ = store.noteProvenOutbound("203.0.113.1:64646", domain.PeerIdentity{0xc2}, endpointProtectionWanted(domain.ProtectedBindingPoolContact))
-	_, _ = store.noteProvenOutbound("203.0.113.2:64646", domain.PeerIdentity{0xc3}, endpointProtectionWanted(domain.ProtectedBindingPoolRelation))
+	_, _ = store.noteProvenOutbound(dialledAt("203.0.113.1:64646"), domain.PeerIdentity{0xc2}, endpointProtectionWanted(domain.ProtectedBindingPoolContact))
+	_, _ = store.noteProvenOutbound(dialledAt("203.0.113.2:64646"), domain.PeerIdentity{0xc3}, endpointProtectionWanted(domain.ProtectedBindingPoolRelation))
 	// The contact removed, then moved to R.
-	_, _ = store.noteProvenOutbound(endpoints[0], contact, endpointProtectionNone())
-	_, _ = store.noteProvenOutbound(endpoints[1], contact, endpointProtectionWanted(domain.ProtectedBindingPoolRelation))
+	_, _ = store.noteProvenOutbound(dialledAt(endpoints[0]), contact, endpointProtectionNone())
+	_, _ = store.noteProvenOutbound(dialledAt(endpoints[1]), contact, endpointProtectionWanted(domain.ProtectedBindingPoolRelation))
 	// A fifth endpoint of the contact.
-	_, _ = store.noteProvenOutbound("203.0.113.3:64646", contact, endpointProtectionWanted(domain.ProtectedBindingPoolContact))
+	_, _ = store.noteProvenOutbound(dialledAt("203.0.113.3:64646"), contact, endpointProtectionWanted(domain.ProtectedBindingPoolContact))
 	// A new owner of a protected endpoint.
 	newOwner := domain.PeerIdentity{0xc4}
-	_, _ = store.noteProvenOutbound(endpoints[2], newOwner, endpointProtectionNone())
+	_, _ = store.noteProvenOutbound(dialledAt(endpoints[2]), newOwner, endpointProtectionNone())
 	// A full pin store, and a new identity on a protected endpoint.
 	fillPinStore(t, store)
-	if _, err := store.noteProvenOutbound(endpoints[3], domain.PeerIdentity{0xc5}, endpointProtectionNone()); !errors.Is(err, errPinStoreFull) {
+	if _, err := store.noteProvenOutbound(dialledAt(endpoints[3]), domain.PeerIdentity{0xc5}, endpointProtectionNone()); !errors.Is(err, errPinStoreFull) {
 		t.Fatalf("precondition: a new identity at the pin bound: %v", err)
 	}
 	// 60 days.
 	clock.now = clock.now.Add(2 * endpointBindingTTL)
-	_, _ = store.noteProvenOutbound("203.0.113.4:64646", domain.PeerIdentity{0xc6}, endpointProtectionNone())
+	_, _ = store.noteProvenOutbound(dialledAt("203.0.113.4:64646"), domain.PeerIdentity{0xc6}, endpointProtectionNone())
 
 	want := before
 	owned := want[endpoints[2]]
@@ -539,7 +554,7 @@ func TestNoPathLowersOrRemovesAProtectedBinding(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read: %v", err)
 	}
-	restarted := loadSecureSessionStore(path, clock.read)
+	restarted := loadSecureSessionStore(path, clock.trusted())
 	if after := protectedRecords(restarted); !reflect.DeepEqual(want, after) {
 		t.Fatalf("the restart changed the protected bindings: %d before, %d after", len(want), len(after))
 	}
@@ -566,21 +581,21 @@ func TestNoPathLowersOrRemovesAProtectedBinding(t *testing.T) {
 // the protection fails with the typed refusal.
 func TestTheOutcomesOfABindingAreReportedApart(t *testing.T) {
 	t.Parallel()
-	store := loadSecureSessionStore("", newStoreClock().read)
+	store := loadSecureSessionStore("", newStoreClock().trusted())
 
-	result, err := store.noteProvenOutbound("198.51.100.1:64646", domain.PeerIdentity{0xc1}, endpointProtectionWanted(domain.ProtectedBindingPoolContact))
+	result, err := store.noteProvenOutbound(dialledAt("198.51.100.1:64646"), domain.PeerIdentity{0xc1}, endpointProtectionWanted(domain.ProtectedBindingPoolContact))
 	if err != nil || result.tier != bindingTierProtected || result.refused != nil {
 		t.Fatalf("protection with room: tier %v, refusal %q, err %v", result.tier, refusalReason(result), err)
 	}
 
 	fillProtected(t, store, domain.ProtectedBindingPoolContact, 0, maxProtectedBindings-1)
-	result, err = store.noteProvenOutbound("198.51.100.2:64646", domain.PeerIdentity{0xc2}, endpointProtectionWanted(domain.ProtectedBindingPoolContact))
+	result, err = store.noteProvenOutbound(dialledAt("198.51.100.2:64646"), domain.PeerIdentity{0xc2}, endpointProtectionWanted(domain.ProtectedBindingPoolContact))
 	if err != nil || result.tier != bindingTierGeneral || refusalReason(result) != domain.ProtectedBindingRefusedStoreFull {
 		t.Fatalf("protection refused, general recorded: tier %v, refusal %q, err %v", result.tier, refusalReason(result), err)
 	}
 
 	required := domain.PeerAddress("198.51.100.3:64646")
-	result, err = store.noteProvenOutbound(required, domain.PeerIdentity{0xc3}, endpointProtectionRequired(domain.ProtectedBindingPoolContact))
+	result, err = store.noteProvenOutbound(dialledAt(required), domain.PeerIdentity{0xc3}, endpointProtectionRequired(domain.ProtectedBindingPoolContact))
 	var refused *domain.ProtectedBindingRefused
 	if !errors.As(err, &refused) || refused.Reason != domain.ProtectedBindingRefusedStoreFull {
 		t.Fatalf("an operation that needs the protection: err %v, want the typed refusal store_full", err)
@@ -592,11 +607,11 @@ func TestTheOutcomesOfABindingAreReportedApart(t *testing.T) {
 	// The ordinary tier full too: no binding at all.
 	store.mu.Lock()
 	for i := 0; store.generalBindings < maxGeneralBindings; i++ {
-		store.insertBindingLocked(domain.PeerAddress(fmt.Sprintf("203.0.%d.%d:64646", byte(i>>8), byte(i))), endpointBinding{identity: domain.PeerIdentity{0xc4}, lastV2: store.now()})
+		insertSeededLocked(t, store, domain.PeerAddress(fmt.Sprintf("203.0.%d.%d:64646", byte(i>>8), byte(i))), endpointBinding{identity: domain.PeerIdentity{0xc4}, lastV2: store.now()})
 	}
 	store.mu.Unlock()
 	nowhere := domain.PeerAddress("198.51.100.4:64646")
-	result, err = store.noteProvenOutbound(nowhere, domain.PeerIdentity{0xc5}, endpointProtectionWanted(domain.ProtectedBindingPoolContact))
+	result, err = store.noteProvenOutbound(dialledAt(nowhere), domain.PeerIdentity{0xc5}, endpointProtectionWanted(domain.ProtectedBindingPoolContact))
 	if err != nil || result.tier != bindingTierNone || refusalReason(result) != domain.ProtectedBindingRefusedStoreFull {
 		t.Fatalf("no binding: tier %v, refusal %q, err %v", result.tier, refusalReason(result), err)
 	}
@@ -640,9 +655,14 @@ func storeFileSize(identities, protected, general, hostLen int) int {
 	)
 	identity := len(`"`) + idLen + len(`":"`) + timeLen + len(`"`)
 	key := len(`"`) + hostLen + len(`:65535`) + len(`":`)
-	general1 := key + len(`{"identity":"`) + idLen + len(`","last_v2":"`) + timeLen + len(`"}`)
+	// The longest group is the shared one of names; a general record
+	// carries derived_from — the longest name key — as a derived key would.
+	keyFields := len(`,"transport":"tcp","source_group":"`) + len(domain.SourceGroupUnresolvedName) +
+		len(`","first_at":"`) + timeLen + len(`"`)
+	general1 := key + len(`{"identity":"`) + idLen + len(`","last_v2":"`) + timeLen + len(`"`) +
+		keyFields + len(`,"derived_from":"`) + hostLen + len(`:65535"}`)
 	protected1 := key + len(`{"identity":"`) + idLen + len(`","last_v2":"`) + timeLen +
-		len(`","protected":true,"protected_by":"`) + idLen + len(`","pool":"K"}`)
+		len(`","protected":true,"protected_by":"`) + idLen + len(`","pool":"K"`) + keyFields + len(`}`)
 	endpoints := protected + general
 	return len(`{"format":1,"identities":{`) +
 		identities*identity + max(identities-1, 0) +
@@ -662,18 +682,22 @@ func heapInUse() uint64 {
 const mib = 1 << 20
 
 // liveStoreBudget is the memory bound for the live structure in the worst
-// case — every host a 253-character name.
-const liveStoreBudget = 30 * mib
+// case — every host a 253-character name, every ordinary binding a derived
+// key naming another 253-character name, every binding with its creation
+// time and a group string of its own, the daily quota full. Measured ≈ 32.8
+// MiB: above the ≈ 30 MiB the design of endpoint keys and groups estimated,
+// a deviation recorded here and in docs/protocol/session_v2.md, and the
+// bound is the measurement with ≈ 10 % to spare.
+const liveStoreBudget = 36 * mib
 
 // savingStoreBudget is the heap during a save in the worst case, derived from
-// this implementation: the live structure, a snapshot of ≈ 7.1 MiB and the
-// encoded file twice, because encoding/json builds the document in its own
-// scratch buffer and returns a copy of it; the scratch buffer stays pooled
-// until the next collections. A format written from one buffer would hold
-// the file once; the store is JSON, and a save measured ≈ 69 MiB. The
-// budget below (live + 8 MiB + 2 × file ≈ 79 MiB) only keeps that
-// measurement from growing; changing the file format is out of this test's
-// scope.
+// this implementation: the live structure, a snapshot and the encoded file
+// twice, because encoding/json builds the document in its own scratch buffer
+// and returns a copy of it; the scratch buffer stays pooled until the next
+// collections. A format written from one buffer would hold the file once; the
+// store is JSON, and a save measured ≈ 92 MiB. The budget below (live budget
+// + 8 MiB + 2 × file ≈ 101 MiB) only keeps that measurement from growing;
+// changing the file format is out of this test's scope.
 func savingStoreBudget(file int64) uint64 {
 	return liveStoreBudget + 8*mib + 2*uint64(file)
 }
@@ -691,7 +715,7 @@ func TestTheStoreAtItsBoundsStaysWithinItsSizeBudget(t *testing.T) {
 	path := filepath.Join(dir, "secure-sessions-64646.json")
 
 	base := heapInUse()
-	store := loadSecureSessionStore("", clock.read)
+	store := loadSecureSessionStore("", clock.trusted())
 	store.mu.Lock()
 	now := store.now()
 	for i := range maxPinnedIdentities {
@@ -699,17 +723,34 @@ func TestTheStoreAtItsBoundsStaysWithinItsSizeBudget(t *testing.T) {
 	}
 	for i := range maxProtectedBindings {
 		giver := boundIdentity(i / maxProtectedPerIdentity)
-		store.insertBindingLocked(domain.PeerAddress(worstHost(i)+":65535"), endpointBinding{
+		insertSeededLocked(t, store, domain.PeerAddress(worstHost(i)+":65535"), endpointBinding{
 			identity:   giver,
 			lastV2:     now,
 			protection: &bindingProtection{by: giver, pool: domain.ProtectedBindingPoolContact},
+			firstAt:    &now,
 		})
 	}
 	for i := range maxGeneralBindings {
-		store.insertBindingLocked(domain.PeerAddress(worstHost(maxProtectedBindings+i)+":65535"), endpointBinding{
-			identity: boundIdentity(i),
-			lastV2:   now,
+		name := mustCanonical(t, domain.PeerAddress(worstHost(maxProtectedBindings+maxGeneralBindings+i)+":65535"))
+		insertSeededLocked(t, store, domain.PeerAddress(worstHost(maxProtectedBindings+i)+":65535"), endpointBinding{
+			identity:    boundIdentity(i),
+			lastV2:      now,
+			firstAt:     &now,
+			derivedFrom: &name,
 		})
+	}
+	// As on the real path, every binding holds a group string of its own
+	// (sourceGroup formats one per creation, and a load decodes one per
+	// record), of the longest length a group has; and the daily quota holds
+	// as many creations as it ever may for the ordinary tier — 64 in each of
+	// the groups that 16 384 creations fill.
+	for endpoint, binding := range store.endpoints {
+		binding.group = domain.SourceGroup(strings.Clone(string(domain.SourceGroupUnresolvedName)))
+		store.endpoints[endpoint] = binding
+	}
+	for i := range maxGeneralBindings {
+		group := domain.SourceGroup(fmt.Sprintf("%04x:%04x::/32x", i/generalCreationsPerGroupPerDay, 0))
+		store.recordGeneralCreationLocked(group, now)
 	}
 	store.mu.Unlock()
 	live := heapInUse() - base
@@ -786,7 +827,7 @@ func TestTheStoreAtItsBoundsStaysWithinItsSizeBudget(t *testing.T) {
 	if err := os.Chtimes(stale, old, old); err != nil {
 		t.Fatalf("age temp: %v", err)
 	}
-	restarted := loadSecureSessionStore(path, clock.read)
+	restarted := loadSecureSessionStore(path, clock.trusted())
 	if restarted.unreadable {
 		t.Fatal("the full store could not be read back")
 	}
@@ -808,12 +849,12 @@ func TestAStoreLoadedPastTheProtectedBoundKeepsEveryBindingAndRefusesNewOnes(t *
 	clock := newStoreClock()
 	path := filepath.Join(t.TempDir(), "secure-sessions-64646.json")
 	const past = maxProtectedBindings + 100
-	store := loadSecureSessionStore("", clock.read)
+	store := loadSecureSessionStore("", clock.trusted())
 	store.mu.Lock()
 	now := store.now()
 	for i := range past {
 		giver := boundIdentity(i)
-		store.insertBindingLocked(boundEndpoint(i), endpointBinding{
+		insertSeededLocked(t, store, boundEndpoint(i), endpointBinding{
 			identity:   giver,
 			lastV2:     now,
 			protection: &bindingProtection{by: giver, pool: domain.ProtectedBindingPoolContact},
@@ -823,7 +864,7 @@ func TestAStoreLoadedPastTheProtectedBoundKeepsEveryBindingAndRefusesNewOnes(t *
 	diskBacked(t, store, path)
 	before := protectedRecords(store)
 
-	restarted := loadSecureSessionStore(path, clock.read)
+	restarted := loadSecureSessionStore(path, clock.trusted())
 	if restarted.unreadable {
 		t.Fatal("a store past the protected bound was refused as unreadable")
 	}
@@ -834,11 +875,11 @@ func TestAStoreLoadedPastTheProtectedBoundKeepsEveryBindingAndRefusesNewOnes(t *
 	if got := restarted.stats().ProtectedBindingsContact; got != past {
 		t.Fatalf("contact pool = %d, want %d", got, past)
 	}
-	result, _ := restarted.noteProvenOutbound("198.51.100.1:64646", domain.PeerIdentity{0xc1}, endpointProtectionWanted(domain.ProtectedBindingPoolContact))
+	result, _ := restarted.noteProvenOutbound(dialledAt("198.51.100.1:64646"), domain.PeerIdentity{0xc1}, endpointProtectionWanted(domain.ProtectedBindingPoolContact))
 	if refusalReason(result) != domain.ProtectedBindingRefusedStoreFull {
 		t.Fatalf("a new contact: refusal %q, want store_full", refusalReason(result))
 	}
-	result, _ = restarted.noteProvenOutbound("198.51.100.2:64646", domain.PeerIdentity{0xc2}, endpointProtectionWanted(domain.ProtectedBindingPoolRelation))
+	result, _ = restarted.noteProvenOutbound(dialledAt("198.51.100.2:64646"), domain.PeerIdentity{0xc2}, endpointProtectionWanted(domain.ProtectedBindingPoolRelation))
 	if refusalReason(result) != domain.ProtectedBindingRefusedPoolRFull {
 		t.Fatalf("a new relation: refusal %q, want pool_r_full", refusalReason(result))
 	}
@@ -848,16 +889,16 @@ func TestAStoreLoadedPastTheProtectedBoundKeepsEveryBindingAndRefusesNewOnes(t *
 // bound: per_identity is checked first, and only it is counted.
 func TestTheIdentityBoundIsReportedBeforeThePoolBound(t *testing.T) {
 	t.Parallel()
-	store := loadSecureSessionStore("", newStoreClock().read)
+	store := loadSecureSessionStore("", newStoreClock().trusted())
 	fillProtected(t, store, domain.ProtectedBindingPoolRelation, 0, maxProtectedBindings-protectedReserveContact)
 	giver := domain.PeerIdentity{0xc1}
 	for i := range maxProtectedPerIdentity {
 		endpoint := domain.PeerAddress(fmt.Sprintf("198.51.100.%d:64646", i))
-		if result, _ := store.noteProvenOutbound(endpoint, giver, endpointProtectionWanted(domain.ProtectedBindingPoolContact)); result.tier != bindingTierProtected {
+		if result, _ := store.noteProvenOutbound(dialledAt(endpoint), giver, endpointProtectionWanted(domain.ProtectedBindingPoolContact)); result.tier != bindingTierProtected {
 			t.Fatalf("precondition: endpoint %d of the identity not protected", i)
 		}
 	}
-	result, _ := store.noteProvenOutbound("203.0.113.1:64646", giver, endpointProtectionWanted(domain.ProtectedBindingPoolRelation))
+	result, _ := store.noteProvenOutbound(dialledAt("203.0.113.1:64646"), giver, endpointProtectionWanted(domain.ProtectedBindingPoolRelation))
 	if refusalReason(result) != domain.ProtectedBindingRefusedPerIdentity {
 		t.Fatalf("refusal %q, want per_identity", refusalReason(result))
 	}
@@ -872,17 +913,17 @@ func TestTheIdentityBoundIsReportedBeforeThePoolBound(t *testing.T) {
 // binding, with its reason.
 func TestARaiseRefusedAtTheBoundIsCountedAndLoggedOnce(t *testing.T) {
 	t.Parallel()
-	store := loadSecureSessionStore("", newStoreClock().read)
+	store := loadSecureSessionStore("", newStoreClock().trusted())
 	var journal bytes.Buffer
 	store.logger = zerolog.New(&journal)
 	endpoint, contact := domain.PeerAddress("198.51.100.1:64646"), domain.PeerIdentity{0xc1}
-	if result, _ := store.noteProvenOutbound(endpoint, contact, endpointProtectionNone()); result.tier != bindingTierGeneral {
+	if result, _ := store.noteProvenOutbound(dialledAt(endpoint), contact, endpointProtectionNone()); result.tier != bindingTierGeneral {
 		t.Fatal("precondition: the binding is not ordinary")
 	}
 	fillProtected(t, store, domain.ProtectedBindingPoolContact, 0, maxProtectedBindings)
 
 	for renewal := range 3 {
-		result, err := store.noteProvenOutbound(endpoint, contact, endpointProtectionWanted(domain.ProtectedBindingPoolContact))
+		result, err := store.noteProvenOutbound(dialledAt(endpoint), contact, endpointProtectionWanted(domain.ProtectedBindingPoolContact))
 		if err != nil || result.tier != bindingTierGeneral || refusalReason(result) != domain.ProtectedBindingRefusedStoreFull {
 			t.Fatalf("renewal %d: tier %v, refusal %q, err %v; want general, store_full", renewal, result.tier, refusalReason(result), err)
 		}
@@ -903,13 +944,13 @@ func TestARaiseRefusedAtTheBoundIsCountedAndLoggedOnce(t *testing.T) {
 // owner_changed is not a bound and is not counted as one.
 func TestARequiredProtectionOnAChangedOwnerIsRefused(t *testing.T) {
 	t.Parallel()
-	store := loadSecureSessionStore("", newStoreClock().read)
+	store := loadSecureSessionStore("", newStoreClock().trusted())
 	endpoint := domain.PeerAddress("198.51.100.1:64646")
 	stranger, contact := domain.PeerIdentity{0xc1}, domain.PeerIdentity{0xc2}
-	if _, err := store.noteProvenOutbound(endpoint, stranger, endpointProtectionNone()); err != nil {
+	if _, err := store.noteProvenOutbound(dialledAt(endpoint), stranger, endpointProtectionNone()); err != nil {
 		t.Fatalf("precondition: %v", err)
 	}
-	result, err := store.noteProvenOutbound(endpoint, contact, endpointProtectionRequired(domain.ProtectedBindingPoolContact))
+	result, err := store.noteProvenOutbound(dialledAt(endpoint), contact, endpointProtectionRequired(domain.ProtectedBindingPoolContact))
 	var refused *domain.ProtectedBindingRefused
 	if !errors.As(err, &refused) || refused.Reason != domain.ProtectedBindingRefusedOwnerChanged {
 		t.Fatalf("err = %v, want the typed refusal owner_changed", err)
@@ -925,7 +966,7 @@ func TestARequiredProtectionOnAChangedOwnerIsRefused(t *testing.T) {
 		t.Fatal("owner_changed was counted as a bound")
 	}
 	// The same owner proven again, still required: now raised.
-	if result, err := store.noteProvenOutbound(endpoint, contact, endpointProtectionRequired(domain.ProtectedBindingPoolContact)); err != nil || result.tier != bindingTierProtected {
+	if result, err := store.noteProvenOutbound(dialledAt(endpoint), contact, endpointProtectionRequired(domain.ProtectedBindingPoolContact)); err != nil || result.tier != bindingTierProtected {
 		t.Fatalf("the owner proven again: tier %v, err %v; want protected", result.tier, err)
 	}
 }
@@ -935,10 +976,10 @@ func TestARequiredProtectionOnAChangedOwnerIsRefused(t *testing.T) {
 // at all; it is the operation that fails.
 func TestARequiredProtectionRefusedAtABoundKeepsTheOrdinaryBinding(t *testing.T) {
 	t.Parallel()
-	store := loadSecureSessionStore("", newStoreClock().read)
+	store := loadSecureSessionStore("", newStoreClock().trusted())
 	fillProtected(t, store, domain.ProtectedBindingPoolContact, 0, maxProtectedBindings)
 	endpoint := domain.PeerAddress("198.51.100.1:64646")
-	_, err := store.noteProvenOutbound(endpoint, domain.PeerIdentity{0xc1}, endpointProtectionRequired(domain.ProtectedBindingPoolContact))
+	_, err := store.noteProvenOutbound(dialledAt(endpoint), domain.PeerIdentity{0xc1}, endpointProtectionRequired(domain.ProtectedBindingPoolContact))
 	var refused *domain.ProtectedBindingRefused
 	if !errors.As(err, &refused) || refused.Reason != domain.ProtectedBindingRefusedStoreFull {
 		t.Fatalf("err = %v, want the typed refusal store_full", err)
@@ -958,26 +999,26 @@ func TestRenewalsAreWrittenInBatchesAtMostOnceAMinute(t *testing.T) {
 	t.Parallel()
 	clock := newStoreClock()
 	path := filepath.Join(t.TempDir(), "secure-sessions-64646.json")
-	store := loadSecureSessionStore(path, clock.read)
+	store := loadSecureSessionStore(path, clock.trusted())
 	writes := 0
 	store.writeFile = func(raw []byte) error {
 		writes++
 		return store.writeToDisk(raw)
 	}
 	endpoint, id := domain.PeerAddress("192.0.2.1:64646"), domain.PeerIdentity{7}
-	if _, err := store.noteProvenOutbound(endpoint, id, endpointProtectionNone()); err != nil {
+	if _, err := store.noteProvenOutbound(dialledAt(endpoint), id, endpointProtectionNone()); err != nil {
 		t.Fatalf("bind: %v", err)
 	}
 	if writes != 1 {
 		t.Fatalf("creating a binding wrote %d times, want at once", writes)
 	}
 	onDisk := func() time.Time {
-		binding, _ := bindingOf(loadSecureSessionStore(path, clock.read), endpoint)
+		binding, _ := bindingOf(loadSecureSessionStore(path, clock.trusted()), endpoint)
 		return binding.lastV2
 	}
 
 	clock.now = clock.now.Add(90 * time.Second)
-	_, _ = store.noteProvenOutbound(endpoint, id, endpointProtectionNone())
+	_, _ = store.noteProvenOutbound(dialledAt(endpoint), id, endpointProtectionNone())
 	renewed := clock.now.UTC()
 	if writes != 1 {
 		t.Fatalf("a renewal wrote the store itself (%d writes): renewals are batched", writes)
@@ -990,7 +1031,7 @@ func TestRenewalsAreWrittenInBatchesAtMostOnceAMinute(t *testing.T) {
 	}
 
 	clock.now = clock.now.Add(10 * time.Second)
-	_, _ = store.noteProvenOutbound(endpoint, id, endpointProtectionNone())
+	_, _ = store.noteProvenOutbound(dialledAt(endpoint), id, endpointProtectionNone())
 	if err := store.flushRenewals(); err != nil {
 		t.Fatalf("flush: %v", err)
 	}
@@ -1013,7 +1054,7 @@ func TestRenewalsAreWrittenInBatchesAtMostOnceAMinute(t *testing.T) {
 
 	// The last flush, when the node stops, writes whatever is unwritten.
 	clock.now = clock.now.Add(5 * time.Second)
-	_, _ = store.noteProvenOutbound(endpoint, id, endpointProtectionNone())
+	_, _ = store.noteProvenOutbound(dialledAt(endpoint), id, endpointProtectionNone())
 	if err := store.flushRenewalsNow(); err != nil {
 		t.Fatalf("final flush: %v", err)
 	}
@@ -1027,15 +1068,15 @@ func TestRenewalsAreWrittenInBatchesAtMostOnceAMinute(t *testing.T) {
 func TestRenewingAProtectedBindingWritesNothing(t *testing.T) {
 	t.Parallel()
 	clock := newStoreClock()
-	store := loadSecureSessionStore(filepath.Join(t.TempDir(), "secure-sessions-64646.json"), clock.read)
+	store := loadSecureSessionStore(filepath.Join(t.TempDir(), "secure-sessions-64646.json"), clock.trusted())
 	endpoint, id := domain.PeerAddress("192.0.2.1:64646"), domain.PeerIdentity{7}
-	if result, _ := store.noteProvenOutbound(endpoint, id, endpointProtectionWanted(domain.ProtectedBindingPoolContact)); result.tier != bindingTierProtected {
+	if result, _ := store.noteProvenOutbound(dialledAt(endpoint), id, endpointProtectionWanted(domain.ProtectedBindingPoolContact)); result.tier != bindingTierProtected {
 		t.Fatal("precondition: the binding is not protected")
 	}
 	writes := 0
 	store.writeFile = func([]byte) error { writes++; return nil }
 	clock.now = clock.now.Add(2 * time.Hour)
-	_, _ = store.noteProvenOutbound(endpoint, id, endpointProtectionWanted(domain.ProtectedBindingPoolContact))
+	_, _ = store.noteProvenOutbound(dialledAt(endpoint), id, endpointProtectionWanted(domain.ProtectedBindingPoolContact))
 	clock.now = clock.now.Add(2 * time.Minute)
 	if err := store.flushRenewals(); err != nil {
 		t.Fatalf("flush: %v", err)
@@ -1049,7 +1090,7 @@ func TestRenewingAProtectedBindingWritesNothing(t *testing.T) {
 // it was called for already written returns without writing again.
 func TestConcurrentSavesOfOneStateWriteOnce(t *testing.T) {
 	t.Parallel()
-	store := loadSecureSessionStore(filepath.Join(t.TempDir(), "secure-sessions-64646.json"), newStoreClock().read)
+	store := loadSecureSessionStore(filepath.Join(t.TempDir(), "secure-sessions-64646.json"), newStoreClock().trusted())
 	var writes atomic.Int32
 	store.writeFile = func([]byte) error {
 		writes.Add(1)
@@ -1100,6 +1141,17 @@ func (c *sharedStoreClock) advance(d time.Duration) {
 	c.now = c.now.Add(d)
 }
 
+// sinceBoot moves with now: the test only lets time go by and never sets the
+// wall clock.
+func (c *sharedStoreClock) sinceBoot() (time.Duration, error) {
+	return c.read().Sub(storeClockBoot), nil
+}
+
+// trusted is the trusted time of a process started now on these clocks.
+func (c *sharedStoreClock) trusted() *trustedclock.Clock {
+	return trustedclock.New(trustedclock.Sources{Wall: c.read, SinceBoot: c.sinceBoot})
+}
+
 // bootstrapFlushNode is a running node whose bootstrap ticks the test sends
 // and whose secure-session store lives at path on the test's clock.
 func bootstrapFlushNode(t *testing.T, clock *sharedStoreClock, path string) (*Service, chan<- time.Time, func()) {
@@ -1107,7 +1159,7 @@ func bootstrapFlushNode(t *testing.T, clock *sharedStoreClock, path string) (*Se
 	ticks := make(chan time.Time)
 	svc, stop := startQuietNode(t, func(svc *Service) {
 		svc.bootstrapTickOverride = ticks
-		svc.secureSessions.store = loadSecureSessionStore(path, clock.read)
+		svc.secureSessions.store = loadSecureSessionStore(path, clock.trusted())
 	})
 	return svc, ticks, stop
 }
@@ -1121,7 +1173,7 @@ func tick(ticks chan<- time.Time) {
 
 func lastV2OnDisk(t *testing.T, path string, clock *sharedStoreClock, endpoint domain.PeerAddress) time.Time {
 	t.Helper()
-	binding, _ := bindingOf(loadSecureSessionStore(path, clock.read), endpoint)
+	binding, _ := bindingOf(loadSecureSessionStore(path, clock.trusted()), endpoint)
 	return binding.lastV2
 }
 
@@ -1136,12 +1188,12 @@ func TestTheBootstrapTickWritesBatchedRenewalsAndRetriesAFailedOne(t *testing.T)
 	defer stop()
 	store := svc.secureSessions.store
 	endpoint, id := domain.PeerAddress("192.0.2.1:64646"), domain.PeerIdentity{7}
-	if _, err := store.noteProvenOutbound(endpoint, id, endpointProtectionNone()); err != nil {
+	if _, err := store.noteProvenOutbound(dialledAt(endpoint), id, endpointProtectionNone()); err != nil {
 		t.Fatalf("bind: %v", err)
 	}
 
 	clock.advance(renewalFlushEvery + time.Second)
-	_, _ = store.noteProvenOutbound(endpoint, id, endpointProtectionNone())
+	_, _ = store.noteProvenOutbound(dialledAt(endpoint), id, endpointProtectionNone())
 	renewed := clock.read().UTC()
 	tick(ticks)
 	if got := lastV2OnDisk(t, path, clock, endpoint); !got.Equal(renewed) {
@@ -1155,7 +1207,7 @@ func TestTheBootstrapTickWritesBatchedRenewalsAndRetriesAFailedOne(t *testing.T)
 	store.writeFile = func([]byte) error { return diskFull }
 	store.writeMu.Unlock()
 	clock.advance(renewalFlushEvery)
-	_, _ = store.noteProvenOutbound(endpoint, id, endpointProtectionNone())
+	_, _ = store.noteProvenOutbound(dialledAt(endpoint), id, endpointProtectionNone())
 	failed := clock.read().UTC()
 	tick(ticks)
 	store.writeMu.Lock()
@@ -1180,11 +1232,11 @@ func TestStoppingTheNodeWritesTheUnwrittenRenewals(t *testing.T) {
 	svc, _, stop := bootstrapFlushNode(t, clock, path)
 	store := svc.secureSessions.store
 	endpoint, id := domain.PeerAddress("192.0.2.1:64646"), domain.PeerIdentity{7}
-	if _, err := store.noteProvenOutbound(endpoint, id, endpointProtectionNone()); err != nil {
+	if _, err := store.noteProvenOutbound(dialledAt(endpoint), id, endpointProtectionNone()); err != nil {
 		t.Fatalf("bind: %v", err)
 	}
 	clock.advance(5 * time.Second)
-	_, _ = store.noteProvenOutbound(endpoint, id, endpointProtectionNone())
+	_, _ = store.noteProvenOutbound(dialledAt(endpoint), id, endpointProtectionNone())
 	stop()
 	if got := lastV2OnDisk(t, path, clock, endpoint); !got.Equal(clock.read().UTC()) {
 		t.Fatalf("stopping the node lost the last renewal: on disk %v, want %v", got, clock.read().UTC())

@@ -235,7 +235,12 @@ Field notes:
   always present; a subsystem this build did not wire (the datagram
   plane on a node without it) reports an empty gauge list rather than
   disappearing, so "nothing is holding it there" stays distinguishable
-  from "this build cannot answer".
+  from "this build cannot answer". The list is the subsystem enum
+  itself: a guard test walks every value of it and fails when one has
+  no line or has two. **File-transfer state is not in the breakdown**
+  (the file store, transfer manager and file router have no subsystem
+  yet); this is a written exclusion rather than an omission, so growth
+  there will not show up here — read it from `getResourceUsage`.
 - `subsystems[].gauges[].count` — **exact**: the live cardinality of one
   container, read as a `len` under the lock its owner already holds, or
   a byte total the owner already maintains. The few walks that do happen
@@ -602,7 +607,12 @@ challenge-и.
   всегда все; подсистема, которой в этой сборке нет (плоскость датаграмм
   на узле без неё), отдаёт пустой список gauge-ей, а не исчезает — чтобы
   «там ничего не лежит» осталось отличимо от «эта сборка не умеет
-  отвечать».
+  отвечать». Список — это само перечисление подсистем: тест-сторож
+  обходит каждое его значение и падает, если у значения нет строки или
+  их две. **Состояния передачи файлов в разбивке нет** (у хранилища
+  файлов, менеджера передач и маршрутизатора файлов пока нет подсистемы);
+  это записанное исключение, а не пропуск, поэтому рост там здесь не
+  виден — его смотрят через `getResourceUsage`.
 - `subsystems[].gauges[].count` — **точное** число: живая мощность одного
   контейнера, снятая как `len` под уже удерживаемой владельцем
   блокировкой, либо сумма байт, которую владелец и так ведёт. Немногие

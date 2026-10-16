@@ -107,6 +107,9 @@ type Metrics struct {
 	// a capability rollout could not be watched from a running node
 	// (docs/rpc/datagram.md, `metrics.SendRefusals`).
 	sendRefusals [sendRefusalSlots]atomic.Uint64
+	// localSends attributes every SendLocal call to the subsystem that made
+	// it, slot zero being the unattributed row (local_senders.go).
+	localSends [localSenderBound]localSendCounters
 }
 
 // sendRefusalSlot names WHICH admission gate refused a send.
@@ -385,13 +388,20 @@ func (m *Metrics) Snapshot() MetricsSnapshot {
 		snapshot.SendRefusals[sendRefusalNames[slot]] = count
 	}
 	snapshot.UnknownDType = m.unknown.Load()
-	if !m.startedAt.IsZero() {
-		startedAt := m.startedAt
-		snapshot.StartedAt = &startedAt
-	}
+	snapshot.StartedAt = m.startedAtStamp()
 	readAt := time.Now().UTC()
 	snapshot.ReadAt = &readAt
 	return snapshot
+}
+
+// startedAtStamp is the period start every block read from this counter set
+// carries; nil when unknown, so it renders as `null` rather than the year 1.
+func (m *Metrics) startedAtStamp() *time.Time {
+	if m == nil || m.startedAt.IsZero() {
+		return nil
+	}
+	startedAt := m.startedAt
+	return &startedAt
 }
 
 func (m *Metrics) modeCounts(slot int) ModeCounts {
@@ -445,6 +455,14 @@ type Diagnostics struct {
 	// the only one whose overflow REFUSES instead of evicting. A refusal there
 	// does not slow a subsystem down, it stops it from asking at all.
 	Reverse ReverseDiagnostics
+	// Handlers is what the type handlers did, per registered dtype and mode
+	// (handler_stats.go): the same handler calls Metrics.ByMode counts, cut by
+	// type rather than added to them.
+	Handlers HandlerStatsSnapshot
+	// LocalSenders is every local send attributed to the subsystem that made
+	// it (local_senders.go): who filled the shared local quota and whom it
+	// turned away.
+	LocalSenders LocalSendersSnapshot
 }
 
 // ReverseDiagnostics is what the reverse-state table reports.
@@ -482,33 +500,54 @@ type ReplayDiagnostics struct {
 	Held int
 }
 
+// DiagnosticsSources are the components one diagnostic is read from. Every
+// one but Limits is optional.
+type DiagnosticsSources struct {
+	// Limits are the numbers the layer was configured with.
+	Limits Limits
+	// Metrics is the layer's counter set; it also anchors the period of the
+	// handler and local-sender blocks.
+	Metrics *Metrics
+	// Admission is the per-neighbour budget.
+	Admission *PeerAdmission
+	// Queue is the weighted class queue.
+	Queue *WeightedQueue
+	// Replay is the base anti-replay cache.
+	Replay *BaseReplayCache
+	// Reverse is the reverse-state table.
+	Reverse *ReverseTable
+	// Types is the endpoint registry whose entries carry the handler counters.
+	Types *TypeRegistry
+}
+
 // CollectDiagnostics assembles the snapshot. Every component is optional: a
 // node that wired no queue reports a zero queue rather than refusing to
 // answer, because a diagnostic that fails when a subsystem is absent is a
 // diagnostic nobody calls.
-func CollectDiagnostics(
-	limits Limits,
-	metrics *Metrics,
-	admission *PeerAdmission,
-	queue *WeightedQueue,
-	replay *BaseReplayCache,
-	reverse *ReverseTable,
-) Diagnostics {
-	diagnostics := Diagnostics{Limits: limits.Normalized(), Metrics: metrics.Snapshot()}
-	if admission != nil {
-		diagnostics.Admission = admission.Stats()
+//
+// The sources arrive as one struct rather than positionally: seven components,
+// six of them pointers, is a call site where two can be swapped silently.
+func CollectDiagnostics(sources DiagnosticsSources) Diagnostics {
+	diagnostics := Diagnostics{
+		Limits:       sources.Limits.Normalized(),
+		Metrics:      sources.Metrics.Snapshot(),
+		LocalSenders: sources.Metrics.LocalSendersSnapshot(),
+		Handlers:     newHandlerStatsSnapshot(sources.Types, sources.Metrics.startedAtStamp()),
 	}
-	if queue != nil {
-		diagnostics.Queue = queue.Stats()
+	if sources.Admission != nil {
+		diagnostics.Admission = sources.Admission.Stats()
 	}
-	if replay != nil {
-		diagnostics.Replay = ReplayDiagnostics{Counters: replay.Metrics(), Held: replay.Len()}
+	if sources.Queue != nil {
+		diagnostics.Queue = sources.Queue.Stats()
 	}
-	if reverse != nil {
+	if sources.Replay != nil {
+		diagnostics.Replay = ReplayDiagnostics{Counters: sources.Replay.Metrics(), Held: sources.Replay.Len()}
+	}
+	if sources.Reverse != nil {
 		diagnostics.Reverse = ReverseDiagnostics{
-			Held:          reverse.Len(),
-			LocalSlots:    reverse.LocalSlots(),
-			LocalRefusals: reverseRefusalNames(reverse.LocalRefusals()),
+			Held:          sources.Reverse.Len(),
+			LocalSlots:    sources.Reverse.LocalSlots(),
+			LocalRefusals: reverseRefusalNames(sources.Reverse.LocalRefusals()),
 		}
 	}
 	return diagnostics

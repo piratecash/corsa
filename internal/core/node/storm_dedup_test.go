@@ -69,7 +69,7 @@ func TestRecomputeVersionPolicyLocked_SuppressesNoOpPublish(t *testing.T) {
 
 	svc := &Service{
 		eventBus:     bus,
-		peerIDs:      make(map[domain.PeerAddress]domain.PeerIdentity),
+		peerIDs:      make(addressIdentities),
 		peerBuilds:   make(map[domain.PeerAddress]int),
 		peerVersions: make(map[domain.PeerAddress]string),
 	}
@@ -116,7 +116,7 @@ func TestRecomputeVersionPolicyLocked_HeartbeatRepublishesUnchangedSnapshot(t *t
 
 	svc := &Service{
 		eventBus:     bus,
-		peerIDs:      make(map[domain.PeerAddress]domain.PeerIdentity),
+		peerIDs:      make(addressIdentities),
 		peerBuilds:   make(map[domain.PeerAddress]int),
 		peerVersions: make(map[domain.PeerAddress]string),
 	}
@@ -157,7 +157,7 @@ func TestRecomputeVersionPolicyLocked_PublishesOnRealChange(t *testing.T) {
 
 	svc := &Service{
 		eventBus:     bus,
-		peerIDs:      make(map[domain.PeerAddress]domain.PeerIdentity),
+		peerIDs:      make(addressIdentities),
 		peerBuilds:   make(map[domain.PeerAddress]int),
 		peerVersions: make(map[domain.PeerAddress]string),
 	}
@@ -201,7 +201,7 @@ func TestPublishAggregateStatusChangedLocked_SuppressesNoOpPublishOnSameContent(
 		eventBus:        bus,
 		health:          make(map[domain.PeerAddress]*peerHealth),
 		pending:         make(map[domain.PeerAddress][]pendingFrame),
-		peerIDs:         make(map[domain.PeerAddress]domain.PeerIdentity),
+		peerIDs:         make(addressIdentities),
 		peerBuilds:      make(map[domain.PeerAddress]int),
 		peerVersions:    make(map[domain.PeerAddress]string),
 		aggregateStatus: domain.AggregateStatusSnapshot{Status: domain.NetworkStatusOffline},
@@ -284,7 +284,7 @@ func TestPublishAggregateStatusChangedLocked_HeartbeatRepublishesUnchangedSnapsh
 		eventBus:        bus,
 		health:          make(map[domain.PeerAddress]*peerHealth),
 		pending:         make(map[domain.PeerAddress][]pendingFrame),
-		peerIDs:         make(map[domain.PeerAddress]domain.PeerIdentity),
+		peerIDs:         make(addressIdentities),
 		peerBuilds:      make(map[domain.PeerAddress]int),
 		peerVersions:    make(map[domain.PeerAddress]string),
 		aggregateStatus: domain.AggregateStatusSnapshot{Status: domain.NetworkStatusOffline},

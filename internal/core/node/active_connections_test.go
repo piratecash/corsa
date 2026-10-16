@@ -35,7 +35,7 @@ func activeConnTestService(t *testing.T) *Service {
 	svc := &Service{
 		health:          make(map[domain.PeerAddress]*peerHealth),
 		sessions:        make(map[domain.PeerAddress]*peerSession),
-		peerIDs:         make(map[domain.PeerAddress]domain.PeerIdentity),
+		peerIDs:         make(addressIdentities),
 		peerVersions:    make(map[domain.PeerAddress]string),
 		peerBuilds:      make(map[domain.PeerAddress]int),
 		conns:           make(map[domain.ConnID]*connEntry),
@@ -89,7 +89,7 @@ func addOutboundPeer(svc *Service, addr string, identity string, connID domain.C
 		peerIdentity: domaintest.ID(identity),
 		connID:       connID,
 	}
-	svc.peerIDs[pa] = domaintest.ID(identity)
+	svc.peerIDs[pa] = claimedAddressIdentity(domaintest.ID(identity))
 	primeActiveConnSnapshots(svc)
 }
 
@@ -108,7 +108,7 @@ func addInboundPeer(t *testing.T, svc *Service, addr string, identity string, co
 		LastConnectedAt:     now,
 		LastUsefulReceiveAt: now,
 	}
-	svc.peerIDs[pa] = domaintest.ID(identity)
+	svc.peerIDs[pa] = claimedAddressIdentity(domaintest.ID(identity))
 
 	core := testInboundCore(t, pa, domaintest.ID(identity), connID)
 	svc.conns[connID] = &connEntry{core: core}
@@ -225,7 +225,7 @@ func TestActiveConnectionsJSON_OutboundWithSlotState(t *testing.T) {
 		svc.sessions = make(map[domain.PeerAddress]*peerSession)
 	}
 	if svc.peerIDs == nil {
-		svc.peerIDs = make(map[domain.PeerAddress]domain.PeerIdentity)
+		svc.peerIDs = make(addressIdentities)
 	}
 	if svc.conns == nil {
 		svc.conns = make(map[domain.ConnID]*connEntry)
@@ -245,7 +245,7 @@ func TestActiveConnectionsJSON_OutboundWithSlotState(t *testing.T) {
 		peerIdentity: domaintest.ID("id-1.2.3.4:9000"),
 		connID:       domain.ConnID(1),
 	}
-	svc.peerIDs[pa] = domaintest.ID("id-1.2.3.4:9000")
+	svc.peerIDs[pa] = claimedAddressIdentity(domaintest.ID("id-1.2.3.4:9000"))
 	svc.peerMu.Unlock()
 
 	// Post-mutation prime: the snapshots are loaded atomically by the hot
@@ -551,7 +551,7 @@ func TestActiveConnectionsJSON_Integration(t *testing.T) {
 		svc.sessions = make(map[domain.PeerAddress]*peerSession)
 	}
 	if svc.peerIDs == nil {
-		svc.peerIDs = make(map[domain.PeerAddress]domain.PeerIdentity)
+		svc.peerIDs = make(addressIdentities)
 	}
 	if svc.conns == nil {
 		svc.conns = make(map[domain.ConnID]*connEntry)
@@ -573,7 +573,7 @@ func TestActiveConnectionsJSON_Integration(t *testing.T) {
 			peerIdentity: id,
 			connID:       domain.ConnID(uint64(i) + 1),
 		}
-		svc.peerIDs[pa] = id
+		svc.peerIDs[pa] = claimedAddressIdentity(id)
 	}
 
 	// Add an inbound peer directly to health/registry.
@@ -586,7 +586,7 @@ func TestActiveConnectionsJSON_Integration(t *testing.T) {
 		LastConnectedAt:     now,
 		LastUsefulReceiveAt: now,
 	}
-	svc.peerIDs[inAddr] = domaintest.ID("inbound_identity")
+	svc.peerIDs[inAddr] = claimedAddressIdentity(domaintest.ID("inbound_identity"))
 	svc.peerMu.Unlock()
 
 	// Register the inbound core in the conn registry.
@@ -677,7 +677,7 @@ func TestActiveConnectionsJSON_PeerAddressDiffersFromRemote(t *testing.T) {
 	svc.peerMu.Lock()
 	svc.health = make(map[domain.PeerAddress]*peerHealth)
 	svc.sessions = make(map[domain.PeerAddress]*peerSession)
-	svc.peerIDs = make(map[domain.PeerAddress]domain.PeerIdentity)
+	svc.peerIDs = make(addressIdentities)
 	svc.conns = make(map[domain.ConnID]*connEntry)
 	now := time.Now().UTC()
 	pa := domain.PeerAddress(canonical)
@@ -694,7 +694,7 @@ func TestActiveConnectionsJSON_PeerAddressDiffersFromRemote(t *testing.T) {
 		peerIdentity: domaintest.ID("id-fallback"),
 		connID:       domain.ConnID(1),
 	}
-	svc.peerIDs[pa] = domaintest.ID("id-fallback")
+	svc.peerIDs[pa] = claimedAddressIdentity(domaintest.ID("id-fallback"))
 	svc.peerMu.Unlock()
 
 	// Post-mutation prime so peerHealthFrames observes the seeded state —

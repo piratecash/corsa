@@ -71,6 +71,12 @@ const (
 	// its own line because it has already been the answer once: a leak
 	// traced to ban maps that were only cleaned lazily.
 	ResourceSubsystemBans
+
+	// resourceSubsystemBound is one past the last real subsystem. It is the
+	// range every walk over the enum stops at, so a new subsystem is declared
+	// ABOVE this line; one declared below it is not Valid and drops out of
+	// every walk, which the domain test catches by its name.
+	resourceSubsystemBound
 )
 
 var resourceSubsystemNames = map[ResourceSubsystem]string{
@@ -92,10 +98,24 @@ func (s ResourceSubsystem) String() string {
 	return fmt.Sprintf("unknown(%d)", s)
 }
 
-// Valid reports whether the value names a real subsystem.
+// Valid reports whether the value names a real subsystem: named, and inside
+// the enumeration range.
 func (s ResourceSubsystem) Valid() bool {
 	_, ok := resourceSubsystemNames[s]
-	return ok && s != ResourceSubsystemUnset
+	return ok && s > ResourceSubsystemUnset && s < resourceSubsystemBound
+}
+
+// ResourceSubsystems returns every real subsystem in declaration order.
+//
+// It exists so a completeness check walks the enum itself rather than a list
+// copied next to it: a copied list is extended by the same person who forgot
+// the breakdown line, and then both agree on the omission.
+func ResourceSubsystems() []ResourceSubsystem {
+	all := make([]ResourceSubsystem, 0, int(resourceSubsystemBound)-1)
+	for subsystem := ResourceSubsystemUnset + 1; subsystem < resourceSubsystemBound; subsystem++ {
+		all = append(all, subsystem)
+	}
+	return all
 }
 
 // SizeOfAll sums the in-memory footprint of the given zero values — the

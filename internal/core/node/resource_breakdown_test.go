@@ -44,15 +44,10 @@ func TestBreakdownCoversEveryStateOwningSubsystem(t *testing.T) {
 		present[usage.Subsystem()] = true
 	}
 
-	for _, want := range []domain.ResourceSubsystem{
-		domain.ResourceSubsystemRoutePlane,
-		domain.ResourceSubsystemAnnounce,
-		domain.ResourceSubsystemDatagram,
-		domain.ResourceSubsystemDelivery,
-		domain.ResourceSubsystemSessions,
-		domain.ResourceSubsystemKnowledge,
-		domain.ResourceSubsystemBans,
-	} {
+	// The walk is over the ENUM, not over a list kept here: a list would be
+	// extended by the same person who forgot to extend the breakdown, and a new
+	// subsystem without a line would pass.
+	for _, want := range domain.ResourceSubsystems() {
 		if !present[want] {
 			t.Fatalf("%s is missing from the breakdown: growth there would read as nobody's", want)
 		}

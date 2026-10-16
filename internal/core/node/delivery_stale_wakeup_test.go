@@ -177,7 +177,7 @@ func setRoutingPeerConnected(t *testing.T, svc *Service, addr string, peerIdenti
 		authOK:       true,
 	}
 	svc.health[address] = &peerHealth{Connected: true}
-	svc.peerIDs[address] = peerIdentity
+	svc.peerIDs[address] = claimedAddressIdentity(peerIdentity)
 	svc.conns[connID] = &connEntry{}
 	return connID
 }

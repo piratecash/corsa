@@ -39,7 +39,7 @@ func attachCapableRelayPeer(t *testing.T, svc *Service, addr string, peerIdentit
 	}
 	svc.health[domain.PeerAddress(addr)] = &peerHealth{Connected: true}
 	if !peerIdentity.IsZero() {
-		svc.peerIDs[domain.PeerAddress(addr)] = peerIdentity
+		svc.peerIDs[domain.PeerAddress(addr)] = claimedAddressIdentity(peerIdentity)
 	}
 	svc.peerMu.Unlock()
 	return sendCh

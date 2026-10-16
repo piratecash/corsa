@@ -407,7 +407,7 @@ func (p *Pipeline) forwardPublisher(plan forwardPlan) hopPublisher {
 // BEFORE the enqueue, worth repeating with a backoff, and it does not license
 // the transport fallback that `rejected` and `no_route` do (see SendFailed).
 func reserveRefusalOutcome(local bool, result ReserveResult) SendOutcome {
-	return SendOutcome{kind: SendRejected, local: local, err: result.Err()}
+	return SendOutcome{kind: SendRejected, cause: rejectedByReplay, local: local, err: result.Err()}
 }
 
 // release is the ONE place the layer gives a reservation back, so the branch

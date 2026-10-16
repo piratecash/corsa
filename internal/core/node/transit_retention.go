@@ -265,7 +265,7 @@ func (s *Service) viaIdentityForAddress(addr domain.PeerAddress) domain.PeerIden
 	}
 	s.peerMu.RLock()
 	defer s.peerMu.RUnlock()
-	return s.peerIDs[s.resolveHealthAddress(addr)]
+	return s.peerIDs.identityOf(s.resolveHealthAddress(addr))
 }
 
 // isIngressNextHop reports whether the resolved table-directed
@@ -359,7 +359,7 @@ func (s *Service) excludeNextHopFromGossip(targets []domain.PeerAddress, id doma
 	canonAddr := s.resolveHealthAddress(addr)
 	for _, t := range targets {
 		canonT := s.resolveHealthAddress(t)
-		if !id.IsZero() && s.peerIDs[canonT] == id {
+		if !id.IsZero() && s.peerIDs.identityOf(canonT) == id {
 			continue
 		}
 		if addr != "" && (t == addr || canonT == canonAddr) {
@@ -413,7 +413,7 @@ func (s *Service) filterGossipTargetsForEnvelope(e protocol.Envelope, targets []
 		// holds this id (the gossip-storm amplifier — a peer acked every
 		// push and we re-pushed anyway).
 		if len(delivered) > 0 {
-			if _, has := delivered[s.peerIDs[canonT]]; has {
+			if _, has := delivered[s.peerIDs.identityOf(canonT)]; has {
 				continue
 			}
 		}

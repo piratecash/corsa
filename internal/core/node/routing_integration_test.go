@@ -3910,7 +3910,7 @@ func TestRoutingTargetsDeduplicatesFallbackPort(t *testing.T) {
 		LastConnectedAt: time.Now().UTC(),
 	}
 	svc.peerTypes[canonical] = domain.NodeTypeFull
-	svc.peerIDs[canonical] = domaintest.ID("peer-identity-A")
+	svc.peerIDs[canonical] = claimedAddressIdentity(domaintest.ID("peer-identity-A"))
 
 	// Canonical peer in peer list (no session under this key).
 	svc.peers = []transport.Peer{

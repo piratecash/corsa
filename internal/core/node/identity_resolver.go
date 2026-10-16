@@ -774,7 +774,7 @@ func (r *identityResolver) sendAttempt(ctx context.Context, target domain.PeerId
 	r.mu.Unlock()
 
 	r.sendSlots <- struct{}{}
-	outcome := layer.pipeline.SendLocal(ctx, datagram.LocalSendOpts{Frame: frame, Avoid: avoidOpt})
+	outcome := layer.pipeline.SendLocal(ctx, datagram.LocalSenderIdentityResolver, datagram.LocalSendOpts{Frame: frame, Avoid: avoidOpt})
 	<-r.sendSlots
 
 	r.mu.Lock()

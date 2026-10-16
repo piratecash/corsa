@@ -211,7 +211,7 @@ func TestBuiltFrameGoesThroughTheLayerUnchanged(t *testing.T) {
 		t.Fatalf("Build: %v", err)
 	}
 
-	outcome := origin.pipeline.SendLocal(context.Background(), LocalSendOpts{Frame: frame})
+	outcome := origin.pipeline.SendLocal(context.Background(), testSender, LocalSendOpts{Frame: frame})
 	if outcome.Kind() != SendQueued {
 		t.Fatalf("SendLocal = %s (%v)", outcome, outcome.Err())
 	}

@@ -23,7 +23,7 @@ func fillPinStore(t *testing.T, store *secureSessionStore) {
 	t.Helper()
 	store.mu.Lock()
 	for i := 0; len(store.identities) < maxPinnedIdentities; i++ {
-		store.identities[domain.PeerIdentity{0xa0, byte(i), byte(i >> 8), byte(i >> 16)}] = store.clock()
+		store.identities[domain.PeerIdentity{0xa0, byte(i), byte(i >> 8), byte(i >> 16)}] = store.now()
 		store.changes++
 	}
 	store.mu.Unlock()
@@ -36,7 +36,7 @@ func TestAFullPinStoreRefusesANewIdentityAndKeepsEveryExistingOne(t *testing.T) 
 	t.Parallel()
 	clock := newStoreClock()
 	path := filepath.Join(t.TempDir(), "secure-sessions-64646.json")
-	store := loadSecureSessionStore(path, clock.read)
+	store := loadSecureSessionStore(path, clock.trusted())
 	honest := domain.PeerIdentity{1}
 	if err := store.noteProvenInbound(honest); err != nil {
 		t.Fatalf("pin the honest identity: %v", err)
@@ -49,7 +49,7 @@ func TestAFullPinStoreRefusesANewIdentityAndKeepsEveryExistingOne(t *testing.T) 
 		if err := store.noteProvenInbound(newcomer); !errors.Is(err, errPinStoreFull) {
 			t.Fatalf("attempt %d, accepted: err = %v, want pin_store_full", attempt, err)
 		}
-		if _, err := store.noteProvenOutbound(endpoint, newcomer, endpointProtectionNone()); !errors.Is(err, errPinStoreFull) {
+		if _, err := store.noteProvenOutbound(dialledAt(endpoint), newcomer, endpointProtectionNone()); !errors.Is(err, errPinStoreFull) {
 			t.Fatalf("attempt %d, dialled: err = %v, want pin_store_full", attempt, err)
 		}
 		if store.identityPinned(newcomer) {
@@ -64,7 +64,7 @@ func TestAFullPinStoreRefusesANewIdentityAndKeepsEveryExistingOne(t *testing.T) 
 	if err := store.noteProvenInbound(honest); err != nil {
 		t.Fatalf("an identity pinned before the store filled up was refused: %v", err)
 	}
-	if _, err := store.noteProvenOutbound("198.51.100.10:64646", honest, endpointProtectionNone()); err != nil {
+	if _, err := store.noteProvenOutbound(dialledAt("198.51.100.10:64646"), honest, endpointProtectionNone()); err != nil {
 		t.Fatalf("a dial to an identity pinned before the store filled up was refused: %v", err)
 	}
 
@@ -77,7 +77,7 @@ func TestAFullPinStoreRefusesANewIdentityAndKeepsEveryExistingOne(t *testing.T) 
 	}
 
 	// A restart loses nothing that was protected, and does not make room.
-	restarted := loadSecureSessionStore(path, clock.read)
+	restarted := loadSecureSessionStore(path, clock.trusted())
 	if !restarted.identityPinned(honest) {
 		t.Fatal("an existing pin was lost across a restart")
 	}

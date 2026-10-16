@@ -344,7 +344,7 @@ func TestLocalRequestTakesTheLocalUpstreamMarker(t *testing.T) {
 	registerType(t, fixture.target, requestType(dtypeQuery, acceptingHandler()))
 
 	label := newLabel(t, "mine")
-	outcome := fixture.origin.pipeline.SendLocal(context.Background(), LocalSendOpts{
+	outcome := fixture.origin.pipeline.SendLocal(context.Background(), testSender, LocalSendOpts{
 		Frame: requestFrame(t, requestOpts{label: label, dst: fixture.target.id}),
 	})
 	if outcome.Kind() != SendQueued {

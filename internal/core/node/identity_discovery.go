@@ -730,7 +730,10 @@ func (s *Service) sendInitialIdentityPush(ctx context.Context, peer domain.PeerI
 	// on its own, so no_route is retried briefly; every other outcome is
 	// final for this session.
 	for attempt := 0; attempt < initialPushNoRouteRetries; attempt++ {
-		outcome := layer.pipeline.SendLocal(ctx, datagram.LocalSendOpts{Frame: signed, Avoid: datagram.NoAvoidedNextHop()})
+		outcome := layer.pipeline.SendLocal(ctx, datagram.LocalSenderIdentityDiscovery, datagram.LocalSendOpts{
+			Frame: signed,
+			Avoid: datagram.NoAvoidedNextHop(),
+		})
 		switch outcome.Kind() {
 		case datagram.SendQueued:
 			log.Debug().Str("peer", peer.String()).Msg("push_identity_sent")

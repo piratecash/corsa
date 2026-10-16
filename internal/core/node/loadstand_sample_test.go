@@ -158,6 +158,11 @@ type loadStandNodeSample struct {
 //
 //   - TransportTraffic, SessionOutcomes, Neighbours, RouteEntries — yes,
 //     fetchRouteSummary carries them (transport_traffic among them).
+//   - Session kinds — yes: fetchRouteSummary carries session_kinds, the
+//     cumulative v2 / legacy sessions per direction since started_at and the
+//     live gauge of distinct identities. The sample does not read them yet;
+//     the RPC renders them as a map of its own, so a source decodes them
+//     into a stand DTO, not into domain.SessionKindStats.
 //   - DatagramSummary — yes, fetchDatagramSummary is the same JSON this
 //     in-process source decodes.
 //   - ModeSelection — partly: the RPC renders the enums with String() and

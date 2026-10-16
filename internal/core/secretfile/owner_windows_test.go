@@ -3,6 +3,7 @@
 package secretfile
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -78,5 +79,50 @@ func assertOwnerOnly(t *testing.T, what, path string) {
 	}
 	if denied := strings.Count(dacl, "(D;"); denied != 0 {
 		t.Fatalf("%s: DACL carries deny ACEs, which is not the shape this package builds: %s", what, dacl)
+	}
+}
+
+// grantOthersRead is the Windows half of "make this file readable by somebody
+// other than its owner": a DACL that keeps the current user and adds read for
+// Everyone, the way an inherited ACL from a shared folder would.
+func grantOthersRead(t *testing.T, path string) {
+	t.Helper()
+	setDACL(t, path, fmt.Sprintf("D:P(A;;FA;;;%s)(A;;FR;;;WD)", currentUserSID(t)))
+}
+
+// denyOwnerWrites is the Windows half of "this process may no longer create
+// files in dir": a DACL that leaves the current user read and traverse only.
+// Full control is given back on cleanup so t.TempDir can remove it.
+func denyOwnerWrites(t *testing.T, dir string) {
+	t.Helper()
+	sid := currentUserSID(t)
+	setDACL(t, dir, fmt.Sprintf("D:P(A;;FRFX;;;%s)", sid))
+	t.Cleanup(func() {
+		descriptor, err := windows.SecurityDescriptorFromString(fmt.Sprintf("D:P(A;OICI;FA;;;%s)", sid))
+		if err != nil {
+			return
+		}
+		dacl, _, err := descriptor.DACL()
+		if err != nil {
+			return
+		}
+		_ = windows.SetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT,
+			windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, dacl, nil)
+	})
+}
+
+func setDACL(t *testing.T, path, sddl string) {
+	t.Helper()
+	descriptor, err := windows.SecurityDescriptorFromString(sddl)
+	if err != nil {
+		t.Fatalf("build descriptor: %v", err)
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil {
+		t.Fatalf("read dacl: %v", err)
+	}
+	if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, dacl, nil); err != nil {
+		t.Fatalf("apply dacl: %v", err)
 	}
 }

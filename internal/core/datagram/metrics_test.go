@@ -187,7 +187,7 @@ func TestMetricsDiagnosticsAssembleFromWhatIsWired(t *testing.T) {
 	admission := NewPeerAdmission(AdmissionConfig{Budget: limits.Peer})
 	queue := NewWeightedQueue(WeightedQueueConfig{})
 
-	partial := CollectDiagnostics(limits, metrics, nil, nil, nil, nil)
+	partial := CollectDiagnostics(DiagnosticsSources{Limits: limits, Metrics: metrics})
 	if partial.Metrics.Forwarded != 1 {
 		t.Fatalf("metrics missing from the diagnostic: %+v", partial.Metrics)
 	}
@@ -219,7 +219,14 @@ func TestMetricsDiagnosticsAssembleFromWhatIsWired(t *testing.T) {
 	}
 
 	reverse := NewReverseTable(ReverseTableConfig{})
-	full := CollectDiagnostics(limits, metrics, admission, queue, replay, reverse)
+	full := CollectDiagnostics(DiagnosticsSources{
+		Limits:    limits,
+		Metrics:   metrics,
+		Admission: admission,
+		Queue:     queue,
+		Replay:    replay,
+		Reverse:   reverse,
+	})
 	// A wired reverse table always reports its refusal map, empty or not: a
 	// nil there would be indistinguishable from a build that cannot answer.
 	if full.Reverse.LocalRefusals == nil {

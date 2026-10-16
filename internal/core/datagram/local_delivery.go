@@ -2,6 +2,7 @@ package datagram
 
 import (
 	"context"
+	"time"
 
 	"github.com/rs/zerolog/log"
 
@@ -89,7 +90,7 @@ type localDelivery struct {
 // Verify and the handler for free until its validity ran out. `failed` is a
 // fault after which a repeat makes sense, so the key is released.
 func (p *Pipeline) runLocalDelivery(ctx context.Context, run localDelivery) InboundResult {
-	result := runHandler(ctx, run.entry.Handler(), run.delivery, run.payload)
+	result := p.runHandler(ctx, run.entry, run.delivery, run.payload)
 	switch result.Outcome() {
 	case HandlerAccepted:
 		return p.completeAccepted(ctx, run, result)
@@ -113,8 +114,8 @@ func (p *Pipeline) completeAccepted(ctx context.Context, run localDelivery, resu
 	return delivered
 }
 
-// commitDelivered is the layer's half of the `accepted` row, also replayed on
-// its own for the already_committed case.
+// commitDelivered is the layer's half of the `accepted` row: the commit of the
+// replay key after the handler accepted, with Release when the commit fails.
 func (p *Pipeline) commitDelivered(ctx context.Context, run localDelivery) InboundResult {
 	if !p.replay.Commit(ctx, run.rsv).IsApplied() {
 		// Commit.fail: Release. The delivery has already been accepted, so the
@@ -166,14 +167,45 @@ func (p *Pipeline) completeFailed(ctx context.Context, run localDelivery, result
 // killing the reader goroutine that serves every other type on the same
 // session. It is the boundary of hook_guard.go, reached through the same helper
 // as every other seam so the crash report has the same shape.
-func runHandler(ctx context.Context, handler Handler, delivery DeliveryContext, payload []byte) HandlerResult {
+//
+// It is also the ONE place a handler call is counted (handler_stats.go): every
+// plane calls a handler through here and only after every gate, so one record
+// per call covers routed, request and response without a second counting site.
+// It takes the registry ENTRY rather than the bare Handler for that reason —
+// the entry carries the type's counters.
+func (p *Pipeline) runHandler(
+	ctx context.Context,
+	entry RegisteredType,
+	delivery DeliveryContext,
+	payload []byte,
+) HandlerResult {
 	site := hookSite{hook: "Handle", dtype: delivery.Header().DType()}
 	// The PRESENTED name: a crash report has to say which neighbour it happened
 	// on, proven or not, and the level travels with the value it came from.
 	site.peer, _ = delivery.IncomingPeer().PresentedIdentity()
-	return guardHook(site, FailDelivery(errHookPanicked), func() HandlerResult {
-		return handler.Handle(ctx, delivery, payload)
+
+	// returned is set only by a Handle that came back: the guard's fallback is
+	// an ordinary FailDelivery, so the result alone cannot tell a panic from an
+	// honest failure.
+	returned := false
+	var wall time.Duration
+	result := guardHook(site, FailDelivery(errHookPanicked), func() HandlerResult {
+		// The clock stops in a defer of THIS frame, which a panic unwinds
+		// before guardHook's recovery writes the crash report: the report and
+		// its stack trace are the guard's cost, not the handler's.
+		started := p.monotonic()
+		defer func() { wall = p.monotonic().Sub(started) }()
+		answer := entry.Handler().Handle(ctx, delivery, payload)
+		returned = true
+		return answer
 	})
+	entry.stats.record(handlerCall{
+		mode:     delivery.Header().Mode(),
+		outcome:  result.Outcome(),
+		wall:     wall,
+		panicked: !returned,
+	})
+	return result
 }
 
 // ---------------------------------------------------------------------------
@@ -200,7 +232,7 @@ func (p *Pipeline) deliverUnsigned(
 	if reason != DropReasonUnset {
 		return HandlerResult{}, reason
 	}
-	return runHandler(ctx, admitted.entry.Handler(), admitted.delivery, arrival.frame.Payload), DropReasonUnset
+	return p.runHandler(ctx, admitted.entry, admitted.delivery, arrival.frame.Payload), DropReasonUnset
 }
 
 // ---------------------------------------------------------------------------

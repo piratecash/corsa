@@ -116,7 +116,7 @@ func TestMaximumPathRoundTrip(t *testing.T) {
 	}
 
 	label := newLabel(t, "max-path")
-	outcome := origin.pipeline.SendLocal(context.Background(), LocalSendOpts{
+	outcome := origin.pipeline.SendLocal(context.Background(), testSender, LocalSendOpts{
 		Frame: requestFrame(t, requestOpts{label: label, dst: target.id}),
 	})
 	if outcome.Kind() != SendQueued {

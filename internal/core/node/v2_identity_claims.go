@@ -112,6 +112,7 @@ func (s *Service) onIdentityProvenV2(ctx context.Context, proof sessionv2.Proven
 		return nil
 	}
 	s.closeLegacyClaimsOf(ctx, id)
+	s.forgetClaimedAddressesOf(id)
 	if err := s.unprovenRouting.waitDrained(ctx, id); err != nil {
 		if !s.unprovenRouting.owePurge(id) {
 			log.Warn().Err(err).Str("peer", id.String()).Msg("routing_unproven_purge_passed_to_last_legacy_writer")
@@ -170,6 +171,76 @@ func (s *Service) closeLegacyClaimsOf(ctx context.Context, id domain.PeerIdentit
 			Msg("legacy_connection_closed_identity_proved_v2")
 		_ = network.Close(ctx, connID)
 	}
+}
+
+// forgetClaimedAddressesOf forgets, once id proved itself over v2, every
+// address that only a claim ties to id — a v1 hello or welcome: its peerIDs
+// entry, and the identity in its persisted metadata, so
+// peers.json no longer carries it after the next write and a restart does
+// not bring it back. An entry v2 recorded for id stays, and so does an
+// address bound to id by a v2 dial (the store's binding names id as the
+// last identity proven there). Claims of other identities are untouched:
+// nothing is known against them.
+//
+// The binding snapshot is taken before peerMu, and peers.json is marked for
+// the next write only after peerMu is released (markPeerStateDirty takes it
+// itself). The caller must hold no domain mutex.
+func (s *Service) forgetClaimedAddressesOf(id domain.PeerIdentity) {
+	bound := s.secureSessions.store.endpointsBoundTo(id)
+	s.peerMu.Lock()
+	forgotten := s.forgetClaimedAddressesLocked(id, bound)
+	s.peerMu.Unlock()
+	if forgotten == 0 {
+		return
+	}
+	s.markPeerStateDirty()
+	log.Info().Str("peer", id.String()).Int("addresses", forgotten).Msg("legacy_address_claims_forgotten_identity_proved_v2")
+}
+
+// recordAddressIdentityLocked records the identity of address — unless it is
+// only a claim of an identity that has proved itself over v2 to this node.
+// Every v1 path checks the pin before it records the claim, and the proof may
+// land in between: the check made here, under the same peerMu hold as the
+// write, is what closes that window. The pin is stored before
+// forgetClaimedAddressesOf takes peerMu, so a claim recorded before this
+// hold is forgotten by it and one attempted after is refused here. Reports
+// whether the entry changed. Caller holds peerMu (write); takes the store's
+// leaf mu under it (peerMu → store mu: nothing is called under that mu).
+func (s *Service) recordAddressIdentityLocked(address domain.PeerAddress, recorded addressIdentity) bool {
+	if recorded.origin != domain.PeerIdentityProvenV2 && s.identityPinnedV2(recorded.identity) {
+		return false
+	}
+	return s.peerIDs.record(address, recorded)
+}
+
+// identityPinnedV2 reports whether id proved itself over v2 to this node — its
+// pin is stored (or the store is unreadable, when every identity is taken
+// for pinned). A v1-only node pins nothing. Takes only the store's leaf mu.
+func (s *Service) identityPinnedV2(id domain.PeerIdentity) bool {
+	return s.sessionMode() != sessionv2.ModeLegacyOnly && s.secureSessions.store.identityPinned(id)
+}
+
+// forgetClaimedAddressesLocked drops the claims of id on every address not in
+// bound and returns how many addresses it changed. Caller holds peerMu
+// (write).
+func (s *Service) forgetClaimedAddressesLocked(id domain.PeerIdentity, bound endpointsOfIdentity) int {
+	claimedOnly := func(address domain.PeerAddress, recorded addressIdentity) bool {
+		return recorded.identity == id && recorded.origin != domain.PeerIdentityProvenV2 && !bound.covers(address)
+	}
+	forgotten := make(map[domain.PeerAddress]struct{})
+	for address, recorded := range s.peerIDs {
+		if claimedOnly(address, recorded) {
+			delete(s.peerIDs, address)
+			forgotten[address] = struct{}{}
+		}
+	}
+	for address, persisted := range s.persistedMeta {
+		if persisted != nil && claimedOnly(address, addressIdentity{identity: persisted.Identity, origin: restoredIdentityOrigin(persisted.IdentityOrigin)}) {
+			persisted.Identity, persisted.IdentityOrigin = domain.PeerIdentity{}, ""
+			forgotten[address] = struct{}{}
+		}
+	}
+	return len(forgotten)
 }
 
 // admitRoutingInput decides whether a routing-plane input from sender may be
