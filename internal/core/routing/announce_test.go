@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/mock"
@@ -775,8 +776,12 @@ func TestAnnounceLoop_TickInterval_BusyLoopGuard(t *testing.T) {
 //	  the trigger PAST it (~forcedCap + one tick), exceeding the budget.
 //
 // The assertion `gap ≤ forcedCap + tolerance` fails on the bug shape and passes
-// on the current code, regardless of how many triggers interleave. The
-// tolerance absorbs scheduler jitter without admitting the bug envelope.
+// on the current code, regardless of how many triggers interleave.
+//
+// The test runs in a synctest bubble: the gap is a difference of fake clock
+// readings, so it is exact. Measured on the real clock it was not — under a
+// loaded machine the scheduler alone stretched the gap past the 80ms
+// tolerance and the test failed with no regression present.
 func TestAnnounceLoop_TriggerDoesNotDelayForcedFullDeadline(t *testing.T) {
 	const (
 		announceInterval = 200 * time.Millisecond
@@ -785,98 +790,100 @@ func TestAnnounceLoop_TriggerDoesNotDelayForcedFullDeadline(t *testing.T) {
 		// lands on the cap-th tick) and the bug-shape gap (the first trigger
 		// past the deadline). With forcedCap=multiplier*200ms and
 		// triggerCadence=180ms the bug-shape gap is ceil(cap/180)*180, i.e.
-		// ~160ms past cap, so 80ms leaves ~80ms of headroom on BOTH sides —
-		// enough to absorb scheduler jitter without admitting the regression.
+		// ~160ms past cap, so 80ms leaves ~80ms on BOTH sides. On the fake
+		// clock the only slack it has to cover is the 2ms polling step.
 		gapTolerance = 80 * time.Millisecond
+		pollStep     = 2 * time.Millisecond
 	)
-	// forcedCap tracks the constants (EffectiveForcedFullSyncInterval =
-	// multiplier*interval, capped at TTL/2) so the test auto-adjusts when
-	// ForcedFullSyncMultiplier / DefaultTTL change. gapBudget = forcedCap +
-	// tolerance must stay below the bug-shape gap (~forcedCap + one tick) so the
-	// assertion distinguishes the ticker.Reset regression cleanly.
-	forcedCap := routing.EffectiveForcedFullSyncInterval(announceInterval)
-	gapBudget := forcedCap + gapTolerance
 
-	table := routing.NewTable(routing.WithLocalOrigin(domaintest.ID("self-node-identity")))
-	if _, err := table.AddDirectPeer(domaintest.ID("peer-a-identity-direct")); err != nil {
-		t.Fatalf("setup AddDirectPeer: %v", err)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		// forcedCap tracks the constants (EffectiveForcedFullSyncInterval =
+		// multiplier*interval, capped at TTL/2) so the test auto-adjusts when
+		// ForcedFullSyncMultiplier / DefaultTTL change. gapBudget = forcedCap +
+		// tolerance must stay below the bug-shape gap (~forcedCap + one tick) so
+		// the assertion distinguishes the ticker.Reset regression cleanly.
+		forcedCap := routing.EffectiveForcedFullSyncInterval(announceInterval)
+		gapBudget := forcedCap + gapTolerance
 
-	sender, rec := newMockPeerSender(t)
-	peers := func() []routing.AnnounceTarget {
-		return []routing.AnnounceTarget{
-			{
-				Address:      "peer-a-addr",
-				Identity:     domaintest.ID("peer-a-identity"),
-				Capabilities: []routing.PeerCapability{domain.CapMeshRoutingV1},
-			},
+		table := routing.NewTable(routing.WithLocalOrigin(domaintest.ID("self-node-identity")))
+		if _, err := table.AddDirectPeer(domaintest.ID("peer-a-identity-direct")); err != nil {
+			t.Fatalf("setup AddDirectPeer: %v", err)
 		}
-	}
 
-	loop := routing.NewAnnounceLoop(table, sender, peers,
-		routing.WithAnnounceInterval(announceInterval))
-
-	ctx, cancel := context.WithTimeout(context.Background(), forcedCap+1500*time.Millisecond)
-	defer cancel()
-	go loop.Run(ctx)
-
-	// Trigger the initial forced-full sync immediately; there is no
-	// baseline so needsFull=true and the cycle takes the forced-full
-	// branch. This is wire send #1 — its timestamp anchors the gap
-	// measurement.
-	loop.TriggerUpdate()
-	deadline := time.Now().Add(500 * time.Millisecond)
-	for rec.callCount() < 1 && time.Now().Before(deadline) {
-		time.Sleep(2 * time.Millisecond)
-	}
-	if rec.callCount() < 1 {
-		t.Fatalf("expected first forced-full sync within 500ms, got %d", rec.callCount())
-	}
-	firstSendAt := time.Now()
-
-	// Drive triggers every triggerCadence (180ms). The trigger
-	// goroutine stops when ctx is cancelled by the assertion path
-	// below or by t.Cleanup. Bug shape: each trigger ticker.Reset()
-	// would push the natural tick forward by one tick each time, so the
-	// natural tick at the forced-full deadline (t≈forcedCap) never fires
-	// and the deadline is only caught at the first TRIGGER past it
-	// (t≈ceil(forcedCap/triggerCadence)*triggerCadence), exceeding the budget.
-	triggerCtx, stopTriggers := context.WithCancel(ctx)
-	defer stopTriggers()
-	go func() {
-		ticker := time.NewTicker(triggerCadence)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-triggerCtx.Done():
-				return
-			case <-ticker.C:
-				loop.TriggerUpdate()
+		sender, rec := newMockPeerSender(t)
+		peers := func() []routing.AnnounceTarget {
+			return []routing.AnnounceTarget{
+				{
+					Address:      "peer-a-addr",
+					Identity:     domaintest.ID("peer-a-identity"),
+					Capabilities: []routing.PeerCapability{domain.CapMeshRoutingV1},
+				},
 			}
 		}
-	}()
 
-	// Wait for the second wire send. Budget is generous so the test
-	// can still observe the bug shape (gap ≈ first trigger past the
-	// forcedCap deadline) and fail on the gap assertion below — failing
-	// fast here would mask the bug
-	// signal.
-	secondDeadline := time.Now().Add(forcedCap + 500*time.Millisecond)
-	for rec.callCount() < 2 && time.Now().Before(secondDeadline) {
-		time.Sleep(2 * time.Millisecond)
-	}
-	stopTriggers()
+		loop := routing.NewAnnounceLoop(table, sender, peers,
+			routing.WithAnnounceInterval(announceInterval))
 
-	if rec.callCount() < 2 {
-		t.Fatalf("expected second forced-full sync within %s, got %d sends; ticker.Reset bug may be back blocking the deadline check entirely",
-			forcedCap+500*time.Millisecond, rec.callCount())
-	}
+		ctx, cancel := context.WithTimeout(context.Background(), forcedCap+1500*time.Millisecond)
+		defer cancel()
+		go loop.Run(ctx)
 
-	gap := time.Since(firstSendAt)
-	if gap > gapBudget {
-		t.Fatalf("forced-full deadline regression: gap between wire sends %s exceeds budget %s (forcedCap=%s + tolerance=%s); ticker.Reset bug from round 15.9 may be back, triggers stretching the natural tick past the cap",
-			gap, gapBudget, forcedCap, gapTolerance)
-	}
+		// Trigger the initial forced-full sync immediately; there is no
+		// baseline so needsFull=true and the cycle takes the forced-full
+		// branch. This is wire send #1 — its timestamp anchors the gap
+		// measurement.
+		loop.TriggerUpdate()
+		deadline := time.Now().Add(500 * time.Millisecond)
+		for rec.callCount() < 1 && time.Now().Before(deadline) {
+			time.Sleep(pollStep)
+		}
+		if rec.callCount() < 1 {
+			t.Fatalf("expected first forced-full sync within 500ms, got %d", rec.callCount())
+		}
+		firstSendAt := time.Now()
+
+		// Drive triggers every triggerCadence (180ms). Bug shape: each
+		// trigger ticker.Reset() would push the natural tick forward by one
+		// tick each time, so the natural tick at the forced-full deadline
+		// (t≈forcedCap) never fires and the deadline is only caught at the
+		// first TRIGGER past it (t≈ceil(forcedCap/triggerCadence)*triggerCadence),
+		// exceeding the budget.
+		triggerCtx, stopTriggers := context.WithCancel(ctx)
+		defer stopTriggers()
+		go func() {
+			ticker := time.NewTicker(triggerCadence)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-triggerCtx.Done():
+					return
+				case <-ticker.C:
+					loop.TriggerUpdate()
+				}
+			}
+		}()
+
+		// Wait for the second wire send. Budget is generous so the test
+		// can still observe the bug shape (gap ≈ first trigger past the
+		// forcedCap deadline) and fail on the gap assertion below — failing
+		// fast here would mask the bug signal.
+		secondDeadline := time.Now().Add(forcedCap + 500*time.Millisecond)
+		for rec.callCount() < 2 && time.Now().Before(secondDeadline) {
+			time.Sleep(pollStep)
+		}
+		stopTriggers()
+
+		if rec.callCount() < 2 {
+			t.Fatalf("expected second forced-full sync within %s, got %d sends; ticker.Reset bug may be back blocking the deadline check entirely",
+				forcedCap+500*time.Millisecond, rec.callCount())
+		}
+
+		gap := time.Since(firstSendAt)
+		if gap > gapBudget {
+			t.Fatalf("forced-full deadline regression: gap between wire sends %s exceeds budget %s (forcedCap=%s + tolerance=%s); ticker.Reset bug from round 15.9 may be back, triggers stretching the natural tick past the cap",
+				gap, gapBudget, forcedCap, gapTolerance)
+		}
+	})
 }
 
 // TestEffectiveForcedFullSyncInterval_CappedAtTTLHalf pins the
