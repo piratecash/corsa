@@ -108,13 +108,14 @@ evidence names: a pin store marker that turns a lost or moved store into an expl
 notices and every dial through the common path with SOCKS/Tor and no direct fallback, the raw legacy
 dial removed; compatibility tests against all five real releases with protocol 28–30 in both
 directions (a message sent by the old node itself cannot be tested, the headless release has no
-sending command; old-to-new delivery is proven through an old relay).
+sending command; old-to-new delivery is proven through an old relay); the identity-less probe after a
+failed TLS attempt, with per-endpoint back-off; the manual TLS-first switch; the minimum session
+version in the node's own record.
 
 Implemented, with checks still missing (a condition counts only when every check passes on the commit
-it names): the identity-less probe after a failed TLS attempt, with per-endpoint back-off; the manual
-TLS-first switch; refusal to start, before listening, on an unsafe pin store, directory or marker (the
+it names): refusal to start, before listening, on an unsafe pin store, directory or marker (the
 Windows tests still have to run on a real Windows host); a loopback inbound class (its budgets are not
-measured yet); the minimum session version in the node's own record.
+measured yet).
 
 Outstanding: an independent cryptographic review; a measurement of the handshake phases over Tor; a
 measurement of first-connection latency over Tor that sets the TLS probe timeout; measured loopback
@@ -231,13 +232,13 @@ with checks and evidence is in `packaging/release-admission.json`.
 дозвоны через общий путь с SOCKS/Tor без прямого обхода, сырой legacy-дозвон удалён; тесты совместимости
 со всеми пятью настоящими выпусками протокола 28–30 в обе стороны (отправку сообщения самим старым узлом
 проверить нельзя — в headless-выпуске нет команды отправки; доставка «старый → новый» доказана через
-старый узел-ретранслятор).
+старый узел-ретранслятор); проба без identity после неудачной TLS-попытки, с отступом повторов по
+endpoint; ручной выключатель «TLS-первым»; минимальная версия сессии в собственной записи узла.
 
 Реализовано, но проверок ещё не хватает (условие засчитывается, только когда все проверки проходят на
-названном коммите): проба без identity после неудачной TLS-попытки, с отступом повторов по endpoint;
-ручной выключатель «TLS-первым»; отказ старта до открытия слушателей при небезопасных хранилище pin,
+названном коммите): отказ старта до открытия слушателей при небезопасных хранилище pin,
 каталоге или маркере (Windows-тесты ещё должны пройти на настоящей Windows); отдельный класс
-loopback-входа (бюджеты пока не измерены); минимальная версия сессии в собственной записи узла.
+loopback-входа (бюджеты пока не измерены).
 
 Не выполнено: независимая криптографическая экспертиза; замер фаз рукопожатия через Tor; замер
 задержки первого подключения через Tor, по которому выбирается таймаут TLS-пробы; измеренные бюджеты

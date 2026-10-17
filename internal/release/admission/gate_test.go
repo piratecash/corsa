@@ -156,7 +156,10 @@ func TestCommittedManifestKeepsReleaseClosed(t *testing.T) {
 	// The conditions met today: the owner's choice of release order, and the
 	// checks confirmed on the commit their evidence names. Closing another one
 	// is a deliberate edit here as well as in the manifest.
-	doneToday := []ConditionID{"owner_release_shape", "compat_real_releases", "pin_store_marker", "dial_paths_unified"}
+	doneToday := []ConditionID{
+		"owner_release_shape", "compat_real_releases", "probe_per_contract", "tls_first_switch",
+		"pin_store_marker", "dial_paths_unified", "self_record_min_session",
+	}
 	var want []ConditionID
 	for _, id := range RequiredConditions() {
 		if !slices.Contains(doneToday, id) {

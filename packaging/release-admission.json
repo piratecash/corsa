@@ -52,10 +52,10 @@
       "executor": "developer",
       "check": "Integration tests: probe after a failed TLS attempt, forged answers, dropped TLS handshake, reconnect after restart, no probe or legacy for pinned identities and endpoints in either switch position; back-off: an inbound session of X does not reset the delays of its addresses A and B, an outbound session to A proving the expected identity resets only A; the same scenarios repeated against real old releases.",
       "evidence": {
-        "report": "Emulated coverage in internal/core/node/session_dial_choice_test.go, session_probe_test.go and session_tls_first_switch_test.go; real releases (internal/core/node/release_interop_test.go, tag interop) cover TLS, probe, legacy and the pinned or bound refusal with TLS-first on. Missing: real-release repeats with TLS-first off, after a restart of either side, and with forged or dropped answers through the recording proxy; a Service-level restart test for identity pins.",
-        "commit": "b3adfd8dcc514276f4d40be954795c02479d1496"
+        "report": "Run on this commit (clean tree): internal/core/node/session_dial_choice_test.go, session_probe_test.go and session_unproven_failure_test.go cover the probe after a failed TLS attempt, forged and cut answers and a dropped or broken TLS handshake; session_restart_v2_requirement_test.go covers a real Service restart with neither probe nor legacy for an identity known before the dial or a bound endpoint, in both switch positions; session_dial_choice_test.go TestOnlyAnOutboundV2SessionToTheEndpointResetsItsBackoff shows an inbound session of X resetting neither A nor B and an outbound session to A resetting only A; internal/core/node/release_interop_test.go (tag interop) repeats them against v1.0.64, v2.1.67, v2.2.68, v2.3.69 and v2.4.70, 95 of 95 scenarios green.",
+        "commit": "659c9806b22f94c5febdd2f48dde6f5aedf98f9d"
       },
-      "status": "partial"
+      "status": "done"
     },
     {
       "id": "tls_first_switch",
@@ -63,10 +63,10 @@
       "executor": "developer",
       "check": "Tests show that with the switch off unpinned peers are dialled with the legacy hello, recorded version hints (address marks) do not trigger an upgrade, while a live secure-session answer of the peer to the probe moves that same dial to TLS, and pinned peers and endpoints still use the secure session.",
       "evidence": {
-        "report": "Configuration, SDK, startup warning, metric, status field and dial behaviour are covered by internal/core/node/session_tls_first_switch_test.go and the config, sdk and rpc tests. Missing: an explicit test that a recorded v2 hint does not make a switched-off dial open with TLS.",
-        "commit": "b3adfd8dcc514276f4d40be954795c02479d1496"
+        "report": "Run on this commit (clean tree): internal/core/node/session_tls_first_switch_test.go shows an unpinned dial opening with the legacy hello when the switch is off, recorded address marks not bringing the ClientHello back, a live secure-session answer to the probe moving that dial to TLS, pinned identities and bound endpoints still dialled over TLS only, the startup warning and the status field; the configuration, SDK and RPC tests cover the field and metric; the interop run on the same commit repeats the switched-off cases against all five real releases.",
+        "commit": "659c9806b22f94c5febdd2f48dde6f5aedf98f9d"
       },
-      "status": "partial"
+      "status": "done"
     },
     {
       "id": "pin_store_marker",
@@ -114,8 +114,11 @@
       "condition": "The node's own identity record carries the minimum session version, and the node sends it to neighbours when a session is set up.",
       "executor": "developer",
       "check": "Unit test of the record gate and an integration test of the record exchange on the candidate.",
-      "evidence": null,
-      "status": "not_done"
+      "evidence": {
+        "report": "Run on this commit (clean tree): internal/core/protocol/identity_record_min_session_test.go and internal/core/node/self_record_min_session_test.go (TestSelfRecordMinSessionFollowsTheSessionMode, TestTheConfiguredBuildIssuesMinSession) test the record gate; TestSessionSetupDeliversTheSelfRecordWithMinSession shows two real nodes receiving each other's signed record with min_session in the push at session setup, over the secure session and legacy; a refused start does not re-issue the record.",
+        "commit": "659c9806b22f94c5febdd2f48dde6f5aedf98f9d"
+      },
+      "status": "done"
     },
     {
       "id": "owner_session_choices",
