@@ -239,6 +239,17 @@ type sessionAddressMarks struct {
 
 	mu    sync.Mutex
 	marks map[domain.PeerAddress]sessionAddressMark
+	// dials are the dials to an address running now (openDial). They are
+	// kept apart from the marks: a running dial is not a fact the address
+	// earned, and must neither be evicted with a mark nor keep one alive.
+	dials map[domain.PeerAddress]*openDials
+}
+
+// openDials is the dials to one address running now and whether one of them
+// already moved the address's v2 retry backoff on.
+type openDials struct {
+	running int
+	stepped bool
 }
 
 func newSessionAddressMarks(clock func() time.Time) *sessionAddressMarks {
@@ -365,7 +376,7 @@ func (m *sessionAddressMarks) noteLegacyRefused(address domain.PeerAddress) time
 		// without pacing the refused address would be redialled every few
 		// seconds for good. The v2 retry backoff paces it instead; a dial it
 		// holds is not charged either.
-		mark.v2Retry, _ = stepV2Retry(mark.v2Retry, now)
+		m.stepV2RetryLocked(address, mark, now)
 	})
 	return hold
 }
@@ -377,26 +388,71 @@ func (m *sessionAddressMarks) noteLegacyRefused(address domain.PeerAddress) time
 func (m *sessionAddressMarks) noteListenerRefused(address domain.PeerAddress) time.Duration {
 	var wait time.Duration
 	m.update(address, func(mark *sessionAddressMark, now time.Time) {
-		next, stepped := stepV2Retry(mark.v2Retry, now)
-		if stepped {
-			next.until = next.until.Add(m.jitter(next.until.Sub(now) / 2))
+		if m.stepV2RetryLocked(address, mark, now) {
+			mark.v2Retry.until = mark.v2Retry.until.Add(m.jitter(mark.v2Retry.until.Sub(now) / 2))
 		}
-		mark.v2Retry = next
-		wait = next.until.Sub(now)
+		wait = mark.v2Retry.until.Sub(now)
 	})
 	return wait
 }
 
 // noteV2Unanswered moves the v2 retry backoff of address on after a v2
 // attempt there ended without v2, and returns the wait it now imposes. An end
-// met while the wait runs takes no step (stepV2Retry).
+// met while the wait runs, or in a dial that already took its step, takes no
+// step (stepV2RetryLocked).
 func (m *sessionAddressMarks) noteV2Unanswered(address domain.PeerAddress) time.Duration {
 	var wait time.Duration
 	m.update(address, func(mark *sessionAddressMark, now time.Time) {
-		mark.v2Retry, _ = stepV2Retry(mark.v2Retry, now)
+		m.stepV2RetryLocked(address, mark, now)
 		wait = mark.v2Retry.until.Sub(now)
 	})
 	return wait
+}
+
+// openDial records a dial to address running from now until the returned
+// function is called. One dial moves the address's v2 retry backoff on by
+// one step at most, however many of its stages end without v2 and however
+// long it runs: a TLS attempt and a probe, or a probe and the TLS attempt a
+// v2 welcome called for, are one attempt, and an overlay dial may outlast
+// the whole wait its first stage started. Dials to the address that run
+// together count as one, as the running wait already makes them.
+func (m *sessionAddressMarks) openDial(address domain.PeerAddress) (closeDial func()) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.dials == nil {
+		m.dials = make(map[domain.PeerAddress]*openDials)
+	}
+	open, present := m.dials[address]
+	if !present {
+		open = &openDials{}
+		m.dials[address] = open
+	}
+	open.running++
+	return func() {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		open.running--
+		if open.running == 0 {
+			delete(m.dials, address)
+		}
+	}
+}
+
+// stepV2RetryLocked moves the v2 retry backoff of mark on by one step and
+// reports whether it did. No step is taken while the wait runs
+// (stepV2Retry), nor in a dial to address that already took its own
+// (openDial). Caller holds m.mu.
+func (m *sessionAddressMarks) stepV2RetryLocked(address domain.PeerAddress, mark *sessionAddressMark, now time.Time) bool {
+	open := m.dials[address]
+	if open != nil && open.stepped {
+		return false
+	}
+	next, stepped := stepV2Retry(mark.v2Retry, now)
+	mark.v2Retry = next
+	if open != nil {
+		open.stepped = true
+	}
+	return stepped
 }
 
 // legacyHeld reports whether the fall back to v1 at address is held now.

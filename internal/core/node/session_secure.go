@@ -551,6 +551,35 @@ func (s *Service) dialPeerTransport(ctx context.Context, address domain.PeerAddr
 	if err := s.refuseHeldDial(address); err != nil {
 		return nil, err
 	}
+	defer s.openDial(address)()
+	transport, err := s.dialChosenSessionKind(ctx, address, intent, dialRaw)
+	return transport, endedLocally(ctx, err)
+}
+
+// openDial records one dial to address for as long as it runs, so the dial
+// moves the address's v2 retry backoff on once at most (openDial of the
+// marks). A struct-literal test Service without marks records nothing.
+func (s *Service) openDial(address domain.PeerAddress) (closeDial func()) {
+	marks := s.dialMarks()
+	if marks == nil {
+		return func() {}
+	}
+	return marks.openDial(address)
+}
+
+// endedLocally marks err as a dial this node ended itself when ctx was
+// cancelled or ran out: the stage that failed then failed because of it, and
+// that is no failure of the address (errDialAbortedLocally).
+func endedLocally(ctx context.Context, err error) error {
+	if err == nil || ctx.Err() == nil || errors.Is(err, errDialAbortedLocally) {
+		return err
+	}
+	return fmt.Errorf("%w: %w", errDialAbortedLocally, err)
+}
+
+// dialChosenSessionKind is the dial itself: the session kind the mode, the
+// plan and the switch call for.
+func (s *Service) dialChosenSessionKind(ctx context.Context, address domain.PeerAddress, intent domain.DialIntent, dialRaw rawDialer) (*dialledTransport, error) {
 	dial := s.transportDialer(address, dialRaw)
 	mode := s.sessionMode()
 	if mode == sessionv2.ModeLegacyOnly {
@@ -684,8 +713,12 @@ func (s *Service) refuseLegacyWelcome(address domain.PeerAddress, claimed domain
 // the answer can repeat it at will; the listener refused the v2 attempt with
 // its alert — busy; a dial "to X" met another identity on the address, which
 // may simply have changed hands; the probe was answered by a node that speaks
-// v2, whose TLS attempt failed — a hint, forgeable like the rest — or by
-// nobody in time, which a man in the middle can arrange as easily; a v1 line
+// v2, whose TLS attempt failed — a hint, forgeable like the rest — or with
+// an answer that admitted nothing: none in time, none at all, one cut off,
+// broken or forged, which a man in the middle can arrange as easily; a TLS
+// attempt over an opened TCP connection ended before the identity proof
+// verified — nothing was authenticated, so nothing shows the node at fault;
+// the probe failed on this node, or this node ended the dial itself; a v1 line
 // answered the TLS attempt that followed a v2 welcome to the probe — one of
 // the two forged; this
 // node's own pin store had no room for the proven peer's pin, or the dial
@@ -701,7 +734,10 @@ var unchargedDialOutcomes = []error{
 	errEndpointOwnerMismatch,
 	errLegacyProbeAnsweredV2,
 	errLegacyRefusedAfterV2Welcome,
-	errLegacyProbeTimeout,
+	errLegacyProbeAdmittedNothing,
+	errLegacyProbeLocalFailure,
+	errV2FailedBeforeProof,
+	errDialAbortedLocally,
 	errPinStoreFull,
 	errPinRoomAwaited,
 	errV2DialLocalFailure,

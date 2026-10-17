@@ -214,14 +214,14 @@ func (s *Service) runPeerSession(ctx context.Context, address domain.PeerAddress
 				log.Warn().Str("peer", string(address)).Msg("peer_session_stopped_self_identity")
 				return
 			}
-			// A refusal that says nothing against the address
-			// (isUnchargedDialRefusal: a v1 answer refused by pin or
-			// binding, a held fall back or v2 retry, a listener's refusal,
-			// another owner than the dial named, a probe answered by a node
-			// that speaks v2) is not a failure of the
-			// address (onCMDialFailed): nothing is charged, and the loop
-			// stops — a refusal by pin already holds the fall back to v1
-			// at the address, and this path has no v2 to try instead.
+			// An end that says nothing against the address
+			// (isUnchargedDialRefusal: a refusal this node made, a held
+			// dial, a listener's refusal, another owner than the dial named,
+			// anything that ended before the peer was authenticated, a dial
+			// this node ended itself) is not a failure of the address
+			// (onCMDialFailed): nothing is charged, and the loop stops — a
+			// refusal by pin already holds the fall back to v1 at the
+			// address, and this path has no v2 to try instead.
 			if isUnchargedDialRefusal(err) {
 				log.Warn().Err(err).Str("peer", string(address)).Msg("peer_session_stopped_dial_refused_not_charged")
 				return

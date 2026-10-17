@@ -33,10 +33,10 @@
       "executor": "developer",
       "check": "Isolated run (own data directories and test identities, external network denied and verified): new to old and old to new, message delivery both ways, and legacy refused for identities and endpoints that already require the secure session. The report lists release tags, commits, binary origin and hashes, commands and results.",
       "evidence": {
-        "report": "internal/core/node/release_interop_test.go (build tag interop) against v1.0.64, v2.1.67, v2.2.68, v2.3.69 and v2.4.70, both directions, all green; how to run it: docs/protocol/session_v2.md. Not coverable: a message sent by the old node itself (the headless release has no sending command). Done once the test is committed and the run is repeated on that commit.",
-        "commit": null
+        "commit": "b3adfd8dcc514276f4d40be954795c02479d1496",
+        "report": "internal/core/node/release_interop_test.go (tag interop) run on this commit: 45 of 45 scenarios green against v1.0.64 (e672820), v2.1.67 (dfbce4e), v2.2.68 (d7ddd8a), v2.3.69 (4944d6d) and v2.4.70 (5abb920), built offline from the tags; command and isolation in docs/protocol/session_v2.md. Old-to-new delivery is proven through an old relay and the old node's inbound session, not by a message the old node sends itself (the headless release has no sending command); the owner accepted this limit."
       },
-      "status": "partial"
+      "status": "done"
     },
     {
       "id": "load_run_on_candidate",
@@ -48,27 +48,36 @@
     },
     {
       "id": "probe_per_contract",
-      "condition": "TLS first by default. Only after a failed TLS attempt, and only where legacy is still allowed (including with the TLS-first switch off), an unknown peer is sent a separate identity-less hello probe; legacy follows only from a well-formed answer of the old protocol to that probe, never from a TLS error, a timeout or the first byte alone. A failed identity, signature or session-binding check ends the attempt without fallback. Identities and endpoints that already require the secure session get neither a probe nor legacy. The probe answer is an unconfirmed hint and proves no identity. The remaining risk is stated in the session contract: an on-path attacker can still hold a pair that has never proved the secure session in legacy at first contact. Retry back-off is per endpoint and is reset only by a successful outbound secure session to that endpoint that proved the expected identity, when one is set; an inbound session does not reset it.",
+      "condition": "TLS first by default. Only after a failed TLS attempt, and only where legacy is still allowed (including with the TLS-first switch off), an unknown peer is sent a separate identity-less hello probe; legacy follows only from a well-formed answer of the old protocol to that probe, never from a TLS error, a timeout or the first byte alone. A failed identity, signature or session-binding check ends the attempt without fallback. Identities and endpoints known before the dial to require the secure session (a dial intent naming the identity, or a bound endpoint) get neither a probe nor legacy; on a plain address dial a pinned identity is learnt only from the answer and is then refused without legacy. The probe answer is an unconfirmed hint and proves no identity. The remaining risk is stated in the session contract: an on-path attacker can still hold a pair that has never proved the secure session in legacy at first contact. Retry back-off is per endpoint and is reset only by a successful outbound secure session to that endpoint that proved the expected identity, when one is set; an inbound session does not reset it.",
       "executor": "developer",
       "check": "Integration tests: probe after a failed TLS attempt, forged answers, dropped TLS handshake, reconnect after restart, no probe or legacy for pinned identities and endpoints in either switch position; back-off: an inbound session of X does not reset the delays of its addresses A and B, an outbound session to A proving the expected identity resets only A; the same scenarios repeated against real old releases.",
-      "evidence": null,
-      "status": "not_done"
+      "evidence": {
+        "report": "Emulated coverage in internal/core/node/session_dial_choice_test.go, session_probe_test.go and session_tls_first_switch_test.go; real releases (internal/core/node/release_interop_test.go, tag interop) cover TLS, probe, legacy and the pinned or bound refusal with TLS-first on. Missing: real-release repeats with TLS-first off, after a restart of either side, and with forged or dropped answers through the recording proxy; a Service-level restart test for identity pins.",
+        "commit": "b3adfd8dcc514276f4d40be954795c02479d1496"
+      },
+      "status": "partial"
     },
     {
       "id": "tls_first_switch",
       "condition": "Manual switch for TLS-first dialling of peers that have never proved the secure session: configuration field, SDK field, startup warning, metric and status field; peers that proved it keep the secure session.",
       "executor": "developer",
-      "check": "Tests show that with the switch off unpinned peers are dialled with the legacy hello, version hints do not trigger an upgrade, and pinned peers and endpoints still use the secure session.",
-      "evidence": null,
-      "status": "not_done"
+      "check": "Tests show that with the switch off unpinned peers are dialled with the legacy hello, recorded version hints (address marks) do not trigger an upgrade, while a live secure-session answer of the peer to the probe moves that same dial to TLS, and pinned peers and endpoints still use the secure session.",
+      "evidence": {
+        "report": "Configuration, SDK, startup warning, metric, status field and dial behaviour are covered by internal/core/node/session_tls_first_switch_test.go and the config, sdk and rpc tests. Missing: an explicit test that a recorded v2 hint does not make a switched-off dial open with TLS.",
+        "commit": "b3adfd8dcc514276f4d40be954795c02479d1496"
+      },
+      "status": "partial"
     },
     {
       "id": "pin_store_marker",
       "condition": "A marker next to the identity tells a first start from the loss of a pin store that was in use. Once the store has been used, its absence, damage, or a changed port or override path is an explicit startup error with recovery or migration instructions — never a silent empty store that allows legacy. The write order of store and marker is defined so that a crash between them is detected, and existing pins are kept.",
       "executor": "developer",
       "check": "Tests: first start, restart, lost file, damaged file, changed port, changed override path, crash between the store and marker writes; existing pins survive; the session contract names the real file and the marker's role.",
-      "evidence": null,
-      "status": "not_done"
+      "evidence": {
+        "report": "internal/core/node/pin_store_marker_test.go covers first start, restart, lost and damaged store, changed port, changed override path, a crash between the store and marker writes, and pin survival; internal/core/node/service_pin_store_refusal_test.go shows Run refusing before the listener; docs/protocol/session_v2.md names secure-sessions-<port>.json and the marker's role.",
+        "commit": "b3adfd8dcc514276f4d40be954795c02479d1496"
+      },
+      "status": "done"
     },
     {
       "id": "unsafe_pin_store_refusal",
@@ -76,8 +85,8 @@
       "executor": "developer",
       "check": "Integration tests on the release build: safe and unsafe directory, wrong owner, writable by others, substitution through links, restart with existing pins, damaged store; the criteria are stated explicitly (not only mode 0777); Docker documentation describes a protected subdirectory for the node's user; the Windows location audit covers the same cases (owners and DACLs of the file, the marker and every directory up to the volume root, reparse points on the way) and its tests under the windows build tag are executed on a real Windows host before the release; the release notes carry the migration instructions.",
       "evidence": {
-        "report": "Partial: the location audit with a startup warning and the pin_store_unsafe flag, and the fail-closed state for an unreadable store; since then the marker and the refusal to start before listening are implemented (internal/core/node/pin_store_marker.go, pin_store_refusal.go, startup_refusal.go) and await a check on a candidate commit.",
-        "commit": "7ee6c6576273f9f93f46c3817591ab10c1df92fa"
+        "report": "POSIX cases are covered by internal/core/node/secure_session_store_location_test.go, secure_session_store_location_posix_test.go, pin_store_marker_test.go and internal/core/secretfile/audit_test.go, audit_posix_test.go; Docker guidance is in README.md. Pending: the windows-tag tests on a real Windows host, a foreign owner on a real file (only synthetic so far), and final release notes.",
+        "commit": "b3adfd8dcc514276f4d40be954795c02479d1496"
       },
       "status": "partial"
     },
@@ -86,8 +95,11 @@
       "condition": "The unused raw legacy dial chain (OpenSessionAt) is removed after its callers and public API are checked, with a compatible wrapper over the common secure dial if external consumers use it. Push notices go through the common connection path: SOCKS/Tor, secure session and pin requirements, connection limits, timeouts and cancellation. When a proxy is required, its failure ends the attempt with an error and no direct connection; addresses reached through Tor are never resolved by local DNS.",
       "executor": "developer",
       "check": "Tests: the proxy is used, no direct fallback, no local DNS lookup for Tor addresses, legacy refused for a pinned identity or endpoint, resources released on cancellation; the earlier report of notices bypassing the proxy is closed with these results attached.",
-      "evidence": null,
-      "status": "not_done"
+      "evidence": {
+        "report": "OpenSessionAt and its only, uncalled internal user are removed (internal package, no external consumers); internal/core/node/notice_dial_proxy_test.go covers the proxy used by name, no direct fallback, no local DNS for overlay names, legacy refused for a pinned identity and a bound endpoint, and the socket and budget released on cancellation.",
+        "commit": "b3adfd8dcc514276f4d40be954795c02479d1496"
+      },
+      "status": "done"
     },
     {
       "id": "loopback_inbound_class",

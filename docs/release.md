@@ -103,20 +103,22 @@ deleting them restricted to the owner, no force-update.
 ### Current state
 
 The gate is **closed**. The build activates the secure session. Decided: the secure session ships in
-a release of its own, and the overlay role follows in a later release.
+a release of its own, and the overlay role follows in a later release. Confirmed on the commit their
+evidence names: a pin store marker that turns a lost or moved store into an explicit error; push
+notices and every dial through the common path with SOCKS/Tor and no direct fallback, the raw legacy
+dial removed; compatibility tests against all five real releases with protocol 28–30 in both
+directions (a message sent by the old node itself cannot be tested, the headless release has no
+sending command; old-to-new delivery is proven through an old relay).
 
-Implemented, but not yet confirmed on a candidate commit (a condition counts only with the commit it
-was checked on): the identity-less probe after a failed TLS attempt, with per-endpoint back-off; the
-manual TLS-first switch; a pin store marker that turns a lost or moved store into an explicit error;
-refusal to start, before listening, on an unsafe pin store, directory or marker; push notices and every
-dial through the common path with SOCKS/Tor and no direct fallback, the raw legacy dial removed; a
-loopback inbound class (its budgets are not measured yet); compatibility tests against real releases
-with protocol 28–30 (both directions, all five releases; a message sent by the old node itself cannot
-be tested, the headless release has no sending command).
+Implemented, with checks still missing (a condition counts only when every check passes on the commit
+it names): the identity-less probe after a failed TLS attempt, with per-endpoint back-off; the manual
+TLS-first switch; refusal to start, before listening, on an unsafe pin store, directory or marker (the
+Windows tests still have to run on a real Windows host); a loopback inbound class (its budgets are not
+measured yet); the minimum session version in the node's own record.
 
 Outstanding: an independent cryptographic review; a measurement of the handshake phases over Tor; a
 measurement of first-connection latency over Tor that sets the TLS probe timeout; measured loopback
-budgets; a load run on the final candidate; the minimum session version in the node's own record; the
+budgets; a load run on the final candidate; the
 remaining owner choice on operator pin removal; an approved plan for observing the release in the
 network; all checks on the final candidate; release notes. No release decision is recorded. The list
 with checks and evidence is in `packaging/release-admission.json`.
@@ -224,20 +226,21 @@ with checks and evidence is in `packaging/release-admission.json`.
 ### Текущее состояние
 
 Гейт **закрыт**. Сборка включает защищённую сессию. Решено: защищённая сессия выходит отдельным
-выпуском, overlay-роль — в одном из следующих.
+выпуском, overlay-роль — в одном из следующих. Подтверждено на коммите, названном в подтверждении:
+маркер хранилища pin, превращающий потерю или перенос хранилища в явную ошибку; push-уведомления и все
+дозвоны через общий путь с SOCKS/Tor без прямого обхода, сырой legacy-дозвон удалён; тесты совместимости
+со всеми пятью настоящими выпусками протокола 28–30 в обе стороны (отправку сообщения самим старым узлом
+проверить нельзя — в headless-выпуске нет команды отправки; доставка «старый → новый» доказана через
+старый узел-ретранслятор).
 
-Реализовано, но ещё не подтверждено на коммите кандидата (условие засчитывается только с коммитом, на
-котором проверено): проба без identity после неудачной TLS-попытки, с отступом повторов по endpoint;
-ручной выключатель «TLS-первым»; маркер хранилища pin, превращающий потерю или перенос хранилища в явную
-ошибку; отказ старта до открытия слушателей при небезопасных хранилище pin, каталоге или маркере;
-push-уведомления и все дозвоны через общий путь с SOCKS/Tor без прямого обхода, сырой legacy-дозвон
-удалён; отдельный класс loopback-входа (бюджеты пока не измерены); тесты совместимости с настоящими
-выпусками протокола 28–30 (оба направления, все пять выпусков; отправку сообщения самим старым узлом
-проверить нельзя — в headless-выпуске нет команды отправки).
+Реализовано, но проверок ещё не хватает (условие засчитывается, только когда все проверки проходят на
+названном коммите): проба без identity после неудачной TLS-попытки, с отступом повторов по endpoint;
+ручной выключатель «TLS-первым»; отказ старта до открытия слушателей при небезопасных хранилище pin,
+каталоге или маркере (Windows-тесты ещё должны пройти на настоящей Windows); отдельный класс
+loopback-входа (бюджеты пока не измерены); минимальная версия сессии в собственной записи узла.
 
 Не выполнено: независимая криптографическая экспертиза; замер фаз рукопожатия через Tor; замер
 задержки первого подключения через Tor, по которому выбирается таймаут TLS-пробы; измеренные бюджеты
-loopback-класса; нагрузочный прогон финального кандидата; минимальная версия сессии в собственной записи
-узла; оставшееся решение владельца о снятии pin оператором; утверждённый план наблюдения выпуска в сети;
+loopback-класса; нагрузочный прогон финального кандидата; оставшееся решение владельца о снятии pin оператором; утверждённый план наблюдения выпуска в сети;
 все проверки на финальном кандидате; описание выпуска. Решения о выпуске нет. Список с проверками и
 подтверждениями — `packaging/release-admission.json`.

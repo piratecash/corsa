@@ -45,6 +45,7 @@ is**; re-serialisation is forbidden anywhere on the path:
   "boxkey": "base64 x25519",
   "boxsig": "base64url sig(pubkey → boxkey binding)",
   "dtypes": ["get_identity", "post_identity"],
+  "min_session": 2,
   "issued_at": 1780000000,
   "seq": 3
 }
@@ -75,6 +76,18 @@ Rules:
   never issues a record that breaks these bounds: a list of more than 8 names
   is an explicit error at issue time, because every receiver would read it as
   declaring no type at all.
+- **`min_session` is optional:** the lowest session version the owner
+  accepts — `1` the legacy session, `2` the secure session v2
+  ([session_v2.md](session_v2.md), "The minimum session version in the
+  record"). An absent field states nothing, which is not the same as `1`;
+  neither of them, however, is a permission to downgrade: a record that
+  states `1`, or no longer states the field, removes no pin and no endpoint
+  binding — protection once earned is never lowered by a record. A
+  present field must be an integer from 1 to 255, or the record is malformed
+  — it is the owner's signed word, and reading a broken one as "no
+  statement" would quietly drop a downgrade guard; a version above the ones
+  a build speaks is kept as stated. The owner never issues a value outside
+  that range.
 - **Parsing:** duplicate JSON keys are a reject at every level (envelope and
   body). Unknown fields are ignored and their bytes preserved; the payload
   is never rebuilt.
@@ -99,7 +112,7 @@ flowchart TB
     D["datagram { type, v, mode, class, src, dst, ttl,\nroute_policy, dtype, payload, auth? }"]
     P["discovery-payload { v, … }  — schema per dtype"]
     R["record { v, body, sig }  — the signed envelope"]
-    B["record-body { address, pubkey, dm, boxkey, boxsig,\ndtypes?, issued_at, seq }"]
+    B["record-body { address, pubkey, dm, boxkey, boxsig,\ndtypes?, min_session?, issued_at, seq }"]
     D -->|"payload = base64url(…)"| P
     P -->|"record"| R
     R -->|"body = base64url(…)"| B
@@ -140,8 +153,8 @@ kinds of nodes:
 
 - **The owner** — the self-record, built at start, persistent seq. It is
   re-issued (seq+1) whenever the running build would state something
-  different: key material, dm policy, or the declared `dtypes` set — a
-  binary upgrade **or rollback** included. An unchanged build re-uses the
+  different: key material, dm policy, the declared `dtypes` set or
+  `min_session` — a binary upgrade **or rollback** included. An unchanged build re-uses the
   stored record with no seq churn. The owner is the ONLY node entitled to
   answer a `get_identity` addressed to it.
 - **Direct peers of the owner (session memory)** — via the initial
@@ -786,6 +799,7 @@ DM, `fetch_contacts`) в record-хранилище не попадают — о�
   "boxkey": "base64 x25519",
   "boxsig": "base64url sig(pubkey → boxkey binding)",
   "dtypes": ["get_identity", "post_identity"],
+  "min_session": 2,
   "issued_at": 1780000000,
   "seq": 3
 }
@@ -814,6 +828,18 @@ DM, `fetch_contacts`) в record-хранилище не попадают — о�
   всегда приоритетнее записи. Владелец никогда не выпускает запись, нарушающую
   эти границы: список из более чем 8 имён — явная ошибка при выпуске, потому
   что любой получатель прочитал бы его как отсутствие объявленных типов.
+- **`min_session` необязателен:** наименьшая версия сессии, которую
+  владелец принимает, — `1` legacy-сессия, `2` защищённая сессия v2
+  ([session_v2.md](session_v2.md), «Минимальная версия сессии в записи»).
+  Отсутствие поля ничего не утверждает, и это не то же самое, что `1`;
+  но ни то ни другое не разрешает понижение: запись, заявившая `1` или
+  переставшая заявлять поле, не снимает ни pin, ни привязку endpoint —
+  однажды полученная защита записью не понижается.
+  Присутствующее поле обязано быть целым от 1 до 255, иначе запись
+  malformed: это подписанное слово владельца, и прочитать испорченное как
+  «нет утверждения» значило бы тихо снять защиту от понижения; версия выше
+  тех, что знает сборка, сохраняется как заявлена. Владелец значение вне
+  этого диапазона не выпускает.
 - **Парсинг:** дублирующиеся ключи JSON — reject на всех уровнях (конверт и
   body). Неизвестные поля игнорируются, байты сохраняются, payload не
   пересобирается.
@@ -837,7 +863,7 @@ flowchart TB
     D["datagram { type, v, mode, class, src, dst, ttl,\nroute_policy, dtype, payload, auth? }"]
     P["discovery-payload { v, … }  — схема по dtype"]
     R["record { v, body, sig }  — подписанный конверт"]
-    B["record-body { address, pubkey, dm, boxkey, boxsig,\ndtypes?, issued_at, seq }"]
+    B["record-body { address, pubkey, dm, boxkey, boxsig,\ndtypes?, min_session?, issued_at, seq }"]
     D -->|"payload = base64url(…)"| P
     P -->|"record"| R
     R -->|"body = base64url(…)"| B
@@ -877,8 +903,8 @@ Clock skew не является причиной отказа: `issued_at` из
 
 - **Владелец** — self-record, строится при старте, persistent seq.
   Перевыпускается (seq+1) всякий раз, когда работающая сборка заявила бы
-  иное: ключи, dm-политика или объявленный набор `dtypes` — включая
-  апгрейд **и откат** бинарника. Неизменная сборка переиспользует хранимую
+  иное: ключи, dm-политика, объявленный набор `dtypes` или `min_session` —
+  включая апгрейд **и откат** бинарника. Неизменная сборка переиспользует хранимую
   запись без churn-а seq. Владелец — ЕДИНСТВЕННЫЙ узел, вправе ответить на
   адресованный ему `get_identity`.
 - **Прямые пиры владельца (память сессии)** — через initial `push_identity`

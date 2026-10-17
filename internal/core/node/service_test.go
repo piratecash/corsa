@@ -2249,6 +2249,18 @@ func startTestNode(t *testing.T, cfg config.Node) (*Service, func()) {
 // have no mutex because nothing was ever expected to write them twice.
 func startTestNodeWithSetup(t *testing.T, cfg config.Node, setup func(*Service)) (*Service, func()) {
 	t.Helper()
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("generate test identity: %v", err)
+	}
+	return startTestNodeAs(t, cfg, id, setup)
+}
+
+// startTestNodeAs is startTestNodeWithSetup under a given identity: a node
+// restarted on the data directory it ran on before, or a second node that
+// claims an identity another one already proved.
+func startTestNodeAs(t *testing.T, cfg config.Node, id *identity.Identity, setup func(*Service)) (*Service, func()) {
+	t.Helper()
 
 	// Peer state and the data directory in the test's own TempDir: a node
 	// never loads leftovers of a previous run on the same port, and writes
@@ -2260,10 +2272,6 @@ func startTestNodeWithSetup(t *testing.T, cfg config.Node, setup func(*Service))
 	cfg.AllowPrivatePeers = true
 	cfg = deriveTestAdvertisePort(cfg)
 	ctx, cancel := context.WithCancel(context.Background())
-	id, err := identity.Generate()
-	if err != nil {
-		t.Fatalf("generate test identity: %v", err)
-	}
 	svc := NewService(cfg, id, nil)
 	svc.disableRateLimiting = true
 	svc.markPeerStateIntervalTest = -1

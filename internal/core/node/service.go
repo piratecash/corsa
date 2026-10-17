@@ -2531,11 +2531,22 @@ func newService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus, netw
 		svc.datagramPlane.Store(layer)
 	}
 
+	// The session state comes before the self-record: the record states the
+	// minimum session version, and the mode this state runs is its only
+	// source (selfRecordMinSession).
+	svc.secureSessions = newSecureSessions(id, secureSessionsOptions{
+		storePath:        secureSessionStorePath(cfg),
+		markerPath:       pinStoreMarkerPath(cfg),
+		clock:            time.Now,
+		tlsFirstDisabled: cfg.DisableV2TLSFirst,
+	})
+
 	// The node's own signed identity record (docs/protocol/identity-lookup.md
 	// §4.1). Issued AFTER the datagram layer so the declared dtypes mirror
 	// the handshake declaration exactly (localDTypeStrings): absent while the
 	// plane is down, the registry's explicit set otherwise. A binary upgrade
-	// or rollback that changed the set re-issues with a bumped seq here.
+	// or rollback that changed the set or the session mode re-issues with a
+	// bumped seq here.
 	// A failure is the same class as a trust-store load failure — the node
 	// must not run half-identified — hence the same panic.
 	selfRecordNetwork, err := domain.ParseNetworkID(networkName)
@@ -2546,11 +2557,15 @@ func newService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus, netw
 	if svc.localDatagramAdvertise().Endpoint {
 		selfDTypes = domain.ExplicitDTypes(svc.localDatagramDTypes())
 	}
-	selfRecord, selfRecordBody, err := ensureSelfIdentityRecord(svc.trust, id, selfRecordSpec{
-		network: selfRecordNetwork,
-		dm:      !cfg.DisableDirectMessages,
-		dtypes:  selfDTypes,
-	}, time.Now())
+	// A refused start keeps the stored record untouched (see
+	// selfIdentityRecordForStart): every refusal is known by now — the
+	// connection budget above, the session state just built.
+	selfRecord, selfRecordBody, err := selfIdentityRecordForStart(svc.trust, id, selfRecordSpec{
+		network:    selfRecordNetwork,
+		dm:         !cfg.DisableDirectMessages,
+		dtypes:     selfDTypes,
+		minSession: selfRecordMinSession(svc.sessionMode()),
+	}, svc.StartupRefusal(), time.Now())
 	if err != nil {
 		panic(fmt.Errorf("ensure self identity record: %w", err))
 	}
@@ -2578,12 +2593,6 @@ func newService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus, netw
 	// and fetch_peer_health may be served before Run reaches any point it
 	// could publish the manager from. Run closes it.
 	svc.captureManager = svc.newCaptureManager()
-	svc.secureSessions = newSecureSessions(id, secureSessionsOptions{
-		storePath:        secureSessionStorePath(cfg),
-		markerPath:       pinStoreMarkerPath(cfg),
-		clock:            time.Now,
-		tlsFirstDisabled: cfg.DisableV2TLSFirst,
-	})
 
 	svc.relayStates = newRelayStateStore()
 	svc.relayLimiter = newRelayRateLimiter(time.Now)

@@ -1146,6 +1146,68 @@ func TestDiallingAnOldReleaseGoesTLSThenProbeThenLegacy(t *testing.T) {
 	}
 }
 
+// startOldNodeBehind starts an emulated old release of version and a proxy
+// in front of it whose behaviour configure sets before it starts.
+func startOldNodeBehind(t *testing.T, version int, configure func(*legacyVersionProxy)) (*legacyVersionProxy, func()) {
+	t.Helper()
+	oldAddress := freeAddress(t)
+	proxy := &legacyVersionProxy{target: oldAddress, side: oldPeerListens, version: version}
+	configure(proxy)
+	launchLegacyProxy(t, proxy)
+	_, stopOld := startTestNodeWithSetup(t, config.Node{
+		ListenAddress:  oldAddress,
+		BootstrapPeers: []string{},
+		Type:           config.NodeTypeFull,
+	}, withoutOwnDials(asOldNode))
+	return proxy, stopOld
+}
+
+// A TLS attempt dropped right after its ClientHello is no evidence either
+// way: the probe follows on a new connection, and v1 comes from the old
+// node's correct answer to it — never from the TLS error itself.
+func TestADroppedTLSAttemptIsFollowedByTheProbe(t *testing.T) {
+	t.Parallel()
+	proxy, stopOld := startOldNodeBehind(t, config.MinimumProtocolVersion, func(p *legacyVersionProxy) { p.interceptTLS = tlsDropped })
+	defer stopOld()
+	dialer, stopDialer := startQuietNode(t, nil)
+	defer stopDialer()
+
+	if established, err := dialPastTransport(t, dialer, proxy.peerAddress()); !established {
+		t.Fatalf("the old node was not reached after the dropped TLS attempt: %v", err)
+	}
+	if got := proxy.intercepted(); got != 1 {
+		t.Fatalf("%d TLS attempts dropped, want 1", got)
+	}
+	if hellos := proxy.nodeHellos(); len(hellos) < 2 || hellos[0] || !hellos[1] {
+		t.Fatalf("hellos (identified?) = %v, want the identity-less probe, then the full hello", hellos)
+	}
+}
+
+// An answer to the probe cut off before its line ended admits nothing: the
+// dial ends with no complete answer, and no hello with this node's identity
+// is sent.
+func TestACutOffProbeAnswerAdmitsNothing(t *testing.T) {
+	t.Parallel()
+	proxy, stopOld := startOldNodeBehind(t, config.MinimumProtocolVersion, func(p *legacyVersionProxy) { p.cutWelcome = true })
+	defer stopOld()
+	dialer, stopDialer := startQuietNode(t, nil)
+	defer stopDialer()
+
+	established, err := dialPastTransport(t, dialer, proxy.peerAddress())
+	if established || !errors.Is(err, errLegacyProbeNoAnswer) {
+		t.Fatalf("established=%v err=%v, want errLegacyProbeNoAnswer", established, err)
+	}
+	proxy.drain(t)
+	if proxy.cut() == 0 {
+		t.Fatal("the proxy cut no welcome: the dial ended for another reason")
+	}
+	for i, identified := range proxy.nodeHellos() {
+		if identified {
+			t.Fatalf("hello %d carried this node's identity after a cut-off answer", i)
+		}
+	}
+}
+
 // A node of this build is reached over TLS at once: one connection, a proven
 // session, v2_strong, and no probe.
 func TestDiallingANodeOfThisBuildGoesStraightToV2(t *testing.T) {

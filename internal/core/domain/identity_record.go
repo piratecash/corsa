@@ -3,6 +3,8 @@ package domain
 import (
 	"bytes"
 	"errors"
+	"fmt"
+	"math"
 )
 
 // identity_record.go holds the vocabulary of the signed identity record
@@ -176,4 +178,61 @@ func ParseIdentityRecordDTypesField(field *[]string) DeclaredDTypeSet {
 		return AbsentDTypes()
 	}
 	return ParseDeclaredDTypes(*field)
+}
+
+// ---------------------------------------------------------------------------
+// The min_session statement inside a record
+// ---------------------------------------------------------------------------
+
+// SessionVersion is a version of the session layer between two nodes: 1 is
+// the legacy session, 2 the secure session v2 (docs/protocol/session_v2.md).
+// It is not the wire ProtocolVersion of hello/welcome: that one numbers the
+// whole node protocol, this one only how a session is authenticated.
+type SessionVersion uint8
+
+const (
+	// SessionVersionLegacy is the v1 session: hello and auth_session over a
+	// plain connection.
+	SessionVersionLegacy SessionVersion = 1
+	// SessionVersionSecure is the secure session v2: TLS 1.3 with the
+	// identity proven over the connection's exporter.
+	SessionVersionSecure SessionVersion = 2
+)
+
+// ErrSessionVersionInvalid marks a number that is no session version: zero,
+// or above the range a record may state.
+var ErrSessionVersionInvalid = errors.New("invalid session version")
+
+// ParseSessionVersion reads a session version from its wire number. A number
+// above the versions this build speaks is kept as it is: it is a newer
+// build's statement, and the caller compares it, never enumerates it.
+func ParseSessionVersion(value uint64) (SessionVersion, error) {
+	if value < uint64(SessionVersionLegacy) || value > math.MaxUint8 {
+		return 0, fmt.Errorf("%w: %d", ErrSessionVersionInvalid, value)
+	}
+	return SessionVersion(value), nil
+}
+
+// IdentityRecordMinSession is the OPTIONAL min_session statement of a record:
+// the lowest session version the owner accepts. Absent is its own state, not
+// a zero version — a record issued before the field existed says nothing,
+// which is not the same as saying "legacy is fine".
+type IdentityRecordMinSession struct {
+	version  SessionVersion
+	declared bool
+}
+
+// AbsentMinSession states that the record carries no min_session.
+func AbsentMinSession() IdentityRecordMinSession {
+	return IdentityRecordMinSession{}
+}
+
+// DeclaredMinSession states that the record carries min_session = version.
+func DeclaredMinSession(version SessionVersion) IdentityRecordMinSession {
+	return IdentityRecordMinSession{version: version, declared: true}
+}
+
+// Version returns the stated version and whether the record states one.
+func (m IdentityRecordMinSession) Version() (SessionVersion, bool) {
+	return m.version, m.declared
 }

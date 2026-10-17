@@ -153,9 +153,10 @@ func TestCommittedManifestKeepsReleaseClosed(t *testing.T) {
 	if admission.ReleaseDecision != nil {
 		t.Fatalf("committed manifest names release decision %+v; none has been taken", *admission.ReleaseDecision)
 	}
-	// The only condition met today is the owner's choice of release order;
-	// every other one is outstanding.
-	doneToday := []ConditionID{"owner_release_shape"}
+	// The conditions met today: the owner's choice of release order, and the
+	// checks confirmed on the commit their evidence names. Closing another one
+	// is a deliberate edit here as well as in the manifest.
+	doneToday := []ConditionID{"owner_release_shape", "compat_real_releases", "pin_store_marker", "dial_paths_unified"}
 	var want []ConditionID
 	for _, id := range RequiredConditions() {
 		if !slices.Contains(doneToday, id) {

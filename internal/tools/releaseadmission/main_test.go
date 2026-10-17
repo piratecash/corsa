@@ -24,6 +24,25 @@ func committedManifest() string {
 	return filepath.Join(repoRoot, filepath.FromSlash(admission.ManifestPath))
 }
 
+// committedConditions reads the conditions of the committed manifest.
+func committedConditions(t *testing.T) []admission.Condition {
+	t.Helper()
+	file, err := os.Open(committedManifest())
+	if err != nil {
+		t.Fatalf("open the committed manifest: %v", err)
+	}
+	defer func() {
+		// A read-only file: a close error cannot lose data, and the decode
+		// below has already reported anything that went wrong reading it.
+		_ = file.Close()
+	}()
+	manifest, err := admission.DecodeManifest(file)
+	if err != nil {
+		t.Fatalf("decode the committed manifest: %v", err)
+	}
+	return manifest.Conditions
+}
+
 // TestClosedGateExitsNonZeroAndNamesWhatIsMissing is the contract the
 // workflow relies on: a refusal is exit status 1, and the output says why.
 func TestClosedGateExitsNonZeroAndNamesWhatIsMissing(t *testing.T) {
@@ -32,12 +51,15 @@ func TestClosedGateExitsNonZeroAndNamesWhatIsMissing(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("exit code = %d, want 1; stdout:\n%s\nstderr:\n%s", code, stdout.String(), stderr.String())
 	}
-	for _, id := range admission.RequiredConditions() {
-		if id == "owner_release_shape" { // decided; the gate pins this in its own test
-			continue
-		}
-		if !strings.Contains(stdout.String(), "outstanding condition: "+string(id)) {
-			t.Errorf("stdout does not name outstanding condition %q:\n%s", id, stdout.String())
+	// The expectation comes from the committed manifest itself: closing a
+	// condition there is legitimate work and must not break this test, while
+	// a condition the output forgets or wrongly lists still does.
+	for _, condition := range committedConditions(t) {
+		named := strings.Contains(stdout.String(), "outstanding condition: "+string(condition.ID)+"\n")
+		outstanding := condition.Status != admission.ConditionDone
+		if named != outstanding {
+			t.Errorf("condition %q (status %q): named as outstanding = %t, want %t:\n%s",
+				condition.ID, condition.Status, named, outstanding, stdout.String())
 		}
 	}
 	if !strings.Contains(stdout.String(), "no owner decision to release") {

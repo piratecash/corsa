@@ -7,6 +7,7 @@ import (
 	"net"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/rs/zerolog"
 
@@ -300,6 +301,162 @@ func TestWithTLSFirstOffAProbeClosedWithoutAnAnswerPacesTheNextDial(t *testing.T
 			if sockets := peer.sockets(t); len(sockets) != 1 {
 				t.Fatalf("%d sockets, want the first probe's alone", len(sockets))
 			}
+		})
+	}
+}
+
+// Switched off, a mark this node RECORDED about an address does not bring the
+// ClientHello back: v2_hint (a handshake record, a v2 welcome to an earlier
+// probe), the hint an alert left, and legacy_observed are unproven answers of
+// the past, so the next dial still opens with the probe. Only a v2 welcome to
+// THIS dial's probe moves the dial to TLS (the test above), and only what
+// requires v2 — v2_strong, a binding, a dial "to X" — opens with TLS before
+// any answer. The mark stands when the dial starts. What the probe then
+// meets is judged as always: silence leaves a v2 hint standing and forgets
+// legacy_observed (a probe that allowed nothing), and an old node's correct
+// answer replaces a hint with legacy_observed, the later of two unproven
+// answers.
+func TestWithTLSFirstOffARecordedMarkDoesNotOpenTheDialWithTLS(t *testing.T) {
+	t.Parallel()
+	marks := map[string]struct {
+		note             func(*sessionAddressMarks, domain.PeerAddress)
+		standing         func(*sessionAddressMarks, domain.PeerAddress) bool
+		keptAfterSilence bool
+	}{
+		"v2_hint":         {(*sessionAddressMarks).noteV2Hint, (*sessionAddressMarks).v2Hinted, true},
+		"an alert's hint": {func(m *sessionAddressMarks, a domain.PeerAddress) { m.noteV2Alert(a) }, (*sessionAddressMarks).v2Hinted, true},
+		"legacy_observed": {(*sessionAddressMarks).noteLegacyObserved, (*sessionAddressMarks).legacyObserved, false},
+	}
+	for name, mark := range marks {
+		t.Run(name+"/old node", func(t *testing.T) {
+			t.Parallel()
+			svc := newTLSFirstSwitchService(t, true)
+			mark.note(svc.secureSessions.marks, dialChoiceAddress)
+			if !mark.standing(svc.secureSessions.marks, dialChoiceAddress) {
+				t.Fatal("premise: the mark is not recorded")
+			}
+			probe, full := oldNodeWelcomes(t, generateProbeIdentity(t), config.MinimumProtocolVersion)
+			peer := newScriptedPeer(oldNodeSocket(probe, full))
+			transport, err := dialThrough(t, svc, dialChoiceAddress, domain.DialToAddress(), peer)
+			if err != nil {
+				t.Fatalf("dial: %v", err)
+			}
+			if transport.proven != nil || transport.probed == nil {
+				t.Fatalf("transport proven=%v probed=%v, want v1 opened by the probe", transport.proven != nil, transport.probed)
+			}
+			_ = transport.wire.Close()
+			sockets := peer.sockets(t)
+			noClientHello(t, sockets)
+			if len(sockets) != 1 || !isProbe(t, sockets[0]) {
+				t.Fatalf("sockets = %q, want the probe alone", sockets)
+			}
+			if got := svc.SecureSessionStoreStats().DialsOpenedByProbe; got != 1 {
+				t.Fatalf("%d dials opened by the probe, want 1", got)
+			}
+		})
+		t.Run(name+"/silence", func(t *testing.T) {
+			t.Parallel()
+			svc := newTLSFirstSwitchService(t, true)
+			mark.note(svc.secureSessions.marks, dialChoiceAddress)
+			if !mark.standing(svc.secureSessions.marks, dialChoiceAddress) {
+				t.Fatal("premise: the mark is not recorded")
+			}
+			peer := newScriptedPeer(silentPeer)
+			if _, err := dialThrough(t, svc, dialChoiceAddress, domain.DialToAddress(), peer); err == nil {
+				t.Fatal("a silent peer opened a session")
+			}
+			sockets := peer.sockets(t)
+			noClientHello(t, sockets)
+			if len(sockets) != 1 || !isProbe(t, sockets[0]) {
+				t.Fatalf("sockets = %q, want the probe alone", sockets)
+			}
+			if got := mark.standing(svc.secureSessions.marks, dialChoiceAddress); got != mark.keptAfterSilence {
+				t.Fatalf("after a silent probe the mark stands = %v, want %v", got, mark.keptAfterSilence)
+			}
+		})
+	}
+}
+
+// requireNothingProvenAt fails when anything at address reads as v2 proven
+// there: a pin, a binding, v2_strong. A held fall back to v1 forbids v1; it
+// shows nothing about v2.
+func requireNothingProvenAt(t *testing.T, svc *Service, address domain.PeerAddress) {
+	t.Helper()
+	if pins := svc.SecureSessionStoreStats().PinnedIdentities; pins != 0 {
+		t.Fatalf("%d pinned identities, want none", pins)
+	}
+	if svc.secureSessions.store.endpointRequiresV2(address) || svc.secureSessions.marks.v2Strong(address) {
+		t.Fatal("the held address reads as proven v2: a binding or v2_strong")
+	}
+}
+
+// With TLS-first switched off, while the fall back to v1 at an address is
+// held after a refused v1 answer, the dial opens with TLS — v1 is forbidden
+// there, so the probe would have nothing to offer — but only once the v2
+// retry backoff of the address allows a dial at all. No failure of that TLS
+// attempt leads to v1, and the hold proves nothing about v2: no pin, no
+// binding, no v2_strong. Once the hold ended and nothing else requires v2,
+// the switch decides again: the probe first.
+func TestWithTLSFirstOffAHeldFallBackOpensWithTLSUntilItEnds(t *testing.T) {
+	t.Parallel()
+	probe, full := oldNodeWelcomes(t, generateProbeIdentity(t), config.MinimumProtocolVersion)
+	answers := map[string]socketScript{
+		"an old node": oldNodeSocket(probe, full),
+		"silence":     silentPeer,
+		"a reset":     resetAfterFirstBytes,
+		"a TLS error": answerClientHello(tlsHandshakeGarbage),
+		"a TLS alert": answerClientHello(sessionv2.RefusalAlert()),
+	}
+	for name, answer := range answers {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			clock := newStoreClock()
+			svc := newTLSFirstSwitchService(t, true)
+			svc.secureSessions.marks = newSessionAddressMarks(clock.read)
+			marks := svc.secureSessions.marks
+			hold := marks.noteLegacyRefused(dialChoiceAddress)
+
+			held := newScriptedPeer(answer)
+			if _, err := dialThrough(t, svc, dialChoiceAddress, domain.DialToAddress(), held); !errors.Is(err, errV2RetryHeld) {
+				t.Fatalf("a dial inside the v2 retry wait: %v, want errV2RetryHeld", err)
+			}
+			if sockets := held.sockets(t); len(sockets) != 0 {
+				t.Fatalf("%d sockets inside the v2 retry wait, want none", len(sockets))
+			}
+
+			clock.now = clock.now.Add(v2RetryBase + time.Second)
+			if !marks.legacyHeld(dialChoiceAddress) {
+				t.Fatal("premise: the hold ended before the v2 retry wait")
+			}
+			transport, err := dialThrough(t, svc, dialChoiceAddress, domain.DialToAddress(), held)
+			if err == nil {
+				t.Fatalf("a dial under the hold succeeded: proven=%v probed=%v", transport.proven != nil, transport.probed != nil)
+			}
+			sockets := held.sockets(t)
+			if len(sockets) != 1 || !isClientHello(sockets[0]) {
+				t.Fatalf("sockets = %q, want one TLS attempt and no probe", sockets)
+			}
+			requireNothingProvenAt(t, svc, dialChoiceAddress)
+
+			clock.now = clock.now.Add(hold + legacyRefusalHoldMax)
+			if marks.legacyHeld(dialChoiceAddress) || marks.v2RetryHeld(dialChoiceAddress) {
+				t.Fatal("premise: the hold and the v2 retry wait did not end")
+			}
+			after := newScriptedPeer(oldNodeSocket(probe, full))
+			transport, err = dialThrough(t, svc, dialChoiceAddress, domain.DialToAddress(), after)
+			if err != nil {
+				t.Fatalf("the dial after the hold ended: %v", err)
+			}
+			if transport.probed == nil {
+				t.Fatal("after the hold the old node was not reached by the probe")
+			}
+			_ = transport.wire.Close()
+			afterSockets := after.sockets(t)
+			noClientHello(t, afterSockets)
+			if len(afterSockets) != 1 || !isProbe(t, afterSockets[0]) {
+				t.Fatalf("sockets after the hold = %q, want the probe alone", afterSockets)
+			}
+			requireNothingProvenAt(t, svc, dialChoiceAddress)
 		})
 	}
 }

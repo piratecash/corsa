@@ -261,6 +261,9 @@ func TestClearingOneChatLeavesTheOtherAlone(t *testing.T) {
 		})
 	}
 	store := bobNode.chatlog.Store()
+	// Run starts the file subsystem before it opens the listener, so a session
+	// with Bob proves his subsystem is up; registering earlier raced his Run.
+	waitForSession(t, aliceNode, bobAddr)
 	// A REAL file-transfer mapping for Carol's attachment, registered through
 	// the node the way an incoming announce registers one. A second chatlog row
 	// would prove nothing: what a wipe reaches in the file subsystem is decided
@@ -284,7 +287,6 @@ func TestClearingOneChatLeavesTheOtherAlone(t *testing.T) {
 		t.Fatalf("react in Carol's conversation: %v", err)
 	}
 
-	waitForSession(t, aliceNode, bobAddr)
 	if err := alice.SendConversationDelete(ctx, bobAddr); err != nil {
 		t.Fatalf("SendConversationDelete: %v", err)
 	}

@@ -193,35 +193,38 @@ func ParseSignedIdentityRecord(raw []byte) (SignedIdentityRecord, error) {
 // never travels anywhere by itself — the signed bytes do — so it carries no
 // marshalling of its own.
 type IdentityRecordBody struct {
-	PubKey   domain.PeerPublicKey
-	BoxKey   domain.PeerBoxKey
-	BoxSig   domain.PeerBoxSignature
-	DTypes   domain.DeclaredDTypeSet
-	Address  domain.PeerIdentity
-	IssuedAt uint64
-	Seq      domain.IdentityRecordSeq
-	DM       bool
+	PubKey     domain.PeerPublicKey
+	BoxKey     domain.PeerBoxKey
+	BoxSig     domain.PeerBoxSignature
+	DTypes     domain.DeclaredDTypeSet
+	MinSession domain.IdentityRecordMinSession
+	Address    domain.PeerIdentity
+	IssuedAt   uint64
+	Seq        domain.IdentityRecordSeq
+	DM         bool
 }
 
 // identityRecordBodyWire is the JSON shape the OWNER emits when issuing a
 // record. Receivers never use it: they parse field-by-field and keep the
 // signed bytes verbatim.
 type identityRecordBodyWire struct {
-	DTypes   *[]string `json:"dtypes,omitempty"`
-	Address  string    `json:"address"`
-	PubKey   string    `json:"pubkey"`
-	BoxKey   string    `json:"boxkey,omitempty"`
-	BoxSig   string    `json:"boxsig,omitempty"`
-	IssuedAt uint64    `json:"issued_at"`
-	Seq      uint64    `json:"seq"`
-	DM       bool      `json:"dm"`
+	DTypes     *[]string `json:"dtypes,omitempty"`
+	MinSession *uint8    `json:"min_session,omitempty"`
+	Address    string    `json:"address"`
+	PubKey     string    `json:"pubkey"`
+	BoxKey     string    `json:"boxkey,omitempty"`
+	BoxSig     string    `json:"boxsig,omitempty"`
+	IssuedAt   uint64    `json:"issued_at"`
+	Seq        uint64    `json:"seq"`
+	DM         bool      `json:"dm"`
 }
 
 // ParseIdentityRecordBody parses the signed body bytes structurally: size
 // cap first, duplicate keys reject, required fields present and well-typed,
 // box fields consistent with the dm flag, dtypes under the record bounds
-// (a bounds breach drops the field to absent, not the record). Unknown
-// fields are ignored — the caller keeps the raw bytes, so nothing is lost.
+// (a bounds breach drops the field to absent, not the record), min_session
+// absent or a session version. Unknown fields are ignored — the caller keeps
+// the raw bytes, so nothing is lost.
 func ParseIdentityRecordBody(body []byte) (IdentityRecordBody, error) {
 	if len(body) > domain.MaxIdentityRecordBodyBytes {
 		return IdentityRecordBody{}, fmt.Errorf("%w: body %d bytes exceeds %d",
@@ -263,16 +266,21 @@ func ParseIdentityRecordBody(body []byte) (IdentityRecordBody, error) {
 	if err != nil {
 		return IdentityRecordBody{}, err
 	}
+	minSession, err := recordMinSessionField(fields)
+	if err != nil {
+		return IdentityRecordBody{}, err
+	}
 
 	return IdentityRecordBody{
-		Address:  address,
-		PubKey:   domain.PeerPublicKey(pubKey),
-		BoxKey:   domain.PeerBoxKey(boxKey),
-		BoxSig:   domain.PeerBoxSignature(boxSig),
-		DTypes:   dtypes,
-		IssuedAt: issuedAt,
-		Seq:      domain.IdentityRecordSeq(seq),
-		DM:       dm,
+		Address:    address,
+		PubKey:     domain.PeerPublicKey(pubKey),
+		BoxKey:     domain.PeerBoxKey(boxKey),
+		BoxSig:     domain.PeerBoxSignature(boxSig),
+		DTypes:     dtypes,
+		MinSession: minSession,
+		IssuedAt:   issuedAt,
+		Seq:        domain.IdentityRecordSeq(seq),
+		DM:         dm,
 	}, nil
 }
 
@@ -316,6 +324,25 @@ func recordDTypesField(fields map[string]json.RawMessage) (domain.DeclaredDTypeS
 			ErrIdentityRecordMalformed, err)
 	}
 	return domain.ParseIdentityRecordDTypesField(&names), nil
+}
+
+// recordMinSessionField reads the optional min_session statement. Unlike a
+// dtypes bounds breach it does not degrade to absent: only the owner can put
+// it there, a broken value is the owner's broken record, and reading it as
+// "no statement" would quietly turn a downgrade guard into its absence.
+func recordMinSessionField(fields map[string]json.RawMessage) (domain.IdentityRecordMinSession, error) {
+	if _, present := fields["min_session"]; !present {
+		return domain.AbsentMinSession(), nil
+	}
+	value, err := recordUint64Field(fields, "min_session")
+	if err != nil {
+		return domain.IdentityRecordMinSession{}, err
+	}
+	version, err := domain.ParseSessionVersion(value)
+	if err != nil {
+		return domain.IdentityRecordMinSession{}, fmt.Errorf("%w: min_session: %w", ErrIdentityRecordMalformed, err)
+	}
+	return domain.DeclaredMinSession(version), nil
 }
 
 // ---------------------------------------------------------------------------
@@ -392,6 +419,10 @@ type IdentityRecordSpec struct {
 	// Seq is the monotonic issue counter. The caller owns its persistence
 	// and atomicity (reserve → persist → publish).
 	Seq domain.IdentityRecordSeq
+	// MinSession is the lowest session version the owner accepts. Absent
+	// issues a record without the field, which is what a build that does
+	// not speak the secure session states.
+	MinSession domain.IdentityRecordMinSession
 	// DM declares whether the owner accepts direct messages. False issues a
 	// keyless record with no box fields.
 	DM bool
@@ -414,13 +445,18 @@ func BuildSignedIdentityRecord(owner *identity.Identity, spec IdentityRecordSpec
 	if err := checkIssuedDTypesCount(dtypes); err != nil {
 		return SignedIdentityRecord{}, err
 	}
+	minSession, err := issuedMinSessionField(spec.MinSession)
+	if err != nil {
+		return SignedIdentityRecord{}, err
+	}
 	wire := identityRecordBodyWire{
-		Address:  owner.Address,
-		PubKey:   identity.PublicKeyBase64(owner.PublicKey),
-		DM:       spec.DM,
-		DTypes:   dtypes,
-		IssuedAt: spec.IssuedAt,
-		Seq:      uint64(spec.Seq),
+		Address:    owner.Address,
+		PubKey:     identity.PublicKeyBase64(owner.PublicKey),
+		DM:         spec.DM,
+		DTypes:     dtypes,
+		MinSession: minSession,
+		IssuedAt:   spec.IssuedAt,
+		Seq:        uint64(spec.Seq),
 	}
 	if spec.DM {
 		wire.BoxKey = identity.BoxPublicKeyBase64(owner.BoxPublicKey)
@@ -459,6 +495,22 @@ func checkIssuedDTypesCount(field *[]string) error {
 	}
 	return fmt.Errorf("%w: %d names exceed %d",
 		ErrIdentityRecordTooManyDTypes, len(*field), domain.MaxIdentityRecordDTypes)
+}
+
+// issuedMinSessionField renders the min_session statement for the wire: nil
+// for an absent one, so the field is left out rather than sent as a zero. A
+// declared version no receiver would accept is refused here, because every
+// receiver would reject the whole record for it.
+func issuedMinSessionField(minSession domain.IdentityRecordMinSession) (*uint8, error) {
+	version, declared := minSession.Version()
+	if !declared {
+		return nil, nil
+	}
+	if _, err := domain.ParseSessionVersion(uint64(version)); err != nil {
+		return nil, fmt.Errorf("%w: min_session: %w", ErrIdentityRecordMalformed, err)
+	}
+	wire := uint8(version)
+	return &wire, nil
 }
 
 // ---------------------------------------------------------------------------

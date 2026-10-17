@@ -73,10 +73,19 @@ type legacyVersionProxy struct {
 	// signature, all public — so the relabelled frame is self-consistent and
 	// passes every check a v1 frame can be given without a proof.
 	victim *identity.Identity
-	// verbatim forwards the old node's frames untouched: the old node is a
-	// released binary that announces its own version (startRecordingProxy in
-	// release_interop_test.go, build tag interop).
+	// verbatim keeps the version the old node announces: the old node is a
+	// released binary that announces its own (startRecordingProxy in
+	// release_interop_test.go, build tag interop). The relabelling above
+	// still applies when it is set — a forged answer in front of a release.
 	verbatim bool
+	// cutWelcome forwards only the first half of the first welcome the old
+	// node sends on a connection and then closes it: an answer cut off on
+	// the way.
+	cutWelcome bool
+	// interceptTLS takes over every connection the node under test opens
+	// with a ClientHello instead of forwarding it to the old node: the
+	// TLS handshake dropped or broken on the way (tlsInterception).
+	interceptTLS tlsInterception
 
 	mu             sync.Mutex
 	conns          []net.Conn
@@ -87,6 +96,10 @@ type legacyVersionProxy struct {
 	// nodeClientHellos is how many connections the node under test opened
 	// with a TLS ClientHello rather than a v1 line.
 	nodeClientHellos int
+	// welcomesCut counts the welcomes cutWelcome cut off; tlsIntercepted
+	// the ClientHellos interceptTLS took over.
+	welcomesCut    int
+	tlsIntercepted int
 	// stopped is set by close: a connection accepted just before the
 	// listener closed is then closed at once instead of escaping the
 	// close that already ran over conns.
@@ -145,6 +158,25 @@ func (p *legacyVersionProxy) peerAddress() domain.PeerAddress {
 	return domain.PeerAddress(p.address())
 }
 
+// tlsInterception is what the proxy does with a connection the node under
+// test opens with a ClientHello.
+type tlsInterception int
+
+const (
+	// tlsForwarded: nothing — the connection goes to the old node.
+	tlsForwarded tlsInterception = iota
+	// tlsDropped: the connection is reset right after the ClientHello,
+	// before any answer.
+	tlsDropped
+	// tlsBrokenMidway: a TLS handshake record the client cannot parse comes
+	// back, and then the connection ends — a handshake broken in the middle.
+	tlsBrokenMidway
+)
+
+// tlsInterceptDeadline bounds how long an intercepting proxy waits for the
+// first byte of a connection and for the node to close a broken handshake.
+const tlsInterceptDeadline = 10 * time.Second
+
 func (p *legacyVersionProxy) acceptLoop() {
 	defer p.done.Done()
 	for {
@@ -152,29 +184,95 @@ func (p *legacyVersionProxy) acceptLoop() {
 		if err != nil {
 			return
 		}
-		server, err := net.Dial("tcp", p.target)
-		if err != nil {
-			_ = client.Close()
+		if p.interceptTLS == tlsForwarded {
+			p.relay(client)
 			continue
 		}
-		p.mu.Lock()
-		if p.stopped {
-			p.mu.Unlock()
-			_ = client.Close()
-			_ = server.Close()
-			continue
-		}
-		p.conns = append(p.conns, client, server)
-		p.done.Add(2)
-		p.mu.Unlock()
-		go p.forwardFromDialer(client, server)
-		go p.forwardFromListener(server, client)
+		p.done.Add(1)
+		go p.interceptOrRelay(client)
 	}
+}
+
+// relay forwards client to the target.
+func (p *legacyVersionProxy) relay(client net.Conn) {
+	server, err := net.Dial("tcp", p.target)
+	if err != nil {
+		_ = client.Close()
+		return
+	}
+	p.mu.Lock()
+	if p.stopped {
+		p.mu.Unlock()
+		_ = client.Close()
+		_ = server.Close()
+		return
+	}
+	p.conns = append(p.conns, client, server)
+	p.done.Add(2)
+	p.mu.Unlock()
+	go p.forwardFromDialer(client, server)
+	go p.forwardFromListener(server, client)
+}
+
+// interceptOrRelay reads the first byte of client: a ClientHello is taken
+// over as interceptTLS says, anything else is relayed with that byte put back.
+func (p *legacyVersionProxy) interceptOrRelay(client net.Conn) {
+	defer p.done.Done()
+	first := make([]byte, 1)
+	if err := client.SetReadDeadline(time.Now().Add(tlsInterceptDeadline)); err != nil {
+		_ = client.Close()
+		return
+	}
+	if _, err := io.ReadFull(client, first); err != nil {
+		_ = client.Close()
+		return
+	}
+	if err := client.SetReadDeadline(time.Time{}); err != nil {
+		_ = client.Close()
+		return
+	}
+	if first[0] != sessionv2.TLSRecordHandshake {
+		p.relay(&prefixedConn{Conn: client, prefix: first})
+		return
+	}
+	p.mu.Lock()
+	p.nodeClientHellos++
+	p.tlsIntercepted++
+	p.mu.Unlock()
+	if p.interceptTLS == tlsBrokenMidway {
+		// The node reads the broken record and gives up; what it wrote
+		// meanwhile is of no interest, and a failed write is the node
+		// having closed already.
+		_, _ = client.Write(tlsHandshakeGarbage)
+		_ = client.SetReadDeadline(time.Now().Add(tlsInterceptDeadline))
+		_, _ = io.Copy(io.Discard, client)
+	}
+	resetConn(client)
+}
+
+// prefixedConn is a connection whose first bytes were already read: they are
+// returned again before the rest.
+type prefixedConn struct {
+	net.Conn
+	prefix []byte
+}
+
+func (c *prefixedConn) Read(b []byte) (int, error) {
+	if len(c.prefix) > 0 {
+		n := copy(b, c.prefix)
+		c.prefix = c.prefix[n:]
+		return n, nil
+	}
+	return c.Conn.Read(b)
 }
 
 // errProxyWrite marks a copy that ended because the destination refused a
 // write, as opposed to the source ending its stream.
 var errProxyWrite = errors.New("proxy: write to the destination failed")
+
+// errProxyCut marks a copy the proxy ended itself in the middle of a welcome
+// (cutWelcome).
+var errProxyCut = errors.New("proxy: the welcome was cut off")
 
 // forwardFromDialer carries what the dialling side sends. When the dialler is
 // the old node (oldPeerDials) its frames are rewritten; when it is the node
@@ -267,6 +365,15 @@ func (p *legacyVersionProxy) copy(dst io.Writer, src io.Reader, rewrite, record 
 			if record {
 				p.recordFrameType(line)
 			}
+			if rewrite && p.cutWelcome && frameTypeOf(line) == "welcome" {
+				p.mu.Lock()
+				p.welcomesCut++
+				p.mu.Unlock()
+				// The connection ends here either way; whether the half
+				// reached the node is what a cut-off answer leaves open too.
+				_, _ = dst.Write(out[:len(out)/2])
+				return errProxyCut
+			}
 			if _, werr := dst.Write(out); werr != nil {
 				return fmt.Errorf("%w: %w", errProxyWrite, werr)
 			}
@@ -322,6 +429,20 @@ func (p *legacyVersionProxy) nodeHellos() []bool {
 	return append([]bool(nil), p.nodeHelloIdentified...)
 }
 
+// cut is how many welcomes cutWelcome cut off, and intercepted how many
+// ClientHellos interceptTLS took over.
+func (p *legacyVersionProxy) cut() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.welcomesCut
+}
+
+func (p *legacyVersionProxy) intercepted() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.tlsIntercepted
+}
+
 // connections is how many connections the proxy has forwarded.
 func (p *legacyVersionProxy) connections() int {
 	p.mu.Lock()
@@ -341,18 +462,25 @@ func (p *legacyVersionProxy) nodeSentFrame(frameType string) bool {
 	return false
 }
 
-func (p *legacyVersionProxy) announceOldVersion(line []byte) []byte {
-	if p.verbatim {
-		return line
-	}
+// frameTypeOf is the type of a JSON frame line, or "" for anything else.
+func frameTypeOf(line []byte) string {
 	var head struct {
 		Type string `json:"type"`
 	}
-	if json.Unmarshal(line, &head) != nil || (head.Type != "hello" && head.Type != "welcome") {
+	if json.Unmarshal(line, &head) != nil {
+		return ""
+	}
+	return head.Type
+}
+
+func (p *legacyVersionProxy) announceOldVersion(line []byte) []byte {
+	if frameType := frameTypeOf(line); frameType != "hello" && frameType != "welcome" {
 		return line
 	}
-	current := []byte(fmt.Sprintf(`"version":%d`, config.ProtocolVersion))
-	line = bytes.Replace(line, current, []byte(fmt.Sprintf(`"version":%d`, p.version)), 1)
+	if !p.verbatim {
+		current := []byte(fmt.Sprintf(`"version":%d`, config.ProtocolVersion))
+		line = bytes.Replace(line, current, []byte(fmt.Sprintf(`"version":%d`, p.version)), 1)
+	}
 	if p.victimAddress != "" {
 		line = legacyAddressField.ReplaceAll(line, []byte(fmt.Sprintf(`"address":%q`, p.victimAddress)))
 	}

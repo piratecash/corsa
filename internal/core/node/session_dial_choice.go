@@ -122,7 +122,45 @@ var (
 	// v2 session to the address was refused for a full pin store that still
 	// has no room.
 	errPinRoomAwaited = errors.New("secure session: dial held until the pin store has room")
+	// errV2FailedBeforeProof is a TLS attempt over an opened TCP connection
+	// that ended before the identity proof verified: a TLS answer that then
+	// failed — a certificate, a handshake broken on the way, a proof or its
+	// binding that does not verify — an alert that is not the listener's
+	// refusal, or, where v1 is ruled out, silence, a reset or bytes that are
+	// neither. Nothing proved who answered, so it is no fault of the node
+	// there: not charged, only paced. It never leads to v1.
+	errV2FailedBeforeProof = errors.New("secure session: the TLS attempt failed before the peer was authenticated")
+	// errLegacyProbeLocalFailure is a probe that failed on this node before
+	// anything reached the far end: it says nothing about the address.
+	errLegacyProbeLocalFailure = errors.New("secure session: the probe failed on this node")
+	// errDialAbortedLocally is a dial this node ended itself — its stop, or
+	// the caller cancelling — whatever stage it was in: no failure of the
+	// address, and nothing paced.
+	errDialAbortedLocally = errors.New("secure session: the dial was ended by this node")
+	// errLegacyProbeAdmittedNothing is a probe whose answer admits nothing —
+	// none in time, none at all, one cut off, broken or forged. An answer
+	// nobody authenticated shows no fault of the node there: not charged,
+	// only paced.
+	errLegacyProbeAdmittedNothing = errors.New("secure session: the probe's answer admitted nothing")
 )
+
+// localProbeFailures are the probe errors of this node's own making, before
+// anything reached or came back from the far end: they say nothing about the
+// address and pace nothing.
+var localProbeFailures = []error{
+	errLegacyProbeOptionsInvalid,
+	errLegacyProbeEncode,
+	errLegacyProbeDeadline,
+}
+
+func isLocalProbeFailure(err error) bool {
+	for _, local := range localProbeFailures {
+		if errors.Is(err, local) {
+			return true
+		}
+	}
+	return false
+}
 
 // sessionDialPlan is what the mode, the intent, the store and the marks say
 // about the next dial to one address.
@@ -253,13 +291,21 @@ func (s *Service) afterFailedV2Attempt(ctx context.Context, attempt failedV2Atte
 // noteV2FailedAfterTLS: the listener speaks TLS, and the handshake with it
 // failed — a certificate, an identity, a proof or its binding to the TLS
 // session. That ends the attempt without fall back: a v2 hint, and the next
-// v2 attempt is paced. The failure itself is the address's, as before.
+// v2 attempt is paced. Nothing was authenticated, so nothing shows the node
+// there at fault — a man in the middle breaks a handshake as easily — and the
+// address is not charged (errV2FailedBeforeProof).
 func (s *Service) noteV2FailedAfterTLS(attempt failedV2Attempt) error {
-	marks := s.secureSessions.marks
-	marks.noteV2Hint(attempt.address)
-	retry := marks.noteV2Unanswered(attempt.address)
-	log.Debug().Err(attempt.err).Str("peer", string(attempt.address)).Dur("v2_retry", retry).Msg("secure_session_v2_failed_after_tls")
-	return attempt.err
+	s.secureSessions.marks.noteV2Hint(attempt.address)
+	return s.noteV2EndedBeforeProof(attempt)
+}
+
+// noteV2EndedBeforeProof ends a TLS attempt that nothing after it may
+// follow: the next dial to the address is paced — one step per dial — and the
+// address is not charged (errV2FailedBeforeProof).
+func (s *Service) noteV2EndedBeforeProof(attempt failedV2Attempt) error {
+	retry := s.secureSessions.marks.noteV2Unanswered(attempt.address)
+	log.Debug().Err(attempt.err).Str("peer", string(attempt.address)).Dur("v2_retry", retry).Msg("secure_session_v2_ended_before_proof")
+	return fmt.Errorf("%w: %w", errV2FailedBeforeProof, attempt.err)
 }
 
 // afterV2Alert: a TLS alert is a v2 hint. The listener's own refusal also
@@ -269,14 +315,19 @@ func (s *Service) noteV2FailedAfterTLS(attempt failedV2Attempt) error {
 // which the probe reads as a v2 hint.
 func (s *Service) afterV2Alert(ctx context.Context, attempt failedV2Attempt, dial transportDial) (*dialledTransport, error) {
 	repeated := s.secureSessions.marks.noteV2Alert(attempt.address)
-	err := attempt.err
-	if errors.Is(err, sessionv2.ErrRefusedByListener) {
-		err = s.noteV2RefusedByListener(attempt.address, err)
+	refusedByListener := errors.Is(attempt.err, sessionv2.ErrRefusedByListener)
+	var refusal error
+	if refusedByListener {
+		refusal = s.noteV2RefusedByListener(attempt.address, attempt.err)
 	}
-	if !attempt.plan.probeAfterAlert(repeated) {
-		return nil, err
+	switch {
+	case attempt.plan.probeAfterAlert(repeated):
+		return s.probeAfterV2Attempt(ctx, attempt, dial)
+	case refusedByListener:
+		return nil, refusal
+	default:
+		return nil, s.noteV2EndedBeforeProof(attempt)
 	}
-	return s.probeAfterV2Attempt(ctx, attempt, dial)
 }
 
 // afterV1Line: a v1 line is no proof of an old node — a man in the middle
@@ -300,10 +351,13 @@ func (s *Service) afterV1Line(ctx context.Context, attempt failedV2Attempt, dial
 }
 
 // afterUnansweredV2: nothing answered the attempt that says anything; the
-// probe decides where v1 is not ruled out.
+// probe decides where v1 is not ruled out. Where it is ruled out the attempt
+// ends there, paced and not charged: the TCP connection was open, so the
+// silence, the reset or the stray bytes came from whatever stood on it, and
+// nothing proved who that was.
 func (s *Service) afterUnansweredV2(ctx context.Context, attempt failedV2Attempt, dial transportDial) (*dialledTransport, error) {
 	if !attempt.plan.mayProbe() {
-		return nil, attempt.err
+		return nil, s.noteV2EndedBeforeProof(attempt)
 	}
 	return s.probeAfterV2Attempt(ctx, attempt, dial)
 }
@@ -432,37 +486,31 @@ func (s *Service) dialOpenedByProbe(ctx context.Context, address domain.PeerAddr
 }
 
 // noteProbeAllowedNothing: the probe's answer permits nothing. A probe this
-// node aborted itself says nothing about the address and changes nothing.
-// Otherwise legacy_observed is forgotten; a probe nobody answered in time is
-// paced, not charged; an answer below the version floor returns the claimed
-// incompatible version, which the dial paths answer with pacing alone
-// (reactToIncompatibleDial).
+// node aborted itself, or one that failed on this node before it reached the
+// wire, says nothing about the address and changes nothing. Otherwise
+// legacy_observed is forgotten. An answer below the version floor returns the
+// claimed incompatible version, which the dial paths answer with pacing alone
+// (reactToIncompatibleDial). Every other end — no answer in time, the
+// connection closed without one or in the middle of it, an answer broken or
+// forged — is unauthenticated: it shows no fault of the node there, so it is
+// not charged (errLegacyProbeAdmittedNothing) and only paces the next dial,
+// one step per attempt whatever the TLS-first switch says. A node serving TLS
+// alone closes a probe that way too — a known limit of the switched-off mode,
+// to be settled before nodes that speak v2 alone appear (session_v2.md).
 func (s *Service) noteProbeAllowedNothing(address domain.PeerAddress, reply *protocol.Frame, probeErr error) error {
-	if errors.Is(probeErr, errLegacyProbeAborted) {
-		return probeErr
+	switch {
+	case errors.Is(probeErr, errLegacyProbeAborted):
+		return fmt.Errorf("%w: %w", errDialAbortedLocally, probeErr)
+	case isLocalProbeFailure(probeErr):
+		return fmt.Errorf("%w: %w", errLegacyProbeLocalFailure, probeErr)
 	}
 	s.secureSessions.marks.forgetLegacyObserved(address)
-	switch {
-	case errors.Is(probeErr, errLegacyProbeTimeout), s.probeClosedWithTLSFirstOff(probeErr):
-		retry := s.secureSessions.marks.noteV2Unanswered(address)
-		log.Debug().Err(probeErr).Str("peer", string(address)).Dur("v2_retry", retry).Msg("secure_session_probe_unanswered")
-		return probeErr
-	case reply != nil && errors.Is(probeErr, errLegacyProbeVersionTooOld):
+	if reply != nil && errors.Is(probeErr, errLegacyProbeVersionTooOld) {
 		return incompatibleVersionOf(*reply, versionClaimed, probeErr)
-	default:
-		return probeErr
 	}
-}
-
-// probeClosedWithTLSFirstOff: with TLS-first switched off, the far end closed
-// the probe's connection without an answer — what a node serving TLS alone
-// does to a connection that is not TLS. Nothing follows in that dial
-// (session_v2.md: a known limit until S7), so the next dial is paced like one
-// after a probe nobody answered in time, not left to the connection manager's
-// own rate. With TLS-first on, the TLS attempt before the probe already paced
-// what it learned.
-func (s *Service) probeClosedWithTLSFirstOff(probeErr error) bool {
-	return s.tlsFirstDisabled() && errors.Is(probeErr, errLegacyProbeNoAnswer)
+	retry := s.secureSessions.marks.noteV2Unanswered(address)
+	log.Debug().Err(probeErr).Str("peer", string(address)).Dur("v2_retry", retry).Msg("secure_session_probe_admitted_nothing")
+	return fmt.Errorf("%w: %w", errLegacyProbeAdmittedNothing, probeErr)
 }
 
 // legacyProbeWelcome is what the probe's answer named on one connection.
@@ -513,11 +561,14 @@ func (s *Service) dialLegacyTransport(ctx context.Context, address domain.PeerAd
 	if err := s.refuseHeldDial(address); err != nil {
 		return nil, err
 	}
+	defer s.openDial(address)()
 	dial := s.transportDialer(address, dialRaw)
 	if s.sessionMode() == sessionv2.ModeLegacyOnly {
-		return dial(ctx)
+		transport, err := dial(ctx)
+		return transport, endedLocally(ctx, err)
 	}
-	return s.dialLegacyByProbe(ctx, address, domain.DialToAddress(), dial)
+	transport, err := s.dialLegacyByProbe(ctx, address, domain.DialToAddress(), dial)
+	return transport, endedLocally(ctx, err)
 }
 
 // reactToIncompatibleDial is the one reaction to a dial that ended on an
