@@ -115,6 +115,11 @@ func TestFetchRouteSummaryReportsThePinStore(t *testing.T) {
 	provider.On("SecureSessionStoreStats").Return(domain.SecureSessionStoreStats{
 		ReadAt:                              now,
 		PinnedIdentities:                    20000,
+		SelectedAllocations:                 4097,
+		SelectedConfirmed:                   100,
+		SelectedCapacity:                    4096,
+		SelectedOverCapacity:                true,
+		SelectedAccountingAvailable:         true,
 		PinCapacity:                         20000,
 		Full:                                true,
 		PinRefusalsStoreFull:                7,
@@ -164,6 +169,9 @@ func TestFetchRouteSummaryReportsThePinStore(t *testing.T) {
 	if section["pin_store_full"] != true || section["store_unreadable"] != false || section["pin_store_unsafe"] != true {
 		t.Fatalf("flags = full %v, unreadable %v, unsafe %v", section["pin_store_full"], section["store_unreadable"], section["pin_store_unsafe"])
 	}
+	if section["selected_over_capacity"] != true || section["selected_accounting_available"] != true {
+		t.Fatalf("selected diagnostics flags: %v", section)
+	}
 	if section["v2_tls_first_disabled"] != true {
 		t.Fatalf("v2_tls_first_disabled = %v, want true", section["v2_tls_first_disabled"])
 	}
@@ -172,6 +180,9 @@ func TestFetchRouteSummaryReportsThePinStore(t *testing.T) {
 	}
 	for field, want := range map[string]string{
 		"pinned_identities":                       "20000",
+		"selected_allocations":                    "4097",
+		"selected_confirmed":                      "100",
+		"selected_capacity":                       "4096",
 		"pin_capacity":                            "20000",
 		"pin_refusals_pin_store_full":             "7",
 		"v1_refusals_identity_pinned":             "3",

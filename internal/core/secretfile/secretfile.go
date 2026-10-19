@@ -68,6 +68,9 @@ var ErrNotADirectory = errors.New("secretfile: not a directory")
 // the protection from the write.
 type Dir struct {
 	root *os.Root
+	// durableFault injects failures in same-package tests, set before sharing.
+	// Nil in production; no mutable global filesystem hooks.
+	durableFault func(durableStep) error
 }
 
 // Open pins an existing directory. The caller closes the result.
@@ -187,6 +190,16 @@ func (d *Dir) ReadFile(name string) ([]byte, error) {
 		return nil, stripPath(err)
 	}
 	return data, nil
+}
+
+// OpenFileForRead opens a regular entry without following symlinks or blocking
+// on a FIFO. The caller owns the pinned-directory handle.
+func (d *Dir) OpenFileForRead(name string) (*os.File, error) {
+	if err := checkSingleName(name); err != nil {
+		return nil, err
+	}
+	file, err := d.openRegularForRead(name)
+	return file, stripPath(err)
 }
 
 // Lstat reports on one entry WITHOUT following it, through the pinned handle.

@@ -189,12 +189,9 @@ test-v:
 .PHONY: test-all
 test-all: lint enforce-netcore-boundary test-v test-cgo
 
-# enforce-netcore-boundary runs the §2.9 grep-gate from
-# docs/netcore-migration.md: asserts that forbidden patterns (direct
-# socket writes outside owner, parallel net.Conn registries, stale
-# net.Conn-first wrappers, carve-out membership growth beyond the frozen
-# 14, etc.) have not regressed. Fails non-zero on any drift.
-# See scripts/enforce-netcore-boundary.sh for the concrete baselines.
+# The lexical netcore boundary preserves the exact reviewed legacy multiset;
+# additions, removals and same-count replacements require explicit review.
+# See docs/design/netcore-boundary-baseline.md and scripts/netcore-boundary-baseline.tsv.
 .PHONY: enforce-netcore-boundary
 enforce-netcore-boundary:
 	@./scripts/enforce-netcore-boundary.sh

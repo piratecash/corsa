@@ -26,30 +26,26 @@ import (
 // side's post_identity handler — the only other way a record gets in — ran
 // at all.
 //
-// Only the listener's statement is checked. The legacy dialler is a node of
-// this build demoted by asOldNode AFTER NewService issued its record, so that
-// record still states 2 although the node now speaks v1 only — an artefact
-// of the fixture, not of any real build (a real legacy-only build issues it
-// without the field: TestSelfRecordMinSessionFollowsTheSessionMode). For the
-// dialler the test checks only that its own bytes arrived.
+// The listener's record states min_session 2. Before Run, the legacy-only
+// fixture reissues its own statement without that field, as a real legacy
+// build does: otherwise the listener would correctly end its legacy session
+// as soon as it learned the contradictory min_session 2 statement.
 func TestSessionSetupDeliversTheSelfRecordWithMinSession(t *testing.T) {
 	t.Parallel()
 
-	kinds := map[string]struct {
-		dialerSetup func(*Service)
-		wantV2      bool
-	}{
-		"secure session": {dialerSetup: nil, wantV2: true},
-		"legacy session": {dialerSetup: asLegacyOnlyDialler, wantV2: false},
-	}
-	for name, kind := range kinds {
+	kinds := map[string]bool{"secure session": true, "legacy session": false}
+	for name, wantV2 := range kinds {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
 			addrListener := freeAddress(t)
 			listener, stopListener := startEmptyRegistryDatagramNode(t, addrListener)
 			defer stopListener()
-			dialer, stopDialer := startDatagramNodeWithRegistry(t, freeAddress(t), kind.dialerSetup, normalizeAddress(addrListener))
+			var setup func(*Service)
+			if !wantV2 {
+				setup = legacySelfRecordFixture(t)
+			}
+			dialer, stopDialer := startDatagramNodeWithRegistry(t, freeAddress(t), setup, normalizeAddress(addrListener))
 			defer stopDialer()
 
 			listenerID := domain.PeerIdentityFromWire(listener.Address())
@@ -69,7 +65,7 @@ func TestSessionSetupDeliversTheSelfRecordWithMinSession(t *testing.T) {
 			}
 
 			v2, v1 := authenticatedInbound(listener)
-			if kind.wantV2 && (v2 == 0 || v1 != 0) || !kind.wantV2 && (v1 == 0 || v2 != 0) {
+			if wantV2 && (v2 == 0 || v1 != 0) || !wantV2 && (v1 == 0 || v2 != 0) {
 				t.Fatalf("listener sessions v2=%d v1=%d, want only the %s kind", v2, v1, name)
 			}
 
@@ -85,7 +81,10 @@ func TestSessionSetupDeliversTheSelfRecordWithMinSession(t *testing.T) {
 				t.Fatalf("the dialler reads min_session (%d, %v) from the listener's record, want (2, true)", version, declared)
 			}
 
-			dialerRecord, _ := dialer.SelfIdentityRecord()
+			dialerRecord, dialerBody := dialer.SelfIdentityRecord()
+			if _, declared := dialerBody.MinSession.Version(); declared != wantV2 {
+				t.Fatalf("dialler record min_session declaration=%v, want %v", declared, wantV2)
+			}
 			heldByListener, _, _ := listener.trust.recordFor(testRecordStoreNetwork, dialerID)
 			if !bytes.Equal(heldByListener.Body, dialerRecord.Body) {
 				t.Fatalf("the listener holds %s, not the dialler's own record %s", heldByListener.Body, dialerRecord.Body)
@@ -302,5 +301,41 @@ func TestAnUnbuildableSecureSessionKeepsTheStoredMinSession(t *testing.T) {
 	ondisk := selfRecordOnDisk(t, path, owner)
 	if ondisk.Seq != before.Seq || ondisk.MinSession != before.MinSession {
 		t.Fatalf("on disk after the refusal: seq %d %+v, want seq %d %+v", ondisk.Seq, ondisk.MinSession, before.Seq, before.MinSession)
+	}
+}
+
+// A fixture demoted before Run must issue the statement of a real legacy-only
+// build, rather than offering its peer a reason to close its only transport.
+func legacySelfRecordFixture(t *testing.T) func(*Service) {
+	t.Helper()
+	return func(svc *Service) {
+		asLegacyOnlyDialler(svc)
+		_, previous := svc.SelfIdentityRecord()
+		record, body, err := ensureSelfIdentityRecord(svc.trust, svc.identity, selfRecordSpec{
+			network:    testRecordStoreNetwork,
+			dm:         previous.DM,
+			dtypes:     previous.DTypes,
+			minSession: selfRecordMinSession(svc.sessionMode()),
+		}, time.Now())
+		if err != nil {
+			t.Fatalf("reissue legacy fixture self record before Run: %v", err)
+		}
+		svc.selfRecord, svc.selfRecordBody = record, body
+	}
+}
+
+func TestLegacySelfRecordFixtureMatchesSessionModeBeforeRun(t *testing.T) {
+	svc := newDatagramLayerServiceOfType(t, config.NodeTypeFull)
+	legacySelfRecordFixture(t)(svc)
+	if svc.sessionMode() != sessionv2.ModeLegacyOnly {
+		t.Fatal("fixture is not legacy-only")
+	}
+	record, body := svc.SelfIdentityRecord()
+	if version, declared := body.MinSession.Version(); declared {
+		t.Fatalf("legacy-only fixture claims min_session %d, which it cannot serve", version)
+	}
+	stored, storedBody, exists := svc.trust.recordFor(testRecordStoreNetwork, domain.PeerIdentityFromWire(svc.Address()))
+	if !exists || !bytes.Equal(stored.Body, record.Body) || storedBody.MinSession != body.MinSession {
+		t.Fatal("published fixture statement differs from its persisted record")
 	}
 }

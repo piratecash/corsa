@@ -1626,7 +1626,9 @@ func (w *Window) maybeResolveIdentityKeys(peer domain.PeerIdentity) {
 		return
 	}
 	go func() {
-		if _, err := w.router.ResolveIdentity(peer); err != nil {
+		ctx, cancel := w.uiOpContext()
+		defer cancel()
+		if _, err := w.router.ResolveUserIdentity(ctx, peer); err != nil {
 			log.Debug().Err(err).Str("peer", peer.String()).Msg("identity_resolve_kick_failed")
 		}
 	}()

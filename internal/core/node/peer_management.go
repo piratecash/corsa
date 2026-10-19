@@ -284,8 +284,7 @@ func (s *Service) flushPeerState() {
 	s.peerMu.Unlock()
 	log.Trace().Str("site", "flushPeerState").Str("phase", "lock_released_mid").Msg("peer_mu_writer")
 
-	sortPeerEntries(entries)
-	entries = trimPeerEntries(entries)
+	sortAddressEntries(entries, now)
 
 	// The guard set is read here rather than pushed in by its owner: this is
 	// the single writer of the file, and a second writer would be how two
@@ -319,194 +318,8 @@ func (s *Service) flushPeerState() {
 	log.Trace().Str("site", "flushPeerState").Str("phase", "lock_released_tail").Msg("peer_mu_writer")
 }
 
-// evictStalePeers removes in-memory peers whose score has dropped below
-// peerEvictScoreThreshold and that have not successfully connected within
-// peerEvictStaleWindow.  Bad addresses are purged so they stop consuming dial attempts
-// and make room for fresh peer-exchange discoveries.
-// Bootstrap peers are never evicted — they act as permanent seeds.
-func (s *Service) evictStalePeers() {
-	s.peerMu.RLock()
-	elapsed := time.Since(s.lastPeerEvict)
-	s.peerMu.RUnlock()
-	if elapsed < peerEvictInterval {
-		return
-	}
-
-	now := time.Now()
-
-	// ---------------------------------------------------------------
-	// Phase 1 (RLock): identify eviction candidates without holding
-	// the write lock. This keeps the write-lock window short, reducing
-	// contention with ProbeNode RPCs that need RLock.
-	// ---------------------------------------------------------------
-	s.peerMu.RLock()
-	candidates := make(map[domain.PeerAddress]struct{})
-	for _, peer := range s.peers {
-		health := s.health[peer.Address]
-		if health == nil {
-			continue
-		}
-		if peer.Source == domain.PeerSourceBootstrap {
-			continue
-		}
-		if health.Connected {
-			continue
-		}
-		if pm := s.persistedMeta[peer.Address]; pm != nil && pm.VersionLockout.IsActive() {
-			continue
-		}
-		// Evict if score is terrible AND last successful connection (or
-		// first discovery, if never connected) was more than staleWindow ago.
-		// Importantly, LastDisconnectedAt is NOT used here — it refreshes on
-		// every failed retry and would prevent eviction of perpetually-failing
-		// peers.  Only LastConnectedAt (actual success) matters for eviction.
-		if health.Score <= peerEvictScoreThreshold {
-			lastSuccess := health.LastConnectedAt
-			if lastSuccess.IsZero() {
-				if pm := s.persistedMeta[peer.Address]; pm != nil && pm.AddedAt != nil {
-					lastSuccess = *pm.AddedAt
-				}
-			}
-			if !lastSuccess.IsZero() && now.Sub(lastSuccess) > peerEvictStaleWindow {
-				candidates[peer.Address] = struct{}{}
-			}
-		}
-	}
-	s.peerMu.RUnlock()
-
-	if len(candidates) == 0 {
-		// Still update the timestamp under a short lock so the interval
-		// check does not re-run the scan on every tick.
-		log.Trace().Str("site", "evictStalePeers_noop").Str("phase", "lock_wait").Msg("peer_mu_writer")
-		s.peerMu.Lock()
-		log.Trace().Str("site", "evictStalePeers_noop").Str("phase", "lock_held").Msg("peer_mu_writer")
-		s.lastPeerEvict = now
-		s.peerMu.Unlock()
-		log.Trace().Str("site", "evictStalePeers_noop").Str("phase", "lock_released").Msg("peer_mu_writer")
-		return
-	}
-
-	// ---------------------------------------------------------------
-	// Phase 2 (Lock): apply evictions. Re-check each candidate under
-	// write lock — state may have changed between phases (peer
-	// reconnected, score improved, etc.).
-	// ---------------------------------------------------------------
-	var evicted []domain.PeerAddress
-	var evictIdentities []domain.PeerIdentity
-
-	log.Trace().Str("site", "evictStalePeers").Str("phase", "lock_wait").Msg("peer_mu_writer")
-	s.peerMu.Lock()
-	log.Trace().Str("site", "evictStalePeers").Str("phase", "lock_held").Msg("peer_mu_writer")
-	s.lastPeerEvict = now
-
-	kept := make([]transport.Peer, 0, len(s.peers))
-	for _, peer := range s.peers {
-		if _, candidate := candidates[peer.Address]; !candidate {
-			kept = append(kept, peer)
-			continue
-		}
-		// Re-validate under write lock: conditions may have changed.
-		health := s.health[peer.Address]
-		if health == nil || health.Connected {
-			kept = append(kept, peer)
-			continue
-		}
-		if peer.Source == domain.PeerSourceBootstrap {
-			kept = append(kept, peer)
-			continue
-		}
-		if pm := s.persistedMeta[peer.Address]; pm != nil && pm.VersionLockout.IsActive() {
-			kept = append(kept, peer)
-			continue
-		}
-		if health.Score <= peerEvictScoreThreshold {
-			lastSuccess := health.LastConnectedAt
-			if lastSuccess.IsZero() {
-				if pm := s.persistedMeta[peer.Address]; pm != nil && pm.AddedAt != nil {
-					lastSuccess = *pm.AddedAt
-				}
-			}
-			if !lastSuccess.IsZero() && now.Sub(lastSuccess) > peerEvictStaleWindow {
-				delete(s.health, peer.Address)
-				delete(s.peerTypes, peer.Address)
-				if id := s.peerIDs.identityOf(peer.Address); !id.IsZero() {
-					evictIdentities = append(evictIdentities, id)
-				}
-				delete(s.peerIDs, peer.Address)
-				delete(s.peerVersions, peer.Address)
-				delete(s.peerBuilds, peer.Address)
-				delete(s.persistedMeta, peer.Address)
-				delete(s.metaOrphanFirstSeen, peer.Address)
-				evicted = append(evicted, peer.Address)
-				continue
-			}
-		}
-		kept = append(kept, peer)
-	}
-	s.peers = kept
-	// Filter to identities whose LAST peerIDs anchor was just removed —
-	// must happen under the same peerMu hold as the deletions, before
-	// the identity → address association is unrecoverable.
-	evictIdentities = s.orphanedIdentitiesLocked(evictIdentities)
-	s.peerMu.Unlock()
-	log.Trace().Str("site", "evictStalePeers").Str("phase", "lock_released").Msg("peer_mu_writer")
-
-	// Observed-IP hint history and observed-address votes are
-	// ipState-domain — drop the evicted addresses' entries (and fully
-	// orphaned identities' votes) under a standalone ipStateMu hold
-	// (taken after peerMu is released; never the reverse order). Without
-	// this the hint history outlived every other per-address record
-	// (memory-leak audit, 2026-06), and observedAddrs votes outlived
-	// the peerIDs entry that markPeerDisconnected needs to resolve them.
-	if len(evicted) > 0 {
-		s.ipStateMu.Lock()
-		for _, addr := range evicted {
-			delete(s.observedIPHistoryByPeer, addr)
-		}
-		for _, id := range evictIdentities {
-			delete(s.observedAddrs, id)
-		}
-		s.ipStateMu.Unlock()
-	}
-
-	// Drop the evicted peers' pending rings. Eviction requires 24 h
-	// (peerEvictStaleWindow) without a successful connection while every
-	// queued frame is dead after pendingFrameTTL (5 min) anyway, so the
-	// frames are undeliverable — but without this drop the rings (and
-	// their s.pendingKeys entries, counted against maxPendingFramesTotal)
-	// survive forever: flushPendingPeerFrames only prunes on a session
-	// (re-)establish that will never come, and evictOrphanedHealthEntries
-	// only scans s.health rows, which this sweep just deleted.
-	// deliveryMu is taken standalone after peerMu is released (canonical
-	// order peerMu → deliveryMu → statusMu).
-	if len(evicted) > 0 {
-		log.Trace().Str("site", "evictStalePeers").Str("phase", "lock_wait").Msg("delivery_mu_writer")
-		s.deliveryMu.Lock()
-		log.Trace().Str("site", "evictStalePeers").Str("phase", "lock_held").Msg("delivery_mu_writer")
-		dropped := false
-		for _, addr := range evicted {
-			if _, ok := s.pending[addr]; ok {
-				s.capPendingRingLocked(addr, 0)
-				dropped = true
-			}
-		}
-		if dropped {
-			s.statusMu.Lock()
-			s.refreshAggregatePendingLocked()
-			s.statusMu.Unlock()
-		}
-		s.deliveryMu.Unlock()
-		log.Trace().Str("site", "evictStalePeers").Str("phase", "lock_released").Msg("delivery_mu_writer")
-	}
-
-	// Remove evicted peers from PeerProvider so they no longer
-	// appear in Candidates() and stop consuming dial attempts.
-	if s.peerProvider != nil {
-		for _, addr := range evicted {
-			s.peerProvider.Remove(addr)
-		}
-	}
-}
+// evictStalePeers deliberately does nothing: address eviction requires table pressure.
+func (s *Service) evictStalePeers() {}
 
 // orphanedIdentitiesLocked returns the subset of ids that no longer
 // resolve through ANY surviving s.peerIDs entry. Caller must hold
@@ -545,7 +358,7 @@ func (s *Service) orphanedIdentitiesLocked(ids []domain.PeerIdentity) []domain.P
 // status signal.
 //
 // The sweep runs on the same tick as evictStalePeers (bootstrapLoop, every
-// 2 s) but the inner scan is throttled to peerEvictInterval.
+// 2 s); orphan lifetimes are independent of automatic address aging.
 func (s *Service) evictOrphanedHealthEntries() {
 	now := time.Now().UTC()
 
@@ -874,30 +687,18 @@ func (s *Service) buildPeerEntriesLocked(providerSnap map[domain.PeerAddress]kno
 		var entry peerEntry
 		if pm := s.persistedMeta[peer.Address]; pm != nil {
 			// Preserve stable metadata from the persisted snapshot.
-			entry = peerEntry{
-				Address:  peer.Address,
-				Identity: pm.Identity,
-				NodeType: pm.NodeType,
-				Network:  pm.Network,
-				Source:   pm.Source,
-				AddedAt:  pm.AddedAt,
-			}
+			entry = *pm
 			// If runtime has a fresher NodeType (e.g. from a hello/welcome),
 			// prefer it over the persisted value.
 			if rt := s.peerTypes[peer.Address]; rt != "" {
 				entry.NodeType = rt
 			}
-			// PeerProvider is the runtime authority for Source and AddedAt.
-			// Add(bootstrap) upgrades Source; Promote() refreshes both
-			// Source and AddedAt. persistedMeta still holds the on-disk
-			// values, so we prefer the provider's copy to ensure
-			// promotions round-trip through peers.json.  We read from the
+			// Source promotions round-trip without changing first discovery.
+			// We read from the
 			// pre-captured providerSnap — never call back into peerProvider
 			// from under s.peerMu (see deadlock note above).
 			if kp, ok := providerSnap[peer.Address]; ok {
 				entry.Source = kp.Source
-				t := kp.AddedAt
-				entry.AddedAt = &t
 			}
 		} else {
 			// New peer discovered at runtime — derive from live state.
@@ -914,6 +715,9 @@ func (s *Service) buildPeerEntriesLocked(providerSnap map[domain.PeerAddress]kno
 			clone := entry
 			s.persistedMeta[peer.Address] = &clone
 		}
+		entry.BannedUntil = nil
+		entry.RemoteBannedUntil = nil
+		entry.RemoteBanReason = ""
 		if recorded, ok := s.peerIDs[peer.Address]; ok {
 			entry.Identity, entry.IdentityOrigin = recorded.identity, recorded.origin
 		}
@@ -2147,6 +1951,8 @@ func (s *Service) admitAddPeerTarget(ctx context.Context, target addPeerTarget, 
 // persistedMeta and, for an operator add, the penalty overrides — and marks it
 // for persistence. Returns whether the peer was already known.
 func (s *Service) recordAddedPeer(peerAddress domain.PeerAddress, mode addPeerMode) bool {
+	s.peerAdmissionMu.Lock()
+	defer s.peerAdmissionMu.Unlock()
 	peerSource := mode.peerSource()
 	operatorOverride := mode.operatorOverride()
 
@@ -2205,6 +2011,7 @@ func (s *Service) recordAddedPeer(peerAddress domain.PeerAddress, mode addPeerMo
 	// operatorOverride. Bootstrap relies on the normal Candidates() gates
 	// instead.
 	if operatorOverride {
+		s.persistedMeta[peerAddress].AllowImmediateDial = true
 		// Reset cooldown, ban, and version lockout so the peer is dialled
 		// immediately. A manual add_peer is an explicit operator action that
 		// overrides any automated penalty (incompatible protocol, exponential
@@ -2493,6 +2300,8 @@ func (s *Service) primeStartupBootstrapPeers() {
 // rely on this signal to report peers actually imported rather than raw
 // response size — see docs/peer-discovery-conditional-get-peers.ru.md Step 6.
 func (s *Service) addPeerAddress(address domain.PeerAddress, nodeType string, peerID domain.PeerIdentity) bool {
+	s.peerAdmissionMu.Lock()
+	defer s.peerAdmissionMu.Unlock()
 	if address == "" || s.isSelfAddress(address) || s.shouldSkipDialAddress(address) {
 		return false
 	}
@@ -2522,6 +2331,11 @@ func (s *Service) addPeerAddress(address domain.PeerAddress, nodeType string, pe
 		return false
 	}
 
+	evicted, admitted := s.makeAutomaticAddressRoomLocked(s.peerNow())
+	if !admitted {
+		s.peerMu.Unlock()
+		return false
+	}
 	s.peers = append(s.peers, transport.Peer{
 		Address: address,
 		Source:  domain.PeerSourcePeerExchange,
@@ -2535,7 +2349,7 @@ func (s *Service) addPeerAddress(address domain.PeerAddress, nodeType string, pe
 	// Eagerly populate persistedMeta so that AddedAt is available for
 	// eviction decisions immediately, without waiting for a flush cycle.
 	if _, ok := s.persistedMeta[address]; !ok {
-		now := time.Now().UTC()
+		now := s.peerNow()
 		s.persistedMeta[address] = &peerEntry{
 			Address:  address,
 			NodeType: parseKnownPeerNodeType(nodeType),
@@ -2546,6 +2360,7 @@ func (s *Service) addPeerAddress(address domain.PeerAddress, nodeType string, pe
 	s.peerMu.Unlock()
 	log.Trace().Str("site", "addPeerAddress").Str("phase", "lock_released").Str("address", string(address)).Msg("peer_mu_writer")
 
+	s.finishAddressEviction(evicted)
 	if s.peerProvider != nil {
 		s.peerProvider.Add(address, domain.PeerSourcePeerExchange)
 	}
@@ -2556,11 +2371,14 @@ func (s *Service) addPeerAddress(address domain.PeerAddress, nodeType string, pe
 // trusting third-party metadata such as node type. Freshness boosting is
 // applied only on the first successful insertion.
 func (s *Service) promotePeerAddress(address domain.PeerAddress) {
+	s.peerAdmissionMu.Lock()
+	defer s.peerAdmissionMu.Unlock()
 	if address == "" || s.isSelfAddress(address) || s.shouldSkipDialAddress(address) {
 		return
 	}
 
 	shouldMarkFresh := false
+	var evicted *addressEviction
 	log.Trace().Str("site", "promotePeerAddress").Str("phase", "lock_wait").Str("address", string(address)).Msg("peer_mu_writer")
 	s.peerMu.Lock()
 	log.Trace().Str("site", "promotePeerAddress").Str("phase", "lock_held").Str("address", string(address)).Msg("peer_mu_writer")
@@ -2574,7 +2392,13 @@ func (s *Service) promotePeerAddress(address domain.PeerAddress) {
 	}
 
 	if !found {
-		now := time.Now().UTC()
+		var admitted bool
+		evicted, admitted = s.makeAutomaticAddressRoomLocked(s.peerNow())
+		if !admitted {
+			s.peerMu.Unlock()
+			return
+		}
+		now := s.peerNow()
 		s.peers = append(s.peers, transport.Peer{
 			Address: address,
 			Source:  domain.PeerSourceAnnounce,
@@ -2592,6 +2416,7 @@ func (s *Service) promotePeerAddress(address domain.PeerAddress) {
 	s.peerMu.Unlock()
 	log.Trace().Str("site", "promotePeerAddress").Str("phase", "lock_released").Str("address", string(address)).Msg("peer_mu_writer")
 
+	s.finishAddressEviction(evicted)
 	if s.peerProvider != nil {
 		s.peerProvider.Add(address, domain.PeerSourceAnnounce)
 		if shouldMarkFresh {
@@ -2715,6 +2540,7 @@ func (s *Service) peerIsClientNode(address domain.PeerAddress) bool {
 
 func (s *Service) readPeerSession(reader *bufio.Reader, session *peerSession) {
 	defer crashlog.DeferRecover()
+	defer session.eligibilityEnded.Store(true)
 	for {
 		// The RAW per-neighbour budget is applied AROUND this read, not after
 		// it: readAdmittedSessionLine stops at protocol.MaxFrameLine unless the
@@ -2739,6 +2565,7 @@ func (s *Service) readPeerSession(reader *bufio.Reader, session *peerSession) {
 			continue
 		}
 		if err != nil {
+			session.eligibilityEnded.Store(true)
 			if err == io.EOF {
 				log.Debug().Str("peer", string(session.address)).
 					Msg("peer_session_read: remote closed connection (EOF)")
@@ -2864,6 +2691,10 @@ func (s *Service) readPeerSession(reader *bufio.Reader, session *peerSession) {
 			continue
 		}
 
+		// Snapshot before handing the reply to its waiter: consuming it clears
+		// the pending request, and the reader must not outrun that validation.
+		authReplyPending := frame.Type == "auth_ok" && session.readiness != nil && session.admission.awaitsReply("auth_ok")
+
 		select {
 		case session.inboxCh <- frame:
 		default:
@@ -2873,6 +2704,17 @@ func (s *Service) readPeerSession(reader *bufio.Reader, session *peerSession) {
 			}
 			return
 		}
+		if authReplyPending {
+			if err := session.readiness.wait(); err != nil {
+				select {
+				case session.errCh <- fmt.Errorf("%w: outbound handshake readiness: %w", errDialAbortedLocally, err):
+				default:
+				}
+				_ = session.Close()
+				return
+			}
+		}
+
 	}
 }
 
@@ -6871,6 +6713,32 @@ func (s *Service) dialForCM(ctx context.Context, addresses []domain.PeerAddress)
 	defer func() { s.sessionOutcomes.record(err) }()
 
 	primary := addresses[0]
+	release, held := s.beginAddressDial(primary)
+	if held != nil {
+		return DialResult{}, held
+	}
+	defer func() {
+		if result.Session == nil {
+			release()
+		} else {
+			result.Session.releaseAddressDial = release
+		}
+	}()
+	attempt := &addressDialAttempt{}
+	attemptedFailure := false
+	ctx = context.WithValue(ctx, addressDialAttemptKey{}, attempt)
+	defer func() {
+		if err != nil && ctx.Err() == nil && attemptedFailure {
+			s.recordAddressDialFailure(primary)
+		} else if err == nil && ctx.Err() == nil && attempt.performed {
+			s.peerMu.Lock()
+			if entry := s.persistedMeta[primary]; entry != nil {
+				now := s.peerNow()
+				entry.LastDialAttemptAt = &now
+			}
+			s.peerMu.Unlock()
+		}
+	}()
 	var lastErr error
 	for _, address := range addresses {
 		// Register the fallback→primary mapping BEFORE the handshake, not
@@ -6891,8 +6759,12 @@ func (s *Service) dialForCM(ctx context.Context, addresses []domain.PeerAddress)
 			s.dialOrigin[address] = primary
 			s.peerMu.Unlock()
 		}
+		attempt.performed = false
 		session, err := s.openPeerSessionForCM(ctx, address)
 		if err != nil {
+			if attempt.performed && !localAddressDialOutcome(err) {
+				attemptedFailure = true
+			}
 			// Drop the speculative alias if this fallback never produced a
 			// live session, so a failed dial does not leave a stale
 			// fallback→primary mapping behind. Guarded on s.sessions so a
@@ -7014,45 +6886,6 @@ func (s *Service) ListPeersJSON() (json.RawMessage, error) {
 	}
 
 	resp := response{Peers: entries, Count: len(entries)}
-	return json.Marshal(resp)
-}
-
-// ListBannedJSON returns a JSON-encoded list of banned IPs from
-// PeerProvider for diagnostic purposes.
-// Implements rpc.ConnectionDiagnosticProvider.
-func (s *Service) ListBannedJSON() (json.RawMessage, error) {
-	type bannedEntry struct {
-		IP            string   `json:"ip"`
-		BannedUntil   string   `json:"banned_until"`
-		BanOrigin     string   `json:"ban_origin"`
-		BanReason     string   `json:"ban_reason"`
-		AffectedPeers []string `json:"affected_peers"`
-	}
-	type response struct {
-		BannedIPs []bannedEntry `json:"banned_ips"`
-		Count     int           `json:"count"`
-	}
-
-	var banned []domain.BannedIPInfo
-	if s.peerProvider != nil {
-		banned = s.peerProvider.BannedIPs()
-	}
-	entries := make([]bannedEntry, 0, len(banned))
-	for _, b := range banned {
-		affected := make([]string, len(b.AffectedPeers))
-		for i, a := range b.AffectedPeers {
-			affected[i] = string(a)
-		}
-		entries = append(entries, bannedEntry{
-			IP:            b.IP,
-			BannedUntil:   b.BannedUntil.UTC().Format(time.RFC3339),
-			BanOrigin:     string(b.BanOrigin),
-			BanReason:     b.BanReason,
-			AffectedPeers: affected,
-		})
-	}
-
-	resp := response{BannedIPs: entries, Count: len(entries)}
 	return json.Marshal(resp)
 }
 

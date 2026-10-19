@@ -222,7 +222,7 @@ func TestHandleRouteAnnounceV3_SignedEntryStoresVerifiedSig(t *testing.T) {
 			{Identity: peer.Address, Hops: 1, SeqNo: 1, Sig: base64.StdEncoding.EncodeToString(sigBytes)},
 		},
 	}
-	svc.handleRouteAnnounceV3(provenRoutingSender(attestTransitRelay), senderAddr, frame)
+	svc.handleRouteAnnounceV3(svc.provenRoutingSender(attestTransitRelay), senderAddr, frame)
 
 	got := svc.routingTable.Lookup(domain.PeerIdentityFromWire(peer.Address))
 	if len(got) == 0 {
@@ -275,7 +275,7 @@ func TestHandleRouteAnnounceV3_InvalidSignatureDropsEntry(t *testing.T) {
 			{Identity: peer.Address, Hops: 1, SeqNo: 1, Sig: base64.StdEncoding.EncodeToString(sigBytes)},
 		},
 	}
-	svc.handleRouteAnnounceV3(provenRoutingSender(attestTransitRelay), senderAddr, frame)
+	svc.handleRouteAnnounceV3(svc.provenRoutingSender(attestTransitRelay), senderAddr, frame)
 
 	if got := svc.routingTable.Lookup(domain.PeerIdentityFromWire(peer.Address)); len(got) > 0 {
 		t.Fatalf("invalid-signature entry must NOT reach storage; got %d entries", len(got))
@@ -330,7 +330,7 @@ func TestHandleRouteAnnounceV3_NoAttestedCapPreservesInvalidSigInformational(t *
 			{Identity: peer.Address, Hops: 1, SeqNo: 1, Sig: base64.StdEncoding.EncodeToString(sigBytes)},
 		},
 	}
-	svc.handleRouteAnnounceV3(provenRoutingSender(attestTransitRelay), senderAddr, frame)
+	svc.handleRouteAnnounceV3(svc.provenRoutingSender(attestTransitRelay), senderAddr, frame)
 
 	got := svc.routingTable.Lookup(domain.PeerIdentityFromWire(peer.Address))
 	if len(got) == 0 {

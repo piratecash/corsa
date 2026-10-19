@@ -1375,7 +1375,7 @@ func (r *DMRouter) identitySearchExclusions() []string {
 
 // ImportContactLink verifies and imports a pasted corsa: link, returning
 // the imported identity.
-func (r *DMRouter) ImportContactLink(raw string) (domain.PeerIdentity, error) {
+func (r *DMRouter) ImportContactLink(raw string) (domain.LocalContactIntentResult, error) {
 	return r.client.ImportContactLink(r.opContext(), raw)
 }
 

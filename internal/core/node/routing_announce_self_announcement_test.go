@@ -27,7 +27,7 @@ const selfAnnouncementSeqNo = 1000
 // of a peer that is still connected).
 func TestAnnounceIngest_SenderAnnouncingItselfLeavesDirectClaimIntact(t *testing.T) {
 	sendLegacy := func(svc *Service, wireHops int) {
-		svc.handleAnnounceRoutes(provenRoutingSender(idPeerB), legacyAnnounce(idPeerB, idPeerB, wireHops, selfAnnouncementSeqNo))
+		svc.handleAnnounceRoutes(svc.provenRoutingSender(idPeerB), legacyAnnounce(idPeerB, idPeerB, wireHops, selfAnnouncementSeqNo))
 	}
 	sendV2 := func(svc *Service, wireHops int) {
 		// routes_update applies only on top of a baseline; mark it so the
@@ -35,7 +35,7 @@ func TestAnnounceIngest_SenderAnnouncingItselfLeavesDirectClaimIntact(t *testing
 		svc.announceLoop.StateRegistry().GetOrCreate(idPeerB).MarkBaselineReceived()
 		frame := legacyAnnounce(idPeerB, idPeerB, wireHops, selfAnnouncementSeqNo)
 		frame.Type = "routes_update"
-		svc.handleRoutesUpdate(provenRoutingSender(idPeerB), domain.PeerAddress("addr-peerB"), frame)
+		svc.handleRoutesUpdate(svc.provenRoutingSender(idPeerB), domain.PeerAddress("addr-peerB"), frame)
 	}
 	sendV3 := func(svc *Service, wireHops int) {
 		sendV3Full(svc, idPeerB, uint8(wireHops), selfAnnouncementSeqNo)
@@ -76,7 +76,7 @@ func TestRoutePoison_SenderPoisoningItselfLeavesDirectClaimIntact(t *testing.T) 
 		poison func(svc *Service)
 	}{
 		{name: "route_poison_v1", poison: func(svc *Service) {
-			svc.handleRoutePoison(provenRoutingSender(idPeerB), protocol.RoutePoisonFrame{
+			svc.handleRoutePoison(svc.provenRoutingSender(idPeerB), protocol.RoutePoisonFrame{
 				Type:     protocol.RoutePoisonFrameType,
 				Identity: idPeerB.String(),
 				Reason:   protocol.RoutePoisonReasonUplinkLost,
@@ -84,7 +84,7 @@ func TestRoutePoison_SenderPoisoningItselfLeavesDirectClaimIntact(t *testing.T) 
 			})
 		}},
 		{name: "route_poison_v2", poison: func(svc *Service) {
-			svc.handleRoutePoisonV2(provenRoutingSender(idPeerB), protocol.RoutePoisonV2Frame{
+			svc.handleRoutePoisonV2(svc.provenRoutingSender(idPeerB), protocol.RoutePoisonV2Frame{
 				Type:       protocol.RoutePoisonV2FrameType,
 				Identities: []string{idPeerB.String()},
 				Reason:     protocol.RoutePoisonReasonUplinkLost,
@@ -110,7 +110,7 @@ func TestRoutePoison_SenderPoisoningItselfLeavesDirectClaimIntact(t *testing.T) 
 func TestAnnounceIngest_SenderAnnouncingItselfCreatesNoRoute(t *testing.T) {
 	svc, _ := newSeqOrderFixture(t)
 
-	svc.handleAnnounceRoutes(provenRoutingSender(idPeerB), legacyAnnounce(idPeerB, idPeerB, 0, selfAnnouncementSeqNo))
+	svc.handleAnnounceRoutes(svc.provenRoutingSender(idPeerB), legacyAnnounce(idPeerB, idPeerB, 0, selfAnnouncementSeqNo))
 	sendV3Full(svc, idPeerB, 1, selfAnnouncementSeqNo)
 
 	if claim := svc.routingTable.InspectUplinkClaim(idPeerB, idPeerB); claim != nil {
@@ -129,7 +129,7 @@ func TestAnnounceIngest_SelfAnnouncementRefusalLogsOneWarnPerFrame(t *testing.T)
 
 	svc, _ := newSeqOrderFixture(t)
 	self := idPeerB.String()
-	svc.handleAnnounceRoutes(provenRoutingSender(idPeerB), protocol.Frame{
+	svc.handleAnnounceRoutes(svc.provenRoutingSender(idPeerB), protocol.Frame{
 		Type: "announce_routes",
 		AnnounceRoutes: []protocol.AnnounceRouteFrame{
 			{Identity: self, Origin: self, Hops: 0, SeqNo: selfAnnouncementSeqNo},

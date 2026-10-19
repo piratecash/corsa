@@ -6,6 +6,7 @@ import (
 
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/netcore"
+	"github.com/piratecash/corsa/internal/core/routing"
 	"github.com/piratecash/corsa/internal/core/sessionv2"
 )
 
@@ -219,16 +220,21 @@ func penaltySubjectOfCore(id domain.ConnID, core *netcore.NetCore) penaltySubjec
 //   - penalty is who the quarantine, the announce budget and the resync
 //     debounce charge.
 type routingSender struct {
+	receive  routing.AnnounceReceiveEvidence
 	identity domain.PeerIdentity
 	penalty  penaltySubject
 }
 
 // sessionRoutingSender is the sender behind a session this node dialled.
 func sessionRoutingSender(session *peerSession) routingSender {
-	return routingSender{identity: session.peerIdentity, penalty: session.penaltySubject()}
+	return routingSender{identity: session.peerIdentity, penalty: session.penaltySubject(), receive: session.receive}
 }
 
 // inboundRoutingSender is the sender behind a connection this node accepted.
 func (s *Service) inboundRoutingSender(id domain.ConnID) routingSender {
-	return routingSender{identity: s.inboundPeerIdentity(id), penalty: s.connPenaltySubject(id)}
+	sender := routingSender{identity: s.inboundPeerIdentity(id), penalty: s.connPenaltySubject(id)}
+	s.peerMu.RLock()
+	sender.receive = s.receiveForIDLocked(id)
+	s.peerMu.RUnlock()
+	return sender
 }

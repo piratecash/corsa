@@ -14,6 +14,7 @@ import (
 	"github.com/piratecash/corsa/internal/core/datagram"
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/routing"
+	"github.com/piratecash/corsa/internal/testutil/loadstand"
 	"github.com/piratecash/corsa/internal/testutil/runjournal"
 )
 
@@ -187,7 +188,7 @@ type loadStandNodeSource interface {
 	// the node's own, the instant every counter family begins.
 	TransportTraffic(ctx context.Context) (domain.TransportTrafficStats, error)
 	// DatagramSummary refuses with errDatagramNotEnabled — as a reading, not
-	// an error — when the node runs without the plane.
+	// an error — only for configured-off facts bound to the current incarnation.
 	DatagramSummary(ctx context.Context) (loadStandReading[loadStandDatagramSample], error)
 	SessionOutcomes(ctx context.Context) (domain.SessionOutcomeStats, error)
 	ModeSelection(ctx context.Context) (routing.ModeSelectionStats, error)
@@ -253,7 +254,7 @@ func (n *loadStandNode) Sample(ctx context.Context, clock runjournal.Clock, poli
 		return loadStandNodeSample{}, fmt.Errorf("load stand node %s: %w", n.id, errLoadStandNodeNotRunning)
 	}
 	subject := loadStandSampleSubject{Node: n.id, Role: n.role, Life: n.current.life}
-	return takeLoadStandNodeSample(ctx, clock, subject, loadStandServiceSource{svc: n.current.running.svc}, policy)
+	return takeLoadStandNodeSample(ctx, clock, subject, loadStandServiceSource{svc: n.current.running.svc, binding: n.current.binding}, policy)
 }
 
 // loadStandServiceSource reads a Service of this process through its own
@@ -261,17 +262,18 @@ func (n *loadStandNode) Sample(ctx context.Context, clock runjournal.Clock, poli
 // lock in turn and the ban check reads under peerMu and ipStateMu. None
 // holds one lock across another, so sampling adds read contention on those
 // mutexes — a writer queued behind it waits, and with it every new reader —
-// and nothing more. The context is unused: nothing here waits on I/O.
+// and nothing more. Datagram constructor-state reads also honor cancellation.
 type loadStandServiceSource struct {
-	svc *Service
+	svc     *Service
+	binding loadstand.RuntimeBinding
 }
 
 func (s loadStandServiceSource) TransportTraffic(context.Context) (domain.TransportTrafficStats, error) {
 	return s.svc.TransportTrafficStats(), nil
 }
 
-func (s loadStandServiceSource) DatagramSummary(context.Context) (loadStandReading[loadStandDatagramSample], error) {
-	return readLoadStandDatagram(s.svc)
+func (s loadStandServiceSource) DatagramSummary(ctx context.Context) (loadStandReading[loadStandDatagramSample], error) {
+	return readLoadStandDatagram(ctx, s.svc, s.binding)
 }
 
 func (s loadStandServiceSource) SessionOutcomes(context.Context) (domain.SessionOutcomeStats, error) {
@@ -298,19 +300,36 @@ func (s loadStandServiceSource) Bans(_ context.Context, now time.Time, policy lo
 	return invalidatingLoadStandBanFindings(s.svc, now, policy), nil
 }
 
-// readLoadStandDatagram reads the summary through its JSON form, the one an
-// operator gets, so the stand measures what the RPC reports.
-func readLoadStandDatagram(svc *Service) (loadStandReading[loadStandDatagramSample], error) {
+// readLoadStandDatagram first validates constructor facts against the retained
+// incarnation, then reads the same summary JSON an operator gets. Unknown or
+// failed construction cannot be inferred as configured-off from a summary error.
+func readLoadStandDatagram(ctx context.Context, svc *Service, binding loadstand.RuntimeBinding) (loadStandReading[loadStandDatagramSample], error) {
+	state, err := svc.DatagramRuntimeState(ctx)
+	if err != nil {
+		return loadStandReading[loadStandDatagramSample]{}, err
+	}
+	if binding.Identity.IsZero() || binding.StartedAt.IsZero() || state.Identity != binding.Identity || !state.StartedAt.Equal(binding.StartedAt) {
+		return loadStandReading[loadStandDatagramSample]{}, loadstand.ErrInvalidSample
+	}
+	switch state.State {
+	case domain.DatagramStateConfiguredOff:
+		return loadStandReadingRefused[loadStandDatagramSample](errDatagramNotEnabled), nil
+	case domain.DatagramStateInitialized:
+	default:
+		return loadStandReading[loadStandDatagramSample]{}, loadstand.ErrFamilyUnavailable
+	}
+
 	raw, err := svc.FetchDatagramSummary()
 	switch {
-	case errors.Is(err, errDatagramNotEnabled):
-		return loadStandReadingRefused[loadStandDatagramSample](err), nil
 	case err != nil:
 		return loadStandReading[loadStandDatagramSample]{}, fmt.Errorf("%w: datagram summary: %w", errLoadStandSampleUnreadable, err)
 	}
 	var summary loadStandDatagramSample
 	if err := json.Unmarshal(raw, &summary); err != nil {
 		return loadStandReading[loadStandDatagramSample]{}, fmt.Errorf("%w: decode datagram summary: %w", errLoadStandSampleUnreadable, err)
+	}
+	if summary.Metrics.StartedAt == nil || !summary.Metrics.StartedAt.Equal(binding.StartedAt) {
+		return loadStandReading[loadStandDatagramSample]{}, loadstand.ErrInvalidSample
 	}
 	return loadStandReadingOf(summary), nil
 }

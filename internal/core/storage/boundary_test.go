@@ -67,6 +67,11 @@ func productionGoFiles(t *testing.T) map[string]string {
 
 func TestOnlyStorageOpensTheStateDatabase(t *testing.T) {
 	for path, content := range productionGoFiles(t) {
+		// The external restart-fence broker has its own independently provisioned
+		// ledger. It never opens the node shared-state database.
+		if path == filepath.Join("internal", "startupfence", "ledger.go") {
+			continue
+		}
 		if filepath.Dir(path) == filepath.Join("internal", "core", "storage") {
 			continue
 		}
@@ -91,6 +96,9 @@ func TestRepositoriesContainNoDDL(t *testing.T) {
 	}
 
 	for path, content := range productionGoFiles(t) {
+		if path == filepath.Join("internal", "startupfence", "ledger.go") {
+			continue
+		}
 		directory := filepath.Dir(path)
 		if directory == filepath.Join("internal", "core", "storage") ||
 			directory == filepath.Join("internal", "core", "storage", "migrations") {
@@ -162,6 +170,22 @@ func TestStorageImportsNoJSONStateFiles(t *testing.T) {
 				if strings.Contains(literal, marker) {
 					t.Errorf("%s references JSON state %q — importing the JSON stores is out of this layer's scope", path, marker)
 				}
+			}
+		}
+	}
+}
+
+func TestExternalFenceLedgerCannotBecomeANodeStateDatabase(t *testing.T) {
+	for path, source := range productionGoFiles(t) {
+		if strings.Contains(source, "startupfence.OpenLedger(") && path != filepath.Join("cmd", "corsa-fence-broker", "main.go") && path != filepath.Join("internal", "testutil", "startupfencetest", "broker.go") {
+			t.Errorf("%s opens the external ledger outside its broker/test fixture", path)
+		}
+		if path != filepath.Join("internal", "startupfence", "ledger.go") {
+			continue
+		}
+		for _, forbidden := range []string{"internal/core/storage", "internal/core/config", "internal/core/appdata", "StateDBPath", "CORSA_STATE_DB_PATH"} {
+			if strings.Contains(source, forbidden) {
+				t.Errorf("external ledger depends on node state configuration: %s", forbidden)
 			}
 		}
 	}

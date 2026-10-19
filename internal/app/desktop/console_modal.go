@@ -183,7 +183,10 @@ type consoleModal struct {
 	// settingsList scrolls the Settings tab. Its single row holds every
 	// section, so the language rows inside it never become a second scrolling
 	// surface under the same finger.
-	settingsList widget.List
+	settingsList             widget.List
+	identityPinRemoval       *identityPinDialog // UI goroutine; cancelled on close/shutdown.
+	identityPinRemovalButton widget.Clickable
+	pinReturnFocus           bool
 	// updateCheckToggle is the consent switch for the GitHub release check and
 	// updateCheckNow the manual run of it. Both change state on the Window
 	// (which owns the preference and the checker), not here.
@@ -452,6 +455,7 @@ func (c *consoleModal) claimFocus(gtx layout.Context) {
 	}
 	c.focusPending = false
 	target := c.focusTarget()
+	c.pinReturnFocus = false
 	if target == &c.consoleEditor {
 		c.parent.touchKbd.noteExplicitEditorFocus()
 	}
@@ -467,6 +471,9 @@ func (c *consoleModal) claimFocus(gtx layout.Context) {
 // Frame time and the user is left with no focus anywhere. The close button is
 // in the header of every tab, so it is the fallback.
 func (c *consoleModal) focusTarget() event.Tag {
+	if c.pinReturnFocus && c.currentTab() == consoleTabSettings {
+		return &c.identityPinRemovalButton
+	}
 	if c.currentTab() == consoleTabConsole {
 		return &c.consoleEditor
 	}
@@ -498,6 +505,10 @@ func (w *Window) escapeConsoleModal(gtx layout.Context) {
 // which is why this wants a layout context and why Back is routed through
 // handleBackNavigation's rather than given a context-free path of its own.
 func (c *consoleModal) dismissInnerSurface(gtx layout.Context) bool {
+	if c.identityPinOpen() {
+		c.closeIdentityPinDialog()
+		return true
+	}
 	if c.tabMenuOpen {
 		c.tabMenuOpen = false
 		return true
@@ -533,6 +544,9 @@ func (w *Window) closeConsoleModal() {
 // What the user TYPED is not an open surface and stays, like the command
 // history does.
 func (c *consoleModal) closeInnerSurfaces() {
+	if c.identityPinRemoval != nil {
+		c.identityPinRemoval.close()
+	}
 	c.tabMenuOpen = false
 	c.languageMenuOpen = false
 	c.restoreTypedQuery()
@@ -543,6 +557,9 @@ func (c *consoleModal) closeInnerSurfaces() {
 // output too large to display. They live exactly as long as the entries that
 // point at them, and those now live as long as the process.
 func (c *consoleModal) shutdown() {
+	if c.identityPinRemoval != nil {
+		c.identityPinRemoval.close()
+	}
 	c.unsubscribeConsoleEvents()
 	c.overflow.removeAll()
 }
@@ -569,6 +586,14 @@ func (w *Window) closeOverlaysForModal(gtx layout.Context) {
 // layoutConsoleOverlay draws the console modal.
 func (w *Window) layoutConsoleOverlay(gtx layout.Context) layout.Dimensions {
 	console := w.consoleModal
+	if console.identityPinOpen() {
+		for console.identityPinRemoval.closeButton.Clicked(gtx) {
+			console.closeIdentityPinDialog()
+		}
+		if console.identityPinOpen() {
+			return console.layoutIdentityPinOverlay(gtx)
+		}
+	}
 	console.handleCloseButton(gtx)
 	return w.kit().Modal(gtx, ui.Modal{
 		Title:        w.t("console.title"),
@@ -624,9 +649,15 @@ func (c *consoleModal) touchDrivenInput(gtx layout.Context) bool {
 // the card padding — which is why the 4/6dp window margin this used to apply
 // is gone.
 func (c *consoleModal) layoutContent(gtx layout.Context) layout.Dimensions {
+	if c.identityPinOpen() {
+		return c.layoutIdentityPinContent(gtx)
+	}
 	c.claimFocus(gtx)
 	c.handleEscape(gtx)
 	c.handleActions(gtx)
+	if c.identityPinOpen() {
+		return c.layoutIdentityPinContent(gtx)
+	}
 	c.parent.touchKbd.trackEditorFocus(gtx, gtx.Focused(&c.consoleEditor))
 
 	// Same shape as the main window: the keyboard inset goes on the tab
@@ -985,6 +1016,9 @@ func consoleTabStripFor(visible int, active consoleTab) consoleTabStrip {
 // menu is the menu's job done.
 func (c *consoleModal) selectTab(tab consoleTab) {
 	previous := c.currentTab()
+	if c.identityPinOpen() {
+		c.closeIdentityPinDialog()
+	}
 	atomic.StoreInt32(&c.activeTab, int32(tab))
 	c.tabMenuOpen = false
 	// Leaving or entering the Console tab takes the command line out of the

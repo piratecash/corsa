@@ -23,7 +23,7 @@ func fillPinStore(t *testing.T, store *secureSessionStore) {
 	t.Helper()
 	store.mu.Lock()
 	for i := 0; len(store.identities) < maxPinnedIdentities; i++ {
-		store.identities[domain.PeerIdentity{0xa0, byte(i), byte(i >> 8), byte(i >> 16)}] = store.now()
+		store.identities[domain.PeerIdentity{0xa0, byte(i), byte(i >> 8), byte(i >> 16)}] = identityPinEntry{pinnedAt: store.now()}
 		store.changes++
 	}
 	store.mu.Unlock()
@@ -124,7 +124,7 @@ func TestANodeWithAFullPinStoreRefusesANewIdentitysSession(t *testing.T) {
 	_, stopKnown := dialerNode(t, address, func(svc *Service) {
 		pinnedEarlier = peerIdentityOf(t, svc)
 		listener.secureSessions.store.mu.Lock()
-		listener.secureSessions.store.identities[pinnedEarlier] = time.Now()
+		listener.secureSessions.store.identities[pinnedEarlier] = identityPinEntry{pinnedAt: time.Now()}
 		listener.secureSessions.store.mu.Unlock()
 	})
 	defer stopKnown()

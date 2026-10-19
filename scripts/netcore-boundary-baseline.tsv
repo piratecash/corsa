@@ -1,0 +1,55 @@
+# Static reviewed baseline: legacy source at 251b2a2; readiness sentinel is the D1 addition.
+# category<TAB>path | enclosing signature | normalized matching source (where applicable).
+# Keep multiplicity: a removal, extra occurrence or same-count substitution requires review.
+conn	internal/core/node/accept_inbound.go | func (s *Service) acceptInbound(conn net.Conn)
+conn	internal/core/node/conn_registry.go | func (s *Service) attachOutboundCoreLocked(conn net.Conn, core *netcore.NetCore)
+conn	internal/core/node/conn_registry.go | func (s *Service) connIDFor(conn net.Conn) (domain.ConnID, bool)
+conn	internal/core/node/conn_registry.go | func (s *Service) connIDForLocked(conn net.Conn) (domain.ConnID, bool)
+conn	internal/core/node/conn_registry.go | func (s *Service) registerInboundConnLocked(conn net.Conn, core *netcore.NetCore, metered *netcore.MeteredConn, budget *connbudget.Reservation)
+conn	internal/core/node/conn_registry.go | func (s *Service) unregisterConnLocked(conn net.Conn)
+conn	internal/core/node/listener_refusal.go | func (r *listenerRefusals) closeRefusedSecure(conn net.Conn, reason listenerRefusalReason)
+conn	internal/core/node/listener_refusal.go | func (r *listenerRefusals) refuse(conn net.Conn, reason listenerRefusalReason)
+conn	internal/core/node/listener_refusal.go | func (s *Service) closeUnregisteredInbound(wire net.Conn, secure bool, err error)
+conn	internal/core/node/listener_refusal.go | func sendRefusalAlert(conn net.Conn) (err error)
+conn	internal/core/node/peer_management.go | func enableTCPKeepAlive(conn net.Conn)
+conn	internal/core/node/secure_session_store.go | func outboundDialOf(address domain.PeerAddress, conn net.Conn) outboundDial
+conn	internal/core/node/service.go | func (s *Service) ConnAuthState(conn net.Conn) *connauth.State
+conn	internal/core/node/service.go | func (s *Service) SetConnAuthState(conn net.Conn, state *connauth.State)
+conn	internal/core/node/service.go | func (s *Service) closeRegisteredInboundCore(conn net.Conn)
+conn	internal/core/node/service.go | func (s *Service) closeRegistryCore(id domain.ConnID, conn net.Conn)
+conn	internal/core/node/service.go | func (s *Service) handleConn(conn net.Conn, reservation *connbudget.Reservation)
+conn	internal/core/node/service.go | func (s *Service) isBlacklistedConn(conn net.Conn) bool
+conn	internal/core/node/service.go | func (s *Service) registerInboundConn(conn net.Conn, reservation *connbudget.Reservation) error
+conn	internal/core/node/service.go | func (s *Service) unregisterInboundConn(conn net.Conn)
+conn	internal/core/node/session_liveness.go | func newInboundFrameDeadline(conn net.Conn, frameTimeout time.Duration) *inboundFrameDeadline
+conn	internal/core/node/session_probe.go | func armLegacyProbeDeadline(ctx context.Context, conn net.Conn, opts legacyProbeOptions) (func(), error)
+conn	internal/core/node/session_probe.go | func probeLegacy(ctx context.Context, conn net.Conn, opts legacyProbeOptions) (legacyProbeAnswer, error)
+entry	internal/core/node/resource_breakdown.go | func (s *Service) sessionsUsage() domain.SubsystemUsage | queued, capacity := entry.core.WriterQueue()
+entry	internal/core/node/rollout_metrics.go | func (s *Service) collectNeighbourComposition() domain.NeighbourComposition | _, proven := entry.core.Auth().ProvenIdentity()
+entry	internal/core/node/rollout_metrics.go | func (s *Service) collectNeighbourComposition() domain.NeighbourComposition | count(info.identity, advertisedNamesOf(entry.core.Declarations()), proven)
+entry	internal/core/node/session_kind_metrics.go | func (s *Service) refreshLiveSessionKinds() | auth := entry.core.Auth()
+legacy_import	internal/core/node/accept_inbound.go | "net"
+legacy_import	internal/core/node/conn_budget_dial.go | "net"
+legacy_import	internal/core/node/conn_registry.go | "net"
+legacy_import	internal/core/node/connect_only.go | "net"
+legacy_import	internal/core/node/contact_verify_budget.go | "net"
+legacy_import	internal/core/node/inbound_handshakes.go | "net"
+legacy_import	internal/core/node/listener_refusal.go | "net"
+legacy_import	internal/core/node/loopback_inbound.go | "net"
+legacy_import	internal/core/node/netgroup.go | "net"
+legacy_import	internal/core/node/peer_management.go | "net"
+legacy_import	internal/core/node/peer_provider.go | "net"
+legacy_import	internal/core/node/routing_relay.go | "net"
+legacy_import	internal/core/node/secure_session_store.go | "net"
+legacy_import	internal/core/node/service.go | "net"
+legacy_import	internal/core/node/session_liveness.go | "net"
+legacy_import	internal/core/node/session_probe.go | "net"
+legacy_import	internal/core/node/session_secure.go | "net"
+legacy_import	internal/core/node/socks5.go | "net"
+readiness	internal/core/node/peer_session_readiness.go | func (b *peerSessionReadiness) stop() | b.state, b.failure = peerSessionReadClosed, net.ErrClosed
+readiness_import	internal/core/node/peer_session_readiness.go | "net"
+registry	internal/core/node/resource_breakdown.go | func (s *Service) sessionsUsage() domain.SubsystemUsage | conns := len(s.conns)
+registry	internal/core/node/resource_breakdown.go | func (s *Service) sessionsUsage() domain.SubsystemUsage | for _, entry := range s.conns {
+registry	internal/core/node/rollout_metrics.go | func (s *Service) collectNeighbourComposition() domain.NeighbourComposition | for id, entry := range s.conns {
+registry	internal/core/node/session_kind_metrics.go | func (s *Service) refreshLiveSessionKinds() | for id, entry := range s.conns {
+uint64	internal/core/node/peer_management.go | func isActiveConnectionState(connected bool, connID uint64, state string, slotState domain.SlotState) bool | func isActiveConnectionState(connected bool, connID uint64, state string, slotState domain.SlotState) bool {

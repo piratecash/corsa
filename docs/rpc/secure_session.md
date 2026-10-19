@@ -182,6 +182,19 @@ listEndpointDialDelays
 retryEndpointDial 192.0.2.5:64646
 ```
 
+### Identity pin preview and confirmation
+
+`previewIdentityPinRemoval identity=<40 lowercase hex>` shows one existing identity pin: `identity`, original `pinned_at`, `consequence`, `consequence_version`, opaque `confirm_token` and `removal_available`. It changes no protection. Show the exact identity and consequence before a separate explicit confirmation. `confirmIdentityPinRemoval identity=<same identity> confirm=<token>` is a distinct operation. Both commands are `TransportLoopbackOnly`: real loopback socket and configured authentication are required. Their UI counterparts `previewIdentityPinRemovalUI` / `confirmIdentityPinRemovalUI` are `TransportInProcessOnly`, including when HTTP is authenticated on loopback. The SDK's typed methods use these in-process entrypoints.
+
+**Removal is currently unavailable:** preview reports `removal_available=false`; a structurally valid confirm returns `503 identity_pin_removal_unavailable`. Verified durable storage, an external restart fence and the recovery workflow must be implemented and admitted before enabling it. The normal node continues operating. No identity pin, endpoint binding or other v2 requirement changes through these preparatory commands.
+
+A token is bound to the running store, exact identity, latest accepted proof revision and warning version. Another identity's proof leaves it valid; a new proof of this identity, remove/re-pin or restart invalidates it. Tokens are credentials: diagnostic formatting redacts them, and they belong only in the preview response and explicit confirmation field. No bulk selection is accepted. Missing/zero identity, an absent pin or a malformed confirmation is `400`; an unavailable or unreadable store is `503`.
+
+
+### Current local persistence implementation
+
+The internal C3 transaction and restoration-only `Service.RecoverIdentityPinProtection` port implement strict local save outcomes, guard recovery and a fatal storage latch. They grant no admission: public confirm stays unavailable, and a test fence cannot enable it. The concrete verified-session adapter and offline CLI are an explicit [review candidate](../operations/identity-pin-recovery-candidate.md). Enabling still requires independently provisioned external storage and an admitted supervisor/operator-finalize workflow. Consequence version 2 explicitly binds the inactive candidate stop/one-operation/finalize requirement. A restored receipt alone never authorises network restart. The [dedicated desktop dialog](../operations/identity-pin-desktop.md) presents an exact-identity preview and explicit acknowledgement; production confirmation remains unavailable.
+
 ---
 
 ## Русский
@@ -318,3 +331,15 @@ demoteEndpointBindings endpoints=192.0.2.1:64646,192.0.2.3:64646 confirm=<token>
 listEndpointDialDelays
 retryEndpointDial 192.0.2.5:64646
 ```
+
+### Preview и подтверждение identity pin
+
+`previewIdentityPinRemoval identity=<40 строчных hex>` показывает один существующий identity pin: `identity`, исходный `pinned_at`, `consequence`, `consequence_version`, непрозрачный `confirm_token` и `removal_available`. Защита не меняется. До отдельного явного подтверждения оператору показываются точная identity и предупреждение. `confirmIdentityPinRemoval identity=<та же identity> confirm=<token>` — отдельная операция. Обе команды имеют `TransportLoopbackOnly`: нужны настоящий loopback socket и настроенная аутентификация. UI-варианты `previewIdentityPinRemovalUI` / `confirmIdentityPinRemovalUI` имеют `TransportInProcessOnly`, даже для аутентифицированного HTTP на loopback. Типизированные методы SDK используют эти внутрипроцессные entrypoints.
+
+**Снятие пока недоступно:** preview сообщает `removal_available=false`, структурно корректный confirm возвращает `503 identity_pin_removal_unavailable`. До включения должны быть реализованы и допущены проверенное durable storage, внешний restart fence и recovery workflow. Обычный узел продолжает работать. Подготовительные команды не меняют identity pin, endpoint-привязки или другие требования v2.
+
+Token связан с работающим хранилищем, точной identity, ревизией последнего принятого proof и версией предупреждения. Proof другой identity его не отменяет; новое proof этой identity, снятие с повторным pin или restart отменяют. Token — credential: диагностическое форматирование его скрывает; он передаётся только в ответе preview и явном поле подтверждения. Массового выбора нет. Отсутствующая/нулевая identity, отсутствующий pin или некорректное подтверждение дают `400`; недоступное или нечитаемое хранилище — `503`.
+
+### Текущая локальная реализация сохранения
+
+Внутренняя транзакция С-3 и восстанавливающий port `Service.RecoverIdentityPinProtection` реализуют строгие локальные save outcomes, guard recovery и fatal storage latch. Они не дают допуска: публичный confirm недоступен, test fence его не включает. Concrete verified-session adapter и offline CLI являются явным [review candidate](../operations/identity-pin-recovery-candidate.md). Для включения всё ещё нужны независимо подготовленное внешнее хранение и допущенный supervisor/operator-finalize workflow. Версия последствия 2 явно связывает token с неактивным требованием кандидата stop/одна операция/finalize. Одного restored receipt недостаточно для перезапуска сети. [Отдельный desktop-диалог](../operations/identity-pin-desktop.md) показывает точную identity, preview и явное согласие; production-подтверждение остаётся недоступным.

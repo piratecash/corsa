@@ -39,14 +39,14 @@ var networkOverrideReaders = []networkOverrideSite{
 
 // networkOverrideConstructors are the only functions allowed to set the field,
 // as a key of the struct literal that builds the Service:
-//   - newService is the one production construction path (behind NewService
-//     and NewServiceWithNetwork);
+//   - newServiceWithDatagramConstructor is the one production construction
+//     path (behind newService, NewService and NewServiceWithNetwork);
 //   - newTestServiceWithRoutingOverNetwork is the routing tests' struct-literal
 //     fixture.
 //
 // A key anywhere else could overwrite a live Service (`*svc = Service{...}`).
 var networkOverrideConstructors = []networkOverrideSite{
-	{file: "service.go", fn: "newService"},
+	{file: "service.go", fn: "newServiceWithDatagramConstructor"},
 	{file: "routing_integration_test.go", fn: "newTestServiceWithRoutingOverNetwork"},
 }
 

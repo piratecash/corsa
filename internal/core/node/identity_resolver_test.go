@@ -101,8 +101,9 @@ func TestResolverSingleFlightAndCooldown(t *testing.T) {
 	if len(resolver.resolutions) != 1 {
 		t.Fatalf("resolutions = %d, want single-flight 1", len(resolver.resolutions))
 	}
-	state, finished := resolver.finishLocked(target, domain.IdentityResolutionSucceeded)
+	state, finished, snapshot := resolver.finishLocked(resolver.resolutions[target], domain.IdentityResolutionSucceeded, nil)
 	resolver.mu.Unlock()
+	resolver.persistIntent(snapshot, target)
 	if !finished || state.Lifecycle != domain.IdentityResolutionSucceeded {
 		t.Fatalf("finish state = %+v", state)
 	}
@@ -168,6 +169,8 @@ func registerLookupAttempt(resolver *identityResolver, target domain.PeerIdentit
 	resolver.resolutions[target] = &identityResolution{id: "test-resolution-" + target.String(), dst: target, createdAt: resolver.clock(), openAttempts: 1}
 	resolver.attemptGen++
 	resolver.attempts[label] = identityAttemptEntry{
+		owner:         resolver.resolutions[target],
+		queue:         identityAttemptQueueAccepted,
 		dst:           target,
 		gen:           resolver.attemptGen,
 		qHash:         sha256.Sum256(request),
@@ -616,7 +619,7 @@ func TestResolverExpiredCooldownsAreSwept(t *testing.T) {
 			t.Fatalf("start %d: %v", i, err)
 		}
 		resolver.mu.Lock()
-		if _, finished := resolver.finishLocked(target, domain.IdentityResolutionSucceeded); !finished {
+		if _, finished, _ := resolver.finishLocked(resolver.resolutions[target], domain.IdentityResolutionSucceeded, nil); !finished {
 			resolver.mu.Unlock()
 			t.Fatalf("finish %d: not finished", i)
 		}
@@ -641,7 +644,7 @@ func TestResolverExpiredCooldownsAreSwept(t *testing.T) {
 		t.Fatalf("start live: %v", err)
 	}
 	resolver.mu.Lock()
-	resolver.finishLocked(target, domain.IdentityResolutionSucceeded)
+	resolver.finishLocked(resolver.resolutions[target], domain.IdentityResolutionSucceeded, nil)
 	resolver.mu.Unlock()
 	now = now.Add(identityLookupCooldown / 2)
 	resolver.tick(t.Context())

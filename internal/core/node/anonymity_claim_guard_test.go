@@ -1,7 +1,9 @@
 package node
 
 import (
+	"bytes"
 	"encoding/json"
+	"github.com/piratecash/corsa/internal/core/sessionv2"
 	"testing"
 
 	"github.com/piratecash/corsa/internal/core/config"
@@ -164,6 +166,36 @@ func TestHandshakeFramesCarryOnlyReviewedCapabilities(t *testing.T) {
 			if welcome.Capabilities[i] != name {
 				t.Fatalf("hello[%d] = %q, welcome[%d] = %q", i, name, i, welcome.Capabilities[i])
 			}
+		}
+	}
+}
+
+// Reserved parser tokens must not activate a role on either session mode or
+// enter the signed self record before the overlay implementation is admitted.
+func TestReservedOverlayCapabilitiesStayOffWireAndSelfRecord(t *testing.T) {
+	for _, mode := range []sessionv2.Mode{sessionv2.ModeLegacyOnly, sessionv2.ModeTransition, sessionv2.ModeV2Only} {
+		for _, nodeType := range []domain.NodeType{config.NodeTypeFull, config.NodeTypeClient} {
+			svc := newDatagramLayerServiceOfType(t, nodeType)
+			svc.secureSessions.mode = mode
+			for _, frame := range []protocol.Frame{svc.nodeHelloFrame(), svc.welcomeFrame("challenge", "")} {
+				assertAdvertisedNames(t, "reserved overlay guard", frame.Capabilities)
+				line, err := protocol.MarshalFrameLine(frame)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, name := range []domain.Capability{domain.CapOverlayFindNodeV1, domain.CapOverlayResponderV1} {
+					if bytes.Contains([]byte(line), []byte(name)) {
+						t.Fatalf("mode %v frame %s advertises reserved %s", mode, frame.Type, name)
+					}
+				}
+			}
+			record, _ := svc.SelfIdentityRecord()
+			for _, name := range []domain.Capability{domain.CapOverlayFindNodeV1, domain.CapOverlayResponderV1} {
+				if bytes.Contains(record.Body, []byte(name)) {
+					t.Fatalf("self record advertises reserved %s", name)
+				}
+			}
+			requireExactDTypeSet(t, "reserved overlay self record", signedRecordBodyDTypes(t, record))
 		}
 	}
 }

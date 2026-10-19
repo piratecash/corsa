@@ -354,7 +354,7 @@ func TestAStoreFileWithoutKeysAndGroupsIsReadWithoutLoss(t *testing.T) {
 	at := clock.now.Add(-time.Hour).UTC()
 	giver, pool := domain.PeerIdentity{0xa2}, domain.ProtectedBindingPoolRelation
 	writeHeadStoreFile(t, path, headSecureSessionFile{
-		Format:     secureSessionStoreFormat,
+		Format:     1, // historical build, before class metadata
 		Identities: map[domain.PeerIdentity]time.Time{{0xa1}: at, giver: at},
 		Endpoints: map[domain.PeerAddress]headEndpointBindingRecord{
 			"198.51.100.1:64646":          {Identity: domain.PeerIdentity{0xa1}, LastV2: at},
@@ -455,7 +455,7 @@ func TestRecordsOfOneEndpointMergeWithoutLoweringProtection(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			path := filepath.Join(t.TempDir(), "secure-sessions-64646.json")
-			writeHeadStoreFile(t, path, headSecureSessionFile{Format: secureSessionStoreFormat, Endpoints: tc.records})
+			writeHeadStoreFile(t, path, headSecureSessionFile{Format: 1, Endpoints: tc.records})
 			// Map order differs between reads: the outcome must not.
 			for range 20 {
 				store := loadSecureSessionStoreWith(path, clock.trusted(), zerolog.Nop())
@@ -497,7 +497,7 @@ func TestARecordWithoutACanonicalAddressIsKeptAsItWas(t *testing.T) {
 	at := clock.now.Add(-time.Hour).UTC()
 	giver, pool := domain.PeerIdentity{0xc1}, domain.ProtectedBindingPoolContact
 	protectedRaw, generalRaw := domain.PeerAddress("bücher.de:64646"), domain.PeerAddress("foo_bar.example:64646")
-	writeHeadStoreFile(t, path, headSecureSessionFile{Format: secureSessionStoreFormat, Endpoints: map[domain.PeerAddress]headEndpointBindingRecord{
+	writeHeadStoreFile(t, path, headSecureSessionFile{Format: 1, Endpoints: map[domain.PeerAddress]headEndpointBindingRecord{
 		protectedRaw:         {Identity: giver, LastV2: at, Protected: true, ProtectedBy: &giver, Pool: &pool},
 		generalRaw:           {Identity: domain.PeerIdentity{0xc2}, LastV2: at},
 		"198.51.100.1:64646": {Identity: domain.PeerIdentity{0xc3}, LastV2: at},
@@ -623,9 +623,9 @@ func TestABindingRaisedWithinTheDayKeepsItsQuotaPlaceAcrossARestart(t *testing.T
 	}
 }
 
-// The file this build writes keeps format 1 and adds only optional fields:
-// the previous build's decoder reads every binding back.
-func TestTheNewStoreFileIsReadByThePreviousBuild(t *testing.T) {
+// The format-2 header makes the previous reader refuse, while unchanged
+// endpoint fields retain their canonical protection and source information.
+func TestCurrentStoreFormatRefusesPreviousReaderAndPreservesEndpointFields(t *testing.T) {
 	t.Parallel()
 	clock := newStoreClock()
 	path := filepath.Join(t.TempDir(), "secure-sessions-64646.json")
@@ -642,8 +642,8 @@ func TestTheNewStoreFileIsReadByThePreviousBuild(t *testing.T) {
 	if err := json.Unmarshal(raw, &head); err != nil {
 		t.Fatalf("the previous build cannot decode the new file: %v", err)
 	}
-	if head.Format != 1 || len(head.Endpoints) != 2 {
-		t.Fatalf("format %d, %d endpoints; want 1 and 2", head.Format, len(head.Endpoints))
+	if head.Format != 2 || len(head.Endpoints) != 2 {
+		t.Fatalf("format %d, %d endpoints; want new format 2 and 2; old reader accepts only 1", head.Format, len(head.Endpoints))
 	}
 	named, derived := head.Endpoints["node.example.com:64646"], head.Endpoints["198.51.100.20:64646"]
 	if named.Identity != contact || !named.Protected || derived.Identity != contact || derived.Protected {

@@ -664,7 +664,11 @@ func storeFileSize(identities, protected, general, hostLen int) int {
 	protected1 := key + len(`{"identity":"`) + idLen + len(`","last_v2":"`) + timeLen +
 		len(`","protected":true,"protected_by":"`) + idLen + len(`","pool":"K"`) + keyFields + len(`}`)
 	endpoints := protected + general
-	return len(`{"format":1,"identities":{`) +
+	metadata := 0
+	if identities > 0 {
+		metadata = len(`,"identity_metadata":{`) + identities*(len(`"`)+idLen+len(`":{"version":1,"classification":"unclassified"}`)) + max(identities-1, 0) + len(`}`)
+	}
+	return metadata + len(`{"format":2,"identities":{`) +
 		identities*identity + max(identities-1, 0) +
 		len(`},"endpoints":{`) +
 		protected*protected1 + general*general1 + max(endpoints-1, 0) +
@@ -719,7 +723,7 @@ func TestTheStoreAtItsBoundsStaysWithinItsSizeBudget(t *testing.T) {
 	store.mu.Lock()
 	now := store.now()
 	for i := range maxPinnedIdentities {
-		store.identities[boundIdentity(i)] = now
+		store.identities[boundIdentity(i)] = identityPinEntry{pinnedAt: now}
 	}
 	for i := range maxProtectedBindings {
 		giver := boundIdentity(i / maxProtectedPerIdentity)
@@ -1098,7 +1102,7 @@ func TestConcurrentSavesOfOneStateWriteOnce(t *testing.T) {
 		return nil
 	}
 	store.mu.Lock()
-	store.identities[domain.PeerIdentity{7}] = store.now()
+	store.identities[domain.PeerIdentity{7}] = identityPinEntry{pinnedAt: store.now()}
 	store.changes++
 	store.mu.Unlock()
 

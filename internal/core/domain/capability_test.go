@@ -77,3 +77,17 @@ func TestCapabilityStrings(t *testing.T) {
 		t.Errorf("CapabilityStrings(nil) = %v, want nil", got)
 	}
 }
+
+func TestParseReservedOverlayCapabilities(t *testing.T) {
+	for _, name := range []string{"overlay_find_node_v1", "overlay_responder_v1"} {
+		if got, ok := ParseCapability(name); !ok || got.String() != name {
+			t.Errorf("reserved capability %s: got=%q ok=%v", name, got, ok)
+		}
+	}
+}
+
+func TestReservedOverlayCapabilityNames(t *testing.T) {
+	if CapOverlayFindNodeV1.String() != "overlay_find_node_v1" || CapOverlayResponderV1.String() != "overlay_responder_v1" {
+		t.Fatal("reserved overlay names changed")
+	}
+}

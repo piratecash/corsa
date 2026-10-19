@@ -72,7 +72,7 @@ import (
 // owner-only at creation, fsync, rename), next to the node's peers file.
 
 const (
-	secureSessionStoreFormat = 1
+	secureSessionStoreFormat = 2
 	// maxPinnedIdentities bounds the pins. Every v2 handshake can pin, and a
 	// fresh identity costs an attacker nothing, so the bound is a refusal of
 	// NEW pins, never an eviction of old ones.
@@ -190,8 +190,10 @@ func (t endpointBindingTier) String() string {
 // ordinary binding recorded; no binding — are all here, and a refused
 // protection is never reported as protected.
 type endpointBindingResult struct {
-	tier    endpointBindingTier
-	refused *domain.ProtectedBindingRefused
+	pinBinding identityPinEntryBinding
+	pinGroup   domain.SourceGroup
+	tier       endpointBindingTier
+	refused    *domain.ProtectedBindingRefused
 	// limitRefusalReported: refused is a bound that this note counted and
 	// must log — the first refusal of this binding's protection.
 	limitRefusalReported bool
@@ -338,8 +340,39 @@ type secureSessionStore struct {
 	clock  *trustedclock.Clock
 	logger zerolog.Logger
 
-	mu         sync.Mutex
-	identities map[domain.PeerIdentity]time.Time
+	// pinMutationGate serialises proof publication with destructive pin removal.
+	// Order: pinMutationGate → writeMu → mu. Never held over a handshake.
+	pinMutationGate sync.RWMutex
+	mu              sync.Mutex
+	// Identity history has one owner: these entries. The proof/protection
+	// counters and preview key are runtime-only and owned by mu.
+	evidenceRevision   identityPinEvidenceRevision
+	removalEpoch       identityPinRemovalEpoch
+	protectionRevision identityPinProtectionRevision
+	previewKey         *identityPinPreviewKey
+	// pinRemovalScope/audit/recovery are owned by mu. Scope and audit persist;
+	// recovery is a runtime latch, never cleared by ordinary proof or flush.
+	pinRemovalScope *domain.IdentityPinStoreIdentity
+	pinRemovalAudit []identityPinAuditRecord
+	pinRecovery     *identityPinRecoveryState
+	// The same mu orders startup versus offline recovery. Offline mode is
+	// irreversible for this Service; a fatal latch is never cleared by flushing.
+	pinNetworkStarted    bool
+	pinOfflineRecovery   bool
+	pinSupervisedStartup bool
+	// pinMainLoaded is true only after decoding an existing complete main.
+	// An absent main plus absent marker is never enough for offline recovery.
+	pinMainLoaded bool
+	// N0 is inactive: only valid format3 loads attach a quota owner. Legacy
+	// constructors remain format2. These fields belong to mu; elapsed is an
+	// immutable leaf after construction. No journal row aliases escape.
+	ninFormat3                             bool
+	ninJournal                             *ninJournal
+	ninElapsed                             func() (time.Duration, error)
+	inboundAllocations, inboundConfirmed   int
+	identities                             map[domain.PeerIdentity]identityPinEntry
+	selectedAllocations, selectedConfirmed int
+	relationAllocations, relationConfirmed int
 	// endpoints is keyed by the canonical endpoint (canonicalEndpoint), so
 	// two spellings of one endpoint are one binding.
 	endpoints map[domain.CanonicalEndpoint]endpointBinding
@@ -452,6 +485,8 @@ type secureSessionStoreOptions struct {
 	markerPath string
 	clock      *trustedclock.Clock
 	logger     zerolog.Logger
+	// Optional immutable elapsed test seam; it cannot install a journal.
+	ninElapsed func() (time.Duration, error)
 	// audit judges the location of the store and of the marker;
 	// secretfile.AuditLocation outside tests.
 	audit func(path string) error
@@ -467,6 +502,9 @@ type secureSessionStoreOptions struct {
 // would neither let v1 through nor overwrite the evidence.
 func openSecureSessionStore(opts secureSessionStoreOptions) *secureSessionStore {
 	store := newSecureSessionStore(opts.clock, opts.logger)
+	if opts.ninElapsed != nil {
+		store.ninElapsed = opts.ninElapsed
+	}
 	if opts.path == "" {
 		// Memory only: nothing to write, so no snapshot is ever taken, and
 		// no location to audit or marker to keep — unless a marker says
@@ -487,14 +525,16 @@ func openSecureSessionStore(opts secureSessionStoreOptions) *secureSessionStore 
 	if refusal := store.startFromDisk(opts); refusal != nil {
 		store.refuse(refusal)
 	}
+	store.inspectIdentityPinGuard()
 	return store
 }
 
 func newSecureSessionStore(clock *trustedclock.Clock, logger zerolog.Logger) *secureSessionStore {
 	return &secureSessionStore{
+		ninElapsed:        trustedclock.SinceBoot,
 		clock:             clock,
 		logger:            logger,
-		identities:        make(map[domain.PeerIdentity]time.Time),
+		identities:        make(map[domain.PeerIdentity]identityPinEntry),
 		endpoints:         make(map[domain.CanonicalEndpoint]endpointBinding),
 		generalCreations:  make(map[domain.SourceGroup]*groupCreations),
 		nonCanonical:      make(map[domain.PeerAddress]endpointBinding),
@@ -627,12 +667,23 @@ func (s *secureSessionStore) refuse(refusal *PinStoreRefusalError) {
 }
 
 // startupRefusal is why the node must not start over this store, or nil.
-// Set once while the store is built, before it is shared.
+// Immutable load refusal first, then the mu-owned recovery/enrollment state.
 func (s *secureSessionStore) startupRefusal() error {
-	if s.refusal == nil {
+	if s.refusal != nil {
+		return s.refusal
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	switch {
+	case s.pinOfflineRecovery:
+		return s.identityPinStartupRefusalLocked(domain.PinStoreRefusalIdentityPinRecovery, domain.ErrIdentityPinRecoveryOfflineOnly)
+	case s.pinRecovery != nil:
+		return s.identityPinStartupRefusalLocked(domain.PinStoreRefusalIdentityPinRecovery, errors.Join(domain.ErrIdentityPinRecoveryRequired, s.pinRecovery.cause))
+	case s.pinRemovalScope != nil && !s.pinSupervisedStartup:
+		return s.identityPinStartupRefusalLocked(domain.PinStoreRefusalSupervisionRequired, domain.ErrIdentityPinSupervisionRequired)
+	default:
 		return nil
 	}
-	return s.refusal
 }
 
 // now is the store's trusted time in UTC, so the file does not depend on the
@@ -666,9 +717,13 @@ func (s *secureSessionStore) reportClockJump() {
 }
 
 type secureSessionFile struct {
-	Format     int                                          `json:"format"`
-	Identities map[domain.PeerIdentity]time.Time            `json:"identities"`
-	Endpoints  map[domain.PeerAddress]endpointBindingRecord `json:"endpoints"`
+	Format           int                                                `json:"format"`
+	InboundQuota     *ninJournalImage                                   `json:"inbound_pin_quota,omitempty"`
+	IdentityMetadata map[domain.PeerIdentity]domain.IdentityPinMetadata `json:"identity_metadata,omitempty"`
+	Identities       map[domain.PeerIdentity]time.Time                  `json:"identities"`
+	Endpoints        map[domain.PeerAddress]endpointBindingRecord       `json:"endpoints"`
+	PinStoreIdentity *domain.IdentityPinStoreIdentity                   `json:"pin_store_identity,omitempty"`
+	PinRemovalAudit  []identityPinAuditRecord                           `json:"pin_removal_audit,omitempty"`
 }
 
 // endpointBindingRecord is a binding as the file holds it, under the
@@ -847,16 +902,14 @@ func (s *secureSessionStore) load() (pinStoreFileState, error) {
 	if err != nil {
 		return storeFileUnreadable, fmt.Errorf("read: %w", secretfile.StripPath(err))
 	}
-	var file secureSessionFile
-	if err := json.Unmarshal(raw, &file); err != nil {
-		return storeFileUnreadable, fmt.Errorf("decode: %w", err)
-	}
-	if file.Format != secureSessionStoreFormat {
-		return storeFileUnreadable, fmt.Errorf("unknown format %d", file.Format)
+	file, err := decodeSecureSessionFile(raw)
+	if err != nil {
+		return storeFileUnreadable, err
 	}
 	if err := s.loadFile(file); err != nil {
 		return storeFileUnreadable, err
 	}
+	s.pinMainLoaded = true
 	return storeFileLoaded, nil
 }
 
@@ -864,14 +917,36 @@ func (s *secureSessionStore) load() (pinStoreFileState, error) {
 // holds the store yet; mu is taken for the counters' writers, whose contract
 // it is. The journal lines of the load are written after mu is released.
 func (s *secureSessionStore) loadFile(file secureSessionFile) error {
+	if err := validateSecureSessionPinClasses(file); err != nil {
+		return err
+	}
+	if err := validateIdentityPinMetadata(file); err != nil {
+		return err
+	}
+	s.pinRemovalScope = cloneIdentityPinStoreIdentity(file.PinStoreIdentity)
+	s.pinRemovalAudit = append([]identityPinAuditRecord(nil), file.PinRemovalAudit...)
 	now := s.now()
 	s.mu.Lock()
+	if file.Format == secureSessionJournalFormat {
+		s.ninFormat3 = true
+		s.ninJournal = ninJournalFromImage(file.InboundQuota)
+		s.sampleNinQuotaLocked()
+	}
 	for id, at := range file.Identities {
 		if id.IsZero() {
 			s.mu.Unlock()
 			return errZeroPinnedIdentity
 		}
-		s.identities[id] = at
+		if err := s.restoreHistoricalPinLocked(historicalPinEvidence{identity: id, at: at}); err != nil {
+			s.mu.Unlock()
+			return err
+		}
+		entry := s.identities[id]
+		if err := entry.setUnpublishedMetadata(file.IdentityMetadata[id]); err != nil {
+			s.mu.Unlock()
+			return err
+		}
+		s.putPinEntryLocked(id, entry)
 	}
 	report, err := s.loadBindingsLocked(file.Endpoints, now)
 	if err == nil {
@@ -1117,11 +1192,23 @@ func (s *secureSessionStore) stats() domain.SecureSessionStoreStats {
 	guard := s.clock.Stats()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	selected, selectedErr := s.selectedAllocationsLocked()
+	relation, relationErr := s.relationAllocationsLocked()
 	return domain.SecureSessionStoreStats{
+		RelationAllocations:                 relation,
+		RelationConfirmed:                   s.relationConfirmed,
+		RelationCapacity:                    maxRelationPins,
+		RelationOverCapacity:                relation > maxRelationPins,
+		RelationAccountingAvailable:         relationErr == nil,
+		SelectedAllocations:                 selected,
+		SelectedConfirmed:                   s.selectedConfirmed,
+		SelectedCapacity:                    maxSelectedPins,
+		SelectedOverCapacity:                selected > maxSelectedPins,
+		SelectedAccountingAvailable:         selectedErr == nil,
 		ReadAt:                              s.clock.Wall(),
 		PinnedIdentities:                    len(s.identities),
 		PinCapacity:                         maxPinnedIdentities,
-		Full:                                len(s.identities) >= maxPinnedIdentities,
+		Full:                                s.identityPinCapacityUsedLocked() >= maxPinnedIdentities,
 		PinRefusalsStoreFull:                s.pinRefusals,
 		V1RefusalsIdentityPinned:            s.v1RefusalsIdentity,
 		V1RefusalsEndpointBound:             s.v1RefusalsEndpoint,
@@ -1186,7 +1273,26 @@ func (s *secureSessionStore) noteDialHeldByV2Retry() {
 func (s *secureSessionStore) pinStoreFull() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return len(s.identities) >= maxPinnedIdentities
+	return s.identityPinCapacityUsedLocked() >= maxPinnedIdentities
+}
+
+// A local removal is not an externally finalized workflow. Reserve its one
+// restoration place while absent; reproof of that same identity consumes it.
+// Caller holds mu; actual pin diagnostics still report len(identities).
+func (s *secureSessionStore) identityPinCapacityUsedLocked() int {
+	count := len(s.identities)
+	if s.pinRecovery != nil && s.pinRecovery.permit != nil {
+		if _, present := s.identities[s.pinRecovery.permit.Binding.Identity]; !present {
+			count++
+		}
+	}
+	return count
+}
+func (s *secureSessionStore) identityPinAdmissionFullLocked(id domain.PeerIdentity) bool {
+	if s.pinRecovery != nil && s.pinRecovery.permit != nil && s.pinRecovery.permit.Binding.Identity == id {
+		return len(s.identities) >= maxPinnedIdentities
+	}
+	return s.identityPinCapacityUsedLocked() >= maxPinnedIdentities
 }
 
 // identityPinned reports whether a v1 session naming id must be refused.
@@ -1273,7 +1379,17 @@ func (s *secureSessionStore) endpointsBoundTo(id domain.PeerIdentity) endpointsO
 // the bound, or a write failure — and the caller must not establish the
 // session on it.
 func (s *secureSessionStore) noteProvenInbound(id domain.PeerIdentity) error {
-	return s.pinOnly(id, func() {})
+	_, err := s.noteProvenInboundBinding(id)
+	return err
+}
+
+func (s *secureSessionStore) noteProvenInboundBinding(id domain.PeerIdentity) (identityPinEntryBinding, error) {
+	var binding identityPinEntryBinding
+	err := s.pinOnly(id, func() { binding = s.pinEntryBindingLocked(id) })
+	if err != nil {
+		return identityPinEntryBinding{}, err
+	}
+	return binding, nil
 }
 
 // pinOnly pins id and binds nothing; alsoLocked runs under mu once the pin is
@@ -1281,7 +1397,7 @@ func (s *secureSessionStore) noteProvenInbound(id domain.PeerIdentity) error {
 func (s *secureSessionStore) pinOnly(id domain.PeerIdentity, alsoLocked func()) error {
 	var refused error
 	pinned := 0
-	err := s.update(func(now time.Time) bool {
+	err := s.updatePinProof(func(now time.Time) bool {
 		added, pinErr := s.pinLocked(id, now)
 		refused, pinned = pinErr, len(s.identities)
 		if pinErr == nil {
@@ -1290,7 +1406,9 @@ func (s *secureSessionStore) pinOnly(id domain.PeerIdentity, alsoLocked func()) 
 		return added
 	})
 	if refused != nil {
-		s.logPinRefusal(id, pinned)
+		if errors.Is(refused, errPinStoreFull) {
+			s.logPinRefusal(id, pinned)
+		}
 		return refused
 	}
 	return err
@@ -1384,7 +1502,7 @@ func (s *secureSessionStore) noteProvenOutbound(dial outboundDial, id domain.Pee
 	result := endpointBindingResult{tier: bindingTierNone}
 	var refused error
 	pinned := 0
-	err := s.update(func(now time.Time) bool {
+	err := s.updatePinProof(func(now time.Time) bool {
 		added, pinErr := s.pinLocked(id, now)
 		if pinErr != nil {
 			refused, pinned = pinErr, len(s.identities)
@@ -1392,10 +1510,14 @@ func (s *secureSessionStore) noteProvenOutbound(dial outboundDial, id domain.Pee
 		}
 		var bound bool
 		result, bound = s.bindTargetLocked(target, id, protection, now)
+		result.pinBinding = s.pinEntryBindingLocked(id)
+		result.pinGroup = target.group
 		return added || bound
 	})
 	if refused != nil {
-		s.logPinRefusal(id, pinned)
+		if errors.Is(refused, errPinStoreFull) {
+			s.logPinRefusal(id, pinned)
+		}
 		return endpointBindingResult{tier: bindingTierNone}, refused
 	}
 	s.logBindingOutcome(target.endpoint, id, result)
@@ -1413,13 +1535,14 @@ func (s *secureSessionStore) noteProvenOutbound(dial outboundDial, id domain.Pee
 // spelling would give one host two keys, the very gap canonicalEndpoint
 // closes. The session stands on the pin.
 func (s *secureSessionStore) noteProvenWithoutBinding(address domain.PeerAddress, id domain.PeerIdentity, reason error) (endpointBindingResult, error) {
-	err := s.pinOnly(id, func() { s.skippedNotCanonical++ })
+	var binding identityPinEntryBinding
+	err := s.pinOnly(id, func() { s.skippedNotCanonical++; binding = s.pinEntryBindingLocked(id) })
 	if errors.Is(err, errPinStoreFull) {
 		return endpointBindingResult{tier: bindingTierNone}, err
 	}
 	s.logger.Warn().Str("peer", string(address)).Str("reason", reason.Error()).
 		Msg("endpoint_binding_skipped_not_canonical")
-	return endpointBindingResult{tier: bindingTierNone}, err
+	return endpointBindingResult{tier: bindingTierNone, pinBinding: binding}, err
 }
 
 func (s *secureSessionStore) logPinRefusal(id domain.PeerIdentity, pinned int) {
@@ -1575,8 +1698,13 @@ func (s *secureSessionStore) flushPending(moment renewalFlushMoment) error {
 		return nil
 	}
 	at := s.now()
+	s.sampleNinQuotaLocked()
 	expired := s.sweepExpiredWhenDueLocked(moment, at)
-	if moment == flushRenewalsWhenDue && !s.lastFlush.dueAt(at) {
+	normalPending := s.changes != s.written || s.renewalsUnwritten || len(expired) > 0
+	journalPending := s.ninProgressPendingLocked()
+	if moment == flushRenewalsWhenDue &&
+		(!normalPending || !s.lastFlush.dueAt(at)) &&
+		(!journalPending || !s.ninCheckpointDueLocked()) {
 		// The removals are made in memory and wait for the next batch, like
 		// renewals: until then they only drop bindings that no longer
 		// require v2.
@@ -1588,8 +1716,12 @@ func (s *secureSessionStore) flushPending(moment renewalFlushMoment) error {
 	if s.renewalsUnwritten || len(expired) > 0 {
 		s.changes++
 	}
-	pending := s.changes != s.written
+	pending := s.changes != s.written || s.ninProgressPendingLocked()
 	if pending {
+		if s.ninJournal != nil {
+			reading := s.ninJournal.last
+			s.ninJournal.checkpointAttempt = &reading
+		}
 		s.lastFlush = &renewalFlush{at: at}
 	}
 	s.mu.Unlock()
@@ -1612,6 +1744,14 @@ func (s *secureSessionStore) sweepExpiredWhenDueLocked(moment renewalFlushMoment
 	s.lastExpirySweep = &renewalFlush{at: at}
 	s.forgetOldCreationsLocked(at)
 	return s.pruneExpiredLocked(at)
+}
+
+// updatePinProof serialises publication and its save with pin removal.
+// Caller holds no store mutex; change runs under mu.
+func (s *secureSessionStore) updatePinProof(change func(now time.Time) bool) error {
+	s.pinMutationGate.RLock()
+	defer s.pinMutationGate.RUnlock()
+	return s.update(change)
 }
 
 // update runs change under mu, then writes the store when the change — or an
@@ -1641,15 +1781,18 @@ func (s *secureSessionStore) update(change func(now time.Time) bool) error {
 // protection is guaranteed, new pins are not promised. Caller holds mu; the
 // caller logs a refusal after releasing it.
 func (s *secureSessionStore) pinLocked(id domain.PeerIdentity, now time.Time) (bool, error) {
-	if _, pinned := s.identities[id]; pinned {
-		return false, nil
-	}
-	if len(s.identities) >= maxPinnedIdentities {
+	entry, pinned := s.identities[id]
+	if !pinned && s.identityPinAdmissionFullLocked(id) {
 		s.pinRefusals++
 		return false, errPinStoreFull
 	}
-	s.identities[id] = now
-	return true, nil
+	if pinned {
+		now = entry.pinnedAt
+	}
+	if err := s.recordSessionPinEvidenceLocked(sessionPinEvidence{identity: id, at: now}); err != nil {
+		return false, err
+	}
+	return !pinned, nil
 }
 
 // bindingRequest is one endpoint a note binds: the endpoint in its source
@@ -2050,7 +2193,8 @@ func (s *secureSessionStore) persist() error {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	s.mu.Lock()
-	if s.written == s.changes {
+	s.sampleNinQuotaLocked()
+	if s.written == s.changes && !s.ninProgressPendingLocked() {
 		// A save that waited for writeMu while another wrote the state it
 		// was called for has nothing left to write.
 		s.mu.Unlock()
@@ -2065,6 +2209,8 @@ func (s *secureSessionStore) persist() error {
 		return nil
 	}
 	file := s.snapshotLocked()
+	covers = s.changes
+	quota := file.InboundQuota.stamp()
 	s.mu.Unlock()
 
 	if err := s.writeSnapshot(file); err != nil {
@@ -2072,6 +2218,7 @@ func (s *secureSessionStore) persist() error {
 	}
 	s.mu.Lock()
 	s.markWrittenLocked(covers)
+	s.recordNinSnapshotWrittenLocked(quota, false)
 	s.mu.Unlock()
 	return nil
 }
@@ -2084,13 +2231,24 @@ func (s *secureSessionStore) memoryOnlyLocked() bool {
 
 // snapshotLocked is the store as the file holds it. Caller holds mu.
 func (s *secureSessionStore) snapshotLocked() secureSessionFile {
+	s.sampleNinQuotaLocked()
 	file := secureSessionFile{
-		Format:     secureSessionStoreFormat,
-		Identities: make(map[domain.PeerIdentity]time.Time, len(s.identities)),
-		Endpoints:  make(map[domain.PeerAddress]endpointBindingRecord, len(s.endpoints)+len(s.nonCanonical)),
+		Format:           secureSessionStoreFormat,
+		Identities:       make(map[domain.PeerIdentity]time.Time, len(s.identities)),
+		IdentityMetadata: make(map[domain.PeerIdentity]domain.IdentityPinMetadata, len(s.identities)),
+		Endpoints:        make(map[domain.PeerAddress]endpointBindingRecord, len(s.endpoints)+len(s.nonCanonical)),
 	}
-	for id, at := range s.identities {
-		file.Identities[id] = at
+	if s.ninFormat3 {
+		file.Format = secureSessionJournalFormat
+		if s.ninJournal != nil {
+			file.InboundQuota = s.ninJournal.image()
+		}
+	}
+	file.PinStoreIdentity = cloneIdentityPinStoreIdentity(s.pinRemovalScope)
+	file.PinRemovalAudit = append([]identityPinAuditRecord(nil), s.pinRemovalAudit...)
+	for id, entry := range s.identities {
+		file.Identities[id] = entry.pinnedAt
+		file.IdentityMetadata[id] = entry.classMetadata()
 	}
 	for endpoint, binding := range s.endpoints {
 		file.Endpoints[endpoint.Address()] = recordOf(endpoint, binding)
@@ -2112,7 +2270,11 @@ func (s *secureSessionStore) snapshotLocked() secureSessionFile {
 // is reported written only once both are on disk — a marker that failed is
 // a failed write, retried with the next one.
 func (s *secureSessionStore) writeSnapshot(file secureSessionFile) error {
-	raw, err := json.Marshal(file)
+	err := validateSecureSessionPinClasses(file)
+	var raw []byte
+	if err == nil {
+		raw, err = json.Marshal(file)
+	}
 	if err == nil {
 		err = s.writeFile(raw)
 	}

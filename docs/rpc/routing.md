@@ -346,6 +346,11 @@ whole network is in".
 | `transport_traffic.bytes_received` | uint64 | Bytes read from peer sockets. |
 | `secure_sessions` | object | **The v2 downgrade-protection store** ([session_v2.md](../protocol/session_v2.md)). Read under the store's own leaf mutex; no domain mutex. |
 | `secure_sessions.read_at` | string\|null | RFC 3339 (nanoseconds) moment the figures were read. |
+| `secure_sessions.selected_allocations` | int | N-sel allocations, including unconfirmed metadata and an absent identity's C3 restoration reservation. |
+| `secure_sessions.selected_confirmed` | int | Present Eligible N-sel entries whose exact metadata revision has a strict snapshot ACK in this process; ordinary flush/restart never grants ACK. |
+| `secure_sessions.selected_capacity` | int | New N-sel allocation limit, 4096. |
+| `secure_sessions.selected_over_capacity` | bool | Preserved earlier/preparation metadata exceeds the class bound; no new allocations. This state does not meet the bound or resource/readiness admission. |
+| `secure_sessions.selected_accounting_available` | bool | Class accounting, including the pending recovery backup, was verifiable. False is unavailable evidence, not zero occupancy. |
 | `secure_sessions.pinned_identities` | int | Identities pinned to v2. |
 | `secure_sessions.pin_capacity` | int | The bound on pinned identities. |
 | `secure_sessions.pin_store_full` | bool | `true` when no NEW identity can be pinned: a v2 session of an identity not pinned yet is then refused with `pin_store_full` (no v1 fallback in that attempt). Pinned identities keep being served; existing pins are never dropped to make room. |
@@ -981,6 +986,11 @@ negotiated(O)    = Σ count где reason = negotiated / total(O)
 | `transport_traffic.bytes_received` | uint64 | Байты, прочитанные из peer-сокетов. |
 | `secure_sessions` | object | **Хранилище защиты от понижения v2** ([session_v2.md](../protocol/session_v2.md)). Читается под собственным листовым мьютексом хранилища, без доменных мьютексов. |
 | `secure_sessions.read_at` | string\|null | RFC 3339 (наносекунды) момент чтения. |
+| `secure_sessions.selected_allocations` | int | N-sel allocations, включая неподтверждённые metadata и C3 reservation отсутствующей identity. |
+| `secure_sessions.selected_confirmed` | int | Существующие Eligible N-sel entries со strict snapshot ACK точной metadata revision в этом процессе; обычный flush/restart не выдаёт ACK. |
+| `secure_sessions.selected_capacity` | int | Предел новых N-sel allocations: 4096. |
+| `secure_sessions.selected_over_capacity` | bool | Сохранённые прежние/подготовительные metadata превышают классовый предел; новые allocations запрещены. Это не соответствие пределу или resource/readiness admission. |
+| `secure_sessions.selected_accounting_available` | bool | Классовый учёт вместе с pending recovery backup проверяем. False означает отсутствие доказательства, а не нулевую занятость. |
 | `secure_sessions.pinned_identities` | int | Identity, закреплённые за v2. |
 | `secure_sessions.pin_capacity` | int | Предел закреплённых identity. |
 | `secure_sessions.pin_store_full` | bool | `true`, когда НОВУЮ identity закрепить нельзя: сессия v2 ещё не закреплённой identity тогда отклоняется с `pin_store_full` (без отката на v1 в этой попытке). Закреплённые identity продолжают обслуживаться; существующие pin ради места не удаляются. |

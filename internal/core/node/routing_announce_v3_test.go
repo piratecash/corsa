@@ -53,7 +53,7 @@ func TestHandleRouteAnnounceV3_FullAppliesEntriesAndSynthesisesOrigin(t *testing
 		},
 	}
 
-	svc.handleRouteAnnounceV3(provenRoutingSender(idPeerB), domain.PeerAddress("addr-peerB"), frame)
+	svc.handleRouteAnnounceV3(svc.provenRoutingSender(idPeerB), domain.PeerAddress("addr-peerB"), frame)
 
 	got := svc.routingTable.Lookup(idTargetX)
 	if len(got) == 0 {
@@ -91,7 +91,7 @@ func TestHandleRouteAnnounceV3_DeltaBeforeBaselineRequestsResync(t *testing.T) {
 		},
 	}
 
-	svc.handleRouteAnnounceV3(provenRoutingSender(idPeerB), senderAddr, frame)
+	svc.handleRouteAnnounceV3(svc.provenRoutingSender(idPeerB), senderAddr, frame)
 
 	if got := svc.routingTable.Lookup(idTargetX); len(got) > 0 {
 		t.Fatalf("delta before baseline must NOT be applied (entries=%d)", len(got))
@@ -138,7 +138,7 @@ func TestHandleRouteAnnounceV3_QuarantinedSender_DropsSilentlyNoResync(t *testin
 		},
 	}
 
-	svc.handleRouteAnnounceV3(provenRoutingSender(idPeerB), senderAddr, frame)
+	svc.handleRouteAnnounceV3(svc.provenRoutingSender(idPeerB), senderAddr, frame)
 
 	// 1. Delta must NOT be applied.
 	if got := svc.routingTable.Lookup(idTargetX); len(got) > 0 {
@@ -167,12 +167,12 @@ func TestHandleRouteAnnounceV3_StaleEpochDropped(t *testing.T) {
 		[]routing.PeerCapability{domain.CapMeshRoutingV1, domain.CapMeshRoutingV3})
 
 	// Advance the watermark to epoch 5 with a full frame (also applies).
-	svc.handleRouteAnnounceV3(provenRoutingSender(idPeerB), domain.PeerAddress("addr-peerB"),
+	svc.handleRouteAnnounceV3(svc.provenRoutingSender(idPeerB), domain.PeerAddress("addr-peerB"),
 		protocol.RouteAnnounceV3Frame{Kind: protocol.RouteAnnounceV3KindFull, Epoch: 5})
 
 	// A later frame with a lower epoch is a stale-process replay: dropped
 	// before any table mutation regardless of its entries.
-	svc.handleRouteAnnounceV3(provenRoutingSender(idPeerB), domain.PeerAddress("addr-peerB"),
+	svc.handleRouteAnnounceV3(svc.provenRoutingSender(idPeerB), domain.PeerAddress("addr-peerB"),
 		protocol.RouteAnnounceV3Frame{
 			Kind:  protocol.RouteAnnounceV3KindFull,
 			Epoch: 2,
@@ -201,11 +201,11 @@ func TestHandleRouteAnnounceV3_EpochResetFullRebaselinesWithoutResync(t *testing
 	sendCh := v3PeerSession(t, svc, senderAddr, idPeerB)
 
 	// Seed watermark + baseline at epoch 1.
-	svc.handleRouteAnnounceV3(provenRoutingSender(idPeerB), senderAddr,
+	svc.handleRouteAnnounceV3(svc.provenRoutingSender(idPeerB), senderAddr,
 		protocol.RouteAnnounceV3Frame{Kind: protocol.RouteAnnounceV3KindFull, Epoch: 1})
 
 	// Higher epoch + full → re-baseline and apply, no resync.
-	svc.handleRouteAnnounceV3(provenRoutingSender(idPeerB), senderAddr,
+	svc.handleRouteAnnounceV3(svc.provenRoutingSender(idPeerB), senderAddr,
 		protocol.RouteAnnounceV3Frame{
 			Kind:  protocol.RouteAnnounceV3KindFull,
 			Epoch: 9,
@@ -239,11 +239,11 @@ func TestHandleRouteAnnounceV3_EpochResetDeltaRequestsResync(t *testing.T) {
 	sendCh := v3PeerSession(t, svc, senderAddr, idPeerB)
 
 	// Seed watermark + baseline at epoch 1.
-	svc.handleRouteAnnounceV3(provenRoutingSender(idPeerB), senderAddr,
+	svc.handleRouteAnnounceV3(svc.provenRoutingSender(idPeerB), senderAddr,
 		protocol.RouteAnnounceV3Frame{Kind: protocol.RouteAnnounceV3KindFull, Epoch: 1})
 
 	// Higher epoch + delta → baseline invalid → request_resync, delta dropped.
-	svc.handleRouteAnnounceV3(provenRoutingSender(idPeerB), senderAddr,
+	svc.handleRouteAnnounceV3(svc.provenRoutingSender(idPeerB), senderAddr,
 		protocol.RouteAnnounceV3Frame{
 			Kind:  protocol.RouteAnnounceV3KindDelta,
 			Epoch: 9,

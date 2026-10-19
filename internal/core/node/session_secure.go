@@ -360,9 +360,13 @@ func (s *Service) acceptSecureInbound(metered *netcore.MeteredConn, reader *bufi
 	}
 	// The protection this session earns must be on disk before the session
 	// counts: otherwise a restart would forget the pin and let v1 back in.
-	if err := s.secureSessions.store.noteProvenInbound(peer.Identity); err != nil {
+	binding, pinErr := s.secureSessions.store.noteProvenInboundBinding(peer.Identity)
+	if pinErr != nil {
 		_ = conn.Close()
-		return nil, sessionv2.Peer{}, err
+		return nil, sessionv2.Peer{}, pinErr
+	}
+	if proof, ok := peer.Proof(); ok {
+		s.noteLocalContactProof(proof, binding)
 	}
 	return conn, peer, nil
 }
@@ -481,6 +485,8 @@ var errEndpointOwnerMismatch = errors.New("secure session: the endpoint proved a
 // TCP socket (keepalive), metered counts its bytes, wire carries the frames
 // (TLS for v2, metered itself for v1), and proven is the v2 peer or nil.
 type dialledTransport struct {
+	pinBinding identityPinEntryBinding
+	pinGroup   domain.SourceGroup
 	// connID names this socket from the moment it is dialled, so what the
 	// handshake records — a change of an endpoint's owner — names the same
 	// connection the session later runs on.
@@ -721,11 +727,13 @@ func (s *Service) refuseLegacyWelcome(address domain.PeerAddress, claimed domain
 // the probe failed on this node, or this node ended the dial itself; a v1 line
 // answered the TLS attempt that followed a v2 welcome to the probe — one of
 // the two forged; this
-// node's own pin store had no room for the proven peer's pin, or the dial
+// node's own pin store had no room for the proven peer's pin or exhausted its
+// runtime proof revision, or the dial
 // waited for that room — this node's limit, not the peer's fault; or this node
 // could not even start its v2 attempt; or the dial waited for the endpoint's
 // old-version delay. None of them is charged to the address.
 var unchargedDialOutcomes = []error{
+	errAddressRecheckHeld,
 	errV2RefusedByListener,
 	errLegacyRefusedPinned,
 	errLegacyRefusedV2Bound,
@@ -739,6 +747,7 @@ var unchargedDialOutcomes = []error{
 	errV2FailedBeforeProof,
 	errDialAbortedLocally,
 	errPinStoreFull,
+	domain.ErrIdentityPinRevisionExhausted,
 	errPinRoomAwaited,
 	errV2DialLocalFailure,
 	errOldVersionAwaited,
@@ -817,6 +826,10 @@ func (s *Service) provenTransport(ctx context.Context, transport *dialledTranspo
 		}
 	}
 	s.secureSessions.marks.noteOutboundV2(address)
+	if proof, ok := peer.Proof(); ok {
+		s.noteLocalContactProof(proof, result.pinBinding)
+	}
+	transport.pinBinding, transport.pinGroup = result.pinBinding, result.pinGroup
 	transport.wire, transport.proven, transport.reader = wire, &peer, bufio.NewReader(wire)
 	return transport, nil
 }

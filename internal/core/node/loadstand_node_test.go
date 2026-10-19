@@ -20,6 +20,7 @@ import (
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/ebus"
 	"github.com/piratecash/corsa/internal/core/identity"
+	"github.com/piratecash/corsa/internal/testutil/loadstand"
 )
 
 // A load-stand node is one REAL Service on a real loopback socket, built the
@@ -94,7 +95,7 @@ var loadStandRoleNodeTypes = map[loadStandRole]domain.NodeType{
 
 // loadStandRoleAcceptsDirectMessages is the main profile's DM policy: full
 // nodes serve the network, edges are the users DMs are addressed to. It gates
-// only RECEIVING — a node that refuses DMs still originates them — and it is
+// RECEIVING; plan v3 additionally restricts origins to actual SDK-edge adapters. It is
 // stated here because config.Default().Node accepts DMs and the stand bypasses
 // the headless wiring (CORSA_ACCEPT_DM) that would turn that off.
 var loadStandRoleAcceptsDirectMessages = map[loadStandRole]bool{
@@ -262,6 +263,8 @@ type loadStandNode struct {
 }
 
 type loadStandIncarnation struct {
+	binding loadstand.RuntimeBinding // retained only after successful readiness
+
 	// life is this incarnation's number in the stand; its start time is the
 	// Service's own and is read with every sample, so a stand whose nodes
 	// run elsewhere learns it the same way.
@@ -476,6 +479,10 @@ func (n *loadStandNode) CheckBanFree(now time.Time, policy loadStandBanPolicy) e
 // else: a goroutine the stand starts itself — a load generator — must run
 // under its own pprof.Do to be attributed.
 func (n *loadStandNode) Start(ctx context.Context) error {
+	return n.startWithReadiness(ctx, ctx)
+}
+
+func (n *loadStandNode) startWithReadiness(ctx, readiness context.Context) error {
 	if n.current != nil {
 		return fmt.Errorf("load stand node %s: %w", n.id, errLoadStandNodeRunning)
 	}
@@ -510,11 +517,12 @@ func (n *loadStandNode) Start(ctx context.Context) error {
 		bus:     bus,
 	}
 
-	readyCtx, cancel := context.WithTimeout(ctx, loadStandStartBudget)
+	readyCtx, cancel := context.WithTimeout(readiness, loadStandStartBudget)
 	defer cancel()
 	if err := running.AwaitReady(readyCtx); err != nil {
 		return fmt.Errorf("load stand node %s: %w", n.id, classifyLoadStandRunError(err))
 	}
+	n.current.binding = loadstand.RuntimeBinding{Identity: domain.PeerIdentityFromWire(svc.identity.Address), StartedAt: svc.startedAt}
 	return nil
 }
 
@@ -543,6 +551,9 @@ func (n *loadStandNode) Stop(ctx context.Context) error {
 // Service and stay readable, and with every socket closed nothing moves them
 // any more, so the reading is exact — no tail allowance.
 func (n *loadStandNode) recordEnded(incarnation *loadStandIncarnation) {
+	if incarnation.binding.Identity.IsZero() || incarnation.binding.StartedAt.IsZero() {
+		return
+	}
 	n.ended = append(n.ended, loadStandEndedIncarnation{
 		Node:  n.id,
 		Life:  incarnation.life,

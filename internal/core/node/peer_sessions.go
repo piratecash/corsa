@@ -297,6 +297,7 @@ func (s *Service) openPeerSession(ctx context.Context, address domain.PeerAddres
 
 	_ = conn.SetDeadline(time.Now().Add(handshakeTimeout))
 	session = &peerSession{
+		readiness:    newPeerSessionReadiness(ctx),
 		address:      address,
 		peerIdentity: domain.PeerIdentity{},
 		connID:       transport.connID,
@@ -692,8 +693,7 @@ func (s *Service) authenticatePeerSession(session *peerSession, welcome protocol
 	if reply.Type != "auth_ok" {
 		return protocol.ErrAuthRequired
 	}
-	s.completeOutboundAuth(session)
-	return nil
+	return s.completeOutboundAuth(session)
 }
 
 // completeOutboundAuth is everything an outbound session gets once its peer
@@ -701,8 +701,10 @@ func (s *Service) authenticatePeerSession(session *peerSession, welcome protocol
 // on v2 (openPeerSessionForCM): the negotiated welcome comes into force, the
 // success is recorded, and the initial push_identity and reaction re-offer
 // start.
-func (s *Service) completeOutboundAuth(session *peerSession) {
-	s.markSessionHandshakeComplete(session)
+func (s *Service) completeOutboundAuth(session *peerSession) error {
+	if err := s.markSessionHandshakeComplete(session); err != nil {
+		return err
+	}
 	var remoteAddr string
 	if session.netCore != nil {
 		remoteAddr = session.netCore.RemoteAddr()
@@ -734,6 +736,7 @@ func (s *Service) completeOutboundAuth(session *peerSession) {
 			s.sendInitialIdentityPush(s.runCtx, peerID, func() { _ = session.Close() })
 		})
 	}
+	return nil
 }
 
 // markSessionHandshakeComplete records that auth_ok arrived: everything the
@@ -750,10 +753,21 @@ func (s *Service) completeOutboundAuth(session *peerSession) {
 //
 // It stays a one-way transition: the handshake completes once per session, and a
 // session that has to renegotiate is a new session with a new socket.
-func (s *Service) markSessionHandshakeComplete(session *peerSession) {
+func (s *Service) markSessionHandshakeComplete(session *peerSession) error {
 	s.peerMu.Lock()
 	defer s.peerMu.Unlock()
+	if session.readiness == nil {
+		session.authOK = true
+		return nil
+	}
+	session.readiness.mu.Lock()
+	defer session.readiness.mu.Unlock()
+	if err := session.readiness.prepareReadyLocked(); err != nil {
+		return fmt.Errorf("%w: outbound handshake readiness: %w", errDialAbortedLocally, err)
+	}
 	session.authOK = true
+	session.readiness.publishReadyLocked()
+	return nil
 }
 
 func (s *Service) markPeerConnected(address domain.PeerAddress, direction domain.PeerDirection) {
@@ -761,6 +775,7 @@ func (s *Service) markPeerConnected(address domain.PeerAddress, direction domain
 	s.peerMu.Lock()
 	log.Trace().Str("site", "markPeerConnected").Str("phase", "lock_held").Str("address", string(address)).Msg("peer_mu_writer")
 
+	s.noteAddressSessionLocked(address, direction)
 	address = s.resolveHealthAddress(address)
 	health := s.ensurePeerHealthLocked(address)
 	peerID := s.peerIDs.identityOf(address)
@@ -851,6 +866,8 @@ func (s *Service) markPeerConnected(address domain.PeerAddress, direction domain
 
 	s.peerMu.Unlock()
 	log.Trace().Str("site", "markPeerConnected").Str("phase", "lock_released").Str("address", string(address)).Msg("peer_mu_writer")
+
+	s.markPeerStateDirty()
 
 	// Refresh peer-health snapshot immediately so UI pollers that call
 	// fetch_peer_health right after a connection transition observe the
@@ -1080,10 +1097,16 @@ func (s *Service) openPeerSessionForCM(ctx context.Context, address domain.PeerA
 	if err != nil {
 		return nil, err
 	}
+	return s.finishPeerSessionForCM(ctx, address, transport)
+}
+
+func (s *Service) finishPeerSessionForCM(ctx context.Context, address domain.PeerAddress, transport *dialledTransport) (*peerSession, error) {
+	var err error
 	rawConn, metered, conn := transport.raw, transport.metered, transport.wire
 
 	// Guard goroutine: close the connection if the parent context is cancelled
-	// during the handshake phase, or if we signal abort via closeConn.
+	// before readiness commits. A later dial cancellation must not close the
+	// session already handed to CM; explicit session teardown still does.
 	// On success we close the abort channel WITHOUT closing conn — the CM
 	// event loop takes ownership.
 	//
@@ -1091,11 +1114,14 @@ func (s *Service) openPeerSessionForCM(ctx context.Context, address domain.PeerA
 	// legal while stopRunLifecycle waits: this function runs only as the CM's
 	// DialFn, on a dial worker that the CM event loop — itself a member —
 	// joins (cm.dialWg) before it returns, so the counter is never zero here.
+	readiness := newPeerSessionReadiness(ctx)
 	abort := make(chan struct{})
 	s.goRunLoop(func() {
 		select {
 		case <-ctx.Done():
-			_ = conn.Close()
+			if readiness.abort(context.Cause(ctx)) != nil {
+				_ = conn.Close()
+			}
 		case <-abort:
 			// Handshake completed (success or handled error).
 			// Do NOT close conn — caller manages lifetime.
@@ -1109,6 +1135,7 @@ func (s *Service) openPeerSessionForCM(ctx context.Context, address domain.PeerA
 	// what the listener sent behind the probe's answer.
 	reader := transport.reader
 	session := &peerSession{
+		readiness:    readiness,
 		address:      address,
 		peerIdentity: domain.PeerIdentity{},
 		connID:       transport.connID,
@@ -1143,7 +1170,9 @@ func (s *Service) openPeerSessionForCM(ctx context.Context, address domain.PeerA
 	// and every outbound session socket is closed by the time the join waits:
 	// the CM closes the sessions of its slots and of the dial results it
 	// discards in its own shutdown, and every error path above closes its own.
-	s.goRunLoop(func() { s.readPeerSession(reader, session) })
+	if transport.proven == nil {
+		s.goRunLoop(func() { s.readPeerSession(reader, session) })
+	}
 
 	// v1 asks for the welcome; v2 already holds it, verified, inside the
 	// proven session — the listener's intro.
@@ -1209,8 +1238,14 @@ func (s *Service) openPeerSessionForCM(ctx context.Context, address domain.PeerA
 	}
 
 	if transport.proven != nil {
-		// The identity is proven by session_proof: no auth_session round.
-		s.completeOutboundAuth(session)
+		// Proven intro and negotiated metadata are ready before its reader starts:
+		// the listener may pipeline data immediately behind session_proof.
+		if err := s.completeOutboundAuth(session); err != nil {
+			closeOnError()
+			return nil, err
+		}
+		session.selectedProof = s.captureSelectedProof(transport)
+		s.goRunLoop(func() { s.readPeerSession(reader, session) })
 	} else if err := s.authenticatePeerSession(session, welcome); err != nil {
 		closeOnError()
 		return nil, err
@@ -1245,6 +1280,9 @@ func (s *Service) onCMSessionEstablished(info SessionInfo) {
 	if session == nil {
 		return
 	}
+	s.peerMu.Lock()
+	session.selectedGeneration = info.SlotGeneration
+	s.peerMu.Unlock()
 	// dialAddress is the actual TCP address used for the connection (may be
 	// a fallback port). slotAddress is the CM slot's canonical address.
 	// When a fallback port was used, dialOrigin[dialAddress]=slotAddress
@@ -1354,6 +1392,9 @@ func classifyCMSessionSetup(session *peerSession, initErr error) cmSessionSetupO
 // session first (peerSession.closedBy): a session the ConnectionManager closed
 // on its own decision is never charged to the peer and never published.
 func (s *Service) runCMSession(session *peerSession, slotAddress domain.PeerAddress, slotGeneration uint64) {
+	if session.releaseAddressDial != nil {
+		defer session.releaseAddressDial()
+	}
 	// --- Phase 1: application-level setup (blocking I/O) ---
 	initErr := s.initPeerSession(session)
 	if initErr != nil {
@@ -1409,6 +1450,9 @@ func (s *Service) abortLocallyEvictedCMSession(session *peerSession, slotAddress
 // The session is already closed (runCMSession).
 func (s *Service) failCMSessionSetup(session *peerSession, slotAddress domain.PeerAddress, slotGeneration uint64, initErr error) {
 	dialAddress := session.address
+	if !localAddressDialOutcome(initErr) && s.runCtx.Err() == nil {
+		s.recordAddressDialFailure(slotAddress)
+	}
 	log.Warn().Err(initErr).Str("peer", string(dialAddress)).Msg("cm_session_setup_failed")
 	// Session was never registered in s.sessions / s.upstream, so only
 	// what it left unpublished needs cleanup: dialOrigin (set by dialForCM
@@ -1552,6 +1596,7 @@ func (s *Service) publishAndServeCMSession(session *peerSession, slotAddress dom
 	if !proven {
 		if err := s.refuseLegacyWelcome(dialAddress, session.peerIdentity); err != nil {
 			log.Warn().Err(err).Str("peer", string(dialAddress)).Msg("outbound_v1_refused_identity_proved_v2_during_setup")
+			s.recordAddressDialFailure(slotAddress)
 			s.withdrawRefusedCMSession(session, slotAddress, slotGeneration, err)
 			return
 		}
@@ -1583,6 +1628,9 @@ func (s *Service) publishAndServeCMSession(session *peerSession, slotAddress dom
 	})
 
 	s.markPeerConnected(dialAddress, peerDirectionOutbound)
+	if s.selectedPins != nil {
+		s.selectedPins.notify()
+	}
 	s.flushPendingPeerFrames(dialAddress)
 
 	// Routing table: register direct peer. session.capabilities is
@@ -1819,6 +1867,9 @@ func (s *Service) initPeerSession(session *peerSession) error {
 // dialOrigin[fallback]=primary BEFORE the generation check. This callback
 // cleans up that leaked entry.
 func (s *Service) onCMStaleSession(session *peerSession) {
+	if session.releaseAddressDial != nil {
+		session.releaseAddressDial()
+	}
 	log.Trace().Str("site", "onCMStaleSession").Str("phase", "lock_wait").Str("address", string(session.address)).Msg("peer_mu_writer")
 	s.peerMu.Lock()
 	log.Trace().Str("site", "onCMStaleSession").Str("phase", "lock_held").Str("address", string(session.address)).Msg("peer_mu_writer")

@@ -272,6 +272,14 @@ bytes leave over another is a bug the file router already shipped once.
 
 ---
 
+### Constructor-state observation
+
+`getDatagramRuntimeState` (alias `get_datagram_runtime_state`) is a separate optional provider protected by actual socket loopback and mandatory RPC authentication. Missing providers are unavailable. Existing `fetchDatagramSummary`, reachability and route-plan behavior is unchanged.
+
+The v1 object has exactly `version`, `identity`, `started_at`, `read_at`, `configured_enabled`, and `state`. State is `configured_off`, `initialized`, `initialization_failed`, or `unknown`. It describes the resolved request before construction and the actual constructor outcome, not Run readiness/health or a general configuration dump. Requested-on construction failure remains failure even though the effective flag is cleared to suppress advertisement. Default/uninitialized or contradictory state never becomes off. No paths, credentials, tokens or raw constructor errors are returned.
+
+Sampling binds identity/start to an independently retained completed start receipt. Only configured-off with configured_enabled=false yields disabled without counters. Initialized requires complete diagnostics from the same incarnation; failure/unknown/old schema is unavailable. A raw enabled:false or HTTP503 alone is insufficient. ReadAt is diagnostic; same-incarnation immutable facts need no new age/skew rule. Existing lifecycle, ban freshness and strict counter gates remain mandatory. These observations do not admit a legacy comparison or resource measurement.
+
 ## Русский
 
 Read-only наблюдаемость слоя транспорта датаграмм
@@ -453,3 +461,11 @@ inbound), — и берутся из того же хелпера, которы�
 Это никогда не агрегат по всем сокетам пира: ранжирование по максимальной
 версии с одного сокета, когда байты уходят по другому, — баг, который файловый
 роутер уже однажды выпустил.
+
+### Наблюдение constructor state
+
+`getDatagramRuntimeState` (alias `get_datagram_runtime_state`) — отдельный optional provider с обязательными RPC auth и loopback реального сокета. Отсутствующий provider означает unavailable. Поведение существующих summary/reachability/route-plan не меняется.
+
+Объект v1 содержит ровно `version`, `identity`, `started_at`, `read_at`, `configured_enabled`, `state`. State: `configured_off`, `initialized`, `initialization_failed` или `unknown`. Это resolved request до конструирования и результат реального конструктора, не Run readiness/health и не общий config dump. Requested-on failure остаётся failure, хотя effective flag очищается для подавления advertisement. Default/uninitialized и противоречия не становятся off. Пути, credentials, tokens и сырые ошибки конструктора не возвращаются.
+
+Sampling связывает identity/start с независимо сохранённым завершённым start receipt. Только configured-off с configured_enabled=false даёт disabled без счётчиков. Initialized требует полных diagnostics той же incarnation; failure/unknown/старый schema означает unavailable. Сырого enabled:false или HTTP503 недостаточно. ReadAt диагностический: immutable facts той же incarnation не требуют нового age/skew правила. Существующие lifecycle, ban freshness и строгие counter gates обязательны. Это не допуск legacy-сравнения или ресурсных измерений.

@@ -220,7 +220,7 @@ func TestQuarantine_ApplyAnnounceEntriesDropsQuarantinedSender(t *testing.T) {
 	// Quarantine gate is at the very top of applyAnnounceEntries —
 	// the routing-table mutation path is never reached, so we do
 	// not need the full Service fixture (announceLoop, etc).
-	svc.applyAnnounceEntries(provenRoutingSender(sender), wireRoutes, nil, nil, announceReceiveLegacy)
+	svc.applyAnnounceEntries(svc.provenRoutingSender(sender), wireRoutes, nil, nil, announceReceiveLegacy)
 
 	// Verify nothing was added to the table.
 	got := table.Lookup(domain.PeerIdentityFromWire(target))

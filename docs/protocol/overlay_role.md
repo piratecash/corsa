@@ -4,13 +4,13 @@
 
 ### 1. Status and scope
 
-**Not accepted, not implemented, not announced.** This page fixes the *contract* of one function so
-that two implementations cannot disagree about it. It does **not** say the mechanism that uses the
-function is adopted.
+**Design accepted within a limited scope; the role remains inactive and is not announced.** This page
+fixes the *contract* of one classification function. On 2026-10-18 the owner accepted direction 2
+under the [design decision D](../design/overlay-design-decision.md), for `initiated-limit`, `d=16`,
+`B=32`, q1 and networks up to 10,000 nodes, with its measurement limits and deferred obligations.
 
-- the mechanism (role separation on the anonymous search path) is **direction 2 of blocker O5**, taken
-  by the owner **for detailing and verification only**;
-- **O5 is open and G2 is not closed.** No release may call the transport anonymous, and no node may
+- **O5 is closed only in that scope; G2 is not closed.** Design acceptance does not prove the
+  production anonymity path. No release may call the transport anonymous, and no node may
   announce a capability for it, until 21c has passed;
 - nothing in this page changes wire format, routing, or any network behaviour. The function has no
   production caller and must not acquire one before 21b.
@@ -182,13 +182,13 @@ is on this page.
 
 ### 1. Статус и объём
 
-**Не принят, не реализован, не объявляется.** Эта страница фиксирует *контракт* одной функции, чтобы
-две реализации не могли разойтись в ней. Она **не** утверждает, что механизм, использующий функцию,
-принят.
+**Дизайн принят в ограниченной области; роль не активирована и не объявляется.** Страница фиксирует
+*контракт* одной функции классификации. 2026-10-18 владелец принял направление 2 по
+[решению D](../design/overlay-design-decision.md): `initiated-limit`, `d=16`, `B=32`, q1, сеть до
+10 000 узлов, с ограничениями измерений и перенесёнными обязательствами.
 
-- механизм (разделение ролей на пути анонимного поиска) — это **направление 2 блокера O5**, взятое
-  владельцем **только в детализацию и проверку**;
-- **O5 открыт, G2 не закрыт.** Ни один выпуск не называется анонимным и ни один узел не объявляет
+- **O5 закрыт только в этой области; G2 не закрыт.** Принятие дизайна не доказывает анонимный путь
+  production. Ни один выпуск не называется анонимным и ни один узел не объявляет
   соответствующую capability, пока не пройден 21c;
 - ничто на этой странице не меняет формат провода, маршрутизацию и вообще сетевое поведение. У функции
   нет производственного потребителя, и он не должен появиться раньше 21b.

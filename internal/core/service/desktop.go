@@ -3,7 +3,6 @@ package service
 import (
 	"context"
 	"errors"
-	"fmt"
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/chatlog"
@@ -785,33 +784,20 @@ func (c *DesktopClient) BuildContactLink() (string, error) {
 // verify-then-import — the fingerprint and box binding are checked by the
 // parser, the node-side import re-verifies and pins the contact in the
 // trust store. Works fully offline.
-func (c *DesktopClient) ImportContactLink(ctx context.Context, raw string) (domain.PeerIdentity, error) {
+func (c *DesktopClient) ImportContactLink(ctx context.Context, raw string) (domain.LocalContactIntentResult, error) {
 	contact, err := contactlink.Parse(raw, domain.NetworkID(c.NetworkName()))
 	if err != nil {
-		return domain.PeerIdentity{}, err
+		return domain.LocalContactIntentResult{}, err
 	}
-	reply, err := c.rpc.LocalRequestFrame(protocol.Frame{
-		Type: "import_contacts",
-		Contacts: []protocol.ContactFrame{{
-			Address: contact.Address.String(),
-			PubKey:  string(contact.PubKey),
-			BoxKey:  string(contact.BoxKey),
-			BoxSig:  string(contact.BoxSig),
-		}},
-	})
-	if err != nil {
-		return domain.PeerIdentity{}, err
+	if c.localNode == nil {
+		return domain.LocalContactIntentResult{}, errNoLocalNode
 	}
-	if reply.Type != "contacts_imported" || reply.Count == 0 {
-		return domain.PeerIdentity{}, fmt.Errorf("contact link import refused: %s", reply.Type)
+	result, err := c.localNode.AddLocalContact(ctx, domain.LocalContactIntent{Network: contact.Network, Identity: contact.Address, PubKey: contact.PubKey, BoxKey: contact.BoxKey, BoxSignature: contact.BoxSig})
+	if result.Contact == domain.ContactAppliedLive && c.chatLog != nil {
+		// Established is independently best-effort, never K authority.
+		_ = c.chatLog.MarkEstablished(ctx, contact.Address.String(), chatlog.EstablishedReasonManual, time.Now().UTC())
 	}
-	// A manual import is a §4.10 qualifying event for the established fact.
-	if c.chatLog != nil {
-		if err := c.chatLog.MarkEstablished(ctx, contact.Address.String(), chatlog.EstablishedReasonManual, time.Now().UTC()); err != nil {
-			return contact.Address, nil // the import itself succeeded; the mark is best-effort
-		}
-	}
-	return contact.Address, nil
+	return result, err
 }
 
 // BuildReachableIDs returns identities that have at least one live route

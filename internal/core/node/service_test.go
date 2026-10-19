@@ -4167,23 +4167,10 @@ func TestEvictStalePeersRemovesBadPeers(t *testing.T) {
 
 	svc.peerMu.RLock()
 	defer svc.peerMu.RUnlock()
-	for _, p := range svc.peers {
-		if p.Address == "10.0.0.1:64646" {
-			t.Fatal("expected peer 10.0.0.1 to be evicted, but it still exists")
-		}
+	if len(svc.peers) != 2 || svc.health["10.0.0.1:64646"] == nil {
+		t.Fatal("score sweep must retain addresses without table pressure")
 	}
-	found := false
-	for _, p := range svc.peers {
-		if p.Address == "10.0.0.2:64646" {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatal("expected peer 10.0.0.2 to survive eviction (recently connected)")
-	}
-	if svc.health[domain.PeerAddress("10.0.0.1:64646")] != nil {
-		t.Fatal("expected health for 10.0.0.1 to be cleaned up")
-	}
+
 }
 
 // TestEvictStalePeersKeepsBootstrap verifies that bootstrap peers
@@ -4306,11 +4293,10 @@ func TestEvictStalePeersIgnoresLastDisconnectedAt(t *testing.T) {
 
 	svc.peerMu.RLock()
 	defer svc.peerMu.RUnlock()
-	for _, p := range svc.peers {
-		if p.Address == "10.0.0.1:64646" {
-			t.Fatal("perpetually-failing peer should be evicted (AddedAt > 24h, never connected)")
-		}
+	if len(svc.peers) != 1 {
+		t.Fatal("address must survive without table pressure")
 	}
+
 }
 
 // TestEvictStalePeers_ProtectsActiveVersionLockout verifies that a peer with
@@ -4393,8 +4379,8 @@ func TestEvictStalePeers_ProtectsActiveVersionLockout(t *testing.T) {
 	if !foundLocked {
 		t.Fatal("peer with active VersionLockout must not be evicted")
 	}
-	if foundNormal {
-		t.Fatal("normal stale peer without lockout should have been evicted")
+	if !foundNormal {
+		t.Fatal("normal stale peer must survive without table pressure")
 	}
 
 	// Verify that the lockout data in persistedMeta survived.
@@ -4742,11 +4728,10 @@ func TestEvictRuntimeDiscoveredPeerWithoutFlush(t *testing.T) {
 
 	svc.peerMu.RLock()
 	defer svc.peerMu.RUnlock()
-	for _, p := range svc.peers {
-		if p.Address == "10.0.0.1:64646" {
-			t.Fatal("runtime-discovered peer should be evicted without waiting for flush")
-		}
+	if len(svc.peers) != 1 {
+		t.Fatal("address must survive without table pressure")
 	}
+
 }
 
 // TestPendingQueueFallbackFlushedOnPrimary verifies that frames queued under

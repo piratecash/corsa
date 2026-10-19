@@ -5,6 +5,7 @@
 .corsa/
 _refs/
 docs/_internal/
+/docs/refactoring/
 __pycache__/
 dist/
 /corsa-desktop

@@ -2,7 +2,7 @@
 
 ## Overview
 
-The messaging system supports two topics: direct messages (`dm`) and global broadcasts (`global`). Messages are cryptographically signed, deduplicated, and support various deletion flags. Direct messages use TTL for expiry and require sender pubkey to be known (boxkey-binding is verified when available); global messages skip DM-specific validation and are treated as broadcasts.
+The messaging system supports two topics: direct messages (`dm`) and global broadcasts (`global`). Direct messages are cryptographically signed; global broadcasts carry unsigned sender claims. Messages are deduplicated and support various deletion flags. Direct messages use TTL for expiry and require sender pubkey to be known (boxkey-binding is verified when available); global messages skip DM-specific validation and are treated as broadcasts.
 
 ### PlainMessage extensions
 
@@ -32,7 +32,7 @@ File transfer operations other than the announce use a separate protocol frame (
 
 ### send_message
 
-Publish a new message to the network. The sender's signature is validated, and the message is deduplicated by UUID. Clock drift is checked against a configurable threshold (default 600 seconds).
+Publish a new message to the network. For DM topics the sender's signature is validated; global sender claims are unsigned. Messages are deduplicated by UUID. Clock drift is checked against a configurable threshold (default 600 seconds).
 
 **Request:**
 ```json
@@ -433,7 +433,7 @@ sequenceDiagram
 
 ## Обзор
 
-Система обмена сообщениями поддерживает два типа тем: прямые сообщения (`dm`) и глобальные трансляции (`global`). Сообщения криптографически подписаны, дедублицированы и поддерживают различные флаги удаления. Прямые сообщения используют TTL для истечения и требуют наличия pubkey отправителя (привязка boxkey проверяется при наличии); глобальные сообщения пропускают DM-специфичную валидацию и обрабатываются как broadcast.
+Система обмена сообщениями поддерживает два типа тем: прямые сообщения (`dm`) и глобальные трансляции (`global`). Прямые сообщения криптографически подписаны; global содержит неподписанный claimed sender. Сообщения дедублицированы и поддерживают различные флаги удаления. Прямые сообщения используют TTL для истечения и требуют наличия pubkey отправителя (привязка boxkey проверяется при наличии); глобальные сообщения пропускают DM-специфичную валидацию и обрабатываются как broadcast.
 
 ## Команды
 

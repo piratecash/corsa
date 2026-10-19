@@ -30,12 +30,12 @@ func TestAnnounceIngest_V3ThenLegacySameSlotIsSeqNoOrdered(t *testing.T) {
 	assertStoredRoute(t, svc, idTargetX, 5, 3, now.Add(ttl))
 
 	*now = now.Add(30 * time.Second)
-	svc.handleAnnounceRoutes(provenRoutingSender(idPeerB), legacyAnnounce(idTargetX, idPeerB, 2, 5))
+	svc.handleAnnounceRoutes(svc.provenRoutingSender(idPeerB), legacyAnnounce(idTargetX, idPeerB, 2, 5))
 	assertStoredRoute(t, svc, idTargetX, 5, 3, now.Add(ttl))
 
 	refreshedAt := *now
 	*now = now.Add(30 * time.Second)
-	svc.handleAnnounceRoutes(provenRoutingSender(idPeerB), legacyAnnounce(idTargetX, idPeerB, 1, 4))
+	svc.handleAnnounceRoutes(svc.provenRoutingSender(idPeerB), legacyAnnounce(idTargetX, idPeerB, 1, 4))
 	assertStoredRoute(t, svc, idTargetX, 5, 3, refreshedAt.Add(ttl))
 }
 
@@ -52,7 +52,7 @@ func TestAnnounceIngest_LegacyLiveEntryWithForeignOriginRejected(t *testing.T) {
 	storedAt := *now
 
 	*now = now.Add(30 * time.Second)
-	svc.handleAnnounceRoutes(provenRoutingSender(idPeerB), protocol.Frame{
+	svc.handleAnnounceRoutes(svc.provenRoutingSender(idPeerB), protocol.Frame{
 		Type: "announce_routes",
 		AnnounceRoutes: []protocol.AnnounceRouteFrame{
 			{Identity: idTargetX.String(), Origin: idOriginC.String(), Hops: 0, SeqNo: 4},
@@ -82,7 +82,7 @@ func TestAnnounceIngest_RefusedEntriesLogOneWarnPerReasonPerFrame(t *testing.T) 
 
 	svc, _ := newSeqOrderFixture(t)
 	foreign := idOriginC.String()
-	svc.handleAnnounceRoutes(provenRoutingSender(idPeerB), protocol.Frame{
+	svc.handleAnnounceRoutes(svc.provenRoutingSender(idPeerB), protocol.Frame{
 		Type: "announce_routes",
 		AnnounceRoutes: []protocol.AnnounceRouteFrame{
 			{Identity: idTargetX.String(), Origin: foreign, Hops: 0, SeqNo: 1},
@@ -176,7 +176,7 @@ func newSeqOrderFixture(t *testing.T) (*Service, *time.Time) {
 }
 
 func sendV3Full(svc *Service, target domain.PeerIdentity, wireHops uint8, seqNo uint64) {
-	svc.handleRouteAnnounceV3(provenRoutingSender(idPeerB), domain.PeerAddress("addr-peerB"), protocol.RouteAnnounceV3Frame{
+	svc.handleRouteAnnounceV3(svc.provenRoutingSender(idPeerB), domain.PeerAddress("addr-peerB"), protocol.RouteAnnounceV3Frame{
 		Kind:    protocol.RouteAnnounceV3KindFull,
 		Epoch:   1,
 		Entries: []protocol.RouteAnnounceV3Entry{{Identity: target.String(), Hops: wireHops, SeqNo: seqNo}},

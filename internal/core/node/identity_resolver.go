@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"math"
 	"sync"
 	"time"
 
@@ -153,7 +154,12 @@ func (res *identityResolution) stateLocked() ebus.IdentityResolutionState {
 // identityAttemptEntry correlates one in-flight attempt with its
 // resolution. The label raw bytes are the map key.
 type identityAttemptEntry struct {
-	sentAt time.Time
+	sentAt  time.Time
+	owner   *identityResolution
+	action  identityLookupActionStamp
+	queue   identityAttemptQueue
+	claim   *identityLookupCompletion
+	revoked bool
 	// gen is the resolver-wide monotonic attempt generation: it orders
 	// attempts against watermarks handed out by CurrentAttemptGen without
 	// touching the wall clock (a clock step must never re-validate an old
@@ -183,7 +189,10 @@ type identityResolver struct {
 	cooldownUntil map[domain.PeerIdentity]time.Time
 	// attemptGen is the monotonic generation counter behind
 	// identityAttemptEntry.gen and CurrentAttemptGen.
-	attemptGen uint64
+	attemptGen   uint64
+	actionGen    identityLookupActionGeneration
+	closed       bool
+	ownerContext context.Context
 	// lastStates retains the most recent published state per resolution id
 	// — the lost-event insurance of §4.9: resolve_identity_status reads it.
 	// Terminal states expire after identityLookupStateRetention; the map is
@@ -235,10 +244,18 @@ func newResolutionID() (string, error) {
 
 // emit retains the state for the status poll and publishes it. Called
 // WITHOUT r.mu held — publication is a side effect and stays outside locks.
-func (r *identityResolver) emit(state ebus.IdentityResolutionState) {
+func (r *identityResolver) emit(state ebus.IdentityResolutionState, owner *identityResolution) {
 	now := r.clock()
 	r.mu.Lock()
 	r.sweepStatesLocked(now)
+	if !state.Lifecycle.Terminal() && (owner == nil || r.resolutions[state.Target] != owner) {
+		r.mu.Unlock()
+		return
+	}
+	if previous, ok := r.lastStates[state.ResolutionID]; ok && previous.Lifecycle.Terminal() {
+		r.mu.Unlock()
+		return
+	}
 	r.lastStates[state.ResolutionID] = state
 	r.lastStatesAt[state.ResolutionID] = now
 	r.mu.Unlock()
@@ -302,7 +319,7 @@ func (r *identityResolver) noteProvisionalImport(target domain.PeerIdentity) {
 	usable := r.usableNow(target)
 	r.mu.Lock()
 	res, running := r.resolutions[target]
-	if !running || (res.usable == usable && res.authority != domain.IdentityAuthorityNone) {
+	if r.unavailableLocked() || !running || (res.usable == usable && res.authority != domain.IdentityAuthorityNone) {
 		r.mu.Unlock()
 		return
 	}
@@ -312,7 +329,7 @@ func (r *identityResolver) noteProvisionalImport(target domain.PeerIdentity) {
 	}
 	state := res.stateLocked()
 	r.mu.Unlock()
-	r.emit(state)
+	r.emit(state, res)
 }
 
 // StartResolution registers a reason and opens (or joins) the single
@@ -320,108 +337,125 @@ func (r *identityResolver) noteProvisionalImport(target domain.PeerIdentity) {
 // a recent terminal delays the first ATTEMPT, never the operation itself —
 // the RPC contract needs a resolution_id immediately.
 func (r *identityResolver) StartResolution(target domain.PeerIdentity, reason identityIntentReason) (ebus.IdentityResolutionState, error) {
-	if target.IsZero() || target.String() == r.svc.identity.Address {
-		return ebus.IdentityResolutionState{}, fmt.Errorf("identity lookup: invalid target")
-	}
-	now := r.clock()
-	if _, err := r.intents.add(target, reason, now); err != nil {
-		log.Warn().Err(err).Str("target", target.String()).Msg("identity_lookup_intent_persist_failed")
-	}
-	usable := r.usableNow(target)
+	state, _, err := r.startResolution(func() error { return nil }, target, reason, false)
+	return state, err
+}
 
-	r.mu.Lock()
-	if existing, running := r.resolutions[target]; running {
-		existing.usable = usable
-		state := existing.stateLocked()
-		r.mu.Unlock()
-		r.emit(state)
-		return state, nil
+func (r *identityResolver) startResolution(admissionError func() error, target domain.PeerIdentity, reason identityIntentReason, genuineUser bool) (ebus.IdentityResolutionState, identityLookupActionStamp, error) {
+	if target.IsZero() || target.String() == r.svc.identity.Address {
+		return ebus.IdentityResolutionState{}, identityLookupActionStamp{}, fmt.Errorf("identity lookup: invalid target")
 	}
-	id, err := newResolutionID()
+	now, usable := r.clock(), r.usableNow(target)
+	r.mu.Lock()
+	if r.unavailableLocked() {
+		r.mu.Unlock()
+		return ebus.IdentityResolutionState{}, identityLookupActionStamp{}, fmt.Errorf("identity lookup: resolver stopped")
+	}
+	if err := admissionError(); err != nil {
+		r.mu.Unlock()
+		return ebus.IdentityResolutionState{}, identityLookupActionStamp{}, err
+	}
+	existing, running := r.resolutions[target]
+	var id string
+	var err error
+	if !running {
+		id, err = newResolutionID()
+		if err != nil {
+			r.mu.Unlock()
+			return ebus.IdentityResolutionState{}, identityLookupActionStamp{}, err
+		}
+	}
+	action := identityLookupActionStamp{}
+	if genuineUser {
+		action = r.actionForLocked(target)
+		if action.origin == identityLookupOriginNone {
+			action, err = r.nextActionLocked()
+			if err != nil {
+				r.mu.Unlock()
+				return ebus.IdentityResolutionState{}, action, err
+			}
+		}
+	}
+	snapshot, err := r.intents.addMemory(target, reason, now, action)
 	if err != nil {
 		r.mu.Unlock()
-		return ebus.IdentityResolutionState{}, fmt.Errorf("identity lookup: mint resolution id: %w", err)
+		return ebus.IdentityResolutionState{}, identityLookupActionStamp{}, err
 	}
-	firstAttemptAt := now
-	if until, cooling := r.cooldownUntil[target]; cooling && until.After(firstAttemptAt) {
-		firstAttemptAt = until
+	if running {
+		existing.usable = usable
+	} else {
+		firstAttemptAt := now
+		if until, cooling := r.cooldownUntil[target]; cooling && until.After(firstAttemptAt) {
+			firstAttemptAt = until
+		}
+		existing = &identityResolution{id: id, dst: target, createdAt: now, nextSendAt: firstAttemptAt, lifecycle: domain.IdentityResolutionPending, authority: domain.IdentityAuthorityNone, dmAvailable: domain.DMAvailabilityUnknown, usable: usable}
+		if usable {
+			existing.authority = domain.IdentityAuthorityProvisional
+		}
+		r.resolutions[target] = existing
+		r.svc.pinRecordProtection(target)
 	}
-	res := &identityResolution{
-		id:          id,
-		dst:         target,
-		createdAt:   now,
-		nextSendAt:  firstAttemptAt,
-		lifecycle:   domain.IdentityResolutionPending,
-		authority:   domain.IdentityAuthorityNone,
-		dmAvailable: domain.DMAvailabilityUnknown,
-		usable:      usable,
-	}
-	if usable {
-		res.authority = domain.IdentityAuthorityProvisional
-	}
-	r.resolutions[target] = res
-	// The answer this lookup is waiting for is checked against the cached
-	// record: minSeq starts at zero and only recovery flows raise it, so
-	// while the lookup runs that record IS the floor. Pin it inside the
-	// section that opens the resolution, so no window exists in which the
-	// lookup is running and its floor is evictable.
-	r.svc.pinRecordProtection(target)
-	state := res.stateLocked()
+	state := existing.stateLocked()
 	r.scheduleWakeLocked()
 	r.mu.Unlock()
-
-	r.emit(state)
-	return state, nil
+	r.persistIntent(snapshot, target)
+	r.emit(state, existing)
+	return state, action, nil
 }
 
-// CancelReason removes one reason; the resolution is cancelled only when
-// the last reason is gone (refcount semantics).
+func (r *identityResolver) persistIntent(snapshot *identityIntentSnapshot, target domain.PeerIdentity) {
+	if err := r.intents.persist(snapshot); err != nil {
+		log.Warn().Err(err).Str("target", target.String()).Msg("identity_lookup_intent_persist_failed")
+	}
+}
+
+// CancelReason is a synchronous current-reason command. Delayed work must use
+// its exact attempt owner or an opaque expected-generation user action.
 func (r *identityResolver) CancelReason(target domain.PeerIdentity, reason identityIntentReason) {
-	remaining, err := r.intents.remove(target, reason)
-	if err != nil {
-		log.Warn().Err(err).Str("target", target.String()).Msg("identity_lookup_intent_persist_failed")
-	}
-	if remaining > 0 {
-		return
-	}
-	r.mu.Lock()
-	if _, running := r.resolutions[target]; !running {
-		r.mu.Unlock()
-		return
-	}
-	state, ok := r.finishLocked(target, domain.IdentityResolutionCancelled)
-	r.mu.Unlock()
-	if ok {
-		r.emit(state)
-	}
+	r.cancelReasons(target, func(key identityIntentKey) bool { return key.reason == reason })
 }
-
-// CancelReasonType removes every reason of one type for the target; the
-// resolution is cancelled only when the target's whole reason set became
-// empty (the same refcount semantics as CancelReason).
-func (r *identityResolver) CancelReasonType(target domain.PeerIdentity, reasonType identityIntentReasonType) {
-	remaining, err := r.intents.removeReasonType(target, reasonType)
-	if err != nil {
-		log.Warn().Err(err).Str("target", target.String()).Msg("identity_lookup_intent_persist_failed")
-	}
-	if remaining > 0 {
-		return
-	}
+func (r *identityResolver) CancelReasonType(target domain.PeerIdentity, kind identityIntentReasonType) {
+	r.cancelReasons(target, func(key identityIntentKey) bool { return key.reason.Type == kind })
+}
+func (r *identityResolver) cancelReasons(target domain.PeerIdentity, matches func(identityIntentKey) bool) {
 	r.mu.Lock()
-	if _, running := r.resolutions[target]; !running {
+	var revoked identityLookupActionStamp
+	remaining, snapshot, err := r.intents.removeMemory(target, func(key identityIntentKey, row identityIntentRow) bool {
+		if !matches(key) {
+			return false
+		}
+		if row.action.origin != identityLookupOriginNone {
+			revoked = row.action
+		}
+		return true
+	})
+	if err != nil {
 		r.mu.Unlock()
+		log.Warn().Err(err).Str("target", target.String()).Msg("identity_lookup_intent_mutation_failed")
 		return
 	}
-	state, ok := r.finishLocked(target, domain.IdentityResolutionCancelled)
-	r.mu.Unlock()
-	if ok {
-		r.emit(state)
+	if revoked.origin != identityLookupOriginNone {
+		r.revokeActionLocked(target, revoked.generation)
 	}
+	var state ebus.IdentityResolutionState
+	finished := false
+	if res, ok := r.resolutions[target]; ok && remaining == 0 {
+		state, finished, _ = r.finishLocked(res, domain.IdentityResolutionCancelled, nil)
+	}
+	r.mu.Unlock()
+	if finished {
+		r.emit(state, nil)
+	}
+	r.persistIntent(snapshot, target)
 }
 
 // run is the engine loop: a single goroutine, one timer, state under mu,
 // sends outside it.
 func (r *identityResolver) run(ctx context.Context) {
+	defer r.stop()
+	r.mu.Lock()
+	r.ownerContext = ctx
+	r.mu.Unlock()
 	r.reseedFromIntents()
 	r.svc.eventBus.Subscribe(ebus.TopicRouteTableChanged, func(ebus.RouteTableChange) {
 		select {
@@ -467,38 +501,41 @@ func (r *identityResolver) run(ctx context.Context) {
 func (r *identityResolver) reseedFromIntents() {
 	now := r.clock()
 	for _, seed := range r.intents.seeds() {
-		if now.Sub(seed.CreatedAt) > identityLookupTaskLifetime {
-			if err := r.intents.removeTarget(seed.Target); err != nil {
-				log.Warn().Err(err).Str("target", seed.Target.String()).Msg("identity_lookup_intent_persist_failed")
+		usable := r.usableNow(seed.Target)
+		r.mu.Lock()
+		if r.unavailableLocked() || r.resolutions[seed.Target] != nil {
+			r.mu.Unlock()
+			continue
+		}
+		// Re-read the CURRENT sole intent owner under resolver.mu: the seed
+		// snapshot can have raced a fresh add/cancel before this lock.
+		current, exists := r.intents.seedForTarget(seed.Target)
+		if !exists {
+			r.mu.Unlock()
+			continue
+		}
+		if now.Sub(current.CreatedAt) > identityLookupTaskLifetime {
+			_, snapshot, err := r.intents.removeMemory(seed.Target, func(identityIntentKey, identityIntentRow) bool { return true })
+			r.mu.Unlock()
+			if err != nil {
+				log.Warn().Err(err).Msg("identity_lookup_reseed_mutation_failed")
+			} else {
+				r.persistIntent(snapshot, seed.Target)
 			}
 			continue
 		}
 		id, err := newResolutionID()
 		if err != nil {
+			r.mu.Unlock()
 			log.Error().Err(err).Msg("identity_lookup_reseed_id_entropy_failed")
 			continue
 		}
-		usable := r.usableNow(seed.Target)
-		r.mu.Lock()
-		if _, running := r.resolutions[seed.Target]; !running {
-			res := &identityResolution{
-				id:          id,
-				dst:         seed.Target,
-				createdAt:   seed.CreatedAt,
-				phase:       identityPhaseBackground,
-				bgAttempts:  seed.Attempts,
-				nextSendAt:  now,
-				lifecycle:   domain.IdentityResolutionActive,
-				authority:   domain.IdentityAuthorityNone,
-				dmAvailable: domain.DMAvailabilityUnknown,
-				usable:      usable,
-			}
-			if usable {
-				res.authority = domain.IdentityAuthorityProvisional
-			}
-			r.resolutions[seed.Target] = res
-			r.svc.pinRecordProtection(seed.Target)
+		res := &identityResolution{id: id, dst: seed.Target, createdAt: current.CreatedAt, phase: identityPhaseBackground, bgAttempts: current.Attempts, nextSendAt: now, lifecycle: domain.IdentityResolutionActive, authority: domain.IdentityAuthorityNone, dmAvailable: domain.DMAvailabilityUnknown, usable: usable}
+		if usable {
+			res.authority = domain.IdentityAuthorityProvisional
 		}
+		r.resolutions[seed.Target] = res
+		r.svc.pinRecordProtection(seed.Target)
 		r.mu.Unlock()
 	}
 	select {
@@ -517,6 +554,12 @@ func (r *identityResolver) nextDeadline() time.Time {
 			next = res.nextSendAt
 		}
 	}
+	for _, entry := range r.attempts {
+		deadline := entry.sentAt.Add(identityLookupAttemptWindow + time.Nanosecond)
+		if deadline.Before(next) {
+			next = deadline
+		}
+	}
 	return next
 }
 
@@ -527,16 +570,16 @@ func (r *identityResolver) tick(ctx context.Context) {
 	r.expireAttemptsLocked(now)
 
 	r.mu.Lock()
-	due := make([]domain.PeerIdentity, 0, len(r.resolutions))
-	for target, res := range r.resolutions {
+	due := make([]*identityResolution, 0, len(r.resolutions))
+	for _, res := range r.resolutions {
 		if !now.Before(res.nextSendAt) {
-			due = append(due, target)
+			due = append(due, res)
 		}
 	}
 	r.mu.Unlock()
 
-	for _, target := range due {
-		r.advanceResolution(ctx, target, r.clock())
+	for _, res := range due {
+		r.advanceOwnedResolution(ctx, res, r.clock())
 	}
 }
 
@@ -550,7 +593,7 @@ func (r *identityResolver) expireAttemptsLocked(now time.Time) {
 			continue
 		}
 		delete(r.attempts, label)
-		if res, ok := r.resolutions[entry.dst]; ok && res.openAttempts > 0 {
+		if res, ok := r.resolutions[entry.dst]; ok && res == entry.owner && entry.claim == nil && res.openAttempts > 0 {
 			res.openAttempts--
 		}
 	}
@@ -597,24 +640,25 @@ func (r *identityResolver) expireCooldownsLocked(now time.Time) {
 
 // advanceResolution runs one scheduling step of one resolution: lifetime
 // and phase transitions, the routing gate, then at most one send.
-func (r *identityResolver) advanceResolution(ctx context.Context, target domain.PeerIdentity, now time.Time) {
+func (r *identityResolver) advanceOwnedResolution(ctx context.Context, owner *identityResolution, now time.Time) {
+	target := owner.dst
 	// Recompute the usable axis first: several provisional sources (the
 	// fetch_contacts epidemic, sender keys attached to DM frames) fill the key maps
 	// without any ebus event, so the tick is their only observer.
 	usable := r.usableNow(target)
 	r.mu.Lock()
-	if res, ok := r.resolutions[target]; ok && res.usable != usable {
+	if res, ok := r.resolutions[target]; ok && res == owner && !r.unavailableLocked() && res.usable != usable {
 		res.usable = usable
 		if usable && res.authority == domain.IdentityAuthorityNone {
 			res.authority = domain.IdentityAuthorityProvisional
 		}
 		state := res.stateLocked()
 		r.mu.Unlock()
-		r.emit(state)
+		r.emit(state, owner)
 		r.mu.Lock()
 	}
 	res, ok := r.resolutions[target]
-	if !ok || now.Before(res.nextSendAt) {
+	if !ok || res != owner || r.unavailableLocked() || now.Before(res.nextSendAt) {
 		r.mu.Unlock()
 		return
 	}
@@ -623,10 +667,11 @@ func (r *identityResolver) advanceResolution(ctx context.Context, target domain.
 		(res.phase == identityPhaseBackground && res.bgAttempts >= r.bgAttemptsCap) {
 		// exhausted with usable=true is a valid outcome: keys exist, the
 		// authoritative record was never obtained.
-		state, finished := r.finishLocked(target, domain.IdentityResolutionExhausted)
+		state, finished, snapshot := r.finishLocked(owner, domain.IdentityResolutionExhausted, nil)
 		r.mu.Unlock()
+		r.persistIntent(snapshot, target)
 		if finished {
-			r.emit(state)
+			r.emit(state, owner)
 		}
 		return
 	}
@@ -637,9 +682,9 @@ func (r *identityResolver) advanceResolution(ctx context.Context, target domain.
 		res.phase = identityPhaseBackground
 		res.nextSendAt = now.Add(identityLookupBackgroundDelays[0])
 		state := res.stateLocked()
-		log.Info().Str("target", target.String()).Msg("identity_lookup_interactive_timeout")
 		r.mu.Unlock()
-		r.emit(state)
+		log.Info().Str("target", target.String()).Msg("identity_lookup_interactive_timeout")
+		r.emit(state, owner)
 		return
 	}
 	if res.openAttempts >= identityLookupMaxOpenAttempts {
@@ -657,7 +702,7 @@ func (r *identityResolver) advanceResolution(ctx context.Context, target domain.
 		r.svc.SendRouteQuery(target)
 		r.mu.Lock()
 		res, ok := r.resolutions[target]
-		if !ok {
+		if !ok || res != owner || r.unavailableLocked() {
 			r.mu.Unlock()
 			return
 		}
@@ -667,13 +712,13 @@ func (r *identityResolver) advanceResolution(ctx context.Context, target domain.
 		state := res.stateLocked()
 		r.mu.Unlock()
 		if flipped {
-			r.emit(state)
+			r.emit(state, owner)
 		}
 		return
 	}
 	r.mu.Lock()
 	res, ok = r.resolutions[target]
-	if !ok {
+	if !ok || res != owner || r.unavailableLocked() {
 		r.mu.Unlock()
 		return
 	}
@@ -682,10 +727,10 @@ func (r *identityResolver) advanceResolution(ctx context.Context, target domain.
 	state := res.stateLocked()
 	r.mu.Unlock()
 	if flipped {
-		r.emit(state)
+		r.emit(state, owner)
 	}
 
-	r.sendAttempt(ctx, target, now)
+	r.sendOwnedAttempt(ctx, owner, now)
 }
 
 // canAttempt reads the routing snapshot: the mesh-era resolver answer to
@@ -703,143 +748,140 @@ func (r *identityResolver) canAttempt(target domain.PeerIdentity) bool {
 // sendAttempt performs one send: fresh label, payload, frame, enqueue. The
 // global send-slot cap is held only around the enqueue.
 func (r *identityResolver) sendAttempt(ctx context.Context, target domain.PeerIdentity, now time.Time) {
+	r.mu.Lock()
+	owner := r.resolutions[target]
+	r.mu.Unlock()
+	if owner != nil {
+		r.sendOwnedAttempt(ctx, owner, now)
+	}
+}
+func (r *identityResolver) sendOwnedAttempt(ctx context.Context, owner *identityResolution, _ time.Time) {
 	layer := r.svc.datagramLayer()
 	if layer == nil {
 		return
 	}
-
-	var attemptID domain.PeerIdentity
-	if _, err := rand.Read(attemptID[:]); err != nil {
+	select {
+	case <-ctx.Done():
+		return
+	case r.sendSlots <- struct{}{}:
+	}
+	slotHeld := true
+	defer func() {
+		if slotHeld {
+			<-r.sendSlots
+		}
+	}()
+	if ctx.Err() != nil {
+		return
+	}
+	var label domain.PeerIdentity
+	if _, err := rand.Read(label[:]); err != nil {
 		log.Error().Err(err).Msg("identity_lookup_attempt_id_entropy_failed")
 		return
 	}
-
 	r.mu.Lock()
-	res, ok := r.resolutions[target]
-	if !ok {
+	if r.unavailableLocked() || r.resolutions[owner.dst] != owner || owner.openAttempts >= identityLookupMaxOpenAttempts {
 		r.mu.Unlock()
 		return
 	}
-	minSeq := res.minSeq
-	firstSend := !res.sentAnything
-	avoid := res.prevNextHop
+	minSeq, firstSend, avoid := owner.minSeq, !owner.sentAnything, owner.prevNextHop
 	r.mu.Unlock()
-
-	payload, err := protocol.BuildGetIdentityPayload(protocol.GetIdentityPayload{
-		V:           domain.IdentityLookupSchemaVersion,
-		TargetProof: true,
-		MinSeq:      minSeq,
-	})
+	payload, err := protocol.BuildGetIdentityPayload(protocol.GetIdentityPayload{V: domain.IdentityLookupSchemaVersion, TargetProof: true, MinSeq: minSeq})
 	if err != nil {
 		log.Error().Err(err).Msg("identity_lookup_payload_build_failed")
 		return
 	}
-
-	frame := protocol.DatagramFrame{
-		Version:     domain.DatagramHeaderVersion,
-		Mode:        domain.DatagramModeRequest,
-		Class:       domain.DatagramClassControl,
-		Src:         attemptID,
-		Dst:         target,
-		TTL:         domain.DatagramDefaultMaxHops,
-		RoutePolicy: domain.RoutePolicyBest,
-		DType:       domain.DTypeGetIdentity,
-		Payload:     payload,
-	}
+	frame := protocol.DatagramFrame{Version: domain.DatagramHeaderVersion, Mode: domain.DatagramModeRequest, Class: domain.DatagramClassControl, Src: label, Dst: owner.dst, TTL: domain.DatagramDefaultMaxHops, RoutePolicy: domain.RoutePolicyBest, DType: domain.DTypeGetIdentity, Payload: payload}
 	avoidOpt := datagram.NoAvoidedNextHop()
 	if !firstSend {
-		// Retries explore alternative paths and force a first-hop change
-		// where one exists; the layer's per-(dst, dtype) rotation does the
-		// rest of the walk.
 		frame.RoutePolicy = domain.RoutePolicyExplore
 		if !avoid.IsZero() {
 			avoidOpt = datagram.AvoidNextHop(avoid)
 		}
 	}
-
-	// Register the attempt BEFORE the enqueue: an answer can race the
-	// outcome on a fast path.
-	entry := identityAttemptEntry{
-		dst:           target,
-		qHash:         sha256.Sum256(payload),
-		proofRequired: true,
-		minSeq:        minSeq,
-		sentAt:        now,
-	}
 	r.mu.Lock()
-	r.attemptGen++
-	entry.gen = r.attemptGen
-	r.attempts[attemptID] = entry
-	res.openAttempts++
-	r.mu.Unlock()
-
-	r.sendSlots <- struct{}{}
-	outcome := layer.pipeline.SendLocal(ctx, datagram.LocalSenderIdentityResolver, datagram.LocalSendOpts{Frame: frame, Avoid: avoidOpt})
-	<-r.sendSlots
-
-	r.mu.Lock()
-	res, ok = r.resolutions[target]
-	if !ok {
-		delete(r.attempts, attemptID)
+	_, collision := r.attempts[label]
+	if collision || r.unavailableLocked() || ctx.Err() != nil || r.resolutions[owner.dst] != owner || owner.openAttempts >= identityLookupMaxOpenAttempts || r.attemptGen == math.MaxUint64 {
 		r.mu.Unlock()
 		return
 	}
+	r.attemptGen++
+	entry := identityAttemptEntry{owner: owner, dst: owner.dst, gen: r.attemptGen, qHash: sha256.Sum256(payload), proofRequired: true, minSeq: minSeq, sentAt: r.clock(), action: r.actionForLocked(owner.dst), queue: identityAttemptQueuePending}
+	r.attempts[label] = entry
+	owner.openAttempts++
+	r.mu.Unlock()
+	outcome := layer.pipeline.SendLocal(ctx, datagram.LocalSenderIdentityResolver, datagram.LocalSendOpts{Frame: frame, Avoid: avoidOpt})
+	<-r.sendSlots
+	slotHeld = false
+	r.mu.Lock()
+	if ctx.Err() != nil {
+		if current, ok := r.attempts[label]; ok && current.gen == entry.gen && current.owner == owner {
+			current.revoked = true
+			r.attempts[label] = current
+		}
+	}
+	completion, state, snapshot, emit, mutationErr := r.settleQueueLocked(label, entry, outcome)
+	r.mu.Unlock()
+	if mutationErr != nil {
+		log.Warn().Err(mutationErr).Str("target", owner.dst.String()).Msg("identity_lookup_intent_mutation_failed")
+	}
+	r.persistIntent(snapshot, owner.dst)
+	observeIdentityLookupCompletion(completion)
+	if emit {
+		r.emit(state, owner)
+	}
+}
 
-	var becameActive ebus.IdentityResolutionState
-	emitActive := false
-	switch outcome.Kind() {
-	case datagram.SendQueued:
-		res.sentAnything = true
-		if res.lifecycle == domain.IdentityResolutionPending {
-			res.lifecycle = domain.IdentityResolutionActive
-			becameActive = res.stateLocked()
-			emitActive = true
+// settleQueueLocked never consults a replacement by target to mutate it.
+// Caller holds resolver.mu. Snapshot I/O and emission follow its release.
+func (r *identityResolver) settleQueueLocked(label domain.PeerIdentity, expected identityAttemptEntry, outcome datagram.SendOutcome) (*identityLookupCompletion, ebus.IdentityResolutionState, *identityIntentSnapshot, bool, error) {
+	entry, ok := r.attempts[label]
+	if !ok || entry.gen != expected.gen || entry.owner != expected.owner || r.unavailableLocked() {
+		return nil, ebus.IdentityResolutionState{}, nil, false, nil
+	}
+	entry.queue = identityAttemptQueueRefused
+	if outcome.Kind() == datagram.SendQueued {
+		entry.queue = identityAttemptQueueAccepted
+	}
+	r.attempts[label] = entry
+	if entry.claim != nil {
+		return r.settleClaimLocked(label), ebus.IdentityResolutionState{}, nil, false, nil
+	}
+	owner := entry.owner
+	if r.resolutions[entry.dst] != owner {
+		delete(r.attempts, label)
+		return nil, ebus.IdentityResolutionState{}, nil, false, nil
+	}
+	var snapshot *identityIntentSnapshot
+	var mutationErr error
+	emit := false
+	if outcome.Kind() == datagram.SendQueued {
+		owner.sentAnything = true
+		if owner.lifecycle == domain.IdentityResolutionPending {
+			owner.lifecycle = domain.IdentityResolutionActive
+			emit = true
 		}
 		if hop, ok := outcome.NextHop(); ok {
-			res.prevNextHop = hop
+			owner.prevNextHop = hop
 		}
-		r.scheduleNextSendLocked(res, now)
-		if res.phase == identityPhaseBackground {
-			res.bgAttempts++
-			if err := r.intents.recordAttempt(target); err != nil {
-				log.Warn().Err(err).Str("target", target.String()).Msg("identity_lookup_intent_persist_failed")
-			}
+		r.scheduleNextSendLocked(owner, r.clock())
+	} else {
+		delete(r.attempts, label)
+		if owner.openAttempts > 0 {
+			owner.openAttempts--
 		}
-	case datagram.SendNoRoute:
-		// The gate raced a route withdrawal: not a consumed attempt.
-		delete(r.attempts, attemptID)
-		res.openAttempts--
-		res.noRoute = true
-		res.nextSendAt = now.Add(identityLookupGateRetry)
-	default:
-		// rejected (a gate, unsupported_dtype at the last hop included) or
-		// a local fault: the attempt is consumed — schedule AND cap — so a
-		// permanently refused target cannot spin until the 7-day lifetime
-		// while ignoring the background attempt budget.
-		delete(r.attempts, attemptID)
-		res.openAttempts--
-		r.scheduleNextSendLocked(res, now)
-		if res.phase == identityPhaseBackground {
-			res.bgAttempts++
-			if err := r.intents.recordAttempt(target); err != nil {
-				log.Warn().Err(err).Str("target", target.String()).Msg("identity_lookup_intent_persist_failed")
-			}
+		if outcome.Kind() == datagram.SendNoRoute {
+			owner.noRoute = true
+			owner.nextSendAt = r.clock().Add(identityLookupGateRetry)
+		} else {
+			r.scheduleNextSendLocked(owner, r.clock())
 		}
-		reason := ""
-		if rejection, rejected := outcome.Rejection(); rejected {
-			reason = rejection.String()
-		}
-		log.Warn().
-			Str("target", target.String()).
-			Str("outcome", outcome.Kind().String()).
-			Str("reason", reason).
-			Err(outcome.Err()).
-			Msg("identity_lookup_send_not_queued")
 	}
-	r.mu.Unlock()
-	if emitActive {
-		r.emit(becameActive)
+	if outcome.Kind() != datagram.SendNoRoute && owner.phase == identityPhaseBackground {
+		snapshot, mutationErr = r.intents.recordAttemptMemory(owner.dst)
+		owner.bgAttempts++
 	}
+	return nil, owner.stateLocked(), snapshot, emit, mutationErr
 }
 
 // scheduleNextSendLocked advances the phase schedule after a consumed
@@ -873,7 +915,7 @@ func (r *identityResolver) HandleAnswer(label datagram.Label, payload []byte) bo
 	now := r.clock()
 	r.mu.Lock()
 	entry, ok := r.attempts[label.Raw()]
-	if !ok || now.Sub(entry.sentAt) > identityLookupAttemptWindow {
+	if !ok || r.unavailableLocked() || entry.claim != nil || entry.owner == nil || r.resolutions[entry.dst] != entry.owner || !entry.liveAt(now) {
 		r.mu.Unlock()
 		log.Debug().Str("label", label.String()).Msg("identity_lookup_answer_without_live_attempt")
 		return false
@@ -929,23 +971,44 @@ func (r *identityResolver) HandleAnswer(label datagram.Label, payload []byte) bo
 		// identical-current (duplicate) is a success: the store already
 		// holds this very record.
 		r.mu.Lock()
-		if res, running := r.resolutions[entry.dst]; running {
-			res.authority = domain.IdentityAuthorityAuthoritative
-			res.dmAvailable = domain.DMAvailabilityNo
-			if body.DM {
-				res.dmAvailable = domain.DMAvailabilityYes
-				res.usable = true
-			}
-			// Stamp WHICH attempt's answer proved the record: consumers
-			// that asked their question mid-flight (the DM recovery gate)
-			// must be able to tell a proof of an older question apart.
-			res.answerAttemptGen = entry.gen
+		current, live := r.attempts[label.Raw()]
+		if !live || current.gen != entry.gen || current.owner != entry.owner || current.claim != nil || r.unavailableLocked() || r.resolutions[entry.dst] != entry.owner || !current.liveAt(r.clock()) {
+			r.mu.Unlock()
+			return true
 		}
-		state, finished := r.finishLocked(entry.dst, domain.IdentityResolutionSucceeded)
+		res := entry.owner
+		// Normal successful key resolution is immediate. A pending exact
+		// claimed queue result alone may outlive the resolution in this row.
+		var preserve *domain.PeerIdentity
+		action := r.actionForLocked(entry.dst)
+		if !current.revoked && current.action.origin == identityLookupOriginWindowUser && current.action == action && recordRequiresSessionV2(body.MinSession) {
+			current.claim = &identityLookupCompletion{target: entry.dst, resolutionID: res.id, label: label.Raw(), attemptGeneration: entry.gen, action: current.action, sequence: body.Seq, minSession: body.MinSession, recordDigest: sha256.Sum256([]byte(parsed.Record.Body))}
+			r.attempts[label.Raw()] = current
+			rawLabel := label.Raw()
+			preserve = &rawLabel
+		}
+		_, finished, snapshot := r.finishLocked(res, domain.IdentityResolutionSucceeded, preserve)
+		if !finished {
+			current.claim = nil
+			r.attempts[label.Raw()] = current
+			r.mu.Unlock()
+			return true
+		}
+		res.authority = domain.IdentityAuthorityAuthoritative
+		res.dmAvailable = domain.DMAvailabilityNo
+		if body.DM {
+			res.dmAvailable = domain.DMAvailabilityYes
+			res.usable = true
+		}
+		res.answerAttemptGen = entry.gen
+		state := res.stateLocked()
+		completion := r.settleClaimLocked(label.Raw())
 		r.mu.Unlock()
 		if finished {
-			r.emit(state)
+			r.emit(state, res)
 		}
+		observeIdentityLookupCompletion(completion)
+		r.persistIntent(snapshot, entry.dst)
 		log.Info().
 			Str("target", entry.dst.String()).
 			Uint64("seq", uint64(body.Seq)).
@@ -966,30 +1029,38 @@ func (r *identityResolver) HandleAnswer(label datagram.Label, payload []byte) bo
 // finishLocked removes the resolution, its live attempts and its durable
 // intents, arms the cooldown and returns the terminal state for the caller
 // to emit AFTER releasing r.mu. Caller holds r.mu.
-func (r *identityResolver) finishLocked(target domain.PeerIdentity, terminal domain.IdentityResolutionLifecycle) (ebus.IdentityResolutionState, bool) {
-	res, ok := r.resolutions[target]
-	if !ok {
-		return ebus.IdentityResolutionState{}, false
+func (r *identityResolver) finishLocked(owner *identityResolution, terminal domain.IdentityResolutionLifecycle, preserve *domain.PeerIdentity) (ebus.IdentityResolutionState, bool, *identityIntentSnapshot) {
+	if owner == nil || r.resolutions[owner.dst] != owner {
+		return ebus.IdentityResolutionState{}, false, nil
 	}
-	res.lifecycle = terminal
-	state := res.stateLocked()
-	delete(r.resolutions, target)
-	// The floor this lookup was holding goes with it; a live session for
-	// the same identity holds its own pin.
-	r.svc.releaseRecordProtection(target)
-	for label, entry := range r.attempts {
-		if entry.dst == target {
-			delete(r.attempts, label)
+	r.intents.mu.Lock()
+	hasRows := r.intents.countLocked(owner.dst) > 0
+	r.intents.mu.Unlock()
+	var snapshot *identityIntentSnapshot
+	if hasRows {
+		var err error
+		_, snapshot, err = r.intents.removeMemory(owner.dst, func(identityIntentKey, identityIntentRow) bool { return true })
+		if err != nil {
+			return ebus.IdentityResolutionState{}, false, nil
 		}
+	}
+	owner.lifecycle = terminal
+	state := owner.stateLocked()
+	delete(r.resolutions, owner.dst)
+	r.svc.releaseRecordProtection(owner.dst)
+	for label, entry := range r.attempts {
+		if entry.owner != owner {
+			continue
+		}
+		if terminal == domain.IdentityResolutionSucceeded && preserve != nil && label == *preserve && entry.claim != nil {
+			continue
+		}
+		delete(r.attempts, label)
 	}
 	now := r.clock()
 	r.expireCooldownsLocked(now)
-	r.cooldownUntil[target] = now.Add(identityLookupCooldown)
-	if err := r.intents.removeTarget(target); err != nil {
-		log.Warn().Err(err).Str("target", target.String()).Msg("identity_lookup_intent_persist_failed")
-	}
-	log.Info().Str("target", target.String()).Str("terminal", string(terminal)).Msg("identity_lookup_finished")
-	return state, true
+	r.cooldownUntil[owner.dst] = now.Add(identityLookupCooldown)
+	return state, true, snapshot
 }
 
 // scheduleWakeLocked nudges the loop; caller holds r.mu.

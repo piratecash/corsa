@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -22,6 +24,9 @@ import (
 	"github.com/piratecash/corsa/internal/core/storage"
 	"github.com/piratecash/corsa/internal/core/storage/migrations"
 )
+
+// ErrInvalidIdentityIntentsPath rejects an explicitly empty durability override.
+var ErrInvalidIdentityIntentsPath = errors.New("SDK identity intents path must be nonblank when specified")
 
 // CommandInfo describes a console/RPC command exposed by the SDK runtime.
 type CommandInfo struct {
@@ -38,12 +43,23 @@ type Runtime struct {
 
 	nodeService *corsanode.Service
 	database    *storage.Database
-	client      *service.DesktopClient
-	router      *service.DMRouter
-	eventBus    *ebus.Bus
-	metrics     *metrics.Collector
-	cmdTable    *rpc.CommandTable
-	rpcServer   *rpc.Server
+	// Constructor-owned actual database closer; used only under lifecycle.
+	// The private dependency has no public override.
+	databaseCloser runtimeDatabaseCloser
+	client         *service.DesktopClient
+	router         *service.DMRouter
+	eventBus       *ebus.Bus
+	metrics        *metrics.Collector
+
+	// managedTransportOrigin is immutable construction provenance for normal
+	// NewWithContext runtimes, whose Service unconditionally constructs CM.
+	// It is not a serving/finality flag: every actual Close join is required.
+	managedTransportOrigin bool
+	// finalTransport is latched once under lifecycle after all network owners
+	// join, before database.Close; readers copy an immutable atomic snapshot.
+	finalTransport atomic.Pointer[FinalTransportSnapshot]
+	cmdTable       *rpc.CommandTable
+	rpcServer      *rpc.Server
 
 	// waitCh is closed when the runtime is fully down. It carries no value:
 	// a channel with one buffered result served the FIRST caller and handed
@@ -218,6 +234,9 @@ func New(cfg Config) (*Runtime, error) {
 // runtime's life: the node runs under the context given to Start, and the
 // runtime is released by Close.
 func NewWithContext(ctx context.Context, cfg Config) (*Runtime, error) {
+	if cfg.Node.IdentityIntentsPath != nil && strings.TrimSpace(*cfg.Node.IdentityIntentsPath) == "" {
+		return nil, ErrInvalidIdentityIntentsPath
+	}
 	internalCfg := cfg.internal()
 
 	id, err := resolveIdentity(cfg)
@@ -315,24 +334,28 @@ func NewWithContext(ctx context.Context, cfg Config) (*Runtime, error) {
 	// server's own config. What is left is a long-lived struct an embedder
 	// may print, and fmt cannot be stopped from walking an unexported field
 	// by reflection — so the field must not hold a secret to begin with.
-	return &Runtime{
-		cfg:                 normalizeConfig(cfg).withoutSecrets(),
-		nodeService:         nodeService,
-		database:            database,
-		client:              client,
-		router:              router,
-		eventBus:            eventBus,
-		metrics:             metricsCollector,
-		cmdTable:            cmdTable,
-		rpcServer:           rpcServer,
-		waitCh:              make(chan struct{}),
-		startDone:           make(chan struct{}),
-		nodeStopped:         make(chan struct{}),
-		subscriptions:       subscriptions,
-		cancelSubscriptions: cancelSubscriptions,
-		commands:            commands,
-		cancelCommands:      cancelCommands,
-	}, nil
+	runtime := &Runtime{
+		cfg:                    normalizeConfig(cfg).withoutSecrets(),
+		nodeService:            nodeService,
+		managedTransportOrigin: true,
+		database:               database,
+		databaseCloser:         database,
+		client:                 client,
+		router:                 router,
+		eventBus:               eventBus,
+		metrics:                metricsCollector,
+		cmdTable:               cmdTable,
+		rpcServer:              rpcServer,
+		waitCh:                 make(chan struct{}),
+		startDone:              make(chan struct{}),
+		nodeStopped:            make(chan struct{}),
+		subscriptions:          subscriptions,
+		cancelSubscriptions:    cancelSubscriptions,
+		commands:               commands,
+		cancelCommands:         cancelCommands,
+	}
+	rpc.RegisterGlobalPublisherCommand(cmdTable, globalRPCPublisher{runtime: runtime})
+	return runtime, nil
 }
 
 // streamContext is the ONE context a long-lived stream runs under: it ends
@@ -723,7 +746,8 @@ func (r *Runtime) Close() error {
 		return r.closeErr
 	}
 
-	r.closeErr = r.database.Close()
+	r.latchFinalTransport()
+	r.closeErr = r.closeDatabase()
 	r.closed = true
 
 	// A runtime on which Start was never called has nobody to report the

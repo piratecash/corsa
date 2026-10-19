@@ -1695,6 +1695,10 @@ func (s *Service) sendRelayMessage(address domain.PeerAddress, msg protocol.Enve
 // from that next hop's identity. The fan-out path (sendRelayMessage) marks
 // its attempts relayNextHopGossipFanOut because no table entry chose them.
 func (s *Service) sendTableRoutedRelayMessage(address domain.PeerAddress, msg protocol.Envelope, dispatchedAt time.Time) relaySendOutcome {
+	return s.sendTableRoutedRelayMessageWithR2a(address, msg, dispatchedAt, nil)
+}
+
+func (s *Service) sendTableRoutedRelayMessageWithR2a(address domain.PeerAddress, msg protocol.Envelope, dispatchedAt time.Time, origin *r2aDirectedDispatch) relaySendOutcome {
 	frame := protocol.Frame{
 		Type:        "relay_message",
 		ID:          string(msg.ID),
@@ -1713,7 +1717,21 @@ func (s *Service) sendTableRoutedRelayMessage(address domain.PeerAddress, msg pr
 	s.attachKnownSenderKeys(&frame, msg.Topic, msg.Sender)
 
 	outcome := relaySendRefused
-	via, queued := s.enqueuePeerSendItemVia(address, deliveryPeerSendItem(frame, msg, dispatchedAt))
+	item := deliveryPeerSendItem(frame, msg, dispatchedAt)
+	session := s.snapshotR2aDirectedSession(origin)
+	candidate := s.captureR2aFirstDirectedItem(origin, session, item)
+	var via routingSender
+	var queued bool
+	if candidate != nil {
+		item.writeAck = candidate.ack
+		queued = s.enqueueSessionSendItem(session, item)
+		s.r2aRecordOffer(candidate, queued)
+		if queued {
+			via = sessionRoutingSender(session)
+		}
+	} else {
+		via, queued = s.enqueuePeerSendItemVia(address, item)
+	}
 	if queued {
 		outcome = relaySendQueuedForSession
 	} else if s.queuePeerFrame(address, frame) {

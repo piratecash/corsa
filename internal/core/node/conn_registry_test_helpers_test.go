@@ -5,6 +5,7 @@ import (
 
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/netcore"
+	"github.com/piratecash/corsa/internal/core/routing"
 )
 
 // mustConnIDForTest resolves the ConnID for a net.Conn fixture registered
@@ -32,6 +33,9 @@ func mustConnIDForTest(s *Service, conn net.Conn) domain.ConnID {
 // is minted from s.connIDCounter so the two fixtures sites in the same
 // test do not collide at ConnID(0).
 func (s *Service) setTestConnEntryLocked(conn net.Conn, entry *connEntry) {
+	if entry != nil && entry.receive == nil {
+		entry.receive = routing.NewAnnounceReceiveState()
+	}
 	var id netcore.ConnID
 	if entry != nil && entry.core != nil && entry.core.ConnIDNum() != 0 {
 		id = entry.core.ConnID()

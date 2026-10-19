@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -14,18 +15,38 @@ import (
 	"github.com/piratecash/corsa/internal/core/appdata"
 	"github.com/piratecash/corsa/internal/core/config"
 	"github.com/piratecash/corsa/internal/core/crashlog"
+	"github.com/piratecash/corsa/internal/startupfence"
 
 	"github.com/rs/zerolog/log"
 )
 
-func main() {
+func main() { os.Exit(runNode()) }
+
+func runNode() (exitCode int) {
 	// --version is handled before crashlog / signal / app initialisation so a
 	// version probe does not write a crashlog row, leave a half-started node,
 	// or hold any OS resources. Scan argv directly so unknown process-manager
 	// arguments keep the historic "ignored by corsa-node" behavior.
 	if versionRequested(os.Args[1:]) {
 		fmt.Println(config.CorsaVersion)
-		return
+		return 0
+	}
+
+	var supervised *startupfence.SupervisedSession
+	// Registered first, therefore after signal/crashlog/App teardown. Nothing
+	// writes local state after the bounded handshake; main exits immediately.
+	defer func() {
+		if supervised != nil {
+			if err := supervised.Close(); err != nil {
+				log.Error().Err(err).Msg("supervised shutdown failed")
+				exitCode = 1
+			}
+		}
+	}()
+	supervision, err := candidateSupervisionFromEnvironment(os.Getenv)
+	if err != nil {
+		log.Error().Err(err).Msg("invalid startup-fence candidate profile")
+		return 1
 	}
 
 	// Before crashlog.Setup: the crash log lives in the data directory, and
@@ -33,7 +54,7 @@ func main() {
 	// the plain disk with a fresh identity.
 	if err := appdata.Anchor(); err != nil {
 		log.Error().Err(err).Msg("corsa-node refusing to start: data directory unavailable")
-		os.Exit(1)
+		return 1
 	}
 
 	cleanup := crashlog.Setup()
@@ -47,11 +68,22 @@ func main() {
 	defer stop()
 
 	app := node.New()
-	if err := app.Run(ctx); err != nil {
-		log.Error().Err(err).Msg("corsa-node exited with error")
-		cleanup()
-		os.Exit(1)
+	if supervision.enabled {
+		var offline bool
+		supervised, offline, err = app.PrepareSupervisedStartup(ctx, os.NewFile(3, "startup-fence"), supervision.launcher, supervision.store)
+		if err != nil {
+			log.Error().Err(err).Msg("supervised startup refused")
+			return 1
+		}
+		if offline {
+			return 0
+		}
 	}
+	if err := app.Run(ctx); err != nil {
+		log.Error().Err(errors.Join(err, ctx.Err())).Msg("corsa-node exited with error")
+		return 1
+	}
+	return 0
 }
 
 // configureMemoryLimit applies a soft heap limit (Go's GOMEMLIMIT)

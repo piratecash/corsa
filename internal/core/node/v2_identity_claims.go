@@ -111,12 +111,58 @@ func (s *Service) onIdentityProvenV2(ctx context.Context, proof sessionv2.Proven
 	if !ok {
 		return nil
 	}
+	if err := s.publishIdentityProtection(ctx, id); err != nil {
+		return fmt.Errorf("v2 proof of %s: legacy routing input still in flight: %w", id, err)
+	}
+	return nil
+}
+
+// recordPinPublication is a current store-bound capability, not a TLS proof.
+// Its record-stage constructor has no production caller in the inactive R1a.
+type recordPinPublication struct {
+	binding            identityPinEntryBinding
+	evidenceRevision   identityPinEvidenceRevision
+	protectionRevision identityPinProtectionRevision
+}
+
+func (p recordPinPublication) current(s *Service) bool {
+	if s.secureSessions == nil || s.secureSessions.store == nil || p.binding.owner != s.secureSessions.store {
+		return false
+	}
+	store := s.secureSessions.store
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.pinMetadataMutationRefusalLocked() != nil {
+		return false
+	}
+	entry := store.identities[p.binding.identity]
+	return p.binding.matchesLocked(store) && p.evidenceRevision != 0 && entry.evidenceRevision == p.evidenceRevision && entry.protectionRevision == p.protectionRevision && entry.classMetadata().Relation.State == domain.IdentityPinAllocationEligible
+}
+
+// onRecordPinProtection is unused by production. Neither a DTO nor a wire
+// sender can authorize it; publication is rechecked after draining legacy input.
+func (s *Service) onRecordPinProtection(ctx context.Context, publication recordPinPublication) error {
+	if !publication.current(s) {
+		return errPinMetadataSnapshotStale
+	}
+	if err := s.publishIdentityProtection(ctx, publication.binding.identity); err != nil {
+		return fmt.Errorf("record protection: legacy routing input still in flight: %w", err)
+	}
+	if !publication.current(s) {
+		return errPinMetadataSnapshotStale
+	}
+	return nil
+}
+
+// publishIdentityProtection shares close/drain/purge, without claiming the
+// evidence was a session. Caller holds no domain/store lock or removal gate.
+func (s *Service) publishIdentityProtection(ctx context.Context, id domain.PeerIdentity) error {
 	s.closeLegacyClaimsOf(ctx, id)
 	s.forgetClaimedAddressesOf(id)
 	if err := s.unprovenRouting.waitDrained(ctx, id); err != nil {
 		if !s.unprovenRouting.owePurge(id) {
 			log.Warn().Err(err).Str("peer", id.String()).Msg("routing_unproven_purge_passed_to_last_legacy_writer")
-			return fmt.Errorf("v2 proof of %s: legacy routing input still in flight: %w", id, err)
+			return err
 		}
 	}
 	s.forgetUnprovenRoutingResidue(id)
@@ -160,7 +206,7 @@ func (s *Service) closeLegacyClaimsOf(ctx context.Context, id domain.PeerIdentit
 			Str("address", string(session.address)).
 			Uint64("conn_id", uint64(session.connID)).
 			Dur("legacy_hold", hold).
-			Msg("legacy_session_closed_identity_proved_v2")
+			Msg("legacy_session_closed_identity_requires_v2")
 		_ = session.closeAs(peerSessionClosedByLegacyRefusal)
 	}
 	network := s.Network()
@@ -168,7 +214,7 @@ func (s *Service) closeLegacyClaimsOf(ctx context.Context, id domain.PeerIdentit
 		log.Warn().
 			Str("peer", id.String()).
 			Uint64("conn_id", uint64(connID)).
-			Msg("legacy_connection_closed_identity_proved_v2")
+			Msg("legacy_connection_closed_identity_requires_v2")
 		_ = network.Close(ctx, connID)
 	}
 }
@@ -194,7 +240,7 @@ func (s *Service) forgetClaimedAddressesOf(id domain.PeerIdentity) {
 		return
 	}
 	s.markPeerStateDirty()
-	log.Info().Str("peer", id.String()).Int("addresses", forgotten).Msg("legacy_address_claims_forgotten_identity_proved_v2")
+	log.Info().Str("peer", id.String()).Int("addresses", forgotten).Msg("legacy_address_claims_forgotten_identity_requires_v2")
 }
 
 // recordAddressIdentityLocked records the identity of address — unless it is
@@ -342,7 +388,7 @@ func (s *Service) forgetUnprovenRoutingResidue(id domain.PeerIdentity) {
 	log.Info().
 		Str("peer", id.String()).
 		Int("claims_forgotten", forgotten).
-		Msg("routing_unproven_residue_forgotten_identity_proved_v2")
+		Msg("routing_unproven_residue_forgotten_identity_requires_v2")
 }
 
 // identityRelaySessionCount is the number of relay-capable sessions counted
@@ -488,6 +534,10 @@ func (m *unprovenRoutingWriters) owePurge(id domain.PeerIdentity) (drained bool)
 // with ctx's error. It holds no lock while it waits.
 func (m *unprovenRoutingWriters) waitDrained(ctx context.Context, id domain.PeerIdentity) error {
 	m.mu.Lock()
+	if err := ctx.Err(); err != nil {
+		m.mu.Unlock()
+		return err
+	}
 	if m.inflight[id] == 0 {
 		m.mu.Unlock()
 		return nil
@@ -498,10 +548,33 @@ func (m *unprovenRoutingWriters) waitDrained(ctx context.Context, id domain.Peer
 	waiter := make(chan struct{})
 	m.drained[id] = append(m.drained[id], waiter)
 	m.mu.Unlock()
+	defer m.removeDrainWaiter(id, waiter)
 	select {
 	case <-waiter:
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
+	}
+}
+
+// removeDrainWaiter takes only the routing-writer leaf mutex. The invocation
+// owns its subscription, never another waiter's wake or the last writer's purge.
+func (m *unprovenRoutingWriters) removeDrainWaiter(id domain.PeerIdentity, waiter chan struct{}) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	waiters := m.drained[id]
+	for i, current := range waiters {
+		if current != waiter {
+			continue
+		}
+		copy(waiters[i:], waiters[i+1:])
+		waiters[len(waiters)-1] = nil
+		waiters = waiters[:len(waiters)-1]
+		if len(waiters) == 0 {
+			delete(m.drained, id)
+			return
+		}
+		m.drained[id] = waiters
+		return
 	}
 }

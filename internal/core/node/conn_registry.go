@@ -8,6 +8,7 @@ import (
 	"github.com/piratecash/corsa/internal/core/connbudget"
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/netcore"
+	"github.com/piratecash/corsa/internal/core/routing"
 )
 
 // connInfo is a read-only snapshot of registry state for a single connection,
@@ -527,7 +528,7 @@ func (s *Service) setTrackedByIDLocked(id domain.ConnID, tracked bool) {
 // triple is created for an inbound connection. The caller must hold s.peerMu
 // write lock and must ensure the connection is not already registered.
 func (s *Service) registerInboundConnLocked(conn net.Conn, core *netcore.NetCore, metered *netcore.MeteredConn, budget *connbudget.Reservation) {
-	entry := &connEntry{core: core, budget: budget}
+	entry := &connEntry{core: core, budget: budget, receive: routing.NewAnnounceReceiveState()}
 	if metered != nil {
 		entry.metered = metered
 	}
@@ -543,8 +544,18 @@ func (s *Service) registerInboundConnLocked(conn net.Conn, core *netcore.NetCore
 // not already registered.
 func (s *Service) attachOutboundCoreLocked(conn net.Conn, core *netcore.NetCore) {
 	id := core.ConnID()
-	s.conns[id] = &connEntry{core: core}
+	s.conns[id] = &connEntry{core: core, receive: routing.NewAnnounceReceiveState()}
 	s.connIDByNetConn[conn] = id
+}
+
+// receiveForIDLocked returns only the receive owner of the registered ConnID.
+// The caller holds peerMu. The pointer remains immutable until unregister closes it.
+func (s *Service) receiveForIDLocked(id domain.ConnID) *routing.AnnounceReceiveState {
+	entry := s.conns[id]
+	if entry == nil {
+		return nil
+	}
+	return entry.receive
 }
 
 // unregisterConnLocked removes a connection from the registry, clearing both
@@ -561,6 +572,9 @@ func (s *Service) unregisterConnLocked(conn net.Conn) {
 	// stops being owed here. Release is idempotent, so a path that
 	// unregisters twice cannot inflate free capacity.
 	if entry, exists := s.conns[id]; exists {
+		if entry.receive != nil {
+			entry.receive.Close()
+		}
 		entry.budget.Release()
 	}
 	delete(s.conns, id)

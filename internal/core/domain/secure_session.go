@@ -12,6 +12,21 @@ type SecureSessionStoreStats struct {
 	PinnedIdentities int
 	// PinCapacity is the bound on pinned identities.
 	PinCapacity int
+	// Selected counts allocations, including unconfirmed and C3 restoration
+	// reservations. OverCapacity preserves earlier preparation-file metadata;
+	// it never certifies conformance with the new admission bound.
+	SelectedAllocations         int
+	SelectedConfirmed           int
+	SelectedCapacity            int
+	SelectedOverCapacity        bool
+	SelectedAccountingAvailable bool
+	// Relation counts ALL non-absent R allocations, including Contact+Relation,
+	// unconfirmed state and absent C3 restoration reservations.
+	RelationAllocations         int
+	RelationConfirmed           int
+	RelationCapacity            int
+	RelationOverCapacity        bool
+	RelationAccountingAvailable bool
 	// Full reports that no NEW identity can be pinned: a v2 session of an
 	// identity not pinned yet is refused with pin_store_full. Existing pins
 	// are kept and keep being served.

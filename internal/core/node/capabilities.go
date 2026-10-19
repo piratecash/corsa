@@ -189,7 +189,7 @@ func intersectCapabilities(local []domain.Capability, remote []string) []domain.
 // applyWelcomeMetadata writes session.capabilities and
 // markSessionHandshakeComplete writes session.authOK, both under peerMu
 // (peer_sessions.go), and readPeerSession — one of this helper's callers — is
-// started BEFORE either of them, so a peer that pipelines a frame behind its own
+// started before either on the legacy path, so a peer that pipelines a frame behind its own
 // welcome has the reader here while the handshake goroutine is still assigning.
 //
 // A capability is NEGOTIATED only once the handshake has COMPLETED, and that is
@@ -206,11 +206,13 @@ func intersectCapabilities(local []domain.Capability, remote []string) []domain.
 // dispatchNetworkFrame answers auth_required to every p2pWireCommand arriving on
 // an unauthenticated connection.
 //
-// The refusal drops the frame rather than deferring it, and that costs nothing
-// legitimate. No conforming peer may put plane traffic in this window — its own
-// inbound reader refuses ours identically — so a frame landing here is one the
-// sender was never entitled to send; and holding the window's frames back would
-// mean a per-session queue whose size the neighbour alone decides.
+// Actual pre-authentication plane traffic is still dropped. Once the expected
+// auth_ok is on the wire, however, the peer may legitimately pipeline data:
+// readPeerSession pauses before its next read until the handshake owner
+// publishes readiness, rather than losing such traffic to waiter scheduling.
+// A proven v2 session starts its reader only after metadata and authentication
+// are published. Neither path accepts data before its capability gate is ready,
+// and neither allocates an unbounded queue of early frames.
 // A datagram the plane refuses is dropped without closing the connection
 // (docs/protocol/datagram.md §2), and the announce plane self-heals through the forced
 // periodic full sync and route TTL.

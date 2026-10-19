@@ -1,25 +1,7 @@
 #!/usr/bin/env bash
-# enforce-netcore-boundary.sh — automated gate for §2.9 forbidden patterns.
-#
-# This script is the canonical runner for the grep-based part of the Phase 2
-# compile-time enforcement (§6.4(b)). It runs the exact rg commands listed in
-# docs/netcore-migration.md §2.9 and asserts each against the expected
-# baseline. Any drift — a new occurrence of a forbidden pattern, or the
-# carve-out function set growing beyond the frozen 14 — exits non-zero.
-#
-# Output format on failure:
-#   FAIL: <category>: expected <N>, got <M>
-# followed by the offending lines for human diff.
-#
-# The script is intentionally reliant on rg (ripgrep). rg is already a
-# toolchain dependency for developer workflows; CI uses the ubuntu-latest
-# runner which ships it. Callers that lack rg see a single actionable error.
-#
-# The script is the pair to a separate architectural boundary lint that
-# checks `net` imports in internal/core/node (see scripts/ or tools/
-# subdirectory). The two gates are independent by design — one proves
-# "no new code added to forbidden places", the other proves "no forbidden
-# imports on the whole package".
+# Exact reviewed lexical boundary, documented in docs/design/netcore-boundary-baseline.md.
+# Known legacy debt is a static multiset, not a numerical allowance. Go build,
+# tests and lint remain independent gates; this script is not a Go AST verifier.
 
 set -euo pipefail
 
@@ -99,6 +81,62 @@ expect_count() {
     fi
 }
 
+BASELINE="$SCRIPT_DIR/netcore-boundary-baseline.tsv"
+if [ ! -f "$BASELINE" ]; then
+    echo "FAIL: missing static netcore boundary baseline" >&2
+    exit 2
+fi
+
+normalize_source() {
+    awk '{$1=$1; print}'
+}
+
+# Go declarations and their closing braces are column-zero in gofmt sources.
+# Matching source is tied to its enclosing declaration, never a line number.
+function_at() {
+    awk -v target="$2" '
+        /^func[[:space:]]/ { signature=$0; sub(/[[:space:]]*\{.*/, "", signature) }
+        NR==target { if (signature=="") print "<package>"; else print signature; exit }
+        /^}/ { signature="" }
+    ' "$1" | normalize_source
+}
+
+canonical_records() {
+    local mode="$1" path number source signature
+    while IFS=: read -r path number source; do
+        [ -n "$path" ] || continue
+        source=$(printf '%s\n' "$source" | normalize_source)
+        if [ "$mode" = "import" ]; then
+            printf '%s | %s\n' "$path" "$source"
+        else
+            signature=$(function_at "$path" "$number")
+            if [ "$mode" = "signature" ]; then
+                printf '%s | %s\n' "$path" "$signature"
+            else
+                printf '%s | %s | %s\n' "$path" "$signature" "$source"
+            fi
+        fi
+    done | LC_ALL=C sort
+}
+
+expect_records() {
+    local label="$1" categories="$2" mode="$3" expected actual raw
+    shift 3
+    expected=$(awk -F '\t' -v wanted="$categories" '
+        (" " wanted " ") ~ (" " $1 " ") {sub(/^[^\t]*\t/, ""); print}
+    ' "$BASELINE" | LC_ALL=C sort)
+    raw=$(run_rg "$@")
+    actual=$(printf '%s\n' "$raw" | strip_comment_lines | canonical_records "$mode")
+    if [ "$actual" != "$expected" ]; then
+        REPORT+=("FAIL: $label: exact reviewed multiset differs")
+        echo "  expected records:" >&2
+        printf '%s\n' "$expected" | sed 's/^/    /' >&2
+        echo "  actual records:" >&2
+        printf '%s\n' "$actual" | sed 's/^/    /' >&2
+        FAILED=1
+    fi
+}
+
 # Gate 1: direct socket write outside transport owner.
 # Expected baseline after PR 9.6 / 10.x:
 #   service.go → 0, peer_management.go → 0,
@@ -109,16 +147,16 @@ expect_count() {
 #                         table),
 #   socks5.go → 2 (SOCKS5 greeting + CONNECT).
 expect_count "direct socket write in service.go" 0 -- \
-    rg -n --glob '!**/*_test.go' 'conn\.Write\(|io\.WriteString\(' \
+    rg -nH --glob '!**/*_test.go' 'conn\.Write\(|io\.WriteString\(' \
        internal/core/node/service.go
 expect_count "direct socket write in peer_management.go" 0 -- \
-    rg -n --glob '!**/*_test.go' 'conn\.Write\(|io\.WriteString\(' \
+    rg -nH --glob '!**/*_test.go' 'conn\.Write\(|io\.WriteString\(' \
        internal/core/node/peer_management.go
 expect_count "direct socket write in routing_relay.go" 3 -- \
-    rg -n --glob '!**/*_test.go' 'conn\.Write\(|io\.WriteString\(' \
+    rg -nH --glob '!**/*_test.go' 'conn\.Write\(|io\.WriteString\(' \
        internal/core/node/routing_relay.go
 expect_count "direct socket write in socks5.go" 2 -- \
-    rg -n --glob '!**/*_test.go' 'conn\.Write\(|io\.WriteString\(' \
+    rg -nH --glob '!**/*_test.go' 'conn\.Write\(|io\.WriteString\(' \
        internal/core/node/socks5.go
 
 # Gate 2: raw session.conn write through outbound legacy path.
@@ -128,22 +166,22 @@ expect_count "direct socket write in socks5.go" 2 -- \
 # The looser pattern is retained as a review-time audit — automation asserts
 # the stricter invariant.
 expect_count "raw session.conn write in peer_management.go" 0 -- \
-    rg -n --glob '!**/*_test.go' 'session\.conn\.(Write|WriteTo)\(' \
+    rg -nH --glob '!**/*_test.go' 'session\.conn\.(Write|WriteTo)\(' \
        internal/core/node/peer_management.go
 
 # Gate 3: parallel map[net.Conn]*NetCore registry.
 expect_count "parallel map[net.Conn]*NetCore" 0 -- \
-    rg -n --glob '!**/*_test.go' 'map\[net\.Conn\]\*NetCore' \
+    rg -nH --glob '!**/*_test.go' 'map\[net\.Conn\]\*NetCore' \
        internal/core/node
 
 # Gate 4: primary registry keyed by net.Conn (regressed from PR 9.7).
 expect_count "primary map[net.Conn]*connEntry" 0 -- \
-    rg -n --glob '!**/*_test.go' 'map\[net\.Conn\]\*connEntry' \
+    rg -nH --glob '!**/*_test.go' 'map\[net\.Conn\]\*connEntry' \
        internal/core/node
 
 # Gate 5: direct access to s.conns / s.connIDByNetConn outside conn_registry.go.
-expect_count "s.conns / s.connIDByNetConn outside conn_registry.go" 0 -- \
-    rg -n --glob '!**/*_test.go' --glob '!**/conn_registry.go' \
+expect_records "legacy registry reads" registry site \
+    rg -nH --glob '!**/*_test.go' --glob '!**/conn_registry.go' \
        's\.conns\b|s\.connIDByNetConn\b' \
        internal/core/node
 
@@ -151,58 +189,42 @@ expect_count "s.conns / s.connIDByNetConn outside conn_registry.go" 0 -- \
 # `make lint`; this is a fast backup. ByID variants are the canonical names
 # after PR 10.6.
 expect_count "un-ack'd write-wrappers (async + sync: writeJSONFrame*ByID / enqueueFrame*ByID / sendFrameViaNetwork + sendFrameViaNetworkSync / sendFrameBytesViaNetwork + sendFrameBytesViaNetworkSync / sendSessionFrameViaNetwork)" 0 -- \
-    rg -nU --glob '!**/*_test.go' \
+    rg -nHU --glob '!**/*_test.go' \
        '^\s*(svc|s)\.(writeJSONFrameByID|writeJSONFrameSyncByID|enqueueFrameByID|enqueueFrameSyncByID|sendFrameViaNetwork|sendFrameViaNetworkSync|sendFrameBytesViaNetwork|sendFrameBytesViaNetworkSync|sendSessionFrameViaNetwork)\(' \
        internal/core/node
 
 # Gate 7: untyped uint64 identity regression.
-expect_count "untyped uint64 ConnID identity in node/domain" 0 -- \
-    rg -n --glob '!**/*_test.go' --glob '!**/conn_id.go' \
+expect_records "legacy uint64 identity helper" uint64 site \
+    rg -nH --glob '!**/*_test.go' --glob '!**/conn_id.go' \
        'connID\s+uint64|ConnID\s+uint64' \
        internal/core/node internal/core/domain
 
 # Gate 8: deleted net.Conn-first public lookup wrappers.
 expect_count "legacy netCoreFor / meteredFor / isInboundTracked" 0 -- \
-    rg -n --glob '!**/*_test.go' \
+    rg -nH --glob '!**/*_test.go' \
        '\bs\.(netCoreFor|meteredFor|isInboundTracked)\(' \
        internal/core/node
 
 # Gate 9: deleted setTrackedLocked mutation.
 expect_count "legacy setTrackedLocked" 0 -- \
-    rg -n --glob '!**/*_test.go' '\bs\.setTrackedLocked\(' \
+    rg -nH --glob '!**/*_test.go' '\bs\.setTrackedLocked\(' \
        internal/core/node
 
 # Gate 10: legacy forEach callback signature taking net.Conn.
 expect_count "legacy forEach…Locked(func(net.Conn,…))" 0 -- \
-    rg -n --glob '!**/*_test.go' \
+    rg -nH --glob '!**/*_test.go' \
        'forEach(Inbound|TrackedInbound)ConnLocked\(func\([^)]*net\.Conn' \
        internal/core/node
 
-# Gate 11: carve-out membership — net.Conn-accepting functions and methods.
-# Expected baseline = 12 exactly (11 frozen §2.6.26 Service methods + 1
-# socket-infra package-level enableTCPKeepAlive). Any growth is either
-# regression or a new net.Conn entry point outside the frozen list.
-# The regex is broadened over §2.9 literal to include package-level funcs:
-# `func ( ... )? Name(... net.Conn ...)` — otherwise enableTCPKeepAlive is
-# not counted and the baseline would drift to 11.
-# Note: PR 10.16 follow-up removed connEntryLocked / connEntryForLocked
-# once their production call-sites migrated to ConnID-first helpers
-# (trackedInboundAddressByIDLocked, connIdentityByIDLocked, connEntryByIDLocked).
-# Baseline dropped 14 → 12 accordingly.
-expect_count "carve-out membership (net.Conn-accepting methods / functions)" 12 -- \
-    rg -n --glob '!**/*_test.go' \
+# Gate 11: exact frozen declaration membership; same-count substitutions fail.
+expect_records "net.Conn-accepting functions" conn signature \
+    rg -nH --glob '!**/*_test.go' \
        'func (\([^)]*\) )?[A-Za-z_][A-Za-z0-9_]*\([^)]*net\.Conn' \
        internal/core/node
 
-# Gate 13: scope (v) — direct `entry.core` access outside conn_registry.go.
-# After PR 10.16 the *netcore.NetCore handle behind connEntry is hidden from
-# all production call sites; reads go through coreForIDLocked (handshake-time
-# carve-out) or the value-typed connInfo snapshot returned by the walkers.
-# Test fixtures in conn_registry_test_helpers_test.go / conn_registry_lifecycle_test.go
-# legitimately read entry.core for assertion plumbing — they are excluded by
-# the !**/*_test.go glob.
-expect_count "entry.core.* outside conn_registry.go (scope v)" 0 -- \
-    rg -n --glob '!**/*_test.go' --glob '!**/conn_registry.go' \
+# Gate 13: four specific legacy metrics reads, never a whole-file exclusion.
+expect_records "legacy entry.core metrics reads" entry site \
+    rg -nH --glob '!**/*_test.go' --glob '!**/conn_registry.go' \
        'entry\.core\.' \
        internal/core/node
 
@@ -212,7 +234,7 @@ expect_count "entry.core.* outside conn_registry.go (scope v)" 0 -- \
 # call sites mutate identity/address/auth concurrently with handshake-time
 # writes — exactly the race that PR 10.16 closed.
 expect_count "legacy forEach…ConnLocked(func(…*netcore.NetCore…))" 0 -- \
-    rg -n --glob '!**/*_test.go' \
+    rg -nH --glob '!**/*_test.go' \
        'forEach(Inbound|TrackedInbound|)?ConnLocked\(func\([^)]*\*netcore\.NetCore' \
        internal/core/node
 
@@ -222,58 +244,17 @@ expect_count "legacy forEach…ConnLocked(func(…*netcore.NetCore…))" 0 -- \
 # was the last consumer of *NetCore inside routing_integration.go (now split
 # into routing_announce.go / routing_relay.go / routing_resolver.go / …).
 expect_count "legacy inboundConnKey(*netcore.NetCore) helper" 0 -- \
-    rg -n --glob '!**/*_test.go' \
+    rg -nH --glob '!**/*_test.go' \
        'inboundConnKey\(' \
        internal/core/node
 
-# Gate 12: architectural boundary — `net` stdlib import in internal/core/node.
-# The whitelist captures the frozen carve-out files plus network-level
-# helpers that legitimately need net.IP / net.ParseCIDR / net.Listener:
-#   conn_registry.go     — frozen lifecycle binding (§2.6.26)
-#   service.go           — frozen entry/lifecycle surface (§2.6.26)
-#   peer_management.go   — enableTCPKeepAlive (socket-infra)
-#   routing_relay.go     — §4.4 bootstrap edges of the notice dial
-#                          (sendNoticeToPeer: the raw-socket dial and the
-#                          remote address of its outbound success); see the
-#                          "internal/core/node/" file map in docs/routing.md
-#                          for the per-file scope table
-#   socks5.go            — §5.3.2 sub-NetCore handshake
-#   peer_provider.go     — net.IP / net.ParseCIDR for peer-address policy
-#   netgroup.go          — net.IP grouping helpers for reachability
-#   session_secure.go    — session-kind choice: the first byte of an
-#                          accepted socket and the TLS wrapping of the v2
-#                          session, both before the connection is registered
-# Any new file in internal/core/node that imports `net` is a boundary
-# violation and must either move the functionality into netcore or be
-# added explicitly to this whitelist with review.
-check_net_import_whitelist() {
-    local actual expected diff
-    actual=$(
-        rg -l --glob '!**/*_test.go' '^\s*"net"\s*$|^import\s+"net"\s*$' \
-           internal/core/node 2>/dev/null \
-        | sort
-    )
-    expected=$(cat <<'EOF' | sort
-internal/core/node/conn_registry.go
-internal/core/node/netgroup.go
-internal/core/node/peer_management.go
-internal/core/node/peer_provider.go
-internal/core/node/routing_relay.go
-internal/core/node/service.go
-internal/core/node/session_secure.go
-internal/core/node/socks5.go
-EOF
-    )
-    if [ "$actual" != "$expected" ]; then
-        REPORT+=("FAIL: net-import whitelist: internal/core/node files importing net do not match the carve-out whitelist")
-        echo "  expected whitelist:" >&2
-        printf '    %s\n' $expected >&2
-        echo "  actual importers:" >&2
-        printf '    %s\n' $actual >&2
-        FAILED=1
-    fi
-}
-check_net_import_whitelist
+# Gate 12: eighteen legacy importers plus one sentinel-only readiness import.
+# Matching the complete import source also refuses aliases/dot imports.
+expect_records "net import whitelist" "legacy_import readiness_import" import \
+    rg -nH --glob '!**/*_test.go' '"net"' internal/core/node
+expect_records "readiness net.ErrClosed sentinel in stop only" readiness site \
+    rg -nH --glob '!**/*_test.go' '\bnet[[:space:]]*\.' \
+       internal/core/node/peer_session_readiness.go
 
 # Final report and exit.
 if [ "$FAILED" -ne 0 ]; then

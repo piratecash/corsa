@@ -462,20 +462,7 @@ const (
 func (s *AnnouncePeerState) ObserveV3Epoch(incoming uint64) V3EpochVerdict {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !s.knownV3EpochSet {
-		s.knownV3Epoch = incoming
-		s.knownV3EpochSet = true
-		return V3EpochApply
-	}
-	switch {
-	case incoming < s.knownV3Epoch:
-		return V3EpochStale
-	case incoming > s.knownV3Epoch:
-		s.knownV3Epoch = incoming
-		return V3EpochReset
-	default:
-		return V3EpochApply
-	}
+	return observeV3ReceiveEpoch(incoming, &s.knownV3Epoch, &s.knownV3EpochSet, &s.hasReceivedBaseline)
 }
 
 // KnownV3Epoch reports the highest v3 epoch observed from the peer this
@@ -854,3 +841,7 @@ func (r *AnnounceStateRegistry) Cleanup() {
 	defer r.mu.Unlock()
 	r.peers = make(map[PeerIdentity]*AnnouncePeerState)
 }
+
+// ReceiveReady exists for explicit legacy registry fixtures. Production routing
+// dispatch binds AnnounceReceiveState to the actual connection instead.
+func (*AnnouncePeerState) ReceiveReady() bool { return true }

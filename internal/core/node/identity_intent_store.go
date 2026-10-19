@@ -3,6 +3,7 @@ package node
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"sync"
@@ -17,8 +18,7 @@ import (
 // message cannot be written to the chatlog, so after a restart this table
 // is the ONLY seed for background resolutions.
 //
-// Semantics are a refcount over the reason set: removing one reason (the
-// user closed the chat) does not cancel the operation while other reasons
+// Semantics are a refcount over the reason set: explicitly removing one reason does not cancel the operation while other reasons
 // live. A resolution is cancelled only when its reason set becomes empty.
 
 // identityIntentReasonType names why a resolution must keep running.
@@ -57,6 +57,7 @@ type identityIntentRow struct {
 	Target    string               `json:"target"`
 	Reason    identityIntentReason `json:"reason"`
 	Attempts  int                  `json:"attempts"`
+	action    identityLookupActionStamp
 }
 
 // identityIntentFile is the on-disk shape.
@@ -118,103 +119,96 @@ func loadIdentityIntentStore(path string) *identityIntentStore {
 	return store
 }
 
-// add registers a reason for the target. Returns true when the reason is
-// new (first registration wins; attempts survive re-adds).
-func (s *identityIntentStore) add(target domain.PeerIdentity, reason identityIntentReason, now time.Time) (bool, error) {
-	key := identityIntentKey{target: target, reason: reason}
+// mutate snapshots memory only. Resolver callers already hold resolver.mu;
+// the only lock added here is intent.mu. Save the returned value after both.
+func (s *identityIntentStore) mutate(change func() bool) (*identityIntentSnapshot, error) {
 	s.mu.Lock()
-	if _, exists := s.rows[key]; exists {
-		s.mu.Unlock()
-		return false, nil
+	defer s.mu.Unlock()
+	if s.snapshotGen == math.MaxUint64 {
+		return nil, fmt.Errorf("identity intents: generation exhausted")
 	}
-	s.rows[key] = identityIntentRow{
-		Target:    target.String(),
-		Reason:    reason,
-		CreatedAt: now.UTC(),
+	if !change() {
+		return nil, nil
 	}
 	snapshot := s.snapshotLocked()
-	s.mu.Unlock()
-	return true, s.save(snapshot)
+	return &snapshot, nil
 }
 
-// remove drops one reason. remaining reports how many reasons the target
-// still has — zero means the resolution lost its last reason and must be
-// cancelled.
-func (s *identityIntentStore) remove(target domain.PeerIdentity, reason identityIntentReason) (remaining int, err error) {
-	key := identityIntentKey{target: target, reason: reason}
-	s.mu.Lock()
-	if _, exists := s.rows[key]; !exists {
-		remaining = s.countLocked(target)
-		s.mu.Unlock()
-		return remaining, nil
-	}
-	delete(s.rows, key)
-	remaining = s.countLocked(target)
-	snapshot := s.snapshotLocked()
-	s.mu.Unlock()
-	return remaining, s.save(snapshot)
-}
-
-// removeReasonType drops every reason of one type for the target (a
-// recovery job closed or was evicted — its per-message reasons go
-// together). remaining counts the target's surviving reasons of ANY type.
-func (s *identityIntentStore) removeReasonType(target domain.PeerIdentity, reasonType identityIntentReasonType) (remaining int, err error) {
-	s.mu.Lock()
-	removed := false
-	for key := range s.rows {
-		if key.target == target && key.reason.Type == reasonType {
-			delete(s.rows, key)
-			removed = true
-		}
-	}
-	remaining = s.countLocked(target)
-	if !removed {
-		s.mu.Unlock()
-		return remaining, nil
-	}
-	snapshot := s.snapshotLocked()
-	s.mu.Unlock()
-	return remaining, s.save(snapshot)
-}
-
-// removeTarget drops every reason of a target (resolution terminal).
-func (s *identityIntentStore) removeTarget(target domain.PeerIdentity) error {
-	s.mu.Lock()
-	removed := false
-	for key := range s.rows {
-		if key.target == target {
-			delete(s.rows, key)
-			removed = true
-		}
-	}
-	if !removed {
-		s.mu.Unlock()
-		return nil
-	}
-	snapshot := s.snapshotLocked()
-	s.mu.Unlock()
-	return s.save(snapshot)
-}
-
-// recordAttempt bumps the attempt counter on every row of the target, so a
-// restart resumes the background phase instead of restarting it.
-func (s *identityIntentStore) recordAttempt(target domain.PeerIdentity) error {
-	s.mu.Lock()
-	touched := false
-	for key, row := range s.rows {
-		if key.target == target {
-			row.Attempts++
+func (s *identityIntentStore) addMemory(target domain.PeerIdentity, reason identityIntentReason, now time.Time, action identityLookupActionStamp) (*identityIntentSnapshot, error) {
+	return s.mutate(func() bool {
+		key := identityIntentKey{target: target, reason: reason}
+		row, exists := s.rows[key]
+		if exists {
+			if action.origin == identityLookupOriginNone || row.action == action {
+				return false
+			}
+			row.action = action
 			s.rows[key] = row
-			touched = true
+			// Runtime-only promotion is never serialized, but returns a snapshot
+			// to preserve one mutation/snapshot ordering for this transition.
+			return true
 		}
-	}
-	if !touched {
-		s.mu.Unlock()
+		s.rows[key] = identityIntentRow{Target: target.String(), Reason: reason, CreatedAt: now.UTC(), action: action}
+		return true
+	})
+}
+
+func (s *identityIntentStore) removeMemory(target domain.PeerIdentity, matches func(identityIntentKey, identityIntentRow) bool) (int, *identityIntentSnapshot, error) {
+	remaining := 0
+	snapshot, err := s.mutate(func() bool {
+		changed := false
+		for key, row := range s.rows {
+			if key.target == target && matches(key, row) {
+				delete(s.rows, key)
+				changed = true
+			}
+		}
+		remaining = s.countLocked(target)
+		return changed
+	})
+	return remaining, snapshot, err
+}
+func (s *identityIntentStore) recordAttemptMemory(target domain.PeerIdentity) (*identityIntentSnapshot, error) {
+	return s.mutate(func() bool {
+		changed := false
+		for key, row := range s.rows {
+			if key.target == target {
+				row.Attempts++
+				s.rows[key] = row
+				changed = true
+			}
+		}
+		return changed
+	})
+}
+func (s *identityIntentStore) persist(snapshot *identityIntentSnapshot) error {
+	if snapshot == nil {
 		return nil
 	}
-	snapshot := s.snapshotLocked()
-	s.mu.Unlock()
-	return s.save(snapshot)
+	return s.save(*snapshot)
+}
+
+// Compatibility store operations are standalone: all I/O follows intent.mu.
+func (s *identityIntentStore) add(target domain.PeerIdentity, reason identityIntentReason, now time.Time) (bool, error) {
+	snapshot, err := s.addMemory(target, reason, now, identityLookupActionStamp{})
+	if err != nil {
+		return false, err
+	}
+	return snapshot != nil, s.persist(snapshot)
+}
+func (s *identityIntentStore) remove(target domain.PeerIdentity, reason identityIntentReason) (int, error) {
+	remaining, snapshot, err := s.removeMemory(target, func(key identityIntentKey, _ identityIntentRow) bool { return key.reason == reason })
+	if err != nil {
+		return remaining, err
+	}
+	return remaining, s.persist(snapshot)
+}
+func (s *identityIntentStore) recordAttempt(target domain.PeerIdentity) error {
+	snapshot, err := s.recordAttemptMemory(target)
+	if err != nil {
+		return err
+	}
+	return s.persist(snapshot)
 }
 
 // identityIntentSeed is one target's reseed state after a restart.
@@ -275,6 +269,7 @@ func (s *identityIntentStore) snapshotLocked() identityIntentSnapshot {
 	s.snapshotGen++
 	rows := make([]identityIntentRow, 0, len(s.rows))
 	for _, row := range s.rows {
+		row.action = identityLookupActionStamp{}
 		rows = append(rows, row)
 	}
 	return identityIntentSnapshot{rows: rows, gen: s.snapshotGen}
@@ -309,4 +304,25 @@ func (s *identityIntentStore) save(snapshot identityIntentSnapshot) error {
 	}
 	s.savedGen = snapshot.gen
 	return nil
+}
+
+// seedForTarget returns the current aggregate under intent.mu; resolver callers
+// also hold resolver.mu so later mutation cannot target a replacement reason set.
+func (s *identityIntentStore) seedForTarget(target domain.PeerIdentity) (identityIntentSeed, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	seed := identityIntentSeed{Target: target}
+	for key, row := range s.rows {
+		if key.target != target {
+			continue
+		}
+		if seed.Reasons == 0 || row.CreatedAt.Before(seed.CreatedAt) {
+			seed.CreatedAt = row.CreatedAt
+		}
+		if row.Attempts > seed.Attempts {
+			seed.Attempts = row.Attempts
+		}
+		seed.Reasons++
+	}
+	return seed, seed.Reasons > 0
 }

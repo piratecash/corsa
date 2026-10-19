@@ -42,6 +42,7 @@ type knownPeer struct {
 // Internal to node package — not exposed beyond Service ↔ PeerProvider
 // boundary.
 type PeerHealthView struct {
+	Aging               peerEntry
 	Score               int
 	ConsecutiveFailures int
 	LastDisconnectedAt  time.Time
@@ -201,6 +202,9 @@ type PeerProvider struct {
 	mu     sync.RWMutex
 	known  map[domain.PeerAddress]*knownPeer
 	config PeerProviderConfig
+	// Recheck rotation is protected by mu, alongside known.
+	recheckRound uint64
+	recheckAfter domain.PeerAddress
 }
 
 const (
@@ -262,13 +266,7 @@ func (pp *PeerProvider) Add(address domain.PeerAddress, source domain.PeerSource
 	}
 }
 
-// Promote updates an existing peer's Source and refreshes AddedAt, marking it
-// as freshly seen. Used by add_peer to re-stamp a known peer with
-// Source=Manual. NOTE: this does not raise the peer within Candidates() among
-// equal scores — that list sorts by AddedAt ascending, so a refreshed (newer)
-// timestamp actually sorts later. Operator dial priority comes from the
-// immediate ManualPeerRequested path that bypasses Candidates() entirely, not
-// from this re-stamp. If the address is unknown, it is added as new.
+// Promote updates the discovery source, preserving the first discovery time.
 func (pp *PeerProvider) Promote(address domain.PeerAddress, source domain.PeerSource) {
 	address = domain.PeerAddress(strings.TrimSpace(string(address)))
 	if address == "" {
@@ -285,7 +283,6 @@ func (pp *PeerProvider) Promote(address domain.PeerAddress, source domain.PeerSo
 
 	if existing, exists := pp.known[address]; exists {
 		existing.Source = source
-		existing.AddedAt = pp.config.NowFn()
 		return
 	}
 
@@ -370,8 +367,8 @@ func (pp *PeerProvider) Count() int {
 // Candidates returns the filtered, deduplicated, sorted list of dial
 // candidates. Implements the full 10-step algorithm from the spec.
 func (pp *PeerProvider) Candidates() []domain.CandidatePeer {
-	pp.mu.RLock()
-	defer pp.mu.RUnlock()
+	pp.mu.Lock()
+	defer pp.mu.Unlock()
 
 	cfg := pp.config
 	now := cfg.NowFn()
@@ -396,6 +393,7 @@ func (pp *PeerProvider) Candidates() []domain.CandidatePeer {
 		peer    *knownPeer
 		score   int
 		addedAt time.Time
+		aging   peerEntry
 	}
 
 	// connectOnly pin: when active, only the pinned address survives — every
@@ -515,9 +513,18 @@ func (pp *PeerProvider) Candidates() []domain.CandidatePeer {
 
 		// 6f: check health — per-address ban and cooldown.
 		peerScore := 0
+		aging := peerEntry{Address: kp.Address, AddedAt: &kp.AddedAt}
 		if cfg.HealthFn != nil {
 			if h := cfg.HealthFn(kp.Address); h != nil {
 				peerScore = h.Score
+				aging = h.Aging
+				aging.Address = kp.Address
+				if aging.AddedAt == nil {
+					aging.AddedAt = &kp.AddedAt
+				}
+				if addressStale(aging, now) && now.Before(addressRecheckAt(aging)) {
+					continue
+				}
 
 				// Skip peers carrying an active address-level ban that did
 				// NOT widen to the whole IP (self-identity carve-out — see
@@ -559,6 +566,7 @@ func (pp *PeerProvider) Candidates() []domain.CandidatePeer {
 			peer:    kp,
 			score:   peerScore,
 			addedAt: kp.AddedAt,
+			aging:   aging,
 		})
 	}
 
@@ -573,14 +581,12 @@ func (pp *PeerProvider) Candidates() []domain.CandidatePeer {
 			bestByIP[s.peer.IP] = s
 			continue
 		}
-		switch {
-		case s.score > existing.score:
-			bestByIP[s.peer.IP] = s
-		case s.score == existing.score && s.addedAt.Before(existing.addedAt):
-			bestByIP[s.peer.IP] = s
-		case s.score == existing.score && s.addedAt.Equal(existing.addedAt) && s.peer.Address < existing.peer.Address:
+		left, right := s.aging, existing.aging
+		left.Score, right.Score = s.score, existing.score
+		if addressRankBefore(left, right, now) {
 			bestByIP[s.peer.IP] = s
 		}
+
 	}
 
 	// Collect deduplicated entries.
@@ -593,14 +599,41 @@ func (pp *PeerProvider) Candidates() []domain.CandidatePeer {
 	// then by Address asc for full determinism when score and AddedAt
 	// are equal (e.g. bootstrap peers added in the same batch).
 	sort.Slice(deduped, func(i, j int) bool {
-		if deduped[i].score != deduped[j].score {
-			return deduped[i].score > deduped[j].score
-		}
-		if !deduped[i].addedAt.Equal(deduped[j].addedAt) {
-			return deduped[i].addedAt.Before(deduped[j].addedAt)
-		}
-		return deduped[i].peer.Address < deduped[j].peer.Address
+		left, right := deduped[i].aging, deduped[j].aging
+		left.Score, right.Score = deduped[i].score, deduped[j].score
+		return addressRankBefore(left, right, now)
 	})
+	// Every fourth eligible selection reserves a recheck for an address that
+	// worked before. A cursor advances independently of newly discovered peers.
+	pp.recheckRound++
+	if pp.recheckRound%4 == 0 && !pinned {
+		selected := -1
+		for i := range deduped {
+			if deduped[i].aging.LastSessionAt == nil {
+				continue
+			}
+			if selected < 0 || deduped[i].peer.Address < deduped[selected].peer.Address {
+				selected = i
+			}
+		}
+		next := -1
+		for i := range deduped {
+			address := deduped[i].peer.Address
+			if deduped[i].aging.LastSessionAt == nil || address <= pp.recheckAfter {
+				continue
+			}
+			if next < 0 || address < deduped[next].peer.Address {
+				next = i
+			}
+		}
+		if next >= 0 {
+			selected = next
+		}
+		if selected >= 0 {
+			pp.recheckAfter = deduped[selected].peer.Address
+			deduped = []scored{deduped[selected]}
+		}
+	}
 
 	// Step 9: subnet-diversity filter — at most one automatic outbound
 	// connection per subnet group (/24 IPv4, /64 IPv6). The occupied set
@@ -780,6 +813,12 @@ func (pp *PeerProvider) KnownPeers() []domain.KnownPeerInfo {
 	bannedIPs := pp.buildBannedIPsSet(now)
 
 	result := make([]domain.KnownPeerInfo, 0, len(pp.known))
+	ranks := make(map[domain.PeerAddress]peerEntry, len(pp.known))
+	rank := func(peer domain.KnownPeerInfo) peerEntry {
+		entry := ranks[peer.Address]
+		entry.Score = peer.Score
+		return entry
+	}
 
 	for _, kp := range pp.known {
 		var reasons []domain.ExcludeReason
@@ -820,6 +859,17 @@ func (pp *PeerProvider) KnownPeers() []domain.KnownPeerInfo {
 		var health *PeerHealthView
 		if cfg.HealthFn != nil {
 			health = cfg.HealthFn(kp.Address)
+		}
+
+		aging := peerEntry{Address: kp.Address, AddedAt: &kp.AddedAt}
+		if health != nil {
+			aging = health.Aging
+			aging.Address = kp.Address
+			aging.AddedAt = &kp.AddedAt
+		}
+		ranks[kp.Address] = aging
+		if addressStale(aging, now) && now.Before(addressRecheckAt(aging)) {
+			reasons = append(reasons, domain.ExcludeReasonCooldown)
 		}
 
 		// Banned direct (per-address).
@@ -916,15 +966,7 @@ func (pp *PeerProvider) KnownPeers() []domain.KnownPeerInfo {
 			continue
 		}
 		// Same tie-breaking as Candidates() Step 7.
-		replace := false
-		switch {
-		case r.Score > existing.score:
-			replace = true
-		case r.Score == existing.score && r.AddedAt.Before(existing.addedAt):
-			replace = true
-		case r.Score == existing.score && r.AddedAt.Equal(existing.addedAt) && r.Address < existing.address:
-			replace = true
-		}
+		replace := addressRankBefore(rank(*r), rank(result[existing.idx]), now)
 		if replace {
 			// Previous winner loses — mark it as deduped.
 			result[existing.idx].ExcludeReasons = append(result[existing.idx].ExcludeReasons, domain.ExcludeReasonIPDedup)
@@ -951,13 +993,7 @@ func (pp *PeerProvider) KnownPeers() []domain.KnownPeerInfo {
 		}
 		sort.Slice(eligible, func(a, b int) bool {
 			ri, rj := result[eligible[a]], result[eligible[b]]
-			if ri.Score != rj.Score {
-				return ri.Score > rj.Score
-			}
-			if !ri.AddedAt.Equal(rj.AddedAt) {
-				return ri.AddedAt.Before(rj.AddedAt)
-			}
-			return ri.Address < rj.Address
+			return addressRankBefore(rank(ri), rank(rj), now)
 		})
 		for _, i := range eligible {
 			kp := pp.known[result[i].Address]
@@ -980,13 +1016,7 @@ func (pp *PeerProvider) KnownPeers() []domain.KnownPeerInfo {
 	// Third tie-breaker by Address ensures stable ordering when score and
 	// timestamp are equal (same treatment as Candidates sort).
 	sort.Slice(result, func(i, j int) bool {
-		if result[i].Score != result[j].Score {
-			return result[i].Score > result[j].Score
-		}
-		if !result[i].AddedAt.Equal(result[j].AddedAt) {
-			return result[i].AddedAt.Before(result[j].AddedAt)
-		}
-		return result[i].Address < result[j].Address
+		return addressRankBefore(rank(result[i]), rank(result[j]), now)
 	})
 
 	return result

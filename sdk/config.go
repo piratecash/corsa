@@ -62,11 +62,16 @@ type NodeConfig struct {
 	// every fmt verb; both are covered by tests, because an embedder that
 	// dumps its config for support is the likeliest way this key ever
 	// leaves the machine.
-	PrivateKey     string `json:"-"`
-	IdentityPath   string
-	TrustStorePath string
-	PeersStatePath string
-	ChatLogDir     string
+	PrivateKey   string `json:"-"`
+	IdentityPath string
+	// IdentityIntentsPath opts into durable background resolution reasons.
+	// Nil keeps historical memory-only behavior; explicit blank is invalid.
+	IdentityIntentsPath *string
+	// AllowPrivatePeers is an explicit opt-in for a private deployment or an isolated functional stand.
+	AllowPrivatePeers bool
+	TrustStorePath    string
+	PeersStatePath    string
+	ChatLogDir        string
 
 	// StateDBPath overrides the shared SQLite state database location.
 	// Empty keeps the historical chatlog-<identity_short>-<port>.db file
@@ -355,6 +360,11 @@ func (c Config) internal() coreconfig.Config {
 		}
 	}
 
+	identityIntentsPath := ""
+	if cfg.Node.IdentityIntentsPath != nil {
+		identityIntentsPath = *cfg.Node.IdentityIntentsPath
+	}
+
 	return coreconfig.Config{
 		App: coreconfig.App{
 			Name:     cfg.App.Name,
@@ -364,23 +374,25 @@ func (c Config) internal() coreconfig.Config {
 			Version:  cfg.App.Version,
 		},
 		Node: coreconfig.Node{
-			ListenAddress:    cfg.Node.ListenAddress,
-			AdvertisePort:    advertisePort,
-			BootstrapPeers:   append([]string(nil), cfg.Node.BootstrapPeers...),
-			IdentityPath:     cfg.Node.IdentityPath,
-			TrustStorePath:   cfg.Node.TrustStorePath,
-			PeersStatePath:   cfg.Node.PeersStatePath,
-			ChatLogDir:       cfg.Node.ChatLogDir,
-			StateDBPath:      cfg.Node.StateDBPath,
-			DownloadDir:      cfg.Node.DownloadDir,
-			ProxyAddress:     cfg.Node.ProxyAddress,
-			Type:             nodeType,
-			ListenerEnabled:  listenerEnabled,
-			ListenerSet:      listenerSet,
-			ClientVersion:    cfg.Node.ClientVersion,
-			MaxClockDrift:    cfg.Node.MaxClockDrift,
-			MaxOutgoingPeers: cfg.Node.MaxOutgoingPeers,
-			MaxIncomingPeers: cfg.Node.MaxIncomingPeers,
+			ListenAddress:       cfg.Node.ListenAddress,
+			AdvertisePort:       advertisePort,
+			BootstrapPeers:      append([]string(nil), cfg.Node.BootstrapPeers...),
+			IdentityPath:        cfg.Node.IdentityPath,
+			IdentityIntentsPath: identityIntentsPath,
+			AllowPrivatePeers:   cfg.Node.AllowPrivatePeers,
+			TrustStorePath:      cfg.Node.TrustStorePath,
+			PeersStatePath:      cfg.Node.PeersStatePath,
+			ChatLogDir:          cfg.Node.ChatLogDir,
+			StateDBPath:         cfg.Node.StateDBPath,
+			DownloadDir:         cfg.Node.DownloadDir,
+			ProxyAddress:        cfg.Node.ProxyAddress,
+			Type:                nodeType,
+			ListenerEnabled:     listenerEnabled,
+			ListenerSet:         listenerSet,
+			ClientVersion:       cfg.Node.ClientVersion,
+			MaxClockDrift:       cfg.Node.MaxClockDrift,
+			MaxOutgoingPeers:    cfg.Node.MaxOutgoingPeers,
+			MaxIncomingPeers:    cfg.Node.MaxIncomingPeers,
 			// Default ON (the storm cure) unless the embedder explicitly
 			// opts out via a non-nil pointer to false.
 			HoldDMUntilReachable:     cfg.Node.HoldDMUntilReachable == nil || *cfg.Node.HoldDMUntilReachable,

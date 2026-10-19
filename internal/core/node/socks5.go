@@ -46,10 +46,16 @@ func dialTCPDirect(ctx context.Context, address string, timeout time.Duration) (
 // — the connection manager through dialPeerRawForCM, the auxiliary dials
 // (syncPeer, the notice fallback, session dials) through dialPeerWithBudget.
 // ctx bounds the whole dial, the proxy handshake included.
-func (s *Service) dialPeer(ctx context.Context, address domain.PeerAddress, timeout time.Duration) (net.Conn, error) {
+func (s *Service) dialPeer(ctx context.Context, address domain.PeerAddress, timeout time.Duration) (conn net.Conn, dialErr error) {
+	defer func() {
+		attempt, _ := ctx.Value(addressDialAttemptKey{}).(*addressDialAttempt)
+		if attempt != nil && !errors.Is(dialErr, errProxyUnavailable) && !errors.Is(dialErr, errOverlayWithoutProxy) && !errors.Is(dialErr, errInvalidOverlayAddress) {
+			attempt.performed = true
+		}
+	}()
 	host, port, ok := splitHostPort(string(address))
 	if !ok {
-		return nil, fmt.Errorf("invalid peer address: %s", address)
+		return nil, fmt.Errorf("%w: %s", errInvalidOverlayAddress, address)
 	}
 
 	overlayTarget, overlay, err := overlayDialTarget(host, port)

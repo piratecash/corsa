@@ -2,6 +2,23 @@
 
 ## English
 
+### Runtime and ban diagnostics (T5 A4/R1)
+
+`RuntimeMetrics` reads process runtime counters without Service locks. `banDiagnosticsSnap` is an
+immutable `atomic.Pointer` snapshot; `banDiagnosticsAccessNanos` gates periodic work. Both are outside
+the seven-domain split, synchronising themselves. `banDiagnosticsRequests` is assigned once by
+`NewService` (one buffered request); `hotReadsRefreshLoop` owns its worker and joins it on shutdown.
+An immutable `banDiagnosticsLifecycle` epoch (context plus stopped channel), published through an
+atomic pointer, makes pre-start/post-stop unavailability explicit and interrupts queueing/waiting
+on worker shutdown even while collection is blocked. Both the worker after collection and the
+reader before returning recheck the epoch. A fresh RPC takes no domain mutex. The worker first
+finishes PeerProvider callbacks, then copies peer bans under `peerMu`, releases it, copies IP scores
+and bans under `ipStateMu`, releases it, and reads the loopback penalty gauges (atomics). Sorting and
+JSON happen outside domain locks. These are separate source observations with an explicit collection
+window, not a new cross-domain transaction. The direct cached reader cannot claim freshness.
+See [diagnostic contract](rpc/runtime_metrics.md).
+
+
 ### Motivation
 
 `node.Service` historically guarded every piece of in-memory state with a single `sync.RWMutex` (`s.mu`). That mutex covered at least seven distinct concerns — peer connections, message delivery queues, cryptographic knowledge, gossip topics, IP-level policy, file transfer, and aggregate status. Go's `sync.RWMutex` is writer-preferring: one queued writer blocks every new reader until every in-flight reader drains. Any write to any domain therefore serialised reads across every other domain.
@@ -443,9 +460,242 @@ Phase 2 is complete. The legacy `s.mu` field no longer exists on `Service`; ever
 
 Every migration step must keep the existing node test suite green. Targeted regression tests from Phase 1 (reader-starvation reproducers in `*_starvation_test.go`) are re-run after every step to confirm the no-starvation property is preserved or improved.
 
+## Address aging ownership
+
+`Service.peerAdmissionMu` is an independent admission mutex: take it before domain locks; hold it across automatic insertion/eviction and the subsequent PeerProvider side effects. It also serializes explicit source bookkeeping in `recordAddedPeer`; the subsequent `registerAddedPeerCandidate` provider update runs after that admission hold is released. No caller takes it while holding a domain mutex. `peerEntry` owns aging counters/timestamps, runtime `ActiveDials` leases and one-shot `AllowImmediateDial`, all under `peerMu`; no parallel address-history map exists. `Service.peerClock` is immutable after construction (tests replace it before concurrent use). Provider recheck round/cursor belong to `PeerProvider.mu`; candidate selection takes its write lock. Provider callbacks may take `peerMu`, so admission releases `peerMu` before provider Remove/Add.
+
+`beginAddressDial` takes `peerMu` and returns a once-only lease release; a failed dial releases it, a successful dial transfers it to `peerSession.releaseAddressDial` before handing the session to CM. That function is immutable afterwards and owns its `sync.Once`: `runCMSession` defers it, and stale-generation disposal also invokes it, outside domain locks. An in-flight primary remains ineligible for eviction through fallback and setup, including before session publication. `noteAddressSessionLocked` requires `peerMu` write and runs before health-alias resolution, only on admissible outbound publication.
+
+Admission chooses/removes the victim and inserts the newcomer in one `peerMu` section. It captures any identity losing its last address anchor before deletion. After unlocking: `ipStateMu` cleans observed-IP history/orphaned votes, then a separate `deliveryMu` section drops pending frames (`statusMu` inside only to refresh counts); provider changes and dirty notification follow with no domain mutex held. Pins/bindings/downgrade marks in the security store are untouched. Periodic `evictStalePeers` is inert; orphaned inbound/socket cleanup retains its separate lifetime.
+
+
+## Outbound handshake readiness
+
+`peerSession.readiness` is an immutable pointer to a session-local barrier. Its context, wake channel and wait bound are set before the reader starts; state/failure/channel closure are owned by the barrier's independent leaf mutex. Authentication publication takes `peerMu` then this leaf mutex, writes `authOK`, then commits ready. Barrier methods never acquire domain mutexes or call Service. Pending can become ready, aborted or closed; ready survives later dial-context cancellation and wait timeout, while an actual session Close is terminal even after ready. An abort before readiness prevents a late waiter from reactivating the session.
+
+The legacy reader snapshots `admission.awaitsReply("auth_ok")` before inbox delivery, releases that admission mutex, delivers the expected response, then awaits readiness before its next line read/admission. It holds no domain/admission mutex while waiting. Cancellation, Close and the existing `peerRequestTimeout` bound unblock it with a meaningful local error and close the session; no per-frame queue or extra goroutine exists. Unrequested auth_ok and true pre-auth data do not open the gate. Proven v2 starts its reader after intro validation and metadata/auth publication. CM's dial watcher uses the same terminal readiness decision, so cancel after a successful handoff cannot randomly close the ready session.
+
+
+### Identity pin preview ownership
+
+`secureSessionStore.identities` owns both the original `pinnedAt` and a runtime `evidenceRevision` in each `identityPinEntry`. The store's monotonic proof counter and optional preview HMAC key are owned by its leaf `mu`; there is no parallel identity or token map. Every accepted proof changes only its identity's revision, including a proof of an existing pin. Recreating an entry uses a fresh counter value. Revision exhaustion refuses proof publication locally without wrapping, charging the address or changing existing pins, bindings or v2 marks. Neither revisions nor the process key are persisted; the format-2 file retains identity timestamps and value-only class metadata, and a restart invalidates every prior preview. Metadata shares the same entry/mu; reproof preserves it. Confirmation also commits to canonical metadata, so changing it invalidates a preview without changing proof revision. The independent fence backup retains the full entry; recovery never guesses lost metadata. See [pin metadata/recovery](design/session-v2-pin-metadata.md). The separate monotonic runtime protection revision is owned by the same entry/mu. New entries get fresh protection revisions; reproof preserves them. The private metadata CAS uses `pinMutationGate.RLock → mu`, increments the dirty generation, and performs no I/O or `writeMu` acquisition. Its result certifies only memory staging; the normal writer can persist it later. Both revisions are bound into preview HMAC, so metadata ABA stays stale. Raw metadata assignment is limited to unpublished copies. See [the CAS durability boundary](design/session-v2-pin-metadata-cas.md).
+
+Proof publication and its existing save take `pinMutationGate` for read before entering `update`/`persist`. The order is `pinMutationGate → writeMu → mu`; `mu` still never spans I/O and the gate never spans the network handshake. Preview takes `mu` only after acquiring entropy outside it. Confirmation remains unavailable until verified durable recovery and an external restart fence are implemented and admitted; public confirmation remains unavailable while the internal transaction is verified.
+
+
+### Desktop identity pin dialog
+
+`consoleModal.identityPinRemoval` and all of its widgets, preview, generation, acknowledgement and pending-request pointer belong solely to the window UI goroutine. Each request captures an immutable identity/token/generation and uses `Window.beginUIOp`/`endUIOp` plus the window cancellation context. The worker owns only its fresh capacity-one reply channel and calls the existing typed in-process command; it never writes dialog state. The UI polls only the current channel and checks generation/identity. Edit, close, reopen or shutdown cancels and removes the old request and credential, so a late reply cannot re-enable confirmation. Diagnostic formatting and JSON serialization of credential-bearing UI state are refused/redacted. No token, parallel identity map, persisted UI history or generic console dispatch is introduced. Exact canonical consequence validation precedes its reviewed translation; acknowledgement and confirmation are separate UI gestures. Public confirmation remains unavailable. See [desktop behavior](operations/identity-pin-desktop.md).
+
+### Identity pin durable transaction and offline recovery
+
+The internal removal port is separate from admission: a fake fence or backend never enables public confirm. Exclusive `pinMutationGate` spans token/revision recheck, external Begin, guard/main/cleanup, receipt and memory publication. Order: `pinMutationGate → writeMu → mu`; `mu` never spans I/O. Begin errors permit no local write. After Begin, a separate 30-second context prevents client cancellation from abandoning cleanup; rollback attempts are bounded.
+
+The guard is bounded to 8192 bytes. Main snapshots preserve endpoints and add enrolled store identity plus the last 32 audit phases (`removal_written`, `protection_restored`); these describe file contents, not an external success acknowledgement. Runtime pin deletion follows durable main, durable cleanup and acknowledged receipt. Cleanup/receipt failure triggers protective rollback. Unconfirmed rollback retains the pin, latches fatal `RecoveryRequired` and stops networking after locks release. The last `Service.Run` return defer preserves fatal error after teardown/final flush; cancellation cannot turn it into exit success.
+
+Scope, audit, recovery latch, `pinMainLoaded` and startup/offline flags belong to store `mu`; scope/audit snapshots are copied. Ordinary proof/flush never clears the latch. `written` advances only through covered changes; concurrent endpoint changes and renewals remain dirty. An absent pin named by the pending permit reserves one global slot until finalized clean restart; actual pin count remains separate. Reproof of that identity consumes its own reservation, while a new different identity sees effective occupancy. Construction checks the guard before sharing the store. A guard or enrolled main without verified supervised admission refuses startup before listeners.
+
+`RecoverIdentityPinProtection` restores protection only and irreversibly bars this Service from Run. A complete original main must have been loaded: missing/corrupt main is never synthesised from one permit, even if the marker disappeared. Recovery preserves every pin/endpoint and accepts an absent guard with an exact external permit, while refusing damaged/foreign guards. Its receipt grants no restart permission. Public removal remains unavailable; the dedicated desktop preview dialog respects the same admission. A concrete verified-session adapter and offline CLI exist as an explicit review candidate; see [candidate lifecycle](operations/identity-pin-recovery-candidate.md).
+
+`secretfile.Dir.DurableWrite`/`DurableRemove` stay relative to the pinned directory and return `NotCommitted`, `Committed` or `Indeterminate`. Directory-sync error after replacement/unlink is unknown. Unsupported backends refuse before mutation; the Windows strict backend remains unavailable. Existing ordinary secret writes retain their prior implementation.
+
+The 30-second storage context limits admission to subsequent stages; it cannot interrupt a kernel-blocked open, rename or fsync. Tests cover returning errors and uncertain acknowledgements, not permanently uninterruptible storage I/O.
+
 ---
 
+### Selected-neighbour pin promotion
+
+`Service.selectedPins` is immutable after construction; its one `goRunLoop` worker joins `runLoopsWg`. The capacity-one wake channel coalesces requests. Its independent `passMu` serializes worker passes and owns retry pacing; callers hold no Service/store mutex while acquiring it. A pass snapshots the bounded existing sessions under `peerMu.RLock`, releases it, then consults the pin owner and performs I/O. There is no peer/store cross-lock or extra per-identity work queue.
+
+`peerSession.selectedProof` (opaque proof publication's owner/identity/incarnation binding, actual source group, monotonic proof-ready mark) is immutable before reader start. `selectedGeneration` belongs to `peerMu` and is assigned only after CM accepts its generation. Atomic `eligibilityEnded` becomes terminal at Close or immediately on terminal reader error, before delayed publication cleanup. The live threshold is witnessed before admitting an immutable historical fact; close after that witness may preserve the earned fact. Neither pending age nor an old entry binding crosses connection replacement or pin recreation.
+
+Store `mu` owns entry incarnation, immutable/COW metadata plus runtime strict-ACK revision, and the derived Selected allocation/confirmed counters. All production entry publications/deletions update those counters in the same section; they are not a second live identity owner. Incarnation uses a fresh existing protection-sequence value at creation and remains stable across reproof/metadata changes. Class admission takes `pinMutationGate.RLock → mu`, atomically checks the 4096 allocation bound including an absent C3 backup reservation, then stages through the owner CAS. Unsupported strict-backend preflight precedes new staging. Strict confirmation uses `pinMutationGate.RLock → writeMu → mu`, captures the full snapshot/generation/revisions, releases `mu` for file sync/replacement/parent sync, then acknowledges only unchanged captured protection revisions. No Service/store mutex spans filesystem I/O. Ordinary persistence never grants ACK; unknown outcomes retain counted unconfirmed metadata. See [the promotion contract](design/session-v2-selected-pin-promotion.md).
+
+---
+
+### Connection-owned announce receive evidence
+
+`peerSession.receive` and its outbound `connEntry.receive` share one immutable
+pointer created before the first setup read. Every registered inbound connection
+owns a fresh `AnnounceReceiveState`. An inbound dispatcher resolves that owner
+from the actual ConnID under `peerMu.RLock`; snapshots never own receive evidence.
+Close/unregister closes the owner. The state mutex is a leaf: it calls no service,
+I/O, registry, or routing-table code while locked. `peerMu → receive.mu` on
+unregister has no reverse edge. Handlers release the state mutex before table
+updates. A new v3 epoch clears receive-baseline validity under the same mutex as
+the epoch update; unchanged-epoch deltas cannot restore it. Identity-level
+reconnect/grace hooks still reset send cursors and preserve existing accounting,
+but cannot reset or grant connection-owned receive evidence. See
+[receive baseline](protocol/receive_baseline.md).
+
+### Explicit local-contact K1 ownership
+
+`trustStore.contacts` remains the sole contact/fact owner. The typed local remember captures a store/identity/runtime-row marker stamp under the original trustMutationMu -> trust.mu apply section before unlock/events; the immutable nonzero-sized marker is JSON-ignored, generic refresh preserves it, delete/recreate/restart reset it. First-fact preflight remains outside trustMutationMu; stage rechecks the exact original stamp under trustMutationMu -> saveMu -> trust.mu before creating authority. Optional fact state is immutable/COW in its row; fact revision, runtime ACK, one proof candidate and the permanent authorityObserved latch belong to trust.mu. The strict writer and writer-strength decision share saveMu; staging first authority takes saveMu then mu, preventing a queued weaker writer from replacing a later ACK. Full snapshot encoding/I/O runs outside mu. Loaded authority is audited/read through a pinned handle before it can be reused, not blessed by a later save. No weak fallback is allowed once loaded/staged authority has been observed.
+
+The contact producer is immutable after Service construction; one joined worker owns its pass, with a capacity-one wake channel. Inventory is bounded by current pin-owner identities (at most20,000), copied under pin mu and released before contact lookups under trust.mu. Only proof-bearing target fact stamps are ACKed; full contact-file writing itself still costs O(contact-book size). Eligibility takes trustMutationMu, briefly reads fact state under trust.mu, releases it, then takes pinMutationGate.RLock -> pin mu for entry-bound CAS. No trust leaf/peer mutex spans pin I/O. It releases trustMutationMu before independent strict metadata confirmation, never recursively acquiring the read gate while an exclusive remover waits. Cancellation is checked after acquired locks; captured proof incarnation and local-intent generation are rechecked after I/O. See [the complete K1 boundary](design/session-v2-local-contact-pin.md).
+
+### Identity lookup action/attempt ownership (R0)
+
+The resolver owns its runtime action generation, exact resolution/attempt rows,
+queue state and ephemeral completion claim under `identityResolver.mu`.
+Nonserialized stamps are on existing intent rows; mutation/snapshot order is
+`resolver.mu → identityIntentStore.mu`. Neither is held during intent disk save,
+record verification/import, datagram enqueue, logging or ebus publication. The
+existing `saveMu` serializes disk snapshots after those locks; savedGen rejects
+out-of-order older snapshots. Registration, queue return, successful completion,
+expiry and cancellation recheck the exact owner/generation. Success may preserve
+only one existing claimed attempt pending queue admission; the private reducer
+returns a once-only scalar soft value to a debug observer after unlocking, then
+discards it. No history/worker/pin consumer is added. The owning resolver context
+is separate from Window request admission; shutdown revokes runtime authority
+without interpreting resumed format1 reasons as trusted actions. Record import
+may normally improve a replacement's global key availability, but cannot finish
+or charge that replacement's resolution. See
+[lookup provenance](design/session-v2-relation-provenance.md).
+
+### Datagram constructor facts
+
+`datagramStartup` belongs outside the seven domain mutexes: NewService writes it once, capturing requested configuration before the instance-owned constructor and recording its actual outcome. It is immutable thereafter; cfg's existing failure-time opt-out still controls advertisement. `DatagramRuntimeState` reads immutable identity/start/observation and the existing atomic plane pointer, with no lifecycle mutable fields, domain lock, queue or I/O. No Ready flag or serving guarantee is introduced. Caller/member ownership/readiness and receipt binding remain separate gates. The private constructor dependency is fixed per construction, never a global mutable test hook.
+
+### Inactive record-only R foundation (R1a)
+
+The existing pin owner/mu also owns the destructive-removal epoch and raw Relation
+allocation/confirmed tallies. Put/delete/strict-ACK/load/recovery maintain them
+in the same section. All non-absent R allocations count, including Contact+R,
+unconfirmed metadata and an absent C3 backup; Selected accounting is unchanged.
+The private evidence counter orders session, historical and inactive verified
+record protection. External fence `ProofRevision` remains the compatible legacy
+wire name, not a TLS proof. Format2 has no new runtime evidence/ACK field.
+
+Observation capture uses `pinMutationGate.RLock -> mu`, with no I/O or resolver
+consumer. Existing observations bind store/incarnation; absent observations bind
+store/removalEpoch. Removal increments that checked epoch under exclusive gate
+and mu immediately before external BeginRemoval after prior preflight/guard/token
+checks, and retains it after every error, Unknown or protective restore. No owner
+mutex spans BeginRemoval. No per-identity tombstone/history is introduced.
+
+The unused private verified-record stage takes `pinMutationGate.RLock -> mu`,
+checks owner/capacity/raw-R/reservation/revisions before atomic publication and
+performs no I/O. There is no production constructor/consumer/queue/rate worker.
+A separate record publication capability rechecks current store/incarnation and
+revisions before/after the shared close/drain/purge barrier outside all domain,
+store and removal locks. Cancellation preserves the existing owed-purge handoff.
+It never manufactures ProvenIdentity or republishes a pin from a stale ticket.
+See [the exact inactive scope](design/session-v2-relation-pins.md).
+
+### SDK/process final accounting ownership
+
+SDK lifecycle owns the final snapshot after all normal managed transport/background joins; readers use an atomic pointer to an immutable value and receive copies. A process has one wait owner and one constant-size coalescing signal watcher. Signal admission holds terminalMu through the syscall; public Stop uses a short request lock and preserves context/confirmation bounds. Reaped excludes signals; the waiter joins the watcher and publishes copied exit facts before Done. A short publication/request fence preserves earlier StopUnconfirmed evidence. Post-Done reduction uses a separate context-aware gate; no terminal/member lock spans retained-root I/O. Cancellation retains ownership and returned observations never alias sealed storage. See [the exact boundary](design/loadstand-final-accounting.md).
+
+### Inactive contact signed-record protection (K2A)
+
+`trustStore.pinEvidenceMu` is a scalar RW gate, not another record/fact inventory. WRITE joins
+common merge/own-record memory replacement, contact creation/promotion/forget (including early
+exits), and bound local-fact creation. Order is optional trustMutationMu/saveMu → evidence WRITE →
+trust.mu; both evidence/trust locks are released before persistence. Fact ACK, proof-pointer and
+last-online refresh preserve fact ID/revision and do not need this gate. Unpublished load owns its
+bytes. Inputs and recordFor outputs clone raw signed Body/Sig plus parsed DTypes; recordBodies
+clones DTypes. recordLocked/session getLocked borrow owner values under trust.mu only.
+
+Inactive K2 capture/stage uses candidate.mu → trustMutationMu → pinMutationGate.R → evidence.R →
+brief trust.mu, released before brief pin-store.mu. Evidence.R spans current persistent record
+comparison through pin stage. Already-locked pin helpers avoid recursive RLock behind a waiting C3
+writer. Crypto/preflight occur outside these owner locks. Existing snapshotLocked still clones the
+contact/conflict maps and base64-encodes all persistent records inside trust.mu/evidence sections;
+that preserved proportional cost is neither O(1) nor encoding-free.
+
+The caller-owned owed mutex serializes one explicit completion attempt, with no reverse edge or
+new live queue. Fresh strict coverage uses removalGate.R → writeMu → brief store.mu capture/ACK;
+JSON/backend work is outside store.mu. Exact captured revisions alone receive current ACK; the
+receipt is historical K coverage, not confirmation of concurrent newer metadata. All trust/store/
+evidence/removal locks are released before actual common legacy close/drain/purge. Current contact
+or old evidence revision does not revoke earned cleanup; exact incarnation/earned K/store safety
+are checked before/after. Record ingress remains inactive; the existing joined contact worker owns bounded completion
+retention. See [K2A boundary](design/session-v2-contact-record-pin.md).
+
+### Inactive R2a own-message / first-hop fixture boundary
+
+Ordinary admission/CM/reseed carry nil; only private unused fixture roots opt in.
+Preparation captures original X under the removal read gate and short store mu,
+before message-store I/O. After storage releases admission/gossip locks, the
+optional early entry registration uses `pinMutationGate.RLock → deliveryMu →
+store.mu` and the locked observation helper: no recursive RWMutex acquisition,
+I/O, signature verification, route or event under these locks. Body-digest
+checks in `prepared.matches` / `r2aCurrentLocked` still hash Payload while the
+owner locks are held: O(payload), part of the relative per-owner cost rather
+than constant-time validation. It rechecks the original owner rather than
+recapturing X, and skips later normal registration for that branch.
+
+Actual route/exact-session/capability snapshot uses peerMu alone, released before
+the same gate→delivery→store capture section. The common first directed builder
+owns the fresh ACK on its one item. All locks are released before offer/sendMu;
+the writer only closes the witness channel, with no callback into owner locks.
+Settlement uses gate→delivery→store to check that retained ACK/current row and
+original X/Y bindings once. Removal/cancellation serializes through existing
+delivery ownership; missing/terminal rows cannot be reconstructed. No strict
+writer or live R-stage edge is added. See [inactive outgoing provenance](design/session-v2-outgoing-provenance.md).
+
+### K2 owned completion and cancelled drain waiters — English
+
+The optional classified pin metadata owns at most one record ticket and a store.mu-owned progress
+mirror. COW/ACK preserves both; removing/changing earned Contact, including zero metadata, refuses
+before revision effects. Stage builds the prospective binding/ticket before publishing the entry.
+A present already-K1/loaded K without a ticket creates no synthetic record job/barrier. Exact
+binding + same ticket + earned Contact validates final mirror publication after the real barrier;
+generic ACK alone cannot complete it. Store selectors/status never take owed.mu.
+
+The existing contact worker owns its scalar RR cursor/clock and one selected reference. Selection
+is O(<=20k pins) under store.mu, without a retained batch or second map. K1 runs before each K2
+opportunity; Busy uses TryLock. Whole-pass start spacing and cooperative K2 deadline are 2 seconds;
+wakes remain coalesced during pacing. A blocked syscall/lock still owns its worker/reference and
+shutdown cannot claim join until it returns. External handles/C3 copies/full snapshots cost more
+than the20k resident + one selected-reference inventory; no resource acceptance is implied.
+
+unprovenRouting.mu is a leaf. Waiter removal may run while the invoking completion holds owed.mu;
+the permitted order is owed.mu -> unprovenRouting.mu, with no reverse edge. Registration, removal,
+leave and owePurge take only the routing-writer mutex, never a ticket/store/trust/evidence/removal/
+write lock, and invoke no callbacks. The caller holds no store/trust/evidence/removal/write lock
+during registration/removal/drain waiting. The routing-writer mutex is released before waiting.
+Cancelled wait removes only its own channel, nils the removed slice tail and never closes it or
+changes owed/inflight. Final leave closes survivors only after last-writer purge; a leave race makes
+removal a safe no-op. One worker therefore retains at most one active drain subscription.
+
+
+### Inactive FindNode option-A core ownership
+
+`intakeCoordinator.mu → pending.mu → ONE ForwardCalendar.mu → target Session.state.mu` is the
+composed mutation order. Pending/calendar locks may be held together; no lock below Session is
+acquired after its ID peek. The uninterrupted ID lock covers final validation and infallible commit.
+Standalone PendingTable still takes pending→Session, standalone calendar only itself, allocator only
+Session. No reverse edge, public-wrapper recursion, callback, crypto or I/O is introduced.
+Classification executes before entry. Composed snapshots use the same order after mutation locks
+are released. Only the private owner can access its subowners; no production caller is installed.
+Group records/cursors/registry belong to outer.mu. Row phases require outer+pending; bucket/aliases
+require outer+calendar. Dispatch completion retains the SAME row until actual Finish. Cancellation
+never refunds calendar debt. See [the inactive core contract](design/find-node-option-a-core.md).
+
+### Inactive inbound quota journal (N0)
+
+`secureSessionStore.mu` owns format discrimination, logical clock/domain/content generation, covered/strict stamps, lazy bounded row arena and derived raw Inbound tally. Its immutable elapsed leaf is SinceBoot, with no wall fallback. Legacy format2 never attaches/samples a journal. Format3 loads attach validated complete state with a fresh runtime anchor; no production installer or mature-witness producer exists. Test-only installation uses mutationGate.W → writeMu, releases mu for namespace preflight/encoding/I/O, and publishes only under mu.
+
+Private paired admission orders mutationGate.R → fixture lifetime leaf → brief mu. The terminal owner takes only that leaf and never the gate/store lock. Preflight is outside both leaves; context and original incarnation are rechecked after waits. Strict writers order mutationGate.R → writeMu → brief mu; C3 uses W → writeMu → mu. They never acquire the lifetime leaf. No trust/peer/domain lock, signature verification or filesystem/external I/O spans mu. Bounded row expiry/insertion/copy work does span mu (up to4096×520 bytes/262144 ticks), with no constant-latency claim. Encoding/hash occurs after release. Writers capture a fixed journal stamp before I/O; retaining the full DTO for post-write ACK would unnecessarily retain its large maps. Captured content/tick ACK cannot clear newer phase/progress or complete K2's owned drain/purge obligations. Existing periodic/stop owners checkpoint observed time with both no-op predicates progress-aware; no new timer/queue/worker is introduced. N1 lifecycle wiring and resource admission remain separate.
+
 ## Russian
+
+### Диагностика runtime и банов (T5 A4/R1)
+
+`RuntimeMetrics` читает runtime процесса без Service locks. `banDiagnosticsSnap` — неизменяемый
+`atomic.Pointer`-снимок, `banDiagnosticsAccessNanos` ограничивает периодическую работу активностью
+читателя; они синхронизируют себя вне семи доменов. Канал `banDiagnosticsRequests` создаётся в
+`NewService`, содержит не больше одного ожидающего запроса; worker принадлежит
+`hotReadsRefreshLoop` и завершается вместе с ним. Неизменяемая эпоха `banDiagnosticsLifecycle` (context и канал остановки) публикуется атомарным
+указателем: до старта/после остановки чтение недоступно, отмена worker прерывает очередь/ожидание
+даже при заблокированной сборке. Worker после сборки и читатель перед возвратом перепроверяют
+эпоху. Свежий RPC не захватывает доменных мьютексов. Worker сначала заканчивает callbacks PeerProvider, затем отдельно
+копирует баны под `peerMu`, отдельно IP score/баны под `ipStateMu`, отпускает их и читает атомарные
+счётчики loopback-наказаний. Сортировка и JSON вне locks. Источники имеют явное окно наблюдения,
+это не новая общая транзакция. Кешированное чтение свежесть не обещает.
+[Контракт диагностики](rpc/runtime_metrics.md).
 
 ### Мотивация
 
@@ -858,3 +1108,207 @@ Phase 3 cluster-mesh плана (полный рабочий документ �
 ### Контракт тестов
 
 Каждый шаг миграции должен оставлять существующий node test suite зелёным. Целевые regression-тесты из Фазы 1 (reader-starvation reproducers в `*_starvation_test.go`) перегоняются после каждого шага чтобы подтвердить: свойство no-starvation сохранено или улучшено.
+
+## Владение состоянием старения адресов
+
+Отдельный `Service.peerAdmissionMu` берётся до доменных мьютексов и удерживается от приёма/вытеснения автоматического адреса до последующих изменений PeerProvider. Он также сериализует явное изменение источника в `recordAddedPeer`; последующий `registerAddedPeerCandidate` меняет провайдер уже после освобождения этого мьютекса; из-под доменного мьютекса его не берут. История, счётчик выполняемых дозвонов `ActiveDials` и одноразовое разрешение оператора `AllowImmediateDial` принадлежат `peerEntry` под `peerMu`, параллельной map истории нет. `peerClock` неизменяем после конструктора (тест меняет до конкурентного использования). Ротация повторных проверок принадлежит `PeerProvider.mu`, отбор кандидатов берёт его на запись. Callback провайдера может брать `peerMu`, поэтому Remove/Add выполняются после освобождения `peerMu`.
+
+`beginAddressDial` берёт `peerMu` и выдаёт одноразовое освобождение lease: неудачный дозвон освобождает сам, успешный передаёт `peerSession.releaseAddressDial` до передачи сессии CM. Далее функция неизменяема и владеет `sync.Once`; её вызывают defer в `runCMSession` и удаление устаревшего поколения, вне доменных блокировок. Lease защищает основной адрес на всём дозвоне, fallback и setup до публикации. `noteAddressSessionLocked` требует `peerMu` на запись и вызывается до свёртки health-alias только при допустимой исходящей публикации.
+
+Выбор/удаление жертвы и вставка нового адреса атомарны под `peerMu`; identity, теряющая последнюю привязку адреса, фиксируется до удаления. После unlock отдельный `ipStateMu` удаляет историю наблюдаемых IP и осиротевшие голоса, затем отдельный `deliveryMu` чистит pending (внутри лишь `statusMu` для счётчиков); изменения провайдера и dirty-уведомление идут без доменных блокировок. Security-store pin/привязки/downgrade-метки не меняются. Периодический `evictStalePeers` ничего не удаляет; очистка осиротевших входящих соединений остаётся отдельной.
+
+## Готовность исходящего рукопожатия
+
+`peerSession.readiness` — неизменяемый указатель на барьер одной сессии. Контекст, канал пробуждения и предел ожидания задаются до старта reader; состояние, ошибка и закрытие канала принадлежат отдельному leaf-мьютексу барьера. Публикация аутентификации берёт `peerMu`, затем этот leaf-мьютекс, записывает `authOK` и лишь затем фиксирует ready. Методы барьера не берут доменные мьютексы и не вызывают Service. Pending переходит в ready, aborted или closed; ready переживает позднюю отмену контекста дозвона и таймаут ожидания, но настоящий Close сессии терминален и после ready. Отмена до готовности не позволяет позднему waiter повторно оживить сессию.
+
+Legacy reader фиксирует `admission.awaitsReply("auth_ok")` до доставки в inbox, освобождает admission-мьютекс, передаёт ожидаемый ответ и ждёт готовности до чтения и admission следующей строки. Во время ожидания доменные/admission-мьютексы не удерживаются. Отмена, Close и существующий предел `peerRequestTimeout` освобождают reader с различимой локальной ошибкой и закрывают сессию; очереди фреймов и дополнительной горутины нет. Незапрошенный auth_ok и настоящие pre-auth данные барьер не открывают. V2 reader стартует после проверки intro и публикации metadata/auth. Наблюдатель отмены дозвона CM использует тот же терминальный вердикт: отмена после успешной передачи не закрывает готовую сессию случайным выбором select.
+
+### Владение preview identity pin
+
+`secureSessionStore.identities` хранит исходный `pinnedAt` и runtime `evidenceRevision` в одном `identityPinEntry`. Монотонный счётчик proof и необязательный HMAC-ключ preview принадлежат leaf `mu` хранилища; параллельной map identities или tokens нет. Каждое принятое proof меняет ревизию только своей identity, включая уже закреплённую. Повторное создание записи получает новое значение счётчика. Исчерпание ревизии локально отклоняет публикацию proof без переполнения счётчика, штрафа адресу или изменения прежних pins, привязок и v2 marks. Ревизии и ключ процесса не сохраняются: формат 2 содержит timestamps и value-only metadata классов, а restart отменяет все прежние preview. Metadata принадлежат той же entry/mu; reproof их сохраняет. Подтверждение также связано с каноническими metadata: их изменение отменяет preview без изменения proof revision. Независимый fence backup сохраняет полную запись; recovery не угадывает утраченные metadata. См. [metadata и recovery](design/session-v2-pin-metadata.md). Отдельная монотонная runtime protection revision принадлежит той же entry/mu. Новая запись получает новую protection revision; reproof её сохраняет. Внутренний metadata CAS использует `pinMutationGate.RLock → mu`, увеличивает dirty generation, не делает I/O и не берёт `writeMu`. Результат подтверждает только staging в памяти; обычный writer может сохранить его позднее. Обе ревизии входят в preview HMAC, поэтому metadata ABA остаётся stale. Raw-присваивание metadata ограничено неопубликованными копиями. См. [границу durability CAS](design/session-v2-pin-metadata-cas.md).
+
+Публикация proof и её существующее сохранение берут `pinMutationGate` на чтение до `update`/`persist`. Порядок: `pinMutationGate → writeMu → mu`; `mu` не удерживается при I/O, gate — при сетевом handshake. Preview берёт только `mu`, получив случайные байты до него. Confirm недоступен до реализации и допуска проверенного durable recovery и внешнего restart fence; публичный confirm остаётся недоступным, пока внутренняя транзакция проходит проверку.
+
+### Durable-транзакция identity pin и offline recovery
+
+Внутренний port снятия не является допуском: fake fence или backend не включает публичный confirm. Эксклюзивный `pinMutationGate` охватывает recheck token/revision, внешний Begin, guard/main/cleanup, receipt и публикацию памяти. Порядок: `pinMutationGate → writeMu → mu`; `mu` не удерживается при I/O. Ошибка Begin запрещает локальную запись. После Begin отдельный context на 30 секунд не даёт отмене клиентского запроса оборвать cleanup; число попыток rollback ограничено.
+
+Guard ограничен 8192 байтами. Main сохраняет endpoints и добавляет принадлежность enrolled store и последние 32 фазы аудита (`removal_written`, `protection_restored`); это фазы файла, а не обещание внешнего подтверждения успеха. Runtime pin удаляется после durable main, durable cleanup и ACK receipt. Ошибка cleanup/receipt запускает protective rollback. Неподтверждённый rollback сохраняет pin, фиксирует fatal `RecoveryRequired` и останавливает сеть после освобождения locks. Последний return defer `Service.Run` сохраняет fatal error после teardown/final flush; отмена не превращает его в успешный exit.
+
+Scope, audit, recovery latch, `pinMainLoaded` и startup/offline flags принадлежат store `mu`; scope/audit snapshots копируются. Ordinary proof/flush не очищают latch. `written` продвигается только через покрытые изменения; конкурентные endpoint changes и renewals остаются dirty. Конструктор проверяет guard до публикации store. Guard или enrolled main без проверенного supervised admission запрещает старт до слушателей.
+
+`RecoverIdentityPinProtection` только восстанавливает защиту и необратимо запрещает Run в этом Service. Нужен целиком загруженный исходный main: отсутствующий или повреждённый main не синтезируется из одного permit, даже если marker исчез. Recovery сохраняет все pins/endpoints, допускает отсутствующий guard по точному внешнему permit, но отказывает для повреждённого/чужого guard. Receipt не разрешает restart. Публичное снятие остаётся недоступным; отдельный desktop-диалог preview соблюдает тот же допуск. Concrete verified-session adapter и offline CLI реализованы как явный review candidate; см. [жизненный цикл кандидата](operations/identity-pin-recovery-candidate.md).
+
+`secretfile.Dir.DurableWrite`/`DurableRemove` работают относительно закреплённого каталога и возвращают `NotCommitted`, `Committed` либо `Indeterminate`. Ошибка sync каталога после replacement/unlink означает неизвестный исход. Unsupported backend отклоняется до мутации; Windows strict backend пока недоступен. Прежние обычные secret writes не меняются.
+
+Storage context на 30 секунд ограничивает переход к следующим этапам, но не прерывает заблокированные в kernel open, rename или fsync. Тесты покрывают возвращаемые ошибки и неизвестные ACK, а не навсегда непрерываемый storage I/O.
+
+Отсутствующий pin из pending permit резервирует одно глобальное место до finalized clean restart;
+фактический pin count остаётся отдельным. Reproof этой identity занимает собственный резерв;
+новая другая identity учитывает effective occupancy. Владельцем решения остаётся store `mu`.
+
+### Desktop-диалог pin идентичности
+
+`consoleModal.identityPinRemoval`, его widgets, preview, поколение, согласие и указатель текущего запроса принадлежат только UI-горутине окна. Каждый запрос захватывает неизменяемые identity/token/поколение и использует `Window.beginUIOp`/`endUIOp` вместе с контекстом отмены окна. Worker владеет только своим новым reply channel ёмкостью один и вызывает существующую типизированную внутрипроцессную команду; состояние диалога он не меняет. UI читает только текущий канал и проверяет поколение/identity. Изменение, закрытие, повторное открытие или shutdown отменяют и удаляют старый запрос и credential: поздний ответ не включает подтверждение. Диагностическое форматирование и JSON-сериализация UI-состояния с credential блокируются или скрывают его. Token, параллельная identity map, сохранённая история UI и generic console dispatch не добавляются. Точный канонический текст последствия проверяется до показа проверенного перевода; согласие и подтверждение — разные действия UI. Публичное подтверждение остаётся недоступным. См. [поведение desktop](operations/identity-pin-desktop.md).
+
+### Повышение pin выбранного соседа
+
+`Service.selectedPins` неизменяем после конструирования; единственный worker через `goRunLoop` входит в `runLoopsWg`. Канал ёмкостью один объединяет wakeups. Независимый `passMu` сериализует проходы и retry pacing; при его захвате caller не держит Service/store mutex. Проход снимает ограниченный список существующих сессий под `peerMu.RLock`, освобождает его, затем обращается к владельцу pin и выполняет I/O. Перекрёстного peer/store захвата и очереди заданий по identity нет.
+
+`peerSession.selectedProof` (binding owner/identity/incarnation из настоящей публикации proof, фактическая source group и монотонная отметка готовности proof) неизменяем до старта reader. `selectedGeneration` принадлежит `peerMu` и назначается лишь после принятия поколения CM. Atomic `eligibilityEnded` терминален при Close или сразу при terminal reader error, до отложенной очистки публикации. Живой порог наблюдается до допуска неизменяемого исторического факта; закрытие после наблюдения может сохранить заработанный факт. Pending age и старый binding записи не переживают замену соединения или повторное создание pin.
+
+Store `mu` владеет incarnation записи, неизменяемыми/COW metadata с runtime strict-ACK revision и производными счётчиками Selected allocations/confirmed. Все production-публикации/удаления entry обновляют счётчики в той же секции; второго владельца identity нет. Incarnation получает новое значение существующего protection sequence при создании и сохраняется при reproof/metadata changes. Class admission берёт `pinMutationGate.RLock → mu`, атомарно проверяет предел 4096 с reservation отсутствующей C3 backup и вызывает owner CAS. Preflight strict backend предшествует новому staging. Strict confirmation использует `pinMutationGate.RLock → writeMu → mu`, снимает полный snapshot/generation/revisions, освобождает `mu` на file sync/replacement/parent sync и затем подтверждает только неизменившиеся protection revisions. Service/store mutex не удерживаются на файловом I/O. Обычная persistence не выдаёт ACK; неизвестный результат сохраняет учтённые неподтверждённые metadata. См. [контракт повышения](design/session-v2-selected-pin-promotion.md).
+
+### Владение routing receive evidence
+
+`peerSession.receive` и outbound `connEntry.receive` содержат один неизменяемый
+указатель, созданный до чтения setup. Каждое зарегистрированное inbound-соединение
+получает новый `AnnounceReceiveState`; dispatcher получает его по actual ConnID
+под `peerMu.RLock`, а не из snapshot. Close/unregister закрывает владельца.
+Его mutex — листовой: внутри нет вызовов service, I/O, registry или routing table.
+Для `peerMu → receive.mu` при unregister нет обратного ребра. Перед записью
+маршрутов mutex освобождён. Новый v3 epoch атомарно с watermark сбрасывает
+receive baseline; повторная delta того же epoch не восстанавливает его.
+Identity-level reconnect/grace сохраняют прежние send resets и accounting,
+но не могут выдать или сбросить receive evidence другого соединения.
+
+### Владение явным local-contact K1
+
+`trustStore.contacts` остаётся единственным владельцем контактов/фактов. Typed local remember захватывает store/identity/runtime-row marker stamp внутри исходной apply-секции trustMutationMu -> trust.mu до unlock/events; immutable marker ненулевого размера не сериализуется, generic refresh его сохраняет, delete/recreate/restart сбрасывают. First-fact preflight остаётся вне trustMutationMu; stage перепроверяет исходный stamp под trustMutationMu -> saveMu -> trust.mu до создания authority. Необязательный fact state immutable/COW внутри строки; fact revision, runtime ACK, один proof candidate и постоянный latch authorityObserved принадлежат trust.mu. Strict writer и выбор силы записи используют saveMu; staging первой authority берёт saveMu, затем mu, не позволяя старому слабому writer заменить поздний ACK. Полный snapshot кодируется и записывается вне mu. Загруженная authority проходит audit/read через pinned handle до использования; поздний save её не легализует. После наблюдения загруженной/staged authority слабого fallback нет.
+
+Producer неизменяем после создания Service; один joined worker владеет проходом, wake channel имеет ёмкость один. Inventory ограничен текущими identity pin owner (до20 000): копируется под pin mu, который отпускается до contact lookup под trust.mu. ACK получают только target stamps с proof; полная запись contact file сама остаётся O(размер книги). Eligibility берёт trustMutationMu, коротко читает fact state под trust.mu, отпускает leaf и берёт pinMutationGate.RLock -> pin mu для entry-bound CAS. Trust leaf/peer mutex не охватывает pin I/O. До независимого strict metadata ACK отпускается trustMutationMu; рекурсивного read gate при ожидающем remover нет. Отмена проверяется после acquired locks; исходная proof incarnation и local-intent generation перепроверяются после I/O. См. [полную границу K1](design/session-v2-local-contact-pin.md).
+
+### Владение identity lookup action/attempt (R0)
+
+Runtime action generation, exact resolution/attempt, queue state и ephemeral
+claim принадлежат `identityResolver.mu`. Nonserialized stamp хранится в имеющейся
+intent row; порядок memory mutation/snapshot — `resolver.mu → intent.mu`.
+Оба locks отпускаются до disk save, verify/import, enqueue, log и ebus.
+`saveMu` сериализует immutable snapshots отдельно, savedGen отбрасывает старый.
+Registration/return/completion/expiry/cancel проверяют exact owner/generation.
+После Success может остаться только одна существующая claim row до queue result;
+private reducer возвращает один soft scalar value debug-observer после unlock
+и сразу удаляет, без history/worker/pin consumer. Owner context не является
+Window request context; shutdown отзывает runtime authority, format1/restart её
+не восстанавливают. Обычный import может улучшить глобальные ключи B, но не
+завершить или списать попытку B. Подробнее:
+[lookup provenance](design/session-v2-relation-provenance.md).
+
+### Факты конструктора datagram
+
+`datagramStartup` вне семи domain mutex: NewService один раз захватывает requested configuration до instance-owned конструктора и записывает фактический outcome. Далее значение immutable; прежний failure-time opt-out cfg по-прежнему управляет advertisement. `DatagramRuntimeState` читает immutable identity/start/observation и существующий atomic plane pointer, без mutable lifecycle fields, domain lock, очереди или I/O. Новый Ready/serving guarantee не вводится. Ownership/readiness caller/member и receipt binding остаются отдельными gates. Private constructor dependency фиксирована на создание, это не глобальный изменяемый test hook.
+
+### Неактивная record-only основа R (R1a)
+
+Существующий pin owner/mu также владеет destructive-removal epoch и raw Relation
+allocation/confirmed tallies. Put/delete/strict-ACK/load/recovery меняют их в
+той же секции. Считаются все non-absent R allocations, включая Contact+R,
+unconfirmed metadata и absent C3 backup; Selected accounting не меняется.
+Private evidence counter упорядочивает session, historical и неактивную verified
+record защиту. Внешний fence `ProofRevision` сохраняет совместимое legacy wire
+имя, не являясь TLS proof. Формат2 не получает runtime evidence/ACK field.
+
+Capture observation берёт `pinMutationGate.RLock -> mu`, без I/O и resolver
+consumer. Existing observation связан со store/incarnation; absent — со
+store/removalEpoch. Снятие под exclusive gate и mu увеличивает checked epoch
+непосредственно до внешнего BeginRemoval после прежних preflight/guard/token
+checks и сохраняет increment после любых error, Unknown и protective restore.
+Owner mutex не охватывает BeginRemoval. Per-identity tombstone/history нет.
+
+Неиспользуемый private verified-record stage берёт `pinMutationGate.RLock -> mu`,
+до атомарной публикации проверяет owner/capacity/raw-R/reservation/revisions и
+не делает I/O. Production constructor/consumer/queue/rate worker отсутствует.
+Отдельная record publication capability проверяет текущие store/incarnation и
+revisions до/после общего close/drain/purge barrier вне domain/store/removal
+locks. Отмена сохраняет существующий owed-purge handoff. ProvenIdentity не
+подделывается, stale ticket не публикует pin заново. См. [точную неактивную
+границу](design/session-v2-relation-pins.md).
+
+### Владение итоговым учётом SDK/process
+
+SDK lifecycle фиксирует final snapshot после всех обычных managed transport/background join; readers получают копии immutable atomic pointer. У процесса один wait owner и один watcher сигналов с запросами постоянного размера. Signal держит terminalMu во время syscall, публичный Stop использует короткий request lock и сохраняет context/confirmation bounds. Reaped запрещает сигналы; waiter присоединяет watcher и публикует копии exit facts до Done. Publication/request fence сохраняет ранее выданный StopUnconfirmed. Post-Done reduction имеет отдельный context-aware gate без terminal/member lock на retained-root I/O. Отмена сохраняет владение, observations не разделяют изменяемую память. См. [точную границу](design/loadstand-final-accounting.md).
+
+### Неактивная contact record protection (K2A)
+
+`trustStore.pinEvidenceMu` — scalar RW gate, не второй inventory. WRITE охватывает common merge/
+own-record memory replacement, contact creation/promotion/forget со всеми early exits и создание
+bound local fact. Порядок: optional trustMutationMu/saveMu → evidence WRITE → trust.mu; evidence и
+trust отпускаются до persistence. Fact ACK/proof-pointer/last-online сохраняют ID/revision и gate
+не требуют; load до публикации владеет своими bytes. Merge input/recordFor output копируют raw
+Body/Sig и parsed DTypes; recordBodies копирует DTypes. Private recordLocked/session getLocked
+возвращают borrowed values только под trust.mu.
+
+K2 capture/stage: candidate.mu → trustMutationMu → pinMutationGate.R → evidence.R → короткий
+trust.mu, освобождённый до pin-store.mu. Evidence.R держится от current persistent record check
+до stage. Already-locked helpers не берут рекурсивный RLock при ожидающем C3 writer. Crypto/preflight
+вне owner locks. Прежний snapshotLocked копирует contact/conflict maps и base64-encode persistent
+records внутри trust.mu/evidence sections: пропорциональная цена сохранена, не O(1)/encoding-free.
+
+Внешний owed mutex сериализует completion attempt; Service удерживает ticket в optional classed pin metadata. Store.mu никогда не берёт owed.mu; store-owned mirror читается без доступа к mutable completion. Новый
+strict cover берёт removalGate.R → writeMu → короткий store.mu capture/ACK; JSON/backend вне store.mu.
+ACK получают только совпадающие captured revisions; receipt — историческое покрытие K, не новых
+concurrent metadata. До actual common legacy close/drain/purge все trust/store/evidence/removal locks
+освобождены. Current contact/старая evidence revision долг не снимают; exact incarnation/earned K/
+store safety проверяются до/после. Production record ingress остаётся не подключён; bounded completion обслуживается прежним joined contact worker.
+См. [границу K2A](design/session-v2-contact-record-pin.md).
+
+### Неактивная R2a граница own-message / first-hop фикстур
+
+Обычные admission/CM/reseed передают nil; opt-in есть только у private unused
+fixture roots. Preparation снимает исходное X observation под read gate и short
+store mu до message-store I/O. После освобождения admission/gossip locks
+optional ранняя регистрация берёт `pinMutationGate.RLock → deliveryMu → store.mu`
+и locked helper без повторного RWMutex. Под ними нет I/O, проверки подписи,
+route или event. Проверки body digest в `prepared.matches` / `r2aCurrentLocked`
+по-прежнему хешируют Payload под owner locks: O(payload), часть относительной
+стоимости на owner, а не проверка за постоянное время. Проверяется исходный owner
+X, поздняя обычная регистрация этой ветки пропускается.
+
+Настоящие route/exact-session/capabilities снимаются под peerMu отдельно, до
+capture gate→delivery→store. Общий первый directed builder владеет свежим ACK
+именно своего item. До offer/sendMu все owner locks освобождаются; writer лишь
+закрывает channel без callback в domain/store. Settlement под gate→delivery→store
+однократно проверяет собственный ACK/current row и исходные X/Y bindings.
+Cancellation/removal сериализованы прежним delivery owner; terminal/удалённая
+запись не восстанавливается. Strict writer/live R-stage edge не добавлены.
+См. [неактивный outgoing provenance](design/session-v2-outgoing-provenance.md).
+
+
+### K2 owned completion и отменённые drain waiters — Русский
+
+Optional classified pin metadata владеет одним record ticket и store.mu-owned mirror. COW/ACK
+сохраняет их; удаление/смена earned Contact, включая zero metadata, отказывается до revisions.
+Stage строит prospective binding/ticket до публикации entry. Present already-K1/loaded K без ticket
+не получает synthetic record job/barrier. Final mirror публикуется после actual barrier с exact
+binding/same-ticket/earned-Contact check; generic ACK недостаточен. Store selector/status не берёт owed.mu.
+
+Прежний contact worker владеет scalar RR cursor/clock и одной selected reference. Выбор O(<=20k pins)
+под store.mu, без retained batch/map. K1 идёт до K2, Busy использует TryLock. Минимум между pass starts
+и cooperative deadline K2 — 2 секунды; wakes coalesce во время pacing. Blocked syscall/lock сохраняет
+владение worker/reference: shutdown не объявляет join до return. Внешние handles/C3 copies/full
+snapshots добавляют цену сверх20k resident + одной selected reference; resource acceptance нет.
+
+unprovenRouting.mu — leaf. Снятие waiter может идти под owed.mu: разрешён owed.mu -> routing mutex,
+обратного ребра нет. Registration/removal/leave/owePurge берут только routing mutex, не вызывают
+callbacks и не берут ticket/store/trust/evidence/removal/write locks. Caller не держит последние
+при registration/removal/drain; routing mutex отпущен до wait. Отмена удаляет только свой channel,
+зануляет slice tail, не закрывает его и не меняет owed/inflight. Last leave будит survivors после
+настоящей purge; при race уже снятый waiter даёт no-op. Worker удерживает <=1 active subscription.
+
+### Владение неактивным FindNode core варианта A
+
+Порядок мутации: `intakeCoordinator.mu → pending.mu → ОДИН ForwardCalendar.mu → target Session.state.mu`.
+Pending/calendar можно держать вместе. Ниже Session после ID peek новые locks не захватываются;
+непрерывный ID lock покрывает финальные проверки и безошибочный commit. Standalone pending берёт
+pending→Session, calendar — только себя, allocator — Session. Обратных рёбер, рекурсивных public
+wrappers, callback/crypto/I/O нет. Classification идёт заранее. Composed snapshot берёт тот же
+порядок после освобождения mutation locks. Subowners доступны только private owner, production
+caller отсутствует. Ledger/cursors/registry — outer.mu, row phases — outer+pending, buckets/aliases —
+outer+calendar. Dispatch удерживает ту же строку до actual Finish; отмена не возвращает debt.
+См. [контракт](design/find-node-option-a-core.md).
+
+### Неактивный journal квоты inbound (N0)
+
+`secureSessionStore.mu` владеет format discrimination, logical clock/domain/content generation, covered/strict stamps, lazy bounded arena строк и производным raw Inbound tally. Immutable elapsed leaf — SinceBoot без wall fallback. Legacy format2 журнал не attaches/samples. Format3 load attaches полный проверенный state со свежим runtime anchor; production installer и mature-witness producer отсутствуют. Test-only установка берёт mutationGate.W → writeMu, освобождает mu для namespace preflight/encoding/I/O и публикует только под mu.
+
+Private paired admission: mutationGate.R → fixture lifetime leaf → короткий mu. Terminal owner берёт только leaf, никогда gate/store lock. Preflight вне обоих leaf; context и исходная incarnation перепроверяются после ожиданий. Strict writer: mutationGate.R → writeMu → короткий mu; C3: W → writeMu → mu. Lifetime leaf они не берут. Trust/peer/domain lock, signature verification и filesystem/external I/O не удерживают mu. Bounded expiry/insertion/copy строк выполняется под mu (до4096×520 байт/262144 ticks), без обещания постоянной latency. Encoding/hash — после release. До I/O writer захватывает фиксированный journal stamp: полный DTO для post-write ACK иначе удерживал бы большие maps. ACK захваченных content/tick не стирает новую phase/progress и не завершает owned K2 drain/purge. Прежние periodic/stop owners сохраняют observed time; оба no-op predicates учитывают progress, новый timer/queue/worker не вводится. N1 lifecycle wiring и ресурсная приёмка остаются отдельными.

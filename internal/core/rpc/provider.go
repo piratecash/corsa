@@ -89,6 +89,14 @@ type NodeProvider interface {
 	ExplainFileRoute(dst domain.PeerIdentity) (json.RawMessage, error)
 }
 
+// IdentityPinProvider previews and confirms exactly one identity pin removal.
+// Implementations must refuse confirmation without verified durable recovery
+// and an external restart fence. It grants no endpoint or permanent exception.
+type IdentityPinProvider interface {
+	PreviewIdentityPinRemoval(ctx context.Context, identity domain.PeerIdentity) (domain.IdentityPinRemovalPreview, error)
+	ConfirmIdentityPinRemoval(ctx context.Context, identity domain.PeerIdentity, token domain.IdentityPinConfirmationToken) (domain.IdentityPinRemovalResult, error)
+}
+
 // EndpointBindingProvider is the operator's hand on the endpoint bindings of
 // the v2 downgrade protection (docs/protocol/session_v2.md, "Operator actions
 // on endpoint bindings"): the list, the addressed removal of an ordinary

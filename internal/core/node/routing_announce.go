@@ -2050,6 +2050,9 @@ func (s *Service) sendConnectTimeFullSync(ctx context.Context, peerIdentity doma
 // against the known-good first-sync snapshot. See docs/routing.md
 // "First-sync wire-frame invariant" for the protocol-level contract.
 func (s *Service) handleAnnounceRoutes(sender routingSender, frame protocol.Frame) {
+	if sender.receive == nil || !sender.receive.ReceiveReady() {
+		return
+	}
 	senderIdentity := sender.identity
 	if !identity.IsValidAddress(senderIdentity.String()) {
 		log.Warn().Str("sender", senderIdentity.String()).Msg("announce_routes_malformed_sender")
@@ -2120,6 +2123,9 @@ func (s *Service) handleAnnounceRoutes(sender routingSender, frame protocol.Fram
 // senderAddress is the peer's routing-key address (outbound session or
 // "inbound:" prefix) used to dispatch the request_resync reply.
 func (s *Service) handleRoutesUpdate(sender routingSender, senderAddress domain.PeerAddress, frame protocol.Frame) {
+	if sender.receive == nil || !sender.receive.ReceiveReady() {
+		return
+	}
 	senderIdentity := sender.identity
 	if !identity.IsValidAddress(senderIdentity.String()) {
 		log.Warn().Str("sender", senderIdentity.String()).Msg("routes_update_malformed_sender")
@@ -2187,7 +2193,7 @@ func (s *Service) handleRoutesUpdate(sender routingSender, senderAddress domain.
 	}
 	defer release()
 
-	peerState := s.announceLoop.StateRegistry().GetOrCreate(senderIdentity)
+	peerState := sender.receive
 	if !peerState.HasReceivedBaseline() {
 		// Protocol desync: peer sent a delta before (or independently of)
 		// the first-sync baseline this session owes us. The safe recovery
@@ -2383,6 +2389,9 @@ func (s *Service) acceptRequestResyncDebounced(subject penaltySubject, now time.
 // optimisation, not a correctness requirement. kind="full" is
 // self-contained and establishes the baseline.
 func (s *Service) handleRouteAnnounceV3(sender routingSender, senderAddress domain.PeerAddress, frame protocol.RouteAnnounceV3Frame) {
+	if sender.receive == nil || !sender.receive.ReceiveReady() {
+		return
+	}
 	senderIdentity := sender.identity
 	if !identity.IsValidAddress(senderIdentity.String()) {
 		log.Warn().Str("sender", senderIdentity.String()).Msg("route_announce_v3_malformed_sender")
@@ -2440,9 +2449,8 @@ func (s *Service) handleRouteAnnounceV3(sender routingSender, senderAddress doma
 	// back to the peer, which is outbound routing-control traffic
 	// toward a quarantined peer — the very peer whose routing input
 	// we have stopped trusting. We also do
-	// NOT touch AnnouncePeerState (no GetOrCreate, no ObserveV3Epoch)
-	// so the quarantine window leaves no per-peer routing state
-	// residue.
+	// NOT advance connection-owned receive evidence, so quarantined
+	// input cannot establish a baseline or move its epoch watermark.
 	if s.isSubjectInRouteQuarantine(sender.penalty) {
 		log.Debug().
 			Str("from", senderIdentity.String()).
@@ -2459,7 +2467,7 @@ func (s *Service) handleRouteAnnounceV3(sender routingSender, senderAddress doma
 	}
 	defer release()
 
-	peerState := s.announceLoop.StateRegistry().GetOrCreate(senderIdentity)
+	peerState := sender.receive
 
 	verdict := peerState.ObserveV3Epoch(frame.Epoch)
 	if verdict == routing.V3EpochStale {
@@ -2839,6 +2847,10 @@ func (r *announceEntryRefusals) logSummaries(wireType string) {
 // CompositeScore can apply the trust-score bonus at rank time without
 // re-verifying.
 func (s *Service) applyAnnounceEntries(sender routingSender, wireRoutes []protocol.AnnounceRouteFrame, attestedSigs [][]byte, attestedVerified []bool, mode announceReceiveMode) {
+	if sender.receive == nil || !sender.receive.ReceiveReady() {
+		return
+	}
+
 	senderIdentity := sender.identity
 	if senderIdentity.IsZero() {
 		log.Warn().Msg("announce_routes_no_sender_identity")
@@ -3071,7 +3083,7 @@ func (s *Service) applyAnnounceEntries(sender routingSender, wireRoutes []protoc
 	// the kind="delta" branch of handleRouteAnnounceV3 for the gating
 	// contract.
 	if mode.establishesBaseline() {
-		s.announceLoop.StateRegistry().GetOrCreate(senderIdentity).MarkBaselineReceived()
+		sender.receive.MarkBaselineReceived()
 	}
 
 	// Stability signal: a successful announce-plane round-trip from the

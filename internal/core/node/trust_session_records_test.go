@@ -487,7 +487,7 @@ func TestRecordProtectionFollowsSessionsAndLookups(t *testing.T) {
 	}
 
 	svc.identityResolver.mu.Lock()
-	svc.identityResolver.finishLocked(lookup, domain.IdentityResolutionSucceeded)
+	svc.identityResolver.finishLocked(svc.identityResolver.resolutions[lookup], domain.IdentityResolutionSucceeded, nil)
 	svc.identityResolver.mu.Unlock()
 	if svc.recordProtection.contains(lookup.String()) {
 		t.Error("a finished lookup still protects its target")

@@ -138,7 +138,7 @@ var identityStateInventory = map[string]identityStateEntry{
 	"Service.relayDeliveredTo": {identitySelfAuthenticated, "written from ack_delete only after its payload verified against the fingerprint-checked key"},
 
 	// Service: identities this node named.
-	"Service.awaitingDelivered":         {identityNamedLocally, "message id → this node's own outgoing DM"},
+	"Service.awaitingDelivered":         {identityNamedLocally, "message id → this node's own outgoing DM; optional fixture-only R2a stamp is exact local owner plus original X observation and actual Y proof, never inferred by ordinary/reseed input"},
 	"Service.presenceResolutionAskedAt": {identityNamedLocally, "trusted contacts presence resolves"},
 
 	// Service: no remote identity.
@@ -173,9 +173,10 @@ var identityStateInventory = map[string]identityStateEntry{
 	"Service.upstream":                {identityNotApplicable, "address set"},
 
 	// The v2 store: proven identities only.
-	"secureSessionStore.identities":       {identityFromV2Proof, "pinLocked from noteProvenInbound/noteProvenOutbound, or the store's own file"},
+	"secureSessionStore.identities":       {identitySelfAuthenticated, "genuine session publication or historical own file; inactive record-only constructor additionally verifies the signed subject and exact target proof, with no live producer"},
 	"secureSessionStore.protectedByGiver": {identityFromV2Proof, "the identity a dial proved and that gave the protection"},
-	"secureSessionFile.Identities":        {identityFromV2Proof, "the persisted form of secureSessionStore.identities"},
+	"secureSessionFile.IdentityMetadata":  {identityByOrigin, "derived snapshot of single pin entries: explicit unclassified migration or verified local provenance, never a remote class claim"},
+	"secureSessionFile.Identities":        {identitySelfAuthenticated, "the persisted form of secureSessionStore.identities; format does not assert a live session"},
 	"provenIdentityPenalties.entries":     {identityFromV2Proof, "charged only from the proven identity of a loopback v2 session (chargeLoopbackViolation reads it from penaltySubjectOfCore); a legacy connection is condemned, never charged"},
 
 	// The routing input of legacy connections.
@@ -219,6 +220,8 @@ var identityStateInventory = map[string]identityStateEntry{
 	"boundedKnownIdentities.nodes":             {identityUnprovenClaim, "identities this node has heard of — DM recipients, contacts, handshake peers v1 included; membership grants nothing"},
 	"boundedKnownIdentities.pinned":            {identityNamedLocally, "trusted contacts, mirrored from the trust store"},
 	"trustStore.contacts":                      {identitySelfAuthenticated, "every contact passes identity.VerifyBoxKeyBinding before it is stored"},
+	"trustFile.Contacts":                       {identitySelfAuthenticated, "persistent contact keys are fingerprint/box-binding checked; optional local intent additionally requires protected-file audit and explicit local origin, while transient v2 proof is never serialized"},
+	"trustSnapshot.contacts":                   {identitySelfAuthenticated, "copy of validated contact rows; local intent retains its exact local generation and only captures an opaque v2 proof after mandatory pin publication"},
 	"trustStore.conflicts":                     {identitySelfAuthenticated, "a contact address whose new keys contradict the verified pinned ones"},
 	"trustStore.records":                       {identitySelfAuthenticated, "signed identity records, verified before they merge"},
 	"sessionRecordCache.entries":               {identitySelfAuthenticated, "signed identity records of non-contacts, verified before they merge"},

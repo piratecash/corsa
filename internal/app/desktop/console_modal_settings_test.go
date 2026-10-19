@@ -92,8 +92,8 @@ func TestSettingsTabDrawsTheLanguageLookupAndTheConsentBox(t *testing.T) {
 	// Closed, the language choice is ONE button — not six rows. That is the
 	// whole point of a lookup: six full-width options stretched across the tab
 	// is what it replaced.
-	if len(buttons) != 1 {
-		t.Fatalf("the closed tab laid out %d buttons, want just the language lookup", len(buttons))
+	if len(buttons) != 2 {
+		t.Fatalf("the closed tab laid out %d buttons, want the language lookup and advanced pin action", len(buttons))
 	}
 	if boxes := settingsCheckboxCount(router); boxes != 1 {
 		t.Fatalf("the tab laid out %d checkboxes, want exactly the consent box", boxes)
@@ -117,7 +117,7 @@ func TestTheLanguageLookupOpensAndClosesOnAPick(t *testing.T) {
 		t.Fatal("clicking the lookup did not open it")
 	}
 	// The lookup itself plus one row per language.
-	if want := 1 + len(supportedLanguages); len(buttons) != want {
+	if want := 2 + len(supportedLanguages); len(buttons) != want {
 		t.Fatalf("the open lookup laid out %d buttons, want %d", len(buttons), want)
 	}
 
@@ -149,8 +149,8 @@ func TestTheLanguageLookupOpensAndClosesOnAPick(t *testing.T) {
 	if w.consoleModal.languageMenuOpen {
 		t.Fatal("picking a language left the lookup open")
 	}
-	if len(buttons) != 1 {
-		t.Fatalf("%d buttons after the pick, want the closed lookup alone", len(buttons))
+	if len(buttons) != 2 {
+		t.Fatalf("%d buttons after the pick, want the closed lookup and advanced pin action", len(buttons))
 	}
 }
 

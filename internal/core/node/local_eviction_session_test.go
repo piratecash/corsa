@@ -185,6 +185,7 @@ func (rig *evictionRig) seedSetupFailures() {
 	now := time.Now()
 	rig.svc.peerMu.Lock()
 	defer rig.svc.peerMu.Unlock()
+	rig.svc.persistedMeta[evictionSlotAddress] = &peerEntry{Address: evictionSlotAddress, DialAttempts: 5}
 	for i := 0; i < evictionSeededSetupFailures; i++ {
 		rig.svc.recordSetupFailureLocked(evictionSlotAddress, now)
 	}
@@ -263,6 +264,9 @@ func (rig *evictionRig) assertSlotEvicted(t *testing.T) {
 func (rig *evictionRig) assertEvictionNotChargedToPeer(t *testing.T, eviction string) {
 	t.Helper()
 	rig.svc.peerMu.RLock()
+	if entry := rig.svc.persistedMeta[evictionSlotAddress]; entry == nil || entry.DialAttempts != 5 || entry.LastSessionAt != nil {
+		t.Error("local disposal changed address aging history")
+	}
 	consecutive := 0
 	if entry := rig.svc.setupFailures[evictionSlotAddress]; entry != nil {
 		consecutive = entry.Consecutive

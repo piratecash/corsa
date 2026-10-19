@@ -5,6 +5,7 @@ import (
 	"image/color"
 	"time"
 
+	"gioui.org/io/semantic"
 	"gioui.org/layout"
 	"gioui.org/op"
 	"gioui.org/unit"
@@ -58,6 +59,9 @@ func settingsStatusColor() color.NRGBA {
 // does: a Clickable whose clicks nobody drains keeps them queued, and the
 // language rows would then fire on whatever frame next asked.
 func (c *consoleModal) handleSettingsActions(gtx layout.Context) {
+	for c.identityPinRemovalButton.Clicked(gtx) {
+		c.openIdentityPinDialog()
+	}
 	// Picking a language is the lookup's job done, so it closes with the pick.
 	if c.parent.handleLanguageSelection(gtx) {
 		c.languageMenuOpen = false
@@ -121,6 +125,8 @@ func (c *consoleModal) layoutSettingsSections(gtx layout.Context) layout.Dimensi
 		layout.Rigid(c.layoutLanguageSection),
 		layout.Rigid(layout.Spacer{Height: unit.Dp(settingsSectionGapDp)}.Layout),
 		layout.Rigid(c.layoutReleaseCheckSection),
+		layout.Rigid(layout.Spacer{Height: unit.Dp(settingsSectionGapDp)}.Layout),
+		layout.Rigid(c.layoutIdentityPinSettings),
 	)
 }
 
@@ -336,6 +342,7 @@ func (c *consoleModal) layoutSettingsAction(gtx layout.Context, button *widget.C
 	return layout.W.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 		gtx.Constraints.Min.X = 0
 		return c.parent.kit().Chip(gtx, button, ui.ChipFill(false), unit.Dp(settingsActionRadius), func(gtx layout.Context) layout.Dimensions {
+			semantic.LabelOp(text).Add(gtx.Ops)
 			return layout.Inset{
 				Top: unit.Dp(settingsActionPadYDp), Bottom: unit.Dp(settingsActionPadYDp),
 				Left: unit.Dp(settingsActionPadXDp), Right: unit.Dp(settingsActionPadXDp),

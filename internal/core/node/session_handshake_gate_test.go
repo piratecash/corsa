@@ -250,7 +250,9 @@ func TestSessionCapabilityRequiresACompletedHandshake(t *testing.T) {
 		}
 	}
 
-	svc.markSessionHandshakeComplete(session)
+	if err := svc.markSessionHandshakeComplete(session); err != nil {
+		t.Fatal(err)
+	}
 
 	for _, capability := range negotiated {
 		if !svc.sessionHasCapability(session, capability) {

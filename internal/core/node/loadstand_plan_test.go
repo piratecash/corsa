@@ -126,7 +126,7 @@ const loadStandTrafficResolution = 100 * time.Millisecond
 // loadStandPlanVersion changes whenever the same parameters start producing
 // a different plan, so a journal keyed on parameters does not take a run of
 // the old generator for one of the new.
-const loadStandPlanVersion = "2"
+const loadStandPlanVersion = "3"
 
 const (
 	loadStandPlanDigestDomain = "corsa/node/loadstand/plan/v1\x00"
@@ -614,7 +614,7 @@ func (a loadStandAvailability) onlineAt(id loadStandNodeID, at time.Duration) bo
 
 // --- traffic and samples ---
 
-// scheduleLoadStandDirectMessages draws every slot of every node whether or
+// scheduleLoadStandDirectMessages draws every slot of every SDK-edge whether or
 // not the node is up, then drops what an offline node would have sent. The
 // draws therefore do not depend on churn: one node's traffic under storm is
 // its traffic under quiet minus its outages. Recipients are drawn from the
@@ -626,6 +626,9 @@ func scheduleLoadStandDirectMessages(o loadStandPlanOpts, nodes []loadStandPlanN
 	}
 	var events []loadStandPlanEvent
 	for _, node := range nodes {
+		if node.role != loadStandRoleEdge {
+			continue
+		}
 		draws := newLoadStandDraws(o.Seed, loadStandDrawDirectMessages(node.id))
 		for at := o.Settle + loadStandTrafficResolution; at < o.Duration; at += loadStandTrafficResolution {
 			if !draws.chance(loadStandTrafficResolution, dm.MeanInterval) {
@@ -651,7 +654,9 @@ func scheduleLoadStandGossip(o loadStandPlanOpts, nodes []loadStandPlanNode, ava
 	draws := newLoadStandDraws(o.Seed, loadStandDrawGossip)
 	var events []loadStandPlanEvent
 	for at := o.Settle + gossip.Interval; at < o.Duration; at += gossip.Interval {
-		online := loadStandNodeIDsWhere(nodes, func(node loadStandPlanNode) bool { return availability.onlineAt(node.id, at) })
+		online := loadStandNodeIDsWhere(nodes, func(node loadStandPlanNode) bool {
+			return node.role == loadStandRoleEdge && availability.onlineAt(node.id, at)
+		})
 		if len(online) == 0 {
 			continue
 		}

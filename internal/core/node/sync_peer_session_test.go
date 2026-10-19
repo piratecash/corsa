@@ -11,6 +11,7 @@ import (
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/netcore"
 	"github.com/piratecash/corsa/internal/core/protocol"
+	"github.com/piratecash/corsa/internal/core/routing"
 	"github.com/piratecash/corsa/internal/core/transport"
 )
 
@@ -29,6 +30,7 @@ func attachTestNetCore(t *testing.T, session *peerSession) {
 	if session == nil || session.conn == nil || session.netCore != nil {
 		return
 	}
+	session.receive = routing.NewAnnounceReceiveState()
 	session.netCore = newTestNetCore(t, netcore.ConnID(1), session.conn, netcore.Outbound, netcore.Options{})
 }
 

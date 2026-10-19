@@ -2,6 +2,10 @@
 
 ## English
 
+`listBanned` / `list_banned` require authenticated loopback access. Version 2 adds fresh local
+score/blacklist, remote-endpoint and loopback-identity coverage; see
+[Runtime metrics and ban diagnostics](runtime_metrics.md).
+
 ### POST /rpc/v1/network/peers
 
 List all known peers. Returns the raw peer-exchange response from the node — the same semantic result regardless of transport (HTTP RPC or in-process desktop).
@@ -116,6 +120,10 @@ The `version` field enables forward-compatible evolution. See the design documen
 ---
 
 ## Русский
+
+`listBanned` / `list_banned` требуют loopback с аутентификацией. Версия 2 добавляет свежую
+диагностику локального score/blacklist, remote endpoint и loopback identity:
+[Метрики runtime и диагностика банов](runtime_metrics.md).
 
 ### POST /rpc/v1/network/peers
 

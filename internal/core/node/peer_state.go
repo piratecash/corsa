@@ -5,15 +5,19 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/domain"
 )
 
 type peerEntry struct {
-	Address  domain.PeerAddress  `json:"address"`
-	Identity domain.PeerIdentity `json:"identity,omitzero"`
+	AllowImmediateDial bool                `json:"-"`
+	ActiveDials        int                 `json:"-"`
+	DialAttempts       domain.AttemptCount `json:"dial_attempts,omitempty"`
+	LastDialAttemptAt  *time.Time          `json:"last_dial_attempt_at,omitempty"`
+	LastSessionAt      *time.Time          `json:"last_session_at,omitempty"`
+	Address            domain.PeerAddress  `json:"address"`
+	Identity           domain.PeerIdentity `json:"identity,omitzero"`
 	// IdentityOrigin is what stands behind Identity; absent with it. A file
 	// an earlier build wrote has no origin, and its identities are read as
 	// claimed (restoredIdentityOrigin): nothing there says v2 proved them.
@@ -163,7 +167,7 @@ type peerStateFile struct {
 type announceState string
 
 const (
-	peerStateVersion             = 4              // v4: added the first-hop guard set
+	peerStateVersion             = 5              // v5: endpoint address aging
 	peerScoreConnect             = 10             // awarded on successful TCP handshake
 	peerScoreDisconnect          = -2             // applied on clean disconnect
 	peerScoreFailure             = -5             // applied on dial/protocol failure
@@ -196,13 +200,6 @@ const (
 	peerCooldownBase         = 30 * time.Second // base cooldown after first failure
 	peerCooldownMax          = 30 * time.Minute // cap on exponential backoff
 
-	// Eviction thresholds.
-	// A peer is evictable when its score drops below the threshold AND it has
-	// not been successfully connected for longer than the stale window.
-	peerEvictScoreThreshold = -20              // score at or below this → candidate for eviction
-	peerEvictStaleWindow    = 24 * time.Hour   // must also be unseen for this long
-	peerEvictInterval       = 10 * time.Minute // how often the eviction sweep runs
-
 	// Advertise-address convergence state (peerEntry.AnnounceState).
 	// "unset" is encoded as the empty string and must remain distinct
 	// from "direct_only" per the convergence contract.
@@ -226,8 +223,7 @@ const (
 	// Orphaned health entries — inbound-only peers not present in s.peers.
 	// These accumulate from ephemeral inbound connections (e.g.
 	// 127.0.0.1:<random_port>) that connected once, disconnected, and will
-	// never be dialled. A shorter window than peerEvictStaleWindow is used
-	// because there is no outbound dial target to preserve.
+	// never be dialled. No outbound dial target needs to be preserved.
 	orphanedHealthEvictWindow = 10 * time.Minute
 
 	// metaOrphanSweepInterval throttles evictOrphanedPeerMetadata
@@ -276,6 +272,18 @@ func loadPeerState(path string) (peerStateFile, error) {
 	if state.Peers == nil {
 		state.Peers = []peerEntry{}
 	}
+	if state.Version < 5 {
+		for i := range state.Peers {
+			state.Peers[i].LastSessionAt = state.Peers[i].LastConnectedAt
+		}
+	}
+	now := time.Now().UTC()
+	for i := range state.Peers {
+		if state.Peers[i].AddedAt == nil {
+			state.Peers[i].AddedAt = &now
+		}
+	}
+	state.Version = peerStateVersion
 	return state, nil
 }
 
@@ -310,24 +318,8 @@ func clampScore(score int) int {
 	return score
 }
 
-// sortPeerEntries orders entries the same way PeerProvider.Candidates()
-// does: score descending → AddedAt ascending (older peers first) →
-// address lexicographic. This ensures that the top-500 trim evicts the
-// same peers the dialer would have ranked lowest, making persistence
-// deterministic relative to the live candidate order.
-func sortPeerEntries(entries []peerEntry) {
-	sort.Slice(entries, func(i, j int) bool {
-		if entries[i].Score != entries[j].Score {
-			return entries[i].Score > entries[j].Score
-		}
-		ai := peerTime(entries[i].AddedAt)
-		aj := peerTime(entries[j].AddedAt)
-		if !ai.Equal(aj) {
-			return ai.Before(aj)
-		}
-		return entries[i].Address < entries[j].Address
-	})
-}
+// sortPeerEntries orders persisted startup entries by the shared address rank.
+func sortPeerEntries(entries []peerEntry) { sortAddressEntries(entries, time.Now()) }
 
 func peerTime(t *time.Time) time.Time {
 	if t == nil {
@@ -336,14 +328,10 @@ func peerTime(t *time.Time) time.Time {
 	return *t
 }
 
-// trimPeerEntries caps the persisted peer list at maxPersistedPeers.
-// Entries with an active VersionLockout are always retained regardless
-// of score — without this, a low-scoring locked-out peer would be
-// discarded by the top-N trim and become dialable again after restart,
-// defeating the purpose of the lockout. The remaining budget is filled
-// with the highest-scored non-lockout entries (already sorted by
-// sortPeerEntries). This mirrors the separate persistence bucket for
-// IP-wide bans (bannedIPs section in peerStateFile).
+// trimPeerEntries admits legacy startup files into the automatic-address budget.
+// Explicit sources are outside the budget; persisted security refusals survive
+// even an oversized old file, so loading cannot remove their protection.
+// Live admissions enforce the budget atomically and saves never trim entries.
 func trimPeerEntries(entries []peerEntry) []peerEntry {
 	if len(entries) <= maxPersistedPeers {
 		return entries
@@ -352,7 +340,7 @@ func trimPeerEntries(entries []peerEntry) []peerEntry {
 	// Partition: locked-out entries are always kept.
 	var locked, rest []peerEntry
 	for _, e := range entries {
-		if e.VersionLockout.IsActive() {
+		if protectedAddressSource(e.Source) || e.VersionLockout.IsActive() || e.BannedUntil != nil || e.RemoteBannedUntil != nil {
 			locked = append(locked, e)
 		} else {
 			rest = append(rest, e)
@@ -362,7 +350,12 @@ func trimPeerEntries(entries []peerEntry) []peerEntry {
 	// If locked entries alone exceed the budget, keep all of them
 	// (this is an extreme edge case — it would require 500+ distinct
 	// incompatible peers, which is operationally implausible).
-	budget := maxPersistedPeers - len(locked)
+	budget := maxPersistedPeers
+	for _, e := range locked {
+		if !protectedAddressSource(e.Source) {
+			budget--
+		}
+	}
 	if budget <= 0 {
 		return locked
 	}

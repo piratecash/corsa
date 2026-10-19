@@ -3,6 +3,7 @@ package node
 import (
 	"github.com/piratecash/corsa/internal/core/connbudget"
 	"github.com/piratecash/corsa/internal/core/netcore"
+	"github.com/piratecash/corsa/internal/core/routing"
 )
 
 // connEntry is the single-source-of-truth record the Service keeps per
@@ -28,6 +29,7 @@ import (
 //     outbound dials that do not measure bytes).
 //   - tracked is the auth-promotion flag described above.
 type connEntry struct {
+	receive *routing.AnnounceReceiveState
 	core    *netcore.NetCore
 	metered *netcore.MeteredConn
 	tracked bool

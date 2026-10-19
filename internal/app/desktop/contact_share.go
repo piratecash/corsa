@@ -115,7 +115,18 @@ func (w *Window) handleContactLinkPaste() {
 // importContactLink runs the shared verify-then-import path and reports
 // the outcome in the status line. Returns true on success.
 func (w *Window) importContactLink(link string) bool {
-	peer, err := w.router.ImportContactLink(link)
+	result, err := w.router.ImportContactLink(link)
+	if result.Contact == domain.ContactAppliedLive {
+		key := "status.contact_imported_k_pending"
+		if result.K == domain.LocalContactKConfirmed {
+			key = "status.contact_imported_k_confirmed"
+		}
+		if err != nil || result.Fact != domain.LocalContactFactDurableConfirmed {
+			key = "status.contact_imported_k_unconfirmed"
+		}
+		w.router.SetSendStatus(w.t(key, shortFingerprint(result.Identity.String())))
+		return true
+	}
 	if err != nil {
 		if errors.Is(err, contactlink.ErrLinkNetworkMismatch) {
 			w.router.SetSendStatus(w.t("status.contact_link_other_network"))
@@ -124,7 +135,7 @@ func (w *Window) importContactLink(link string) bool {
 		w.router.SetSendStatus(w.t("status.contact_import_failed", err.Error()))
 		return false
 	}
-	w.router.SetSendStatus(w.t("status.contact_imported", shortFingerprint(peer.String())))
+	w.router.SetSendStatus(w.t("status.contact_imported", shortFingerprint(result.Identity.String())))
 	return true
 }
 

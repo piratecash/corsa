@@ -1,0 +1,26 @@
+[Unit]
+Description=Corsa external startup fence supervisor (review candidate)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+# Intentionally lacks --candidate. Production workflow is not enabled by this template.
+ExecStart=/usr/local/libexec/corsa-supervisor --config /etc/corsa-supervisor/node.json
+Restart=on-failure
+RestartSec=5
+KillMode=control-group
+TimeoutStopSec=10
+UMask=0077
+ProtectSystem=strict
+ReadWritePaths=/var/lib/corsa
+RuntimeDirectory=corsa-supervisor
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=restart
+PrivateTmp=yes
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target

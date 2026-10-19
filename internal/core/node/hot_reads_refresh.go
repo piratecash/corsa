@@ -17,7 +17,7 @@ import (
 // RPC goroutine and re-coupled the "lock-free hot path" contract to the
 // very locks it was built to bypass.
 //
-// Running five rebuilds back-to-back at startup is cheap: the node has no
+// Running six rebuilds back-to-back at startup is cheap: the node has no
 // peers yet, so each is O(1).
 func (s *Service) primeHotReadSnapshots() {
 	s.rebuildNetworkStatsSnapshot()
@@ -25,11 +25,12 @@ func (s *Service) primeHotReadSnapshots() {
 	s.rebuildPeersExchangeSnapshot()
 	s.rebuildCMSlotsSnapshot()
 	s.rebuildRoutingSnapshot()
+	s.rebuildBanDiagnosticsSnapshot()
 }
 
 // hotReadsRefreshLoop periodically rebuilds every atomic snapshot that the
 // hot RPC path depends on: network_stats, peer_health, peers_exchange, the
-// ConnectionManager slots view, and the routing table.  Each snapshot is
+// ConnectionManager slots view, the routing table and ban diagnostics.  Each snapshot is
 // refreshed by its own goroutine with its own ticker so a slow rebuild in
 // one path does not delay the others.  Per-snapshot lock footprint (see
 // docs/locking.md §"Reader path invariants" for the authoritative
@@ -120,7 +121,7 @@ func (s *Service) primeHotReadSnapshots() {
 // each path.
 func (s *Service) hotReadsRefreshLoop(ctx context.Context) {
 	var wg sync.WaitGroup
-	wg.Add(5)
+	wg.Add(6)
 	// network_stats and peer_health use reader-gated variants: the periodic
 	// tick rebuilds only while a consumer is actively polling the matching
 	// RPC, so a headless node stops paying for 2x/s peer-domain snapshots.
@@ -137,6 +138,7 @@ func (s *Service) hotReadsRefreshLoop(ctx context.Context) {
 	go func() { defer wg.Done(); s.runSnapshotTicker(ctx, s.maybeRebuildPeersExchangeSnapshot) }()
 	go func() { defer wg.Done(); s.runSnapshotTicker(ctx, s.rebuildCMSlotsSnapshot) }()
 	go func() { defer wg.Done(); s.runSnapshotTicker(ctx, s.rebuildRoutingSnapshot) }()
+	go func() { defer wg.Done(); s.runBanDiagnosticsRefresh(ctx) }()
 	wg.Wait()
 }
 

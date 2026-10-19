@@ -102,6 +102,12 @@ deleting them restricted to the owner, no force-update.
 
 ### Current state
 
+The release order is: complete the secure-session admission checks, publish the secure session in
+its own release, observe that release in the live network for the owner's approved period and
+criteria, then consider the overlay responder release (D1). D1 also requires the accepted design and
+wire contract and a load run on its final candidate against the approved resource budget. Passing
+local tests or completing the secure-session implementation does not replace any of these steps.
+
 The gate is **closed**. The build activates the secure session. Decided: the secure session ships in
 a release of its own, and the overlay role follows in a later release. Confirmed on the commit their
 evidence names: a pin store marker that turns a lost or moved store into an explicit error; push
@@ -119,8 +125,9 @@ measured yet).
 
 Outstanding: an independent cryptographic review; a measurement of the handshake phases over Tor; a
 measurement of first-connection latency over Tor that sets the TLS probe timeout; measured loopback
-budgets; a load run on the final candidate; the
-remaining owner choice on operator pin removal; an approved plan for observing the release in the
+budgets; a load run on the final candidate; implementation and verification of the owner's
+[operator pin-removal decision](design/identity-pin-removal-decision.md), including the external
+startup fence and confirmed recovery; an approved plan for observing the release in the
 network; all checks on the final candidate; release notes. No release decision is recorded. The list
 with checks and evidence is in `packaging/release-admission.json`.
 
@@ -226,6 +233,12 @@ with checks and evidence is in `packaging/release-admission.json`.
 
 ### Текущее состояние
 
+Порядок выпуска: выполнить условия допуска защищённой сессии, опубликовать её отдельным выпуском,
+наблюдать этот выпуск в живой сети в течение утверждённого владельцем срока по утверждённым
+критериям, затем рассматривать выпуск оверлейного ответчика (D1). Для D1 также нужны принятый дизайн
+и wire-контракт и нагрузочный прогон финального кандидата по утверждённому ресурсному бюджету.
+Успешные локальные тесты и завершённая реализация защищённой сессии эти этапы не заменяют.
+
 Гейт **закрыт**. Сборка включает защищённую сессию. Решено: защищённая сессия выходит отдельным
 выпуском, overlay-роль — в одном из следующих. Подтверждено на коммите, названном в подтверждении:
 маркер хранилища pin, превращающий потерю или перенос хранилища в явную ошибку; push-уведомления и все
@@ -242,6 +255,8 @@ loopback-входа (бюджеты пока не измерены).
 
 Не выполнено: независимая криптографическая экспертиза; замер фаз рукопожатия через Tor; замер
 задержки первого подключения через Tor, по которому выбирается таймаут TLS-пробы; измеренные бюджеты
-loopback-класса; нагрузочный прогон финального кандидата; оставшееся решение владельца о снятии pin оператором; утверждённый план наблюдения выпуска в сети;
+loopback-класса; нагрузочный прогон финального кандидата; реализация и проверка принятого
+[решения владельца о снятии pin оператором](design/identity-pin-removal-decision.md), включая внешний
+запрет перезапуска и подтверждённое восстановление; утверждённый план наблюдения выпуска в сети;
 все проверки на финальном кандидате; описание выпуска. Решения о выпуске нет. Список с проверками и
 подтверждениями — `packaging/release-admission.json`.

@@ -282,6 +282,9 @@ var loadStandPinnedPlanDigests = map[string]map[loadStandChurnProfile]loadStandP
 	},
 	// 2: contacts — and so DM recipients — only among roles that accept
 	// direct messages (edges of the main profile).
+	"3": {
+		loadStandChurnQuiet: "6858064067ba22ecd4dc7c4671eef480bf033c6a5ba2157d311be65c50625800", loadStandChurnFlap: "b90aa81dd9ed40a69c68851b1ffd8c0e9bc274ea6c2a07958bf2bb9cf0bfbcde", loadStandChurnStorm: "515c6c24725bbb7a14d2f2d76539506b677fe11ebb9aa761f631817bd759f116",
+	},
 	"2": {
 		loadStandChurnQuiet: "6580dbc0074fa68b3eca8ed5599472094106a01877b4e53e8cd99f676cdba8e9",
 		loadStandChurnFlap:  "84c8df6117c5dbe4d7c6621083926ca0c2d0adbd34ccbbf913be0906b909ebe9",
@@ -875,9 +878,9 @@ func testLoadStandPlanGossipPublishesEveryInterval(t *testing.T) {
 // ignores MeanInterval altogether.
 func testLoadStandPlanDirectMessageCountFitsTheRate(t *testing.T) {
 	pinned := map[time.Duration]map[loadStandPlanSeed]int{
-		5 * time.Second:  {1: 863, 13: 837, 977: 864},
-		20 * time.Second: {1: 240, 13: 207, 977: 222},
-		80 * time.Second: {1: 54, 13: 55, 977: 55},
+		5 * time.Second:  {1: 622, 13: 597, 977: 613},
+		20 * time.Second: {1: 173, 13: 140, 977: 167},
+		80 * time.Second: {1: 33, 13: 39, 977: 37},
 	}
 	for mean, counts := range pinned {
 		for seed, want := range counts {
@@ -889,7 +892,7 @@ func testLoadStandPlanDirectMessageCountFitsTheRate(t *testing.T) {
 			for at := opts.Settle + loadStandTrafficResolution; at < opts.Duration; at += loadStandTrafficResolution {
 				slots++
 			}
-			trials := float64(slots * len(plan.Nodes()))
+			trials := float64(slots * int(opts.EdgeNodes))
 			p := float64(loadStandTrafficResolution) / float64(mean)
 			expected, deviation := trials*p, math.Sqrt(trials*p*(1-p))
 			if math.Abs(float64(want)-expected) > 5*deviation {
@@ -1042,7 +1045,7 @@ func testLoadStandPlanDrawsAreUnbiasedAndExact(t *testing.T) {
 // DM recipient — has a role that accepts direct messages. A full node of the
 // main profile refuses DMs addressed to it: a plan that picked it would turn
 // part of the traffic into delivery failures and change what 13b measures.
-// Full nodes still SEND: the opt-out gates only inbound DMs.
+// Version 3 originates DMs only at SDK edges. Full nodes serve the network.
 func testLoadStandPlanDirectMessagesGoOnlyToRolesThatAcceptThem(t *testing.T) {
 	forEachLoadStandPlanFixture(t, func(t *testing.T, opts loadStandPlanOpts, plan loadStandPlan) {
 		byID := loadStandPlanNodesByID(plan)
@@ -1063,8 +1066,8 @@ func testLoadStandPlanDirectMessagesGoOnlyToRolesThatAcceptThem(t *testing.T) {
 				fullSenders++
 			}
 		}
-		if fullSenders == 0 {
-			t.Error("no full node sends a direct message; refusing to receive must not stop a node from sending")
+		if fullSenders != 0 {
+			t.Error("full node originates SDK user traffic")
 		}
 	})
 }

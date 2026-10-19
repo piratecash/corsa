@@ -230,6 +230,10 @@ cfg.Node.StateDBPath = "/var/lib/corsa-bot/state.db"
 Nothing is copied from the default location into an explicit one — an empty
 file there is a deliberately new database.
 
+### Durable background identity intents and private peers
+
+`NodeConfig.IdentityIntentsPath` is an optional `*string`: nil retains the historical memory-only identity-intent store. Set it to a nonblank path in a private profile directory to persist background identity-resolution reasons across restarts. `NewWithContext` rejects an explicitly blank path before identity or database I/O. `NodeConfig.AllowPrivatePeers` defaults to false; isolated loopback functional profiles must explicitly opt in. Neither setting reads an environment variable. See [process stand infrastructure](loadstand-process.md) for the real SDK/SQLite functional child and remaining T5 work.
+
 ### TLS-first switch
 
 `NodeConfig.V2TLSFirst` is the operator's TLS-first switch of the secure session v2.
@@ -420,6 +424,19 @@ This example:
 
 ---
 
+### Desktop local-contact intent
+
+The embedded Desktop contact-link path uses a separate typed core intent and reports live-contact, durable fact and K-classification outcomes independently. A late fact-storage error can accompany an already applied contact; consumers must keep that identity/result. ContactAppliedLive describes the original effect; a later delete/recreate can return stale provenance without authorizing the replacement generic row. This is not a new public SDK/operator RPC: generic `importContacts` remains non-K and keeps its existing access policy. K1 accepts only explicit Desktop intent followed by genuine v2 proof; see [scope and partial results](design/session-v2-local-contact-pin.md).
+
+`Runtime.PublishGlobalMessage(ctx, body)` and `publishGlobal`
+commit an own immutable/TTL0 global message locally and attempt normal propagation.
+The returned `stored_locally` outcome is not remote delivery. The RPC uses its
+normal configured access/authentication policy. Global sender claims are unsigned. See [publication contract](design/sdk-global-publication.md).
+
+### Final transport observation
+
+`Runtime.FinalTransport()` returns a copied immutable transport snapshot after every normal managed SDK Close join. No-start, failed-before-node and incomplete shutdown remain unavailable; a successful retry can latch later without changing Wait's first error. Quiescence is independent of a subsequent database-close failure and does not itself assert overall shutdown success. The getter neither starts shutdown nor reopens operation admission. See [process final accounting](design/loadstand-final-accounting.md).
+
 ## Русский
 
 `corsa/sdk` делает этот репозиторий встраиваемым Go SDK.
@@ -598,6 +615,10 @@ cfg.Node.StateDBPath = "/var/lib/corsa-bot/state.db"
 Из расположения по умолчанию в явное ничего не копируется — пустой файл там
 означает осознанно новую базу.
 
+### Долговременные identity-intent и private peers
+
+`NodeConfig.IdentityIntentsPath` — optional `*string`: nil сохраняет прежнее хранилище identity-intent только в памяти. Непустой путь в приватном каталоге профиля сохраняет причины фонового разрешения identity после перезапуска. `NewWithContext` отказывает при явно пустом пути до I/O identity или базы. `NodeConfig.AllowPrivatePeers` по умолчанию false; изолированный loopback-профиль должен явно разрешить private peers. Эти настройки не читают переменные окружения. Настоящий SDK/SQLite child и оставшаяся работа T5 описаны в [инфраструктуре process-стенда](loadstand-process.md).
+
 ### Выключатель «TLS-первым»
 
 `NodeConfig.V2TLSFirst` — выключатель оператора «TLS-первым» защищённой сессии v2.
@@ -725,3 +746,17 @@ for msg := range messages {
 - поднимает локальную ноду
 - слушает расшифрованные входящие DM
 - на любое входящее сообщение отвечает `Sic Parvis Magna`
+
+### Локальное намерение контакта Desktop
+
+Embedded Desktop contact-link path использует отдельное типизированное намерение core и различает live contact, durable fact и классификацию K. Поздняя ошибка хранения может сопровождать уже применённый контакт; consumer сохраняет identity/result. ContactAppliedLive описывает исходный эффект; поздний delete/recreate может дать stale provenance, не авторизуя новую generic-строку. Это не новый публичный SDK/operator RPC: generic `importContacts` остаётся non-K с прежней access policy. K1 принимает только явное намерение Desktop и настоящий v2 proof; см. [область и частичный результат](design/session-v2-local-contact-pin.md).
+
+
+`Runtime.PublishGlobalMessage(ctx, body)` и `publishGlobal` сохраняют свой
+immutable/TTL0 global локально и пробуют обычное распространение. Результат
+`stored_locally` не доказывает доставку; claimed sender global не подписан.
+[Контракт публикации](design/sdk-global-publication.md).
+
+### Итоговое наблюдение transport
+
+`Runtime.FinalTransport()` возвращает immutable копию после всех join обычного managed SDK Close. Без Start, при отказе до запуска узла и незавершённом shutdown результат unavailable; успешный повтор может зафиксировать его позднее без изменения первого исхода Wait. Quiescence независима от последующей ошибки закрытия БД и сама не означает общий успех shutdown. Getter не запускает shutdown и не открывает допуск операций. См. [итоговый процессный учёт](design/loadstand-final-accounting.md).

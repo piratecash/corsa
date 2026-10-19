@@ -1,6 +1,8 @@
 package sdk
 
 import (
+	"context"
+	"errors"
 	"testing"
 
 	"github.com/piratecash/corsa/internal/core/domain"
@@ -237,5 +239,30 @@ func TestNodeConfigV2TLSFirstMapping(t *testing.T) {
 				t.Fatalf("DisableV2TLSFirst = %v, want %v", got, tc.wantDisabled)
 			}
 		})
+	}
+}
+
+func TestProcessStandSDKPathsAndPrivatePeerOptInReachNodeConfig(t *testing.T) {
+	cfg := DefaultConfig()
+	path := "/stand/node/identity-intents.json"
+	cfg.Node.IdentityIntentsPath = &path
+	cfg.Node.AllowPrivatePeers = true
+	actual := cfg.internal().Node
+	if actual.IdentityIntentsPath != path || !actual.AllowPrivatePeers {
+		t.Fatal("SDK process profile silently lost explicit node settings")
+	}
+	cfg.Node.IdentityIntentsPath = nil
+	if cfg.internal().Node.IdentityIntentsPath != "" {
+		t.Fatal("nil must preserve memory-only history")
+	}
+}
+func TestExplicitBlankIdentityIntentsPathRefusesBeforeIdentityIO(t *testing.T) {
+	for _, blank := range []string{"", " \t\n"} {
+		cfg := DefaultConfig()
+		cfg.Node.IdentityIntentsPath = &blank
+		runtime, err := NewWithContext(context.Background(), cfg)
+		if runtime != nil || !errors.Is(err, ErrInvalidIdentityIntentsPath) {
+			t.Fatalf("explicit blank must refuse: %v", err)
+		}
 	}
 }

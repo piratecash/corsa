@@ -55,7 +55,7 @@ func TestChattyWiring_OnlyDeltaFramesArmQuarantine(t *testing.T) {
 			[]routing.PeerCapability{domain.CapMeshRoutingV1, domain.CapMeshRoutingV2})
 		seedChattyHistoryNearThreshold(svc, peer)
 
-		svc.handleAnnounceRoutes(provenRoutingSender(peer), protocol.Frame{
+		svc.handleAnnounceRoutes(svc.provenRoutingSender(peer), protocol.Frame{
 			Type:           "announce_routes",
 			AnnounceRoutes: buildAnnounceRouteFrames(peer, 1),
 		})
@@ -72,7 +72,7 @@ func TestChattyWiring_OnlyDeltaFramesArmQuarantine(t *testing.T) {
 			[]routing.PeerCapability{domain.CapMeshRoutingV1, domain.CapMeshRoutingV3})
 		seedChattyHistoryNearThreshold(svc, peer)
 
-		svc.handleRouteAnnounceV3(provenRoutingSender(peer), domain.PeerAddress("addr-peerB"),
+		svc.handleRouteAnnounceV3(svc.provenRoutingSender(peer), domain.PeerAddress("addr-peerB"),
 			protocol.RouteAnnounceV3Frame{
 				Kind:    protocol.RouteAnnounceV3KindFull,
 				Epoch:   1,
@@ -93,7 +93,7 @@ func TestChattyWiring_OnlyDeltaFramesArmQuarantine(t *testing.T) {
 			[]routing.PeerCapability{domain.CapMeshRoutingV1, domain.CapMeshRoutingV2})
 		seedChattyHistoryNearThreshold(svc, peer)
 
-		svc.handleRoutesUpdate(provenRoutingSender(peer), domain.PeerAddress("addr-peerB"), protocol.Frame{
+		svc.handleRoutesUpdate(svc.provenRoutingSender(peer), domain.PeerAddress("addr-peerB"), protocol.Frame{
 			Type:           "routes_update",
 			AnnounceRoutes: buildAnnounceRouteFrames(peer, 1),
 		})
@@ -110,7 +110,7 @@ func TestChattyWiring_OnlyDeltaFramesArmQuarantine(t *testing.T) {
 			[]routing.PeerCapability{domain.CapMeshRoutingV1, domain.CapMeshRoutingV3})
 		seedChattyHistoryNearThreshold(svc, peer)
 
-		svc.handleRouteAnnounceV3(provenRoutingSender(peer), domain.PeerAddress("addr-peerB"),
+		svc.handleRouteAnnounceV3(svc.provenRoutingSender(peer), domain.PeerAddress("addr-peerB"),
 			protocol.RouteAnnounceV3Frame{
 				Kind:    protocol.RouteAnnounceV3KindDelta,
 				Epoch:   1,
@@ -131,7 +131,7 @@ func TestChattyWiring_OnlyDeltaFramesArmQuarantine(t *testing.T) {
 			[]routing.PeerCapability{domain.CapMeshRoutingV1, domain.CapMeshRoutingV2})
 		seedChattyHistoryNearThreshold(svc, peer)
 
-		svc.handleRequestResync(provenRoutingSender(peer))
+		svc.handleRequestResync(svc.provenRoutingSender(peer))
 
 		if svc.isSubjectInRouteQuarantine(provenIdentitySubject(peer)) {
 			t.Fatal("request_resync (control frame) must NOT count toward chatty_routes")

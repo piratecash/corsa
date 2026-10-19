@@ -341,6 +341,9 @@ func TestSessionKindsSkipADialledSessionWhoseSetupFailed(t *testing.T) {
 	rig.awaitSessionGoroutine(t)
 
 	rig.svc.peerMu.RLock()
+	if entry := rig.svc.persistedMeta[evictionSlotAddress]; entry == nil || entry.DialAttempts != 6 || entry.LastSessionAt != nil {
+		t.Error("failed setup did not count exactly once without claiming success")
+	}
 	consecutive := 0
 	if entry := rig.svc.setupFailures[evictionSlotAddress]; entry != nil {
 		consecutive = entry.Consecutive

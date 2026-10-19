@@ -156,19 +156,13 @@ func TestOutboundSessionReader_PopulatesRawLineForV3(t *testing.T) {
 	svc := newTestServiceWithRouting(t, idNodeA)
 	svc.eventBus = newStormBus(t)
 	senderAddr := domain.PeerAddress("addr-peerB")
-	sendCh := make(chan peerSendItem, 4)
+	session := newReceiveOwnerSession(t, svc, 6303, senderAddr)
 	svc.peerMu.Lock()
-	svc.sessions[senderAddr] = &peerSession{
-		address:      senderAddr,
-		peerIdentity: idPeerB,
-		capabilities: []domain.Capability{domain.CapMeshRoutingV1, domain.CapMeshRoutingV3, domain.CapMeshRelayV1},
-		sendCh:       sendCh,
-		authOK:       true,
-	}
+	session.capabilities = []domain.Capability{domain.CapMeshRoutingV1, domain.CapMeshRoutingV3, domain.CapMeshRelayV1}
 	svc.health = map[domain.PeerAddress]*peerHealth{senderAddr: {Connected: true}}
 	svc.peerMu.Unlock()
 
-	svc.dispatchPeerSessionFrame(senderAddr, svc.sessions[senderAddr], frame)
+	svc.dispatchPeerSessionFrame(senderAddr, session, frame)
 
 	if got := svc.routingTable.Lookup(idTargetX); len(got) == 0 {
 		t.Fatalf("v3 frame must reach the routing table via the outbound session reader → dispatch path; got 0 entries")
@@ -184,15 +178,9 @@ func TestOutboundSessionReader_DropsV3WhenRawLineEmpty(t *testing.T) {
 	svc := newTestServiceWithRouting(t, idNodeA)
 	svc.eventBus = newStormBus(t)
 	senderAddr := domain.PeerAddress("addr-peerB")
-	sendCh := make(chan peerSendItem, 4)
+	session := newReceiveOwnerSession(t, svc, 6304, senderAddr)
 	svc.peerMu.Lock()
-	svc.sessions[senderAddr] = &peerSession{
-		address:      senderAddr,
-		peerIdentity: idPeerB,
-		capabilities: []domain.Capability{domain.CapMeshRoutingV1, domain.CapMeshRoutingV3, domain.CapMeshRelayV1},
-		sendCh:       sendCh,
-		authOK:       true,
-	}
+	session.capabilities = []domain.Capability{domain.CapMeshRoutingV1, domain.CapMeshRoutingV3, domain.CapMeshRelayV1}
 	svc.health = map[domain.PeerAddress]*peerHealth{senderAddr: {Connected: true}}
 	svc.peerMu.Unlock()
 
@@ -200,7 +188,7 @@ func TestOutboundSessionReader_DropsV3WhenRawLineEmpty(t *testing.T) {
 	// pushed to inboxCh before the fix. Dispatcher's
 	// UnmarshalRouteAnnounceV3Frame([]byte("")) fails and the frame
 	// is dropped; nothing reaches the routing table.
-	svc.dispatchPeerSessionFrame(senderAddr, svc.sessions[senderAddr], protocol.Frame{
+	svc.dispatchPeerSessionFrame(senderAddr, session, protocol.Frame{
 		Type: protocol.RouteAnnounceV3FrameType,
 	})
 

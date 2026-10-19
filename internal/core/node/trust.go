@@ -1,6 +1,8 @@
 package node
 
 import (
+	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -15,6 +17,7 @@ import (
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/protocol"
+	"github.com/piratecash/corsa/internal/core/secretfile"
 )
 
 var errTrustConflict = errors.New("trusted contact conflict")
@@ -25,17 +28,20 @@ const trustContactSourceRecord = "identity_record"
 
 // trustFileVersion is the schema version this build writes. Version 2 added
 // the signed identity-record rows; version 3 added the independently tracked
-// last-online observation for trusted contacts. A file without either field is
+// last-online observation for trusted contacts; version 4 adds explicit local
+// contact provenance. A file without the older fields is
 // a legacy layout and is upgraded in place on the first save.
-const trustFileVersion = 3
+const trustFileVersion = 4
 
 type trustedContact struct {
-	Address      string    `json:"address"`
-	PubKey       string    `json:"pub_key"`
-	BoxKey       string    `json:"box_key"`
-	BoxSignature string    `json:"box_signature"`
-	FirstSeenAt  time.Time `json:"first_seen_at"`
-	LastSeenAt   time.Time `json:"last_seen_at"`
+	localRow     *localContactRowIncarnation `json:"-"` // trust.mu; immutable runtime lifecycle token
+	LocalContact *localContactState          `json:"local_contact_intent,omitempty"`
+	Address      string                      `json:"address"`
+	PubKey       string                      `json:"pub_key"`
+	BoxKey       string                      `json:"box_key"`
+	BoxSignature string                      `json:"box_signature"`
+	FirstSeenAt  time.Time                   `json:"first_seen_at"`
+	LastSeenAt   time.Time                   `json:"last_seen_at"`
 	// LastOnlineAt is what THIS node observed with its own clock: a final
 	// route lost, or a DM the sender handed us over its own session. Chat
 	// history is deliberately NOT persisted beside it: what the messages say
@@ -83,6 +89,18 @@ type trustedIdentityRecord struct {
 }
 
 type trustStore struct {
+	// pinEvidenceMu serializes record/fact replacement against inactive K2
+	// eligibility through its pin stage. Never acquired with mu already held.
+	pinEvidenceMu sync.RWMutex
+
+	// mu owns facts/revisions/latch. Latch never clears for this store lifetime.
+	authorityReadErr  error // immutable load refusal; never blessed by resaving
+	authorityObserved bool
+	factRevision      localContactFactRevision
+	// Immutable after load; tests replace before concurrency. All authority writes
+	// share saveMu with the ordinary writer and never fall back once observed.
+	localFiles func() (localContactDurableFiles, error)
+
 	path      string
 	mu        sync.RWMutex
 	contacts  map[string]trustedContact
@@ -175,7 +193,11 @@ func (r trustedKeysLoadReport) boxPairDropped(address string, contact trustedCon
 }
 
 func loadTrustStore(path string, self trustedContact) (*trustStore, error) {
+	return loadTrustStoreWithFiles(path, self, func() (localContactDurableFiles, error) { return openLocalContactFiles(path) })
+}
+func loadTrustStoreWithFiles(path string, self trustedContact, files func() (localContactDurableFiles, error)) (*trustStore, error) {
 	store := &trustStore{
+		localFiles:     files,
 		path:           path,
 		contacts:       map[string]trustedContact{},
 		conflicts:      map[string]string{},
@@ -185,11 +207,49 @@ func loadTrustStore(path string, self trustedContact) (*trustStore, error) {
 	}
 
 	if path != "" {
-		data, err := os.ReadFile(path)
+		data, err := readInitialTrustFile(path)
 		if err == nil {
 			var payload trustFile
 			if err := json.Unmarshal(data, &payload); err != nil {
 				return nil, fmt.Errorf("decode trust store %s: %w", path, err)
+			}
+			if err := decodeTrustAuthority(data, &payload); err != nil {
+				return nil, fmt.Errorf("decode trust authority: %w", err)
+			}
+			hasAuthority := false
+			for _, row := range payload.Contacts {
+				if row.LocalContact != nil {
+					hasAuthority = true
+					break
+				}
+			}
+			if hasAuthority {
+				if err := readLocalContactAuthority(path, data); err != nil {
+					if !errors.Is(err, secretfile.ErrDurabilityUnsupported) {
+						return nil, fmt.Errorf("read trust authority: %w", err)
+					}
+					store.authorityReadErr = err
+				}
+			}
+			if payload.Version < 0 || payload.Version > trustFileVersion {
+				return nil, fmt.Errorf("unsupported trust store version %d", payload.Version)
+			}
+			for address, row := range payload.Contacts {
+				if row.LocalContact == nil {
+					continue
+				}
+				if payload.Version != trustFileVersion || address != row.Address || address == self.Address {
+					return nil, domain.ErrLocalContactIntent
+				}
+				if err := validateLocalContactRow(row); err != nil {
+					return nil, err
+				}
+				store.factRevision++
+				state := *row.LocalContact
+				state.revision = store.factRevision
+				row.LocalContact = &state
+				payload.Contacts[address] = row
+				store.authorityObserved = true
 			}
 			if payload.Contacts != nil {
 				store.contacts = payload.Contacts
@@ -255,7 +315,10 @@ func loadTrustStore(path string, self trustedContact) (*trustStore, error) {
 	}
 
 	if err := store.save(); err != nil {
-		return nil, err
+		if !store.authorityObserved || !errors.Is(err, secretfile.ErrDurabilityUnsupported) {
+			return nil, err
+		}
+		log.Warn().Err(err).Msg("trust_authority_startup_save_unconfirmed")
 	}
 
 	return store, nil
@@ -321,35 +384,54 @@ func (s *trustStore) recordLastOnlineAt(identities []domain.PeerIdentity, at tim
 // cannot distinguish "conflict-path save failed" (not stored) from
 // "stored but save failed".
 func (s *trustStore) remember(contact trustedContact) (stored bool, err error) {
+	return s.rememberContact(context.Background(), contact)
+}
+func (s *trustStore) rememberContact(ctx context.Context, contact trustedContact) (stored bool, err error) {
+	stored, _, err = s.rememberContactOrigin(ctx, contact, contactApplyGeneric)
+	return stored, err
+}
+func (s *trustStore) rememberContactOrigin(ctx context.Context, contact trustedContact, origin contactApplyOrigin) (stored bool, rowStamp localContactRowStamp, err error) {
 	now := s.clock()
 
+	s.pinEvidenceMu.Lock()
 	s.mu.Lock()
+	if err := ctx.Err(); err != nil {
+		s.mu.Unlock()
+		s.pinEvidenceMu.Unlock()
+		return false, localContactRowStamp{}, err
+	}
 	if existing, ok := s.contacts[contact.Address]; ok {
 		if existing.PubKey != contact.PubKey || existing.BoxKey != contact.BoxKey || existing.BoxSignature != contact.BoxSignature {
 			s.conflicts[contact.Address] = fmt.Sprintf("pinned contact mismatch from %s at %s", contact.Source, now.Format(time.RFC3339))
 			snapshot := s.snapshotLocked()
 			s.mu.Unlock()
+			s.pinEvidenceMu.Unlock()
 			if err := s.saveSnapshot(snapshot); err != nil {
-				return false, err
+				return false, localContactRowStamp{}, err
 			}
-			return false, errTrustConflict
+			return false, localContactRowStamp{}, errTrustConflict
 		}
 
+		rowStamp = s.bindLocalContactRowLocked(&existing, origin)
 		existing.LastSeenAt = now
 		existing.Source = contact.Source
 		s.contacts[contact.Address] = existing
 		snapshot := s.snapshotLocked()
 		s.mu.Unlock()
-		return true, s.saveSnapshot(snapshot)
+		s.pinEvidenceMu.Unlock()
+		return true, rowStamp, s.saveSnapshot(snapshot)
 	}
 
+	contact.localRow = nil
+	rowStamp = s.bindLocalContactRowLocked(&contact, origin)
 	contact.FirstSeenAt = now
 	contact.LastSeenAt = now
 	s.contacts[contact.Address] = contact
 	s.promoteSessionRecordsLocked(contact.Address)
 	snapshot := s.snapshotLocked()
 	s.mu.Unlock()
-	return true, s.saveSnapshot(snapshot)
+	s.pinEvidenceMu.Unlock()
+	return true, rowStamp, s.saveSnapshot(snapshot)
 }
 
 // promoteSessionRecordsLocked moves every cached record of an address that
@@ -424,6 +506,7 @@ func (s *trustStore) persistentUsage() (contacts, conflicts, records int) {
 func (s *trustStore) forget(identity domain.PeerIdentity) (removed bool, err error) {
 	address := identity.String()
 
+	s.pinEvidenceMu.Lock()
 	s.mu.Lock()
 	if _, ok := s.contacts[address]; !ok {
 		// Not a contact — nothing on disk to forget, but "forget X" still
@@ -433,6 +516,7 @@ func (s *trustStore) forget(identity domain.PeerIdentity) (removed bool, err err
 		// was deleted, and that is what the caller's unpin keys on.
 		s.sessionRecords.deleteAddressLocked(address)
 		s.mu.Unlock()
+		s.pinEvidenceMu.Unlock()
 		return false, nil
 	}
 	delete(s.contacts, address)
@@ -450,6 +534,7 @@ func (s *trustStore) forget(identity domain.PeerIdentity) (removed bool, err err
 	s.sessionRecords.deleteAddressLocked(address)
 	snapshot := s.snapshotLocked()
 	s.mu.Unlock()
+	s.pinEvidenceMu.Unlock()
 
 	if err := s.saveSnapshot(snapshot); err != nil {
 		return true, fmt.Errorf("persist trust store after forget %s: %w", address, err)
@@ -489,6 +574,22 @@ func restoreTrustRecordRow(row trustRecordRow) (trustRecordKey, trustedIdentityR
 	return key, trustedIdentityRecord{record: record, body: parsed, storedAt: row.StoredAt}, nil
 }
 
+// cloneSignedIdentityRecord preserves verbatim signed bytes, including unknown
+// fields. Ownership copying never re-marshals or authenticates a record.
+func cloneSignedIdentityRecord(record protocol.SignedIdentityRecord) protocol.SignedIdentityRecord {
+	record.Body, record.Sig = bytes.Clone(record.Body), bytes.Clone(record.Sig)
+	return record
+}
+func cloneIdentityRecordBody(body protocol.IdentityRecordBody) protocol.IdentityRecordBody {
+	body.DTypes = body.DTypes.Clone()
+	return body
+}
+func cloneTrustedIdentityRecord(record trustedIdentityRecord) trustedIdentityRecord {
+	record.record = cloneSignedIdentityRecord(record.record)
+	record.body = cloneIdentityRecordBody(record.body)
+	return record
+}
+
 // recordBodies returns the parsed bodies of every stored record of one
 // network — the startup reseed source for the knowledge maps: verified key
 // material that survived the restart must be usable without a fresh
@@ -499,7 +600,7 @@ func (s *trustStore) recordBodies(network string) []protocol.IdentityRecordBody 
 	out := make([]protocol.IdentityRecordBody, 0, len(s.records))
 	for key, stored := range s.records {
 		if key.network == network {
-			out = append(out, stored.body)
+			out = append(out, cloneIdentityRecordBody(stored.body))
 		}
 	}
 	return out
@@ -514,11 +615,13 @@ func (s *trustStore) recordFor(network domain.NetworkID, identity domain.PeerIde
 	if !ok {
 		return protocol.SignedIdentityRecord{}, protocol.IdentityRecordBody{}, false
 	}
+	stored = cloneTrustedIdentityRecord(stored)
 	return stored.record, stored.body, true
 }
 
 // recordLocked finds a record in whichever set holds it. A key is in at
-// most one: acceptance routes it by contact membership, promotion moves it
+// most one. It borrows owner arrays: caller holds mu and clones before escape.
+// Acceptance routes it by contact membership, promotion moves it
 // from the cache to the persistent set, and forget clears both.
 func (s *trustStore) recordLocked(key trustRecordKey) (trustedIdentityRecord, bool) {
 	if stored, ok := s.records[key]; ok {
@@ -564,9 +667,12 @@ func (s *trustStore) rememberOwnRecord(network domain.NetworkID, record protocol
 // the current record, then placement. persistent forces the disk set;
 // otherwise contact membership at this moment decides.
 func (s *trustStore) mergeRecord(network domain.NetworkID, record protocol.SignedIdentityRecord, body protocol.IdentityRecordBody, persistent bool) (domain.IdentityRecordMergeOutcome, error) {
+	record = cloneSignedIdentityRecord(record)
+	body = cloneIdentityRecordBody(body)
 	now := s.clock()
 	key := trustRecordKey{network: network.String(), address: body.Address.String()}
 
+	s.pinEvidenceMu.Lock()
 	s.mu.Lock()
 	stored := domain.AbsentIdentityRecord()
 	if existing, ok := s.recordLocked(key); ok {
@@ -575,6 +681,7 @@ func (s *trustStore) mergeRecord(network domain.NetworkID, record protocol.Signe
 	outcome := domain.DecideIdentityRecordMerge(stored, body.Seq, record.Body)
 	if !outcome.Accepted() {
 		s.mu.Unlock()
+		s.pinEvidenceMu.Unlock()
 		return outcome, nil
 	}
 
@@ -582,6 +689,7 @@ func (s *trustStore) mergeRecord(network domain.NetworkID, record protocol.Signe
 	if !persistent && !s.isPersistentRecordAddressLocked(key.address) {
 		s.sessionRecords.putLocked(key, accepted)
 		s.mu.Unlock()
+		s.pinEvidenceMu.Unlock()
 		return outcome, nil
 	}
 
@@ -601,6 +709,7 @@ func (s *trustStore) mergeRecord(network domain.NetworkID, record protocol.Signe
 	}
 	snapshot := s.snapshotLocked()
 	s.mu.Unlock()
+	s.pinEvidenceMu.Unlock()
 
 	if err := s.saveSnapshot(snapshot); err != nil {
 		return outcome, fmt.Errorf("persist trust store after record merge %s: %w", key.address, err)
@@ -646,6 +755,7 @@ func (s *trustStore) trustedContacts() map[string]trustedContact {
 
 	out := make(map[string]trustedContact, len(s.contacts))
 	for address, contact := range s.contacts {
+		contact.LocalContact = cloneLocalContactState(contact.LocalContact)
 		out[address] = contact
 	}
 	return out
@@ -674,6 +784,7 @@ func (s *trustStore) snapshotLocked() trustSnapshot {
 	s.snapshotGen++
 	contacts := make(map[string]trustedContact, len(s.contacts))
 	for address, contact := range s.contacts {
+		contact.LocalContact = cloneLocalContactState(contact.LocalContact)
 		contacts[address] = contact
 	}
 
@@ -715,14 +826,25 @@ func (s *trustStore) saveSnapshot(snapshot trustSnapshot) error {
 		return fmt.Errorf("create trust store directory: %w", err)
 	}
 
-	payload, err := json.MarshalIndent(trustFile{
-		Version:   trustFileVersion,
-		Contacts:  snapshot.contacts,
-		Conflicts: snapshot.conflicts,
-		Records:   snapshot.records,
-	}, "", "  ")
+	s.mu.RLock()
+	strictRequired := s.authorityObserved
+	s.mu.RUnlock()
+	payload, err := encodeTrustSnapshot(snapshot)
 	if err != nil {
-		return fmt.Errorf("marshal trust store: %w", err)
+		return err
+	}
+	if strictRequired {
+		files, err := s.localFiles()
+		if err != nil {
+			return err
+		}
+		defer func() { _ = files.Close() }()
+		outcome, err := files.Write(context.Background(), payload)
+		if err != nil || outcome != secretfile.DurableCommitted {
+			return errors.Join(domain.ErrLocalContactFactUnconfirmed, err)
+		}
+		s.savedGen = snapshot.gen
+		return nil
 	}
 
 	// Write-temp-then-rename: the trust store is loaded at startup and a
@@ -739,4 +861,8 @@ func (s *trustStore) saveSnapshot(snapshot trustSnapshot) error {
 
 	s.savedGen = snapshot.gen
 	return nil
+}
+
+func encodeTrustSnapshot(snapshot trustSnapshot) ([]byte, error) {
+	return json.MarshalIndent(trustFile{Version: trustFileVersion, Contacts: snapshot.contacts, Conflicts: snapshot.conflicts, Records: snapshot.records}, "", "  ")
 }

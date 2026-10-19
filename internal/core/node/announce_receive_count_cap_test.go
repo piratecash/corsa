@@ -77,7 +77,7 @@ func TestHandleAnnounceRoutes_OverCapFrameDroppedWhole(t *testing.T) {
 		AnnounceRoutes: buildAnnounceRouteFrames(idPeerB, maxRoutesPerAnnounceFrame+1),
 	}
 
-	svc.handleAnnounceRoutes(provenRoutingSender(idPeerB), frame)
+	svc.handleAnnounceRoutes(svc.provenRoutingSender(idPeerB), frame)
 
 	// None of the over-cap entries must have been applied: probing the
 	// first identity is enough — the cap drops the WHOLE frame, so a
@@ -111,7 +111,7 @@ func TestHandleAnnounceRoutes_AtCapFrameAccepted(t *testing.T) {
 		AnnounceRoutes: entries,
 	}
 
-	svc.handleAnnounceRoutes(provenRoutingSender(idPeerB), frame)
+	svc.handleAnnounceRoutes(svc.provenRoutingSender(idPeerB), frame)
 
 	// First and last entries are both present — a partial apply would
 	// have shown up here.
@@ -156,7 +156,7 @@ func TestHandleRoutesUpdate_OverCapFrameDroppedWhole(t *testing.T) {
 		AnnounceRoutes: buildAnnounceRouteFrames(idPeerB, maxRoutesPerAnnounceFrame+50),
 	}
 
-	svc.handleRoutesUpdate(provenRoutingSender(idPeerB), senderAddr, frame)
+	svc.handleRoutesUpdate(svc.provenRoutingSender(idPeerB), senderAddr, frame)
 
 	if got := svc.routingTable.Lookup(domain.PeerIdentityFromWire(frame.AnnounceRoutes[0].Identity)); len(got) > 0 {
 		t.Fatalf("over-cap v2 delta must not apply: %d entries stored for first identity", len(got))
@@ -195,7 +195,7 @@ func TestHandleRouteAnnounceV3_OverCapFrameDroppedWhole(t *testing.T) {
 		Entries: entries,
 	}
 
-	svc.handleRouteAnnounceV3(provenRoutingSender(idPeerB), domain.PeerAddress("addr-peerB"), frame)
+	svc.handleRouteAnnounceV3(svc.provenRoutingSender(idPeerB), domain.PeerAddress("addr-peerB"), frame)
 
 	if got := svc.routingTable.Lookup(domain.PeerIdentityFromWire(entries[0].Identity)); len(got) > 0 {
 		t.Fatalf("over-cap v3 frame must not apply: %d entries stored for first identity", len(got))
@@ -223,7 +223,7 @@ func TestHandleRouteAnnounceV3_AtCapFrameAccepted(t *testing.T) {
 		Entries: entries,
 	}
 
-	svc.handleRouteAnnounceV3(provenRoutingSender(idPeerB), domain.PeerAddress("addr-peerB"), frame)
+	svc.handleRouteAnnounceV3(svc.provenRoutingSender(idPeerB), domain.PeerAddress("addr-peerB"), frame)
 
 	if got := svc.routingTable.Lookup(domain.PeerIdentityFromWire(entries[0].Identity)); len(got) == 0 {
 		t.Fatalf("at-cap v3 frame: first entry missing")

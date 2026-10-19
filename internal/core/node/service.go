@@ -92,7 +92,15 @@ type MessageStore interface {
 }
 
 type Service struct {
-	identity *identity.Identity
+	// selectedPins is immutable after New; its joined worker owns passMu/retry pacing.
+	selectedPins *selectedPinProducer
+	// Immutable producer pointer; its joined worker owns retries, row state stays under trust.mu.
+	contactPins *contactPinProducer
+	// peerAdmissionMu serializes table admission and its provider side effects; never taken under domain locks.
+	peerAdmissionMu sync.Mutex
+	// peerClock is immutable after construction; tests replace it before concurrent use.
+	peerClock func() time.Time
+	identity  *identity.Identity
 	// selfBoxKey / selfBoxSig are the box key (base64) and its identity-
 	// binding signature this node sends in hello/welcome frames. They are
 	// ALWAYS populated — including under cfg.DisableDirectMessages —
@@ -224,6 +232,8 @@ type Service struct {
 	// refusals counted here and the pipeline's own verdicts stay one
 	// series. See docs/locking.md.
 	datagramMetrics *datagram.Metrics
+	// Immutable constructor facts, assigned once by NewService; not readiness.
+	datagramStartup datagramStartupObservation
 
 	// datagramLayer is the assembled datagram transport plane: the conveyor
 	// of docs/protocol/datagram.md §4.1, the scheduler of
@@ -1116,7 +1126,14 @@ type Service struct {
 	// listener opens, so handlers observe a non-nil snapshot on their first
 	// load.  See network_stats_snapshot.go / peer_health_snapshot.go /
 	// peers_exchange_snapshot.go for the per-path contract.
-	networkStatsSnap networkStatsSnapPtr
+	// banDiagnosticsSnap is immutable after publication; RPC never takes a domain lock.
+	banDiagnosticsSnap        atomic.Pointer[banDiagnosticsSnapshot]
+	banDiagnosticsAccessNanos atomic.Int64
+	// Requests are handled by hotReadsRefreshLoop; at most one queued barrier.
+	banDiagnosticsRequests chan banDiagnosticsRequest
+	// The immutable worker epoch publishes startup and cancellation to RPC readers.
+	banDiagnosticsLifecycle atomic.Pointer[banDiagnosticsLifecycle]
+	networkStatsSnap        networkStatsSnapPtr
 	// networkStatsAccessNanos mirrors peerHealthAccessNanos for the
 	// network_stats snapshot: the Unix-nanos timestamp of the last
 	// fetch_network_stats read, gating the periodic rebuild on recent
@@ -1420,9 +1437,22 @@ type subscriber struct {
 }
 
 type peerSession struct {
-	address      domain.PeerAddress
-	peerIdentity domain.PeerIdentity // peer's Ed25519 identity fingerprint from welcome.Address
-	connID       domain.ConnID       // monotonic connection ID for diagnostics
+	// selectedProof is immutable before reader start. selectedGeneration belongs
+	// to peerMu after CM acceptance. Atomic eligibilityEnded is terminal on
+	// Close/reader I/O, independent of delayed peerMu-protected map cleanup.
+	selectedProof      *selectedSessionProof
+	selectedGeneration uint64
+	eligibilityEnded   atomic.Bool
+	// receive is immutable after attachOutboundNetCore and shared with connEntry.
+	receive *routing.AnnounceReceiveState
+	// readiness orders legacy auth_ok consumption before reading the next line.
+	// Immutable pointer, own leaf mutex; nil only in explicit reader fixtures.
+	readiness *peerSessionReadiness
+	// releaseAddressDial is immutable after dialForCM; its closure owns a sync.Once.
+	releaseAddressDial func()
+	address            domain.PeerAddress
+	peerIdentity       domain.PeerIdentity // peer's Ed25519 identity fingerprint from welcome.Address
+	connID             domain.ConnID       // monotonic connection ID for diagnostics
 	// proven is the v2 peer that proved its identity over THIS connection,
 	// or nil for a legacy session, whose welcome identity nobody proved. It
 	// decides who per-peer punitive and budget state is charged to
@@ -1575,11 +1605,16 @@ func (ps *peerSession) closeAs(closer peerSessionCloser) error {
 	if ps == nil {
 		return nil
 	}
+	ps.eligibilityEnded.Store(true)
 	ps.closeOnce.Do(func() {
+		if ps.receive != nil {
+			ps.receive.Close()
+		}
 		// Recorded before anything is torn down: every observer that learns
 		// of the close from the transport (a read error, the writer exiting)
 		// does so after this store.
 		ps.closedBy.Store(&closer)
+		ps.readiness.stop()
 		// Fence and finalise the upper queue BEFORE the transport goes
 		// away. Sessions that die before servePeerSession ever runs (failed
 		// handshake, CM generation mismatch) have no serve-loop exit to
@@ -1828,6 +1863,7 @@ const (
 )
 
 type incomingMessage struct {
+	origin     messageOrigin
 	ID         protocol.MessageID
 	Topic      string
 	Sender     string
@@ -1881,6 +1917,10 @@ func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Ser
 // lets every reader take it without a lock (see the field). nil means the
 // bridge.
 func newService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus, networkOverride netcore.Network) *Service {
+	return newServiceWithDatagramConstructor(cfg, id, eventBus, networkOverride, productionDatagramConstructor{})
+}
+
+func newServiceWithDatagramConstructor(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus, networkOverride netcore.Network, constructor datagramConstructor) *Service {
 	// Load persisted peer state and merge with bootstrap peers.
 	// Bootstrap peers always appear first; persisted peers are appended
 	// in score-descending order, skipping duplicates.
@@ -1901,12 +1941,19 @@ func newService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus, netw
 		})
 		seenAddrs[pa] = struct{}{}
 	}
+	for i := range peerState.Peers {
+		if _, configured := seenAddrs[peerState.Peers[i].Address]; configured {
+			peerState.Peers[i].Source = domain.PeerSourceBootstrap
+		}
+	}
 	sortPeerEntries(peerState.Peers)
+	peerState.Peers = trimPeerEntries(peerState.Peers)
 	// Index persisted entries so we can seed health from their metadata.
 	persistedByAddr := make(map[domain.PeerAddress]*peerEntry, len(peerState.Peers))
 	for i, entry := range peerState.Peers {
 		if _, dup := seenAddrs[entry.Address]; dup {
-			// Even for duplicates (bootstrap overlap) keep the metadata for health seeding.
+			// Configured bootstrap provenance survives restored discovery metadata.
+			peerState.Peers[i].Source = domain.PeerSourceBootstrap
 			persistedByAddr[entry.Address] = &peerState.Peers[i]
 			continue
 		}
@@ -1914,7 +1961,7 @@ func newService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus, netw
 		persistedByAddr[entry.Address] = &peerState.Peers[i]
 		peers = append(peers, transport.Peer{
 			Address: entry.Address,
-			Source:  domain.PeerSourcePersisted,
+			Source:  entry.Source,
 		})
 	}
 
@@ -2172,6 +2219,7 @@ func newService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus, netw
 		conns:                    make(map[netcore.ConnID]*connEntry),
 		connIDByNetConn:          make(map[net.Conn]netcore.ConnID),
 		bans:                     make(map[string]banEntry),
+		banDiagnosticsRequests:   make(chan banDiagnosticsRequest, 1),
 		events:                   make(map[chan protocol.LocalChangeEvent]struct{}),
 		identitySessions:         make(map[domain.PeerIdentity]int),
 		identityRelaySessions:    make(map[domain.PeerIdentity]int),
@@ -2192,16 +2240,23 @@ func newService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus, netw
 		done:                     make(chan struct{}),
 	}
 	// Initialize PeerProvider (Stage 3: connection management integration).
+	svc.peerClock = time.Now
 	svc.peerProvider = NewPeerProvider(PeerProviderConfig{
+		NowFn: svc.peerNow,
 		HealthFn: func(addr domain.PeerAddress) *PeerHealthView {
 			svc.peerMu.RLock()
 			defer svc.peerMu.RUnlock()
+			aging := peerEntry{Address: addr}
+			if entry := svc.persistedMeta[addr]; entry != nil {
+				aging = *entry
+			}
 			addr = svc.resolveHealthAddress(addr)
 			h := svc.health[addr]
 			if h == nil {
-				return nil
+				return &PeerHealthView{Aging: aging}
 			}
 			return &PeerHealthView{
+				Aging:               aging,
 				Score:               h.Score,
 				ConsecutiveFailures: h.ConsecutiveFailures,
 				LastDisconnectedAt:  h.LastDisconnectedAt,
@@ -2524,7 +2579,10 @@ func newService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus, netw
 	// assignment lives here.
 	svc.datagramMetrics = datagram.NewMetricsStartedAt(svc.startedAt)
 
-	if layer, err := newDatagramLayer(svc, svc.datagramMetrics); err != nil {
+	requestedDatagram := svc.cfg.EnableDatagramV1
+	layer, constructionErr := constructor.Build(svc, svc.datagramMetrics)
+	svc.datagramStartup = observeDatagramConstruction(requestedDatagram, layer, constructionErr)
+	if err := constructionErr; err != nil {
 		log.Error().Err(err).Msg("datagram_layer_disabled_construction_failed")
 		svc.cfg.EnableDatagramV1 = false
 	} else {
@@ -2540,6 +2598,9 @@ func newService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus, netw
 		clock:            time.Now,
 		tlsFirstDisabled: cfg.DisableV2TLSFirst,
 	})
+
+	svc.selectedPins = newSelectedPinProducer(selectedPinProducerOptions{service: svc, clock: time.Now})
+	svc.contactPins = newContactPinProducer(svc)
 
 	// The node's own signed identity record (docs/protocol/identity-lookup.md
 	// §4.1). Issued AFTER the datagram layer so the declared dtypes mirror
@@ -2747,7 +2808,14 @@ func (s *Service) stopRunLifecycle(cancel context.CancelFunc) {
 	s.runLoopsWg.Wait()
 }
 
-func (s *Service) Run(ctx context.Context) error {
+func (s *Service) Run(ctx context.Context) (runErr error) {
+	// Fatal storage uncertainty must survive every teardown/flush and cancellation.
+	// Registered first, this runs last: the headless app propagates it to exit 1.
+	defer func() {
+		if fatal := s.identityPinFatalError(); fatal != nil {
+			runErr = fatal
+		}
+	}()
 	// The Service lifecycle context FOLLOWS the caller's and is cancelled on
 	// ANY exit from Run, not only on the caller cancelling.
 	//
@@ -2788,6 +2856,10 @@ func (s *Service) Run(ctx context.Context) error {
 	// and this is a no-op.
 	defer runCancel()
 	ctx = s.runCtx
+
+	if err := s.beginIdentityPinNetworkRun(); err != nil {
+		return err
+	}
 
 	// What NewService found the node must not start with stops it here,
 	// before the first listener (StartupRefusal).
@@ -2857,6 +2929,13 @@ func (s *Service) Run(ctx context.Context) error {
 	// goroutine — when the plane is not wired. They are ordinary lifecycle
 	// loops: they stop on ctx.Done and are joined by the teardown just armed.
 	s.startDatagramLayer(ctx)
+
+	if s.selectedPins != nil {
+		s.goRunLoop(func() { s.selectedPins.run(ctx) })
+	}
+	if s.contactPins != nil {
+		s.goRunLoop(func() { s.contactPins.run(ctx) })
+	}
 
 	// Identity lookup engine (identity_resolver.go). Reseeds the background
 	// phase from durable intents and then serves StartResolution calls; a
@@ -7130,6 +7209,10 @@ func (s *Service) handleAckDeleteFrame(id domain.ConnID, frame protocol.Frame) (
 }
 
 func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bool) (bool, int, string) {
+	return s.storeIncomingMessageWithR2a(msg, validateTimestamp, nil)
+}
+
+func (s *Service) storeIncomingMessageWithR2a(msg incomingMessage, validateTimestamp bool, r2a *r2aDispatch) (bool, int, string) {
 	// Relay-only DM opt-out enforcement (cfg.DisableDirectMessages).
 	// Runs FIRST — before timestamp validation and signature
 	// verification — so spam addressed to a node that opted out of DMs
@@ -7440,7 +7523,11 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 	if isLocal && s.messageStore != nil && msg.Topic != protocol.TopicControlDM {
 		// Unlock before calling into the store — it may do SQLite I/O.
 		s.unlockMessageAdmission(msg.ID, admission, "lock_released_mid")
-		storeResult = s.messageStore.StoreMessage(envelope, ownAuthored)
+		storedEnvelope := envelope
+		if r2a != nil {
+			storedEnvelope.Payload = append([]byte(nil), envelope.Payload...)
+		}
+		storeResult = s.messageStore.StoreMessage(storedEnvelope, ownAuthored)
 		s.lockMessageAdmission(msg.ID, admission)
 	}
 
@@ -7568,6 +7655,9 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 	//
 	// Nothing else moves: the decision is a pure read of routing and peer
 	// state, and the push/gossip that consume it stay where they were.
+	if r2a != nil && ownAuthored && msg.Topic == "dm" && storeResult == StoreInserted {
+		s.registerR2aOrigin(r2a, envelope)
+	}
 	decision := s.router.Route(envelope)
 
 	// An origin-authored message that ARRIVED from the network (Via != "")
@@ -7592,7 +7682,7 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 	// (sender != self) is NOT gated — blind gossip is how relays propagate
 	// other people's messages (INV-3 unchanged for transit).
 	originFirstSend := msg.Via == "" && s.identity != nil && msg.Sender == s.identity.Address
-	originUnreachableHold := s.cfg.HoldDMUntilReachable && originFirstSend && decision.RelayNextHop == nil && len(decision.PushSubscribers) == 0
+	originUnreachableHold := protocol.IsDMTopic(msg.Topic) && s.cfg.HoldDMUntilReachable && originFirstSend && decision.RelayNextHop == nil && len(decision.PushSubscribers) == 0
 	if originUnreachableHold {
 		log.Debug().Str("node", s.identity.Address).Str("id", string(msg.ID)).Str("recipient", msg.Recipient).Msg("origin_send_held_unreachable")
 	}
@@ -7605,6 +7695,9 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 		msg.Recipient != "" && msg.Recipient != "*" && msg.Recipient != s.identity.Address &&
 		storeResult != StoreDuplicate
 	dispatchedAt := time.Now().UTC()
+	if r2a != nil && r2a.early && !s.r2aUpdateInitialHold(r2a, originUnreachableHold) {
+		return true, count, ""
+	}
 
 	// Only notify the desktop UI for messages this node participates in.
 	// Transit relay traffic must not wake up the UI.
@@ -7699,7 +7792,7 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 	//
 	// It starts holdUnconfirmed (or holdUnreachable when the gate refused
 	// to try), so nothing counts as sent until a sink says so.
-	if ownOutgoingDM {
+	if ownOutgoingDM && (r2a == nil || !r2a.early) {
 		s.deliveryMu.Lock()
 		s.registerAwaitingDeliveredLocked(envelope, dispatchedAt, originUnreachableHold)
 		s.deliveryMu.Unlock()
@@ -7720,6 +7813,8 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 	if ownOutgoingDM {
 		wireEnvelope = legacyTransitRestamp(envelope, time.Now().UTC())
 	}
+
+	sealR2aWireProjection(r2a, wireEnvelope)
 
 	if len(decision.PushSubscribers) > 0 {
 		// Tracked: writePushFrame itself is network-only, but the
@@ -7762,7 +7857,7 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 		if (msg.Topic == "dm" || msg.Topic == protocol.TopicControlDM) && msg.Recipient != "" && msg.Recipient != "*" {
 			relayed := relaySendRefused
 			if decision.RelayNextHop != nil {
-				relayed = s.sendTableDirectedRelay(s.runCtx, wireEnvelope, *decision.RelayNextHop, decision.RelayNextHopAddress, decision.RelayNextHopHops, dispatchedAt)
+				relayed = s.sendTableDirectedRelayWithR2a(s.runCtx, wireEnvelope, *decision.RelayNextHop, decision.RelayNextHopAddress, decision.RelayNextHopHops, dispatchedAt, r2a)
 			} else {
 				// No table route — fall back to blind gossip relay to
 				// capable full nodes (pre-Phase 1.2 behavior). Same
@@ -8190,6 +8285,9 @@ func (s *Service) shouldRouteStoredMessage(msg incomingMessage) bool {
 	// below treats both topics identically — recipient gating, forward
 	// capability, and origin checks all apply.
 	isDMClass := msg.Topic == "dm" || msg.Topic == protocol.TopicControlDM
+	if msg.origin == messageOriginOwnGlobal && msg.Topic == string(domain.GlobalMessageTopic) && msg.Sender == s.identity.Address && msg.Recipient == "*" && msg.Via == "" {
+		return true
+	}
 	if isDMClass && msg.Recipient == s.identity.Address {
 		return false
 	}
@@ -9198,6 +9296,7 @@ func (s *Service) attachOutboundNetCore(session *peerSession) error {
 	s.peerMu.Lock()
 	log.Trace().Str("site", "attachOutboundNetCore").Str("phase", "lock_held").Uint64("conn_id", uint64(session.connID)).Msg("peer_mu_writer")
 	s.attachOutboundCoreLocked(session.conn, pc)
+	session.receive = s.receiveForIDLocked(session.connID)
 	s.peerMu.Unlock()
 	log.Trace().Str("site", "attachOutboundNetCore").Str("phase", "lock_released").Uint64("conn_id", uint64(session.connID)).Msg("peer_mu_writer")
 
@@ -10093,19 +10192,33 @@ func (s *Service) offerLocalChangeToSubscribers(event protocol.LocalChangeEvent)
 }
 
 func (s *Service) trustContact(address, pubKey, boxKey, boxSig, source string) {
+	// Generic legacy imports retain their existing event/log error reporting and
+	// carry no explicit local-intent authority.
+	_, _ = s.applyTrustedContact(address, pubKey, boxKey, boxSig, source)
+}
+
+func (s *Service) applyTrustedContact(address, pubKey, boxKey, boxSig, source string) (bool, error) {
+	return s.applyTrustedContactContext(context.Background(), address, pubKey, boxKey, boxSig, source)
+}
+
+func (s *Service) applyTrustedContactContext(ctx context.Context, address, pubKey, boxKey, boxSig, source string) (bool, error) {
+	stored, _, err := s.applyTrustedContactOrigin(ctx, address, pubKey, boxKey, boxSig, source, contactApplyGeneric)
+	return stored, err
+}
+func (s *Service) applyTrustedContactOrigin(ctx context.Context, address, pubKey, boxKey, boxSig, source string, origin contactApplyOrigin) (bool, localContactRowStamp, error) {
 	if address == "" || pubKey == "" || boxKey == "" || boxSig == "" {
-		return
+		return false, localContactRowStamp{}, domain.ErrLocalContactIntent
 	}
 	// Relay-only contact-plane opt-out: a re-imported SELF contact would
 	// persist our box key back into the trust store (and would otherwise
 	// trip a spurious errTrustConflict against the keyless self row
 	// seeded at startup). See suppressesSelfBoxKey.
 	if s.suppressesSelfBoxKey(address) {
-		return
+		return false, localContactRowStamp{}, domain.ErrLocalContactIntent
 	}
 
 	if err := identity.VerifyBoxKeyBinding(address, pubKey, boxKey, boxSig); err != nil {
-		return
+		return false, localContactRowStamp{}, domain.ErrLocalContactIntent
 	}
 
 	// Register the identity (and fire the first-sight IdentityAdded event)
@@ -10124,16 +10237,20 @@ func (s *Service) trustContact(address, pubKey, boxKey, boxSig, source string) {
 	// trustMutationMu makes {remember, Pin} atomic against
 	// deleteTrustedContactFrame's {forget, Unpin} — see the field doc.
 	s.trustMutationMu.Lock()
+	if err := ctx.Err(); err != nil {
+		s.trustMutationMu.Unlock()
+		return false, localContactRowStamp{}, err
+	}
 	before := s.trust.trustedContacts()
 	_, existed := before[address]
 
-	stored, rememberErr := s.trust.remember(trustedContact{
+	stored, rowStamp, rememberErr := s.trust.rememberContactOrigin(ctx, trustedContact{
 		Address:      address,
 		PubKey:       pubKey,
 		BoxKey:       boxKey,
 		BoxSignature: boxSig,
 		Source:       source,
-	})
+	}, origin)
 	if !stored {
 		s.trustMutationMu.Unlock()
 		if errors.Is(rememberErr, errTrustConflict) {
@@ -10141,7 +10258,7 @@ func (s *Service) trustContact(address, pubKey, boxKey, boxSig, source string) {
 		} else if rememberErr != nil {
 			log.Warn().Err(rememberErr).Str("address", address).Str("source", source).Msg("trust store persist failed on conflict path")
 		}
-		return
+		return false, localContactRowStamp{}, rememberErr
 	}
 
 	// Pin the raw address: a newly trusted contact's key knowledge must be
@@ -10175,6 +10292,7 @@ func (s *Service) trustContact(address, pubKey, boxKey, boxSig, source string) {
 		BoxKey:  domain.PeerBoxKey(boxKey),
 		BoxSig:  domain.PeerBoxSignature(boxSig),
 	})
+	return true, rowStamp, rememberErr
 }
 
 // isVerifiedSender checks whether the given sender address corresponds to

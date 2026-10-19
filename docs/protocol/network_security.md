@@ -483,6 +483,11 @@ graph TB
 
 **Diagram: Protocol-Level Security Checks**
 
+## Address aging
+
+Address aging is an availability and resource-bound policy, not evidence of peer guilt. A network intermediary can age an honest address by repeatedly disrupting outbound sessions; minimum attempts, elapsed time, paced rechecks, rotation of previously working endpoints and pressure-only eviction limit cost but do not prove the address malicious. The initial 3/6-hour and 10/7-day thresholds and 500 automatic-address budget are operational parameters, not proven security boundaries. Manual/bootstrap and active addresses remain protected. Address eviction retains pins, endpoint bindings and downgrade prohibitions; it must not make a formerly protected identity eligible for v1. See [peers.md](peers.md#address-aging-and-admission).
+
+
 ---
 
 # Сетевая безопасность — Hardening транспортного уровня
@@ -962,3 +967,7 @@ graph TB
 ```
 
 **Диаграмма: Проверки безопасности на уровне протокола**
+
+## Старение адресов
+
+Старение адреса — компромисс доступности и ограниченности ресурсов, а не доказательство вины пира. Посредник может состарить честный адрес, срывая исходящие сессии; минимальное число попыток, давность, редкие повторы, ротация ранее работавших и вытеснение лишь при заполнении ограничивают расходы, но не доказывают злонамеренность адреса. Начальные пороги 3/6 ч и 10/7 суток и лимит 500 автоматических адресов — эксплуатационные параметры, не доказанные границы безопасности. Операторские/bootstrap и активные адреса защищены. Вытеснение не удаляет pin, привязки endpoint и запреты downgrade и не возвращает ранее защищённую identity к допуску v1. См. [peers.md](peers.md#старение-адресов-и-допуск-в-таблицу).

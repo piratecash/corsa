@@ -4,9 +4,12 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net"
+	"os"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -91,7 +94,7 @@ func legacyBadAuth(t *testing.T, address string, id *identity.Identity) (net.Con
 func endsWithin(conn net.Conn, reader io.Reader, within time.Duration) bool {
 	_ = conn.SetReadDeadline(time.Now().Add(within))
 	_, err := io.Copy(io.Discard, reader)
-	return err == nil
+	return err == nil || errors.Is(err, syscall.ECONNRESET)
 }
 
 // A legacy peer that fails its signature again and again from loopback loses
@@ -791,8 +794,95 @@ func TestAViolationOnAnySessionOfABannedIdentityClosesIt(t *testing.T) {
 	listener.addBanScore(connA, banIncrementInvalidSig)
 	reader := bufio.NewReader(sessionA)
 	_ = sessionA.SetDeadline(time.Now().Add(5 * time.Second))
-	writeJSONFrame(t, sessionA, protocol.Frame{Type: "ping"})
+	if err := writePingAfterPossiblePeerClose(sessionA); err != nil {
+		t.Fatalf("probe the closing banned session: %v", err)
+	}
 	if !endsWithin(sessionA, reader, 5*time.Second) {
 		t.Fatal("a session of a banned identity stayed open after its violation")
 	}
+}
+
+func TestEndsWithinAcceptsPeerTCPReset(t *testing.T) {
+	server, client := tcpPair(t)
+	tcp := server.(*net.TCPConn)
+	if err := tcp.SetLinger(0); err != nil {
+		t.Fatal(err)
+	}
+	if err := tcp.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if !endsWithin(client, client, time.Second) {
+		t.Fatal("TCP reset was mistaken for an open peer connection")
+	}
+}
+
+func TestEndsWithinRejectsTimeoutAndUnrelatedReadError(t *testing.T) {
+	local, remote := net.Pipe()
+	t.Cleanup(func() { _ = local.Close(); _ = remote.Close() })
+	if endsWithin(local, local, 5*time.Millisecond) {
+		t.Error("an idle connection reaching its read deadline was accepted as peer closure")
+	}
+	if endsWithin(local, forcedPeerReadError{err: errors.New("unrelated read failure")}, time.Second) {
+		t.Error("an unrelated read error was accepted as peer closure")
+	}
+}
+
+type forcedPeerReadError struct{ err error }
+
+func (r forcedPeerReadError) Read([]byte) (int, error) { return 0, r.err }
+
+// The listener may already have closed the banned session before its final
+// probe is written; unrelated write failures must still fail the assertion.
+func writePingAfterPossiblePeerClose(conn net.Conn) error {
+	line, err := protocol.MarshalFrameLine(protocol.Frame{Type: "ping"})
+	if err != nil {
+		return err
+	}
+	_, err = io.WriteString(conn, line)
+	switch {
+	case errors.Is(err, syscall.ECONNRESET), errors.Is(err, syscall.EPIPE), errors.Is(err, io.EOF), errors.Is(err, net.ErrClosed), errors.Is(err, io.ErrClosedPipe):
+		return nil
+	default:
+		return err
+	}
+}
+
+func TestPostBanProbeAcceptsOnlySuccessfulWriteOrTerminalPeerClose(t *testing.T) {
+	unexpected := errors.New("unrelated write failure")
+	for _, tc := range []struct {
+		name string
+		err  error
+		ok   bool
+	}{
+		{name: "successful write", ok: true},
+		{name: "TCP reset", err: &net.OpError{Op: "write", Net: "tcp", Err: syscall.ECONNRESET}, ok: true},
+		{name: "broken pipe", err: syscall.EPIPE, ok: true},
+		{name: "EOF", err: io.EOF, ok: true},
+		{name: "closed socket", err: net.ErrClosed, ok: true},
+		{name: "closed pipe", err: io.ErrClosedPipe, ok: true},
+		{name: "timeout", err: os.ErrDeadlineExceeded},
+		{name: "unrelated failure", err: unexpected},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := writePingAfterPossiblePeerClose(forcedPeerWriteError{err: tc.err})
+			if (err == nil) != tc.ok {
+				t.Fatalf("probe result = %v, accept = %v", err, tc.ok)
+			}
+			if !tc.ok && !errors.Is(err, tc.err) {
+				t.Fatalf("probe hid the unexpected failure: %v", err)
+			}
+		})
+	}
+}
+
+type forcedPeerWriteError struct {
+	net.Conn
+	err error
+}
+
+func (c forcedPeerWriteError) Write(p []byte) (int, error) {
+	if c.err != nil {
+		return 0, c.err
+	}
+	return len(p), nil
 }

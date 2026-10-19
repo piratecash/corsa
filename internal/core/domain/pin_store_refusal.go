@@ -20,6 +20,10 @@ var ErrPinStoreRefused = errors.New("pin_store_refused")
 type PinStoreRefusalReason string
 
 const (
+	// PinStoreRefusalIdentityPinRecovery requires trusted offline protection recovery.
+	PinStoreRefusalIdentityPinRecovery PinStoreRefusalReason = "identity_pin_recovery"
+	// PinStoreRefusalSupervisionRequired refuses bypass of an enrolled launcher.
+	PinStoreRefusalSupervisionRequired PinStoreRefusalReason = "supervision_required"
 	// PinStoreRefusalLocationUnsafe: the store, its marker, or a directory
 	// on the way to either may be changed by someone other than the node's
 	// user or root — a symlink in place of the file, a file that is not the

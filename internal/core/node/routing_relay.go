@@ -604,6 +604,10 @@ func (s *Service) sendFrameToAddressVia(ctx context.Context, address domain.Peer
 // already knew, and threw it away, so a route that had gone stale still
 // counted as a send.
 func (s *Service) sendTableDirectedRelay(ctx context.Context, msg protocol.Envelope, nextHopIdentity domain.PeerIdentity, validatedAddress domain.PeerAddress, nextHopHops int, dispatchedAt time.Time) relaySendOutcome {
+	return s.sendTableDirectedRelayWithR2a(ctx, msg, nextHopIdentity, validatedAddress, nextHopHops, dispatchedAt, nil)
+}
+
+func (s *Service) sendTableDirectedRelayWithR2a(ctx context.Context, msg protocol.Envelope, nextHopIdentity domain.PeerIdentity, validatedAddress domain.PeerAddress, nextHopHops int, dispatchedAt time.Time, origin *r2aDispatch) relaySendOutcome {
 	address := validatedAddress
 	if address == "" {
 		// Retry path or caller without cached address — re-resolve with
@@ -644,7 +648,11 @@ func (s *Service) sendTableDirectedRelay(ctx context.Context, msg protocol.Envel
 		return s.tryRelayToCapableFullNodes(msg, targets, dispatchedAt)
 	}
 
-	relayed := s.sendTableRoutedRelayToAddress(ctx, address, msg, dispatchedAt)
+	var selected *r2aDirectedDispatch
+	if origin != nil && origin.early {
+		selected = &r2aDirectedDispatch{origin: origin, nextHop: nextHopIdentity, address: address, hops: nextHopHops}
+	}
+	relayed := s.sendTableRoutedRelayToAddressWithR2a(ctx, address, msg, dispatchedAt, selected)
 	if !relayed.handled() {
 		// Send failed — gossip fallback (same gates as above). An
 		// unresolved directed send is carried INTO the fallback's result:
@@ -694,6 +702,10 @@ func (s *Service) sendTableDirectedRelay(ctx context.Context, msg protocol.Envel
 // Outbound enqueue is non-blocking and does not observe ctx beyond the
 // pre-entry check inside the network bridge.
 func (s *Service) sendTableRoutedRelayToAddress(ctx context.Context, address domain.PeerAddress, msg protocol.Envelope, dispatchedAt time.Time) relaySendOutcome {
+	return s.sendTableRoutedRelayToAddressWithR2a(ctx, address, msg, dispatchedAt, nil)
+}
+
+func (s *Service) sendTableRoutedRelayToAddressWithR2a(ctx context.Context, address domain.PeerAddress, msg protocol.Envelope, dispatchedAt time.Time, origin *r2aDirectedDispatch) relaySendOutcome {
 	if strings.HasPrefix(string(address), "inbound:") {
 		frame := protocol.Frame{
 			Type:        "relay_message",
@@ -794,7 +806,10 @@ func (s *Service) sendTableRoutedRelayToAddress(ctx context.Context, address dom
 		// writer, so reaching here means the frame left this node.
 		return relaySendHandedToPeer
 	}
-	return s.sendTableRoutedRelayMessage(address, msg, dispatchedAt)
+	if origin == nil {
+		return s.sendTableRoutedRelayMessage(address, msg, dispatchedAt)
+	}
+	return s.sendTableRoutedRelayMessageWithR2a(address, msg, dispatchedAt, origin)
 }
 
 // resolveRouteNextHopAddress finds a transport address for a route's

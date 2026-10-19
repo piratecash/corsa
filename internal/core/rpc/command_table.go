@@ -287,10 +287,15 @@ func (t *CommandTable) AllNames() []string {
 // backward compatibility and will be removed after 2 releases.
 func RegisterAllCommands(t *CommandTable, node NodeProvider, chatlog ChatlogProvider, dmRouter DMRouterProvider, metricsProvider MetricsProvider) {
 	RegisterSystemCommands(t, node)
+	runtimeProvider, _ := node.(RuntimeMetricsProvider)
+	RegisterRuntimeMetricsCommand(t, runtimeProvider)
+	datagramStateProvider, _ := node.(DatagramRuntimeStateProvider)
+	RegisterDatagramRuntimeStateCommand(t, datagramStateProvider)
 	RegisterNetworkCommands(t, node)
 	RegisterMeshCommands(t, node)
 	RegisterIdentityCommands(t, node)
 	RegisterMessageCommands(t, node, dmRouter, chatlog)
+	RegisterGlobalPublisherCommand(t, nil)
 	RegisterFileCommands(t, node, dmRouter)
 	RegisterChatlogCommands(t, chatlog)
 	RegisterNoticeCommands(t, node)
@@ -328,6 +333,12 @@ func RegisterAllCommands(t *CommandTable, node NodeProvider, chatlog ChatlogProv
 		ep = e
 	}
 	RegisterEndpointBindingCommands(t, ep)
+
+	var ip IdentityPinProvider
+	if provider, ok := node.(IdentityPinProvider); ok {
+		ip = provider
+	}
+	RegisterIdentityPinCommands(t, ip)
 
 	var dd EndpointDialDelayProvider
 	if d, ok := node.(EndpointDialDelayProvider); ok {
@@ -392,6 +403,7 @@ func registerSnakeCaseAliases(t *CommandTable) {
 		"fetch_route_table":              "fetchRouteTable",
 		"fetch_route_summary":            "fetchRouteSummary",
 		"fetch_route_lookup":             "fetchRouteLookup",
+		"get_datagram_runtime_state":     "getDatagramRuntimeState",
 		"fetch_datagram_summary":         "fetchDatagramSummary",
 		"datagram_reachable":             "datagramReachable",
 		"explain_datagram_route":         "explainDatagramRoute",
@@ -953,7 +965,7 @@ func RegisterConnectionCommands(t *CommandTable, cd ConnectionDiagnosticProvider
 	activePeersInfo := CommandInfo{Name: "getActivePeers", Description: "Get ConnectionManager slot snapshot", Category: "network"}
 	activeConnsInfo := CommandInfo{Name: "getActiveConnections", Description: "Get all live peer connections (inbound + outbound)", Category: "network"}
 	listPeersInfo := CommandInfo{Name: "listPeers", Description: "Get all known peers with exclude reasons", Category: "network"}
-	listBannedInfo := CommandInfo{Name: "listBanned", Description: "Get banned IPs with reasons", Category: "network"}
+	listBannedInfo := CommandInfo{Name: "listBanned", Description: "Get IP bans, local scores and per-peer remote bans with snapshot freshness", Category: "network", Transport: TransportLoopbackOnly}
 
 	if cd == nil {
 		t.RegisterUnavailable(activePeersInfo)
@@ -1007,7 +1019,7 @@ func RegisterConnectionCommands(t *CommandTable, cd ConnectionDiagnosticProvider
 			if r, done := ctxDone(req); done {
 				return r
 			}
-			data, err := cd.ListBannedJSON()
+			data, err := readBanDiagnostics(requestContext(req), cd)
 			if err != nil {
 				return internalError(fmt.Errorf("list banned: %w", err))
 			}

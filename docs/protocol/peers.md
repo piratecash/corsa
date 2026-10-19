@@ -352,8 +352,9 @@ Peer addresses discovered via `get_peers` exchange and bootstrap are persisted l
 - score increases on successful TCP handshake (+10) and decreases on failure (-5) or clean disconnect (-2), clamped to [-50, +100]
 - stable metadata (`node_type`, `source`, `added_at`) loaded from the file is preserved across restart+flush cycles; only newly discovered peers derive these fields from runtime state
 - the file is flushed every 5 minutes during the bootstrap loop and once on graceful shutdown; `Run` waits for the flush to complete before returning
-- on restart, persisted peers are merged with bootstrap peers: bootstrap entries appear first, then persisted entries sorted by score descending; duplicates are skipped but their metadata is still used for health seeding
-- the persisted list is capped at 500 entries; lowest-scoring entries are trimmed on save
+- on restart, persisted peers are merged with bootstrap peers: bootstrap entries appear first, then persisted entries in address-aging rank order; duplicates are skipped but their metadata is still used for health seeding
+- the automatically learned address table has the same 500-address budget in memory and on disk; manual and bootstrap addresses are outside that budget. Admission replaces only an eligible stale automatic address, or rejects the newcomer. Saved discovery source survives restart; promoting a source never rewrites first discovery time
+- on migration of an oversized older file, persisted ban/version-refusal rows are retained even if they exceed 500 automatic entries; the same restored set is kept in memory and on disk. New automatic addresses require an eligible stale replacement and cannot increase that restored count; security refusals are not discarded to meet the budget
 
 ## Peer dial prioritisation
 
@@ -365,21 +366,28 @@ Outgoing connection candidates are selected using score-based ordering instead o
 - when a peer session ends (error or clean disconnect), the upstream slot is released immediately; the next `ensurePeerSessions` cycle (≤2 s) picks the best available candidate by score
 - cooldown and score are evaluated against the primary peer address (the one stored in `s.peers`); fallback dial variants (e.g. same host with default port) inherit the primary's reputation so that cooldown cannot be bypassed by dialling an alternative port
 - the pending outbound queue is also keyed by primary peer address, so frames queued while connected via a fallback variant are correctly flushed when any variant reconnects
-- dial candidates are ordered deterministically by score descending, then by `added_at` ascending, then by address ascending; the `added_at` and address tie-breakers (not raw insertion order) decide the winner when scores are equal — this also determines which peer claims a shared subnet group (/24 for public IPv4, /64 for public IPv6) under the subnet-diversity filter
+- dial candidates are ordered by stale status (stale last), `min(dial_attempts, 3)` ascending, score descending, `added_at` ascending, then address ascending; the `added_at` and address tie-breakers (not raw insertion order) decide the winner when scores are equal — this also determines which peer claims a shared subnet group (/24 for public IPv4, /64 for public IPv6) under the subnet-diversity filter
 - **host deduplication**: if any active connection (outbound or inbound) already exists to a given host IP, all dial candidates with the same host are skipped; this maximises fault tolerance by spreading connections across distinct hosts rather than accumulating multiple connections to the same IP
 - **v2 retry backoff**: an address whose v2 attempts ended without v2 — its v1 answer refused because the peer requires v2, the fall back to v1 held after such a refusal, a TLS attempt over an opened TCP connection that ended before the identity proof verified, or a probe whose answer admitted nothing — is skipped until its v2 retry backoff runs out: 30 s, doubled per further such end, at most 30 min ([session_v2.md](session_v2.md), "A refusal on dial is not a failure of the address", "A failure before authentication is not a failure of the address either"). Unlike the failure cooldown above, it reads no failure count and changes neither score nor failures: such an end is this node's decision or one nothing authenticated, and a man in the middle can provoke it
 - **subnet diversity**: at most one automatic outbound connection per subnet group — /24 for public IPv4, /64 for public IPv6. A candidate is skipped when its subnet group is already occupied by one of this node's own outbound choices — an outbound session, a dial slot in any state — or by a better-ranked candidate in the same selection pass. Inbound connections never occupy a group: the remote side chooses them, so counting them would let a remote that authenticates one inbound session from an address in a group close that whole group to this node's outbound dials. Skipped peers are reported by `list_peers` with the `same_subnet` exclude reason. There are exactly two deliberate exemptions:
   - **operator `add_peer`** bypasses candidate filtering entirely (immediate dial via `ManualPeerRequested`), so an operator can deliberately connect to several nodes inside one subnet. Startup bootstrap priming does **not** get this bypass — compiled/default bootstrap peers are registered through the same add-peer bookkeeping but dialled through the regular candidate path, so a bootstrap list with several nodes in one /24 still opens only one connection;
   - **non-routable addresses** (loopback, RFC 1918, ULA, CGNAT, link-local) and non-IP hosts (`.onion`, `.i2p`, hostnames) carry no subnet group. This matters only in `AllowPrivatePeers` (dev/LAN) mode — without it private addresses never become automatic candidates at all — and in that mode stacking several same-subnet private connections is intended: LAN/dev clusters legitimately co-locate many nodes inside one private subnet.
 
-## Stale peer eviction
+## Address aging and admission
 
-In-memory peer lists are periodically pruned to remove stale entries.  Every 10 minutes the node scans all known peers and removes those that meet **both** criteria:
+`peers-{port}.json` v5 stores `dial_attempts` (failures since the last admissible outbound session, saturated at 255), `last_dial_attempt_at`, and `last_session_at` in the existing address entry. `added_at` is first discovery and is unchanged by announcements, source promotion, and operator retries. On migration from v4, the old `last_connected_at` is conservatively reused as historical success: that field did not record direction and is **not** evidence of an outbound session. Absent discovery time is set on load.
 
-- score ≤ −20 (`peerEvictScoreThreshold`)
-- no successful connection within the last 24 hours (`peerEvictStaleWindow`); if the peer was never connected, `added_at` is used as the reference timestamp
+One connection-manager dial, including its address ladder, can add at most one failure to the primary address. A remote busy refusal, failed TCP/TLS/proof or probe, refusal of a v1 answer, wrong endpoint identity, self identity, and incompatible version count when the dial actually reached the endpoint. Score policy is separate: a busy or unauthenticated refusal does not lower score. Cancellation, shutdown, local preparation errors, exhausted local budget or pin capacity, missing/unreachable proxy, and waits for backoff or pin room do not add failures. An earlier real failed branch still counts when a later branch is refused locally. If the same ladder succeeds, its result is successful; a later remote setup failure adds one failure, whereas local disposal does not.
 
-Eviction cleans up all associated state (health, peer type, version, persisted metadata).  Bootstrap peers and currently-connected peers are **never** evicted regardless of score.
+Only a fully set up, admissible, published **outbound** session resets `dial_attempts` and writes `last_session_at` for the exact endpoint dialled, after pin and expected-identity checks. TCP connect, transport handshake, and inbound sessions (including proven v2) cannot reset it. Success at B does not reset A even if health aliases or identity group them together; an untracked synthetic fallback has no address history to reset. A successful fallback still records the primary ladder's attempt time, so stale A cannot bypass pacing. An explicit operator `add_peer` authorizes one immediate retry without changing discovery or success history; announcements and automatic bootstrap priming do not authorize it.
+
+Initial **operational parameters**, not proven security boundaries:
+
+- Never worked: at least 3 failures and at least 6 hours since first discovery.
+- Worked before: at least 10 failures since success and at least 7 days since that success.
+- Stale addresses are ranked last and retried at most once per 6 hours plus a stable per-address/per-attempt jitter of 0–36 minutes. The gate applies at the common CM dial entry, including retries of an existing slot. Each fourth candidate-selection pass reserves one due previously working address, rotating by endpoint, so a stream of new addresses cannot starve their rechecks.
+
+Addresses are evicted **only when admitting a new automatic address into a full table**. There is no periodic deletion by score or after 30 days. Only stale automatic entries qualify; active sessions, in-flight dials, manual/bootstrap/connect-only targets and active version lockouts or bans are protected. A just-attempted address has a one-minute eviction grace. Victims are chosen by never-worked first, more failures first, oldest discovery/success first, then endpoint. If none qualifies, admission is rejected. Eviction removes address bookkeeping and undeliverable pending frames, but retains security-store pins, endpoint bindings, and downgrade marks. Aging attempts use the periodic five-minute save; session success and eviction mark state dirty for the existing debounced save.
 
 ## Stale inbound connection cleanup
 
@@ -470,6 +478,11 @@ graph TB
 5. **Error Accumulation**: `consecutive_failures` increments on each failed request and resets on successful message exchange
 
 6. **Traffic Accounting**: `bytes_sent/received` are cumulative and never reset during a node lifetime (for session stats, subtract previous snapshots)
+
+## Reserved overlay capability names
+
+`overlay_find_node_v1` and `overlay_responder_v1` are reserved typed capability names, accepted by the capability parser but **inactive**. This build does not advertise them in legacy or v2 hello/welcome or in its signed self record. No overlay dtype or frame is enabled by reserving these names; the released dtype set remains unchanged.
+
 
 ---
 
@@ -827,8 +840,9 @@ graph TB
 - score увеличивается при успешном TCP-рукопожатии (+10) и уменьшается при ошибке (-5) или чистом отключении (-2), зажат в диапазоне [-50, +100]
 - стабильные метаданные (`node_type`, `source`, `added_at`) загруженные из файла сохраняются через циклы restart+flush; только для вновь обнаруженных пиров эти поля вычисляются из runtime-состояния
 - файл сбрасывается на диск каждые 5 минут в bootstrap loop и один раз при graceful shutdown; `Run` дожидается завершения flush перед возвратом
-- при перезапуске персистированные пиры мержатся с bootstrap: записи bootstrap идут первыми, затем персистированные в порядке убывания score; дубликаты пропускаются, но их метаданные используются для инициализации health
-- список ограничен 500 записями; записи с наименьшим score обрезаются при сохранении
+- при перезапуске персистированные пиры мержатся с bootstrap: записи bootstrap идут первыми, затем персистированные по приоритету старения адресов; дубликаты пропускаются, но их метаданные используются для инициализации health
+- автоматически полученные адреса имеют одинаковый лимит 500 в памяти и файле; операторские/bootstrap в него не входят; замена возможна только для допустимого устаревшего адреса, иначе новый адрес отклоняется
+- при миграции переполненного старого файла записи бана/version-refusal сохраняются даже сверх 500 автоматических адресов; восстановленный набор одинаков в памяти и файле. Новые автоматические адреса требуют допустимой устаревшей замены и не увеличивают восстановленный размер; защитные отказы ради лимита не удаляются
 
 ## Приоритизация пиров при подключении
 
@@ -840,21 +854,28 @@ graph TB
 - при завершении пир-сессии (ошибка или чистое отключение) upstream-слот освобождается немедленно; следующий цикл `ensurePeerSessions` (≤2 с) выбирает лучшего кандидата по score
 - cooldown и score вычисляются по основному адресу пира (тому, что хранится в `s.peers`); fallback-варианты (тот же хост с портом по умолчанию) наследуют репутацию основного, чтобы cooldown нельзя было обойти попыткой подключения на альтернативный порт
 - очередь исходящих pending-фреймов также привязана к основному адресу пира, поэтому фреймы, поставленные в очередь через fallback-вариант, корректно отправляются при переподключении через любой вариант
-- кандидаты для подключения упорядочены детерминированно: по score по убыванию, затем по `added_at` по возрастанию, затем по адресу по возрастанию; при равных score победителя определяют тай-брейки по `added_at` и адресу (а не сырой порядок вставки) — это же правило решает, какой пир займёт общую группу подсети (/24 для публичного IPv4, /64 для публичного IPv6) под фильтром разнообразия подсетей
+- кандидаты упорядочены по устареванию (устаревшие последними), `min(dial_attempts, 3)` по возрастанию, score по убыванию, `added_at` по возрастанию и адресу; при равных score победителя определяют тай-брейки по `added_at` и адресу (а не сырой порядок вставки) — это же правило решает, какой пир займёт общую группу подсети (/24 для публичного IPv4, /64 для публичного IPv6) под фильтром разнообразия подсетей
 - **дедупликация по хосту**: если к данному IP-хосту уже есть активное соединение (исходящее или входящее), все кандидаты с тем же хостом пропускаются; это максимизирует отказоустойчивость за счёт распределения соединений по разным хостам, а не накопления нескольких соединений к одному IP
 - **отступ повторов v2**: адрес, попытки v2 к которому закончились без v2 — его ответ v1 отвергнут, потому что собеседнику нужен v2, после такого отказа задержан откат на v1, попытка TLS по открытому TCP-соединению закончилась до проверки доказательства identity или ответ на пробу ничего не допустил, — пропускается, пока не истечёт его отступ повторов v2: 30 с, удвоение на каждый следующий такой исход, не больше 30 мин ([session_v2.md](session_v2.md), «Отказ на дозвоне — не неудача адреса», «Неудача до аутентификации — тоже не неудача адреса»). В отличие от охлаждения за неудачи выше он не читает счётчик неудач и не меняет ни рейтинг, ни неудачи: такой исход — решение этого узла или то, что никто не аутентифицировал, и посредник может вызвать его когда угодно
 - **разнообразие подсетей**: не более одного автоматического исходящего соединения на группу подсети — /24 для публичного IPv4, /64 для публичного IPv6. Кандидат пропускается, если его группа уже занята собственным исходящим выбором ноды — исходящей сессией, слотом дозвона в любом состоянии — или кандидатом с лучшим рангом в том же проходе отбора. Входящие соединения группу не занимают никогда: их выбирает удалённая сторона, и их учёт позволил бы удалённой стороне, аутентифицировавшей одну входящую сессию с адреса в группе, закрыть всю эту группу для исходящих дозвонов ноды. Пропущенные пиры видны в `list_peers` с причиной исключения `same_subnet`. Существует ровно два намеренных исключения:
   - **операторский `add_peer`** полностью обходит фильтрацию кандидатов (немедленный dial через `ManualPeerRequested`), так что оператор может намеренно подключиться к нескольким нодам внутри одной подсети. Стартовый bootstrap-прайминг этот обход **не** получает: вшитые/дефолтные bootstrap-пиры регистрируются через ту же add-peer-логику, но dial идёт по обычному кандидатскому пути, поэтому bootstrap-список с несколькими нодами в одном /24 всё равно открывает только одно соединение;
   - **немаршрутизируемые адреса** (loopback, RFC 1918, ULA, CGNAT, link-local) и не-IP хосты (`.onion`, `.i2p`, hostname) не получают группу подсети. Это имеет значение только в режиме `AllowPrivatePeers` (dev/LAN) — без него приватные адреса вообще не становятся автоматическими кандидатами — и в этом режиме накопление нескольких соединений в одной приватной подсети намеренно: LAN/dev-кластеры легитимно размещают много нод в одной подсети.
 
-## Вытеснение устаревших пиров
+## Старение адресов и допуск в таблицу
 
-Список пиров в памяти периодически очищается для удаления устаревших записей. Каждые 10 минут нода проверяет всех известных пиров и удаляет тех, кто удовлетворяет **обоим** критериям:
+Файл `peers-{port}.json` v5 хранит в существующей записи адреса `dial_attempts` (неудачи после последней допустимой исходящей сессии, максимум 255), `last_dial_attempt_at` и `last_session_at`. `added_at` — первое обнаружение: анонсы, Promote и повтор оператора его не меняют. При миграции v4 прежний `last_connected_at` консервативно принимается за исторический успех; направление там не записывалось, поэтому это **не** доказательство исходящей сессии. Отсутствующее время обнаружения задаётся при загрузке. Источник Manual/Bootstrap сохраняется после рестарта.
 
-- score ≤ −20 (`peerEvictScoreThreshold`)
-- не было успешного подключения за последние 24 часа (`peerEvictStaleWindow`); если пир никогда не подключался, используется `added_at` как точка отсчёта
+Один дозвон CM вместе с лестницей адресов добавляет не более одной неудачи основному адресу. Считаются реально выполненные сетевые попытки: отказ занятого слушателя, неудачи TCP/TLS/proof/пробы, отказ v1-ответа, другая или собственная identity, несовместимая версия. Старение независимо от score: busy и неаутентифицированный отказ score не снижают. Отмена/остановка, локальная ошибка подготовки, нехватка бюджета или pin store, отсутствие/недоступность прокси, ожидание backoff или места для pin не увеличивают счётчик. Реальная неудача ранней ветви учитывается, даже если последняя ветвь отклонена локально. Успешная лестница имеет успешный итог; последующая удалённая неудача setup даёт одну неудачу, локальное вытеснение — нет.
 
-При вытеснении очищается всё связанное состояние (health, тип пира, версия, персистированные метаданные). Bootstrap-пиры и подключённые в данный момент пиры **никогда** не удаляются вне зависимости от score.
+Сбрасывает счётчик и обновляет `last_session_at` только полностью подготовленная допустимая опубликованная **исходящая** сессия, после pin и проверки ожидаемой identity, по точно набранному endpoint. TCP-connect, транспортное рукопожатие и входящая сессия (включая доказанную v2) не сбрасывают историю. Успех на B не сбрасывает A той же identity или health-alias; у синтетического fallback без записи нет отдельной истории для сброса. Успешный fallback всё равно фиксирует время дозвона основной лестницы, сохраняя ограничение частоты A. Явный операторский `add_peer` разрешает один немедленный повтор, сохраняя историю обнаружения и успеха; анонсы и автоматический bootstrap-прайминг такого разрешения не дают.
+
+Начальные **эксплуатационные параметры**, а не доказанные границы безопасности:
+
+- Никогда не работавший адрес: не менее 3 неудач и возраст не менее 6 ч.
+- Ранее работавший: не менее 10 неудач после успеха и не менее 7 суток без успеха.
+- Устаревшие идут последними; повтор — не чаще раза в 6 ч плюс стабильный разброс 0–36 мин по адресу и времени попытки. Общий вход дозвона CM проверяет это и при повторе существующего слота. Каждый четвёртый отбор резервирует один подошедший по времени ранее работавший адрес с ротацией endpoint: поток новых адресов не вытесняет их из повторных проверок навсегда.
+
+Вытеснение происходит **только при приёме нового автоматического адреса в полную таблицу**. Периодического удаления по score или через 30 суток нет. Подходят лишь устаревшие автоматические адреса; активные сессии, выполняемые дозвоны, операторские/bootstrap/connect-only адреса, действующие баны и version lockout защищены. После попытки действует минута защиты от вытеснения. Порядок жертв: никогда не работавшие, больше неудач, более старое обнаружение/успех, endpoint. Нет допустимой жертвы — новый адрес отклоняется. Чистятся адресные метаданные и недоставляемые pending-фреймы; pin, привязки endpoint и запреты downgrade сохраняются. Попытки сохраняет периодическая запись раз в 5 мин; успех сессии и вытеснение помечают состояние dirty для существующей отложенной записи.
 
 ## Очистка зависших inbound-соединений
 
@@ -945,3 +966,7 @@ graph TB
 5. **Накопление ошибок**: `consecutive_failures` увеличивает с каждым неудачным запросом и сбрасывается при успешном обмене сообщениями
 
 6. **Учет трафика**: `bytes_sent/received` кумулятивны и никогда не сбрасываются во время жизненного цикла узла (для статистики сеанса вычтите предыдущие снимки)
+
+## Зарезервированные имена overlay capability
+
+`overlay_find_node_v1` и `overlay_responder_v1` зарезервированы как типизированные имена и распознаются парсером, но **неактивны**. Эта сборка не объявляет их в legacy/v2 hello/welcome или подписанной self-record. Резервирование не включает overlay dtype или кадры; выпущенный набор dtype не меняется.

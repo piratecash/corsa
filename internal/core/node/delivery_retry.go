@@ -289,9 +289,11 @@ const (
 // deliveryRetryEntry tracks one locally-sent DM awaiting its delivered/seen
 // receipt. Owned by s.deliveryMu.
 type deliveryRetryEntry struct {
-	Envelope      protocol.Envelope
-	Attempts      int
-	NextAttemptAt time.Time
+	// outgoingProvenance is nil on every ordinary/reseed path; deliveryMu owns it.
+	outgoingProvenance *r2aOwnSendStamp
+	Envelope           protocol.Envelope
+	Attempts           int
+	NextAttemptAt      time.Time
 	// Hold says why the last pass did not put this envelope on the wire,
 	// or holdNone when a sink confirmed that it did.
 	//

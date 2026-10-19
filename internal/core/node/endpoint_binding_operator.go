@@ -326,8 +326,9 @@ func (s *secureSessionStore) commitOperatorEdits(check func(now time.Time) ([]bi
 		s.mu.Unlock()
 		return edits, nil
 	}
-	covers := s.changes
 	file := s.snapshotLocked()
+	covers := s.changes
+	quota := file.InboundQuota.stamp()
 	for _, edit := range edits {
 		edit.writeInto(file)
 	}
@@ -346,6 +347,7 @@ func (s *secureSessionStore) commitOperatorEdits(check func(now time.Time) ([]bi
 	}
 	s.applyEditsLocked(edits)
 	s.markWrittenLocked(covers)
+	s.recordNinSnapshotWrittenLocked(quota, false)
 	s.mu.Unlock()
 	return edits, nil
 }
@@ -383,14 +385,16 @@ func (s *secureSessionStore) applyEditsLocked(edits []bindingEdit) {
 // writeMu and not mu.
 func (s *secureSessionStore) rewriteFromMemoryHoldingWriteMu() error {
 	s.mu.Lock()
-	covers := s.changes
 	file := s.snapshotLocked()
+	covers := s.changes
+	quota := file.InboundQuota.stamp()
 	s.mu.Unlock()
 	if err := s.writeSnapshot(file); err != nil {
 		return fmt.Errorf("%w; restoring the store file: %w", domain.ErrEndpointBindingSelectionChanged, err)
 	}
 	s.mu.Lock()
 	s.markWrittenLocked(covers)
+	s.recordNinSnapshotWrittenLocked(quota, false)
 	s.mu.Unlock()
 	return fmt.Errorf("%w: a binding changed while the action was written; nothing was changed, repeat it", domain.ErrEndpointBindingSelectionChanged)
 }

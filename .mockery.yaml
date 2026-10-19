@@ -18,8 +18,10 @@ packages:
       ConnectionDiagnosticProvider: {}
       CaptureProvider: {}
       DatagramProvider: {}
+      DatagramRuntimeStateProvider: {}
       DiagnosticProvider: {}
       EndpointBindingProvider: {}
+      IdentityPinProvider: {}
       EndpointDialDelayProvider: {}
   # --- Metrics collector ---
   github.com/piratecash/corsa/internal/core/metrics:
@@ -50,6 +52,10 @@ packages:
         unroll-variadic: true
     interfaces:
       MessageStore: {}
+      IdentityPinRemovalFence: {}
+      identityPinDurableFiles: {}
+      localContactDurableFiles: {}
+      datagramConstructor: {}
       Router: {}
   # --- stdlib: net.Conn for node/netcore tests ---
   net:
@@ -82,3 +88,25 @@ packages:
           - dir: '{{.InterfaceDir}}/mocks'
             pkgname: 'mocks'
             filename: '{{ .InterfaceName | snakecase }}.go'
+
+  # --- Final lifecycle observation dependencies ---
+  github.com/piratecash/corsa/sdk:
+    config:
+      dir: '{{.InterfaceDir}}'
+      structname: 'Mock{{.InterfaceName}}'
+      filename: 'mock_{{ .InterfaceName | snakecase }}_test.go'
+      template: testify
+      template-data:
+        unroll-variadic: true
+    interfaces:
+      runtimeDatabaseCloser: {}
+  github.com/piratecash/corsa/internal/testutil/loadstand:
+    config:
+      dir: '{{.InterfaceDir}}'
+      structname: 'Mock{{.InterfaceName}}'
+      filename: 'mock_{{ .InterfaceName | snakecase }}_test.go'
+      template: testify
+      template-data:
+        unroll-variadic: true
+    interfaces:
+      processSignaler: {}

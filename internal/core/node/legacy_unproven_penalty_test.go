@@ -43,6 +43,7 @@ var legacyRoutingCaps = []domain.Capability{
 // identity is the peer's word.
 func legacyOutboundSession(address domain.PeerAddress, claimed domain.PeerIdentity) *peerSession {
 	return &peerSession{
+		receive:      routing.NewAnnounceReceiveState(),
 		address:      address,
 		peerIdentity: claimed,
 		authOK:       true,
@@ -336,8 +337,8 @@ func TestLegacyUnprovenUnattributedPushesDoNotSuppressNamedIdentityHop(t *testin
 // provenRoutingSender is a sender whose identity a v2 session proved — what
 // the routing-plane tests that predate the penalty subject were written
 // against.
-func provenRoutingSender(id domain.PeerIdentity) routingSender {
-	return routingSender{identity: id, penalty: provenIdentitySubject(id)}
+func (svc *Service) provenRoutingSender(id domain.PeerIdentity) routingSender {
+	return routingSender{identity: id, penalty: provenIdentitySubject(id), receive: registryReceiveFixture{svc: svc, id: id}}
 }
 
 // The inbound fixture above must be able to land a baseline at all, or "the
@@ -487,4 +488,23 @@ func TestPenaltySubjectOfDialledSession(t *testing.T) {
 	if got := described.penaltySubject(); got != dialledAddressSubject(legacyAttackerAddress) {
 		t.Fatalf("a peer description no handshake produced = %s, want the dialled address", got)
 	}
+}
+
+// This fixture delegates to the real registry at the original validated
+// transition, preserving tests that require refused frames to create no state.
+// Production dispatch never uses identity-registry receive evidence.
+type registryReceiveFixture struct {
+	svc *Service
+	id  domain.PeerIdentity
+}
+
+func (registryReceiveFixture) ReceiveReady() bool { return true }
+func (r registryReceiveFixture) MarkBaselineReceived() {
+	r.svc.announceLoop.StateRegistry().GetOrCreate(r.id).MarkBaselineReceived()
+}
+func (r registryReceiveFixture) HasReceivedBaseline() bool {
+	return r.svc.announceLoop.StateRegistry().GetOrCreate(r.id).HasReceivedBaseline()
+}
+func (r registryReceiveFixture) ObserveV3Epoch(epoch uint64) routing.V3EpochVerdict {
+	return r.svc.announceLoop.StateRegistry().GetOrCreate(r.id).ObserveV3Epoch(epoch)
 }

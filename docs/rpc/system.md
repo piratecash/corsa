@@ -2,6 +2,9 @@
 
 ## English
 
+For loopback-only Go process counters and fresh ban diagnostics see
+[Runtime metrics and ban diagnostics](runtime_metrics.md).
+
 ### POST /rpc/v1/system/help
 
 List all available commands.
@@ -370,6 +373,9 @@ was charting it should drop the series rather than see it flat-line.
 ---
 
 ## Русский
+
+Loopback-only счётчики процесса Go и свежая диагностика банов:
+[Метрики runtime и диагностика банов](runtime_metrics.md).
 
 ### POST /rpc/v1/system/help
 
