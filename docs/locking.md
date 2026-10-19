@@ -680,6 +680,39 @@ never refunds calendar debt. See [the inactive core contract](design/find-node-o
 
 Private paired admission orders mutationGate.R → fixture lifetime leaf → brief mu. The terminal owner takes only that leaf and never the gate/store lock. Preflight is outside both leaves; context and original incarnation are rechecked after waits. Strict writers order mutationGate.R → writeMu → brief mu; C3 uses W → writeMu → mu. They never acquire the lifetime leaf. No trust/peer/domain lock, signature verification or filesystem/external I/O spans mu. Bounded row expiry/insertion/copy work does span mu (up to4096×520 bytes/262144 ticks), with no constant-latency claim. Encoding/hash occurs after release. Writers capture a fixed journal stamp before I/O; retaining the full DTO for post-write ACK would unnecessarily retain its large maps. Captured content/tick ACK cannot clear newer phase/progress or complete K2's owned drain/purge obligations. Existing periodic/stop owners checkpoint observed time with both no-op predicates progress-aware; no new timer/queue/worker is introduced. N1 lifecycle wiring and resource admission remain separate.
 
+### Inactive R1b record admission owner
+
+The normal identity resolver keeps a nil recordAdmission pointer. A private
+fixture-only factory owns one fixed256-slot relationRecordAdmission under the
+existing resolver.mu; the observed clock/backend opener are immutable after
+construction. No extra owner mutex/map/queue is added. Prospective, answer-await,
+qualified, Processing and earned work share the same physical capacity. Existing
+attempt/resolution optional refs are non-owning companions; no caller target map
+can rebind original evidence. Record-protection reconcile snapshots slot-held
+refs with resolutions under resolver.mu, then releases it before other work.
+
+Registration uses pinGate.TryRLock -> resolver.mu -> store.mu.TryLock and releases
+all before SendLocal. Final transaction order is pinGate.R -> evidence.R ->
+resolver.mu -> trust.mu.R -> store.mu, released in reverse. Clock samples are
+bounded local leaves. The shared sampler strips wall monotonic readings with
+Round(0) before retaining startup/original/current/createdAt; the independent
+elapsed value remains the only rate/startup authority. No crypto, disk/network I/O or legacy drain occurs under
+these locks. Existing resolver -> intents/recordProtection leaf edges remain;
+store/trust/recordProtection never acquire resolver in reverse. Trust R stays
+held through K classification/stage, including durable contact confirmation.
+
+A single separately joined worker performs synchronous preflight/strict I/O and
+unlocked legacy close/drain/purge, with whole-pass2s pacing and cooperative2s
+attempt context. The context is not a hard syscall bound. Processing storage is
+not cleared/reused until actual worker return; shutdown may wait. Strict coverage
+holds pinGate.R -> writeMu, briefly store.mu for snapshot, releases store.mu for
+encoding/I/O, then briefly ACKs only captured revisions and pre-I/O N-in stamp.
+The gate is released before the barrier. Reproof/unrelated COW preserves the
+earned incarnation/allocation obligation; C3 recreation makes it stale. After
+actual worker join one StoppedOwed head may remain in the same closed slot,
+without raw/action/resolution/seq-floor replay authority. No default worker,
+activation, across-restart owed replay or resource acceptance is asserted.
+
 ## Russian
 
 ### Диагностика runtime и банов (T5 A4/R1)
@@ -1312,3 +1345,32 @@ outer+calendar. Dispatch удерживает ту же строку до actual
 `secureSessionStore.mu` владеет format discrimination, logical clock/domain/content generation, covered/strict stamps, lazy bounded arena строк и производным raw Inbound tally. Immutable elapsed leaf — SinceBoot без wall fallback. Legacy format2 журнал не attaches/samples. Format3 load attaches полный проверенный state со свежим runtime anchor; production installer и mature-witness producer отсутствуют. Test-only установка берёт mutationGate.W → writeMu, освобождает mu для namespace preflight/encoding/I/O и публикует только под mu.
 
 Private paired admission: mutationGate.R → fixture lifetime leaf → короткий mu. Terminal owner берёт только leaf, никогда gate/store lock. Preflight вне обоих leaf; context и исходная incarnation перепроверяются после ожиданий. Strict writer: mutationGate.R → writeMu → короткий mu; C3: W → writeMu → mu. Lifetime leaf они не берут. Trust/peer/domain lock, signature verification и filesystem/external I/O не удерживают mu. Bounded expiry/insertion/copy строк выполняется под mu (до4096×520 байт/262144 ticks), без обещания постоянной latency. Encoding/hash — после release. До I/O writer захватывает фиксированный journal stamp: полный DTO для post-write ACK иначе удерживал бы большие maps. ACK захваченных content/tick не стирает новую phase/progress и не завершает owned K2 drain/purge. Прежние periodic/stop owners сохраняют observed time; оба no-op predicates учитывают progress, новый timer/queue/worker не вводится. N1 lifecycle wiring и ресурсная приёмка остаются отдельными.
+
+### Неактивный owner R1b record admission
+
+В обычном resolver recordAdmission=nil. Закрытая fixture factory владеет одним
+fixed256-массивом под существующим resolver.mu; clock/backend opener immutable
+после construction. Вторых mutex/map/queue нет. Prospective/answer-await/qualified/
+Processing/earned делят capacity. Optional refs в attempt/resolution не вторые
+owners; current target map не переустанавливает исходную authority. Reconcile
+снимает snapshot slot-held refs вместе с resolutions под resolver.mu.
+
+Регистрация: pinGate.TryRLock -> resolver.mu -> store.mu.TryLock, всё отпущено до
+SendLocal. Final stage: pinGate.R -> evidence.R -> resolver.mu -> trust.mu.R ->
+store.mu; release обратно. Clock — bounded local leaf; общий sampler снимает wall monotonic reading через
+Round(0) до startup/original/current/createdAt, отдельное elapsed остаётся
+единственной rate/startup authority. Crypto/I/O/drain под ними
+нет. Resolver -> intents/recordProtection остаются leaf; store/trust/recordProtection
+не берут resolver обратно. Trust R удержан через K decision/stage и исключает
+разрыв с durable contact confirmation.
+
+Один joined worker выполняет synchronous preflight/strict I/O и unlocked legacy
+close/drain/purge с whole-pass2s и cooperative attempt2s. Context не ограничивает
+kernel syscall жёстко. Processing нельзя очистить/reuse до actual return, shutdown
+может ждать. Strict coverage держит pinGate.R -> writeMu, коротко store.mu для
+snapshot; encoding/I/O вне store.mu; ACK коротко под store.mu только captured
+revisions и pre-I/O N-in stamp. Gate отпущен до barrier. Reproof/COW сохраняет
+earned incarnation/allocation obligation; C3 recreation делает stale. После
+actual join максимум одна StoppedOwed остаётся в том же закрытом slot без raw/
+action/resolution/seq-floor replay authority. Default worker, activation,
+restart replay и resource acceptance не заявляются.

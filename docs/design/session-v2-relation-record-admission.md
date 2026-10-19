@@ -92,6 +92,40 @@ unbounded execution. A candidate may occupy one bounded queue slot for days when
 storage is delayed; seven days is the chosen policy, not a processing-time bound.
 This document records the owner's decision, not an implementation or test result.
 
+### Inactive R1b composition (candidate implementation)
+
+A private, fixture-only resolver factory composes the original Window action,
+pre-Send pin-owner observation, signed answer/TargetProof, accepted class queue,
+and store admission. The normal resolver has a nil admission owner and starts
+no additional worker. No config, frame, RPC or default profile enables this
+branch. This candidate is neither live activation nor R/K priority readiness.
+See [the implementation boundary](session-v2-relation-admission-core.md).
+
+The one fixed 256-slot owner includes prospective registrations before capture,
+verified-await-SendQueued, qualified FIFO rows, Processing and earned owed work.
+If full or the original pin gate/store is busy, ordinary lookup still sends;
+that attempt gets no later R authority. Rejected/expired work costs zero. A fresh
+valid stage costs one, including existing R; Unknown writes and strict retries
+never refund or charge twice. A qualifying K contact yields ContactPathRequired,
+with no R stage, debit or claim that K publication has completed.
+
+Startup begins at actual Run, using a distinct observed elapsed clock. Original
+resolution creation has paired wall/elapsed upper bounds of seven days; join,
+Success, queue residence and redraw never replace them. Restarted intent rows
+have no proven original elapsed anchor, so their ordinary lookup remains usable
+but this finite slice cannot mint record-admission authority from them.
+
+One separately joined worker uses the existing two-second whole-pass cadence and
+cooperative attempt budget. Actual backend I/O is never detached or declared
+finished by a context timeout. A shutdown clears prestage authority; at most one
+unfinished earned head remains StoppedOwed in the same closed owner's slot only
+after actual worker return. It is historical/unconfirmed state, not a restart
+replay or a guarantee of completion after the Service object is destroyed.
+Strict coverage preserves format3 N-in quota/history and ACKs only its captured
+pre-I/O fixed stamp and captured metadata revisions. Reproof/COW does not erase
+an earned close/drain/purge obligation; C3 remove/recreate invalidates its old
+incarnation and never authorizes repinning.
+
 ## Русский
 
 **Решение владельца от 2026-10-19: утверждены реализация и лёгкие функциональные проверки.**
@@ -177,3 +211,36 @@ stage повторно проверяются exact claim, исходное де
 исполнение. При задержке хранения кандидат может занимать одно место ограниченной
 очереди несколько суток; семь суток — выбранная политика, не граница времени обработки.
 Файл фиксирует решение владельца, а не завершённую реализацию или результаты тестов.
+
+### Неактивная композиция R1b (кандидат реализации)
+
+Закрытая factory только для fixtures связывает исходное действие Window,
+наблюдение pin-owner до Send, подписанный ответ/TargetProof, accepted class queue
+и допуск store. У обычного resolver admission-owner равен nil, дополнительный
+worker не запускается. Включения через config, Frame, RPC или defaults нет.
+Это не активация и не готовность R/K priority. См.
+[границу реализации](session-v2-relation-admission-core.md).
+
+Единственный массив 256 slots включает prospective до capture,
+verified-await-SendQueued, FIFO, Processing и earned owed. При заполнении либо
+занятом исходном gate/store обычный lookup продолжает отправку, но этот attempt
+не приобретает R authority позже. Отказ/expiry стоит ноль; новый stage стоит
+один даже для existing R. Unknown и strict retry не возвращают debit и не
+списывают его повторно. Квалифицирующий K даёт ContactPathRequired: без R stage,
+debit и заявления, что K publication завершён.
+
+Startup отсчитывается от настоящего Run отдельными observed elapsed часами.
+При создании исходного resolution фиксируются wall/elapsed границы семь дней;
+join, Success, очередь и redraw их не заменяют. У resumed intent нет доказанного
+исходного elapsed anchor: обычный lookup доступен, R authority не выдумывается.
+
+Один отдельно joined worker использует существующий двухсекундный whole-pass
+cadence и cooperative attempt budget. Настоящий backend I/O не отделяется в
+потерянную goroutine и не объявляется завершённым по timeout. Shutdown снимает
+prestage authority; после фактического return worker максимум одна earned head
+остаётся StoppedOwed в том же slot закрытого owner. Это historical/unconfirmed
+состояние, не replay после restart и не гарантия завершения после уничтожения
+Service. Strict coverage сохраняет format3 N-in history/quota и ACK только
+captured pre-I/O fixed stamp и metadata revisions. Reproof/COW не снимает
+заработанные close/drain/purge; C3 remove/recreate делает старую incarnation
+stale и не разрешает repin.

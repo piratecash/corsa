@@ -2942,6 +2942,9 @@ func (s *Service) Run(ctx context.Context) (runErr error) {
 	// node without the datagram plane keeps the loop — the routing gate
 	// refuses sends until a plane exists.
 	if s.identityResolver != nil {
+		if s.identityResolver.beginRecordAdmissionRun() {
+			s.goRunLoop(func() { s.identityResolver.runRecordAdmission(ctx) })
+		}
 		s.goRunLoop(func() { s.identityResolver.run(ctx) })
 	}
 

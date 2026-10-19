@@ -231,7 +231,7 @@ func (s *Service) liveRecordProtectionCounts() map[string]int {
 	s.peerMu.RUnlock()
 
 	if s.identityResolver != nil {
-		for _, target := range s.identityResolver.openResolutionTargets() {
+		for _, target := range s.identityResolver.recordProtectionTargets() {
 			live[target.String()]++
 		}
 	}
@@ -258,4 +258,24 @@ func (s *Service) reconcileRecordProtection() {
 		}
 	}
 	log.Debug().Msg("record_protection_reconcile_skipped_busy")
+}
+
+// recordProtectionTargets snapshots BOTH existing resolutions and physical
+// admission refs under resolver.mu. The returned list is not another owner map.
+func (r *identityResolver) recordProtectionTargets() []domain.PeerIdentity {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	targets := make([]domain.PeerIdentity, 0, len(r.resolutions))
+	for target := range r.resolutions {
+		targets = append(targets, target)
+	}
+	if a := r.recordAdmission; a != nil {
+		for i := range a.slots {
+			slot := &a.slots[i]
+			if slot.protectionHeld {
+				targets = append(targets, slot.observed.identity)
+			}
+		}
+	}
+	return targets
 }

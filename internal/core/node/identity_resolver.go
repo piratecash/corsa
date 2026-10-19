@@ -97,7 +97,8 @@ const (
 
 // identityResolution is one single-flight lookup of one target.
 type identityResolution struct {
-	createdAt time.Time
+	recordLifetime *relationAdmissionLifetime
+	createdAt      time.Time
 	// nextSendAt is when the engine looks at this resolution again.
 	nextSendAt time.Time
 	// id is the stable operation identifier: RPC returns it, events and
@@ -154,12 +155,13 @@ func (res *identityResolution) stateLocked() ebus.IdentityResolutionState {
 // identityAttemptEntry correlates one in-flight attempt with its
 // resolution. The label raw bytes are the map key.
 type identityAttemptEntry struct {
-	sentAt  time.Time
-	owner   *identityResolution
-	action  identityLookupActionStamp
-	queue   identityAttemptQueue
-	claim   *identityLookupCompletion
-	revoked bool
+	recordAdmission *relationAdmissionRef
+	sentAt          time.Time
+	owner           *identityResolution
+	action          identityLookupActionStamp
+	queue           identityAttemptQueue
+	claim           *identityLookupCompletion
+	revoked         bool
 	// gen is the resolver-wide monotonic attempt generation: it orders
 	// attempts against watermarks handed out by CurrentAttemptGen without
 	// touching the wall clock (a clock step must never re-validate an old
@@ -176,12 +178,13 @@ type identityAttemptEntry struct {
 // needs from the Service goes through the svc reference on the goroutine's
 // own stack, outside the lock.
 type identityResolver struct {
-	svc       *Service
-	intents   *identityIntentStore
-	network   domain.NetworkID
-	clock     func() time.Time
-	wake      chan struct{}
-	sendSlots chan struct{}
+	recordAdmission *relationRecordAdmission
+	svc             *Service
+	intents         *identityIntentStore
+	network         domain.NetworkID
+	clock           func() time.Time
+	wake            chan struct{}
+	sendSlots       chan struct{}
 
 	mu            sync.Mutex
 	resolutions   map[domain.PeerIdentity]*identityResolution
@@ -384,11 +387,18 @@ func (r *identityResolver) startResolution(admissionError func() error, target d
 	if running {
 		existing.usable = usable
 	} else {
+		var lifetime *relationAdmissionLifetime
+		if r.recordAdmission != nil {
+			if sample, ok := r.recordAdmission.sampleLocked(); ok {
+				now = sample.wall
+				lifetime = &relationAdmissionLifetime{origin: sample}
+			}
+		}
 		firstAttemptAt := now
 		if until, cooling := r.cooldownUntil[target]; cooling && until.After(firstAttemptAt) {
 			firstAttemptAt = until
 		}
-		existing = &identityResolution{id: id, dst: target, createdAt: now, nextSendAt: firstAttemptAt, lifecycle: domain.IdentityResolutionPending, authority: domain.IdentityAuthorityNone, dmAvailable: domain.DMAvailabilityUnknown, usable: usable}
+		existing = &identityResolution{recordLifetime: lifetime, id: id, dst: target, createdAt: now, nextSendAt: firstAttemptAt, lifecycle: domain.IdentityResolutionPending, authority: domain.IdentityAuthorityNone, dmAvailable: domain.DMAvailabilityUnknown, usable: usable}
 		if usable {
 			existing.authority = domain.IdentityAuthorityProvisional
 		}
@@ -592,27 +602,13 @@ func (r *identityResolver) expireAttemptsLocked(now time.Time) {
 		if now.Sub(entry.sentAt) <= identityLookupAttemptWindow {
 			continue
 		}
+		r.discardRelationAttemptLocked(entry)
 		delete(r.attempts, label)
 		if res, ok := r.resolutions[entry.dst]; ok && res == entry.owner && entry.claim == nil && res.openAttempts > 0 {
 			res.openAttempts--
 		}
 	}
 	r.expireCooldownsLocked(now)
-}
-
-// openResolutionTargets lists the identities with a non-terminal
-// resolution. Membership in r.resolutions IS that predicate: finishLocked
-// deletes the entry as it records the terminal. Used by the trust store's
-// live set, so an answer that is still being waited for cannot have its
-// seq floor evicted out from under it.
-func (r *identityResolver) openResolutionTargets() []domain.PeerIdentity {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	targets := make([]domain.PeerIdentity, 0, len(r.resolutions))
-	for target := range r.resolutions {
-		targets = append(targets, target)
-	}
-	return targets
 }
 
 // cooldownCount reports the live cooldown map size for the resource
@@ -799,17 +795,32 @@ func (r *identityResolver) sendOwnedAttempt(ctx context.Context, owner *identity
 			avoidOpt = datagram.AvoidNextHop(avoid)
 		}
 	}
+	var admissionStore *secureSessionStore
+	if r.recordAdmission != nil {
+		if store := r.svc.localContactPinStore(); store != nil && store.pinMutationGate.TryRLock() {
+			admissionStore = store
+		}
+	}
 	r.mu.Lock()
 	_, collision := r.attempts[label]
 	if collision || r.unavailableLocked() || ctx.Err() != nil || r.resolutions[owner.dst] != owner || owner.openAttempts >= identityLookupMaxOpenAttempts || r.attemptGen == math.MaxUint64 {
 		r.mu.Unlock()
+		if admissionStore != nil {
+			admissionStore.pinMutationGate.RUnlock()
+		}
 		return
 	}
 	r.attemptGen++
 	entry := identityAttemptEntry{owner: owner, dst: owner.dst, gen: r.attemptGen, qHash: sha256.Sum256(payload), proofRequired: true, minSeq: minSeq, sentAt: r.clock(), action: r.actionForLocked(owner.dst), queue: identityAttemptQueuePending}
+	if admissionStore != nil {
+		entry.recordAdmission = r.reserveRelationAttemptLocked(label, entry, admissionStore)
+	}
 	r.attempts[label] = entry
 	owner.openAttempts++
 	r.mu.Unlock()
+	if admissionStore != nil {
+		admissionStore.pinMutationGate.RUnlock()
+	}
 	outcome := layer.pipeline.SendLocal(ctx, datagram.LocalSenderIdentityResolver, datagram.LocalSendOpts{Frame: frame, Avoid: avoidOpt})
 	<-r.sendSlots
 	slotHeld = false
@@ -844,11 +855,15 @@ func (r *identityResolver) settleQueueLocked(label domain.PeerIdentity, expected
 		entry.queue = identityAttemptQueueAccepted
 	}
 	r.attempts[label] = entry
+	if r.recordAdmission != nil {
+		r.noteRelationQueueLocked(entry)
+	}
 	if entry.claim != nil {
 		return r.settleClaimLocked(label), ebus.IdentityResolutionState{}, nil, false, nil
 	}
 	owner := entry.owner
 	if r.resolutions[entry.dst] != owner {
+		r.discardRelationAttemptLocked(entry)
 		delete(r.attempts, label)
 		return nil, ebus.IdentityResolutionState{}, nil, false, nil
 	}
@@ -866,6 +881,7 @@ func (r *identityResolver) settleQueueLocked(label domain.PeerIdentity, expected
 		}
 		r.scheduleNextSendLocked(owner, r.clock())
 	} else {
+		r.discardRelationAttemptLocked(entry)
 		delete(r.attempts, label)
 		if owner.openAttempts > 0 {
 			owner.openAttempts--
@@ -960,6 +976,15 @@ func (r *identityResolver) HandleAnswer(label datagram.Label, payload []byte) bo
 		return false
 	}
 
+	var relationRecord verifiedRelationPinRecord
+	if entry.recordAdmission != nil {
+		verified, verifyErr := verifyRelationPinRecord(relationPinQuestion{network: r.network, target: entry.dst, label: label.Raw(), qHash: entry.qHash, minSeq: entry.minSeq}, parsed.Record, parsed.TargetProof)
+		if verifyErr == nil {
+			relationRecord = verified
+		}
+		// Failure refuses only optional R evidence; ordinary verified import
+		// retains its original behavior and does not wait for class admission.
+	}
 	outcome, err := r.svc.importVerifiedIdentityRecord(r.network, parsed.Record, body)
 	if err != nil {
 		log.Warn().Err(err).Str("target", entry.dst.String()).Msg("identity_lookup_import_failed")
@@ -982,6 +1007,7 @@ func (r *identityResolver) HandleAnswer(label datagram.Label, payload []byte) bo
 		var preserve *domain.PeerIdentity
 		action := r.actionForLocked(entry.dst)
 		if !current.revoked && current.action.origin == identityLookupOriginWindowUser && current.action == action && recordRequiresSessionV2(body.MinSession) {
+			r.captureRelationAnswerLocked(current, parsed.Record, parsed.TargetProof, relationRecord)
 			current.claim = &identityLookupCompletion{target: entry.dst, resolutionID: res.id, label: label.Raw(), attemptGeneration: entry.gen, action: current.action, sequence: body.Seq, minSession: body.MinSession, recordDigest: sha256.Sum256([]byte(parsed.Record.Body))}
 			r.attempts[label.Raw()] = current
 			rawLabel := label.Raw()
@@ -989,6 +1015,8 @@ func (r *identityResolver) HandleAnswer(label datagram.Label, payload []byte) bo
 		}
 		_, finished, snapshot := r.finishLocked(res, domain.IdentityResolutionSucceeded, preserve)
 		if !finished {
+			r.discardRelationAttemptLocked(current)
+			current.recordAdmission = nil
 			current.claim = nil
 			r.attempts[label.Raw()] = current
 			r.mu.Unlock()
@@ -1055,6 +1083,7 @@ func (r *identityResolver) finishLocked(owner *identityResolution, terminal doma
 		if terminal == domain.IdentityResolutionSucceeded && preserve != nil && label == *preserve && entry.claim != nil {
 			continue
 		}
+		r.discardRelationAttemptLocked(entry)
 		delete(r.attempts, label)
 	}
 	now := r.clock()

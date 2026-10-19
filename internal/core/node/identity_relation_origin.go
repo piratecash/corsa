@@ -103,6 +103,11 @@ func (r *identityResolver) settleClaimLocked(label domain.PeerIdentity) *identit
 	if entry.queue == identityAttemptQueuePending && !entry.revoked && !r.unavailableLocked() && entry.liveAt(r.clock()) {
 		return nil
 	}
+	if entry.queue == identityAttemptQueueAccepted && !entry.revoked && !r.unavailableLocked() && entry.liveAt(r.clock()) {
+		r.settleRelationClaimLocked(entry)
+	} else {
+		r.discardRelationAttemptLocked(entry)
+	}
 	delete(r.attempts, label)
 	if entry.queue != identityAttemptQueueAccepted || entry.revoked || r.unavailableLocked() || !entry.liveAt(r.clock()) {
 		return nil
@@ -131,8 +136,21 @@ func (r *identityResolver) nextActionLocked() (identityLookupActionStamp, error)
 
 func (r *identityResolver) cancelUserAction(action UserIdentityLookup) error {
 	r.mu.Lock()
+	clearedRuntimeAction := false
+	if r.recordAdmission != nil {
+		r.cancelRelationActionLocked(action)
+		r.revokeActionLocked(action.target, action.generation)
+		r.intents.mu.Lock()
+		key := identityIntentKey{target: action.target, reason: identityIntentReason{Type: identityIntentReasonUIChat}}
+		if row, ok := r.intents.rows[key]; ok && row.action.generation == action.generation {
+			row.action = identityLookupActionStamp{}
+			r.intents.rows[key] = row
+			clearedRuntimeAction = true
+		}
+		r.intents.mu.Unlock()
+	}
 	_, snapshot, err := r.intents.removeMemory(action.target, func(key identityIntentKey, row identityIntentRow) bool {
-		return key.reason == identityIntentReason{Type: identityIntentReasonUIChat} && row.action.generation == action.generation && row.action.origin == identityLookupOriginWindowUser
+		return key.reason == identityIntentReason{Type: identityIntentReasonUIChat} && ((row.action.generation == action.generation && row.action.origin == identityLookupOriginWindowUser) || clearedRuntimeAction)
 	})
 	if err != nil {
 		r.mu.Unlock()
@@ -162,6 +180,7 @@ func (r *identityResolver) revokeActionLocked(target domain.PeerIdentity, genera
 		if entry.dst != target || entry.action.generation != generation || entry.action.origin == identityLookupOriginNone {
 			continue
 		}
+		r.discardRelationAttemptLocked(entry)
 		entry.revoked = true
 		if entry.claim != nil {
 			delete(r.attempts, label)
@@ -176,6 +195,7 @@ func (r *identityResolver) stop() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.closed = true
+	r.stopRecordAdmissionLocked()
 	clear(r.attempts)
 	r.intents.mu.Lock()
 	defer r.intents.mu.Unlock()
