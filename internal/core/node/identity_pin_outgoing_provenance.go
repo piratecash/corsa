@@ -1,7 +1,7 @@
 package node
 
-// This foundation has no production opt-in caller. Ordinary admission, CM,
-// retries and raw commands carry nil; the closed reference guard enforces it.
+// Ordinary construction, retries and raw commands carry nil. One unused internal
+// candidate root can compose genuine typed own-DM/CM provenance; no R admission.
 import (
 	"context"
 	"crypto/sha256"
@@ -21,18 +21,20 @@ var errR2aNotWritten = errors.New("outgoing provenance has no positive first-wri
 
 type r2aPreparedOwnDM struct{ sealed *r2aPreparedEnvelope }
 type r2aPreparedEnvelope struct {
-	owner     *Service
-	message   incomingMessage
-	digest    [sha256.Size]byte
-	recipient pinOwnerObservation
+	owner       *Service
+	message     incomingMessage
+	digest      [sha256.Size]byte
+	recipient   pinOwnerObservation
+	r2Residence *ownDMResidenceOrigin
 }
 type r2aHopPublication struct{ sealed *r2aPublishedHop }
 type r2aPublishedHop struct {
-	owner   *Service
-	session *peerSession
-	connID  domain.ConnID
-	proof   sessionv2.ProvenIdentity
-	binding identityPinEntryBinding
+	owner            *Service
+	session          *peerSession
+	connID           domain.ConnID
+	proof            sessionv2.ProvenIdentity
+	binding          identityPinEntryBinding
+	r2PublishedReady bool // peerMu; candidate publication only, after actual CM Ready
 }
 
 // r2aOwnSendStamp and its candidate belong to deliveryMu. The immutable
@@ -42,6 +44,7 @@ type r2aOwnSendStamp struct {
 	entry     *deliveryRetryEntry
 	candidate *r2aFirstWrite
 	consumed  bool
+	r2Claim   *ownDMRelationClaim
 }
 type r2aFirstWrite struct {
 	stamp   *r2aOwnSendStamp
@@ -55,19 +58,21 @@ type r2aWireProjection struct {
 }
 
 type r2aDispatch struct {
-	ctx        context.Context
-	prepared   *r2aPreparedEnvelope
-	expected   r2aHopPublication
-	stamp      *r2aOwnSendStamp
-	early      bool
-	failure    error
-	projection *r2aWireProjection
+	ctx           context.Context
+	prepared      *r2aPreparedEnvelope
+	expected      r2aHopPublication
+	stamp         *r2aOwnSendStamp
+	early         bool
+	failure       error
+	projection    *r2aWireProjection
+	r2ResolvedHop *r2aPublishedHop // same synchronous directed dispatch, never caller supplied
 }
 type r2aSubmissionResult struct {
-	stored bool
-	count  int
-	code   string
-	stamp  *r2aOwnSendStamp
+	r2Dispatched bool // ordinary store call actually occurred
+	stored       bool
+	count        int
+	code         string
+	stamp        *r2aOwnSendStamp
 }
 type r2aRecipientEvidence struct {
 	original pinOwnerObservation
@@ -82,6 +87,9 @@ type r2aNearestHopEvidence struct {
 }
 
 func (s *Service) prepareR2aFixtureOwnDM(ctx context.Context, input protocol.Envelope) (r2aPreparedOwnDM, error) {
+	return s.prepareR2aOwnDM(ctx, input)
+}
+func (s *Service) prepareR2aOwnDM(ctx context.Context, input protocol.Envelope) (r2aPreparedOwnDM, error) {
 	if err := ctx.Err(); err != nil {
 		return r2aPreparedOwnDM{}, err
 	}
@@ -117,6 +125,9 @@ func (s *Service) prepareR2aFixtureOwnDM(ctx context.Context, input protocol.Env
 }
 
 func (s *Service) submitR2aFixtureOwnDM(ctx context.Context, prepared r2aPreparedOwnDM, expected r2aHopPublication) (r2aSubmissionResult, error) {
+	return s.submitR2aOwnDM(ctx, prepared, expected)
+}
+func (s *Service) submitR2aOwnDM(ctx context.Context, prepared r2aPreparedOwnDM, expected r2aHopPublication) (r2aSubmissionResult, error) {
 	if err := ctx.Err(); err != nil {
 		return r2aSubmissionResult{}, err
 	}
@@ -128,7 +139,7 @@ func (s *Service) submitR2aFixtureOwnDM(ctx context.Context, prepared r2aPrepare
 	if !stored && code == "" {
 		dispatch.stamp = s.existingR2aOrigin(prepared.sealed)
 	}
-	return r2aSubmissionResult{stored: stored, count: count, code: code, stamp: dispatch.stamp}, dispatch.failure
+	return r2aSubmissionResult{r2Dispatched: true, stored: stored, count: count, code: code, stamp: dispatch.stamp}, dispatch.failure
 }
 
 // registerR2aOrigin runs after real storage admission and before Route/events.
@@ -221,14 +232,20 @@ type r2aDirectedDispatch struct {
 // snapshotR2aDirectedSession validates the ACTUAL Route result against the
 // expected owner; it never selects a session from the expected capsule.
 func (s *Service) snapshotR2aDirectedSession(route *r2aDirectedDispatch) *peerSession {
-	if route == nil || route.origin == nil || route.origin.expected.sealed == nil || strings.HasPrefix(string(route.address), "inbound:") {
+	if route == nil || route.origin == nil || strings.HasPrefix(string(route.address), "inbound:") {
 		return nil
 	}
 	expected := route.origin.expected.sealed
 	s.peerMu.RLock()
 	defer s.peerMu.RUnlock()
 	session := s.sessions[route.address]
-	if session == nil || session != expected.session || expected.owner != s || session.connID != expected.connID || session.peerIdentity != route.nextHop || expected.binding.identity != route.nextHop || !session.authOK || session.eligibilityEnded.Load() || session.closedBy.Load() != nil {
+	if expected == nil && s.r2OwnDMOwner != nil && session != nil {
+		expected = session.r2OwnDMHop
+		if expected == nil || !expected.r2PublishedReady {
+			return nil
+		}
+	}
+	if expected == nil || session == nil || session != expected.session || expected.owner != s || session.connID != expected.connID || session.peerIdentity != route.nextHop || expected.binding.identity != route.nextHop || !session.authOK || session.eligibilityEnded.Load() || session.closedBy.Load() != nil {
 		return nil
 	}
 	health := s.health[s.resolveHealthAddress(route.address)]
@@ -247,6 +264,7 @@ func (s *Service) snapshotR2aDirectedSession(route *r2aDirectedDispatch) *peerSe
 	if !ok || !valid || !expectedValid || id != expectedID || id != route.nextHop {
 		return nil
 	}
+	route.origin.r2ResolvedHop = expected
 	return session
 }
 
@@ -267,13 +285,13 @@ func (s *Service) captureR2aFirstDirectedItem(route *r2aDirectedDispatch, sessio
 	return s.claimR2aFirstDirectedItemLocked(d, session, item)
 }
 func (s *Service) claimR2aFirstDirectedItemLocked(d *r2aDispatch, session *peerSession, item peerSendItem) *r2aFirstWrite {
-	if d.ctx.Err() != nil || !s.r2aCurrentLocked(d.stamp) || d.stamp.consumed || d.stamp.candidate != nil || d.expected.sealed == nil {
+	if d.ctx.Err() != nil || !s.r2aCurrentLocked(d.stamp) || d.stamp.consumed || d.stamp.candidate != nil || d.r2ResolvedHop == nil {
 		return nil
 	}
 	if _, frozen := s.frozenDeliveries[item.delivery.Envelope.ID]; frozen {
 		return nil
 	}
-	hop := d.expected.sealed
+	hop := d.r2ResolvedHop
 	store := s.secureSessions.store
 	if store.pinMetadataMutationRefusalLocked() != nil || !d.prepared.recipient.matchesLocked(store) || !hop.binding.matchesLocked(store) || hop.session != session || session.eligibilityEnded.Load() || session.closedBy.Load() != nil || !d.prepared.matches(item.delivery.Envelope) {
 		return nil
@@ -311,10 +329,19 @@ func (s *Service) settleR2aOwnHop(ctx context.Context, result r2aSubmissionResul
 	defer s.deliveryMu.Unlock()
 	store.mu.Lock()
 	defer store.mu.Unlock()
+	if result.stamp.r2Claim != nil {
+		return emptyX, emptyY, errR2aOrigin
+	}
+	return s.settleR2aOwnHopLocked(ctx, result.stamp)
+}
+
+// Caller holds pinGate.R, deliveryMu and store.mu. Common genuine witness check.
+func (s *Service) settleR2aOwnHopLocked(ctx context.Context, stamp *r2aOwnSendStamp) (r2aRecipientEvidence, r2aNearestHopEvidence, error) {
+	emptyX, emptyY := r2aRecipientEvidence{}, r2aNearestHopEvidence{}
+	store := s.secureSessions.store
 	if err := ctx.Err(); err != nil {
 		return emptyX, emptyY, err
 	}
-	stamp := result.stamp
 	if !s.r2aCurrentLocked(stamp) || stamp.consumed || s.runCtx.Err() != nil {
 		return emptyX, emptyY, errR2aOrigin
 	}

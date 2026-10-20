@@ -47,7 +47,7 @@ func TestEveryInboundWriteGoesThroughTheDeliveryGate(t *testing.T) {
 		"writeDeliveryFrameToInbound": "the gate itself",
 		"sendAckDeleteByID":           "ack_delete — a control ack, no message body",
 		"sendNoticeToPeer":            "push_notice — the broadcast notice plane",
-		"inboundHeartbeat":            "ping",
+		"inboundHeartbeatOwned":       "ping",
 		"handleRouteProbe":            "route probe answer — announce plane",
 		"handleRouteQuery":            "route query answer — announce plane",
 		"handleRouteSyncDigest":       "route sync digest — announce plane",
@@ -57,14 +57,14 @@ func TestEveryInboundWriteGoesThroughTheDeliveryGate(t *testing.T) {
 		// relay_hop_ack, the ack_delete reply — and answers carry no
 		// message body. A user message leaving this node goes out through
 		// the gossip, relay or session paths instead, never from here.
-		"dispatchNetworkFrame":        "answers to inbound requests — acks, errors, hop-acks",
-		"dispatchPeerSessionFrame":    "route_sync_summary — announce plane",
-		"peerSessionRequest":          "pong on the session's own read loop",
-		"dispatchInboundDatagramWire": "auth-required error",
-		"emitPeerBannedNoticeByID":    "connection_notice — the ban notice, sent as the socket closes",
-		"handleConn":                  "rate-limited error, before any command is read",
-		"handleCommand":               "invalid-json error",
-		"endInboundReadLoop":          "frame-too-large / read errors at the end of the loop",
+		"dispatchNetworkFrameOwned":        "answers to inbound requests — acks, errors, hop-acks",
+		"dispatchPeerSessionFrame":         "route_sync_summary — announce plane",
+		"peerSessionRequest":               "pong on the session's own read loop",
+		"dispatchInboundDatagramWireOwned": "auth-required error",
+		"emitPeerBannedNoticeByID":         "connection_notice — the ban notice, sent as the socket closes",
+		"handleConn":                       "rate-limited error, before any command is read",
+		"handleCommandOwned":               "invalid-json error",
+		"endInboundReadLoop":               "frame-too-large / read errors at the end of the loop",
 		// These two DO carry user messages, and both take the gate — just
 		// not by calling writeDeliveryFrameToInbound, because each has a
 		// transport contract of its own that the shared helper would break.

@@ -1,0 +1,17 @@
+# FIND_NODE capacity epochs: inactive logical core / неактивное логическое ядро
+
+This private model extends the disconnected intake A core. Ordinary fixed-cap construction remains unchanged and leaves capacity nil. There is no Node degree bridge, public setter, handler, clock callback, worker, peer-state hint codec or activation. The unused private constructor copies a scalar bootstrap hint and mints a distinct nonzero domain tied to one owner; it never rebuilds old source/target accounting.
+
+The first600-second window uses a valid nonnegative hint younger than24h, clipped to64, to derive max(512,60*d); absent/invalid/future/stale hint uses512. This is a private logical input, not an implemented JSON reader or wall-clock validator. Subsequent windows use floor((logicalNow-origin)/600s). A complete current-epoch cut from the same owner/domain can freeze a cap; delayed sampling is not backdated. The frozen cap is not revised within that epoch. Skipped epochs take one checked division. A missing/stale/foreign/incomplete cut refuses new provisional admission before quota publication; normal housekeeping, round closure and accepted operations continue.
+
+Old pending/dispatching/answer work, source-owner token, source histories, calendar debt, groups/names/generations and spent tokens are retained through shrink/growth. No eviction or refund occurs. New distinct group/target records respect the selected cap and existing hard admission rule; retained historical records may exceed the smaller cap+16*257, while the global maximum remains7952. Existing-record references retain their established policy. Forwarding debt remains tied to the planned slot+600s and actual writer-finish+600s, never the capacity-sample timestamp.
+
+The final target-lock check validates the SAME supplied logical instant/state. It is deliberately not an owned real-time sample after waits. Actual online composition still needs a shared opaque owner/clock/cut port and genuine membership-view owner/at revalidation after final mutex waits, plus all affected plans checked at that real instant. Tests with private logical cuts and genuine core Sessions do not supply this missing Node authority or prove online guarantees. No unconditional six-second availability, G2 or resource acceptance is claimed.
+
+## Русский
+
+Это только приватное логическое расширение неактивного A-ядра. Обычный конструктор с фиксированной ёмкостью не изменён. Реальной связи с degree узла, публичного setter, обработчика, callback часов под mutex, worker, кодека peers-файла и активации нет. Первое окно600с сохраняет отдельную политику hint/512; последующие требуют полного наблюдения текущей эпохи того же owner/domain. Поздний отсчёт не выдаётся за измерение в прошлом начале окна.
+
+Отказ на границе закрывает только новый допуск до списания квоты. Ранее принятые обязательства, writer, sourceOwner, история источников, группы и долги календарей сохраняются; уменьшение ёмкости не вытесняет записи и не возвращает токены. Исторический объём может быть выше нового порога допуска, сохраняя общий максимум7952. Срок долга остаётся slot+600с и finish+600с.
+
+Повторная проверка после target mutex использует тот же модельный Instant; это не доказательство свежести реальных часов после ожидания. Будущий Node bridge обязан отдельно обеспечить аутентичное общее clock-domain и повторную проверку membership/планов. Модельные тесты не подтверждают онлайн-гарантию и не разрешают G2, тяжёлые измерения или включение.

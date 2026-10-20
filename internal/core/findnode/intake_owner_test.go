@@ -100,8 +100,8 @@ func TestCandidateTrialRefusalNoEffectsAndIDExhaustion(t *testing.T) {
 	if s := o.snapshot(); s.names != 0 || s.records != 0 || s.calendars != 0 || s.pending != 0 || s.cursor != 0 {
 		t.Fatalf("partial effects %+v", s)
 	}
-	if target.state.nextID != next {
-		t.Fatal("ID consumed on refusal")
+	if target.state.nextID != next || source.state.sourceWindows.Load() != nil {
+		t.Fatal("ID consumed or source bound on refusal")
 	}
 	if _, _, err = o.takeForward(r, seal); !errors.Is(err, ErrStaleWork) {
 		t.Fatal("refused handle remained live")
@@ -468,5 +468,301 @@ func TestCandidateComposedAnswerCorrelationAndABA(t *testing.T) {
 	}
 	if ok, err := o.cancel(fresh, at); !ok || err != nil {
 		t.Fatal("fresh authority unavailable")
+	}
+}
+
+func TestCandidateSourceFinalJointSlotAndFinishMaximum(t *testing.T) {
+	o := candidateTestOwner(t)
+	source, _ := provenFixture(t, 10, "source", 0)
+	target, _ := provenFixture(t, 20, "target", 0)
+	// Explicit target-debt boundary fixture, separate from the reachable witness.
+	calendar, err := NewForwardCalendar(target.Identity(), 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	o.calendars[target.Identity()] = calendar
+	r, out := candidateSourceOfferSeal(t, o, source, target, 1, 0)
+	if out.reserved != 1 {
+		t.Fatal(out)
+	}
+	state := r.entry.intake
+	row := candidateSourceRow(t, o, r)
+	if state.alias.at != Instant(time.Second) || row.projected.count != 1 || row.projected.times[0] != state.alias.at || row.expires != state.alias.at+candidateGroupWindow {
+		t.Fatal("source charged at floor instead of final joint slot", row, state.alias)
+	}
+	permit, _, err := o.takeForward(r, Instant(1500*time.Millisecond))
+	if err != nil {
+		t.Fatal(err)
+	}
+	finish := Instant(2 * time.Second)
+	if err := o.finishForward(permit, finish, candidateWriteFinished); err != nil {
+		t.Fatal(err)
+	}
+	row = candidateSourceRow(t, o, r)
+	if row.expires != finish+candidateGroupWindow || row.refs != 1 {
+		t.Fatal("Finish max/ref rule", row)
+	}
+	before := row
+	if err := o.finishForward(permit, finish, candidateWriteFinished); !errors.Is(err, ErrStaleWork) || candidateSourceRow(t, o, r) != before {
+		t.Fatal("repeat normal Finish changed row", err)
+	}
+	if ok, err := o.cancel(r, finish); !ok || err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCandidateSourceReachableDelayedActualRefusal(t *testing.T) {
+	const origin = Instant(time.Second)
+	o, err := newIntakeCoordinator(candidateProfile{timing: TimingProfile{Target: time.Second, Network: time.Second, Runtime: time.Second}, round: Instant(50 * time.Millisecond), nodeCap: 512, initialTokens: 4}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, _ := provenFixture(t, 10, "source", 0)
+	target, _ := provenFixture(t, 20, "target", 0)
+	sources := []Session{source}
+	offer := func(id domain.FindNodeRequestID, at Instant) candidateReservation {
+		t.Helper()
+		r, e := o.offer(source, target, request(id, target.Identity(), byte(id)), candidateView(t, o, at, sources, sources, target), at)
+		if e != nil {
+			t.Fatal(e)
+		}
+		return r
+	}
+	seal := func(at Instant, want int) {
+		t.Helper()
+		out, e := o.sealRound(candidateView(t, o, at, sources, sources, target), at)
+		if e != nil || out.reserved != want || out.refused != 1-want {
+			t.Fatalf("seal at%v: %+v/%v", at, out, e)
+		}
+	}
+	takeFinishCancel := func(r candidateReservation, at Instant) {
+		t.Helper()
+		permit, _, e := o.takeForward(r, at)
+		if e != nil {
+			t.Fatal(e)
+		}
+		if e = o.finishForward(permit, at, candidateWriteFinished); e != nil {
+			t.Fatal(e)
+		}
+		if ok, e := o.cancel(r, at); !ok || e != nil {
+			t.Fatal(e)
+		}
+	}
+	first := offer(1, origin-Instant(50*time.Millisecond))
+	seal(origin, 1)
+	second := offer(2, origin+Instant(550*time.Millisecond))
+	takeFinishCancel(first, origin+Instant(600*time.Millisecond))
+	seal(origin+Instant(600*time.Millisecond), 1)
+	third := offer(3, origin+Instant(650*time.Millisecond))
+	takeFinishCancel(second, origin+Instant(700*time.Millisecond))
+	seal(origin+Instant(700*time.Millisecond), 1)
+	takeFinishCancel(third, origin+Instant(800*time.Millisecond))
+	windows := source.state.sourceWindows.Load()
+	row := windows.rows[0]
+	if row.projected != (candidatePairHistory{times: [3]Instant{origin, origin + Instant(600*time.Millisecond), origin + Instant(700*time.Millisecond)}, count: 3}) || row.actual != (candidatePairHistory{times: [3]Instant{origin + Instant(600*time.Millisecond), origin + Instant(700*time.Millisecond), origin + Instant(800*time.Millisecond)}, count: 3}) || row.refs != 0 {
+		t.Fatal("reachable histories differ", row)
+	}
+	fourth := offer(4, origin+Instant(27350*time.Millisecond))
+	if fourth.entry.intake.latest != origin+Instant(30350*time.Millisecond) {
+		t.Fatal("original deadline changed")
+	}
+	beforeRows := windows.rows
+	calendar := o.calendars[target.Identity()]
+	beforeP, beforeA, beforeID := calendar.projected, calendar.actual, target.state.nextID
+	beforeRecords, beforeNames := len(o.groups.records), len(o.groups.named)
+	seal(origin+Instant(27400*time.Millisecond), 0)
+	if windows.rows != beforeRows || calendar.projected != beforeP || calendar.actual != beforeA || target.state.nextID != beforeID || len(calendar.slots) != 0 || len(o.groups.records) != beforeRecords || len(o.groups.named) != beforeNames || o.snapshot().pending != 0 {
+		t.Fatal("delayed-actual refusal published a commitment")
+	}
+}
+
+func TestCandidateSourceProvisionalClockAndTerminalReference(t *testing.T) {
+	o := candidateTestOwner(t)
+	source, _ := provenFixture(t, 1, "source", 0)
+	target, _ := provenFixture(t, 2, "target", 0)
+	sources := []Session{source}
+	r, err := o.offer(source, target, request(1, target.Identity(), 1), candidateView(t, o, 0, sources, sources, target), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if source.state.sourceWindows.Load() != nil {
+		t.Fatal("offer bound source owner")
+	}
+	if _, err := o.offer(source, target, request(2, target.Identity(), 2), candidateView(t, o, 0, sources, sources, target), 0); !errors.Is(err, ErrCapacity) || source.state.sourceWindows.Load() != nil {
+		t.Fatal("rejected provisional charged source", err)
+	}
+	if _, err := o.sealRound(candidateView(t, o, 0, sources, sources, target), -1); !errors.Is(err, ErrClock) || source.state.sourceWindows.Load() != nil {
+		t.Fatal("invalid clock bound source", err)
+	}
+	cut := o.profile.round
+	if out, err := o.sealRound(candidateView(t, o, cut, sources, sources, target), cut); err != nil || out.reserved != 1 {
+		t.Fatal(out, err)
+	}
+	permit, _, err := o.takeForward(r, cut)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := candidateSourceRow(t, o, r)
+	if err := o.finishForward(permit, cut-1, candidateWriteFinished); !errors.Is(err, ErrClock) || candidateSourceRow(t, o, r) != before {
+		t.Fatal("backwards Finish changed row", err)
+	}
+	if err := o.closeSession(source, cut); err != nil {
+		t.Fatal(err)
+	}
+	if r.entry.intake.phase != candidateTerminalDispatch || candidateSourceRow(t, o, r).refs != 1 {
+		t.Fatal("close released unresolved dispatch")
+	}
+	if err := o.finishForward(permit, cut, candidateWriteFailed); err != nil {
+		t.Fatal(err)
+	}
+	row := source.state.sourceWindows.Load().rows[0]
+	if row.refs != 0 || row.projected != before.projected || row.actual != before.actual || row.expires != before.expires {
+		t.Fatal("failed write refunded history", row)
+	}
+}
+
+func TestCandidateSourceAnswerRetainsDispatchUntilFinish(t *testing.T) {
+	for _, during := range []bool{false, true} {
+		t.Run(map[bool]string{false: "awaiting", true: "dispatching"}[during], func(t *testing.T) {
+			o := candidateTestOwner(t)
+			source, _ := provenFixture(t, 1, "source", 0)
+			target, key := provenFixture(t, 2, "target", 0)
+			r, out := candidateSourceOfferSeal(t, o, source, target, 1, 0)
+			if out.reserved != 1 {
+				t.Fatal(out)
+			}
+			at := o.profile.round
+			permit, input, err := o.takeForward(r, at)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !during {
+				if err := o.finishForward(permit, at, candidateWriteFinished); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before := candidateSourceRow(t, o, r)
+			if _, err := o.answer(target, bodyFor(t, key).Answer(input.request.ID), at); err != nil {
+				t.Fatal(err)
+			}
+			row := source.state.sourceWindows.Load().rows[0]
+			if during {
+				if row.refs != 1 || r.entry.intake.phase != candidateTerminalDispatch {
+					t.Fatal("answer released outstanding dispatch")
+				}
+				if err := o.finishForward(permit, at, candidateWriteFinished); err != nil {
+					t.Fatal(err)
+				}
+				row = source.state.sourceWindows.Load().rows[0]
+			}
+			if row.refs != 0 || row.projected != before.projected || row.actual != before.actual || row.expires != before.expires {
+				t.Fatal("answer refunded history or leaked ref", row)
+			}
+			if _, err := o.answer(target, bodyFor(t, key).Answer(input.request.ID), at); !errors.Is(err, ErrUnmatchedAnswer) {
+				t.Fatal("repeat answer", err)
+			}
+		})
+	}
+}
+
+func TestCandidateSourceCalendarAndGroupRefusalsDoNotBind(t *testing.T) {
+	for _, kind := range []string{"calendar", "group", "group-ref-overflow"} {
+		t.Run(kind, func(t *testing.T) {
+			o := candidateTestOwner(t)
+			source, _ := provenFixture(t, 1, "source", 0)
+			target, _ := provenFixture(t, 2, "target", 0)
+			if kind == "calendar" {
+				o.profile.timing = TimingProfile{Target: time.Second, Network: time.Second, Runtime: 3250 * time.Millisecond}
+				calendar, err := NewForwardCalendar(target.Identity(), 0, 0)
+				if err != nil {
+					t.Fatal(err)
+				}
+				o.calendars[target.Identity()] = calendar
+			} else {
+				o.groups.named[source.state.group] = 0
+				if kind == "group" {
+					for i := range 512 {
+						o.groups.records[candidateRecordKey{0, candidateTarget(i + 100)}] = candidateGroupRecord{expires: candidateGroupWindow}
+					}
+				} else {
+					o.groups.records[candidateRecordKey{0, target.Identity()}] = candidateGroupRecord{expires: candidateGroupWindow, refs: math.MaxInt}
+				}
+			}
+			beforeNames, beforeRecords, beforeCalendars := len(o.groups.named), len(o.groups.records), len(o.calendars)
+			_, out := candidateSourceOfferSeal(t, o, source, target, 1, 0)
+			if out.reserved != 0 || out.refused != 1 || source.state.sourceWindows.Load() != nil || target.state.nextID != 0 || len(o.groups.named) != beforeNames || len(o.groups.records) != beforeRecords || len(o.calendars) != beforeCalendars || len(o.pending.byTarget) != 0 {
+				t.Fatal("failed joint trial bound or published source", out)
+			}
+		})
+	}
+}
+
+func TestCandidateSourceReplacedProvisionalHasNoHistory(t *testing.T) {
+	o := candidateTestOwner(t)
+	target, _ := provenFixture(t, 100, "target", 0)
+	sources := make([]Session, 17)
+	for i := range sources {
+		sources[i], _ = provenFixture(t, domain.ConnID(i+1), "shared", 0)
+	}
+	view, err := captureCandidateMembership(o, []domain.PeerIdentity{target.Identity()}, sources, sources, 0, func(info SessionInfo) (SessionClass, error) {
+		if info.ConnID == 1 {
+			return ClassSelected, nil
+		}
+		return ClassOrdinary, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var victim candidateReservation
+	for i := 1; i < len(sources); i++ {
+		r, err := o.offer(sources[i], target, request(1, target.Identity(), 1), view, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if i == 16 {
+			victim = r
+		}
+	}
+	if _, err := o.offer(sources[0], target, request(1, target.Identity(), 1), view, 0); err != nil {
+		t.Fatal(err)
+	}
+	if o.snapshot().replaced != 1 || o.snapshot().provisional != 16 {
+		t.Fatal("replacement witness missing", o.snapshot())
+	}
+	if ok, err := o.cancel(victim, 0); ok || err != nil {
+		t.Fatal("replaced handle remained current", err)
+	}
+	for _, source := range sources {
+		if source.state.sourceWindows.Load() != nil {
+			t.Fatal("provisional replacement created source charge")
+		}
+	}
+}
+
+func TestCandidateSourceExpiryKeepsDispatchReference(t *testing.T) {
+	o := candidateTestOwner(t)
+	source, _ := provenFixture(t, 1, "source", 0)
+	target, _ := provenFixture(t, 2, "target", 0)
+	r, out := candidateSourceOfferSeal(t, o, source, target, 1, 0)
+	if out.reserved != 1 {
+		t.Fatal(out)
+	}
+	permit, _, err := o.takeForward(r, o.profile.round)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := o.expire(responderTimeout); err != nil {
+		t.Fatal(err)
+	}
+	if r.entry.intake.phase != candidateTerminalDispatch || candidateSourceRow(t, o, r).refs != 1 {
+		t.Fatal("expiry released unresolved dispatch")
+	}
+	finish := responderTimeout + 1
+	if err := o.finishForward(permit, finish, candidateWriteFinished); err != nil {
+		t.Fatal(err)
+	}
+	row := source.state.sourceWindows.Load().rows[0]
+	if row.refs != 0 || row.expires != finish+candidateGroupWindow {
+		t.Fatal("terminal expiry Finish failed exact release", row)
 	}
 }

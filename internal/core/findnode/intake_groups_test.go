@@ -144,11 +144,13 @@ func TestCandidatePhysicalRowsAllPhasesAndCanonicalIdentity(t *testing.T) {
 		targets[i], _ = provenFixture(t, domain.ConnID(i+1000), "target", 0)
 	}
 	handles := make([]candidateReservation, 0, 512)
+	// Each source visits16 distinct identities; every target still owns4 rows.
+	// The old stride32 revisited only4 pairs four times inside30s.
 	for round := range 16 {
 		at := Instant(round) * Instant(100*time.Millisecond)
 		view := candidateView(t, o, at, sources, sources, targets...)
 		for i, source := range sources {
-			target := targets[(round*32+i)%len(targets)]
+			target := targets[(round*8+i)%len(targets)]
 			h, err := o.offer(source, target, request(domain.FindNodeRequestID(round), target.Identity(), byte(round)), view, at)
 			if err != nil {
 				t.Fatalf("round%d/source%d: %v", round, i, err)

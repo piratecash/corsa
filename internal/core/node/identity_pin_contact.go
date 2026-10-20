@@ -131,10 +131,11 @@ func (s *secureSessionStore) contactConfirmationNeeded() bool {
 // K1 facts stay in contact rows; K2 obligations stay in capped pin metadata.
 // The joined worker keeps only one selected ticket and coalesces wakeups.
 type contactPinProducer struct {
-	service *Service             // immutable after New
-	wake    chan struct{}        // coalesced notifications, capacity one
-	cursor  *domain.PeerIdentity // worker-owned RR position, never an identity inventory
-	clock   func() time.Time     // immutable after construction
+	service         *Service             // immutable after New
+	wake            chan struct{}        // coalesced notifications, capacity one
+	cursor          *domain.PeerIdentity // worker-owned RR position, never an identity inventory
+	reconcileCursor *domain.PeerIdentity // independent one-selection startup cursor
+	clock           func() time.Time     // immutable after construction
 }
 
 func newContactPinProducer(s *Service) *contactPinProducer {
@@ -191,7 +192,11 @@ func (p *contactPinProducer) scan(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return errors.Join(k1Err, err)
 	}
-	return errors.Join(k1Err, p.scanOwed(ctx))
+	reconcileErr := p.scanReconciliation(ctx)
+	if err := ctx.Err(); err != nil {
+		return errors.Join(k1Err, reconcileErr, err)
+	}
+	return errors.Join(k1Err, reconcileErr, p.scanOwed(ctx))
 }
 
 func (p *contactPinProducer) scanK1(ctx context.Context) error {

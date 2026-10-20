@@ -542,13 +542,152 @@ func sameContactOrder(left, right []protocol.ContactFrame) bool {
 func TestNetworkFetchContactsServesTheTrimmedReply(t *testing.T) {
 	t.Parallel()
 
-	calls := callsInsideFunctionBody(t, "service.go", "dispatchNetworkFrame")
-	for _, name := range calls {
-		if name == "contactsFrameForNetwork" {
-			return
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	parsed, err := parser.ParseFile(token.NewFileSet(), filepath.Join(filepath.Dir(thisFile), "service.go"), nil, 0)
+	if err != nil {
+		t.Fatalf("parse service.go: %v", err)
+	}
+	body := networkDispatchBodyForGuard(t, parsed)
+	clauses := 0
+	ast.Inspect(body.Body, func(n ast.Node) bool {
+		clause, ok := n.(*ast.CaseClause)
+		if !ok || !caseClauseNames(clause, "fetch_contacts") {
+			return true
+		}
+		clauses++
+		// Bind the builder to the ACTUAL reply argument, not a dummy call
+		// elsewhere in this case or in the dispatcher.
+		if len(clause.Body) != 2 {
+			t.Fatal("fetch_contacts must send exactly one bounded answer then return")
+		}
+		assign, ok := clause.Body[0].(*ast.AssignStmt)
+		if !ok || assign.Tok != token.ASSIGN || len(assign.Lhs) != 1 || len(assign.Rhs) != 1 {
+			t.Fatal("fetch_contacts answer statement changed")
+		}
+		ignored, ok := assign.Lhs[0].(*ast.Ident)
+		if !ok || ignored.Name != "_" {
+			t.Fatal("fetch_contacts answer statement changed")
+		}
+		send, ok := assign.Rhs[0].(*ast.CallExpr)
+		if !ok || len(send.Args) != 3 {
+			t.Fatal("fetch_contacts must send the bounded reply through the handshake writer")
+		}
+		callee, ok := send.Fun.(*ast.SelectorExpr)
+		if !ok || callee.Sel.Name != "sendHandshakeReplyViaNetwork" {
+			t.Fatal("fetch_contacts reply writer changed")
+		}
+		receiver, ok := callee.X.(*ast.Ident)
+		if !ok || receiver.Name != "s" {
+			t.Fatal("fetch_contacts reply must use the same Service")
+		}
+		ctx, ok := send.Args[0].(*ast.SelectorExpr)
+		if !ok || ctx.Sel.Name != "runCtx" {
+			t.Fatal("fetch_contacts reply context changed")
+		}
+		ctxOwner, ok := ctx.X.(*ast.Ident)
+		id, isID := send.Args[1].(*ast.Ident)
+		if !ok || ctxOwner.Name != "s" || !isID || id.Name != "connID" {
+			t.Fatal("fetch_contacts reply must use the original Service and ConnID")
+		}
+		builder, ok := send.Args[2].(*ast.CallExpr)
+		if !ok || len(builder.Args) != 0 {
+			t.Fatal("the actual network fetch_contacts reply must be contactsFrameForNetwork()")
+		}
+		bounded, ok := builder.Fun.(*ast.SelectorExpr)
+		if !ok || bounded.Sel.Name != "contactsFrameForNetwork" {
+			t.Fatal("the actual network fetch_contacts reply is not built by contactsFrameForNetwork")
+		}
+		builderOwner, ok := bounded.X.(*ast.Ident)
+		if !ok || builderOwner.Name != "s" {
+			t.Fatal("fetch_contacts bounded builder must use the same Service")
+		}
+		ret, ok := clause.Body[1].(*ast.ReturnStmt)
+		if !ok || len(ret.Results) != 1 {
+			t.Fatal("fetch_contacts answer must return true")
+		}
+		accepted, ok := ret.Results[0].(*ast.Ident)
+		if !ok || accepted.Name != "true" {
+			t.Fatal("fetch_contacts answer must return true")
+		}
+		return false
+	})
+	if clauses != 1 {
+		t.Fatalf("found %d fetch_contacts cases in actual network dispatch, want exactly 1", clauses)
+	}
+}
+
+// networkDispatchBodyForGuard follows ONE exact compatibility edge. It is not
+// a suffix/name resolver: an altered receiver, argument or wrapper body refuses.
+func networkDispatchBodyForGuard(t *testing.T, parsed *ast.File) *ast.FuncDecl {
+	t.Helper()
+	var wrapper, owned *ast.FuncDecl
+	for _, decl := range parsed.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok {
+			continue
+		}
+		if fn.Name.Name != "dispatchNetworkFrame" && fn.Name.Name != "dispatchNetworkFrameOwned" {
+			continue
+		}
+		// Name alone is not authority: another receiver can legally declare
+		// the same method name and must never replace the Service body.
+		if fn.Recv == nil || len(fn.Recv.List) != 1 {
+			t.Fatalf("network dispatch declaration %s must have receiver (s *Service)", fn.Name.Name)
+		}
+		recv := fn.Recv.List[0]
+		if len(recv.Names) != 1 || recv.Names[0].Name != "s" {
+			t.Fatalf("network dispatch declaration %s must have receiver (s *Service)", fn.Name.Name)
+		}
+		pointer, ok := recv.Type.(*ast.StarExpr)
+		if !ok {
+			t.Fatalf("network dispatch declaration %s must have receiver (s *Service)", fn.Name.Name)
+		}
+		service, ok := pointer.X.(*ast.Ident)
+		if !ok || service.Name != "Service" {
+			t.Fatalf("network dispatch declaration %s must have receiver (s *Service)", fn.Name.Name)
+		}
+		switch fn.Name.Name {
+		case "dispatchNetworkFrame":
+			if wrapper != nil {
+				t.Fatal("duplicate network dispatch wrapper declaration")
+			}
+			wrapper = fn
+		case "dispatchNetworkFrameOwned":
+			if owned != nil {
+				t.Fatal("duplicate owned network dispatch declaration")
+			}
+			owned = fn
 		}
 	}
-	t.Fatal("the network fetch_contacts reply is not built by contactsFrameForNetwork: an honest large node's reply is refused by every peer running the count cap")
+	if wrapper == nil || wrapper.Body == nil || len(wrapper.Body.List) != 1 || owned == nil || owned.Body == nil {
+		t.Fatal("network dispatch must have its exact forwarding wrapper and actual owned body")
+	}
+	ret, ok := wrapper.Body.List[0].(*ast.ReturnStmt)
+	if !ok || len(ret.Results) != 1 {
+		t.Fatal("network dispatch wrapper must return exactly one delegation")
+	}
+	call, ok := ret.Results[0].(*ast.CallExpr)
+	if !ok || len(call.Args) != 3 {
+		t.Fatal("network dispatch wrapper must forward connID, wire, nil")
+	}
+	callee, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok || callee.Sel.Name != "dispatchNetworkFrameOwned" {
+		t.Fatal("network dispatch wrapper must call the actual owned body")
+	}
+	receiver, ok := callee.X.(*ast.Ident)
+	if !ok || receiver.Name != "s" {
+		t.Fatal("network dispatch wrapper must keep the same Service")
+	}
+	for i, want := range []string{"connID", "wire", "nil"} {
+		arg, ok := call.Args[i].(*ast.Ident)
+		if !ok || arg.Name != want {
+			t.Fatalf("network dispatch wrapper argument %d must be %s", i, want)
+		}
+	}
+	return owned
 }
 
 // TestSessionContactSyncPunishesAnOversizeReply pins that the SESSION path routes

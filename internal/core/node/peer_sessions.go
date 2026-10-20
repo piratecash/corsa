@@ -489,8 +489,10 @@ func (s *Service) servePeerSession(ctx context.Context, session *peerSession) er
 	for {
 		select {
 		case <-ctx.Done():
+			session.endProofTransport()
 			return nil
 		case <-writerDoneCh:
+			session.endProofTransport()
 			if err := ctx.Err(); err != nil {
 				// Local shutdown closed the socket, which killed the
 				// writer. Treat as a clean teardown.
@@ -500,6 +502,7 @@ func (s *Service) servePeerSession(ctx context.Context, session *peerSession) er
 			s.retirePeerSession(session, writeErr)
 			return writeErr
 		case err := <-session.errCh:
+			session.endProofTransport()
 			log.Info().Str("peer", string(session.address)).Str("recipient", s.identity.Address).Err(err).Msg("upstream subscription closed")
 			s.retirePeerSession(session, err)
 			return err
@@ -529,6 +532,7 @@ func (s *Service) servePeerSession(ctx context.Context, session *peerSession) er
 				// to produce another, and peerSessionRequest has no ctx
 				// branch). Answer the requester first (buffered chan —
 				// never blocks), then tear the session down.
+				session.endProofTransport()
 				reply <- 0
 				log.Warn().Str("peer", string(session.address)).Err(err).Msg("owned_contact_sync_failed, tearing down session")
 				s.retirePeerSession(session, err)
@@ -537,6 +541,7 @@ func (s *Service) servePeerSession(ctx context.Context, session *peerSession) er
 			reply <- imported
 		case <-pingTimer.C:
 			if _, err := s.peerSessionRequest(session, protocol.Frame{Type: "ping"}, "pong", false); err != nil {
+				session.endProofTransport()
 				log.Warn().Str("peer", string(session.address)).Str("recipient", s.identity.Address).Err(err).Msg("heartbeat failed, peer stalled")
 				s.retirePeerSession(session, err)
 				return err
@@ -554,6 +559,7 @@ func (s *Service) servePeerSession(ctx context.Context, session *peerSession) er
 				// Buffer-full drops the frame and keeps the session — see
 				// the SendBufferFull case below for the contract.
 				if session.netCore == nil {
+					session.endProofTransport()
 					return fmt.Errorf("fire_and_forget: outbound session missing NetCore")
 				}
 				// A frame can sit in this queue long enough for its author
@@ -613,6 +619,7 @@ func (s *Service) servePeerSession(ctx context.Context, session *peerSession) er
 					s.recordDeliveryRefusedByWriter(item, st)
 					continue
 				case netcore.SendChanClosed, netcore.SendWriterDone:
+					session.endProofTransport()
 					writeErr := fmt.Errorf("fire_and_forget: connection closing (%s)", st.String())
 					s.recordDeliveryRefusedByWriter(item, st)
 					s.retirePeerSession(session, writeErr)
@@ -622,6 +629,7 @@ func (s *Service) servePeerSession(ctx context.Context, session *peerSession) er
 					s.recordDeliveryRefusedByWriter(item, st)
 					continue
 				default:
+					session.endProofTransport()
 					writeErr := fmt.Errorf("fire_and_forget: unexpected send status %s", st.String())
 					log.Error().Str("peer", string(session.address)).Str("type", outbound.Type).Str("status", st.String()).Msg("fire_and_forget_unexpected_status")
 					s.retirePeerSession(session, writeErr)
@@ -641,6 +649,7 @@ func (s *Service) servePeerSession(ctx context.Context, session *peerSession) er
 					s.flushPendingPeerFrames(session.address)
 					continue
 				}
+				session.endProofTransport()
 				log.Error().Str("peer", string(session.address)).Str("type", outbound.Type).Err(err).Msg("peer session send failed")
 				s.retirePeerSession(session, err)
 				return err
@@ -705,6 +714,16 @@ func (s *Service) completeOutboundAuth(session *peerSession) error {
 	if err := s.markSessionHandshakeComplete(session); err != nil {
 		return err
 	}
+	// Registry attach has consumed the original P/T/R/W tuple. Auth is now
+	// committed and seed/group facts are already owned; retain no full TLS proof
+	// for a dialer, including peers that negotiated no FindNode capability.
+	if l := session.common; l != nil {
+		l.mu.Lock()
+		if l.peer == session && l.entry != nil && l.nin == nil {
+			l.evidence = nil
+		}
+		l.mu.Unlock()
+	}
 	var remoteAddr string
 	if session.netCore != nil {
 		remoteAddr = session.netCore.RemoteAddr()
@@ -729,12 +748,11 @@ func (s *Service) completeOutboundAuth(session *peerSession) error {
 		// lifecycle: joined by backgroundWg (WaitBackground). One bounded read
 		// plus one enqueue into the debounce buffer.
 		s.goBackground(func() { s.reofferReactions(s.runCtx, peerID) })
-		// lifecycle: joined by backgroundWg (WaitBackground). The push is one
-		// bounded SendLocal enqueue — milliseconds, no retry loop — and its
-		// session-close callback owns no goroutine of its own.
-		s.goBackground(func() {
-			s.sendInitialIdentityPush(s.runCtx, peerID, func() { _ = session.Close() })
-		})
+		initialOwner := captureSessionTransportOwner(s, session)
+		// lifecycle: joined by backgroundWg (WaitBackground), not by Run.
+		// The initial push has at most 20 ctx-aware no_route attempts with
+		// 250ms delays; its session-close callback starts no goroutine.
+		s.goBackground(func() { s.sendInitialIdentityPushOwned(s.runCtx, peerID, func() { _ = session.Close() }, initialOwner) })
 	}
 	return nil
 }
@@ -1101,6 +1119,11 @@ func (s *Service) openPeerSessionForCM(ctx context.Context, address domain.PeerA
 }
 
 func (s *Service) finishPeerSessionForCM(ctx context.Context, address domain.PeerAddress, transport *dialledTransport) (*peerSession, error) {
+	// Capture the ORIGINAL transport binding before readiness/auth I/O waits.
+	var outgoing r2aHopPublication
+	if s.r2OwnDMOwner != nil {
+		outgoing, _ = s.captureR2aHopPublication(transport)
+	}
 	var err error
 	rawConn, metered, conn := transport.raw, transport.metered, transport.wire
 
@@ -1135,6 +1158,8 @@ func (s *Service) finishPeerSessionForCM(ctx context.Context, address domain.Pee
 	// what the listener sent behind the probe's answer.
 	reader := transport.reader
 	session := &peerSession{
+		r2OwnDMHop:   outgoing.sealed,
+		common:       transport.common,
 		readiness:    readiness,
 		address:      address,
 		peerIdentity: domain.PeerIdentity{},
@@ -1148,6 +1173,17 @@ func (s *Service) finishPeerSessionForCM(ctx context.Context, address domain.Pee
 		// Owner-serialised contact sync (sender-key recovery). Unbuffered:
 		// see the peerSession field doc.
 		contactSyncCh: make(chan chan int),
+	}
+	if outgoing.sealed != nil {
+		outgoing.sealed.session = session
+	}
+	if session.common != nil {
+		l := session.common
+		l.mu.Lock()
+		if !l.ended && l.peer == nil && l.id == session.connID {
+			l.peer = session
+		}
+		l.mu.Unlock()
 	}
 	// closeOnError tears down the session (including the outbound NetCore
 	// registration) and stops the guard goroutine. Must be called on every
@@ -1282,6 +1318,7 @@ func (s *Service) onCMSessionEstablished(info SessionInfo) {
 	}
 	s.peerMu.Lock()
 	session.selectedGeneration = info.SlotGeneration
+	s.captureFindNodeCMAcceptedLocked(info)
 	s.peerMu.Unlock()
 	// dialAddress is the actual TCP address used for the connection (may be
 	// a fallback port). slotAddress is the CM slot's canonical address.
@@ -1622,10 +1659,12 @@ func (s *Service) publishAndServeCMSession(session *peerSession, slotAddress dom
 	// is not advertised to peer exchange. Emitted only once the session is
 	// registered and has passed the pin, so a slot is never promoted for a
 	// session the Service did not publish.
+	s.publishFindNodeCM(session, slotAddress, slotGeneration)
 	s.connManager.EmitSlot(SessionInitReady{
 		Address:        slotAddress,
 		SlotGeneration: slotGeneration,
 	})
+	s.publishR2OwnDMHop(session)
 
 	s.markPeerConnected(dialAddress, peerDirectionOutbound)
 	if s.selectedPins != nil {

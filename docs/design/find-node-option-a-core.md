@@ -34,7 +34,7 @@ next1.1s but actual next1.6s refuses a candidate whose latest is1.35s before any
 Commit locks are `coordinator.mu → pending.mu → one calendar.mu → target Session.state.mu`.
 The final outgoing-ID peek and advance share one uninterrupted Session lock. All checks precede
 infallible shared assignments. No callback, crypto or I/O executes under those locks. Classification
-and full-membership enumeration occur before entry, retaining only at most512 source facts and
+and full-membership enumeration occur before entry, retaining only at most 512 source facts and
 four witnesses per represented target. The trusted classifier's honesty and actual connection
 binding are external requirements; a capture constructor does not prove them.
 
@@ -58,13 +58,64 @@ The pending entry gains one optional-companion pointer, including standalone ent
 row additionally owns that companion. Counts are structural bounds, not measured bytes, CPU, RSS
 or resource acceptance. Full connection
 enumeration and caller-held inputs/handles are outside the retained-owner bound. Remaining work:
-actual strict-named dispatch/roles/connection adapter; input limits; atomic pair3/30s and source128/
-10min histories; actual degree/window producer; current durable C5 provider; complete T integration;
+actual strict-named dispatch/roles/connection adapter; input limits; real-path composition of the
+local source/pair histories; actual degree/window producer; current durable C5 provider; complete T integration;
 writer lifecycle, timing/network evidence, G2 and the separate release sequence. No pass boolean
 stands in for these gates. Standalone public state APIs keep their old limited semantics and cannot
 access this core's private subowners. Closed call/reference and state-field guards preserve that
 boundary. See [accepted option A](d1-bounded-intake-proposal.md),
 [conditional deadlines](d1-admission-budget.md), and [state blocks](inactive-find-node-state.md).
+
+### Atomic source-session / target-identity histories
+
+The disconnected owner now composes source128 distinct targets/10min and pair3/30s in the same
+commit as target calendar, group ledger and outgoing ID. Standalone `PairWindow` remains one
+caller-owned gate; it is not mutated by this composition. One optional atomic companion in a
+canonical Session contains 128 fixed identity rows, each with projected/actual three-event
+histories, distinct expiry, checked generation and pending refs. All target links share the same
+identity row; a genuinely new source Session has independent history. A permanent, explicitly
+nonzero-sized owner token prevents independent coordinators spending the same Session history.
+It has no coordinator backpointer. First companions are prepared off-lock and attached by CAS only
+after every fallible joint trial. Offer/refused provisional work binds no owner and charges nothing.
+
+The pair floor combines projected history with copied actual history pessimistically replaying
+only existing unconsumed same-pair aliases at their maximum latest. It is an input to target slot
+selection, never the debit timestamp. Projected pair charge is stamped at the FINAL joint `slot.at`;
+source expiry is `max(old, slot.at+600s)`. Actual pair and target budgets are trialled together on Take
+before either debit or alias consumption. At exactly30s an event leaves the sliding window. A
+reachable synthetic trace at O=1s retains projected O+[0,.6,.7] and actual O+[.6,.7,.8]; its fourth
+cut O+27.4 refuses original latest O+30.35 because actual earliest O+30.6 is too late. These explicit
+fixture timings are not deployment parameters or network evidence.
+
+One source-row ref follows each existing committed pending row. Normal Finish extends expiry by
+`max(old, Finish+600s)` and keeps that ref while AwaitingAnswer. Answer/cancel/close/expiry during
+Dispatching keeps TerminalDispatch/ref1 until sole Finish. Final release decrements once without
+refunding histories; nominal request deadlines do not make an unresolved writer disappear. Row
+reuse requires ref0, reached distinct expiry and BOTH actual/projected debt truly expired. Generation
+never wraps, and exact Session/owner/identity/generation checks reject stale handles. Invalid time
+cannot create a debit, renewal, reuse or ownership claim; existing closed-session reconciliation
+remains terminal-only. No reset or rebind operation exists.
+
+Retained overhead is one optional 128-row companion per participating canonical Session plus fixed
+source refs in the same at-most 512 pending companions. No retained source/pair registry, completed
+history map, worker or second queue is added. Cost is O(128×participating Sessions +512), not 7952:
+7952 bounds only the group ledger. A seal may transiently prepare at most 512 first companions;
+caller-held ended Sessions, snapshots and other transient allocations remain additional. Struct
+sizes, heap/CPU/RSS, timing profiles and resource acceptance have not been measured by this slice.
+The source-ID replay-lifetime gap and the real class/membership/degree/input/dispatch/T composition,
+G2, capability activation and separate release gates all remain open.
+
+### Inactive F1 proof-transport foundation
+
+The private, unused FindNode factory composes a memory-only transport adapter. Ordinary constructors leave it nil and still advertise neither overlay capability. It installs no handler, admission, class provider, worker, signer or socket writer. Explicit-cap genuine TLS fixtures do not change production hello/welcome capabilities. A canonical `SessionSeed` captures actual local/remote negotiated facts immediately after Accept/Dial; copies share one consumption latch. Invalid Bind arguments do not consume it. The seed and Session retain identity proof values, not a full TLS ProvenSession or connection. End closes the one canonical Session without refund or I/O.
+
+One `proofTransportLifetime.mu` orders original terminal, accepted/CM publication and the independent N-in companion. Raw R and decoded W, the registry and the outbound peer alias the SAME cell. An atomic provisional terminal latch plus bind-once CAS covers Read/Write/Close before the cell is attached; it cannot mint proof. End clears proof/socket/entry/peer/store chains before existing blocking diagnostics. Accepted and dialled datagrams capture an original terminal-only arrival capsule before the synchronous pipeline; outbound initial push captures its original owner before background scheduling. No current-ID/address lookup substitutes another transport.
+
+Accepted publication follows actual auth. Outbound publication follows the CM generation-accepted callback, successful setup/registration and the legacy-pin recheck, immediately before SessionInitReady. It samples independent monotonic elapsed time AFTER owner-lock waits. The coverage is only **registered accepted and CM post-setup readers**; it excludes one-shot/unregistered readers and does not claim complete overlay admission or already-consumed CM Active. CM deactivation/stale-success refusal Ends the selected original session before later teardown diagnostics.
+
+N-in remains listener-only, with the same original mandatory pin/incarnation, ten-minute continuous lifetime, source-group journal/debit, strict ACK and owed-work semantics. A dialler has no N-in companion. An N-in clock failure cannot mint its class or suppress a separately valid F1 publication. No limits, activation, resource admission or release gates change. One cell/optional companion per original transport and an on-demand O(current registered readers) snapshot are structural costs; TLS evidence before publication, snapshot allocations, external delayed handles and full process/heap costs remain additional.
+
+F1/N-in transport fixtures set the existing synchronous-withdrawal test seam before starting their workers. These checks exclude production route-grace timing and its default resource cost; dedicated routing tests and production defaults remain unchanged.
 
 ## Русский
 
@@ -119,9 +170,63 @@ debt. Close link не reset. Group reset требует idle rolling window, exp
 Pending entry получает один optional-companion pointer даже в standalone mode; composed row
 дополнительно владеет companion. Это структурные пределы, не измерения bytes/CPU/RSS и не resource acceptance. Полный обход
 connections и caller-held inputs/handles вне retained-owner bound. Ещё нужны actual strict-named
-roles/connection adapter, input limits, атомарные pair3/30s/source128/10min histories, degree/window
+roles/connection adapter, input limits, композиция локальных source/pair histories на реальных путях, degree/window
 producer, current durable C5 provider, T/writer integration, timing/network evidence, G2 и отдельный
 выпуск. Pass boolean их не заменяет. Public standalone API сохраняет прежние ограниченные semantics
 и не получает private subowners core. Closed-call/reference и field-inventory guards удерживают
 границу. См. [принятый A](d1-bounded-intake-proposal.md),
 [условные сроки](d1-admission-budget.md), [блоки состояния](inactive-find-node-state.md).
+
+### Атомарная история source Session / identity цели
+
+Неактивный owner объединяет source128 различных целей/10min и pair3/30s с calendar, ledger и
+outgoing ID в одном commit. Standalone `PairWindow` сохраняет прежнюю отдельную семантику. Один
+optional atomic companion canonical Session хранит128 identity rows: по три projected/actual
+события, distinct expiry, checked generation и pending refs. Links одной цели разделяют row;
+новая настоящая source Session начинает независимо. Постоянный nonzero-sized owner token
+запрещает двум coordinators независимо тратить её историю и не удерживает coordinator. Первый
+companion готовится вне locks и присоединяется CAS после всех fallible trials. Offer и отказанная
+provisional не закрепляют owner и не списывают бюджет.
+
+Pair floor объединяет projected history с копией actual и консервативным replay только прежних
+unconsumed aliases этой пары в максимальном latest. Это граница выбора, а не время списания.
+Projected event получает FINAL joint `slot.at`, expiry — `max(old, slot.at+600s)`. Take сначала
+совместно проверяет actual pair/target и лишь затем списывает оба и снимает alias. Ровно 30s выводит
+событие из окна. Достижимая synthetic последовательность с O=1s даёт projected O+[0,.6,.7] и actual
+O+[.6,.7,.8]; четвёртый cut O+27.4 отказывает latest O+30.35 из-за actual earliest O+30.6. Эти входы
+фикстуры не являются deployment profile или сетевым доказательством.
+
+Один source ref принадлежит существующей committed pending row. Обычный Finish продлевает expiry
+до `max(old, Finish+600s)` и сохраняет ref в AwaitingAnswer. Answer/cancel/close/expiry при Dispatching
+оставляют TerminalDispatch/ref1 до sole Finish. Final release снимает ref ровно один раз без
+возврата истории; номинальный deadline не устраняет зависший writer. Reuse требует ref0, истечения
+distinct и ОБЕИХ projected/actual histories. Generation не переполняется; точные Session/owner/
+identity/generation защищают от stale handles. Неверное время не даёт debit/renewal/reuse/claim;
+прежняя terminal reconciliation закрытых сессий сохраняется. Reset/rebind API нет.
+
+Retained cost — optional 128-row companion участвующей canonical Session и fixed refs в прежних
+≤512 pending companions. Дополнительных retained source registry, completed map, worker/queue нет.
+Оценка O(128×участвующие Sessions +512), а7952 ограничивает только group ledger. На seal временно
+готовится максимум 512 первых companions; caller-held ended Sessions, snapshots и transient
+allocations учитываются дополнительно. Struct sizes, heap/CPU/RSS, timing/resource acceptance не
+измерены. Срок source-ID replay и реальная class/membership/degree/input/dispatch/T композиция,
+G2, activation и отдельные release gates остаются открытыми.
+
+### Неактивная proof-transport основа F1
+
+Private неиспользуемая FindNode factory собирает memory-only transport adapter. Обычные конструкторы оставляют его nil и по-прежнему не объявляют обе overlay capability. Handler, admission, class provider, worker, signer и socket writer не устанавливаются. Genuine TLS фикстуры с явно согласованными capability не меняют production hello/welcome. Canonical `SessionSeed` сразу после Accept/Dial захватывает настоящие согласованные факты; копии разделяют одноразовый latch. Неверные Bind arguments его не расходуют. Seed и Session удерживают identity proof values, а не полный TLS ProvenSession/connection. End закрывает единственный canonical Session без refund и I/O.
+
+Один `proofTransportLifetime.mu` упорядочивает исходный terminal, accepted/CM publication и независимый N-in companion. Raw R, decoded W, registry и outbound peer ссылаются на ТОТ ЖЕ cell. Atomic provisional terminal latch и bind-once CAS покрывают Read/Write/Close до attach и не создают proof. End очищает proof/socket/entry/peer/store chains ДО прежних блокирующих diagnostics. Accepted и dialled datagram захватывают исходную terminal-only arrival capsule до синхронного pipeline; outbound initial push захватывает исходного owner до background scheduling. Поиск текущего ID/address не подставляет другой transport.
+
+Accepted publication следует за настоящим auth. Outbound publication идёт после CM generation-accepted callback, успешных setup/registration и legacy-pin recheck, непосредственно перед SessionInitReady. Независимый monotonic elapsed читается ПОСЛЕ ожиданий owner locks. Coverage — только **registered accepted и CM post-setup readers**: one-shot/unregistered readers исключены; это не полная overlay admission и не утверждение уже обработанного CM Active. CM deactivation/stale-success refusal завершает выбранную исходную session до последующих teardown diagnostics.
+
+N-in остаётся listener-only с прежними исходными mandatory pin/incarnation, десятью минутами непрерывного lifetime, source-group journal/debit, strict ACK и owed-work semantics. Dialler не получает N-in companion. Отказ N-in clock не даёт классификацию и не запрещает независимо допустимую F1 publication. Лимиты, activation, resource admission и release gates не меняются. Один cell/optional companion на исходный transport и on-demand O(current registered readers) snapshot — структурные издержки; допубликационные TLS evidence, snapshot allocations, внешние delayed handles и полная стоимость heap/process учитываются дополнительно.
+
+Транспортные фикстуры F1/N-in включают существующий тестовый режим синхронного withdrawal до запуска работников. Эти проверки не покрывают production route-grace timing и его стоимость ресурсов по умолчанию; отдельные routing tests и production defaults остаются неизменными.
+
+
+### Private bounded C5 observation / Private C5-наблюдение
+
+The unused private observer uses explicit copied MaxMembers/MaxRegistryVisits inputs, complete-or-refused capture, genuine current F1 owner rechecks and current strict classes. Target links count toward M and are excluded from requester oldest-four selection. This historical observation is not AdmittedAtR/T, full online composition or a C3-immune permit. See [bounded class reader](find-node-priority-adapter.md). Deployment profiles, resources, G2 and activation remain separate.
+
+Private observer читает настоящие F1 members и strict C5 через явные M/V; переполнение отказывает целиком. Это наблюдение, без допуска R/T, гарантии доступности или жёсткой задержки mutex/CPU.

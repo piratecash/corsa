@@ -732,11 +732,12 @@ func (s *Service) dispatchSessionDatagramLine(session *peerSession, line string)
 		// ours rather than the sender's — dropping is the only honest answer.
 		return
 	}
+	ctx := sessionTransportArrivalContext(s.runCtx, s, session)
 	address := session.address
 	s.markPeerRead(address, protocol.Frame{Type: protocol.DatagramFrameType})
 	s.markPeerUsefulReceive(address)
 	neighbour := s.sessionDatagramNeighbour(session)
-	result := s.handleDatagramFrame(s.runCtx, line, neighbour)
+	result := s.handleDatagramFrame(ctx, line, neighbour)
 	if result.BanWorthy() {
 		// The outbound side has no ConnID-keyed ban surface — the ban score is
 		// charged per accepted connection (addBanScore keys on the inbound
@@ -767,7 +768,11 @@ func (s *Service) dispatchSessionDatagramLine(session *peerSession, line string)
 // stated on dispatchSessionDatagramLine: a refusal above the budget is a
 // refusal the neighbour gets for free, and it was free on both directions.
 func (s *Service) dispatchInboundDatagramLine(connID domain.ConnID, wire string) bool {
-	result := s.handleDatagramFrame(s.runCtx, wire, s.inboundDatagramNeighbour(connID))
+	return s.dispatchInboundDatagramLineOwned(connID, wire, nil)
+}
+func (s *Service) dispatchInboundDatagramLineOwned(connID domain.ConnID, wire string, owner *proofTransportOwner) bool {
+	ctx := acceptedTransportArrivalContext(s.runCtx, s, connID, owner)
+	result := s.handleDatagramFrame(ctx, wire, s.inboundDatagramNeighbour(connID))
 	if result.BanWorthy() {
 		// docs/protocol/datagram.md §4.1: punishment is reserved for violations
 		// of the stable header and auth, which every datagram transit is
@@ -792,7 +797,7 @@ func (s *Service) dispatchInboundDatagramLine(connID domain.ConnID, wire string)
 // It always keeps the connection: a datagram this node will not process is a
 // silent drop by contract (docs/protocol/datagram.md §2), never an error frame
 // and never a tear-down.
-func (s *Service) dispatchInboundDatagramWire(connID domain.ConnID, addr string, wire string) bool {
+func (s *Service) dispatchInboundDatagramWireOwned(connID domain.ConnID, addr string, wire string, owner *proofTransportOwner) bool {
 	accepted := false
 	defer func() {
 		log.Debug().
@@ -806,10 +811,11 @@ func (s *Service) dispatchInboundDatagramWire(connID domain.ConnID, addr string,
 
 	s.touchConnActivity(connID)
 	if !s.isConnAuthenticated(connID) {
+		owner.end()
 		_ = s.sendFrameViaNetworkSync(s.runCtx, connID, protocol.Frame{Type: "error", Code: protocol.ErrCodeAuthRequired})
 		return false
 	}
-	accepted = s.dispatchInboundDatagramLine(connID, wire)
+	accepted = s.dispatchInboundDatagramLineOwned(connID, wire, owner)
 	return true
 }
 

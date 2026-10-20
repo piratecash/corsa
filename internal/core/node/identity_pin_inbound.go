@@ -4,25 +4,24 @@ import (
 	"context"
 	"errors"
 	"math"
-	"sync"
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/sessionv2"
 )
 
-// There is no production constructor/caller. N1 must register the ORIGINAL
-// mandatory publication binding in its actual inbound lifetime owner. Fixture
-// roots exercise this core with real accepted v2 proofs, never a caller bool.
+// N1 binds this leaf only to the ORIGINAL accepted proof and registration.
+// N0 fixtures remain explicitly store-level and do not create Service authority.
 type matureInboundWitness struct {
-	mu      sync.Mutex
-	binding identityPinEntryBinding
-	session sessionv2.ProvenSession
-	connID  domain.ConnID
-	group   domain.SourceGroup
-	ready   time.Duration
-	ended   bool
+	transport *proofTransportLifetime
+	phase     inboundLifetimePhase
+	producer  *inboundPinProducer
+	binding   identityPinEntryBinding
+	session   sessionv2.ProvenSession
+	group     domain.SourceGroup
+	ready     time.Duration
 }
+
 type inboundPinStageState uint8
 
 const (
@@ -40,7 +39,8 @@ type inboundPinStage struct {
 
 var errNinWitness = errors.New("inbound quota witness stale, incomplete or not mature")
 
-// stageInboundPin has no live caller. Preflight occurs outside all owner locks.
+// stageInboundPin is consumed only by the private candidate producer.
+// Preflight occurs outside all owner locks.
 // Order: removal gate.R → lifetime leaf → store.mu. No I/O under either leaf.
 func (s *secureSessionStore) stageInboundPin(ctx context.Context, witness *matureInboundWitness, files identityPinDurableFiles) (inboundPinStage, error) {
 	if err := ctx.Err(); err != nil {
@@ -55,7 +55,7 @@ func (s *secureSessionStore) stageInboundPin(ctx context.Context, witness *matur
 	if !attached || memory {
 		return inboundPinStage{}, errNinJournal
 	}
-	if witness == nil || files == nil {
+	if witness == nil || witness.transport == nil || files == nil {
 		return inboundPinStage{}, errNinWitness
 	}
 	if err := files.Preflight(ctx); err != nil {
@@ -63,8 +63,8 @@ func (s *secureSessionStore) stageInboundPin(ctx context.Context, witness *matur
 	}
 	s.pinMutationGate.RLock()
 	defer s.pinMutationGate.RUnlock()
-	witness.mu.Lock()
-	defer witness.mu.Unlock()
+	witness.transport.mu.Lock()
+	defer witness.transport.mu.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := ctx.Err(); err != nil {
@@ -73,7 +73,7 @@ func (s *secureSessionStore) stageInboundPin(ctx context.Context, witness *matur
 	if err := s.pinMetadataMutationRefusalLocked(); err != nil {
 		return inboundPinStage{}, err
 	}
-	if !witness.binding.matchesLocked(s) || witness.ended || witness.connID == 0 {
+	if !witness.binding.matchesLocked(s) || witness.transport.ended || witness.phase != inboundPublished || witness.transport.id == 0 {
 		return inboundPinStage{}, errNinWitness
 	}
 	peer, err := witness.session.Peer()

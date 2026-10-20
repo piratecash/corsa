@@ -507,7 +507,7 @@ func TestInboundCommandReaderIsTheStrictBudget(t *testing.T) {
 
 // TestInboundReadLoopHandsOverTheWireLine pins the one step of the inbound
 // chain no unit test can reach: handleConn is entered with a live socket it
-// registers itself, so the call it makes into handleCommand cannot be observed
+// registers itself, so the call it makes into handleCommandOwned cannot be observed
 // without standing up a whole connection.
 //
 // What matters about that call is a single property — the argument is the line
@@ -544,18 +544,25 @@ func TestInboundReadLoopHandsOverTheWireLine(t *testing.T) {
 			return true
 		}
 		selector, isSelector := call.Fun.(*ast.SelectorExpr)
-		if !isSelector || selector.Sel.Name != "handleCommand" || len(call.Args) != 2 {
+		if !isSelector || selector.Sel.Name != "handleCommandOwned" {
 			return true
 		}
 		calls++
-		argument, isIdent := call.Args[1].(*ast.Ident)
-		if !isIdent || argument.Name != "line" {
-			t.Errorf("handleConn passes %T to handleCommand instead of the wire line: the datagram byte budget of docs/protocol/datagram.md §5 is charged on those bytes", call.Args[1])
+		receiver, isReceiver := selector.X.(*ast.Ident)
+		if !isReceiver || receiver.Name != "s" || len(call.Args) != 3 {
+			t.Error("handleConn must pass the original ConnID, wire line and owner to the same Service")
+			return true
+		}
+		for i, want := range []string{"connID", "line", "owner"} {
+			argument, isIdent := call.Args[i].(*ast.Ident)
+			if !isIdent || argument.Name != want {
+				t.Errorf("handleConn argument %d to handleCommandOwned is %T, want untouched %s: the original wire bytes and owner must cross together", i, call.Args[i], want)
+			}
 		}
 		return true
 	})
 	if calls != 1 {
-		t.Fatalf("found %d handleCommand calls in handleConn, want exactly 1", calls)
+		t.Fatalf("found %d handleCommandOwned calls in handleConn, want exactly 1", calls)
 	}
 }
 

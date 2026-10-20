@@ -3,7 +3,7 @@
 ## English
 
 This is a partial implementation of PR-4/5 in `internal/core/findnode`, after the separately
-reviewed codec. No production caller imports this package. It installs no dispatcher, advertises
+reviewed codec. Only the private inactive F1 adapter imports this package; no live intake caller is installed. It installs no dispatcher, advertises
 no capability, writes no frame, signs no payload and changes no pin. It is not completed PR-4/5,
 G2 approval, a timing-profile approval or D1 release admission.
 
@@ -15,7 +15,7 @@ G2 approval, a timing-profile approval or D1 release admission.
 | `PrioritySnapshot` | Explicit authoritative K/N-sel/N-in class function; priority belongs to a session, never its group; four oldest eligible level-2 sessions; no zero class default | Supply **all live candidates for this target**, not just cache holders; install a real C5 class provider; do not derive protected classes from unpinned metadata |
 | `PendingTable` | Exact direct target, one forwarded request per active source ID, source/target session correlation, original challenge and ID retained; pending 16/source session, 16/target identity across all its TLS links, 512/node; six-second expiry | Role/capability, command and input-rate gates; pair/distinct-target admission; fair deadline reservations; actual send and reader-close lifecycle |
 | `TargetCache` | At most 256 Reserved/Ready rows, eight active row references/session, three historical session recipients/challenge; one work token per cached challenge; one response/copy per challenge/session; 60-second Ready lifetime; stale completion refuses | Actual node/per-session signing admission and crypto; finite signing deadline; complete current priority snapshot |
-| `PairWindow` | Required typed `PairKey` = proven source Session + target identity across its links; three attempts per 30-second sliding window, three timestamps, no map | Bound the registry of source-session/exact-target pairs with the complete admission system |
+| `PairWindow` | Required typed `PairKey` = proven source Session + target identity across its links; three attempts per 30-second sliding window, three timestamps, no map | Real-path admission integration; private A-owner now has separate fixed source128/pair3 histories |
 | `ForwardCalendar` | Required target-identity binding; one shared R→target 1/s, burst-4 bucket across its TLS links, at most 16 reservations; append-only slot reservation through an explicit latest time; actual-time charge prevents delayed jobs from bunching beyond burst 4 | All priority levels share the calendar; reserve before admitting; bounded fair intake rounds, timing evidence, cancellation/expiry and writer integration |
 | `SigningCalendar` | All R and direct sources share one target calendar; independent 1/s, burst-4 session buckets; required spacing profile cannot exceed the established 4/s node budget; at most 256 budget aliases | Every alias belongs to an existing Reserved cache row; no separate job queue; actual signing occurs only after Consume, outside locks; apply the approved fair intake policy |
 | `TargetCoordinator` | Private cache/calendar composition, consumed-only completion, exact retained-row generation, fixed public transcript inputs, paired alias cleanup and one composed local snapshot | Actual reader/session/role binding, approved intake/timing policy, external signing, pending/writer integration; this is not network admission |
@@ -28,10 +28,7 @@ store policy or change its limits. Group values reuse `domain.SourceGroup`; no c
 /48 grouping function is introduced. The future adapter must call the existing reached-address
 /16 IPv4, /32 IPv6, loopback grouping, not trust an advertised endpoint.
 
-The current production handshake adapter retains `sessionv2.Peer`, not the full ProvenSession.
-Production integration must retain and bind the opaque proof on the actual connection; a claimed
-`peerIdentity` or a Peer literal cannot construct this block's Session. A constructor call alone
-cannot prove that a caller supplied the right ConnID, source address or local node context.
+The private F1 adapter binds captured genuine proof to the original transport gate and retains one canonical Session after actual accepted auth or CM post-setup registration. It is described below. Claimed identity, cached peer metadata and a Peer literal cannot create a Session. Ordinary nodes do not negotiate the overlay capability.
 
 ### Cache, copies and lifecycle
 
@@ -142,8 +139,8 @@ node spacing of at least 250 ms, no extra node-wide burst, and an explicit reser
 See [d1-admission-budget.md](d1-admission-budget.md). In particular, admission at R does not reserve
 T's global budget and does not imply admission or an answer at T.
 
-Before full PR-4/5: complete actual-path composition of accepted option A and approve timing profiles; implement degree/window and
-distinct-target accounting; specify duplicate source-ID lifetime beyond active pending entries;
+Before full PR-4/5: complete actual-path composition of accepted option A and approve timing profiles; implement degree/window and real-path composition of local
+source/distinct-target accounting; specify duplicate source-ID lifetime beyond active pending entries;
 wire the named-classifier/strict-codec gate in **both** dispatchers and `find_node` into the outbound
 command limiter; bind actual proven connections; compose the local target owner with pending reservations and
 rollback/close/late-answer paths; implement snapshot DTO/resource accounting; run the required
@@ -160,13 +157,35 @@ measurements or a full 13b-D1 run.
 ### Inactive option-A core
 
 A private candidate-reservation owner now composes the same512 pending rows, the accepted256+one
-group ledger and at most512 canonical target calendars. Combined actual/projected/remaining-alias
+group ledger and at most 512 canonical target calendars. Combined actual/projected/remaining-alias
 trials precede atomic commit; continuous locks serialize outgoing IDs. Fixed rounds, true per-target
 four-oldest L2 capture, L1 cursor/watermark and lower cell/session RR are state-level mechanisms.
-This does not install full source/pair/degree/role gates, a C5 production adapter, T admission or any
-network caller. Public standalone semantics remain limited. See the precise
+The private owner also composes atomic source128/10min and pair3/30s histories with final-slot
+projected charges and jointly trialled actual budgets. This does not install real-path
+source/pair/degree/role gates, a C5 production adapter, T admission or any network caller. Public standalone semantics remain limited. See the precise
 [option-A core contract](find-node-option-a-core.md) for no-refund/dispatch retention, reset and
 structural-bound limitations. Its outcomes are not full AdmittedAtR/T.
+
+
+The added source history is one optional 128-row companion per participating canonical Session,
+with two fixed 3-event histories/row and a nonzero-sized permanent owner token. One fixed ref in
+an existing pending companion keeps a row through AwaitingAnswer and unresolved TerminalDispatch.
+Only final row release drops the ref; Finish first retains max(old, completion+600s). Reuse needs
+ref0, distinct expiry and both pair debts expired, with checked nonwrapping generation. No global
+source map, extra queue or worker is added. Retained bound is O(128×participating Sessions+512),
+not the group ledger's7952. Up to512 first companions can be prepared transiently at one seal;
+caller-held ended Sessions, snapshots, transient allocations and full heap/CPU/RSS remain additional.
+These are source-functional guarantees of an inactive core, without timing/resource admission.
+
+### Inactive F1 proof-transport foundation
+
+The private, unused FindNode factory composes a memory-only transport adapter. Ordinary constructors leave it nil and still advertise neither overlay capability. It installs no handler, admission, class provider, worker, signer or socket writer. Explicit-cap genuine TLS fixtures do not change production hello/welcome capabilities. A canonical `SessionSeed` captures actual local/remote negotiated facts immediately after Accept/Dial; copies share one consumption latch. Invalid Bind arguments do not consume it. The seed and Session retain identity proof values, not a full TLS ProvenSession or connection. End closes the one canonical Session without refund or I/O.
+
+One `proofTransportLifetime.mu` orders original terminal, accepted/CM publication and the independent N-in companion. Raw R and decoded W, the registry and the outbound peer alias the SAME cell. An atomic provisional terminal latch plus bind-once CAS covers Read/Write/Close before the cell is attached; it cannot mint proof. End clears proof/socket/entry/peer/store chains before existing blocking diagnostics. Accepted and dialled datagrams capture an original terminal-only arrival capsule before the synchronous pipeline; outbound initial push captures its original owner before background scheduling. No current-ID/address lookup substitutes another transport.
+
+Accepted publication follows actual auth. Outbound publication follows the CM generation-accepted callback, successful setup/registration and the legacy-pin recheck, immediately before SessionInitReady. It samples independent monotonic elapsed time AFTER owner-lock waits. The coverage is only **registered accepted and CM post-setup readers**; it excludes one-shot/unregistered readers and does not claim complete overlay admission or already-consumed CM Active. CM deactivation/stale-success refusal Ends the selected original session before later teardown diagnostics.
+
+N-in remains listener-only, with the same original mandatory pin/incarnation, ten-minute continuous lifetime, source-group journal/debit, strict ACK and owed-work semantics. A dialler has no N-in companion. An N-in clock failure cannot mint its class or suppress a separately valid F1 publication. No limits, activation, resource admission or release gates change. One cell/optional companion per original transport and an on-demand O(current registered readers) snapshot are structural costs; TLS evidence before publication, snapshot allocations, external delayed handles and full process/heap costs remain additional.
 
 ## Русский
 
@@ -197,7 +216,8 @@ Production-код пакет не подключает. Он не регистр
   token не восстанавливает отменённую, истёкшую или вытесненную запись, даже с тем же challenge.
 - `PairWindow` требует `PairKey` из доказанной source Session и identity цели, общей всем её TLS-
   соединениям; хранит три timestamps одной такой пары, проверяет 3 за 30 секунд без
-  attacker-keyed map. Ограниченный реестр пар остаётся задачей внешнего admission.
+  attacker-keyed map. Private A-owner отдельно объединяет fixed source128/pair3 histories;
+  реальная admission integration остаётся внешней.
 - `ForwardCalendar` требует identity цели и моделирует общий для всех её TLS-соединений и уровней R→T бюджет 1/с, burst 4 и не больше 16 резервов.
   Явный latest time ограничивает допуск; отдельное списание по фактическому времени не позволяет
   опоздавшим работам собраться во всплеск больше четырёх.
@@ -213,9 +233,7 @@ Production-код пакет не подключает. Он не регистр
   Service/RPC/SDK DTO и `ResourceBreakdown` пока не подключены.
 
 Группы используют `domain.SourceGroup`: новой /24 или /48 функции нет. Будущий adapter применяет
-существующие /16 IPv4, /32 IPv6 и loopback. Текущий production adapter сохраняет `sessionv2.Peer`,
-а не полный ProvenSession; перед включением opaque proof нужно удержать и связать с настоящим
-соединением. Конструктор сам не доказывает корректность переданных ConnID, адреса и local node context.
+существующие /16 IPv4, /32 IPv6 и loopback. Private F1 adapter связывает genuine proof с исходным transport и одним canonical Session после actual auth/CM post-setup registration. Обычные узлы overlay capability не согласуют. Claimed identity/Peer literal не создают proof, а сам конструктор не доказывает корректность ConnID, адреса и local node context.
 См. [разрыв C5](session-v2-pin-classes.md).
 
 Подписанное тело `target/pubkey/sig` у копий одного challenge **одинаково**. Envelope ID относится
@@ -302,8 +320,8 @@ authority/cleanup. Snapshot — последний sample, не автомати
 T и не гарантирует её ответ. См. [предложение допуска](d1-admission-budget.md).
 
 До полного PR-4/5 остаются: полная композиция принятого варианта A на реальных путях и
-утверждение профилей времени; degree/window и distinct-target
-учёт; срок запрета повторного source ID после завершения active pending; гейты named classifier /
+утверждение профилей времени; degree/window и реальная source/distinct-target
+композиция; срок запрета повторного source ID после завершения active pending; гейты named classifier /
 strict codec **в обоих** диспетчерах и outbound command limiter; настоящая привязка proven connection;
 композиция локального target owner с pending, ошибками writer, close и late answers; DTO/resource accounting;
 end-to-end сценарии и полный regression. До PR-6/S6/G2 capability и socket writes не включаются.
@@ -321,6 +339,36 @@ Private candidate-reservation owner объединяет те же512 pending ro
 максимум512 canonical target calendars. Совместный actual/projected/remaining-alias trial идёт до
 атомарного commit с непрерывной сериализацией outgoing ID. Fixed rounds, per-target четыре L2 из
 полного membership, L1 cursor/watermark и RR cell/session — локальные механизмы состояния.
-Full source/pair/degree/role gates, C5 production adapter, T admission и network caller не подключены.
+Private owner также атомарно объединяет source128/10min и pair3/30s с final-slot projected
+списанием и совместным actual trial. Реальные source/pair/degree/role gates, C5 production
+adapter, T admission и network caller не подключены.
 Public standalone semantics прежние. [Точный контракт](find-node-option-a-core.md) описывает no-refund,
 удержание dispatch, reset и пределы структурных оценок. Outcomes не являются полным AdmittedAtR/T.
+
+
+Source history добавляет optional 128-row companion участвующей canonical Session: две fixed 3-event
+истории на row и постоянный nonzero-sized owner token. Один fixed ref прежней pending companion
+сохраняет row в AwaitingAnswer и unresolved TerminalDispatch. Только final release снимает ref;
+Finish сначала сохраняет max(old, completion+600s). Reuse требует ref0, distinct expiry, истечения
+обоих pair debt и checked generation без wrap. Global source map, дополнительной queue/worker нет.
+Retained bound O(128×участвующие Sessions+512), а не7952 group ledger. На seal временно готовится
+до 512 первых companions; caller-held ended Sessions, snapshots, transient allocations и полная
+heap/CPU/RSS стоимость остаются дополнительными. Это локальные source-functional гарантии
+неактивного core, без timing/resource admission.
+
+### Неактивная proof-transport основа F1
+
+Private неиспользуемая FindNode factory собирает memory-only transport adapter. Обычные конструкторы оставляют его nil и по-прежнему не объявляют обе overlay capability. Handler, admission, class provider, worker, signer и socket writer не устанавливаются. Genuine TLS фикстуры с явно согласованными capability не меняют production hello/welcome. Canonical `SessionSeed` сразу после Accept/Dial захватывает настоящие согласованные факты; копии разделяют одноразовый latch. Неверные Bind arguments его не расходуют. Seed и Session удерживают identity proof values, а не полный TLS ProvenSession/connection. End закрывает единственный canonical Session без refund и I/O.
+
+Один `proofTransportLifetime.mu` упорядочивает исходный terminal, accepted/CM publication и независимый N-in companion. Raw R, decoded W, registry и outbound peer ссылаются на ТОТ ЖЕ cell. Atomic provisional terminal latch и bind-once CAS покрывают Read/Write/Close до attach и не создают proof. End очищает proof/socket/entry/peer/store chains ДО прежних блокирующих diagnostics. Accepted и dialled datagram захватывают исходную terminal-only arrival capsule до синхронного pipeline; outbound initial push захватывает исходного owner до background scheduling. Поиск текущего ID/address не подставляет другой transport.
+
+Accepted publication следует за настоящим auth. Outbound publication идёт после CM generation-accepted callback, успешных setup/registration и legacy-pin recheck, непосредственно перед SessionInitReady. Независимый monotonic elapsed читается ПОСЛЕ ожиданий owner locks. Coverage — только **registered accepted и CM post-setup readers**: one-shot/unregistered readers исключены; это не полная overlay admission и не утверждение уже обработанного CM Active. CM deactivation/stale-success refusal завершает выбранную исходную session до последующих teardown diagnostics.
+
+N-in остаётся listener-only с прежними исходными mandatory pin/incarnation, десятью минутами непрерывного lifetime, source-group journal/debit, strict ACK и owed-work semantics. Dialler не получает N-in companion. Отказ N-in clock не даёт классификацию и не запрещает независимо допустимую F1 publication. Лимиты, activation, resource admission и release gates не меняются. Один cell/optional companion на исходный transport и on-demand O(current registered readers) snapshot — структурные издержки; допубликационные TLS evidence, snapshot allocations, внешние delayed handles и полная стоимость heap/process учитываются дополнительно.
+
+
+### Private bounded C5 observation / Private C5-наблюдение
+
+The unused private observer uses explicit copied MaxMembers/MaxRegistryVisits inputs, complete-or-refused capture, genuine current F1 owner rechecks and current strict classes. Target links count toward M and are excluded from requester oldest-four selection. This historical observation is not AdmittedAtR/T, full online composition or a C3-immune permit. See [bounded class reader](find-node-priority-adapter.md). Deployment profiles, resources, G2 and activation remain separate.
+
+Private observer читает настоящие F1 members и strict C5 через явные M/V; переполнение отказывает целиком. Это наблюдение, без допуска R/T, гарантии доступности или жёсткой задержки mutex/CPU.

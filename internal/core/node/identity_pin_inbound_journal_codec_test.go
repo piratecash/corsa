@@ -160,9 +160,9 @@ func TestInboundN0NewMemberDuplicateAndAliasRejection(t *testing.T) {
 	}
 }
 
-// Closed source inventory: no production install, witness producer or call/
-// function-value escape to admission exists in N0. Test-only closures cannot
-// become a configuration bool or a live incoming hook through refactoring.
+// The generic inventory forbids installation, witness and admission roots.
+// The caller normalizes only exact reviewed N1 leaves and the two N2 Unknown
+// attachment sites; there is no file-wide/default-constructor allowance.
 func ninClosedSource(src []byte) error {
 	file, err := parser.ParseFile(token.NewFileSet(), "candidate.go", src, 0)
 	if err != nil {
@@ -181,6 +181,21 @@ func ninClosedSource(src []byte) error {
 		case *ast.CompositeLit:
 			if name, ok := n.Type.(*ast.Ident); ok && (name.Name == "matureInboundWitness" || name.Name == "ninJournal") {
 				refused = fmt.Errorf("live witness/installation constructor")
+			}
+		case *ast.CallExpr:
+			if name, ok := n.Fun.(*ast.Ident); ok && name.Name == "new" && len(n.Args) == 1 {
+				if typ, ok := n.Args[0].(*ast.Ident); ok && typ.Name == "ninJournal" {
+					refused = fmt.Errorf("live installation new constructor")
+				}
+			}
+		case *ast.TypeSpec:
+			if n.Assign.IsValid() {
+				ast.Inspect(n.Type, func(v ast.Node) bool {
+					if id, ok := v.(*ast.Ident); ok && id.Name == "ninJournal" {
+						refused = fmt.Errorf("live journal type alias")
+					}
+					return true
+				})
 			}
 		case *ast.AssignStmt:
 			for _, lhs := range n.Lhs {
@@ -236,11 +251,43 @@ func TestInboundN0ClosedProductionReferenceInventory(t *testing.T) {
 			}
 			raw = bytes.Replace(raw, literal, replacement, 1)
 		}
+		// Exact N1 and N2 roots are normalized only at reviewed AST function/sites,
+		// never by excluding an entire lifecycle/installation source file.
+		for _, rule := range []struct{ file, function, literal, replacement string }{
+			{"identity_pin_inbound_lifecycle.go", "attempt", ".stageInboundPin(", ".reviewedPairedInboundStage("},
+			{"session_secure.go", "acceptSecureInbound", "&matureInboundWitness{", "&reviewedOriginalInboundLeaf{"},
+			{"identity_pin_inbound_install.go", "installUnknownInboundPinJournal", "s.ninFormat3 = true", "s.reviewedUnknownFormatSentinel = true"},
+			{"identity_pin_inbound_install.go", "installUnknownInboundPinJournal", "&ninJournal{", "&reviewedUnknownJournal{"},
+		} {
+			if name != rule.file {
+				continue
+			}
+			old := []byte(rule.literal)
+			if bytes.Count(raw, old) != 1 {
+				t.Fatal("changed exact N1 authority inventory", name, rule.function)
+			}
+			offset := bytes.Index(raw, old)
+			fs := token.NewFileSet()
+			parsed, err := parser.ParseFile(fs, name, raw, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			inside := false
+			for _, decl := range parsed.Decls {
+				if fn, ok := decl.(*ast.FuncDecl); ok && fn.Name.Name == rule.function && fn.Body != nil {
+					inside = offset >= fs.Position(fn.Body.Pos()).Offset && offset < fs.Position(fn.Body.End()).Offset
+				}
+			}
+			if !inside {
+				t.Fatal("N1 root moved outside exact allowed function", name)
+			}
+			raw = bytes.Replace(raw, old, []byte(rule.replacement), 1)
+		}
 		if err := ninClosedSource(raw); err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
 	}
-	for _, body := range []string{`func bad(s *secureSessionStore){s.stageInboundPin(nil,nil,nil)}`, `var escaped=(*secureSessionStore).stageInboundPin`, `var forged=&matureInboundWitness{}`, `func bad(s *secureSessionStore){s.ninFormat3=true}`, `var forged=&ninJournal{}`} {
+	for _, body := range []string{`func bad(s *secureSessionStore){s.stageInboundPin(nil,nil,nil)}`, `var escaped=(*secureSessionStore).stageInboundPin`, `var forged=&matureInboundWitness{}`, `func bad(s *secureSessionStore){s.ninFormat3=true}`, `var forged=&ninJournal{}`, `func bad(){_=new(ninJournal)}`, `type Escape = ninJournal`, `type Escape = *ninJournal`} {
 		if err := ninClosedSource([]byte("package node;" + body)); err == nil {
 			t.Fatal("closed guard accepted production escape", body)
 		}
@@ -250,9 +297,10 @@ func TestInboundN0ClosedProductionReferenceInventory(t *testing.T) {
 func ninReferenceErrors(sources map[string][]byte) []string {
 	type site struct{ file, function string }
 	expected := map[string]map[site]int{
-		"stageInboundPin": {}, "ninInstallFixture": {}, "ninInstallVirginFixture": {}, "ninInstallUnknownFixture": {}, "ninProofFixture": {}, "ninProofForFixture": {},
-		"ninJournalFromImage":  {{"secure_session_store.go", "loadFile"}: 1},
-		"matureInboundWitness": {{"identity_pin_inbound.go", "<package>"}: 1},
+		"stageInboundPin": {{"identity_pin_inbound_lifecycle.go", "attempt"}: 1}, "ninInstallFixture": {}, "ninInstallVirginFixture": {}, "ninInstallUnknownFixture": {}, "ninProofFixture": {}, "ninProofForFixture": {},
+		"ninJournalFromImage":             {{"secure_session_store.go", "loadFile"}: 1},
+		"installUnknownInboundPinJournal": {{"identity_pin_inbound_lifecycle.go", "newUnknownInboundPinCandidateService"}: 1},
+		"matureInboundWitness":            {{"conn_registry.go", "selectInboundPinAfterLocked"}: 1, {"identity_pin_inbound.go", "<package>"}: 1, {"identity_pin_inbound_lifecycle.go", "attempt"}: 1, {"proof_transport_lifetime.go", "<package>"}: 1, {"session_secure.go", "acceptSecureInbound"}: 1},
 	}
 	actual := make(map[string]map[site]int)
 	for name := range expected {
@@ -314,8 +362,8 @@ func TestInboundN0ExactClosedAuthorityReferences(t *testing.T) {
 	if errors := ninReferenceErrors(sources); len(errors) != 0 {
 		t.Fatal(errors)
 	}
-	for _, src := range []string{`func bad(s *secureSessionStore){s.stageInboundPin(nil,nil,nil)}`, `var escaped=(*secureSessionStore).stageInboundPin`, `func bad(){_ = ninJournalFromImage}`, `func ninInstallFixture(){}`, `func bad(){_=new(matureInboundWitness)}`} {
-		compileSource := "package fixture; type secureSessionStore struct{}; func (*secureSessionStore) stageInboundPin(any,any,any){}; type matureInboundWitness struct{}; func ninJournalFromImage(){};" + src
+	for _, src := range []string{`func bad(s *secureSessionStore){s.stageInboundPin(nil,nil,nil)}`, `var escaped=(*secureSessionStore).stageInboundPin`, `func bad(){_ = ninJournalFromImage}`, `func ninInstallFixture(){}`, `func bad(){_=new(matureInboundWitness)}`, `var escaped=(*secureSessionStore).installUnknownInboundPinJournal`} {
+		compileSource := "package fixture; type secureSessionStore struct{}; func (*secureSessionStore) stageInboundPin(any,any,any){}; func (*secureSessionStore) installUnknownInboundPinJournal(any,any){}; type matureInboundWitness struct{}; func ninJournalFromImage(){};" + src
 		fs := token.NewFileSet()
 		parsed, parseErr := parser.ParseFile(fs, "counterexample.go", compileSource, 0)
 		if parseErr != nil {

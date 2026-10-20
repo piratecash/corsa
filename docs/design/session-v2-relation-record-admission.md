@@ -94,7 +94,7 @@ This document records the owner's decision, not an implementation or test result
 
 ### Inactive R1b composition (candidate implementation)
 
-A private, fixture-only resolver factory composes the original Window action,
+A private resolver and unused R-only Service candidate factory compose the original Window action,
 pre-Send pin-owner observation, signed answer/TargetProof, accepted class queue,
 and store admission. The normal resolver has a nil admission owner and starts
 no additional worker. No config, frame, RPC or default profile enables this
@@ -214,7 +214,7 @@ stage повторно проверяются exact claim, исходное де
 
 ### Неактивная композиция R1b (кандидат реализации)
 
-Закрытая factory только для fixtures связывает исходное действие Window,
+Закрытая resolver factory и неиспользуемая R-only factory Service связывают исходное действие Window,
 наблюдение pin-owner до Send, подписанный ответ/TargetProof, accepted class queue
 и допуск store. У обычного resolver admission-owner равен nil, дополнительный
 worker не запускается. Включения через config, Frame, RPC или defaults нет.
@@ -244,3 +244,23 @@ Service. Strict coverage сохраняет format3 N-in history/quota и ACK т
 captured pre-I/O fixed stamp и metadata revisions. Reproof/COW не снимает
 заработанные close/drain/purge; C3 remove/recreate делает старую incarnation
 stale и не разрешает repin.
+
+
+The R-only Service candidate binds its real-store receiver after secureSessions
+and self-record construction; actual Run starts and joins the existing worker.
+Its finite fixtures distinguish registered-handler/strict-store composition from
+full Window/TLS/network qualification. A separate real-write callback-return
+fixture exercises join without claiming blocked kernel I/O. Fresh acceptance of
+these fixtures remains required. Public/default activation, R|K composition,
+R2 sent/hop authority, N-in journal installation, G2 and release remain separate.
+The 30/60, startup60, shared256, original7day lifetime and no-refund policy above
+are unchanged.
+
+R-only кандидат Service связывает backend реального store после secureSessions
+и self-record; настоящий Run запускает и присоединяет прежний worker. Конечные
+fixtures отличают композицию registered handler/strict store от полного пути
+Window/TLS/network. Отдельный fixture удерживает возврат callback после реальной
+записи для проверки join, не объявляя это зависшим kernel I/O. Новые fixtures
+требуют отдельной проверки. Публичная/default активация, R|K, R2 sent/hop,
+установка N-in journal, G2 и выпуск остаются отдельными. Политика 30/60,
+startup60, shared256, исходные 7 суток и отсутствие возврата дебета не меняется.

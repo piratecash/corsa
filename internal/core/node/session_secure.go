@@ -19,6 +19,7 @@ import (
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/netcore"
+	"github.com/piratecash/corsa/internal/core/protocol"
 	"github.com/piratecash/corsa/internal/core/secretfile"
 	"github.com/piratecash/corsa/internal/core/sessionv2"
 	"github.com/piratecash/corsa/internal/core/trustedclock"
@@ -85,6 +86,8 @@ type secureSessions struct {
 // secureSessionsOptions is what a node's v2 state is built from besides its
 // identity.
 type secureSessionsOptions struct {
+	// ninElapsed is immutable before the store loads/anchors a journal.
+	ninElapsed func() (time.Duration, error)
 	// storePath is the downgrade-protection store's file.
 	storePath string
 	// markerPath is the store's marker next to the identity
@@ -140,6 +143,7 @@ func buildSecureSessions(id *identity.Identity, opts secureSessionsOptions, buil
 		return unavailableSessions(opts, fmt.Errorf("certificate source: %w", err))
 	}
 	store := openSecureSessionStore(secureSessionStoreOptions{
+		ninElapsed: opts.ninElapsed,
 		path:       opts.storePath,
 		markerPath: opts.markerPath,
 		clock:      trustedclock.New(trustedclock.Sources{Wall: opts.clock, SinceBoot: trustedclock.SinceBoot}),
@@ -316,6 +320,7 @@ func (s *Service) openInboundTransport(metered *netcore.MeteredConn, source io.R
 			return nil, nil, nil, err
 		}
 	}
+	s.publishDegreeInbound(conn)
 	return conn, bufio.NewReader(conn), &peer, nil
 }
 
@@ -358,8 +363,9 @@ func (s *Service) acceptSecureInbound(metered *netcore.MeteredConn, reader *bufi
 	if err != nil {
 		return nil, sessionv2.Peer{}, err
 	}
-	// The protection this session earns must be on disk before the session
-	// counts: otherwise a restart would forget the pin and let v1 back in.
+	// Publish the original mandatory binding before this session counts, using
+	// its existing persistence contract (memory-only stores remain supported).
+	// This publication is not an N-in strict metadata/journal acknowledgment.
 	binding, pinErr := s.secureSessions.store.noteProvenInboundBinding(peer.Identity)
 	if pinErr != nil {
 		_ = conn.Close()
@@ -368,6 +374,22 @@ func (s *Service) acceptSecureInbound(metered *netcore.MeteredConn, reader *bufi
 	if proof, ok := peer.Proof(); ok {
 		s.noteLocalContactProof(proof, binding)
 	}
+	if s.inboundPins != nil || s.findNode != nil || s.degree != nil || s.hasContactRecordPushTransportCapability() {
+		l := &proofTransportLifetime{token: s.proofToken, role: sessionv2.RoleListener}
+		wire := &peekedConn{Conn: conn, reader: conn}
+		l.evidence = &proofTransportEvidence{session: session, protected: conn, raw: replayed, wire: wire, group: sourceGroup(resolveRemoteIPFromAddr(metered.RemoteAddr())), identity: peer.Identity}
+		if s.inboundPins != nil {
+			l.nin = &matureInboundWitness{transport: l, binding: binding, session: session, group: l.evidence.group, producer: s.inboundPins}
+		}
+		s.captureFindNodeSeed(l, session, welcome)
+		if !wire.bindProofTransport(l) || !replayed.bindProofTransport(l) {
+			l.end()
+			_ = conn.Close()
+			return nil, sessionv2.Peer{}, errProofTransportBinding
+		}
+		return wire, peer, nil
+	}
+
 	return conn, peer, nil
 }
 
@@ -420,14 +442,65 @@ func readTLSRecord(reader *bufio.Reader) ([]byte, error) {
 	return record, nil
 }
 
+// Capture-only evidence: only genuine Accept/Dial writes this tuple. No getter
+// exports it. Publication consumes it; End releases every proof/socket alias.
+var errProofTransportBinding = errors.New("secure session: original proof transport already bound")
+
+type proofTransportEvidence struct {
+	session   sessionv2.ProvenSession
+	protected net.Conn
+	raw, wire *peekedConn
+	group     domain.SourceGroup
+	identity  domain.PeerIdentity
+}
+
 // peekedConn reads through the buffered reader that holds the peeked first
 // byte, so the TLS handshake sees the connection from its first byte.
 type peekedConn struct {
 	net.Conn
 	reader io.Reader
+	// Same immutable leaf on raw R and candidate-only decoded W.
+	common   atomic.Pointer[proofTransportLifetime]
+	terminal atomic.Bool
 }
 
-func (c *peekedConn) Read(b []byte) (int, error) { return c.reader.Read(b) }
+// Bind once and replay an already-observed terminal event. The SC ordering
+// covers terminal-before-CAS and CAS-before-terminal without a second lock.
+func (c *peekedConn) bindProofTransport(l *proofTransportLifetime) bool {
+	if l == nil {
+		return false
+	}
+	if !c.common.CompareAndSwap(nil, l) && c.common.Load() != l {
+		return false
+	}
+	if c.terminal.Load() {
+		l.end()
+	}
+	return true
+}
+func (c *peekedConn) endProofTransportIO() {
+	c.terminal.Store(true)
+	c.common.Load().end()
+}
+
+func (c *peekedConn) Read(b []byte) (int, error) {
+	n, err := c.reader.Read(b)
+	if err != nil {
+		c.endProofTransportIO()
+	}
+	return n, err
+}
+func (c *peekedConn) Write(b []byte) (int, error) {
+	n, err := c.Conn.Write(b)
+	if err != nil {
+		c.endProofTransportIO()
+	}
+	return n, err
+}
+func (c *peekedConn) Close() error {
+	c.endProofTransportIO()
+	return c.Conn.Close()
+}
 
 // NetConn exposes the socket under the peeked bytes (netcore.MeteredOf).
 func (c *peekedConn) NetConn() net.Conn { return c.Conn }
@@ -437,14 +510,16 @@ func (c *peekedConn) NetConn() net.Conn { return c.Conn }
 // advertise bookkeeping, the same auth completion and the same delivery
 // start. The only difference is what proved the identity — session_proof
 // over this connection's exporter instead of a challenge signature.
-func (s *Service) acceptProvenInbound(connID domain.ConnID, peer sessionv2.Peer, remoteAddr string) bool {
+func (s *Service) acceptProvenInboundOwned(connID domain.ConnID, peer sessionv2.Peer, remoteAddr string, owner *proofTransportOwner) bool {
 	hello := peer.Intro
 	if err := validateProtocolHandshake(hello); err != nil {
+		owner.end()
 		log.Warn().Err(err).Uint64("conn_id", uint64(connID)).Str("addr", remoteAddr).Msg("secure_session_inbound_version_refused")
 		return false
 	}
 	proof, proven := peer.Proof()
 	if !proven {
+		owner.end()
 		// Only the handshake mints a proof; a peer without one did not come
 		// from it, and admitting it here would make it count as proven.
 		log.Error().Uint64("conn_id", uint64(connID)).Str("addr", remoteAddr).Msg("secure_session_inbound_without_proof")
@@ -459,7 +534,7 @@ func (s *Service) acceptProvenInbound(connID domain.ConnID, peer sessionv2.Peer,
 	s.applyAdvertiseOnInboundAccept(remoteAddr, advertiseResult)
 	log.Info().Uint64("conn_id", uint64(connID)).Str("peer", hello.Address).Str("addr", remoteAddr).Msg("secure_session_inbound_established")
 	backlogSub, fullSync := s.completeInboundAuth(connID, verified)
-	s.startInboundSessionDelivery(connID, backlogSub, fullSync)
+	s.startInboundSessionDeliveryOwned(connID, backlogSub, fullSync, owner)
 	return true
 }
 
@@ -485,6 +560,9 @@ var errEndpointOwnerMismatch = errors.New("secure session: the endpoint proved a
 // TCP socket (keepalive), metered counts its bytes, wire carries the frames
 // (TLS for v2, metered itself for v1), and proven is the v2 peer or nil.
 type dialledTransport struct {
+	common   *proofTransportLifetime
+	proofRaw *peekedConn
+
 	pinBinding identityPinEntryBinding
 	pinGroup   domain.SourceGroup
 	// connID names this socket from the moment it is dialled, so what the
@@ -605,12 +683,18 @@ func (s *Service) dialV2(ctx context.Context, address domain.PeerAddress, intent
 	if err != nil {
 		return nil, err
 	}
-	session, err := sessionv2.Dial(ctx, transport.metered, s.secureSessions.local, s.nodeHelloFrame(), expectedPeerOf(intent), s.secureSessions.dialTimeouts.forAddress(address).tls)
+	intro := s.nodeHelloFrame()
+	var proofWire net.Conn = transport.metered
+	if s.findNode != nil || s.degree != nil || s.hasContactRecordPushTransportCapability() {
+		transport.proofRaw = &peekedConn{Conn: transport.metered, reader: transport.metered}
+		proofWire = transport.proofRaw
+	}
+	session, err := sessionv2.Dial(ctx, proofWire, s.secureSessions.local, intro, expectedPeerOf(intent), s.secureSessions.dialTimeouts.forAddress(address).tls)
 	if err != nil {
 		attempt := failedV2Attempt{address: address, intent: intent, connID: transport.connID, plan: plan, err: err}
 		return s.afterFailedV2Attempt(ctx, attempt, dial)
 	}
-	return s.provenTransport(ctx, transport, session, address, intent)
+	return s.provenTransport(ctx, transport, session, address, intent, intro)
 }
 
 // dialHeld reports whether the next dial to address waits — for its
@@ -802,7 +886,7 @@ func (s *Service) dialPeerRawForCM(ctx context.Context, address domain.PeerAddre
 // forgotten (onIdentityProvenV2), before this session is registered. Only
 // then is the address marked v2_strong and its backoffs reset: a proof whose
 // protection did not land proves nothing this node keeps.
-func (s *Service) provenTransport(ctx context.Context, transport *dialledTransport, session sessionv2.ProvenSession, address domain.PeerAddress, intent domain.DialIntent) (*dialledTransport, error) {
+func (s *Service) provenTransport(ctx context.Context, transport *dialledTransport, session sessionv2.ProvenSession, address domain.PeerAddress, intent domain.DialIntent, intro protocol.Frame) (*dialledTransport, error) {
 	wire, err := session.Conn()
 	if err != nil {
 		return nil, err
@@ -830,7 +914,21 @@ func (s *Service) provenTransport(ctx context.Context, transport *dialledTranspo
 		s.noteLocalContactProof(proof, result.pinBinding)
 	}
 	transport.pinBinding, transport.pinGroup = result.pinBinding, result.pinGroup
+	if (s.findNode != nil || s.degree != nil || s.hasContactRecordPushTransportCapability()) && transport.proofRaw != nil {
+		l := &proofTransportLifetime{token: s.proofToken, role: sessionv2.RoleDialer, outbound: true, id: transport.connID}
+		wrapped := &peekedConn{Conn: wire, reader: wire}
+		l.evidence = &proofTransportEvidence{session: session, protected: wire, raw: transport.proofRaw, wire: wrapped, group: sourceGroup(resolveRemoteIPFromAddr(transport.raw.RemoteAddr())), identity: peer.Identity}
+		s.captureFindNodeSeed(l, session, intro)
+		if !wrapped.bindProofTransport(l) || !transport.proofRaw.bindProofTransport(l) {
+			l.end()
+			_ = wire.Close()
+			return nil, errProofTransportBinding
+		}
+		transport.common = l
+		wire = wrapped
+	}
 	transport.wire, transport.proven, transport.reader = wire, &peer, bufio.NewReader(wire)
+	s.publishDegreeTransport(transport.common)
 	return transport, nil
 }
 

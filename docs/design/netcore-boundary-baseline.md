@@ -7,7 +7,10 @@ not claim that the NetCore migration or removal of raw socket dependencies is
 complete. The former script expected 12 declarations and eight importers while
 that commit already contained 23 matching declarations, 18 importers, four
 registry reads, four `entry.core` metrics reads and one `uint64` identity helper.
-D1 adds one import used only for the readiness close sentinel.
+D1 separately adds one declaration/import for degree observation and one import
+used only for the readiness close sentinel: 24 declaration matches and 20
+reviewed `"net"` import occurrences in total. The 23/18 legacy counts do not
+include these additions.
 
 `make enforce-netcore-boundary` runs
 [`scripts/enforce-netcore-boundary.sh`](../../scripts/enforce-netcore-boundary.sh).
@@ -36,6 +39,19 @@ check, not a claim to enumerate every semantic use of `net.Conn`.
 | `service.go` | `handleConn`, `ConnAuthState`, `SetConnAuthState`, `isBlacklistedConn`, `registerInboundConn`, `unregisterInboundConn`, `closeRegisteredInboundCore`, `closeRegistryCore` |
 | `session_liveness.go` | `newInboundFrameDeadline` |
 | `session_probe.go` | `probeLegacy`, `armLegacyProbeDeadline` |
+
+### D1 degree observation addition
+
+The exact new declaration is
+`internal/core/node/find_node_degree.go | func (s *Service) publishDegreeInbound(conn net.Conn)`.
+Its exact import record is `internal/core/node/find_node_degree.go | "net"`.
+The function is a no-op without a degree observer; otherwise it type-asserts the
+existing `*peekedConn`, reads `wire.common.Load()` and delegates to the existing
+transport-proof publication checks. This declaration introduces no socket
+read/write/close or new registry. The records acknowledge its concrete lexical
+dependency; they do not complete the NetCore migration or grant this file a
+blanket network-I/O exception. Compilation, behavior and SOURCE guards remain
+separate checks.
 
 ### Frozen access debt
 
@@ -75,6 +91,12 @@ The 18 legacy importers remain explicit debt with their existing purposes:
 | `session_secure.go` | session-kind selection and pre-registration TLS |
 | `socks5.go` | SOCKS5 handshake before NetCore |
 
+The added D1 `find_node_degree.go` import is the nineteenth record in the
+existing `legacy_import` matching category. That category name is retained for
+the strict matcher, not a claim that the addition existed at `251b2a2`. The
+readiness import is a separate twentieth record; neither addition replaces or
+removes any of the 18 historical import records.
+
 `peer_session_readiness.go` is separate: its only allowed `net` selector is
 `net.ErrClosed`, in `(*peerSessionReadiness).stop`. A new selector, relocation,
 aliased/dot import or additional importer fails. The import check conservatively
@@ -92,7 +114,9 @@ column-zero function declarations/closing braces for enclosing-function lookup.
 fixtures in a temporary directory, without copying the repository. Positive
 controls cover line shifts/whitespace; negative controls cover membership,
 multiplicity, source/function substitution, each legacy access category,
-readiness and retained zero-pattern gates.
+readiness and retained zero-pattern gates. Focused D1 controls also remove,
+duplicate and replace its declaration/import records and add a different
+unreviewed importer; the reviewed degree addition does not allow those changes.
 
 ## Русский
 
@@ -100,8 +124,11 @@ Boundary guard фиксирует существующий технически�
 заявление о завершении миграции NetCore или удалении raw socket dependencies.
 Старый скрипт ожидал 12 деклараций и восемь importers, хотя этот коммит уже содержал
 23 совпадения деклараций, 18 importers, четыре чтения registry, четыре metrics-чтения
-`entry.core` и один helper с `uint64` identity. D1 добавляет один import исключительно
-для close sentinel readiness.
+`entry.core` и один helper с `uint64` identity. D1 отдельно добавляет одну
+декларацию/import для degree observation и один
+import исключительно для close sentinel readiness: итого 24 совпадения деклараций
+и 20 проверяемых вхождений `"net"`. Прежние legacy числа 23/18 этих дополнений
+не включают.
 
 `make enforce-netcore-boundary` запускает
 [`scripts/enforce-netcore-boundary.sh`](../../scripts/enforce-netcore-boundary.sh).
@@ -129,6 +156,18 @@ Boundary guard фиксирует существующий технически�
 | `service.go` | `handleConn`, `ConnAuthState`, `SetConnAuthState`, `isBlacklistedConn`, `registerInboundConn`, `unregisterInboundConn`, `closeRegisteredInboundCore`, `closeRegistryCore` |
 | `session_liveness.go` | `newInboundFrameDeadline` |
 | `session_probe.go` | `probeLegacy`, `armLegacyProbeDeadline` |
+
+### Дополнение D1 для наблюдения degree
+
+Новая точная декларация —
+`internal/core/node/find_node_degree.go | func (s *Service) publishDegreeInbound(conn net.Conn)`.
+Точная запись import — `internal/core/node/find_node_degree.go | "net"`.
+Без degree observer функция ничего не делает; иначе проверяет существующий тип
+`*peekedConn`, читает `wire.common.Load()` и передаёт результат прежним проверкам
+публикации transport proof. В этой функции нет нового socket read/write/close
+или registry. Записи фиксируют конкретную лексическую зависимость; они не
+завершают миграцию NetCore и не разрешают произвольный network I/O в этом файле.
+Compilation, behavior и SOURCE guards остаются отдельными проверками.
 
 ### Зафиксированный долг доступов
 
@@ -168,6 +207,12 @@ TSV фиксирует полные source expressions, включая прис�
 | `session_secure.go` | выбор session kind и TLS до регистрации |
 | `socks5.go` | SOCKS5 handshake до NetCore |
 
+Новый D1 import из `find_node_degree.go` — девятнадцатая запись существующей
+категории сопоставления `legacy_import`. Имя категории сохранено для строгого
+matcher и не означает, что дополнение существовало в `251b2a2`. Readiness import
+остаётся отдельной двадцатой записью; ни одно дополнение не заменяет и не удаляет
+18 исторических записей import.
+
 `peer_session_readiness.go` рассматривается отдельно: единственный разрешённый
 selector — `net.ErrClosed` в `(*peerSessionReadiness).stop`. Новый selector, перенос,
 alias/dot import или дополнительный importer вызывает отказ. Import check
@@ -185,4 +230,6 @@ lookup/mutation helpers и старые walker signatures. Прежние direct
 лексические fixtures во временном каталоге без копии репозитория. Positive controls
 проверяют сдвиг строк и пробелы; negative controls — membership, кратность,
 замену source/function, каждую категорию legacy accesses, readiness и сохранённые
-zero-pattern gates.
+zero-pattern gates. Отдельные D1 controls удаляют, дублируют и заменяют
+его declaration/import записи и добавляют другой непроверенный importer;
+проверенное дополнение degree эти изменения не разрешает.

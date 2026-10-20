@@ -137,7 +137,7 @@ func (r *identityResolver) nextActionLocked() (identityLookupActionStamp, error)
 func (r *identityResolver) cancelUserAction(action UserIdentityLookup) error {
 	r.mu.Lock()
 	clearedRuntimeAction := false
-	if r.recordAdmission != nil {
+	if r.recordAdmission.admitsR() {
 		r.cancelRelationActionLocked(action)
 		r.revokeActionLocked(action.target, action.generation)
 		r.intents.mu.Lock()

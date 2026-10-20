@@ -1297,6 +1297,7 @@ func (cm *ConnectionManager) handleDialSucceeded(_ context.Context, ev DialSucce
 
 	s := cm.findSlotLocked(ev.Address)
 	if s == nil || s.Generation != ev.SlotGeneration {
+		ev.Session.endProofTransport()
 		// Late success after the slot was replaced or removed. The socket
 		// below is real, so its unit is taken OUT of the parking table here
 		// but released only AFTER the socket is closed: releasing first
@@ -1850,6 +1851,7 @@ func (cm *ConnectionManager) deactivateSlotLocked(s *slot, reason slotDeactivati
 		return nil
 	}
 
+	s.Session.endProofTransport()
 	teardown := &sessionTeardown{
 		info: SessionInfo{
 			Address:      s.Address,

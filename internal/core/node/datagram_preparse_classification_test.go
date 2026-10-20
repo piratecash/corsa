@@ -195,16 +195,18 @@ func TestNoDatagramDeliveryBelowTheUniversalParser(t *testing.T) {
 	t.Parallel()
 
 	forbidden := map[string]bool{
-		"dispatchSessionDatagramLine": true,
-		"dispatchInboundDatagramLine": true,
-		"dispatchInboundDatagramWire": true,
-		"handleDatagramFrame":         true,
+		"dispatchSessionDatagramLine":      true,
+		"dispatchInboundDatagramLine":      true,
+		"dispatchInboundDatagramLineOwned": true,
+		"dispatchInboundDatagramWire":      true,
+		"dispatchInboundDatagramWireOwned": true,
+		"handleDatagramFrame":              true,
 	}
 	for _, where := range []struct {
 		file     string
 		function string
 	}{
-		{"service.go", "dispatchNetworkFrame"},
+		{"service.go", "dispatchNetworkFrameOwned"},
 		{"peer_management.go", "dispatchPeerSessionFrame"},
 	} {
 		for _, called := range callsInsideCaseClause(t, where.file, where.function, protocol.DatagramFrameType) {
@@ -233,6 +235,10 @@ func callsInsideCaseClause(t *testing.T, file, function, label string) []string 
 	parsed, err := parser.ParseFile(fset, filepath.Join(filepath.Dir(thisFile), file), nil, 0)
 	if err != nil {
 		t.Fatalf("parse %s: %v", file, err)
+	}
+
+	if file == "service.go" && function == "dispatchNetworkFrameOwned" {
+		networkDispatchBodyForGuard(t, parsed)
 	}
 
 	var names []string

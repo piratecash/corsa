@@ -98,11 +98,12 @@ func ninProofForFixture(t *testing.T, s *secureSessionStore, c *ninFixtureClock,
 	if err != nil {
 		t.Fatal(err)
 	}
-	w := &matureInboundWitness{binding: binding, session: accepted.session, connID: 1, group: sourceGroup(addr.Addr()), ready: time.Duration(c.tick.Load())}
+	w := &matureInboundWitness{phase: inboundPublished, binding: binding, session: accepted.session, transport: &proofTransportLifetime{id: 1}, group: sourceGroup(addr.Addr()), ready: time.Duration(c.tick.Load())}
+	w.transport.nin = w
 	t.Cleanup(func() {
-		w.mu.Lock()
-		w.ended = true
-		w.mu.Unlock()
+		w.transport.mu.Lock()
+		w.transport.ended = true
+		w.transport.mu.Unlock()
 		_ = server.Close()
 		_ = client.Close()
 		wire, _ := dialed.Conn()
@@ -209,9 +210,9 @@ func TestInboundN0RealWitnessMaturityTerminalABAAndPreflight(t *testing.T) {
 	if metadataSnapshot(t, s, w.binding.identity) != before || s.ninJournal.generation != 1 {
 		t.Fatal("preflight refusal had effects")
 	}
-	w.mu.Lock()
-	w.ended = true
-	w.mu.Unlock()
+	w.transport.mu.Lock()
+	w.transport.ended = true
+	w.transport.mu.Unlock()
 	if _, err := s.stageInboundPin(t.Context(), w, f); !errors.Is(err, errNinWitness) {
 		t.Fatal("ended session earned class", err)
 	}
@@ -519,9 +520,9 @@ func TestInboundN0ConcurrentLastRawClassAndExistingPending(t *testing.T) {
 
 func TestInboundN0NegativeMaturityAnchorCannotEarn(t *testing.T) {
 	s, _, files, w := ninMatureFixture(t)
-	w.mu.Lock()
+	w.transport.mu.Lock()
 	w.ready = -1
-	w.mu.Unlock()
+	w.transport.mu.Unlock()
 	if _, err := s.stageInboundPin(t.Context(), w, files); !errors.Is(err, errNinWitness) {
 		t.Fatal("negative maturity anchor admitted", err)
 	}

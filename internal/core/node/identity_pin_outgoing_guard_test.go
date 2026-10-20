@@ -20,14 +20,17 @@ type r2aReferenceSite struct{ file, function string }
 // Exact multisets, reviewed with the inactive foundation. A same-count caller
 // replacement, including a method value rather than a call, changes membership.
 var r2aClosedReferences = map[string]map[r2aReferenceSite]int{
-	"prepareR2aFixtureOwnDM": {}, "submitR2aFixtureOwnDM": {}, "openR2aFixtureHop": {}, "settleR2aOwnHop": {},
-	"storeIncomingMessageWithR2a":          {{"service.go", "storeIncomingMessage"}: 1, {"identity_pin_outgoing_provenance.go", "submitR2aFixtureOwnDM"}: 1},
+	"settleR2aOwnHopLocked":  {{"identity_pin_outgoing_provenance.go", "settleR2aOwnHop"}: 1, {"identity_record_admission_own_dm.go", "prepareOwnDMRelation"}: 1},
+	"prepareR2aFixtureOwnDM": {}, "submitR2aFixtureOwnDM": {}, "openR2aFixtureHop": {}, "settleR2aOwnHop": {{"identity_pin_own_dm_port.go", "TrySettle"}: 1},
+	"prepareR2aOwnDM":                      {{"identity_pin_outgoing_provenance.go", "prepareR2aFixtureOwnDM"}: 1, {"identity_pin_own_dm_port.go", "Submit"}: 1},
+	"submitR2aOwnDM":                       {{"identity_pin_outgoing_provenance.go", "submitR2aFixtureOwnDM"}: 1, {"identity_pin_own_dm_port.go", "Submit"}: 1},
+	"storeIncomingMessageWithR2a":          {{"service.go", "storeIncomingMessage"}: 1, {"identity_pin_outgoing_provenance.go", "submitR2aOwnDM"}: 1},
 	"finishPeerSessionForCM":               {{"peer_sessions.go", "openPeerSessionForCM"}: 1, {"identity_pin_outgoing_provenance.go", "openR2aFixtureHop"}: 1},
-	"captureR2aHopPublication":             {{"identity_pin_outgoing_provenance.go", "openR2aFixtureHop"}: 1},
+	"captureR2aHopPublication":             {{"identity_pin_outgoing_provenance.go", "openR2aFixtureHop"}: 1, {"peer_sessions.go", "finishPeerSessionForCM"}: 1},
 	"registerR2aOrigin":                    {{"service.go", "storeIncomingMessageWithR2a"}: 1},
 	"sealR2aWireProjection":                {{"service.go", "storeIncomingMessageWithR2a"}: 1},
 	"r2aUpdateInitialHold":                 {{"service.go", "storeIncomingMessageWithR2a"}: 1},
-	"existingR2aOrigin":                    {{"identity_pin_outgoing_provenance.go", "submitR2aFixtureOwnDM"}: 1},
+	"existingR2aOrigin":                    {{"identity_pin_outgoing_provenance.go", "submitR2aOwnDM"}: 1},
 	"snapshotR2aDirectedSession":           {{"relay.go", "sendTableRoutedRelayMessageWithR2a"}: 1},
 	"captureR2aFirstDirectedItem":          {{"relay.go", "sendTableRoutedRelayMessageWithR2a"}: 1},
 	"claimR2aFirstDirectedItemLocked":      {{"identity_pin_outgoing_provenance.go", "captureR2aFirstDirectedItem"}: 1},
@@ -38,18 +41,18 @@ var r2aClosedReferences = map[string]map[r2aReferenceSite]int{
 	"sendTableRoutedRelayMessageWithR2a":   {{"relay.go", "sendTableRoutedRelayMessage"}: 1, {"routing_relay.go", "sendTableRoutedRelayToAddressWithR2a"}: 1},
 }
 var r2aConstructors = map[string]r2aReferenceSite{
-	"r2aPreparedOwnDM":      {"identity_pin_outgoing_provenance.go", "prepareR2aFixtureOwnDM"},
-	"r2aPreparedEnvelope":   {"identity_pin_outgoing_provenance.go", "prepareR2aFixtureOwnDM"},
+	"r2aPreparedOwnDM":      {"identity_pin_outgoing_provenance.go", "prepareR2aOwnDM"},
+	"r2aPreparedEnvelope":   {"identity_pin_outgoing_provenance.go", "prepareR2aOwnDM"},
 	"r2aHopPublication":     {"identity_pin_outgoing_provenance.go", "captureR2aHopPublication"},
 	"r2aPublishedHop":       {"identity_pin_outgoing_provenance.go", "captureR2aHopPublication"},
-	"r2aDispatch":           {"identity_pin_outgoing_provenance.go", "submitR2aFixtureOwnDM"},
+	"r2aDispatch":           {"identity_pin_outgoing_provenance.go", "submitR2aOwnDM"},
 	"r2aOwnSendStamp":       {"identity_pin_outgoing_provenance.go", "registerR2aOrigin"},
 	"r2aFirstWrite":         {"identity_pin_outgoing_provenance.go", "claimR2aFirstDirectedItemLocked"},
 	"r2aDirectedDispatch":   {"routing_relay.go", "sendTableDirectedRelayWithR2a"},
 	"r2aWireProjection":     {"identity_pin_outgoing_provenance.go", "sealR2aWireProjection"},
-	"r2aSubmissionResult":   {"identity_pin_outgoing_provenance.go", "submitR2aFixtureOwnDM"},
-	"r2aRecipientEvidence":  {"identity_pin_outgoing_provenance.go", "settleR2aOwnHop"},
-	"r2aNearestHopEvidence": {"identity_pin_outgoing_provenance.go", "settleR2aOwnHop"},
+	"r2aSubmissionResult":   {"identity_pin_outgoing_provenance.go", "submitR2aOwnDM"},
+	"r2aRecipientEvidence":  {"identity_pin_outgoing_provenance.go", "settleR2aOwnHopLocked"},
+	"r2aNearestHopEvidence": {"identity_pin_outgoing_provenance.go", "settleR2aOwnHopLocked"},
 }
 
 func r2aGuardErrors(sources map[string][]byte, expected map[string]map[r2aReferenceSite]int) []string {
@@ -103,7 +106,7 @@ func r2aGuardErrors(sources map[string][]byte, expected map[string]map[r2aRefere
 				}
 				if literal, ok := node.(*ast.CompositeLit); ok && len(literal.Elts) > 0 {
 					if name, ok := literal.Type.(*ast.Ident); ok {
-						if allowed, tracked := r2aConstructors[name.Name]; tracked && site != allowed {
+						if allowed, tracked := r2aConstructors[name.Name]; tracked && site != allowed && (name.Name != "r2aPreparedOwnDM" || site != (r2aReferenceSite{"identity_record_admission_own_dm.go", "bindOwnDMResidence"})) {
 							failures = append(failures, fmt.Sprintf("%s constructed at %v", name.Name, site))
 						}
 					}
@@ -143,9 +146,9 @@ func r2aGuardErrors(sources map[string][]byte, expected map[string]map[r2aRefere
 	if len(expected) == len(r2aClosedReferences) {
 		wantFields := map[string]map[r2aReferenceSite]int{
 			"outgoingProvenance": {{"identity_pin_outgoing_provenance.go", "registerR2aOrigin"}: 1, {"identity_pin_outgoing_provenance.go", "r2aCurrentLocked"}: 1, {"identity_pin_outgoing_provenance.go", "existingR2aOrigin"}: 2},
-			"ack":                {{"identity_pin_outgoing_provenance.go", "settleR2aOwnHop"}: 1, {"relay.go", "sendTableRoutedRelayMessageWithR2a"}: 1},
-			"sealed":             {{"identity_pin_outgoing_provenance.go", "submitR2aFixtureOwnDM"}: 5, {"identity_pin_outgoing_provenance.go", "openR2aFixtureHop"}: 1, {"identity_pin_outgoing_provenance.go", "snapshotR2aDirectedSession"}: 2, {"identity_pin_outgoing_provenance.go", "claimR2aFirstDirectedItemLocked"}: 2},
-			"prepared":           {{"identity_pin_outgoing_provenance.go", "registerR2aOrigin"}: 3, {"identity_pin_outgoing_provenance.go", "r2aCurrentLocked"}: 4, {"identity_pin_outgoing_provenance.go", "claimR2aFirstDirectedItemLocked"}: 8, {"identity_pin_outgoing_provenance.go", "settleR2aOwnHop"}: 6},
+			"ack":                {{"identity_pin_outgoing_provenance.go", "settleR2aOwnHopLocked"}: 1, {"relay.go", "sendTableRoutedRelayMessageWithR2a"}: 1},
+			"sealed":             {{"identity_record_admission_own_dm.go", "bindOwnDMResidence"}: 4, {"identity_pin_outgoing_provenance.go", "submitR2aOwnDM"}: 5, {"identity_pin_outgoing_provenance.go", "openR2aFixtureHop"}: 1, {"identity_pin_outgoing_provenance.go", "snapshotR2aDirectedSession"}: 1, {"peer_sessions.go", "finishPeerSessionForCM"}: 3, {"identity_pin_own_dm_port.go", "Submit"}: 3},
+			"prepared":           {{"identity_pin_outgoing_provenance.go", "registerR2aOrigin"}: 3, {"identity_pin_outgoing_provenance.go", "r2aCurrentLocked"}: 4, {"identity_pin_outgoing_provenance.go", "claimR2aFirstDirectedItemLocked"}: 8, {"identity_pin_outgoing_provenance.go", "settleR2aOwnHop"}: 1, {"identity_pin_outgoing_provenance.go", "settleR2aOwnHopLocked"}: 5, {"identity_record_admission.go", "expireRelationSlotsLocked"}: 1, {"identity_record_admission_own_dm.go", "ownDMObservation"}: 1, {"identity_record_admission_own_dm.go", "registerOwnDMRecordAdmission"}: 3, {"identity_record_admission_own_dm.go", "ownDMClaimCurrentLocked"}: 2, {"identity_record_admission_own_dm.go", "stageOwnDMRelationRecordLocked"}: 3},
 		}
 
 		for field, want := range wantFields {
@@ -154,14 +157,15 @@ func r2aGuardErrors(sources map[string][]byte, expected map[string]map[r2aRefere
 			}
 		}
 		wantWrites := map[r2aReferenceSite]map[string]int{
-			{"identity_pin_outgoing_provenance.go", "submitR2aFixtureOwnDM"}:           {"dispatch.stamp": 1},
+			{"identity_pin_outgoing_provenance.go", "submitR2aOwnDM"}:                  {"dispatch.stamp": 1},
 			{"identity_pin_outgoing_provenance.go", "registerR2aOrigin"}:               {"d.failure": 3, "entry.outgoingProvenance": 1, "d.stamp": 1, "d.early": 1},
 			{"identity_pin_outgoing_provenance.go", "r2aUpdateInitialHold"}:            {"d.stamp.entry.Hold": 1},
 			{"identity_pin_outgoing_provenance.go", "openR2aFixtureHop"}:               {"publication.sealed.session": 1},
 			{"identity_pin_outgoing_provenance.go", "claimR2aFirstDirectedItemLocked"}: {"d.stamp.candidate": 1},
 			{"identity_pin_outgoing_provenance.go", "r2aRecordOffer"}:                  {"candidate.offered": 1},
-			{"identity_pin_outgoing_provenance.go", "settleR2aOwnHop"}:                 {"stamp.consumed": 1},
+			{"identity_pin_outgoing_provenance.go", "settleR2aOwnHopLocked"}:           {"stamp.consumed": 1},
 			{"identity_pin_outgoing_provenance.go", "sealR2aWireProjection"}:           {"d.projection": 1},
+			{"identity_pin_outgoing_provenance.go", "snapshotR2aDirectedSession"}:      {"route.origin.r2ResolvedHop": 1},
 		}
 		if !reflect.DeepEqual(writes, wantWrites) {
 			failures = append(failures, fmt.Sprintf("private owner writes%v want%v", writes, wantWrites))

@@ -78,6 +78,36 @@ expect_failure 'duplicate Conn member multiplicity' 'net.Conn-accepting function
 reset_case
 replace_source peer_management.go '/^func enableTCPKeepAlive/,/^}/d'
 expect_failure 'missing legacy member' 'net.Conn-accepting functions'
+# D1 degree is an exact new member, not a whole-file/count allowance.
+reset_case
+replace_source find_node_degree.go '/^func .* publishDegreeInbound(/,/^}/d'
+expect_failure 'missing D1 degree Conn member' 'net.Conn-accepting functions'
+reset_case
+append_go find_node_degree.go <<'GO'
+func (s *Service) publishDegreeInbound(conn net.Conn) {}
+GO
+expect_failure 'duplicate D1 degree Conn member multiplicity' 'net.Conn-accepting functions'
+reset_case
+replace_source find_node_degree.go 's/publishDegreeInbound/replacementDegreeInbound/'
+expect_failure 'same-count D1 degree Conn replacement' 'net.Conn-accepting functions'
+reset_case
+replace_source find_node_degree.go '/^[[:space:]]*"net"$/d'
+expect_failure 'missing D1 degree net import' 'net import whitelist'
+reset_case
+append_go find_node_degree.go <<'GO'
+import "net"
+GO
+expect_failure 'duplicate D1 degree net import multiplicity' 'net import whitelist'
+reset_case
+replace_source find_node_degree.go 's/"net"/n "net"/'
+expect_failure 'same-count D1 degree net import replacement' 'net import whitelist'
+reset_case
+append_go degree_unreviewed_import.go <<'GO'
+package node
+import "net"
+GO
+expect_failure 'new importer beyond reviewed D1 degree import' 'net import whitelist'
+
 reset_case
 append_go resource_breakdown.go <<'GO'
 func newRegistryRead() {

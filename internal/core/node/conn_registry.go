@@ -9,6 +9,7 @@ import (
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/netcore"
 	"github.com/piratecash/corsa/internal/core/routing"
+	"github.com/piratecash/corsa/internal/core/sessionv2"
 )
 
 // connInfo is a read-only snapshot of registry state for a single connection,
@@ -533,6 +534,9 @@ func (s *Service) registerInboundConnLocked(conn net.Conn, core *netcore.NetCore
 		entry.metered = metered
 	}
 	id := core.ConnID()
+	if wire, ok := conn.(*peekedConn); ok {
+		s.bindProofTransportLocked(entry, id, wire)
+	}
 	s.conns[id] = entry
 	s.connIDByNetConn[conn] = id
 }
@@ -544,7 +548,11 @@ func (s *Service) registerInboundConnLocked(conn net.Conn, core *netcore.NetCore
 // not already registered.
 func (s *Service) attachOutboundCoreLocked(conn net.Conn, core *netcore.NetCore) {
 	id := core.ConnID()
-	s.conns[id] = &connEntry{core: core, receive: routing.NewAnnounceReceiveState()}
+	entry := &connEntry{core: core, metered: netcore.MeteredOf(conn), receive: routing.NewAnnounceReceiveState()}
+	if wire, ok := conn.(*peekedConn); ok {
+		s.bindProofTransportLocked(entry, id, wire)
+	}
+	s.conns[id] = entry
 	s.connIDByNetConn[conn] = id
 }
 
@@ -572,6 +580,7 @@ func (s *Service) unregisterConnLocked(conn net.Conn) {
 	// stops being owed here. Release is idempotent, so a path that
 	// unregisters twice cannot inflate free capacity.
 	if entry, exists := s.conns[id]; exists {
+		entry.common.end()
 		if entry.receive != nil {
 			entry.receive.Close()
 		}
@@ -579,4 +588,263 @@ func (s *Service) unregisterConnLocked(conn net.Conn) {
 	}
 	delete(s.conns, id)
 	delete(s.connIDByNetConn, conn)
+}
+
+// bindProofTransportLocked is the original registry attach. Tuple checks live
+// only here, in the existing net-owning boundary; no caller receives Conn/P.
+func (s *Service) bindProofTransportLocked(entry *connEntry, id domain.ConnID, wire *peekedConn) {
+	l := wire.common.Load()
+	if l == nil {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	e := l.evidence
+	if e == nil || l.ended || l.token != s.proofToken || l.entry != nil || (l.id != 0 && l.id != id) {
+		return
+	}
+	original, err := e.session.Conn()
+	inner, innerOK := original.(interface{ NetConn() net.Conn })
+	peer, perr := e.session.Peer()
+	role, rerr := e.session.Role()
+	if err != nil || perr != nil || rerr != nil || !innerOK || entry.core == nil || l.outbound != (entry.core.Dir() == netcore.Outbound) || role != l.role || peer.Identity != e.identity || e.protected != original || e.wire != wire || wire.Conn != original || wire.reader != original || e.raw == nil || e.raw.common.Load() != l || e.raw.Conn != entry.metered || (l.outbound != (role == sessionv2.RoleDialer)) {
+		return
+	}
+	// Accept's TLS input is R itself. Dial owns exactly one firstByteConn
+	// between TLS and R; its NetConn exposes that same originally supplied R.
+	// The role comes from genuine P, never from an address/current registry.
+	rawInput := inner.NetConn()
+	switch role {
+	case sessionv2.RoleListener:
+		// No extra unwrap on the accepted path.
+	case sessionv2.RoleDialer:
+		first, ok := rawInput.(interface{ NetConn() net.Conn })
+		if !ok {
+			return
+		}
+		rawInput = first.NetConn()
+	default:
+		return
+	}
+	if rawInput != e.raw {
+		return
+	}
+	l.entry, l.id = entry, id
+	entry.common = l
+	s.bindInboundLeafLocked(entry, id, wire)
+}
+
+// The general attach gate is already held. N-in repeats its independent policy
+// binding and never derives eligibility from the general transport receipt.
+func (s *Service) bindInboundLeafLocked(entry *connEntry, id domain.ConnID, wire *peekedConn) {
+	l := wire.common.Load()
+	w := l.nin
+	if w == nil {
+		return
+	}
+	peer, err := w.session.Peer()
+	role, rerr := w.session.Role()
+	if err != nil || rerr != nil || role != sessionv2.RoleListener || l.outbound || w.transport != l || w.phase != inboundProvisional || w.producer != s.inboundPins || s.inboundPins == nil || w.binding.owner != s.inboundPins.store || peer.Identity != w.binding.identity || l.entry != entry || l.id != id {
+		l.nin = nil
+	}
+}
+
+// inboundTerminalForWire binds id+owner in ONE peerMu read section before any
+// capture callback. The concrete pointer is the original opaque wire token.
+func (s *Service) inboundTerminalForWire(wire *peekedConn) (domain.ConnID, *proofTransportOwner) {
+	s.peerMu.RLock()
+	defer s.peerMu.RUnlock()
+	id, ok := s.connIDForLocked(wire)
+	if !ok {
+		return 0, nil
+	}
+	entry := s.conns[id]
+	if entry == nil || entry.core == nil || entry.core.Conn() != wire || entry.common != wire.common.Load() {
+		return id, nil
+	}
+	return id, s.transportTerminalLocked(id)
+}
+
+// transportTerminalLocked requires peerMu. It captures only the selected entry's
+// original leaf, never a later identity/ID lookup in a callback.
+func (s *Service) transportTerminalLocked(id domain.ConnID) *proofTransportOwner {
+	e := s.conns[id]
+	if e == nil || e.common == nil {
+		return nil
+	}
+	l := e.common
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.entry != e || l.id != id || l.token != s.proofToken {
+		return nil
+	}
+	return l.ownerLocked()
+}
+
+// publishAcceptedProofTransport validates the actual accepted auth publication.
+// N-in clock failure does not suppress an independently valid FindNode binding.
+func (s *Service) publishAcceptedProofTransport(owner *proofTransportOwner) {
+	if owner == nil || owner.life == nil {
+		return
+	}
+	s.peerMu.Lock()
+	l := owner.life
+	l.mu.Lock()
+	e := s.conns[owner.id]
+	valid := owner.matchesTransportLocked(s, owner.id) && !l.outbound && l.role == sessionv2.RoleListener && !s.inboundClosed && e != nil && e == l.entry && e.common == l && e.core != nil && s.runCtx.Err() == nil
+	if valid {
+		auth := e.core.Auth()
+		valid = auth != nil
+		if valid {
+			proof, ok := auth.ProvenIdentity()
+			identity, identityOK := proof.Identity()
+			expected := domain.PeerIdentity{}
+			if l.evidence != nil {
+				expected = l.evidence.identity
+			}
+			if l.findNode != nil {
+				expected = l.findNode.identity
+			}
+			if l.nin != nil {
+				expected = l.nin.binding.identity
+			}
+			valid = ok && identityOK && !identity.IsZero() && (expected.IsZero() || identity == expected)
+		}
+	}
+	if valid {
+		s.publishFindNodeLocked(l)
+		l.evidence = nil
+	}
+	l.mu.Unlock()
+	s.peerMu.Unlock()
+	if valid {
+		s.publishInboundLifetime(owner)
+	} else {
+		owner.end()
+	}
+}
+
+// publishInboundLifetime performs H1 under peerMu -> original leaf. The sole
+// elapsed read follows ALL publication mutex waits and final auth validation.
+func (s *Service) publishInboundLifetime(owner *proofTransportOwner) bool {
+	if owner == nil || owner.life == nil || owner.life.nin == nil {
+		return false
+	}
+	s.peerMu.Lock()
+	leaf := owner.life.nin
+	leaf.transport.mu.Lock()
+	entry := s.conns[owner.id]
+	valid := !s.inboundClosed && leaf.phase == inboundProvisional && !leaf.transport.ended && leaf.producer == s.inboundPins && s.inboundPins != nil && leaf.binding.owner == s.inboundPins.store && entry != nil && entry == leaf.transport.entry && entry.common == leaf.transport && entry.core != nil && entry.core.Conn() != nil && leaf.transport.id == owner.id && s.runCtx.Err() == nil
+	if valid {
+		state := entry.core.Auth()
+		peer, peerErr := leaf.session.Peer()
+		role, roleErr := leaf.session.Role()
+		valid = state != nil && peerErr == nil && roleErr == nil && role == sessionv2.RoleListener && peer.Identity == leaf.binding.identity
+		if valid {
+			proof, proven := state.ProvenIdentity()
+			identity, identityOK := proof.Identity()
+			valid = proven && identityOK && identity == leaf.binding.identity
+		}
+	}
+	if valid {
+		reading, err := s.inboundPins.store.ninElapsed()
+		if err == nil && reading >= 0 && s.runCtx.Err() == nil {
+			leaf.ready, leaf.phase = reading, inboundPublished
+		} else {
+			valid = false
+		}
+	}
+	leaf.transport.mu.Unlock()
+	s.peerMu.Unlock()
+	if valid {
+		s.inboundPins.notify()
+	}
+	return valid
+}
+
+// selectInboundPinAfterLocked requires peerMu and retains at most ONE leaf.
+// Cursor wraps through the current registry; no copied map/identity inventory.
+func (s *Service) selectInboundPinAfterLocked(cursor domain.ConnID) (*matureInboundWitness, domain.ConnID) {
+	var first, next *matureInboundWitness
+	var firstID, nextID domain.ConnID
+	for id, entry := range s.conns {
+		if entry.common == nil || entry.common.nin == nil {
+			continue
+		}
+		leaf := entry.common.nin
+		leaf.transport.mu.Lock()
+		eligible := leaf.phase == inboundPublished && !leaf.transport.ended && leaf.producer == s.inboundPins && leaf.transport.entry == entry && leaf.transport.id == id
+		leaf.transport.mu.Unlock()
+		if !eligible {
+			continue
+		}
+		if first == nil || id < firstID {
+			first, firstID = leaf, id
+		}
+		if id > cursor && (next == nil || id < nextID) {
+			next, nextID = leaf, id
+		}
+	}
+	if next != nil {
+		return next, nextID
+	}
+	return first, firstID
+}
+
+// endInboundLeavesLocked requires peerMu; no core/transport/diagnostic call.
+func (s *Service) endInboundLeavesLocked() {
+	for _, entry := range s.conns {
+		entry.common.end()
+	}
+}
+
+type staleInboundTerminal struct {
+	id     domain.ConnID
+	addr   domain.PeerAddress
+	ident  domain.PeerIdentity
+	remote string
+	owner  *proofTransportOwner
+}
+
+// staleInboundTerminalsLocked requires peerMu. Snapshot core locks are released
+// before End. This replaces the existing ONE temporary stale slice.
+func (s *Service) staleInboundTerminalsLocked(now time.Time, threshold time.Duration) []staleInboundTerminal {
+	var stale []staleInboundTerminal
+	for id, entry := range s.conns {
+		if entry.core == nil || entry.core.Dir() != netcore.Inbound {
+			continue
+		}
+		info, ok := snapshotEntryLocked(id, entry)
+		if !ok || info.lastActivity.IsZero() || now.Sub(info.lastActivity) < threshold {
+			continue
+		}
+		owner := s.transportTerminalLocked(id)
+		owner.end()
+		stale = append(stale, staleInboundTerminal{id: id, addr: info.address, ident: info.identity, remote: info.remoteAddr, owner: owner})
+	}
+	return stale
+}
+
+// condemnInboundSelected commits the existing ID-selected condemnation and
+// ends THAT selected leaf before peerMu is released or diagnostics execute.
+func (s *Service) condemnInboundSelected(id domain.ConnID) bool {
+	s.peerMu.RLock()
+	defer s.peerMu.RUnlock()
+	owner := s.transportTerminalLocked(id)
+	first := s.loopbackInbound.condemn(id) // its leaf mutex is released here
+	if first || s.loopbackInbound.isCondemned(id) {
+		owner.end()
+	}
+	return first
+}
+
+// forEachConnIDLocked visits every registered key, including entries whose
+// core is nil. The caller holds s.peerMu; returning false stops the walk.
+// It exposes only ConnID and does not acquire locks or retain an inventory.
+func (s *Service) forEachConnIDLocked(fn func(domain.ConnID) bool) {
+	for id := range s.conns {
+		if !fn(id) {
+			return
+		}
+	}
 }

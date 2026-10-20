@@ -91,7 +91,7 @@ func registerIdentityDiscoveryTypes(types *datagram.TypeRegistry, svc *Service, 
 	}
 
 	pushHandler := &pushIdentityHandler{
-		svc: svc, network: network, clock: clock,
+		svc: svc, network: network, clock: clock, kPort: svc.identityResolver,
 		lastAcceptedAt: map[pushSessionKey]time.Time{},
 		violationAt:    map[pushSessionKey]time.Time{},
 	}
@@ -488,6 +488,7 @@ func (a *pushIdentityAuthorizer) Authorize(_ context.Context, delivery datagram.
 
 // pushIdentityHandler verifies, rate-limits and merges an authorized push.
 type pushIdentityHandler struct {
+	kPort   *identityResolver // immutable original registration; nil in ordinary construction
 	svc     *Service
 	clock   func() time.Time
 	network domain.NetworkID
@@ -510,6 +511,7 @@ type pushSessionKey struct {
 }
 
 func (h *pushIdentityHandler) Handle(ctx context.Context, delivery datagram.DeliveryContext, payload []byte) datagram.HandlerResult {
+	owner := transportArrivalOwner(ctx, h.svc, delivery)
 	signedSrc, ok := delivery.Header().SignedSrc()
 	if !ok {
 		return datagram.RejectDelivery(errors.New("push_identity: no signed source"))
@@ -531,7 +533,7 @@ func (h *pushIdentityHandler) Handle(ctx context.Context, delivery datagram.Deli
 		// A frame that passed the authorizer but fails full verification is
 		// a validation error of the session's own making: close it — the
 		// fresh handshake re-pushes a coherent record.
-		h.closePushSession(ctx, delivery, "push_identity_record_invalid", err)
+		h.closePushSessionOwned(ctx, delivery, "push_identity_record_invalid", err, owner)
 		return datagram.RejectDelivery(err)
 	}
 
@@ -543,7 +545,9 @@ func (h *pushIdentityHandler) Handle(ctx context.Context, delivery datagram.Deli
 	}
 	if verdict := h.admitPushRate(pushSessionKey{peer: signedSrc, conn: sessionConn}); verdict != pushRateAdmit {
 		if verdict == pushRateCloseSession {
-			h.closePushSession(ctx, delivery, "push_identity_rate_limit", nil)
+			owner.end()
+			log.Warn().Str("peer", signedSrc.String()).Uint64("conn_id", uint64(sessionConn)).Msg("push_identity_rate_limit_repeat")
+			h.closePushSessionOwned(ctx, delivery, "push_identity_rate_limit", nil, owner)
 		}
 		return datagram.RejectDelivery(errors.New("push_identity: rate limit"))
 	}
@@ -557,6 +561,13 @@ func (h *pushIdentityHandler) Handle(ctx context.Context, delivery datagram.Deli
 	// a round trip earlier than the probe could.
 	h.svc.notePresenceSignedFrame(signedSrc)
 
+	var invocation *contactRecordStageAuthority
+	if h.kPort != nil {
+		invocation = h.kPort.prepareContactRecordPush(ctx, owner, h.network, signedSrc, push.Record)
+		if invocation != nil {
+			defer h.kPort.finishContactRecordPush(invocation)
+		}
+	}
 	outcome, err := h.svc.importVerifiedIdentityRecord(h.network, push.Record, body)
 	if err != nil {
 		return datagram.FailDelivery(err)
@@ -566,12 +577,17 @@ func (h *pushIdentityHandler) Handle(ctx context.Context, delivery datagram.Deli
 		// Same seq, different bytes, from the owner's OWN session: the peer
 		// is obliged to bump seq, and the session is not honouring the
 		// contract. Closing forces a fresh handshake with a coherent push.
-		h.closePushSession(ctx, delivery, "push_identity_seq_conflict", domain.ErrIdentityRecordConflict)
+		h.closePushSessionOwned(ctx, delivery, "push_identity_seq_conflict", domain.ErrIdentityRecordConflict, owner)
 		return datagram.RejectDelivery(domain.ErrIdentityRecordConflict)
 	case domain.IdentityRecordMergeStale:
 		// A legal reorder after a reconnect: silent no-op.
 		return datagram.AcceptDelivery()
 	default:
+		// Optional K refusal never changes a successful ordinary import. The shared
+		// stage rechecks the exact current record; stale/conflict return above.
+		if invocation != nil && (outcome.Accepted() || outcome == domain.IdentityRecordMergeDuplicate) {
+			h.kPort.settleContactRecordPush(invocation)
+		}
 		log.Debug().
 			Str("peer", signedSrc.String()).
 			Str("merge", outcome.String()).
@@ -618,7 +634,6 @@ func (h *pushIdentityHandler) admitPushRate(key pushSessionKey) pushRateVerdict 
 	}
 	if firstViolation, violated := h.violationAt[key]; violated && now.Sub(firstViolation) < pushIdentityMinInterval {
 		delete(h.violationAt, key)
-		log.Warn().Str("peer", key.peer.String()).Uint64("conn_id", uint64(key.conn)).Msg("push_identity_rate_limit_repeat")
 		return pushRateCloseSession
 	}
 	h.violationAt[key] = now
@@ -627,7 +642,7 @@ func (h *pushIdentityHandler) admitPushRate(key pushSessionKey) pushRateVerdict 
 }
 
 // closePushSession tears down the connection the push arrived on.
-func (h *pushIdentityHandler) closePushSession(ctx context.Context, delivery datagram.DeliveryContext, reason string, cause error) {
+func (h *pushIdentityHandler) closePushSessionOwned(ctx context.Context, delivery datagram.DeliveryContext, reason string, cause error, owner *proofTransportOwner) {
 	channel, ok := delivery.IncomingPeer().Channel()
 	if !ok {
 		return
@@ -636,6 +651,7 @@ func (h *pushIdentityHandler) closePushSession(ctx context.Context, delivery dat
 	if !ok {
 		return
 	}
+	owner.end()
 	log.Warn().
 		Err(cause).
 		Uint64("conn_id", uint64(connID)).
@@ -677,7 +693,7 @@ func (s *Service) sessionSupportsIdentityDiscovery(session *peerSession) bool {
 // hello/welcome. For a capable peer the push's reliability IS the session:
 // there is no ack and no timer, so a failed enqueue closes the session and
 // the reconnect handshake redistributes the record.
-func (s *Service) sendInitialIdentityPush(ctx context.Context, peer domain.PeerIdentity, closeSession func()) {
+func (s *Service) sendInitialIdentityPushOwned(ctx context.Context, peer domain.PeerIdentity, closeSession func(), owner *proofTransportOwner) {
 	layer := s.datagramLayer()
 	if layer == nil || peer.IsZero() {
 		return
@@ -761,6 +777,9 @@ func (s *Service) sendInitialIdentityPush(ctx context.Context, peer domain.PeerI
 		default:
 			// A local enqueue fault on a capable session: close it, the
 			// fresh handshake carries the record.
+			if closeSession != nil {
+				owner.end()
+			}
 			log.Warn().Err(outcome.Err()).Str("peer", peer.String()).Msg("push_identity_enqueue_failed_closing_session")
 			if closeSession != nil {
 				closeSession()

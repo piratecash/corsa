@@ -92,10 +92,21 @@ type MessageStore interface {
 }
 
 type Service struct {
+	r2OwnDMOwner *ownDMProvenanceOwner // immutable before candidate constructor returns; ordinary nil
+	// Immutable constructor/private-factory composition; no ordinary activation.
+	proofToken *proofTransportServiceToken
+	findNode   *findNodeAdapter
+	degree     *degreeOwner // immutable inactive statistical observer; ordinary nil
+	// Immutable optional statistics producer, assigned only by the unused root.
+	degreeStatisticProducer *degreeStatisticProducer
+
 	// selectedPins is immutable after New; its joined worker owns passMu/retry pacing.
 	selectedPins *selectedPinProducer
 	// Immutable producer pointer; its joined worker owns retries, row state stays under trust.mu.
 	contactPins *contactPinProducer
+	// inboundPins is immutable after the private candidate factory; nil in ordinary constructors.
+	// Its passMu owns selection/pacing and Run joins its one worker.
+	inboundPins *inboundPinProducer
 	// peerAdmissionMu serializes table admission and its provider side effects; never taken under domain locks.
 	peerAdmissionMu sync.Mutex
 	// peerClock is immutable after construction; tests replace it before concurrent use.
@@ -798,6 +809,7 @@ type Service struct {
 	listener        net.Listener
 	lastSync        time.Time
 	peersStatePath  string
+	overlayDWin     overlayDegreeStatistic // peerMu; optional loaded statistic, no live producer
 	lastPeerSave    time.Time
 	// peerStateDirty records that persisted peer state changed since the
 	// last successful flush. Every mutation outside the periodic catch-all
@@ -1437,6 +1449,11 @@ type subscriber struct {
 }
 
 type peerSession struct {
+	r2OwnDMHop *r2aPublishedHop // original transport binding; pointer immutable before readers
+	// Original transport alias established before reader/background tasks start.
+	common          *proofTransportLifetime
+	findNodeReceipt *findNodeCMReceipt // peerMu, only CM acceptance callback mints
+
 	// selectedProof is immutable before reader start. selectedGeneration belongs
 	// to peerMu after CM acceptance. Atomic eligibilityEnded is terminal on
 	// Close/reader I/O, independent of delayed peerMu-protected map cleanup.
@@ -1605,6 +1622,7 @@ func (ps *peerSession) closeAs(closer peerSessionCloser) error {
 	if ps == nil {
 		return nil
 	}
+	ps.endProofTransport()
 	ps.eligibilityEnded.Store(true)
 	ps.closeOnce.Do(func() {
 		if ps.receive != nil {
@@ -1920,7 +1938,38 @@ func newService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus, netw
 	return newServiceWithDatagramConstructor(cfg, id, eventBus, networkOverride, productionDatagramConstructor{})
 }
 
-func newServiceWithDatagramConstructor(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus, networkOverride netcore.Network, constructor datagramConstructor) *Service {
+func newServiceWithDatagramConstructor(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus, networkOverride netcore.Network, constructor datagramConstructor, inboundClocks ...inboundPinClock) *Service {
+	return newServiceWithRecordAdmissionClasses(cfg, id, eventBus, networkOverride, constructor, recordAdmissionConstruction{}, inboundClocks...)
+}
+
+// Unused private candidate factory. No cfg/RPC/wire flag selects this branch.
+func newContactRecordPushCandidateService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Service {
+	return newServiceWithRecordAdmissionClasses(cfg, id, eventBus, nil, productionDatagramConstructor{}, recordAdmissionConstruction{classes: recordAdmissionImmediateK})
+}
+
+// Unused private reconciliation-only candidate. It creates no push port and
+// is absent from ordinary construction/config/RPC/wire selection.
+func newContactRecordReconciliationCandidateService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Service {
+	return newServiceWithRecordAdmissionClasses(cfg, id, eventBus, nil, productionDatagramConstructor{}, recordAdmissionConstruction{classes: recordAdmissionImmediateK, kSource: contactRecordReconciliationSource})
+}
+
+// Unused private R-only candidate. Public construction remains inactive.
+func newRelationRecordCandidateService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Service {
+	return newServiceWithRecordAdmissionClasses(cfg, id, eventBus, nil, productionDatagramConstructor{}, recordAdmissionConstruction{classes: recordAdmissionChargedR})
+}
+
+func newServiceWithRecordAdmissionClasses(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus, networkOverride netcore.Network, constructor datagramConstructor, admission recordAdmissionConstruction, inboundClocks ...inboundPinClock) *Service {
+	classes := admission.classes
+	if !admission.kSource.valid() || classes != recordAdmissionImmediateK && admission.kSource != contactRecordPushSource {
+		panic("unsupported Service K provenance")
+	}
+	if admission.borrowedKFiles != nil && classes != recordAdmissionImmediateK {
+		panic("borrowed K dependency without K class")
+	}
+	if !classes.valid() || classes != recordAdmissionNone && classes != recordAdmissionImmediateK && classes != recordAdmissionChargedR {
+		panic("unsupported Service record admission classes")
+	}
+
 	// Load persisted peer state and merge with bootstrap peers.
 	// Bootstrap peers always appear first; persisted peers are appended
 	// in score-descending order, skipping duplicates.
@@ -2154,6 +2203,7 @@ func newServiceWithDatagramConstructor(cfg config.Node, id *identity.Identity, e
 	lifecycleCtx, lifecycleCancel := context.WithCancel(context.Background())
 
 	svc := &Service{
+		proofToken:       &proofTransportServiceToken{},
 		recordProtection: recordProtection,
 		runCtx:           lifecycleCtx,
 		runCancel:        lifecycleCancel,
@@ -2176,6 +2226,7 @@ func newServiceWithDatagramConstructor(cfg config.Node, id *identity.Identity, e
 		trust:             trust,
 		peers:             peers,
 		peersStatePath:    peersStatePath,
+		overlayDWin:       peerState.OverlayDWin.stat,
 		persistedMeta:     persistedByAddr,
 		known:             known,
 		boxKeys:           boxKeys,
@@ -2579,6 +2630,17 @@ func newServiceWithDatagramConstructor(cfg config.Node, id *identity.Identity, e
 	// assignment lives here.
 	svc.datagramMetrics = datagram.NewMetricsStartedAt(svc.startedAt)
 
+	// K registration captures the final complete resolver before Build can escape
+	// its handler. Ordinary construction retains its original later intent load.
+	var selfRecordNetwork domain.NetworkID
+	if classes == recordAdmissionImmediateK {
+		parsedNetwork, parseErr := domain.ParseNetworkID(networkName)
+		if parseErr != nil {
+			panic(fmt.Errorf("parse network id %q: %w", networkName, parseErr))
+		}
+		selfRecordNetwork = parsedNetwork
+		svc.identityResolver = newIdentityResolverWithContactRecordAdmission(svc, loadIdentityIntentStore(cfg.IdentityIntentsPath), selfRecordNetwork, admission.borrowedKFiles, admission.kSource)
+	}
 	requestedDatagram := svc.cfg.EnableDatagramV1
 	layer, constructionErr := constructor.Build(svc, svc.datagramMetrics)
 	svc.datagramStartup = observeDatagramConstruction(requestedDatagram, layer, constructionErr)
@@ -2592,7 +2654,12 @@ func newServiceWithDatagramConstructor(cfg config.Node, id *identity.Identity, e
 	// The session state comes before the self-record: the record states the
 	// minimum session version, and the mode this state runs is its only
 	// source (selfRecordMinSession).
+	var inboundElapsed func() (time.Duration, error)
+	if len(inboundClocks) == 1 {
+		inboundElapsed = inboundClocks[0].elapsed
+	}
 	svc.secureSessions = newSecureSessions(id, secureSessionsOptions{
+		ninElapsed:       inboundElapsed,
 		storePath:        secureSessionStorePath(cfg),
 		markerPath:       pinStoreMarkerPath(cfg),
 		clock:            time.Now,
@@ -2610,9 +2677,12 @@ func newServiceWithDatagramConstructor(cfg config.Node, id *identity.Identity, e
 	// bumped seq here.
 	// A failure is the same class as a trust-store load failure — the node
 	// must not run half-identified — hence the same panic.
-	selfRecordNetwork, err := domain.ParseNetworkID(networkName)
-	if err != nil {
-		panic(fmt.Errorf("parse network id %q: %w", networkName, err))
+	if classes != recordAdmissionImmediateK {
+		var parseErr error
+		selfRecordNetwork, parseErr = domain.ParseNetworkID(networkName)
+		if parseErr != nil {
+			panic(fmt.Errorf("parse network id %q: %w", networkName, parseErr))
+		}
 	}
 	selfDTypes := domain.AbsentDTypes()
 	if svc.localDatagramAdvertise().Endpoint {
@@ -2635,7 +2705,14 @@ func newServiceWithDatagramConstructor(cfg config.Node, id *identity.Identity, e
 
 	// Identity lookup engine: constructed after the self-record so the
 	// datagram handlers registered above observe a fully identified node.
-	svc.identityResolver = newIdentityResolver(svc, loadIdentityIntentStore(cfg.IdentityIntentsPath), selfRecordNetwork)
+	switch classes {
+	case recordAdmissionNone:
+		svc.identityResolver = newIdentityResolver(svc, loadIdentityIntentStore(cfg.IdentityIntentsPath), selfRecordNetwork)
+	case recordAdmissionChargedR:
+		// Bind the immutable backend only after secureSessions and self-record.
+		// post_identity reads this final resolver through its Service at Handle.
+		svc.identityResolver = newIdentityResolverWithRecordAdmission(svc, loadIdentityIntentStore(cfg.IdentityIntentsPath), selfRecordNetwork)
+	}
 	// Built here, next to the resolver, because both consume post_identity
 	// and the ingest has to be able to ask each of them whose answer it is
 	// holding — see postIdentityHandler.
@@ -2936,6 +3013,9 @@ func (s *Service) Run(ctx context.Context) (runErr error) {
 	if s.contactPins != nil {
 		s.goRunLoop(func() { s.contactPins.run(ctx) })
 	}
+	if s.inboundPins != nil {
+		s.goRunLoop(func() { s.inboundPins.run(ctx) })
+	}
 
 	// Identity lookup engine (identity_resolver.go). Reseeds the background
 	// phase from durable intents and then serves StartResolution calls; a
@@ -3000,6 +3080,13 @@ func (s *Service) Run(ctx context.Context) (runErr error) {
 		// within its write and drain bounds.
 		s.listenerRefusals.wait()
 	}()
+
+	// LIFO: revoke K before inbound drain, while retaining Processing capacity
+	// until each synchronous callback and the existing transport-root joins return.
+	if s.identityResolver != nil {
+		defer s.identityResolver.closeContactRecordPushes()
+		s.identityResolver.beginContactRecordPushRun()
+	}
 
 	// Start ConnectionManager event loop (Stage 3).
 	s.goRunLoop(func() { s.connManager.Run(ctx) })
@@ -3367,7 +3454,13 @@ func (s *Service) handleConn(conn net.Conn, reservation *connbudget.Reservation)
 	// helpers reach the connection state through the netcore.Network
 	// registry (RemoteAddr, SendFrame, Close) instead of holding a
 	// *netcore.NetCore handle.
-	connID, _ := s.connIDFor(wire)
+	var connID domain.ConnID
+	var owner *proofTransportOwner
+	if original, ok := wire.(*peekedConn); ok {
+		connID, owner = s.inboundTerminalForWire(original)
+	} else {
+		connID, _ = s.connIDFor(wire)
+	}
 	var peerOfflineEvidence *peerOfflineEvidence
 
 	// Capture lifecycle hook: notify manager about the new inbound
@@ -3378,6 +3471,7 @@ func (s *Service) handleConn(conn net.Conn, reservation *connbudget.Reservation)
 	s.notifyCaptureNewConn(connID)
 
 	defer func() {
+		owner.end()
 		// Capture lifecycle hook: stop capture for this connection.
 		s.notifyCaptureConnClosed(connID)
 
@@ -3397,10 +3491,11 @@ func (s *Service) handleConn(conn net.Conn, reservation *connbudget.Reservation)
 	log.Info().Str("addr", conn.RemoteAddr().String()).Msg("incoming connection")
 	enableTCPKeepAlive(conn)
 	conn = wire
-	if proven != nil && !s.acceptProvenInbound(connID, *proven, conn.RemoteAddr().String()) {
+	if proven != nil && !s.acceptProvenInboundOwned(connID, *proven, conn.RemoteAddr().String(), owner) {
 		return
 	}
 
+	s.publishAcceptedProofTransport(owner)
 	var heartbeatStop chan struct{}
 	// The heartbeat is joined to THIS handler, and closing its stop channel is
 	// not the join. Closing only ASKS: the loop can be inside a ping send or
@@ -3417,6 +3512,8 @@ func (s *Service) handleConn(conn net.Conn, reservation *connbudget.Reservation)
 		}
 		heartbeatDone.Wait()
 	}()
+	// LIFO: original End precedes heartbeat join and all handler diagnostics.
+	defer owner.end()
 
 	connKey := conn.RemoteAddr().String()
 	defer s.cmdLimiter.removeConn(connKey)
@@ -3433,20 +3530,23 @@ func (s *Service) handleConn(conn net.Conn, reservation *connbudget.Reservation)
 		// bound — and, once its first byte is in, the frame itself.
 		// session_liveness.go has the schedule the two are fitted to.
 		if err := frames.awaitFrame(liveness.inboundIdle(heartbeatStop != nil), reader.Buffered() > 0); err != nil {
+			owner.end()
 			s.endInboundReadLoop(connID, conn.RemoteAddr().String(), err)
 			return
 		}
 
-		line, err := s.readInboundCommandLine(reader, connID)
+		line, err := s.readInboundCommandLineOwned(reader, connID, owner)
 		if errors.Is(err, errInboundLineDropped) {
 			// One line consumed and dropped by admission; the connection lives
 			// on and the next line is read from where that one ended.
 			continue
 		}
 		if err != nil {
+			owner.end()
 			if sessionCloseProvidesPeerOfflineEvidence(err) {
 				peerOfflineEvidence = s.observePeerOffline()
 			}
+			owner.end()
 			s.endInboundReadLoop(connID, conn.RemoteAddr().String(), err)
 			return
 		}
@@ -3461,6 +3561,7 @@ func (s *Service) handleConn(conn net.Conn, reservation *connbudget.Reservation)
 		// it, and why the question is asked of the whole line rather than of a
 		// peeked type, is frameLineExemptFromCommandLimit.
 		if !s.admitInboundCommandLine(connID, connKey, line) {
+			owner.end()
 			log.Debug().Str("addr", conn.RemoteAddr().String()).
 				Msg("inbound_read_loop: closing connection — command rate limit exceeded")
 			_ = s.sendFrameViaNetworkSync(s.runCtx, connID, protocol.Frame{Type: "error", Code: protocol.ErrCodeRateLimited})
@@ -3476,7 +3577,7 @@ func (s *Service) handleConn(conn net.Conn, reservation *connbudget.Reservation)
 		// docs/protocol/datagram.md §3.5 requires the strict parser to read the
 		// same one (see rawLineForDispatch for the full argument and for why
 		// the announce-plane types stay on the trimmed form).
-		if !s.handleCommand(connID, line) {
+		if !s.handleCommandOwned(connID, line, owner) {
 			return
 		}
 		// A loopback connection that committed a violation is ended here,
@@ -3510,7 +3611,7 @@ func (s *Service) handleConn(conn net.Conn, reservation *connbudget.Reservation)
 					// to runLoopsWg — one goroutine, one owner.
 					go func() {
 						defer heartbeatDone.Done()
-						s.inboundHeartbeat(connID, addr, heartbeatStop)
+						s.inboundHeartbeatOwned(connID, addr, heartbeatStop, owner)
 					}()
 				}
 			}
@@ -3604,15 +3705,21 @@ var errInboundLineDropped = errors.New("inbound command line dropped by admissio
 // which is the only name an over-long line will ever have — the rest of it is
 // never read, and nothing downstream will classify it.
 func (s *Service) readInboundCommandLine(reader *bufio.Reader, connID domain.ConnID) (string, error) {
+	return s.readInboundCommandLineOwned(reader, connID, nil)
+}
+func (s *Service) readInboundCommandLineOwned(reader *bufio.Reader, connID domain.ConnID, owner *proofTransportOwner) (string, error) {
 	claimed := ""
 	read, err := readFrameLineStaged(reader, maxCommandLineBytes, func(prefix string) int {
 		claimed, _ = claimedFrameTypeFromPrefix(prefix)
 		return 0
 	})
 	if !errors.Is(err, errFrameTooLarge) {
+		if err != nil {
+			owner.end()
+		}
 		return read.line, err
 	}
-	return "", s.refuseOversizeInboundLine(reader, connID, claimed, read)
+	return "", s.refuseOversizeInboundLineOwned(reader, connID, claimed, read, owner)
 }
 
 // refuseOversizeInboundLine decides what an over-long inbound line costs, and
@@ -3640,12 +3747,11 @@ func (s *Service) readInboundCommandLine(reader *bufio.Reader, connID domain.Con
 // somewhere past its limit, and a size reconstructed from the constants
 // under-charges every refusal by that overshoot — which on this path is the
 // only cost the neighbour bears at all.
-func (s *Service) refuseOversizeInboundLine(
-	reader *bufio.Reader,
-	connID domain.ConnID,
-	claimed string,
-	read frameLineRead,
-) error {
+func (s *Service) refuseOversizeInboundLineOwned(reader *bufio.Reader, connID domain.ConnID, claimed string, read frameLineRead, owner *proofTransportOwner) error {
+	if claimed != protocol.DatagramFrameType {
+		owner.end()
+		return errFrameTooLarge
+	}
 	key := s.inboundDatagramBudgetKey(connID)
 	discarded, discardErr := 0, error(nil)
 	if !read.delimited && claimed == protocol.DatagramFrameType {
@@ -3655,9 +3761,11 @@ func (s *Service) refuseOversizeInboundLine(
 		discarded, discardErr = discardFrameLineRemainder(reader, oversizeDatagramResyncBytes)
 	}
 	if discardErr != nil {
+		owner.end()
 		return errFrameTooLarge
 	}
 	if !s.refuseOversizeDatagramClaim(datagramInbound, claimed, key, read.consumed+discarded) {
+		owner.end()
 		return errFrameTooLarge
 	}
 	return errInboundLineDropped
@@ -3735,7 +3843,11 @@ func exemptFrameTypeFromCommandLimit(frameType string) bool {
 // It is passed on untouched — protocol.IsJSONLine trims for itself — because
 // the datagram plane is defined on those exact bytes (rawLineForDispatch).
 func (s *Service) handleCommand(connID domain.ConnID, wire string) bool {
+	return s.handleCommandOwned(connID, wire, nil)
+}
+func (s *Service) handleCommandOwned(connID domain.ConnID, wire string, owner *proofTransportOwner) bool {
 	if !protocol.IsJSONLine(wire) {
+		owner.end()
 		addr := s.Network().RemoteAddr(connID)
 		log.Debug().
 			Str("protocol", "json/tcp").
@@ -3747,7 +3859,7 @@ func (s *Service) handleCommand(connID domain.ConnID, wire string) bool {
 		_ = s.sendFrameViaNetworkSync(s.runCtx, connID, protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidJSON})
 		return false
 	}
-	return s.dispatchNetworkFrame(connID, wire)
+	return s.dispatchNetworkFrameOwned(connID, wire, owner)
 }
 
 // dispatchNetworkFrame parses and dispatches an inbound wire frame.
@@ -3764,8 +3876,12 @@ func (s *Service) handleCommand(connID domain.ConnID, wire string) bool {
 // before. Only the datagram case reads `wire`, and rawLineForDispatch — the
 // same split the outbound peer-session reader applies — says why.
 func (s *Service) dispatchNetworkFrame(connID domain.ConnID, wire string) bool {
+	return s.dispatchNetworkFrameOwned(connID, wire, nil)
+}
+func (s *Service) dispatchNetworkFrameOwned(connID domain.ConnID, wire string, owner *proofTransportOwner) bool {
 	addr := s.Network().RemoteAddr(connID)
 	if addr == "" {
+		owner.end()
 		return false
 	}
 
@@ -3778,7 +3894,7 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, wire string) bool {
 	// the strict parser of docs/protocol/datagram.md §3.5 needs the original
 	// bytes anyway.
 	if isDatagramWireLine(wire) {
-		return s.dispatchInboundDatagramWire(connID, addr, wire)
+		return s.dispatchInboundDatagramWireOwned(connID, addr, wire, owner)
 	}
 
 	// AMBIGUITY IS REFUSED UNPARSED, on this path for the same reason as on the
@@ -3802,6 +3918,7 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, wire string) bool {
 	line := strings.TrimSpace(wire)
 	frame, err := protocol.ParseFrameLine(line)
 	if err != nil {
+		owner.end()
 		log.Debug().
 			Str("protocol", "json/tcp").
 			Str("addr", addr).
@@ -3993,6 +4110,7 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, wire string) bool {
 			// the only hello field that distinguishes a peer from a
 			// local subscriber.
 			if strings.TrimSpace(frame.Listener) == "1" && s.isSelfIdentity(domain.PeerIdentityFromWire(frame.Address)) {
+				owner.end()
 				accepted = false
 				log.Warn().
 					Str("local_identity", s.identity.Address).
@@ -4014,6 +4132,7 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, wire string) bool {
 			// read against the dialler's clock is fragile when the clocks
 			// disagree, and the dialler's default is the window it knows.
 			if err := s.refuseLegacyIdentity(domain.PeerIdentityFromWire(frame.Address)); err != nil {
+				owner.end()
 				accepted = false
 				log.Warn().Err(err).Uint64("conn_id", uint64(connID)).Str("addr", addr).Msg("inbound_v1_refused_identity_pinned_to_v2")
 				s.emitPeerBannedNoticeByID(connID, time.Time{}, protocol.PeerBannedReasonPeerBan)
@@ -4021,6 +4140,7 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, wire string) bool {
 			}
 			authState, err := connauth.PrepareAuth(frame)
 			if err != nil {
+				owner.end()
 				accepted = false
 				s.addBanScore(connID, banIncrementInvalidSig)
 				_ = s.sendFrameViaNetworkSync(s.runCtx, connID, protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidAuthSignature, Error: err.Error()})
@@ -4062,8 +4182,9 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, wire string) bool {
 		s.sendWelcomeFrame(connID, "", remoteIPFromString(addr))
 		return true
 	case "auth_session":
-		reply, ok, backlogSub, fullSync := s.handleAuthSession(connID, frame)
+		reply, ok, backlogSub, fullSync := s.handleAuthSessionOwned(connID, frame, owner)
 		if !ok {
+			owner.end()
 			accepted = false
 			_ = s.sendFrameViaNetworkSync(s.runCtx, connID, reply)
 			return false
@@ -4123,7 +4244,7 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, wire string) bool {
 			// buffer would be wasted work the peer never reads.
 			return true
 		}
-		s.startInboundSessionDelivery(connID, backlogSub, fullSync)
+		s.startInboundSessionDeliveryOwned(connID, backlogSub, fullSync, owner)
 		return true
 
 	default:
@@ -4140,6 +4261,7 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, wire string) bool {
 	// Auth gate for P2P commands. Handshake commands returned above;
 	// everything reaching this point is either a P2P command or unknown.
 	if !s.isConnAuthenticated(connID) {
+		owner.end()
 		// Check whether the command is a known P2P command before deciding
 		// on the error code: known P2P → auth_required, unknown → unknown_command.
 		if isP2PWireCommand(frame.Type) {
@@ -4204,8 +4326,9 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, wire string) bool {
 		_ = s.sendHandshakeReplyViaNetwork(s.runCtx, connID, s.contactsFrameForNetwork())
 		return true
 	case "ack_delete":
-		reply, ok := s.handleAckDeleteFrame(connID, frame)
+		reply, ok := s.handleAckDeleteFrameOwned(connID, frame, owner)
 		if !ok {
+			owner.end()
 			accepted = false
 			_ = s.sendFrameViaNetworkSync(s.runCtx, connID, reply)
 			return false
@@ -4564,6 +4687,7 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, wire string) bool {
 		s.reportDatagramResidueUnreachable("inbound", addr)
 		return true
 	default:
+		owner.end()
 		accepted = false
 		_ = s.sendFrameViaNetworkSync(s.runCtx, connID, protocol.Frame{Type: "error", Code: protocol.ErrCodeUnknownCommand})
 		return false
@@ -4872,7 +4996,10 @@ func (r enqueueResult) String() string {
 // longer required — slow-peer eviction is performed through NetCore.Close
 // on the already-resolved core.
 func (s *Service) enqueueFrameByID(id domain.ConnID, data []byte) enqueueResult {
-	pc := s.netCoreForID(id)
+	s.peerMu.RLock()
+	pc := s.coreForIDLocked(id)
+	sendOwner := s.transportTerminalLocked(id)
+	s.peerMu.RUnlock()
 	if pc == nil {
 		return enqueueUnregistered
 	}
@@ -4881,6 +5008,7 @@ func (s *Service) enqueueFrameByID(id domain.ConnID, data []byte) enqueueResult 
 	case netcore.SendOK:
 		return enqueueSent
 	case netcore.SendBufferFull:
+		sendOwner.end()
 		// Peer too slow — evict by closing the NetCore (shuts the send gate,
 		// closes the raw socket and waits for the writer to drain).
 		log.Warn().Str("addr", addr).Msg("send buffer full, disconnecting slow peer")
@@ -4907,7 +5035,10 @@ func (s *Service) enqueueFrameByID(id domain.ConnID, data []byte) enqueueResult 
 // Used by writeJSONFrameSyncByID for error-path frames that must be delivered
 // before the connection is torn down.
 func (s *Service) enqueueFrameSyncByID(id domain.ConnID, data []byte) enqueueResult {
-	pc := s.netCoreForID(id)
+	s.peerMu.RLock()
+	pc := s.coreForIDLocked(id)
+	sendOwner := s.transportTerminalLocked(id)
+	s.peerMu.RUnlock()
 	if pc == nil {
 		return enqueueUnregistered
 	}
@@ -4922,10 +5053,12 @@ func (s *Service) enqueueFrameSyncByID(id domain.ConnID, data []byte) enqueueRes
 	case netcore.SendOK:
 		return enqueueSent
 	case netcore.SendBufferFull:
+		sendOwner.end()
 		log.Warn().Str("addr", addr).Msg("send buffer full, disconnecting slow peer")
 		pc.Close()
 		return enqueueDropped
 	case netcore.SendTimeout:
+		sendOwner.end()
 		log.Warn().Str("addr", addr).Msg("sync flush timeout, disconnecting peer")
 		pc.Close()
 		return enqueueDropped
@@ -5457,10 +5590,7 @@ func ackDeletePayloadForFrame(frame protocol.Frame) []byte {
 // of the two; the connect-time full sync joined it after a round in which the
 // dialler, having started refusing capability-gated frames until auth_ok, began
 // dropping the very route table this call sends.
-func (s *Service) handleAuthSession(
-	id domain.ConnID,
-	frame protocol.Frame,
-) (reply protocol.Frame, ok bool, backlogSub *subscriber, fullSync connectFullSync) {
+func (s *Service) handleAuthSessionOwned(id domain.ConnID, frame protocol.Frame, owner *proofTransportOwner) (reply protocol.Frame, ok bool, backlogSub *subscriber, fullSync connectFullSync) {
 	// Trace checkpoints along this function share conn_id as the
 	// correlation key so the inbound-auth arc can be reconstructed from
 	// interleaved goroutine logs (announce is spawned async).
@@ -5469,6 +5599,7 @@ func (s *Service) handleAuthSession(
 	state := s.connAuthStateByID(id)
 	verified, reply, ok := connauth.VerifyAuthSession(state, frame)
 	if !ok {
+		owner.end()
 		if reply.Code == protocol.ErrCodeInvalidAuthSignature {
 			s.addBanScore(id, banIncrementInvalidSig)
 		}
@@ -5486,6 +5617,7 @@ func (s *Service) handleAuthSession(
 	// recognisable. Checking again here, as the last step before the session
 	// counts, leaves no window (v2_identity_claims.go).
 	if err := s.refuseLegacyIdentity(domain.PeerIdentityFromWire(verified.Hello.Address)); err != nil {
+		owner.end()
 		log.Warn().Err(err).Uint64("conn_id", uint64(id)).Msg("inbound_v1_refused_identity_proved_v2_during_auth")
 		// The same refusal as at the hello, so the same notice: an old
 		// dialler meets it again on every redial. It goes out before the
@@ -5606,7 +5738,7 @@ func (s *Service) completeInboundAuth(id domain.ConnID, verified *connauth.State
 // kick and the connect-time full sync. On v1 it runs strictly after auth_ok
 // is enqueued, so none of it overtakes the handshake reply the dialler waits
 // for; on v2 there is no auth_ok and it runs once the proof verified.
-func (s *Service) startInboundSessionDelivery(connID domain.ConnID, backlogSub *subscriber, fullSync connectFullSync) {
+func (s *Service) startInboundSessionDeliveryOwned(connID domain.ConnID, backlogSub *subscriber, fullSync connectFullSync, owner *proofTransportOwner) {
 	// Mandatory initial push_identity (identity-discovery layer), ordered
 	// behind auth_ok for the same reason as the backlog below. The proven
 	// inbound identity is the push's addressee; the send path skips peers
@@ -5623,7 +5755,7 @@ func (s *Service) startInboundSessionDelivery(connID domain.ConnID, backlogSub *
 		// SendLocal enqueue; the close callback is a NetCore close, not a
 		// goroutine.
 		s.goBackground(func() {
-			s.sendInitialIdentityPush(s.runCtx, pushPeer, func() { _ = s.Network().Close(s.runCtx, connID) })
+			s.sendInitialIdentityPushOwned(s.runCtx, pushPeer, func() { _ = s.Network().Close(s.runCtx, connID) }, owner)
 		})
 	}
 	// Auto-subscribe backlog replay — strictly AFTER auth_ok has been
@@ -7165,18 +7297,25 @@ func (s *Service) storeDeliveryReceiptFrame(frame protocol.Frame) protocol.Frame
 // unregistered id (0) drops through to auth_required because
 // authenticatedAddressForConn returns ok=false.
 func (s *Service) handleAckDeleteFrame(id domain.ConnID, frame protocol.Frame) (protocol.Frame, bool) {
+	return s.handleAckDeleteFrameOwned(id, frame, nil)
+}
+func (s *Service) handleAckDeleteFrameOwned(id domain.ConnID, frame protocol.Frame, owner *proofTransportOwner) (protocol.Frame, bool) {
 	if id == 0 {
+		owner.end()
 		return protocol.Frame{Type: "error", Code: protocol.ErrCodeAuthRequired}, false
 	}
 	hello, ok := s.authenticatedAddressForConn(id)
 	if !ok {
+		owner.end()
 		return protocol.Frame{Type: "error", Code: protocol.ErrCodeAuthRequired}, false
 	}
 	if strings.TrimSpace(frame.Address) == "" || strings.TrimSpace(frame.Address) != strings.TrimSpace(hello.Address) || strings.TrimSpace(frame.ID) == "" {
+		owner.end()
 		s.addBanScore(id, banIncrementInvalidSig)
 		return protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidAckDelete, Error: "invalid ack identity or id"}, false
 	}
 	if err := identity.VerifyPayload(hello.Address, hello.PubKey, ackDeletePayloadForFrame(frame), frame.Signature); err != nil {
+		owner.end()
 		s.addBanScore(id, banIncrementInvalidSig)
 		return protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidAuthSignature, Error: err.Error()}, false
 	}
@@ -7205,6 +7344,7 @@ func (s *Service) handleAckDeleteFrame(id domain.ConnID, frame protocol.Frame) (
 	case "receipt":
 		count = s.deleteBacklogReceiptForRecipient(identityFromAck(frame))
 	default:
+		owner.end()
 		return protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidAckDelete, Error: "unknown ack type"}, false
 	}
 	log.Info().Str("node", s.identity.Address).Str("address", frame.Address).Str("type", frame.AckType).Str("id", frame.ID).Str("status", frame.Status).Int("removed", count).Msg("ack_delete_applied")
@@ -9419,6 +9559,7 @@ func (s *Service) closeAllInboundConns() {
 	// From here on no connection registers: the set closed below is final.
 	s.peerMu.Lock()
 	s.inboundClosed = true
+	s.endInboundLeavesLocked()
 	s.peerMu.Unlock()
 
 	ids := make([]domain.ConnID, 0)

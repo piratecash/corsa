@@ -46,9 +46,11 @@ var ErrReplyToNotFound = errors.New("reply_to message not found in conversation"
 // identity for key material. No direct reach into config, filetransfer,
 // or chat persistence writes.
 type DMCrypto struct {
-	rpc     *LocalRPCClient
-	chatlog *ChatlogGateway
-	id      *identity.Identity
+	ownDMPort     node.OwnDMProvenancePort   // private candidate constructor only
+	ownDMObserver func(node.OwnDMSubmission) // synchronous, outside node locks; no default observer
+	rpc           *LocalRPCClient
+	chatlog       *ChatlogGateway
+	id            *identity.Identity
 	// onDecryptFailure is the §4.10 single entry point: every decrypt path
 	// (live, previews, batch) reports through it. Optional — nil means no
 	// recovery subsystem is wired (SDK consumers). Set once at wiring time
@@ -292,7 +294,7 @@ func (d *DMCrypto) SendDirectMessage(ctx context.Context, to domain.PeerIdentity
 	now := time.Now().UTC().Truncate(time.Second)
 	createdAt := now.Format(time.RFC3339)
 
-	reply, err := d.rpc.LocalRequestFrameCtx(ctx, protocol.Frame{
+	frame := protocol.Frame{
 		Type:      "send_message",
 		Topic:     "dm",
 		ID:        string(messageID),
@@ -321,7 +323,8 @@ func (d *DMCrypto) SendDirectMessage(ctx context.Context, to domain.PeerIdentity
 		CreatedAt:  createdAt,
 		TTLSeconds: 0,
 		Body:       ciphertext,
-	})
+	}
+	reply, err := d.submitOwnDM(ctx, frame, now)
 	if err != nil {
 		return nil, err
 	}

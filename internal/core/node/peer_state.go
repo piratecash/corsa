@@ -158,6 +158,8 @@ type peerStateFile struct {
 	// A mismatch drops the rows and keeps the peers: the two answer different
 	// questions and only one of them is about us.
 	FirstHopGuardsOwner string `json:"first_hop_guards_owner,omitempty"`
+	// Optional statistics only; the private value decoder drops malformed hints.
+	OverlayDWin overlayDegreeHint `json:"overlay_d_win,omitzero"`
 }
 
 // announceState is the closed enum for peerEntry.AnnounceState and for
@@ -278,6 +280,7 @@ func loadPeerState(path string) (peerStateFile, error) {
 		}
 	}
 	now := time.Now().UTC()
+	state.OverlayDWin = overlayDegreeHint{stat: freshOverlayDegreeStatistic(state.OverlayDWin.stat, now)}
 	for i := range state.Peers {
 		if state.Peers[i].AddedAt == nil {
 			state.Peers[i].AddedAt = &now

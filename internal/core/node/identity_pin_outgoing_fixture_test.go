@@ -257,8 +257,13 @@ func r2aRemoveActualPin(t *testing.T, s *Service, id domain.PeerIdentity) {
 	preview := pinRemovalPreview(t, store, id)
 	store.mu.Lock()
 	entry := store.identities[id]
+	metadata := entry.classMetadata()
 	store.mu.Unlock()
-	binding := pinBindingBackup(t, domain.IdentityPinFenceBinding{Scope: domain.IdentityPinStoreIdentity{Node: domain.PeerIdentityFromWire(s.Address()), Store: "r2a-fixture-store"}, RuntimeEpoch: "r2a-runtime", Generation: 1, Identity: id, ProofRevision: domain.IdentityPinProofRevision(entry.evidenceRevision), PreviousPinnedAt: entry.pinnedAt})
+	backup, err := domain.NewIdentityPinBackup(id, entry.pinnedAt, metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding := domain.IdentityPinFenceBinding{Scope: domain.IdentityPinStoreIdentity{Node: domain.PeerIdentityFromWire(s.Address()), Store: "r2a-fixture-store"}, RuntimeEpoch: "r2a-runtime", Generation: 1, Identity: id, ProofRevision: domain.IdentityPinProofRevision(entry.evidenceRevision), PreviousPinnedAt: entry.pinnedAt, Backup: backup}
 	files, err := store.openIdentityPinFiles()
 	if err != nil {
 		t.Fatal(err)

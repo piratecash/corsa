@@ -37,6 +37,7 @@ type candidatePending struct {
 	calendar          *ForwardCalendar
 	alias             *forwardSlot
 	cell              candidateRecordKey
+	source            candidateSourceRef
 }
 type candidateReservation struct {
 	owner      *intakeCoordinator
@@ -73,7 +74,9 @@ type intakeCoordinator struct {
 	pending           *PendingTable
 	calendars         map[domain.PeerIdentity]*ForwardCalendar
 	groups            candidateGroups
+	sourceOwner       *candidateSourceOwnerToken
 	profile           candidateProfile
+	capacity          *candidateCapacityEpoch
 	last              Instant
 	generation, round uint64
 	open              bool
@@ -97,7 +100,7 @@ func newIntakeCoordinator(profile candidateProfile, start Instant) (*intakeCoord
 	if _, err = profile.timing.LatestForward(start); err != nil {
 		return nil, err
 	}
-	o := &intakeCoordinator{pending: NewPendingTable(), calendars: make(map[domain.PeerIdentity]*ForwardCalendar), groups: newCandidateGroups(), profile: profile, last: start}
+	o := &intakeCoordinator{pending: NewPendingTable(), calendars: make(map[domain.PeerIdentity]*ForwardCalendar), groups: newCandidateGroups(), sourceOwner: &candidateSourceOwnerToken{}, profile: profile, last: start}
 	o.publishLocked()
 	return o, nil
 }
@@ -115,7 +118,14 @@ func (o *intakeCoordinator) count(counter *uint64) {
 	}
 }
 func (o *intakeCoordinator) currentLocked(r candidateReservation) bool {
-	return r.owner == o && r.entry != nil && r.entry.intake != nil && r.generation == r.entry.intake.generation && o.pending.bySource[pendingKey{r.entry.source, r.entry.request.ID}] == r.entry
+	if r.owner != o || r.entry == nil || r.entry.intake == nil || r.generation != r.entry.intake.generation || o.pending.bySource[pendingKey{r.entry.source, r.entry.request.ID}] != r.entry {
+		return false
+	}
+	if r.entry.intake.phase != candidateProvisional {
+		_, err := o.sourceRowLocked(r.entry)
+		return err == nil
+	}
+	return true
 }
 func (o *intakeCoordinator) handle(entry *pendingEntry) candidateReservation {
 	return candidateReservation{o, entry, entry.intake.generation}
@@ -241,7 +251,8 @@ func (o *intakeCoordinator) less(a Session, ap Priority, b Session, bp Priority)
 	}
 	return a.ConnID() < b.ConnID()
 }
-func (o *intakeCoordinator) sealRound(view candidateMembership, now Instant) (candidateRoundResult, error) {
+func (o *intakeCoordinator) sealRound(view candidateMembership, now Instant, cuts ...candidateCapacityCut) (candidateRoundResult, error) {
+	prepared := o.prepareSources()
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	defer o.publishLocked()
@@ -266,6 +277,9 @@ func (o *intakeCoordinator) sealRound(view candidateMembership, now Instant) (ca
 	if err = o.advanceLocked(now); err != nil {
 		return candidateRoundResult{}, err
 	}
+	// A refused new-window cut closes/refuses provisional work through the
+	// normal round path. It never resets or blocks accepted obligations.
+	_, capacityErr := o.selectCapacityLocked(now, cuts)
 	rows := make([]*pendingEntry, 0, MaxPendingTotal)
 	for _, entry := range o.pending.bySource {
 		if entry.intake.phase == candidateProvisional {
@@ -337,10 +351,12 @@ func (o *intakeCoordinator) sealRound(view candidateMembership, now Instant) (ca
 	rows = ordered
 	for _, entry := range rows {
 		invalid := now > last || entry.intake.priority == 0 || !entry.source.valid() || !entry.target.valid() || (entry.intake.priority == PriorityProtected && entry.source.ConnID() > o.watermark)
-		if invalid {
+		if capacityErr != nil {
+			err = capacityErr
+		} else if invalid {
 			err = ErrBudget
 		} else {
-			err = o.commitLocked(entry, now)
+			err = o.commitLocked(entry, now, prepared[entry.source])
 		}
 		if err != nil {
 			o.pending.release(entry)
@@ -374,7 +390,15 @@ func (o *intakeCoordinator) sealRound(view candidateMembership, now Instant) (ca
 }
 
 // commitLocked requires o.mu and pending.mu; acquires ONE calendar then ID lock.
-func (o *intakeCoordinator) commitLocked(entry *pendingEntry, now Instant) error {
+func (o *intakeCoordinator) commitLocked(entry *pendingEntry, now Instant, prepared *candidateSourceWindows) error {
+	capacity, err := o.frozenCapacityLocked(now)
+	if err != nil {
+		return err
+	}
+	source, err := o.planSourceLocked(entry, now, prepared)
+	if err != nil {
+		return err
+	}
 	calendar := o.calendars[entry.request.Target]
 	fresh := calendar == nil
 	var retire domain.PeerIdentity
@@ -407,13 +431,20 @@ func (o *intakeCoordinator) commitLocked(entry *pendingEntry, now Instant) error
 	if !o.aliasesMatchLocked(calendar) {
 		return ErrInvalid
 	}
-	plan, err := calendar.planCombinedLocked(now, entry.intake.latest)
+	plan, err := calendar.planCombinedFloorLocked(now, entry.intake.latest, source.floor)
 	if err != nil {
 		return err
 	}
-	group, err := o.groups.plan(entry.source.state.group, entry.request.Target, plan.slot.at, o.profile.nodeCap)
+	source, err = source.finalizeSourceLocked(plan.slot.at)
 	if err != nil {
 		return err
+	}
+	group, err := o.groups.plan(entry.source.state.group, entry.request.Target, plan.slot.at, capacity)
+	if err != nil {
+		return err
+	}
+	if o.groups.records[group.key].refs == math.MaxInt {
+		return ErrCapacity
 	}
 	entry.target.state.mu.Lock()
 	defer entry.target.state.mu.Unlock()
@@ -427,10 +458,19 @@ func (o *intakeCoordinator) commitLocked(entry *pendingEntry, now Instant) error
 	if _, ok := o.pending.byTarget[pendingKey{entry.target, id}]; ok {
 		return ErrDuplicateID
 	}
+	if currentCapacity, capacityErr := o.frozenCapacityLocked(now); capacityErr != nil || currentCapacity != capacity {
+		return ErrNotReady
+	}
 	slot := &forwardSlot{at: plan.slot.at, latest: plan.slot.latest}
 	forwarded := entry.request
 	forwarded.ID = id
+	// Last fallible ownership claim: no source charge has been published yet.
+	if source.fresh && !entry.source.state.sourceWindows.CompareAndSwap(nil, source.windows) {
+		return ErrStaleWork
+	}
 	// All validation and checked arithmetic precede this uninterrupted commit.
+	source.windows.rows[source.index] = source.row
+	entry.intake.source = candidateSourceRef{windows: source.windows, index: source.index, generation: source.row.generation}
 	entry.target.commitNextIDLocked(id)
 	if fresh {
 		if !retire.IsZero() {
@@ -483,13 +523,19 @@ func (o *intakeCoordinator) takeForward(r candidateReservation, now Instant) (ca
 	if now < state.alias.at {
 		return candidateForwardPermit{}, immutableForwardInput{}, ErrNotReady
 	}
+	row, err := o.sourceRowLocked(entry)
+	if err != nil {
+		return candidateForwardPermit{}, immutableForwardInput{}, err
+	}
+	pair, pairErr := row.actual.candidatePairTrial(now)
 	actual := calendar.actual
 	actual.refill(now)
-	if actual.tokens < forwardToken {
+	if pairErr != nil || actual.tokens < forwardToken {
 		o.count(&o.counters.violations)
 		return candidateForwardPermit{}, immutableForwardInput{}, errCandidateAssumption
 	}
 	actual.tokens -= forwardToken
+	row.actual = pair
 	calendar.actual = actual
 	calendar.last = now
 	delete(calendar.slots, state.alias)
@@ -518,12 +564,20 @@ func (o *intakeCoordinator) finishForward(permit candidateForwardPermit, now Ins
 	if state.phase != candidateDispatching && state.phase != candidateTerminalDispatch {
 		return ErrStaleWork
 	}
-	if _, err := now.plus(candidateGroupWindow); err != nil {
+	row, err := o.sourceRowLocked(entry)
+	if err != nil {
 		return err
 	}
+	expiry, err := now.plus(candidateGroupWindow)
+	if err != nil {
+		return err
+	}
+	nextSource := *row
+	nextSource.expires = max(nextSource.expires, expiry)
 	if err := o.groups.finish(state.cell, now); err != nil {
 		return err
 	}
+	*row = nextSource
 	o.last = now
 	if now > state.latest {
 		// Completion is an upper bound on actual writer start, not proof of it.
@@ -550,6 +604,9 @@ func (o *intakeCoordinator) answer(target Session, answer protocol.FindNodeAnswe
 	}
 	entry := o.pending.byTarget[pendingKey{target, answer.ID}]
 	if entry == nil || entry.request.Target != answer.Target || !entry.source.valid() || !target.valid() || (entry.intake.phase != candidateDispatching && entry.intake.phase != candidateAwaitingAnswer) {
+		return Delivery{}, ErrUnmatchedAnswer
+	}
+	if _, err := o.sourceRowLocked(entry); err != nil {
 		return Delivery{}, ErrUnmatchedAnswer
 	}
 	answer.ID = entry.request.ID
@@ -627,6 +684,7 @@ func (o *intakeCoordinator) releaseLocked(entry *pendingEntry) {
 		}
 		o.groups.release(state.cell)
 	}
+	o.releaseSourceLocked(entry)
 	o.pending.release(entry)
 }
 

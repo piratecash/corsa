@@ -324,7 +324,7 @@ var errLoopbackIdentityBanned = errors.New("loopback inbound: the proven identit
 func (s *Service) chargeLoopbackViolation(id domain.ConnID, core *netcore.NetCore, delta int) {
 	peer, proven := penaltySubjectOfCore(id, core).provenIdentity()
 	if !proven {
-		if !s.loopbackInbound.condemn(id) {
+		if !s.condemnInboundSelected(id) {
 			return
 		}
 		s.loopbackInbound.noteViolationClosed()
@@ -333,19 +333,23 @@ func (s *Service) chargeLoopbackViolation(id domain.ConnID, core *netcore.NetCor
 		return
 	}
 	verdict := s.loopbackInbound.identities.charge(peer, delta)
+	firstCondemn := false
+	if verdict.unrecorded || verdict.banned {
+		firstCondemn = s.condemnInboundSelected(id)
+	}
 	// Debug, not Warn: a session may commit a violation per frame within its
 	// command budget; the ban below is the event an operator looks for.
 	log.Debug().Uint64("conn_id", uint64(id)).Str("peer", peer.String()).Int("delta", delta).
 		Int("score", verdict.score).Bool("banned", verdict.banned).Msg("loopback_violation_identity_charged")
 	switch {
 	case verdict.unrecorded:
-		if s.loopbackInbound.condemn(id) {
+		if firstCondemn {
 			s.loopbackInbound.noteViolationClosed()
 			log.Warn().Uint64("conn_id", uint64(id)).Str("peer", peer.String()).
 				Msg("loopback_violation_unrecorded_connection_closed")
 		}
 	case verdict.banned:
-		if !s.loopbackInbound.condemn(id) {
+		if !firstCondemn {
 			return
 		}
 		s.loopbackInbound.noteIdentityBanned()

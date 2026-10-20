@@ -449,9 +449,9 @@ type contactRecordReferenceSite struct{ file, function string }
 
 func contactRecordReferenceErrors(sources map[string][]byte) []string {
 	expected := map[string]map[contactRecordReferenceSite]int{
-		"observeContactRecord": {}, "verifyContactMinSessionRecord": {}, "stageContactRecord": {}, "completeOwedContactRecord": {},
-		"setUnpublishedMetadata":          {{"identity_pin_metadata_mutation.go", "stagePinMetadataLocked"}: 1, {"identity_pin_contact_record.go", "stageContactRecordLocked"}: 1, {"identity_pin_relation.go", "stageRelationRecordLocked"}: 1, {"identity_pin_inbound.go", "stageInboundPin"}: 1, {"secure_session_store.go", "loadFile"}: 1, {"identity_pin_recovery.go", "recoverIdentityPinProtection"}: 1},
-		"stageContactRecordLocked":        {{"identity_pin_contact_record.go", "stageContactRecord"}: 1},
+		"observeContactRecord": {{"identity_record_admission.go", "prepareContactRecordPush"}: 1}, "verifyContactMinSessionRecord": {{"identity_record_admission.go", "prepareContactRecordPush"}: 1, {"identity_pin_contact_reconciliation.go", "scanReconciliation"}: 1}, "stageContactRecord": {}, "completeOwedContactRecord": {},
+		"setUnpublishedMetadata":          {{"identity_pin_metadata_mutation.go", "stagePinMetadataLocked"}: 1, {"identity_pin_contact_record.go", "stageContactRecordLocked"}: 1, {"identity_pin_relation.go", "stageClassifiedRelationRecordLocked"}: 1, {"identity_pin_inbound.go", "stageInboundPin"}: 1, {"secure_session_store.go", "loadFile"}: 1, {"identity_pin_recovery.go", "recoverIdentityPinProtection"}: 1},
+		"stageContactRecordLocked":        {{"identity_pin_contact_record.go", "stageContactRecordWithAuthority"}: 1},
 		"tryCompleteOwedContactRecord":    {{"identity_pin_contact.go", "scanOwed"}: 1},
 		"completeOwedContactRecordLocked": {{"identity_pin_contact_record.go", "completeOwedContactRecord"}: 1, {"identity_pin_contact_record.go", "tryCompleteOwedContactRecord"}: 1},
 	}
@@ -512,12 +512,12 @@ func contactRecordReferenceErrors(sources map[string][]byte) []string {
 // statements, not an arbitrary AST control/dataflow proof.
 func contactRecordCheckedCOWReferences(set *token.FileSet, body ast.Node, site contactRecordReferenceSite) map[token.Pos]bool {
 	shapes := map[contactRecordReferenceSite]string{
-		{"identity_pin_inbound.go", "stageInboundPin"}:                  "if err := entry.setUnpublishedMetadata(next); err != nil { return inboundPinStage{}, err }",
-		{"identity_pin_metadata_mutation.go", "stagePinMetadataLocked"}: "if err := entry.setUnpublishedMetadata(next); err != nil { return identityPinMetadataMutation{}, err }",
-		{"identity_pin_contact_record.go", "stageContactRecordLocked"}:  "if err := entry.setUnpublishedMetadata(next); err != nil { return contactRecordStage{}, err }",
-		{"identity_pin_relation.go", "stageRelationRecordLocked"}:       "if err := entry.setUnpublishedMetadata(next); err != nil { return relationPinStage{}, err }",
-		{"secure_session_store.go", "loadFile"}:                         "if err := entry.setUnpublishedMetadata(file.IdentityMetadata[id]); err != nil { s.mu.Unlock() return err }",
-		{"identity_pin_recovery.go", "recoverIdentityPinProtection"}:    "if err := entry.setUnpublishedMetadata(record.Metadata); err != nil { s.mu.Unlock() return domain.IdentityPinReceipt{}, err }",
+		{"identity_pin_inbound.go", "stageInboundPin"}:                      "if err := entry.setUnpublishedMetadata(next); err != nil { return inboundPinStage{}, err }",
+		{"identity_pin_metadata_mutation.go", "stagePinMetadataLocked"}:     "if err := entry.setUnpublishedMetadata(next); err != nil { return identityPinMetadataMutation{}, err }",
+		{"identity_pin_contact_record.go", "stageContactRecordLocked"}:      "if err := entry.setUnpublishedMetadata(next); err != nil { return contactRecordStage{}, err }",
+		{"identity_pin_relation.go", "stageClassifiedRelationRecordLocked"}: "if err := entry.setUnpublishedMetadata(next); err != nil { return relationPinStage{}, err }",
+		{"secure_session_store.go", "loadFile"}:                             "if err := entry.setUnpublishedMetadata(file.IdentityMetadata[id]); err != nil { s.mu.Unlock() return err }",
+		{"identity_pin_recovery.go", "recoverIdentityPinProtection"}:        "if err := entry.setUnpublishedMetadata(record.Metadata); err != nil { s.mu.Unlock() return domain.IdentityPinReceipt{}, err }",
 	}
 	result := map[token.Pos]bool{}
 	want, reviewed := shapes[site]
@@ -566,6 +566,19 @@ func TestContactRecordOwnerRootsRemainInactiveAndMetadataErrorsHandled(t *testin
 	if failures := contactRecordReferenceErrors(sources); len(failures) > 0 {
 		t.Fatal(failures)
 	}
+	uncheckedSources := make(map[string][]byte, len(sources))
+	for name, source := range sources {
+		uncheckedSources[name] = append([]byte(nil), source...)
+	}
+	checkedRelationCOW := []byte("\tif err := entry.setUnpublishedMetadata(next); err != nil {\n\t\treturn relationPinStage{}, err\n\t}")
+	if bytes.Count(uncheckedSources["identity_pin_relation.go"], checkedRelationCOW) != 1 {
+		t.Fatal("expected one checked relation COW fixture")
+	}
+	uncheckedSources["identity_pin_relation.go"] = bytes.Replace(uncheckedSources["identity_pin_relation.go"], checkedRelationCOW, []byte("\t_ = entry.setUnpublishedMetadata(next)"), 1)
+	if failures := contactRecordReferenceErrors(uncheckedSources); !reflect.DeepEqual(failures, []string{"unreviewed or unchecked COW reference"}) {
+		t.Fatal("guard did not isolate unchecked relation COW", failures)
+	}
+
 	sources["unexpected.go"] = []byte("package node\nfunc unsafeIngress(s *Service) { _ = s.observeContactRecord }")
 	if failures := contactRecordReferenceErrors(sources); len(failures) == 0 {
 		t.Fatal("guard accepted a production function-value escape")
@@ -576,15 +589,17 @@ func TestContactRecordOwnerRootsRemainInactiveAndMetadataErrorsHandled(t *testin
 // may retain tickets without a map, and external historical handles add cost.
 func contactRecordOwnerShapeErrors(sources map[string][]byte) []string {
 	expected := map[string]map[string]string{
-		"identityPinMetadataState": {"value": "domain.IdentityPinMetadata", "confirmedRevision": "identityPinProtectionRevision", "recordOwner": "*contactRecordOwedState", "recordMirror": "contactRecordOwnerMirror"},
-		"contactPinProducer":       {"service": "*Service", "wake": "chan struct{}", "cursor": "*domain.PeerIdentity", "clock": "func() time.Time"},
-		"contactRecordSelection":   {"binding": "identityPinEntryBinding", "ticket": "*contactRecordOwedState"},
-		"contactRecordStage":       {"disposition": "contactRecordStageDisposition", "owed": "*contactRecordOwedState"},
-		"contactRecordOwedState":   {"mu": "sync.Mutex", "protection": "owedContactProtection", "completion": "contactRecordCompletion"},
-		"contactRecordAttempt":     {"state": "contactRecordAttemptState", "completion": "contactRecordCompletion"},
-		"contactRecordCompletion":  {"state": "contactRecordCompletionState", "receipt": "contactRecordCoverReceipt", "attemptCovered": "bool", "barrierAttempted": "bool"},
-		"owedContactProtection":    {"service": "*Service", "binding": "identityPinEntryBinding", "contact": "domain.IdentityPinAllocation", "fact": "localContactStamp", "recordDigest": "[sha256.Size]byte", "recordSequence": "domain.IdentityRecordSeq", "evidenceRevision": "identityPinEvidenceRevision", "protectionRevision": "identityPinProtectionRevision"},
-		"contactRecordCandidate":   {"mu": "sync.Mutex", "service": "*Service", "trust": "*trustStore", "store": "*secureSessionStore", "fact": "localContactStamp", "factAt": "time.Time", "observed": "pinOwnerObservation", "network": "domain.NetworkID", "record": "protocol.SignedIdentityRecord", "sequence": "domain.IdentityRecordSeq", "digest": "[sha256.Size]byte", "verified": "bool", "rejected": "bool", "staged": "contactRecordStage"},
+		"identityPinMetadataState":             {"value": "domain.IdentityPinMetadata", "confirmedRevision": "identityPinProtectionRevision", "recordOwner": "*contactRecordOwedState", "recordMirror": "contactRecordOwnerMirror"},
+		"contactPinProducer":                   {"service": "*Service", "wake": "chan struct{}", "cursor": "*domain.PeerIdentity", "reconcileCursor": "*domain.PeerIdentity", "clock": "func() time.Time"},
+		"contactRecordSelection":               {"binding": "identityPinEntryBinding", "ticket": "*contactRecordOwedState"},
+		"preparedContactRecordStage":           {"candidate": "*contactRecordCandidate", "store": "*secureSessionStore", "identity": "domain.PeerIdentity", "observed": "pinOwnerObservation", "original": "identityPinEntry", "present": "bool", "recovery": "*identityPinRecoveryState", "permit": "*domain.IdentityPinRemovalPermit", "permitValue": "domain.IdentityPinRemovalPermit", "entry": "identityPinEntry", "metadata": "domain.IdentityPinMetadata", "err": "error"},
+		"contactRecordStage":                   {"disposition": "contactRecordStageDisposition", "owed": "*contactRecordOwedState"},
+		"contactRecordOwedState":               {"mu": "sync.Mutex", "protection": "owedContactProtection", "completion": "contactRecordCompletion"},
+		"contactRecordAttempt":                 {"state": "contactRecordAttemptState", "completion": "contactRecordCompletion"},
+		"contactRecordCompletion":              {"state": "contactRecordCompletionState", "receipt": "contactRecordCoverReceipt", "attemptCovered": "bool", "barrierAttempted": "bool"},
+		"owedContactProtection":                {"service": "*Service", "binding": "identityPinEntryBinding", "contact": "domain.IdentityPinAllocation", "fact": "localContactStamp", "recordDigest": "[sha256.Size]byte", "recordSequence": "domain.IdentityRecordSeq", "evidenceRevision": "identityPinEvidenceRevision", "protectionRevision": "identityPinProtectionRevision"},
+		"contactRecordReconciliationAuthority": {"admission": "*relationRecordAdmission", "resolver": "*identityResolver", "service": "*Service", "network": "domain.NetworkID", "index": "uint16", "generation": "uint64", "ctx": "context.Context", "cancel": "context.CancelFunc", "candidate": "*contactRecordCandidate", "revoked": "bool", "finished": "bool", "staged": "bool"},
+		"contactRecordCandidate":               {"mu": "sync.Mutex", "service": "*Service", "trust": "*trustStore", "store": "*secureSessionStore", "fact": "localContactStamp", "factAt": "time.Time", "observed": "pinOwnerObservation", "network": "domain.NetworkID", "record": "protocol.SignedIdentityRecord", "sequence": "domain.IdentityRecordSeq", "digest": "[sha256.Size]byte", "verified": "bool", "rejected": "bool", "staged": "contactRecordStage"},
 	}
 	actual := map[string]map[string]string{}
 	for name, source := range sources {
@@ -633,7 +648,7 @@ func contactRecordOwnerShapeErrors(sources map[string][]byte) []string {
 
 func TestContactRecordOwnerShapesExcludeHiddenInventory(t *testing.T) {
 	sources := map[string][]byte{}
-	for _, name := range []string{"identity_pin_metadata_durable.go", "identity_pin_contact_record.go", "identity_pin_contact.go"} {
+	for _, name := range []string{"identity_pin_metadata_durable.go", "identity_pin_contact_record.go", "identity_pin_contact.go", "identity_pin_contact_reconciliation.go"} {
 		raw, err := os.ReadFile(name)
 		if err != nil {
 			t.Fatal(err)

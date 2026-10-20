@@ -4,7 +4,7 @@
 
 This candidate implements the already accepted
 [record-admission decision](session-v2-relation-record-admission.md) in a private
-fixture composition. The ordinary constructor keeps `recordAdmission=nil`.
+candidate composition. The ordinary constructor keeps `recordAdmission=nil`.
 No live ingress, public setting, flag, handler, capability, overlay priority,
 K admission consumer, R2 producer, G2 or release is enabled.
 
@@ -179,3 +179,44 @@ write по-прежнему строит/кодирует полный pin/endpo
 это не O(1). Существующая snapshot/base64 работа под owner сохраняется; внешнее
 кодирование/дисковый I/O идут после освобождения store.mu. Full build/lint/native
 и combined acceptance остаются отдельными gates.
+
+
+## Private R-only Service composition / Закрытая R-композиция Service
+
+The unused `newRelationRecordCandidateService` factory selects only ChargedR.
+The final resolver and immutable real-store backend are constructed after
+secureSessions and the self-record. The registered post_identity handler reads
+that final resolver through its original Service; R-only construction captures
+no K push port or K transport capability. None and K construction retain their
+previous branches; R|K and unknown masks refuse. No public factory/config/RPC
+selects this candidate.
+
+The new finite fixtures use actual Service.Run for startup60 and its one joined
+R worker, typed user lookup, actual SendLocal class-queue acceptance, the actual
+registered answer handler and a real strict backend. They never manually begin
+the epoch, replace the resolver, or call processRelationSlot. A separate fixture
+wraps the original real WriteMain: it delegates the real write and then holds
+callback return to test Run join. This is callback ownership evidence, not a
+blocked kernel syscall, TLS path or full Window-to-network integration. The
+construction and positive fixtures keep the original backend method value.
+Injected paired time demonstrates policy boundaries without claiming 60 real
+elapsed seconds. Fresh CODE/TYPE/runtime acceptance is required for these
+fixtures; their presence alone is not a test result or activation.
+
+Неиспользуемая закрытая factory `newRelationRecordCandidateService` выбирает
+только ChargedR. Финальный resolver и backend реального store создаются после
+secureSessions и self-record. Зарегистрированный post_identity обращается к
+финальному resolver через исходный Service; K port и K transport capability у
+R-композиции отсутствуют. Ветки None/K сохранены, R|K и неизвестные mask
+отклоняются; публичные factory/config/RPC кандидата не включают.
+
+Новые конечные fixtures используют настоящий Service.Run: startup60, один
+присоединённый R worker, typed user lookup, реальный SendLocal с приёмом в class
+queue, зарегистрированный answer handler и strict backend. Ручного begin,
+замены resolver и processRelationSlot в них нет. Отдельный wrapper исходного
+реального WriteMain сначала делегирует запись, затем удерживает возврат callback
+для проверки join. Это граница владения callback, не зависший syscall, TLS или
+полный путь Window-to-network. Constructor и positive fixture сохраняют исходный
+method value backend. Подставленное парное время не является 60 секундами реального
+ожидания. Для новых fixtures ещё нужны CODE/TYPE/runtime проверки; наличие кода
+не считается результатом теста или разрешением активации.

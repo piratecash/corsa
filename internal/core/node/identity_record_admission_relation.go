@@ -14,7 +14,7 @@ import (
 // Store contention opts out ONLY this R candidate; ordinary Send remains usable.
 func (r *identityResolver) reserveRelationAttemptLocked(label domain.PeerIdentity, entry identityAttemptEntry, store *secureSessionStore) *relationAdmissionRef {
 	a := r.recordAdmission
-	if a == nil || a.started == nil || a.closing || entry.action.origin != identityLookupOriginWindowUser || entry.owner.recordLifetime == nil {
+	if !a.admitsR() || a.started == nil || a.closing || entry.action.origin != identityLookupOriginWindowUser || entry.owner.recordLifetime == nil {
 		return nil
 	}
 	now, ok := a.sampleLocked()
@@ -95,7 +95,7 @@ func (r *identityResolver) settleRelationClaimLocked(entry identityAttemptEntry)
 }
 func (r *identityResolver) cancelRelationActionLocked(action UserIdentityLookup) {
 	a := r.recordAdmission
-	if a == nil {
+	if !a.admitsR() {
 		return
 	}
 	for i := range a.slots {
@@ -124,6 +124,12 @@ var errRelationAdmissionStale = errors.New("identity record admission original c
 // debit with pinGate.R -> evidence.R -> resolver.mu -> trust.R -> store.mu.
 // No crypto, I/O or legacy barrier executes under these locks.
 func (r *identityResolver) stageRelationAdmission(ctx context.Context, slot *relationAdmissionSlot) (relationAdmissionDisposition, error) {
+	if slot.r2Claim != nil {
+		return r.stageOwnDMRelationAdmission(ctx, slot)
+	}
+	if !r.recordAdmission.admitsR() {
+		return relationAdmissionWait, errRelationAdmissionStale
+	}
 	store, trust := r.svc.localContactPinStore(), r.svc.trust
 	if store == nil || trust == nil {
 		return relationAdmissionWait, domain.ErrIdentityPinStoreUnavailable

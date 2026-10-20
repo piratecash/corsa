@@ -388,7 +388,7 @@ func (r *identityResolver) startResolution(admissionError func() error, target d
 		existing.usable = usable
 	} else {
 		var lifetime *relationAdmissionLifetime
-		if r.recordAdmission != nil {
+		if r.recordAdmission.admitsR() {
 			if sample, ok := r.recordAdmission.sampleLocked(); ok {
 				now = sample.wall
 				lifetime = &relationAdmissionLifetime{origin: sample}
@@ -796,7 +796,7 @@ func (r *identityResolver) sendOwnedAttempt(ctx context.Context, owner *identity
 		}
 	}
 	var admissionStore *secureSessionStore
-	if r.recordAdmission != nil {
+	if r.recordAdmission.admitsR() {
 		if store := r.svc.localContactPinStore(); store != nil && store.pinMutationGate.TryRLock() {
 			admissionStore = store
 		}
@@ -855,7 +855,7 @@ func (r *identityResolver) settleQueueLocked(label domain.PeerIdentity, expected
 		entry.queue = identityAttemptQueueAccepted
 	}
 	r.attempts[label] = entry
-	if r.recordAdmission != nil {
+	if r.recordAdmission.admitsR() {
 		r.noteRelationQueueLocked(entry)
 	}
 	if entry.claim != nil {
@@ -977,7 +977,7 @@ func (r *identityResolver) HandleAnswer(label datagram.Label, payload []byte) bo
 	}
 
 	var relationRecord verifiedRelationPinRecord
-	if entry.recordAdmission != nil {
+	if r.recordAdmission.admitsR() && entry.recordAdmission != nil {
 		verified, verifyErr := verifyRelationPinRecord(relationPinQuestion{network: r.network, target: entry.dst, label: label.Raw(), qHash: entry.qHash, minSeq: entry.minSeq}, parsed.Record, parsed.TargetProof)
 		if verifyErr == nil {
 			relationRecord = verified

@@ -127,7 +127,10 @@ func (s *Service) sendFrameViaNetwork(ctx context.Context, id domain.ConnID, fra
 		return nil
 	}
 
-	sendErr := network.SendFrame(ctx, id, data)
+	sendOwner, sendErr := s.sendInboundBound(ctx, network, id, data, false)
+	if errors.Is(sendErr, netcore.ErrSendBufferFull) {
+		sendOwner.end()
+	}
 	res := classifyNetworkSendResult(sendErr)
 	emitProtocolTrace(addr, frame, res)
 
@@ -233,7 +236,10 @@ func (s *Service) sendFrameViaNetworkSync(ctx context.Context, id domain.ConnID,
 		return nil
 	}
 
-	sendErr := network.SendFrameSync(ctx, id, data)
+	sendOwner, sendErr := s.sendInboundBound(ctx, network, id, data, true)
+	if errors.Is(sendErr, netcore.ErrSendBufferFull) || errors.Is(sendErr, netcore.ErrSendTimeout) {
+		sendOwner.end()
+	}
 	res := classifyNetworkSendResult(sendErr)
 	emitProtocolTrace(addr, frame, res)
 
@@ -452,7 +458,10 @@ func (s *Service) sendFrameBytesViaNetwork(ctx context.Context, id domain.ConnID
 	network := s.Network()
 	addr := network.RemoteAddr(id)
 
-	sendErr := network.SendFrame(ctx, id, data)
+	sendOwner, sendErr := s.sendInboundBound(ctx, network, id, data, false)
+	if errors.Is(sendErr, netcore.ErrSendBufferFull) {
+		sendOwner.end()
+	}
 
 	switch {
 	case sendErr == nil:
@@ -496,7 +505,10 @@ func (s *Service) sendFrameBytesViaNetworkSync(ctx context.Context, id domain.Co
 	network := s.Network()
 	addr := network.RemoteAddr(id)
 
-	sendErr := network.SendFrameSync(ctx, id, data)
+	sendOwner, sendErr := s.sendInboundBound(ctx, network, id, data, true)
+	if errors.Is(sendErr, netcore.ErrSendBufferFull) || errors.Is(sendErr, netcore.ErrSendTimeout) {
+		sendOwner.end()
+	}
 
 	switch {
 	case sendErr == nil:
@@ -656,4 +668,20 @@ func classifyNetworkSendResult(err error) enqueueResult {
 		// distinct from "never delivered because conn not registered".
 		return enqueueDropped
 	}
+}
+
+// sendInboundBound keeps ordinary injected-Network behavior exact. Only the
+// private real-bridge candidate can receive an original send-owner handle.
+func (s *Service) sendInboundBound(ctx context.Context, network netcore.Network, id domain.ConnID, data []byte, synchronous bool) (*proofTransportOwner, error) {
+	if s.inboundPins != nil || s.findNode != nil {
+		bridge, ok := network.(*networkBridge)
+		if !ok || bridge.svc != s {
+			return nil, ErrNetworkOverrideOwnsNoConnections
+		}
+		return bridge.sendFrameBound(ctx, id, data, synchronous)
+	}
+	if synchronous {
+		return nil, network.SendFrameSync(ctx, id, data)
+	}
+	return nil, network.SendFrame(ctx, id, data)
 }

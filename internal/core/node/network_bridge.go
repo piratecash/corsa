@@ -124,15 +124,40 @@ func (b *networkBridge) coreForID(id domain.ConnID) *netcore.NetCore {
 // touching the transport (no partial-send race). Otherwise delegates to
 // NetCore.SendRaw and maps the returned SendStatus to a public sentinel.
 func (b *networkBridge) SendFrame(ctx context.Context, id domain.ConnID, frame []byte) error {
+	_, err := b.sendFrameBound(ctx, id, frame, false)
+	return err
+}
+
+// sendFrameBound selects the ACTUAL core and original leaf in one peerMu
+// section. synchronous controls transport waiting only, never proof authority.
+type inboundSendSelection struct {
+	core  *netcore.NetCore
+	owner *proofTransportOwner
+}
+
+// selectInboundSend fixes the actual core+original owner in ONE registry read.
+// The value retains neither a Service/ConnID nor any callback for late lookup.
+func (b *networkBridge) selectInboundSend(id domain.ConnID) inboundSendSelection {
+	b.svc.peerMu.RLock()
+	selected := inboundSendSelection{core: b.svc.coreForIDLocked(id), owner: b.svc.transportTerminalLocked(id)}
+	b.svc.peerMu.RUnlock()
+	return selected
+}
+func (selected inboundSendSelection) sendCapturedInbound(ctx context.Context, frame []byte, synchronous bool) (*proofTransportOwner, error) {
+	if selected.core == nil {
+		return nil, netcore.ErrUnknownConn
+	}
+	if synchronous {
+		return selected.owner, ctxSendStatusToError(ctx, selected.core.SendRawSyncCtx(ctx, frame))
+	}
+	return selected.owner, netcore.SendStatusToError(selected.core.SendRaw(frame))
+}
+func (b *networkBridge) sendFrameBound(ctx context.Context, id domain.ConnID, frame []byte, synchronous bool) (*proofTransportOwner, error) {
 	if err := ctx.Err(); err != nil {
-		return err
+		return nil, err
 	}
-	core := b.coreForID(id)
-	if core == nil {
-		return netcore.ErrUnknownConn
-	}
-	status := core.SendRaw(frame)
-	return netcore.SendStatusToError(status)
+	selected := b.selectInboundSend(id)
+	return selected.sendCapturedInbound(ctx, frame, synchronous)
 }
 
 // SendFrameSync enqueues frame and blocks until one of: the writer flushes
@@ -150,14 +175,8 @@ func (b *networkBridge) SendFrame(ctx context.Context, id domain.ConnID, frame [
 // via errors.Is — the defensive ErrSendCtxCancelled mapping exists for
 // any future caller that bypasses this bridge path.
 func (b *networkBridge) SendFrameSync(ctx context.Context, id domain.ConnID, frame []byte) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	core := b.coreForID(id)
-	if core == nil {
-		return netcore.ErrUnknownConn
-	}
-	return ctxSendStatusToError(ctx, core.SendRawSyncCtx(ctx, frame))
+	_, err := b.sendFrameBound(ctx, id, frame, true)
+	return err
 }
 
 // SendFrameBlocking enqueues frame on id's writer queue, waiting for a slot
@@ -233,13 +252,28 @@ func (b *networkBridge) Enumerate(ctx context.Context, dir netcore.Direction, fn
 // skipped close there is a leak, not a cancellation: the inbound teardown
 // removes the registry entry right after this call, and once it is gone
 // nothing can reach the core, whose writer returns only on Close.
-func (b *networkBridge) Close(_ context.Context, id domain.ConnID) error {
-	core := b.coreForID(id)
-	if core == nil {
+// A close selection retains only the actual core, after its original leaf
+// was Ended under peerMu. Its completion cannot resolve a replacement by name.
+type inboundCloseSelection struct{ core *netcore.NetCore }
+
+func (b *networkBridge) selectInboundClose(id domain.ConnID) inboundCloseSelection {
+	b.svc.peerMu.RLock()
+	selected := inboundCloseSelection{core: b.svc.coreForIDLocked(id)}
+	owner := b.svc.transportTerminalLocked(id)
+	owner.end()
+	b.svc.peerMu.RUnlock()
+	return selected
+}
+func (selected inboundCloseSelection) closeCapturedInbound() error {
+	if selected.core == nil {
 		return netcore.ErrUnknownConn
 	}
-	core.Close()
+	selected.core.Close()
 	return nil
+}
+func (b *networkBridge) Close(_ context.Context, id domain.ConnID) error {
+	selected := b.selectInboundClose(id)
+	return selected.closeCapturedInbound()
 }
 
 // RemoteAddr returns the peer address string for id, or "" if id is not

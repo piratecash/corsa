@@ -16,7 +16,7 @@ import (
 var errContactRecordEvidence = errors.New("contact pin signed record evidence invalid")
 var errContactRecordInvariant = errors.New("contact pin earned allocation unexpectedly changed")
 
-// Verification has no production ingress. After stage, the capped pin owner
+// Only closed private push/reconciliation roots capture production-shaped evidence. After stage, the capped pin owner
 // retains completion independently of this handle. Raw payload <=2048+64 bytes;
 // external handles and existing full snapshots have additional cost.
 type contactRecordCandidate struct {
@@ -106,7 +106,7 @@ type contactRecordOwedState struct {
 	completion contactRecordCompletion
 }
 
-// observeContactRecord has no production caller. Capture precedes asynchronous
+// observeContactRecord is called only by the private K invocation root. Capture precedes
 // verification/import, with original durable local fact and pin owner/absence.
 func (s *Service) observeContactRecord(ctx context.Context, id domain.PeerIdentity, record protocol.SignedIdentityRecord) (*contactRecordCandidate, error) {
 	store := s.localContactPinStore()
@@ -187,6 +187,20 @@ func (candidate *contactRecordCandidate) stagedOutcome() (contactRecordStage, bo
 // stageContactRecord has no production caller. Only this original verified
 // capsule can stage; repeated calls return its retained outcome without effects.
 func (s *Service) stageContactRecord(ctx context.Context, verified verifiedContactMinSessionRecord) (contactRecordStage, error) {
+	return s.stageContactRecordWithAuthority(ctx, verified, nil, nil)
+}
+
+func (s *Service) stageContactRecordPush(verified verifiedContactMinSessionRecord, guard *contactRecordStageAuthority) (contactRecordStage, error) {
+	if guard == nil || guard.admission == nil || guard.ctx == nil {
+		return contactRecordStage{}, errContactRecordEvidence
+	}
+	return s.stageContactRecordWithAuthority(guard.ctx, verified, guard, nil)
+}
+
+func (s *Service) stageContactRecordWithAuthority(ctx context.Context, verified verifiedContactMinSessionRecord, guard *contactRecordStageAuthority, reconciliation *contactRecordReconciliationAuthority) (contactRecordStage, error) {
+	if guard != nil && reconciliation != nil {
+		return contactRecordStage{}, errContactRecordEvidence
+	}
 	candidate := verified.candidate
 	if candidate == nil {
 		return contactRecordStage{}, errContactRecordEvidence
@@ -196,7 +210,7 @@ func (s *Service) stageContactRecord(ctx context.Context, verified verifiedConta
 	if candidate.service != s || !candidate.verified || candidate.rejected {
 		return contactRecordStage{}, errContactRecordEvidence
 	}
-	if candidate.staged.disposition != contactRecordStageInvalid {
+	if guard == nil && reconciliation == nil && candidate.staged.disposition != contactRecordStageInvalid {
 		return candidate.staged, nil
 	}
 	if candidate.trust != s.trust || candidate.store != s.localContactPinStore() {
@@ -205,11 +219,29 @@ func (s *Service) stageContactRecord(ctx context.Context, verified verifiedConta
 	if err := ctx.Err(); err != nil {
 		return contactRecordStage{}, err
 	}
-	files, err := candidate.store.openIdentityPinFiles()
-	if err != nil {
-		return contactRecordStage{}, err
+	var files identityPinDurableFiles
+	if guard != nil {
+		if guard.service != s || guard.candidate != candidate || guard.admission == nil || guard.admission.service != s || guard.resolver != guard.admission.resolver || guard.network != candidate.network || !guard.admission.admitsContactPush() {
+			return contactRecordStage{}, errContactRecordEvidence
+		}
+		files = guard.admission.kFiles
 	}
-	defer func() { _ = files.Close() }()
+	if reconciliation != nil {
+		if reconciliation.service != s || reconciliation.candidate != candidate || reconciliation.admission == nil || reconciliation.resolver != reconciliation.admission.resolver || !reconciliation.admission.admitsContactReconciliation() || reconciliation.network != candidate.network {
+			return contactRecordStage{}, errContactRecordEvidence
+		}
+		files = reconciliation.admission.kFiles
+	}
+	if files == nil {
+		owned, err := candidate.store.openIdentityPinFiles()
+		if err != nil {
+			return contactRecordStage{}, err
+		}
+		files = owned
+		defer func() { _ = owned.Close() }()
+	}
+	// Borrowed fixture files remain fixture-owned. No cancellation claims a close.
+
 	if err := files.Preflight(ctx); err != nil {
 		return contactRecordStage{}, err
 	}
@@ -223,7 +255,7 @@ func (s *Service) stageContactRecord(ctx context.Context, verified verifiedConta
 	s.trust.mu.RLock()
 	row := s.trust.contacts[candidate.fact.identity.String()]
 	current, present := s.trust.records[trustRecordKey{network: candidate.network.String(), address: candidate.fact.identity.String()}]
-	valid := s.trust.authorityReadErr == nil && candidate.fact.matches(row.LocalContact, s.trust) && row.LocalContact.confirmed == row.LocalContact.revision && present && current.record.Version == candidate.record.Version && bytes.Equal(current.record.Body, candidate.record.Body) && current.body.Seq == candidate.sequence
+	valid := s.trust.authorityReadErr == nil && candidate.fact.matches(row.LocalContact, s.trust) && row.LocalContact.confirmed == row.LocalContact.revision && present && current.record.Version == candidate.record.Version && bytes.Equal(current.record.Body, candidate.record.Body) && bytes.Equal(current.record.Sig, candidate.record.Sig) && current.body.Seq == candidate.sequence
 	s.trust.mu.RUnlock()
 	if !valid {
 		candidate.rejected = true
@@ -234,44 +266,135 @@ func (s *Service) stageContactRecord(ctx context.Context, verified verifiedConta
 	if err := ctx.Err(); err != nil {
 		return contactRecordStage{}, err
 	}
-	stage, err := store.stageContactRecordLocked(candidate)
+	prepared := store.prepareContactRecordStageLocked(candidate)
+	// All earlier locks remain held uninterrupted. No clock/Restore under leaf.
+	if guard != nil {
+		a := guard.admission
+		a.kStageMu.Lock()
+		defer a.kStageMu.Unlock()
+		if !guard.validForStageLocked(s, candidate) {
+			return contactRecordStage{}, domain.ErrLocalContactFactStale
+		}
+	}
+	if reconciliation != nil {
+		a := reconciliation.admission
+		a.kStageMu.Lock()
+		defer a.kStageMu.Unlock()
+		if !reconciliation.validForReconciliationStageLocked(s, candidate) {
+			return contactRecordStage{}, domain.ErrLocalContactFactStale
+		}
+	}
+	stage, err := store.stageContactRecordLocked(candidate, prepared)
 	if err != nil {
 		return contactRecordStage{}, err
 	}
 	// Publish owed ownership in this same serialized operation. No later context
 	// error may hide a real staged protection or turn its ticket into zero.
 	candidate.staged = stage
+	if guard != nil {
+		guard.staged = true
+	}
+	if reconciliation != nil {
+		reconciliation.staged = true
+	}
 	return stage, nil
 }
 
-// stageContactRecordLocked requires store.mu, removal read gate and the trust
-// evidence read gate. No I/O, callback or recursive public lock facade occurs.
-func (s *secureSessionStore) stageContactRecordLocked(candidate *contactRecordCandidate) (contactRecordStage, error) {
+// A sealed input, not admission authority. Only preparation constructs it while
+// store/removal/evidence locks remain uninterrupted through final publication.
+type preparedContactRecordStage struct {
+	candidate   *contactRecordCandidate
+	store       *secureSessionStore
+	identity    domain.PeerIdentity
+	observed    pinOwnerObservation
+	original    identityPinEntry
+	present     bool
+	recovery    *identityPinRecoveryState
+	permit      *domain.IdentityPinRemovalPermit
+	permitValue domain.IdentityPinRemovalPermit
+	entry       identityPinEntry
+	metadata    domain.IdentityPinMetadata
+	err         error
+}
+
+func (s *secureSessionStore) prepareContactRecordStageLocked(candidate *contactRecordCandidate) preparedContactRecordStage {
+	p := preparedContactRecordStage{candidate: candidate, store: s}
+	if candidate == nil || !candidate.verified || candidate.store != s {
+		p.err = errContactRecordEvidence
+		return p
+	}
+	if err := s.pinMetadataMutationRefusalLocked(); err != nil {
+		p.err = err
+		return p
+	}
+	if !candidate.observed.matchesLocked(s) {
+		p.err = errPinMetadataSnapshotStale
+		return p
+	}
+	p.identity, p.observed = candidate.fact.identity, candidate.observed
+	p.original, p.present = s.identities[p.identity]
+	p.entry, p.metadata, p.recovery = p.original, p.original.classMetadata(), s.pinRecovery
+	if p.recovery != nil {
+		p.permit = p.recovery.permit
+		if p.permit != nil {
+			p.permitValue = *p.permit
+		}
+	}
+	if !p.present {
+		if s.identityPinAdmissionFullLocked(p.identity) {
+			p.err = errPinStoreFull
+			return p
+		}
+		// Preserve the original clock -> exact Backup.Restore ordering, even refusal.
+		p.entry.pinnedAt = s.now()
+		if p.permit != nil && p.permitValue.Binding.Identity == p.identity {
+			binding := p.permitValue.Binding
+			backup, err := binding.Backup.Restore(p.identity, binding.PreviousPinnedAt)
+			if err != nil {
+				p.err = err
+				return p
+			}
+			p.metadata, p.entry.pinnedAt = backup.Metadata, backup.PinnedAt
+		}
+	}
+	return p
+}
+func (p preparedContactRecordStage) matchesLocked(s *secureSessionStore, candidate *contactRecordCandidate) bool {
+	if p.store != s || p.candidate != candidate || p.identity != candidate.fact.identity || p.observed != candidate.observed || !p.observed.matchesLocked(s) || p.recovery != s.pinRecovery {
+		return false
+	}
+	entry, present := s.identities[p.identity]
+	if present != p.present || entry != p.original {
+		return false
+	}
+	if p.recovery == nil {
+		return p.permit == nil
+	}
+	return p.recovery.permit == p.permit && (p.permit == nil || *p.permit == p.permitValue)
+}
+
+// Requires store.mu/removal/evidence and (for K ingress) the final leaf. These
+// callees only validate values, allocate COW metadata and update bounded maps:
+// pinMetadataMutationRefusalLocked, observed.matchesLocked, classMetadata,
+// identityPinAdmissionFullLocked, existingContactRecordStageLocked, Validate,
+// setUnpublishedMetadata, putPinEntryLocked (including relation tally helpers).
+// No clock, Restore, decode/hash, callback, I/O, notification or owner lock here.
+func (s *secureSessionStore) stageContactRecordLocked(candidate *contactRecordCandidate, prepared preparedContactRecordStage) (contactRecordStage, error) {
+	if prepared.err != nil {
+		return contactRecordStage{}, prepared.err
+	}
 	if candidate == nil || !candidate.verified || candidate.store != s {
 		return contactRecordStage{}, errContactRecordEvidence
 	}
 	if err := s.pinMetadataMutationRefusalLocked(); err != nil {
 		return contactRecordStage{}, err
 	}
-	if !candidate.observed.matchesLocked(s) {
+	if !prepared.matchesLocked(s, candidate) {
 		return contactRecordStage{}, errPinMetadataSnapshotStale
 	}
-	id := candidate.fact.identity
-	entry, present := s.identities[id]
-	metadata := entry.classMetadata()
-	if !present {
-		if s.identityPinAdmissionFullLocked(id) {
-			return contactRecordStage{}, errPinStoreFull
-		}
-		entry.pinnedAt = s.now()
-		if s.pinRecovery != nil && s.pinRecovery.permit != nil && s.pinRecovery.permit.Binding.Identity == id {
-			binding := s.pinRecovery.permit.Binding
-			backup, err := binding.Backup.Restore(id, binding.PreviousPinnedAt)
-			if err != nil {
-				return contactRecordStage{}, err
-			}
-			metadata, entry.pinnedAt = backup.Metadata, backup.PinnedAt
-		}
+	id, entry, present, metadata := prepared.identity, prepared.entry, prepared.present, prepared.metadata
+	if !present && s.identityPinAdmissionFullLocked(id) {
+		return contactRecordStage{}, errPinStoreFull
 	}
 
 	if present && metadata.Contact.State == domain.IdentityPinAllocationEligible {
@@ -482,4 +605,15 @@ func (s *Service) mirrorContactRecordOwner(state *contactRecordOwedState, mirror
 	entry.metadata = &metadata
 	store.putPinEntryLocked(owed.binding.identity, entry)
 	return nil
+}
+
+// Caller holds kStageMu last, after all current-record/store/preparation waits.
+// ctx is our context.WithCancel child, never a caller-implemented Err method.
+func (guard *contactRecordStageAuthority) validForStageLocked(s *Service, candidate *contactRecordCandidate) bool {
+	a := guard.admission
+	if a == nil || int(guard.index) >= len(a.slots) {
+		return false
+	}
+	slot := &a.slots[guard.index]
+	return slot.kAuthority == guard && slot.generation == guard.generation && slot.processing && slot.phase == relationAdmissionImmediateKProcessing && a.admitsContactPush() && a.classes.valid() && a.kReady && !a.kClosing && !guard.revoked && !guard.finished && !guard.staged && guard.ctx.Err() == nil && guard.service == s && guard.resolver == a.resolver && a.service == s && guard.network == a.network && candidate == guard.candidate && candidate != nil && candidate.service == s && candidate.network == guard.network && candidate.store == s.localContactPinStore()
 }

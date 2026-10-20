@@ -217,6 +217,8 @@ func (s *Service) maybeSavePeerState() {
 
 // flushPeerState builds a snapshot from in-memory state and writes it to disk.
 func (s *Service) flushPeerState() {
+	// Historical statistics only: unavailable/partial preserves the original prior tuple.
+	liveStatistic, _ := s.captureOverlayDWinForFlush()
 	// Snapshot peerProvider metadata OUTSIDE s.peerMu.  PeerProvider.Candidates()
 	// runs under pp.mu.RLock and calls back into Service via RemoteBannedFn
 	// / BannedIPsFn, which take s.peerMu.RLock and s.ipStateMu.RLock — that
@@ -243,6 +245,8 @@ func (s *Service) flushPeerState() {
 	s.peerStateDirty = false
 	entries := s.buildPeerEntriesLocked(providerSnap)
 	path := s.peersStatePath
+	s.overlayDWin = selectOverlayDegreeStatistic(s.overlayDWin, liveStatistic, time.Now().UTC())
+	overlayHint := s.overlayDWin
 
 	// Snapshot IP-wide bans, filtering out expired entries.  bannedIPSet
 	// and remoteBannedIPs live in the IP/advertise domain; nest
@@ -284,6 +288,9 @@ func (s *Service) flushPeerState() {
 	s.peerMu.Unlock()
 	log.Trace().Str("site", "flushPeerState").Str("phase", "lock_released_mid").Msg("peer_mu_writer")
 
+	// Revalidate the copied statistic after peer/IP locks. Keep its original
+	// observation instant; UpdatedAt is a separate file-write timestamp.
+	overlayHint = freshOverlayDegreeStatistic(overlayHint, time.Now().UTC())
 	sortAddressEntries(entries, now)
 
 	// The guard set is read here rather than pushed in by its owner: this is
@@ -293,6 +300,7 @@ func (s *Service) flushPeerState() {
 	state := peerStateFile{
 		Version:             peerStateVersion,
 		Peers:               entries,
+		OverlayDWin:         overlayDegreeHint{stat: overlayHint},
 		BannedIPs:           bannedIPs,
 		RemoteBannedIPs:     remoteBannedIPs,
 		FirstHopGuards:      firstHopGuardRows(s.firstHopGuardEntries()),
@@ -2541,6 +2549,7 @@ func (s *Service) peerIsClientNode(address domain.PeerAddress) bool {
 func (s *Service) readPeerSession(reader *bufio.Reader, session *peerSession) {
 	defer crashlog.DeferRecover()
 	defer session.eligibilityEnded.Store(true)
+	defer session.endProofTransport()
 	for {
 		// The RAW per-neighbour budget is applied AROUND this read, not after
 		// it: readAdmittedSessionLine stops at protocol.MaxFrameLine unless the
@@ -2565,6 +2574,7 @@ func (s *Service) readPeerSession(reader *bufio.Reader, session *peerSession) {
 			continue
 		}
 		if err != nil {
+			session.endProofTransport()
 			session.eligibilityEnded.Store(true)
 			if err == io.EOF {
 				log.Debug().Str("peer", string(session.address)).
@@ -2601,6 +2611,7 @@ func (s *Service) readPeerSession(reader *bufio.Reader, session *peerSession) {
 		// then be told the frame was never admissible.
 		dropped, fatal := s.refuseUnadmissibleFrameLine(session, line)
 		if fatal != nil {
+			session.endProofTransport()
 			select {
 			case session.errCh <- fatal:
 			default:
@@ -2698,6 +2709,7 @@ func (s *Service) readPeerSession(reader *bufio.Reader, session *peerSession) {
 		select {
 		case session.inboxCh <- frame:
 		default:
+			session.endProofTransport()
 			select {
 			case session.errCh <- fmt.Errorf("%w for %s", errPeerSessionInboxOverflow, session.address):
 			default:
@@ -2706,6 +2718,7 @@ func (s *Service) readPeerSession(reader *bufio.Reader, session *peerSession) {
 		}
 		if authReplyPending {
 			if err := session.readiness.wait(); err != nil {
+				session.endProofTransport()
 				select {
 				case session.errCh <- fmt.Errorf("%w: outbound handshake readiness: %w", errDialAbortedLocally, err):
 				default:
@@ -6129,6 +6142,9 @@ func (s *Service) activePeerSession(address domain.PeerAddress) (*peerSession, b
 // If the peer does not respond within pongStallTimeout after a ping, the
 // connection is closed — same semantics as outbound session heartbeats.
 func (s *Service) inboundHeartbeat(id domain.ConnID, address domain.PeerAddress, stop <-chan struct{}) {
+	s.inboundHeartbeatOwned(id, address, stop, nil)
+}
+func (s *Service) inboundHeartbeatOwned(id domain.ConnID, address domain.PeerAddress, stop <-chan struct{}, owner *proofTransportOwner) {
 	defer crashlog.DeferRecover()
 	liveness := s.sessionLiveness()
 	timer := time.NewTimer(liveness.listenerPingDelay())
@@ -6170,6 +6186,7 @@ func (s *Service) inboundHeartbeat(id domain.ConnID, address domain.PeerAddress,
 				return
 			}
 			if !pongReceived {
+				owner.end()
 				log.Warn().Str("peer", string(address)).Msg("inbound heartbeat failed, peer stalled — closing connection")
 				// Force-disconnect via netcore.Network so the registry
 				// (live bridge or netcoretest.Backend) owns the close;
@@ -6203,29 +6220,8 @@ func (s *Service) evictStaleInboundConns() {
 	now := time.Now().UTC()
 	stallThreshold := s.sessionLiveness().inboundSessionIdle
 
-	type staleEntry struct {
-		id     domain.ConnID
-		addr   domain.PeerAddress
-		ident  domain.PeerIdentity
-		remote string
-	}
-
 	s.peerMu.RLock()
-	var stale []staleEntry
-	s.forEachInboundConnLocked(func(info connInfo) bool {
-		if info.lastActivity.IsZero() {
-			return true
-		}
-		if now.Sub(info.lastActivity) >= stallThreshold {
-			stale = append(stale, staleEntry{
-				id:     info.id,
-				addr:   info.address,
-				ident:  info.identity,
-				remote: info.remoteAddr,
-			})
-		}
-		return true
-	})
+	stale := s.staleInboundTerminalsLocked(now, stallThreshold)
 	s.peerMu.RUnlock()
 
 	ctx := context.Background()

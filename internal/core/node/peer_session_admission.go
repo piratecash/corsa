@@ -912,6 +912,9 @@ func (s *Service) refuseOverBudgetSessionLine(
 // argued there.
 func (s *Service) punishSessionAdmission(session *peerSession, reason, claimed string, size int) error {
 	score, tearDown := session.admission.recordViolation()
+	if tearDown {
+		session.endProofTransport()
+	}
 	event := log.Warn().
 		Str("peer", string(session.address)).
 		Str("peer_identity", session.peerIdentity.String()).
@@ -975,6 +978,9 @@ func (s *Service) refuseUnsolicitedReplyLine(session *peerSession, claimed strin
 // depended on the caller acting would be a teardown that mostly did not happen.
 func (s *Service) refuseOversizeContactsReply(session *peerSession, offered int) error {
 	score, tearDown := session.admission.recordViolation()
+	if tearDown {
+		session.endProofTransport()
+	}
 	event := log.Warn().
 		Str("peer", string(session.address)).
 		Str("peer_identity", session.peerIdentity.String()).

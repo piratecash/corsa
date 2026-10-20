@@ -171,6 +171,31 @@ func extractSwitchCasesFromFunc(t *testing.T, funcName string) map[string]bool {
 		t.Fatalf("parse service.go: %v", err)
 	}
 
+	if funcName == "dispatchNetworkFrame" {
+		var wrapper *ast.FuncDecl
+		for _, decl := range node.Decls {
+			if fn, ok := decl.(*ast.FuncDecl); ok && fn.Name.Name == funcName {
+				wrapper = fn
+			}
+		}
+		if wrapper == nil || wrapper.Body == nil || len(wrapper.Body.List) != 1 {
+			t.Fatal("network dispatch wrapper must delegate exactly once")
+		}
+		ret, ok := wrapper.Body.List[0].(*ast.ReturnStmt)
+		if !ok || len(ret.Results) != 1 {
+			t.Fatal("network dispatch wrapper changed")
+		}
+		call, ok := ret.Results[0].(*ast.CallExpr)
+		if !ok || len(call.Args) != 3 {
+			t.Fatal("network dispatch wrapper call changed")
+		}
+		callee, ok := call.Fun.(*ast.SelectorExpr)
+		last, isNil := call.Args[2].(*ast.Ident)
+		if !ok || callee.Sel.Name != "dispatchNetworkFrameOwned" || !isNil || last.Name != "nil" {
+			t.Fatal("ordinary network dispatch must delegate to actual owned body with nil")
+		}
+		funcName = "dispatchNetworkFrameOwned"
+	}
 	cases := make(map[string]bool)
 	var insideFunc bool
 

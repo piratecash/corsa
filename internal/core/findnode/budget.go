@@ -8,7 +8,7 @@ import (
 )
 
 // PairKey keeps one source SESSION and an exact target IDENTITY, not a target
-// connection. A future bounded registry MUST use this key across target links.
+// connection. An enclosing bounded registry must retain that identity key.
 type PairKey struct {
 	source Session
 	target domain.PeerIdentity
@@ -23,7 +23,8 @@ func NewPairKey(source Session, target domain.PeerIdentity) (PairKey, error) {
 
 // PairWindow is one caller-owned (proven source session, exact target) gate.
 // It has three timestamps and no attacker-keyed map. Registry lifetime and
-// bounded distinct-target accounting belong to the future enclosing admission.
+// bounded distinct-target accounting belong to enclosing admission. The private
+// inactive A-owner uses its own atomic fixed histories, not this mutable object.
 type PairWindow struct {
 	key   PairKey
 	mu    sync.Mutex
@@ -244,6 +245,15 @@ type combinedForwardPlan struct {
 // planCombinedLocked requires c.mu. It never publishes virtual actual debt.
 // All remaining aliases belong to the private enclosing owner's pending rows.
 func (c *ForwardCalendar) planCombinedLocked(now, latest Instant) (combinedForwardPlan, error) {
+	return c.planCombinedFloorLocked(now, latest, now)
+}
+
+// planCombinedFloorLocked preserves the real clock/deadline checks. A source
+// floor is only a projected lower bound, never the timestamp of a charge.
+func (c *ForwardCalendar) planCombinedFloorLocked(now, latest, sourceFloor Instant) (combinedForwardPlan, error) {
+	if sourceFloor < now {
+		return combinedForwardPlan{}, ErrInvalid
+	}
 	if now < 0 || now < c.last {
 		return combinedForwardPlan{}, ErrClock
 	}
@@ -272,7 +282,7 @@ func (c *ForwardCalendar) planCombinedLocked(now, latest Instant) (combinedForwa
 	if err != nil {
 		return combinedForwardPlan{}, err
 	}
-	projected, at, err := c.projected.project(max(now, floor))
+	projected, at, err := c.projected.project(max(now, floor, sourceFloor))
 	if err != nil {
 		return combinedForwardPlan{}, err
 	}
@@ -298,4 +308,62 @@ func (c *ForwardCalendar) retireableLocked(now Instant) bool {
 	projected.refill(now)
 	actual.refill(now)
 	return projected.tokens == forwardBurst && actual.tokens == forwardBurst
+}
+
+// candidatePairHistory is a value trial, never a separately retained registry.
+// Equal-to-window events have expired; future events cannot be spent early.
+type candidatePairHistory struct {
+	times [3]Instant
+	count int
+}
+
+const candidatePairWindow = Instant(30 * time.Second)
+
+func (h candidatePairHistory) candidatePairTrial(at Instant) (candidatePairHistory, error) {
+	if at < 0 || h.count < 0 || h.count > len(h.times) {
+		return candidatePairHistory{}, ErrClock
+	}
+	if h.count != 0 && at < h.times[h.count-1] {
+		return candidatePairHistory{}, ErrClock
+	}
+	next := candidatePairHistory{}
+	for i := 0; i < h.count; i++ {
+		if h.times[i] < 0 || (i > 0 && h.times[i] < h.times[i-1]) {
+			return candidatePairHistory{}, ErrInvalid
+		}
+		if at-h.times[i] < candidatePairWindow {
+			next.times[next.count] = h.times[i]
+			next.count++
+		}
+	}
+	if next.count == len(next.times) {
+		return candidatePairHistory{}, ErrBudget
+	}
+	next.times[next.count] = at
+	next.count++
+	return next, nil
+}
+
+func (h candidatePairHistory) candidatePairProject(now Instant) (candidatePairHistory, Instant, error) {
+	if now < 0 || h.count < 0 || h.count > len(h.times) {
+		return candidatePairHistory{}, 0, ErrClock
+	}
+	at := now
+	if h.count != 0 {
+		at = max(at, h.times[h.count-1])
+	}
+	next, err := h.candidatePairTrial(at)
+	if err == ErrBudget {
+		at, err = h.times[0].plus(candidatePairWindow)
+		if err != nil {
+			return candidatePairHistory{}, 0, err
+		}
+		at = max(at, now)
+		next, err = h.candidatePairTrial(at)
+	}
+	return next, at, err
+}
+
+func (h candidatePairHistory) candidatePairExpired(now Instant) bool {
+	return h.count == 0 || (h.count > 0 && h.count <= len(h.times) && now >= h.times[h.count-1] && now-h.times[h.count-1] >= candidatePairWindow)
 }

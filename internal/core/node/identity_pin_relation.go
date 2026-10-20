@@ -169,6 +169,20 @@ func (s *secureSessionStore) stageRelationRecordLocked(observed pinOwnerObservat
 	if !observed.matchesLocked(s) {
 		return relationPinStage{}, errPinMetadataSnapshotStale
 	}
+	return s.stageClassifiedRelationRecordLocked(observed, domain.IdentityPinOriginUserLookup, domain.IdentityPinEvidenceReference(record.evidence.question.label.String()))
+}
+
+// Both typed validators converge here; no caller supplies an unchecked origin.
+func (s *secureSessionStore) stageClassifiedRelationRecordLocked(observed pinOwnerObservation, origin domain.IdentityPinOrigin, reference domain.IdentityPinEvidenceReference) (relationPinStage, error) {
+	if err := s.pinMetadataMutationRefusalLocked(); err != nil {
+		return relationPinStage{}, err
+	}
+	if !observed.matchesLocked(s) {
+		return relationPinStage{}, errPinMetadataSnapshotStale
+	}
+	if origin != domain.IdentityPinOriginUserLookup && origin != domain.IdentityPinOriginOutgoingSend && origin != domain.IdentityPinOriginProvenNextHop {
+		return relationPinStage{}, errRelationPinRecord
+	}
 	id := observed.identity
 	entry, present := s.identities[id]
 	metadata := entry.classMetadata()
@@ -197,7 +211,7 @@ func (s *secureSessionStore) stageRelationRecordLocked(observed pinOwnerObservat
 	}
 	next := metadata
 	if next.Relation.State != domain.IdentityPinAllocationEligible {
-		next.Relation = domain.IdentityPinAllocation{State: domain.IdentityPinAllocationEligible, Origin: domain.IdentityPinOriginUserLookup, At: s.now(), Reference: domain.IdentityPinEvidenceReference(record.evidence.question.label.String())}
+		next.Relation = domain.IdentityPinAllocation{State: domain.IdentityPinAllocationEligible, Origin: origin, At: s.now(), Reference: reference}
 	}
 	if err := next.Validate(); err != nil {
 		return relationPinStage{}, err

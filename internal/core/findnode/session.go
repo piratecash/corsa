@@ -48,13 +48,13 @@ func (at Instant) plus(delta Instant) (Instant, error) {
 
 type Session struct{ state *sessionState }
 type sessionState struct {
-	proof                           sessionv2.ProvenSession
 	connID                          domain.ConnID
 	identity                        domain.PeerIdentity
 	identityProof                   sessionv2.ProvenIdentity
 	group                           domain.SourceGroup
 	opened                          Instant
 	closed                          atomic.Bool
+	sourceWindows                   atomic.Pointer[candidateSourceWindows]
 	mu                              sync.Mutex
 	nextID                          domain.FindNodeRequestID
 	exhausted                       bool
@@ -62,26 +62,46 @@ type sessionState struct {
 	signingProjected, signingActual forwardBucket
 }
 
-// NewSession derives identity only from this handshake. The future adapter must
-// bind connID/group/opened to the actual reader connection, use node.sourceGroup
-// on its reached address, and retain ONE Session per connection. Advertised
-// addresses and a bare claimed identity are never accepted as a proof.
-func NewSession(proven sessionv2.ProvenSession, connID domain.ConnID, group domain.SourceGroup, opened Instant, local []domain.Capability) (Session, error) {
+// SessionSeed captures proof and negotiated capabilities at the handshake. Copies
+// share a one-shot latch; neither the seed nor Session retains TLS/Conn aliases.
+type SessionSeed struct{ state *sessionSeedState }
+type sessionSeedState struct {
+	identity domain.PeerIdentity
+	proof    sessionv2.ProvenIdentity
+	consumed atomic.Bool
+}
+
+func PrepareSession(proven sessionv2.ProvenSession, local []domain.Capability) (SessionSeed, error) {
 	peer, err := proven.Peer()
 	if err != nil {
-		return Session{}, ErrUnauthenticated
+		return SessionSeed{}, ErrUnauthenticated
 	}
 	proof, ok := peer.Proof()
-	if !ok {
-		return Session{}, ErrUnauthenticated
+	if !ok || !slices.Contains(local, domain.CapOverlayFindNodeV1) || !slices.Contains(peer.Intro.Capabilities, string(domain.CapOverlayFindNodeV1)) {
+		return SessionSeed{}, ErrUnauthenticated
 	}
-	if !slices.Contains(local, domain.CapOverlayFindNodeV1) || !slices.Contains(peer.Intro.Capabilities, string(domain.CapOverlayFindNodeV1)) {
+	return SessionSeed{state: &sessionSeedState{identity: peer.Identity, proof: proof}}, nil
+}
+func (seed SessionSeed) Bind(connID domain.ConnID, group domain.SourceGroup, opened Instant) (Session, error) {
+	if seed.state == nil {
 		return Session{}, ErrUnauthenticated
 	}
 	if connID == 0 || group == "" || opened < 0 {
 		return Session{}, ErrInvalid
 	}
-	return Session{state: &sessionState{proof: proven, connID: connID, identity: peer.Identity, identityProof: proof, group: group, opened: opened}}, nil
+	if !seed.state.consumed.CompareAndSwap(false, true) {
+		return Session{}, ErrInvalid
+	}
+	return Session{state: &sessionState{connID: connID, identity: seed.state.identity, identityProof: seed.state.proof, group: group, opened: opened}}, nil
+}
+
+// NewSession preserves proof/capability/argument validation of the original API.
+func NewSession(proven sessionv2.ProvenSession, connID domain.ConnID, group domain.SourceGroup, opened Instant, local []domain.Capability) (Session, error) {
+	seed, err := PrepareSession(proven, local)
+	if err != nil {
+		return Session{}, err
+	}
+	return seed.Bind(connID, group, opened)
 }
 func (s Session) valid() bool { return s.state != nil && !s.state.closed.Load() }
 func (s Session) ConnID() domain.ConnID {
@@ -96,11 +116,12 @@ func (s Session) Identity() domain.PeerIdentity {
 	}
 	return s.state.identity
 }
-func (s Session) close() {
+func (s Session) End() {
 	if s.state != nil {
 		s.state.closed.Store(true)
 	}
 }
+func (s Session) close() { s.End() }
 func (s Session) allocateID() (domain.FindNodeRequestID, error) {
 	s.state.mu.Lock()
 	defer s.state.mu.Unlock()
@@ -155,8 +176,9 @@ type SessionInfo struct {
 
 // PrioritySource is an explicit authoritative class port. It must read K/N-sel/
 // N-in classification, never infer a class from the group or create pin state.
-// The current pin store has no complete C5 class provider; no production port
-// is installed by this package. Calls occur before taking any state mutex.
+// A private node candidate may synchronously capture current strict classes for
+// registered F1 members; that bounded observation is not online R/T admission.
+// No production port is installed here. Calls precede every state mutex.
 type PrioritySource func(SessionInfo) (SessionClass, error)
 type PrioritySnapshot struct {
 	target     domain.PeerIdentity

@@ -2,6 +2,23 @@
 
 ## English
 
+### Inactive K original-push stage
+
+K admission classes are immutable; the unused private Service candidate alone selects K. Original
+push reservation uses resolver.mu -> kStageMu and shared256 Processing capacity. Stage follows
+candidate.mu -> trustMutationMu -> pinMutationGate.R -> pinEvidenceMu.R -> brief trust.mu.R (released)
+-> store.mu -> kStageMu. Clock and exact recovery Backup.Restore preparation precede the leaf while
+store/removal/evidence stay locked; full entry/permit bindings are compared without decode/hash. The
+leaf performs only value validation, bounded COW/tallies and authoritative owed publication, with a
+standard internally-created context check after its last wait. No leaf -> earlier owner-lock edge,
+backend I/O, clock, crypto, Restore or notification. Nil-guard foundation shares the same memory body.
+Shutdown resolver.mu -> leaf revokes pending authority, retains Processing slots, releases locks and
+only then invokes captured cancellation functions. Actual callback return releases capacity; actual
+connWg/runLoopsWg joins prove transport completion. K close LIFO precedes inbound drain. Fixture-owned
+borrowed durable files can hold Preflight outside these locks, but every production factory supplies
+nil; neither cancellation nor borrowed Preflight success is an I/O join or durable ACK.
+
+
 ### Runtime and ban diagnostics (T5 A4/R1)
 
 `RuntimeMetrics` reads process runtime counters without Service locks. `banDiagnosticsSnap` is an
@@ -713,7 +730,46 @@ actual worker join one StoppedOwed head may remain in the same closed slot,
 without raw/action/resolution/seq-floor replay authority. No default worker,
 activation, across-restart owed replay or resource acceptance is asserted.
 
+### Inactive original inbound lifetime ownership (N1)
+
+Ordinary Service construction leaves `inboundPins` nil. The private unused factory publishes that immutable pointer only after valid format3 load and strict-backend preflight, before sharing the Service. Its one run-loop owner joins producer exit; `passMu` serializes one synchronous attempt, cursor and current selection. A cap1 wake never bypasses the relative retry deadline. Actual runtime wrappers pass nil into shared runWithFiles/attempt; only a private fixture lends the existing typed strict-files port until synchronous join. No backend is retained in the producer. Real Run cancellation/join and common scheduler timing are separate test oracles. No per-session worker/timer, new registry or outgoing-queue field is added.
+
+`peerMu → original lifetime.mu` protects exact R/T/W/entry/ConnID binding, capture and publication. Publication reads the SAME immutable N0 elapsed leaf AFTER both mutex waits and final auth validation, then commits ready/Published without another wait. This is only the trusted nonreentrant memory/clock leaf exception: no arbitrary callback, signature verification, network/filesystem I/O or logging is allowed there. Selection releases peerMu before paired admission or strict work. End holds lifetime.mu only, clears authority chains and never calls back to Service/store, logs, does I/O or joins another owner.
+
+Paired admission remains `pinMutationGate.R → lifetime.mu → store.mu`; strict confirmation uses `pinMutationGate.R → writeMu → store.mu`; C3 uses W→writeMu→store.mu. Strict never takes lifetime.mu. End-first forbids allocation; stage-first retains its paired content and strict obligation. Pending alone is not owed earned metadata. No store→peer/lifetime reverse edge is introduced; the producer releases store.mu before registry selection. Snapshot encoding and strict I/O occur outside peer/lifetime/store mutexes.
+
+Original raw and decoded wrappers share one optional leaf, fixed before exposure. Read/Write errors and Close End before delegated/diagnostic work. The handler's End defer runs BEFORE heartbeat join. All owned bodies use the captured handle; incoming context stays on the synchronous dispatch→pipeline→push stack. Existing background initial-push/heartbeat closures capture that original leaf rather than a fresh ID lookup. Terminal aliases retain no proof/socket/store/entry chain. Existing jobs are a separate J term, not proved bounded by live B sessions.
+
+Bound SEND captures core+original leaf in one peerMu section. Eviction Ends its captured SEND owner before diagnostics; actual Close separately selects and Ends its current target under peerMu, releases peerMu, then closes the captured core. Immutable send/close selection values retain respectively core+original handle / core only, with no Service, ConnID or callback for completion-time relookup. Their shallow costs are two pointers / one pointer, in addition to existing concurrent callers; this is not a bound on the number of callers. Stale collection uses its existing single temporary slice and Ends the actual selected owners before warnings; loopback condemnation releases its own leaf before End while peerMu still fixes selection. Push repeat-rate warning runs after limiter unlock and original End. No logging or signature verification is newly moved under lifetime/store locks; bounded N0 expiry/copy work retains its documented cost. Cooperative timeouts do not forcibly interrupt kernel-blocked I/O.
+
+### Inactive F1 proof-transport foundation
+
+The private, unused FindNode factory composes a memory-only transport adapter. Ordinary constructors leave it nil and still advertise neither overlay capability. It installs no handler, admission, class provider, worker, signer or socket writer. Explicit-cap genuine TLS fixtures do not change production hello/welcome capabilities. A canonical `SessionSeed` captures actual local/remote negotiated facts immediately after Accept/Dial; copies share one consumption latch. Invalid Bind arguments do not consume it. The seed and Session retain identity proof values, not a full TLS ProvenSession or connection. End closes the one canonical Session without refund or I/O.
+
+One `proofTransportLifetime.mu` orders original terminal, accepted/CM publication and the independent N-in companion. Raw R and decoded W, the registry and the outbound peer alias the SAME cell. An atomic provisional terminal latch plus bind-once CAS covers Read/Write/Close before the cell is attached; it cannot mint proof. End clears proof/socket/entry/peer/store chains before existing blocking diagnostics. Accepted and dialled datagrams capture an original terminal-only arrival capsule before the synchronous pipeline; outbound initial push captures its original owner before background scheduling. No current-ID/address lookup substitutes another transport.
+
+Accepted publication follows actual auth. Outbound publication follows the CM generation-accepted callback, successful setup/registration and the legacy-pin recheck, immediately before SessionInitReady. It samples independent monotonic elapsed time AFTER owner-lock waits. The coverage is only **registered accepted and CM post-setup readers**; it excludes one-shot/unregistered readers and does not claim complete overlay admission or already-consumed CM Active. CM deactivation/stale-success refusal Ends the selected original session before later teardown diagnostics.
+
+FindNode observes registry keys through `forEachConnIDLocked` and resolves each with `connEntryByIDLocked` while the same `peerMu.RLock` remains held. The ID-only walker includes registered nil-core entries and exposes no core or retained inventory. Each original lifetime check still takes `common.mu` under `peerMu`; cancellation returns no partial snapshot. CM publication uses the same point-lookup facade under its unchanged `peerMu` → `common.mu` critical section.
+
+N-in remains listener-only, with the same original mandatory pin/incarnation, ten-minute continuous lifetime, source-group journal/debit, strict ACK and owed-work semantics. A dialler has no N-in companion. An N-in clock failure cannot mint its class or suppress a separately valid F1 publication. No limits, activation, resource admission or release gates change. One cell/optional companion per original transport and an on-demand O(current registered readers) snapshot are structural costs; TLS evidence before publication, snapshot allocations, external delayed handles and full process/heap costs remain additional.
+
 ## Russian
+
+### Неактивный K stage исходного push
+
+Классы admission immutable; только неиспользуемый private Service candidate выбирает K. Reservation
+держит resolver.mu -> kStageMu, physical256 включает Processing. Stage: candidate.mu -> trustMutationMu
+-> pinMutationGate.R -> pinEvidenceMu.R -> краткий trust.mu.R (освобождён) -> store.mu -> kStageMu.
+Clock и exact Backup.Restore выполняются ДО leaf при непрерывных store/removal/evidence locks;
+entry/permit сверяются по полным значениям/указателям без decode/hash. Под leaf только bounded values,
+COW/tallies, публикация owed и стандартный внутренний context check после последнего ожидания.
+Нет leaf -> ранних locks/IO/clock/crypto/Restore/notification. Nil foundation разделяет memory body.
+Shutdown resolver.mu -> leaf отзывает pending, оставляет Processing, отпускает locks, затем вызывает
+фиксированные cancel functions. Только actual callback return освобождает slot; connWg/runLoopsWg
+доказывают transport join. K close по LIFO до inbound drain. Borrowed typed файлы принадлежат только
+fixture, их Preflight вне locks; production всегда nil. Отмена и успешный mock Preflight не join/ACK.
+
 
 ### Диагностика runtime и банов (T5 A4/R1)
 
@@ -1374,3 +1430,41 @@ earned incarnation/allocation obligation; C3 recreation делает stale. По
 actual join максимум одна StoppedOwed остаётся в том же закрытом slot без raw/
 action/resolution/seq-floor replay authority. Default worker, activation,
 restart replay и resource acceptance не заявляются.
+
+### Владение исходным inbound lifetime неактивного N1
+
+Обычный Service оставляет `inboundPins` nil. Неиспользуемая private factory публикует immutable pointer лишь после valid format3 load и strict preflight, до передачи Service другим владельцам. Один run-loop owner присоединяет producer; `passMu` сериализует синхронную попытку/cursor/selection. Cap1 wake не обходит relative retry deadline. Actual runtime wrappers передают nil в общие runWithFiles/attempt; только private fixture одалживает прежний typed strict-files port до синхронного join. Producer не удерживает backend. Actual Run cancellation/join и время общего scheduler проверяются раздельными oracles. Per-session worker/timer, новая registry и поля outgoing queue не добавляются.
+
+Порядок `peerMu → исходный lifetime.mu` защищает точные R/T/W/entry/ConnID, capture и publication. Publication читает ТОТ ЖЕ immutable N0 elapsed leaf ПОСЛЕ обоих mutex wait и auth validation, затем без нового wait фиксирует ready/Published. Допускается лишь прежний trusted nonreentrant clock leaf: произвольные callback, signature verification, network/filesystem I/O и logging запрещены. Selection отпускает peerMu до paired/strict операций. End держит только lifetime.mu, очищает authority chains, не вызывает Service/store, logging/I/O/join.
+
+Paired admission сохраняет `pinMutationGate.R → lifetime.mu → store.mu`; strict writer — R→writeMu→store.mu; C3 — W→writeMu→store.mu. Strict не берёт lifetime.mu. End-first запрещает allocation; stage-first сохраняет парный content и strict obligation. Pending сам по себе не является earned metadata. Store→peer/lifetime reverse edge отсутствует: producer отпускает store.mu до registry selection. Encoding и strict I/O выполняются вне peer/lifetime/store mutexes.
+
+Исходные raw/decoded wrappers разделяют один optional leaf, установленный до exposure. Read/Write errors и Close делают End до delegated/diagnostic work. LIFO End handler выполняется ДО heartbeat join. Owned bodies используют captured handle; incoming context остаётся на синхронном dispatch→pipeline→push stack. Уже существующие initial-push/heartbeat jobs захватывают тот же leaf, не ищут новый по ID. Terminal aliases не удерживают proof/socket/store/entry chains. Прежние jobs учитываются отдельным J, без доказанного J≤B.
+
+Bound SEND захватывает core+original leaf в одном peerMu section. Eviction завершает captured SEND owner до diagnostics. Actual Close независимо выбирает и завершает текущую цель под peerMu, отпускает peerMu и закрывает захваченный core. Immutable send/close selection хранит только core+original handle / только core, без Service, ConnID или callback для позднего relookup. Shallow стоимость — два указателя / один указатель сверх существующих concurrent callers, без заявления об их количестве. Stale collector использует прежний единственный temporary slice и завершает выбранные owners до warnings. Loopback condemnation отпускает свой leaf до End, сохраняя peerMu selection. Push repeat warning выполняется после limiter unlock и original End. Logging/signature verification под lifetime/store locks не добавлены; bounded N0 expiry/copy сохраняет документированную цену. Cooperative timeout не прерывает kernel-blocked I/O принудительно.
+
+### Неактивная proof-transport основа F1
+
+Private неиспользуемая FindNode factory собирает memory-only transport adapter. Обычные конструкторы оставляют его nil и по-прежнему не объявляют обе overlay capability. Handler, admission, class provider, worker, signer и socket writer не устанавливаются. Genuine TLS фикстуры с явно согласованными capability не меняют production hello/welcome. Canonical `SessionSeed` сразу после Accept/Dial захватывает настоящие согласованные факты; копии разделяют одноразовый latch. Неверные Bind arguments его не расходуют. Seed и Session удерживают identity proof values, а не полный TLS ProvenSession/connection. End закрывает единственный canonical Session без refund и I/O.
+
+Один `proofTransportLifetime.mu` упорядочивает исходный terminal, accepted/CM publication и независимый N-in companion. Raw R, decoded W, registry и outbound peer ссылаются на ТОТ ЖЕ cell. Atomic provisional terminal latch и bind-once CAS покрывают Read/Write/Close до attach и не создают proof. End очищает proof/socket/entry/peer/store chains ДО прежних блокирующих diagnostics. Accepted и dialled datagram захватывают исходную terminal-only arrival capsule до синхронного pipeline; outbound initial push захватывает исходного owner до background scheduling. Поиск текущего ID/address не подставляет другой transport.
+
+Accepted publication следует за настоящим auth. Outbound publication идёт после CM generation-accepted callback, успешных setup/registration и legacy-pin recheck, непосредственно перед SessionInitReady. Независимый monotonic elapsed читается ПОСЛЕ ожиданий owner locks. Coverage — только **registered accepted и CM post-setup readers**: one-shot/unregistered readers исключены; это не полная overlay admission и не утверждение уже обработанного CM Active. CM deactivation/stale-success refusal завершает выбранную исходную session до последующих teardown diagnostics.
+
+FindNode обходит ключи registry через `forEachConnIDLocked` и читает каждую запись через `connEntryByIDLocked`, сохраняя тот же `peerMu.RLock` на весь обход. Walker передаёт только ConnID, включает зарегистрированные nil-core записи и не раскрывает core или сохраняемый inventory. Проверка исходного lifetime по-прежнему берёт `common.mu` под `peerMu`; отмена не возвращает частичный snapshot. CM publication использует тот же point-lookup facade в неизменном critical section `peerMu` → `common.mu`.
+
+N-in остаётся listener-only с прежними исходными mandatory pin/incarnation, десятью минутами непрерывного lifetime, source-group journal/debit, strict ACK и owed-work semantics. Dialler не получает N-in companion. Отказ N-in clock не даёт классификацию и не запрещает независимо допустимую F1 publication. Лимиты, activation, resource admission и release gates не меняются. Один cell/optional companion на исходный transport и on-demand O(current registered readers) snapshot — структурные издержки; допубликационные TLS evidence, snapshot allocations, внешние delayed handles и полная стоимость heap/process учитываются дополнительно.
+
+
+The unused own-DM record-admission candidate combines the existing R2 custody
+and record owner in this order: `pinMutationGate.R -> trust.pinEvidenceMu.R ->
+deliveryMu -> resolver.mu -> trust.mu.R -> store.mu`. Selection releases
+`resolver.mu` before acquiring that order and rechecks exact slot generation.
+Submit captures the original observed-monotonic anchor and exact actual-Run
+started token before its prepare/store; it never holds those locks over crypto,
+filesystem work, enqueue or callbacks. Original context Done is retained only
+as a channel and polled without a waiter. All pending ACK/record/Processing/earned
+refs share the one fixed256 owner and existing paced joined worker. A same-claim
+earned sibling binding certifies only its original in-memory protective stage,
+not strict confirmation. No current-owner recapture or C3 ABA rebind is allowed.
+See [the inactive scope and profile boundary](design/session-v2-own-dm-record-admission.md).

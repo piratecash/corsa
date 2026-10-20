@@ -2,10 +2,9 @@
 
 ## English
 
-This private foundation has **fixture-only opt-in callers**. Ordinary
+This foundation retains its fixtures and adds one **unused internal candidate constructor** for genuine typed own-DM/CM provenance. Ordinary
 Desktop/DMCrypto/SDK/RPC/raw message admission, imports and outbox reseeding
-remain NoOrigin. There is no production provenance producer, R metadata stage,
-worker, timer, new queue, rate policy, dial or capability. The closed AST guard
+remain NoOrigin. The exported Go symbol is confined to the existing internal node package and has no normal construction caller. There is no R metadata stage, worker, timer, new queue, rate policy, extra dial, public configuration or RPC activation. The closed AST guard
 checks exact reference/constructor/owner-write membership and ordinary zero
 arguments, including function-value escapes and same-count caller replacement.
 It complements behavioral tests; it does not make arbitrary unsafe/reflection
@@ -86,9 +85,8 @@ are not aggregate memory/resource admission or D1 acceptance.
 
 # Происхождение собственного сообщения и фактического хопа: неактивная основа R2a
 
-Ненулевой private путь вызывается **только фикстурами**. Обычные Desktop/DMCrypto/
-SDK/RPC/raw admission, import и reseed outbox остаются NoOrigin. Нет production
-producer, R stage, worker, timer, новой очереди, rate policy, dial или capability.
+Основа сохраняет фикстуры и добавляет один **неиспользуемый internal candidate constructor** для настоящего typed own-DM/CM producer. Обычные Desktop/DMCrypto/
+SDK/RPC/raw admission, import и reseed outbox остаются NoOrigin. Экспортированный Go-символ находится в существующем internal node package; обычные конструкторы его не вызывают. Нет R stage, worker, timer, новой очереди, rate policy, дополнительного dial или публичного config/RPC включения.
 AST guard проверяет точные references/constructors/owner writes и нулевые
 аргументы обычных wrappers, включая function value escape и замену caller при
 прежнем количестве. Он дополняет behavioral tests, не разрешая unsafe/reflection.
@@ -154,3 +152,35 @@ fixed stamp/candidate/proof/ACK и собственные входные bytes �
 или history нет. Это стоимость на owner: общий delivery/outbox working set не
 ограничен 20,000 pin. Structural sizes не включают backing storage, channel и
 allocator overhead; это не aggregate resource admission и не приёмка D1.
+
+
+## Inactive genuine own-DM producer composition / Неактивная композиция настоящего own-DM producer
+
+English: `NewInactiveOwnDMProvenanceCandidate` creates ONE new Service and its opaque owner-bound port together. No existing-Service getter/setter can mint or attach it. The service-private DMCrypto constructor validates the exact `rpc.LocalNode()` and identity pointer; public constructors remain zero. The actual SendDirectMessage path still validates and encrypts the real payload, then the candidate port uses the common R2a preparation BEFORE message-store I/O. It returns the ordinary storage reply/DirectMessage echo truthfully, even when cancellation/C3 invalidated optional provenance after storage. Cancellation before dispatch cannot fabricate a message_known success. No authority is added to Frame or DirectMessage.
+
+The private synchronous observer receives one genuine opaque submission outside all node owner locks and does not wait. Submit does not wait for ACK; explicit TrySettle uses the existing same first-item writer witness and original X/Y owners, consuming once. Zero/foreign ports and receipts fail closed. There is no automatic settlement consumer, history map, new waiter, queue, worker or timer. Ordinary duplicate/import/raw/reseed work cannot gain a stamp.
+
+The candidate's real CM setup captures the original mandatory-publication proof/binding BEFORE readiness/auth I/O. Its exact session capsule becomes usable only after actual CM registration/pin refusal checks and SessionInitReady. Actual Route selects the session; the capsule cannot redirect it. Eligibility/capability/health, original binding, exact session/ConnID, freeze/cancel/withdrawal and actual writer ACK checks remain in force. Separate fixture expected-hop checks retain their meaning. Memory-only mandatory publication is still not strict metadata ACK.
+
+This slice supplies provenance only. X and Y still need independently verified exact-network signed min2 records and reviewed admission/strict persistence. No R1b TargetProof, Window 60-second/7-day residence, signed-record TTL, pair charging/partial-admission policy, R stage or activation is introduced. Future admission must reuse the one 256-slot/30-record owner and joined strict-completion lifecycle; this slice allocates none of those slots. Existing delivery/outbox population is not bounded by the pin cap. Fixed port/receipt/session pointers and retained owners are inventoried in source tests; sizes exclude body backing, channels/allocator and are not resource acceptance.
+
+Русский: `NewInactiveOwnDMProvenanceCandidate` одновременно создаёт ОДИН новый Service и opaque port, привязанный к его owner. Getter/setter для существующего Service отсутствует. Закрытый конструктор DMCrypto проверяет точные `rpc.LocalNode()` и указатель identity; публичные конструкторы остаются с нулевым port. Настоящий SendDirectMessage сохраняет валидацию и шифрование, затем candidate использует общую подготовку R2a ДО message-store I/O. Обычный ответ хранения и DirectMessage echo сохраняются правдиво, даже если отмена/C3 после записи отозвали дополнительное provenance. Отмена до dispatch не создаёт ложного message_known. Frame и DirectMessage не получают authority.
+
+Закрытый синхронный observer получает один настоящий opaque submission после освобождения node owner locks и не ждёт. Submit не ждёт ACK; явный TrySettle использует прежний writer witness того же первого item и исходных X/Y owners, однократно. Нулевые и чужие port/receipt отклоняются. Нет автоматического consumer, history map, дополнительного waiter, очереди, worker или таймера. Обычный duplicate/import/raw/reseed не получает stamp.
+
+Настоящий candidate CM сохраняет исходные proof/binding mandatory publication ДО ожидания readiness/auth I/O. Capsule точной session доступен только после реальных CM registration/pin checks и SessionInitReady. Session выбирает настоящий Route; capsule не перенаправляет маршрут. Проверки eligibility/capabilities/health, original binding, точной session/ConnID, freeze/cancel/withdrawal и writer ACK сохраняются. Ожидание явного hop в старых фикстурах сохраняет смысл. Memory-only mandatory publication не является strict metadata ACK.
+
+Это только происхождение. Для X и Y всё ещё нужны независимые signed min2 records точной сети/identity, admission и strict persistence. Не вводятся R1b TargetProof, Window 60 секунд/7 суток, TTL signed record, политика pair charging/частичного допуска, R stage или активация. Будущий admission должен использовать общие 256 slots/30 records и joined strict-completion; текущий slice slots не занимает. Число delivery/outbox не ограничено pin cap. Source inventory учитывает фиксированные port/receipt/session pointers и retained owners; размеры не включают backing/channels/allocator и не являются ресурсной приёмкой.
+
+
+A separate unused constructor now composes the parameterized
+[own-DM record-admission candidate](session-v2-own-dm-record-admission.md).
+It requires a finite proposal profile, shares the existing256/30 owner and
+strict completion, and leaves this provenance-only constructor unchanged.
+Normal roots remain inactive; numeric deployment/G2 and execution evidence
+are separate.
+
+Отдельный неиспользуемый конструктор описан в
+[кандидате допуска записей own-DM](session-v2-own-dm-record-admission.md).
+Он требует конечный профиль-предложение и общие256/30/strict; прежний
+provenance-only конструктор R не ставит. Обычные roots не включены.

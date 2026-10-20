@@ -1,4 +1,4 @@
-# Static reviewed baseline: legacy source at 251b2a2; readiness sentinel is the D1 addition.
+# Static reviewed baseline: legacy source at 251b2a2 plus explicit D1 degree and readiness additions.
 # category<TAB>path | enclosing signature | normalized matching source (where applicable).
 # Keep multiplicity: a removal, extra occurrence or same-count substitution requires review.
 conn	internal/core/node/accept_inbound.go | func (s *Service) acceptInbound(conn net.Conn)
@@ -7,6 +7,7 @@ conn	internal/core/node/conn_registry.go | func (s *Service) connIDFor(conn net.
 conn	internal/core/node/conn_registry.go | func (s *Service) connIDForLocked(conn net.Conn) (domain.ConnID, bool)
 conn	internal/core/node/conn_registry.go | func (s *Service) registerInboundConnLocked(conn net.Conn, core *netcore.NetCore, metered *netcore.MeteredConn, budget *connbudget.Reservation)
 conn	internal/core/node/conn_registry.go | func (s *Service) unregisterConnLocked(conn net.Conn)
+conn	internal/core/node/find_node_degree.go | func (s *Service) publishDegreeInbound(conn net.Conn)
 conn	internal/core/node/listener_refusal.go | func (r *listenerRefusals) closeRefusedSecure(conn net.Conn, reason listenerRefusalReason)
 conn	internal/core/node/listener_refusal.go | func (r *listenerRefusals) refuse(conn net.Conn, reason listenerRefusalReason)
 conn	internal/core/node/listener_refusal.go | func (s *Service) closeUnregisteredInbound(wire net.Conn, secure bool, err error)
@@ -33,6 +34,7 @@ legacy_import	internal/core/node/conn_budget_dial.go | "net"
 legacy_import	internal/core/node/conn_registry.go | "net"
 legacy_import	internal/core/node/connect_only.go | "net"
 legacy_import	internal/core/node/contact_verify_budget.go | "net"
+legacy_import	internal/core/node/find_node_degree.go | "net"
 legacy_import	internal/core/node/inbound_handshakes.go | "net"
 legacy_import	internal/core/node/listener_refusal.go | "net"
 legacy_import	internal/core/node/loopback_inbound.go | "net"

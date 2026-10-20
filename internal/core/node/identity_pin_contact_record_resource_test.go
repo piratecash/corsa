@@ -139,3 +139,21 @@ func TestContactRecordKDoesNotDiscountRawRelationCapacity(t *testing.T) {
 		t.Fatal("K discounted raw R8192 allocations")
 	}
 }
+
+func TestContactReconciliationSamePhysicalInventory(t *testing.T) {
+	var owner relationRecordAdmission
+	if len(owner.slots) != 256 {
+		t.Fatal("reconciliation introduced second capacity")
+	}
+	// Each shared slot has mutually exclusive typed provenance; one worker cursor
+	// and one transient bounded raw capsule add cost. Existing full trust/pin
+	// snapshots and O(total contacts) scan/strict ACK work remain proportional.
+	for i := range owner.slots {
+		if owner.slots[i].kAuthority != nil || owner.slots[i].kReconciliation != nil {
+			t.Fatal("zero slot retains authority")
+		}
+	}
+	if len(owner.slots[0].body)*len(owner.slots) != 524288 {
+		t.Fatal("shared raw body table changed")
+	}
+}

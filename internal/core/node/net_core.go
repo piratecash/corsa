@@ -29,6 +29,8 @@ import (
 //     outbound dials that do not measure bytes).
 //   - tracked is the auth-promotion flag described above.
 type connEntry struct {
+	common *proofTransportLifetime // immutable canonical original transport alias
+
 	receive *routing.AnnounceReceiveState
 	core    *netcore.NetCore
 	metered *netcore.MeteredConn
