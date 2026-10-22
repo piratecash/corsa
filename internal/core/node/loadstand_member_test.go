@@ -63,11 +63,21 @@ func (m *loadStandFullMember) ImportContacts(ctx context.Context, contacts []loa
 	}
 	return nil
 }
+func (*loadStandFullMember) RuntimeProcess() loadstand.RuntimeProcess {
+	return loadstand.CurrentRuntimeProcess()
+}
 func (m *loadStandFullMember) Sample(ctx context.Context) (loadstand.MemberSample, error) {
 	if err := m.CheckRunning(ctx); err != nil {
 		return loadstand.MemberSample{}, err
 	}
-	return loadStandMemberSample(ctx, m.clock, m.receipt, loadStandServiceSource{svc: m.node.current.running.svc, binding: loadstand.RuntimeBinding{Identity: m.receipt.Public.Identity, StartedAt: m.receipt.Incarnation.StartedAt}})
+	s, sampleErr := loadStandMemberSample(ctx, m.clock, m.receipt, loadStandServiceSource{svc: m.node.current.running.svc, binding: loadstand.RuntimeBinding{Identity: m.receipt.Public.Identity, StartedAt: m.receipt.Incarnation.StartedAt}})
+	// This genuine heap read follows this member's resource/family reads.
+	metrics := m.node.current.running.svc.RuntimeMetrics()
+	runtimeErr := loadstand.ValidateMemberRuntime(metrics, m.receipt.Incarnation.StartedAt)
+	s.Process = m.RuntimeProcess()
+	s.Runtime = loadstand.Observed(metrics, runtimeErr)
+	s.ReadAt = m.clock.Now()
+	return s, errors.Join(sampleErr, runtimeErr, m.CheckRunning(ctx))
 }
 func (m *loadStandFullMember) Stop(ctx context.Context) (loadstand.StopReceipt, error) {
 	before := len(m.node.ended)
@@ -193,6 +203,9 @@ func (m *loadStandSDKMember) ImportContacts(ctx context.Context, contacts []load
 	}
 	return nil
 }
+func (m *loadStandSDKMember) RuntimeProcess() loadstand.RuntimeProcess {
+	return m.process.RuntimeProcess()
+}
 func (m *loadStandSDKMember) Sample(ctx context.Context) (sample loadstand.MemberSample, sampleErr error) {
 	defer func() {
 		if sample.Traffic.Available() {
@@ -216,7 +229,14 @@ func (m *loadStandSDKMember) Sample(ctx context.Context) (sample loadstand.Membe
 		return loadstand.MemberSample{}, err
 	}
 	sample, sampleErr = loadStandMemberSample(ctx, m.clock, m.receipt, loadStandProcessSource{source: source})
-	return sample, sampleErr
+	metrics, runtimeErr := source.Runtime(ctx)
+	if runtimeErr == nil {
+		runtimeErr = loadstand.ValidateMemberRuntime(metrics, m.receipt.Incarnation.StartedAt)
+	}
+	sample.Process = m.RuntimeProcess()
+	sample.Runtime = loadstand.Observed(metrics, runtimeErr)
+	sample.ReadAt = m.clock.Now()
+	return sample, errors.Join(sampleErr, runtimeErr, m.CheckRunning(ctx))
 }
 func (m *loadStandSDKMember) Stop(ctx context.Context) (loadstand.StopReceipt, error) {
 	if !m.Owned() {

@@ -28,6 +28,7 @@ const (
 )
 
 type linuxInit struct {
+	Planned      *linuxPlannedInit `json:",omitempty"`
 	Nonce        LaunchNonce
 	Role         string
 	Config       ChildConfig
@@ -66,6 +67,9 @@ func (s *linuxStartClaim) markDefect() {
 }
 
 type linuxHelperRuntime struct {
+	membership                     *linuxMemberMembershipView
+	memberBinding                  *CompletedStartBinding
+	memberFinal                    *linuxMemberFinal
 	mu                             sync.Mutex
 	readerJoinOnce                 sync.Once
 	readerJoinErr                  error
@@ -88,6 +92,7 @@ type linuxHelperRuntime struct {
 // role is authenticated by private inherited channels and actual OS properties;
 // no JSON boolean or arbitrary PID/FD grants launch ownership.
 type linuxHelperSession struct {
+	membership                 *os.File
 	runtime                    *linuxHelperRuntime
 	namespace, parent, profile *os.File
 	provenance                 LinuxProcessProvenance
@@ -144,12 +149,17 @@ func openLinuxHelperSession(ctx context.Context) (session *linuxHelperSession, r
 	if err != nil || packet.kind != linuxInitPublic || packet.id != 1 || packet.ordinal != 1 || init.Nonce == (LaunchNonce{}) || init.Role != "loadstand-linux-helper-v4" {
 		return nil, ErrLinuxOwnerProtocol
 	}
+	var membership *os.File
+	if init.Planned != nil && init.Planned.Membership != nil {
+		unix.CloseOnExec(7)
+		membership = os.NewFile(7, "original-public-membership")
+	}
 	workCtx, cancelWork := context.WithCancel(ctx)
 	r := &linuxHelperRuntime{life: life, work: work, init: init, startup: newLinuxStartClaim(), workCtx: workCtx, cancelWork: cancelWork, wake: make(chan struct{}, 1), lifeDone: make(chan struct{}), workDone: make(chan struct{}), writerDone: make(chan struct{})}
 	// The one lifecycle reader owns all post-Init input, including slow
 	// validation and preflight. It only latches Stop until a real Process exists.
 	go r.readLifecycle()
-	return &linuxHelperSession{runtime: r, namespace: files[2], parent: files[3]}, nil
+	return &linuxHelperSession{runtime: r, namespace: files[2], parent: files[3], membership: membership}, nil
 }
 func (s *linuxHelperSession) prepare(ctx context.Context) (bool, error) {
 	r := s.runtime
@@ -159,6 +169,15 @@ func (s *linuxHelperSession) prepare(ctx context.Context) (bool, error) {
 			return false, nil
 		}
 		return false, ErrLinuxOwnerProtocol
+	}
+	if init.Planned != nil && init.Planned.Membership != nil {
+		view, readErr := readLinuxMemberMembership(workCtx, s.membership, *init.Planned.Membership)
+		closeErr := s.membership.Close()
+		s.membership = nil
+		if readErr != nil || closeErr != nil {
+			return false, errors.Join(readErr, closeErr)
+		}
+		r.membership = view
 	}
 	profile, err := createLinuxPrivateProfile(workCtx, s.parent, init)
 	if err != nil {
@@ -233,11 +252,12 @@ func (s *linuxHelperSession) serve(ctx context.Context) error {
 	closeWorkErr := work.close()
 	readShutdownErr := r.joinLifecycleReader()
 	<-r.workDone // kernel-blocked sampler remains retained, never false join
-	if errors.Join(closeWorkErr, readShutdownErr, sampler.Close(), process.ReleaseArtifacts(ctx)) != nil {
+	finalErr := r.reduceMemberFinal(ctx)
+	if errors.Join(closeWorkErr, readShutdownErr, sampler.Close(), process.ReleaseArtifacts(ctx), finalErr) != nil {
 		r.startup.markDefect()
 	}
-	// No independent member StartReceipt exists in this primitive slice. FPA
-	// resources are released only post-Done; exact final accounting is unavailable.
+	// Old nil-planned primitive still has no Member receipt/finalcredit. The
+	// explicit planned Member branch reduces only its original completedStart.
 	r.publishStatus(linuxHelperJoined, exit)
 	<-r.writerDone
 	if r.startup.snapshot().defect {
@@ -263,16 +283,30 @@ func (s *linuxHelperSession) close(ctx context.Context) error {
 		result = errors.Join(result, r.process.ReleaseArtifacts(ctx))
 	}
 	result = errors.Join(result, r.joinLifecycleReader(), r.life.close(), r.work.close(), s.namespace.Close(), s.parent.Close())
+	if s.membership != nil {
+		result = errors.Join(result, s.membership.Close())
+		s.membership = nil
+	}
 	if s.profile != nil {
 		result = errors.Join(result, s.profile.Close())
 	}
 	return result
 }
 func validateLinuxHelperInit(ctx context.Context, init linuxInit, namespace *os.File) error {
-	if init.Role != "loadstand-linux-helper-v4" || init.Nonce == (LaunchNonce{}) || init.UID == 0 || uint32(os.Getuid()) != uint32(init.UID) || uint32(os.Geteuid()) != uint32(init.UID) || uint32(os.Getgid()) != init.GID || uint32(os.Getegid()) != init.GID || init.Config.ValidateLoopback() != nil || auditLinuxExecutable(ctx, init.TargetBinary, init.TargetHash) != nil {
+	if init.Role != "loadstand-linux-helper-v4" || init.Nonce == (LaunchNonce{}) || init.UID == 0 || uint32(os.Getuid()) != uint32(init.UID) || uint32(os.Geteuid()) != uint32(init.UID) || uint32(os.Getgid()) != init.GID || uint32(os.Getegid()) != init.GID || !validLinuxHelperChildConfiguration(init) || auditLinuxExecutable(ctx, init.TargetBinary, init.TargetHash) != nil {
 		return ErrLinuxOwnerUnsupported
 	}
-	config, _, err := ReadChildEnvironment(os.Getenv)
+	var config ChildConfig
+	var err error
+	if init.Planned == nil {
+		config, _, err = ReadChildEnvironment(os.Getenv)
+	} else {
+		var plan PlannedChildConfig
+		config, plan, _, err = ReadPlannedChildEnvironment(os.Getenv)
+		if err == nil && !samePlannedChild(plan, init.Planned.Plan) {
+			err = ErrLinuxOwnerProtocol
+		}
+	}
 	if err != nil || config.DataDir != init.Config.DataDir || config.Listen != init.Config.Listen || config.RPC != init.Config.RPC || config.Listener != init.Config.Listener || config.Procs != init.Config.Procs || !slices.Equal(config.Bootstrap, init.Config.Bootstrap) {
 		return ErrLinuxOwnerProtocol
 	}
@@ -327,15 +361,31 @@ func validateLinuxHelperInit(ctx context.Context, init linuxInit, namespace *os.
 	return self.Close()
 }
 func launchLinuxTarget(ctx context.Context, init linuxInit) (*Process, error) {
-	_, credentials, err := ReadChildEnvironment(os.Getenv)
+	var credentials *Credentials
+	var err error
+	if init.Planned == nil {
+		_, credentials, err = ReadChildEnvironment(os.Getenv)
+	} else {
+		_, _, credentials, err = ReadPlannedChildEnvironment(os.Getenv)
+	}
 	if err != nil {
 		return nil, err
 	}
-	environment, err := init.Config.environment(credentials)
+	var environment []string
+	if init.Planned == nil {
+		environment, err = init.Config.environment(credentials)
+	} else {
+		environment, err = plannedChildEnvironment(init.Config, init.Planned.Plan, credentials)
+	}
 	if err != nil {
 		return nil, err
 	}
-	binding, err := newLaunchBinding(init.Config, string(init.TargetHash))
+	var binding launchBinding
+	if init.Planned == nil {
+		binding, err = newLaunchBinding(init.Config, string(init.TargetHash))
+	} else {
+		binding = launchBinding{nonce: init.Planned.FinalNonce, fingerprint: init.Planned.FinalFingerprint}
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -343,7 +393,11 @@ func launchLinuxTarget(ctx context.Context, init linuxInit) (*Process, error) {
 	if err != nil {
 		return nil, err
 	}
-	log, err := os.OpenFile(filepath.Join(init.Config.DataDir, "child.log"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	flags := os.O_CREATE | os.O_EXCL | os.O_WRONLY | unix.O_NOFOLLOW
+	if init.Planned != nil && init.Planned.Ordinal > 1 {
+		flags = os.O_WRONLY | os.O_APPEND | unix.O_NOFOLLOW
+	}
+	log, err := os.OpenFile(filepath.Join(init.Config.DataDir, "child.log"), flags, 0600)
 	if err != nil {
 		return nil, errors.Join(err, artifacts.close())
 	}
@@ -375,6 +429,9 @@ func launchLinuxTarget(ctx context.Context, init linuxInit) (*Process, error) {
 	closeErr := artifacts.writer.Close()
 	artifacts.writer = nil
 	p := startOwnedProcess(ctx, command, client, log, Provenance{PID: ProcessID(command.Process.Pid), LaunchedAt: time.Now().UTC(), LaunchFileSHA256: string(init.TargetHash), Platform: runtime.GOOS + "/" + runtime.GOARCH}, artifacts, closeErr != nil)
+	if init.Planned != nil {
+		p.finalRole = init.Planned.Plan.Role
+	}
 	if closeErr != nil {
 		p.terminal.submit(StopLifetime, false, time.Now().Add(5*time.Second), false)
 	}
@@ -428,8 +485,40 @@ func (r *linuxHelperRuntime) sampleWork() {
 			}
 			return
 		}
+		if packet.kind == linuxMemberReceipts {
+			request, decodeErr := decodeLinuxBody[linuxMemberReceiptsRequest](packet)
+			if decodeErr != nil || packet.ordinal != 1 || packet.id <= lastID || request.Nonce != r.init.Nonce || request.BudgetNanos <= 0 {
+				r.requestStop(0, 5*time.Second, true)
+				return
+			}
+			lastID = packet.id
+			ctx, cancel := context.WithTimeout(r.workCtx, time.Duration(request.BudgetNanos))
+			err := r.writeMemberReceipts(ctx, packet, request)
+			cancel()
+			if err != nil {
+				r.requestStop(0, 5*time.Second, true)
+				return
+			}
+			continue
+		}
+		if packet.kind == linuxMemberBind {
+			request, decodeErr := decodeLinuxBody[linuxMemberBindRequest](packet)
+			if decodeErr != nil || packet.ordinal != 1 || packet.id <= lastID || request.Nonce != r.init.Nonce || request.BudgetNanos <= 0 {
+				r.requestStop(0, 5*time.Second, true)
+				return
+			}
+			lastID = packet.id
+			ctx, cancel := context.WithTimeout(r.workCtx, time.Duration(request.BudgetNanos))
+			bindErr := r.writeMemberBind(ctx, packet, request)
+			cancel()
+			if bindErr != nil {
+				r.requestStop(0, 5*time.Second, true)
+				return
+			}
+			continue
+		}
 		body, err := decodeLinuxBody[linuxSampleRequest](packet)
-		if err != nil || (packet.kind != linuxSample && packet.kind != linuxObserveRuntime) || packet.ordinal != 1 || packet.id <= lastID || body.Nonce != r.init.Nonce || body.BudgetNanos <= 0 {
+		if err != nil || (packet.kind != linuxSample && packet.kind != linuxObserveRuntime && packet.kind != linuxMemberBind) || packet.ordinal != 1 || packet.id <= lastID || body.Nonce != r.init.Nonce || body.BudgetNanos <= 0 {
 			r.requestStop(0, 5*time.Second, true)
 			return
 		}
@@ -494,7 +583,11 @@ func (r *linuxHelperRuntime) writeLifecycle() {
 		if defect {
 			code = linuxResultUnavailable
 		}
-		packet, err := encodeLinuxPacket(kind, id, 1, linuxTerminal{Nonce: r.init.Nonce, Code: code, Exit: exit})
+		terminal := linuxTerminal{Nonce: r.init.Nonce, Code: code, Exit: exit}
+		if kind == linuxHelperJoined {
+			terminal.MemberFinal = r.memberFinal
+		}
+		packet, err := encodeLinuxPacket(kind, id, 1, terminal)
 		if err == nil {
 			err = r.life.write(packet, minLinuxPacketDeadline(time.Time{}))
 		}

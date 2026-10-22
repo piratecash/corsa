@@ -83,7 +83,7 @@ func TestLoadStandExecutorRealFullLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !report.FunctionalLifecycleComplete || report.AcceptanceEligible || len(report.Samples) != 8 {
+	if !report.FunctionalLifecycleComplete || report.AcceptanceEligible || len(report.Samples) != 9 {
 		t.Fatalf("invalid functional lifecycle report: complete=%v acceptance=%v samples=%d", report.FunctionalLifecycleComplete, report.AcceptanceEligible, len(report.Samples))
 	}
 	for _, ended := range report.Ended {

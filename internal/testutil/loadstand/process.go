@@ -52,6 +52,7 @@ type processReadiness struct {
 }
 
 type Process struct {
+	finalRole  MemberRole
 	command    *exec.Cmd
 	done       chan struct{}
 	exit       ProcessExitResult

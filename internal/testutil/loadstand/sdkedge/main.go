@@ -37,7 +37,7 @@ func run(ctx context.Context) (runErr error) {
 	if err := disableCoreDumps(); err != nil {
 		return err
 	}
-	config, credentials, err := loadstand.ReadChildEnvironment(os.Getenv)
+	config, credentials, err := loadstand.ReadSDKChildEnvironment(os.Getenv)
 	if err != nil {
 		return err
 	}

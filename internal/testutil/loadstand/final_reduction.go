@@ -119,7 +119,11 @@ func (p *Process) FinalAccounting(ctx context.Context, binding CompletedStartBin
 			}
 		}
 		if err == nil {
-			result.Traffic, err = DecodeFinalReport(raw, binding, prior)
+			if p.finalRole == MemberFull {
+				result.Traffic, err = DecodeHeadlessFinalReport(raw, binding, prior)
+			} else {
+				result.Traffic, err = DecodeFinalReport(raw, binding, prior)
+			}
 			if err == nil {
 				result.Finality = FinalExact
 				result.Reason = ""

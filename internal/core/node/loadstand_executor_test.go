@@ -60,7 +60,9 @@ type loadStandMemberObservation struct {
 	At      time.Duration
 	Node    loadstand.MemberID
 	PreStop bool
-	Sample  loadstand.MemberSample
+	// Siblings are sampled for the stopping member's shared heap, not stopped.
+	PreStopOf loadstand.MemberID
+	Sample    loadstand.MemberSample
 }
 type loadStandExecutionID string
 type loadStandGlobalObservation struct {
@@ -81,7 +83,20 @@ type loadStandExpectedGlobal struct {
 	Incarnation      loadstand.Incarnation
 	Observed         bool
 }
+type loadStandRuntimeCheck struct {
+	At                  time.Duration
+	PreStopOf           loadstand.MemberID
+	Group               uint64
+	Members             []loadstand.MemberID
+	Provider            loadstand.MemberID
+	ProviderIncarnation loadstand.Incarnation
+	RuntimeReadAt       time.Time
+	FloorBytes          uint64
+	HeapObjectsBytes    *uint64
+	Verdict             string
+}
 type loadStandExecutionReport struct {
+	RuntimeChecks               []loadStandRuntimeCheck
 	GlobalObservations          []loadStandGlobalObservation
 	ExecutionID                 loadStandExecutionID
 	OwnedAfterCleanup           []loadstand.MemberID
@@ -106,18 +121,20 @@ type loadStandExpectedReceipt struct {
 	MessageID  domain.MessageID
 }
 type loadStandExecutor struct {
-	plan        loadStandPlan
-	members     map[loadStandNodeID]loadstand.Member
-	wall        runjournal.Clock
-	schedule    func() loadstand.ScheduleClock
-	limits      loadStandExecutionLimits
-	ownedStarts []loadStandNodeID
-	starts      map[loadStandNodeID]loadstand.StartReceipt
-	globals     []loadStandExpectedGlobal
-	expected    []loadStandExpectedReceipt
-	report      loadStandExecutionReport
-	clock       loadstand.ScheduleClock
-	lastElapsed time.Duration
+	plan          loadStandPlan
+	members       map[loadStandNodeID]loadstand.Member
+	wall          runjournal.Clock
+	schedule      func() loadstand.ScheduleClock
+	limits        loadStandExecutionLimits
+	ownedStarts   []loadStandNodeID
+	starts        map[loadStandNodeID]loadstand.StartReceipt
+	processes     map[loadStandNodeID]loadstand.RuntimeProcess
+	runtimeGroups map[loadstand.RuntimeProcess]uint64
+	globals       []loadStandExpectedGlobal
+	expected      []loadStandExpectedReceipt
+	report        loadStandExecutionReport
+	clock         loadstand.ScheduleClock
+	lastElapsed   time.Duration
 }
 
 // compile validates the whole immutable plan before the first side effect.
@@ -322,6 +339,8 @@ func (e *loadStandExecutor) run(ctx context.Context) (report loadStandExecutionR
 	e.ownedStarts = nil
 	e.lastElapsed = 0
 	e.starts = map[loadStandNodeID]loadstand.StartReceipt{}
+	e.processes = map[loadStandNodeID]loadstand.RuntimeProcess{}
+	e.runtimeGroups = map[loadstand.RuntimeProcess]uint64{}
 	e.report = loadStandExecutionReport{ExecutionID: loadStandExecutionID(hex.EncodeToString(runID[:])), PlanVersion: "3", PlanDigest: e.plan.Digest(), FullSampleAvailable: true, Ended: map[loadstand.MemberID][]loadstand.EndedIncarnation{}}
 	lifetime, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	defer func() {
@@ -410,6 +429,20 @@ func (e *loadStandExecutor) start(ctx, lifetime context.Context, id loadStandNod
 	if old, ok := e.starts[id]; ok && (old.Public != r.Public || r.Incarnation.Ordinal != old.Incarnation.Ordinal+1 || !r.Incarnation.StartedAt.After(old.Incarnation.StartedAt)) {
 		return loadstand.ErrMemberState
 	}
+	process := e.members[id].RuntimeProcess()
+	if !process.Valid() {
+		return loadstand.ErrMemberState
+	}
+	if e.processes == nil {
+		e.processes = map[loadStandNodeID]loadstand.RuntimeProcess{}
+	}
+	if e.runtimeGroups == nil {
+		e.runtimeGroups = map[loadstand.RuntimeProcess]uint64{}
+	}
+	if _, found := e.runtimeGroups[process]; !found {
+		e.runtimeGroups[process] = uint64(len(e.runtimeGroups) + 1)
+	}
+	e.processes[id] = process
 	e.starts[id] = r
 	return nil
 }
@@ -562,23 +595,115 @@ func (e *loadStandExecutor) dispatch(ctx, lifetime context.Context, a loadStandE
 		return loadstand.ErrUnsupportedPlan
 	}
 }
-func (e *loadStandExecutor) sample(ctx context.Context, at time.Duration, preStop bool) error {
+
+// collectRuntimeSweep keeps the real executor/lifecycle. A nonzero filter is
+// exactly one retained process group; all other owned members are untouched.
+func (e *loadStandExecutor) collectRuntimeSweep(ctx context.Context, at time.Duration, filter loadstand.RuntimeProcess, preStopOf loadstand.MemberID) error {
+	var groups []loadStandRuntimeCheck
+	byOwner := map[loadstand.RuntimeProcess]int{}
 	for _, n := range e.plan.Nodes() {
 		m := e.members[n.id]
-		if !m.Owned() {
+		if !m.Owned() || (filter.Valid() && e.processes[n.id] != filter) {
 			continue
 		}
-		s, err := m.Sample(ctx)
-		e.report.Samples = append(e.report.Samples, loadStandMemberObservation{At: at, Node: m.ID(), PreStop: preStop, Sample: s})
+		s, readErr := m.Sample(ctx)
+		e.report.Samples = append(e.report.Samples, loadStandMemberObservation{At: at, Node: m.ID(), PreStop: preStopOf == m.ID(), PreStopOf: preStopOf, Sample: s})
 		if !s.FullSampleAvailable() {
 			e.report.FullSampleAvailable = false
 		}
-		if err != nil {
-			return err
-		}
+		// Identity/incarnation and owner custody are separate original bindings.
 		if s.Incarnation != e.starts[n.id].Incarnation || s.Identity != e.starts[n.id].Public.Identity {
-			return loadstand.ErrMemberState
+			return errors.Join(readErr, loadstand.ErrMemberState)
 		}
+		expected := e.processes[n.id]
+		check := loadStandRuntimeCheck{At: at, PreStopOf: preStopOf, Group: e.runtimeGroups[expected], Members: []loadstand.MemberID{m.ID()}, Provider: m.ID(), ProviderIncarnation: s.Incarnation}
+		fail := func(verdict string) error {
+			check.Verdict = verdict
+			e.report.RuntimeChecks = append(e.report.RuntimeChecks, check)
+			return errors.Join(readErr, loadStandRuntimeFailure(check))
+		}
+		if !expected.Valid() || s.Process != expected || m.RuntimeProcess() != expected {
+			return fail("runtime_owner_mismatch")
+		}
+		if !s.Runtime.Available() {
+			return fail("runtime_unavailable")
+		}
+		if err := loadstand.ValidateMemberRuntime(*s.Runtime.Value, e.starts[n.id].Incarnation.StartedAt); err != nil {
+			return fail("runtime_binding_invalid")
+		}
+		if readErr != nil {
+			return readErr
+		}
+		if !s.Resources.Available() {
+			return fail("resource_floor_unavailable")
+		}
+		floor, err := loadStandCheckedFloor(*s.Resources.Value)
+		if err != nil {
+			return fail("resource_floor_overflow")
+		}
+		index, found := byOwner[expected]
+		if !found {
+			index = len(groups)
+			byOwner[expected] = index
+			groups = append(groups, loadStandRuntimeCheck{At: at, PreStopOf: preStopOf, Group: e.runtimeGroups[expected]})
+		}
+		g := &groups[index]
+		if floor > ^uint64(0)-g.FloorBytes {
+			return fail("resource_floor_overflow")
+		}
+		g.FloorBytes += floor
+		g.Members = append(g.Members, m.ID())
+		// Last in executor read order, not maximum remote wall time. Its runtime
+		// read follows ALL resource reads of this physical group in this sweep.
+		heap := *s.Runtime.Value.HeapObjectsBytes
+		g.HeapObjectsBytes = &heap
+		g.RuntimeReadAt = s.Runtime.Value.ReadAt
+		g.Provider = m.ID()
+		g.ProviderIncarnation = s.Incarnation
+	}
+	var failures []error
+	for _, check := range groups {
+		check.Verdict = "pass"
+		if check.FloorBytes > *check.HeapObjectsBytes {
+			check.Verdict = string(loadStandDefectFloorAboveHeap)
+		}
+		e.report.RuntimeChecks = append(e.report.RuntimeChecks, check)
+		if check.Verdict != "pass" {
+			failures = append(failures, loadStandRuntimeFailure(check))
+		}
+	}
+	return errors.Join(failures...)
+}
+func loadStandRuntimeFailure(check loadStandRuntimeCheck) error {
+	return errors.Join(loadstand.ErrMemberState, &loadStandDefect{Kind: loadStandDefectKind(check.Verdict), Detail: fmt.Sprintf("group=%d provider=%s ordinal=%d preStopOf=%s floor=%d", check.Group, check.Provider, check.ProviderIncarnation.Ordinal, check.PreStopOf, check.FloorBytes)})
+}
+func loadStandCheckedFloor(b domain.ResourceBreakdown) (uint64, error) {
+	var floor uint64
+	for _, subsystem := range b.Subsystems() {
+		for _, gauge := range subsystem.Gauges() {
+			if gauge.Kind() == domain.ResourceGaugeSaturation {
+				continue
+			}
+			count, entry := gauge.Count(), gauge.EntryBytes()
+			if entry != 0 && count > ^uint64(0)/entry {
+				return 0, loadstand.ErrInvalidSample
+			}
+			value := count * entry
+			if value > ^uint64(0)-floor {
+				return 0, loadstand.ErrInvalidSample
+			}
+			floor += value
+		}
+	}
+	return floor, nil
+}
+func (e *loadStandExecutor) sample(ctx context.Context, at time.Duration, preStop bool) error {
+	// preStop is retained for existing call sites; stopping has an exact target.
+	if preStop {
+		return loadstand.ErrMemberState
+	}
+	if err := e.collectRuntimeSweep(ctx, at, loadstand.RuntimeProcess{}, ""); err != nil {
+		return err
 	}
 	return errors.Join(e.observeReceipts(ctx), e.observeGlobals(ctx))
 }
@@ -587,10 +712,18 @@ func (e *loadStandExecutor) stop(ctx context.Context, id loadStandNodeID, at tim
 	if !m.Owned() {
 		return loadstand.ErrMemberState
 	}
-	s, sampleErr := m.Sample(ctx)
-	e.report.Samples = append(e.report.Samples, loadStandMemberObservation{At: at, Node: m.ID(), PreStop: true, Sample: s})
-	if !s.FullSampleAvailable() {
+	// Never reuse a periodic sample. Fresh siblings share the same Go heap.
+	process := e.processes[id]
+	var sampleErr error
+	if process.Valid() {
+		sampleErr = e.collectRuntimeSweep(ctx, at, process, m.ID())
+	} else {
+		// Partial Start still owns cleanup; an absent successful binding cannot
+		// authorize any floor result, and must not suppress original Stop.
+		s, err := m.Sample(ctx)
+		e.report.Samples = append(e.report.Samples, loadStandMemberObservation{At: at, Node: m.ID(), PreStop: true, PreStopOf: m.ID(), Sample: s})
 		e.report.FullSampleAvailable = false
+		sampleErr = errors.Join(loadstand.ErrMemberState, err)
 	}
 	receipt, stopErr := m.Stop(ctx)
 	if !receipt.Terminated {
@@ -704,7 +837,7 @@ func (e *loadStandExecutor) traceBound() error {
 }
 func (e *loadStandExecutor) journalKey() runjournal.ConfigKey {
 	params := e.plan.Params()
-	params = append(params, loadStandParam("executor_version", "1"), loadStandParam("plan_digest", string(e.plan.Digest())), loadStandParam("profile", "functional-loopback"), loadStandParam("acceptance_eligible", "false"), loadStandParam("action_budget", e.limits.Action.String()), loadStandParam("readiness_budget", e.limits.Readiness.String()), loadStandParam("route_ready_budget", e.limits.RouteReady.String()), loadStandParam("cleanup_budget", e.limits.Cleanup.String()), loadStandParam("receipt_drain", e.limits.ReceiptDrain.String()), loadStandParam("allowed_lateness", e.limits.AllowedLateness.String()), loadStandParam("max_actions", strconv.Itoa(e.limits.MaxActions)), loadStandParam("max_samples", strconv.Itoa(e.limits.MaxSamples)), loadStandParam("max_trace_bytes", strconv.Itoa(e.limits.MaxTraceBytes)))
+	params = append(params, loadStandParam("executor_version", "2"), loadStandParam("plan_digest", string(e.plan.Digest())), loadStandParam("profile", "functional-loopback"), loadStandParam("acceptance_eligible", "false"), loadStandParam("action_budget", e.limits.Action.String()), loadStandParam("readiness_budget", e.limits.Readiness.String()), loadStandParam("route_ready_budget", e.limits.RouteReady.String()), loadStandParam("cleanup_budget", e.limits.Cleanup.String()), loadStandParam("receipt_drain", e.limits.ReceiptDrain.String()), loadStandParam("allowed_lateness", e.limits.AllowedLateness.String()), loadStandParam("max_actions", strconv.Itoa(e.limits.MaxActions)), loadStandParam("max_samples", strconv.Itoa(e.limits.MaxSamples)), loadStandParam("max_trace_bytes", strconv.Itoa(e.limits.MaxTraceBytes)))
 	return runjournal.ConfigKey{Measurement: "loadstand-functional-lifecycle", Label: "headless-sdk", Params: params}
 }
 func (e *loadStandExecutor) runJournal(ctx context.Context, j *runjournal.Journal) (loadStandExecutionReport, error) {

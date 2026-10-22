@@ -50,6 +50,16 @@ func peerAddressStrings(addresses []domain.PeerAddress) []string {
 	return names
 }
 func ReadChildEnvironment(getenv func(string) string) (ChildConfig, *Credentials, error) {
+	config, credentials, err := readChildEnvironmentUnchecked(getenv)
+	if err != nil {
+		return ChildConfig{}, nil, err
+	}
+	if err = config.ValidateLoopback(); err != nil {
+		return ChildConfig{}, nil, err
+	}
+	return config, credentials, nil
+}
+func readChildEnvironmentUnchecked(getenv func(string) string) (ChildConfig, *Credentials, error) {
 	procs, err := strconv.Atoi(getenv("GOMAXPROCS"))
 	if err != nil {
 		return ChildConfig{}, nil, ErrInvalidConfiguration
@@ -62,9 +72,6 @@ func ReadChildEnvironment(getenv func(string) string) (ChildConfig, *Credentials
 	for _, address := range strings.Split(getenv("LOADSTAND_BOOTSTRAP"), ",") {
 		config.Bootstrap = append(config.Bootstrap, domain.PeerAddress(address))
 	}
-	if err := config.ValidateLoopback(); err != nil {
-		return ChildConfig{}, nil, err
-	}
 	credentials, err := credentialsFromEnvironment(getenv("LOADSTAND_RPC_USER"), getenv("LOADSTAND_RPC_PASSWORD"))
 	return config, credentials, err
 }
@@ -72,6 +79,9 @@ func (c ChildConfig) environment(credentials *Credentials) ([]string, error) {
 	if err := c.ValidateLoopback(); err != nil {
 		return nil, err
 	}
+	return c.environmentUnchecked(credentials)
+}
+func (c ChildConfig) environmentUnchecked(credentials *Credentials) ([]string, error) {
 	if !credentials.valid() {
 		return nil, ErrInvalidConfiguration
 	}

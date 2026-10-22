@@ -56,7 +56,9 @@ LIMITS = {
 }
 TARGETS = {'corsa-node': './cmd/corsa-node',
            'sdkedge': './internal/testutil/loadstand/sdkedge',
-           'linuxhelper': './internal/testutil/loadstand/linuxhelper'}
+           'linuxhelper': './internal/testutil/loadstand/linuxhelper',
+           'fullnode': './internal/testutil/loadstand/fullnode'}
+GO_VERSION = 'go1.27.3'
 FLAVOURS = ('native-linux-arm64', 'cross-compile-cgo0')
 STATES = ('not_started', 'present_verified', 'unavailable', 'invalid', 'unconfirmed')
 HASH = r'^(?!0{64}$)[0-9a-f]{64}$'
@@ -264,7 +266,7 @@ DEFS = {
               'closure_sha256': N(D), 'cache_initially_empty': N(B), 'joined': N(B),
               'targets': A(E(*TARGETS), 3, 0, True)},
     'host': {'system': S(), 'architecture': S()},
-    'environment': {'go_version': E('go1.27.3'), 'goos': E('linux'), 'goarch': E('arm64'),
+    'environment': {'go_version': E(GO_VERSION), 'goos': E('linux'), 'goarch': E('arm64'),
                      'goarm64': E('v8.0'), 'cgo': E(0, 1), 'goexperiment': E(''),
                      'vcs': E('disabled_archive'), 'network_isolation': E('not_established'),
                      'image': R('image')},
@@ -3637,7 +3639,7 @@ def empty_receipt(request, raw):
             'status': 'incomplete', 'source': evidence(), 'origins': [],
             'flavour': request['flavour'],
             'host': {'system': platform.system(), 'architecture': platform.machine()},
-            'environment': {'go_version': 'go1.27.3', 'goos': 'linux', 'goarch': 'arm64',
+            'environment': {'go_version': GO_VERSION, 'goos': 'linux', 'goarch': 'arm64',
                 'goarm64': 'v8.0', 'cgo': 1 if request['flavour'] == 'native-linux-arm64' else 0,
                 'goexperiment': '', 'vcs': 'disabled_archive', 'network_isolation': 'not_established',
                 'image': request['image']},
@@ -3654,13 +3656,22 @@ def empty_receipt(request, raw):
             'output_manifest_sha256': 'f'*64}
 
 
+def validate_go_probe(raw):
+    # Same canonical version as the closed receipt/schema and artifact reader.
+    match = re.fullmatch(rb'go version '+re.escape(GO_VERSION.encode('ascii'))+
+                         rb' linux/([a-z0-9]+)\n', raw)
+    if match is None:
+        fail('GoVersionMismatch', 'toolchain')
+    return match.group(1).decode('ascii')
+
+
 def parse_artifact_metadata(version_raw, build_id_raw, target):
     try:
         text, build_id = version_raw.decode('utf-8'), build_id_raw.decode('ascii').strip()
     except UnicodeError as exc:
         raise Failure('ArtifactMetadataInvalid') from exc
     lines = text.splitlines()
-    if not lines or not lines[0].endswith(': go1.27.3') or not build_id or len(build_id.encode()) > 4096 or any(ord(c) < 33 or ord(c) > 126 for c in build_id):
+    if not lines or not lines[0].endswith(': '+GO_VERSION) or not build_id or len(build_id.encode()) > 4096 or any(ord(c) < 33 or ord(c) > 126 for c in build_id):
         fail('ArtifactMetadataInvalid')
     settings, path, module = {}, None, None
     for line in lines[1:]:
@@ -3888,9 +3899,7 @@ class BuildPair:
         record.update(source_before=expected[0], seed_before=expected[1], toolchain_before=expected[2])
         self.store.json(f'checks/lane-{number}-before.json', record.copy(), 'lane_check')
         version, _ = _command_bytes(self.supervisor, self.go, ['version'], lane['source'], env, lane_budget)
-        if not re.fullmatch(rb'go version go1\.27\.2 linux/[a-z0-9]+\n', version):
-            fail('GoVersionMismatch', 'toolchain')
-        host_arch = version.rstrip().rsplit(b'/', 1)[1].decode('ascii')
+        host_arch = validate_go_probe(version)
         for tool in ('compile', 'link', 'asm', 'cgo', 'buildid'):
             path = f'pkg/tool/linux_{host_arch}/{tool}'
             if path not in {x['path'] for x in self.goroot.manifest['files']}:

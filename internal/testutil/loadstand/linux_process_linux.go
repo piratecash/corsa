@@ -21,6 +21,7 @@ import (
 )
 
 type LinuxFixtureSpec struct {
+	planned      *linuxPlannedLaunch
 	HelperBinary string
 	HelperSHA256 ExecutableSHA256
 	TargetBinary string
@@ -59,22 +60,28 @@ type linuxInitializationResult struct {
 }
 
 type linuxSampleExchange struct {
-	initialize    bool
-	observe       bool
-	runtimeResult chan linuxRuntimeOutcome
-	ctx           context.Context
-	id            LinuxRequestID
-	result        chan linuxSampleOutcome
+	receiptLimit   int
+	receiptsResult chan linuxMemberReceiptsOutcome
+	bindMember     bool
+	memberResult   chan linuxMemberStartOutcome
+	initialize     bool
+	observe        bool
+	runtimeResult  chan linuxRuntimeOutcome
+	ctx            context.Context
+	id             LinuxRequestID
+	result         chan linuxSampleOutcome
 }
 type linuxSampleOutcome struct {
 	sample LinuxProcessSample
 	err    error
 }
 
-// LinuxFixture is a finite, inactive primitive owner. No member factory or plan
-// consumer calls it. All mutable state is fixed-size and guarded by mu; I/O
-// owners never hold mu across a syscall or a channel wait.
+// LinuxFixture retains the original helper/channel ownership. The reviewed
+// planned Member uses its private path; legacy one-use callers remain intact.
+// Mutable terminal state is guarded by mu; I/O owners never hold it while waiting.
 type LinuxFixture struct {
+	plannedReleased, plannedConsumed                              bool
+	memberFinal                                                   *linuxMemberFinal
 	mu                                                            sync.Mutex
 	stopSubmitMu                                                  sync.Mutex
 	initializationOnce, resolvedOnce, waitOnce                    sync.Once
@@ -165,7 +172,7 @@ func CreateLinuxFixture(ctx context.Context, spec LinuxFixtureSpec, parent *Audi
 	return o, nil
 }
 func newLinuxFixtureResources(ctx context.Context, spec LinuxFixtureSpec, parent *AuditedProfileParent, namespace *OwnedNetNS) (*LinuxFixture, error) {
-	if os.Geteuid() != 0 || namespace == nil || parent == nil || spec.UID == 0 || spec.GID == 0 || !spec.Credentials.valid() || spec.Config.ValidateLoopback() != nil || spec.Config.DataDir != parent.MemberDirectory() || len(spec.Config.Bootstrap) != 1 || ValidateAmbientEnvironment(os.Environ()) != nil {
+	if os.Geteuid() != 0 || namespace == nil || parent == nil || spec.UID == 0 || spec.GID == 0 || !spec.Credentials.valid() || !validLinuxFixtureConfiguration(spec, namespace) || spec.Config.DataDir != parent.MemberDirectory() || ValidateAmbientEnvironment(os.Environ()) != nil {
 		return nil, ErrInvalidConfiguration
 	}
 	if err := errors.Join(auditLinuxExecutable(ctx, spec.HelperBinary, spec.HelperSHA256), auditLinuxExecutable(ctx, spec.TargetBinary, spec.TargetSHA256)); err != nil {
@@ -188,7 +195,7 @@ func newLinuxFixtureResources(ctx context.Context, spec LinuxFixtureSpec, parent
 		return nil, errors.Join(err, life.conn.Close(), childLife.Close(), lease.file.Close())
 	}
 	namespace.mu.Lock()
-	if namespace.fd < 0 || namespace.claimed || namespace.closed || namespace.poisoned || namespace.done == nil {
+	if namespace.fd < 0 || namespace.closed || namespace.poisoned || namespace.done == nil || namespace.busy || namespace.claimed && !consumePlannedNamespaceReuseLocked(spec, namespace) {
 		namespace.mu.Unlock()
 		return nil, errors.Join(ErrLinuxOwnerUnsupported, life.conn.Close(), work.conn.Close(), childLife.Close(), childWork.Close(), lease.file.Close())
 	}
@@ -197,7 +204,12 @@ func newLinuxFixtureResources(ctx context.Context, spec LinuxFixtureSpec, parent
 	config := spec.Config
 	config.Bootstrap = append(config.Bootstrap[:0:0], config.Bootstrap...)
 	spec.Config = config
-	binding, err := newLaunchBinding(spec.Config, string(spec.TargetSHA256))
+	var binding launchBinding
+	if spec.planned == nil {
+		binding, err = newLaunchBinding(spec.Config, string(spec.TargetSHA256))
+	} else {
+		binding = spec.planned.binding
+	}
 	if err != nil {
 		return nil, errors.Join(err, life.conn.Close(), work.conn.Close(), childLife.Close(), childWork.Close(), lease.file.Close())
 	}
@@ -207,6 +219,12 @@ func newLinuxFixtureResources(ctx context.Context, spec LinuxFixtureSpec, parent
 	o.rpc, err = NewRPCClient(RPCOptions{Address: spec.Config.RPC, Credentials: spec.Credentials, DialContext: boundedLinuxRPCDial(o.dialContext)})
 	if err != nil {
 		return nil, errors.Join(err, life.close(), work.close(), childLife.Close(), childWork.Close(), lease.file.Close())
+	}
+	if spec.planned != nil {
+		namespace.mu.Lock()
+		namespace.plannedOwner = o
+		namespace.mu.Unlock()
+		spec.planned.previous = nil
 	}
 	return o, nil
 }
@@ -339,6 +357,13 @@ func (o *LinuxFixture) exchangeLinuxInitialization(ctx context.Context) (ready l
 	}
 	deadline, _ := ctx.Deadline()
 	init := linuxInit{Nonce: o.correlation.nonce, Role: "loadstand-linux-helper-v4", Config: o.spec.Config, TargetBinary: o.spec.TargetBinary, TargetHash: o.spec.TargetSHA256, HelperHash: o.spec.HelperSHA256, UID: o.spec.UID, GID: o.spec.GID, ParentDevice: o.parent.device, ParentInode: o.parent.inode, NSDevice: o.namespace.identity.device, NSInode: o.namespace.identity.inode}
+	if p := o.spec.planned; p != nil {
+		init.Planned = &linuxPlannedInit{Plan: p.plan, Ordinal: p.ordinal, FinalNonce: p.binding.nonce, FinalFingerprint: p.binding.fingerprint, ProfileDevice: p.profileDevice, ProfileInode: p.profileInode}
+		if p.membership != nil {
+			descriptor := p.membership.descriptor
+			init.Planned.Membership = &descriptor
+		}
+	}
 	raw, err := encodeLinuxPacket(linuxInitPublic, 1, 1, init)
 	if err == nil {
 		err = o.life.write(raw, deadline)
@@ -411,7 +436,12 @@ func (o *LinuxFixture) newLinuxHelperCommand(n *OwnedNetNS) (*exec.Cmd, error) {
 	}
 	syscall.CloseOnExec(fd)
 	o.childNS = os.NewFile(uintptr(fd), "owned-netns-verification")
-	environment, err := o.spec.Config.environment(o.spec.Credentials)
+	var environment []string
+	if o.spec.planned == nil {
+		environment, err = o.spec.Config.environment(o.spec.Credentials)
+	} else {
+		environment, err = plannedChildEnvironment(o.spec.Config, o.spec.planned.plan, o.spec.Credentials)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -419,6 +449,12 @@ func (o *LinuxFixture) newLinuxHelperCommand(n *OwnedNetNS) (*exec.Cmd, error) {
 	command.Env = environment
 	command.Dir = "/"
 	command.ExtraFiles = []*os.File{o.childLife, o.childWork, o.childNS, o.parent.file}
+	if p := o.spec.planned; p != nil && p.membership != nil {
+		if p.membership.file == nil {
+			return nil, ErrMemberState
+		}
+		command.ExtraFiles = append(command.ExtraFiles, p.membership.file)
+	}
 	command.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: uint32(o.spec.UID), Gid: o.spec.GID, Groups: []uint32{}}, Pdeathsig: syscall.SIGKILL}
 	return command, nil
 }
@@ -471,6 +507,9 @@ func (o *LinuxFixture) receiveLifecycle() {
 			return
 		}
 		terminal, err := decodeLinuxBody[linuxTerminal](packet)
+		if err == nil && terminal.MemberFinal != nil && (o.spec.planned == nil || packet.kind != linuxHelperJoined) {
+			err = ErrLinuxOwnerProtocol
+		}
 		o.mu.Lock()
 		if err == nil {
 			err = o.correlation.acceptTerminal(packet, terminal)
@@ -493,6 +532,10 @@ func (o *LinuxFixture) receiveLifecycle() {
 					o.correlation.poisoned = true
 				}
 				if packet.kind == linuxHelperJoined {
+					if terminal.MemberFinal != nil {
+						copy := *terminal.MemberFinal
+						o.memberFinal = &copy
+					}
 					o.helperJoined = true
 				}
 			}
@@ -518,6 +561,14 @@ func (o *LinuxFixture) runWork() {
 			if exchange.initialize {
 				_ = o.initializeOnWorkOwner(exchange.ctx)
 				continue // initialized wakes Start; no INIT payload sender.
+			}
+			if exchange.receiptLimit > 0 {
+				o.receiptsOnWorkOwner(exchange)
+				continue
+			}
+			if exchange.bindMember {
+				o.bindMemberOnWorkOwner(exchange)
+				continue
 			}
 			if exchange.observe {
 				o.observeOnWorkOwner(exchange)
@@ -546,15 +597,15 @@ func (o *LinuxFixture) runWork() {
 			if err != nil {
 				o.poison()
 			}
+			o.mu.Lock()
+			o.workBusy = false
+			o.mu.Unlock()
 			select {
 			case exchange.result <- linuxSampleOutcome{body.Sample, err}:
 			case <-exchange.ctx.Done():
 				o.poison()
 			case <-o.stoppingDone:
 			}
-			o.mu.Lock()
-			o.workBusy = false
-			o.mu.Unlock()
 		}
 	}
 }
@@ -717,13 +768,22 @@ func (o *LinuxFixture) Close(ctx context.Context) error {
 		return ctx.Err()
 	}
 	defer func() { o.releaseGate <- struct{}{} }()
-	if err := o.namespace.Close(ctx); err != nil {
+	if o.spec.planned == nil {
+		if err := o.namespace.Close(ctx); err != nil {
+			return errors.Join(stopErr, err)
+		}
+	} else if err := o.confirmPlannedNamespaceIdle(); err != nil {
 		return errors.Join(stopErr, err)
 	}
 	closeErr := errors.Join(o.life.close(), o.work.close())
 	if o.parent.file != nil {
 		closeErr = errors.Join(closeErr, o.parent.file.Close())
 		o.parent.file = nil
+	}
+	if o.spec.planned != nil && closeErr == nil {
+		o.mu.Lock()
+		o.plannedReleased = true
+		o.mu.Unlock()
 	}
 	return errors.Join(stopErr, closeErr)
 }

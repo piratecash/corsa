@@ -56,6 +56,14 @@ func Observed[T any](value T, err error) Observation[T] {
 func (o Observation[T]) Available() bool { return o.State == ObservationAvailable && o.Value != nil }
 
 type MemberSample struct {
+	// Process is original adapter custody, not an identity/role-derived label.
+	// It is never reconstructed from JSON; report group ordinals are labels only.
+	Process RuntimeProcess `json:"-"`
+	Runtime Observation[domain.RuntimeMetrics]
+
+	// Non-nil only for actual external Linux members; unsupported/failed reads
+	// remain explicit unavailable, never in-process heap or measured zero.
+	LinuxProcess *Observation[LinuxProcessSample] `json:",omitempty"`
 	Incarnation  Incarnation
 	Identity     domain.PeerIdentity
 	ReadAt       time.Time
@@ -70,7 +78,7 @@ type MemberSample struct {
 }
 
 func (s MemberSample) FullSampleAvailable() bool {
-	return s.Traffic.Available() && s.Sessions.Available() && s.Modes.Available() && s.Neighbours.Available() && s.RouteEntries.Available() && s.Resources.Available() && (s.Datagram.Available() || s.Datagram.State == ObservationDisabled) && s.Bans.Available()
+	return s.Runtime.Available() && (s.LinuxProcess == nil || s.LinuxProcess.Available()) && s.Traffic.Available() && s.Sessions.Available() && s.Modes.Available() && s.Neighbours.Available() && s.RouteEntries.Available() && s.Resources.Available() && (s.Datagram.Available() || s.Datagram.State == ObservationDisabled) && s.Bans.Available()
 }
 
 type Finality string
@@ -114,6 +122,7 @@ type Member interface {
 	Done() <-chan struct{}
 	PeerHealth(context.Context) error
 	ImportContacts(context.Context, []PublicIdentity) error
+	RuntimeProcess() RuntimeProcess
 	Sample(context.Context) (MemberSample, error)
 	Stop(context.Context) (StopReceipt, error)
 	EndedIncarnations() []EndedIncarnation

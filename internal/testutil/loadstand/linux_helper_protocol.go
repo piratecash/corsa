@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"github.com/piratecash/corsa/internal/core/domain"
 	"io"
 	"math"
 	"reflect"
@@ -35,6 +36,10 @@ const (
 	linuxDefect
 	linuxObserveRuntime
 	linuxRuntimeResult
+	linuxMemberBind
+	linuxMemberBindResult
+	linuxMemberReceipts
+	linuxMemberReceiptsResult
 )
 
 type LinuxRequestID uint64
@@ -79,13 +84,14 @@ type linuxRuntimeReply struct {
 	Facts linuxRuntimeFacts
 }
 type linuxTerminal struct {
-	Nonce LaunchNonce
-	Code  linuxResultCode
-	Exit  ProcessExitResult
+	MemberFinal *linuxMemberFinal `json:",omitempty"`
+	Nonce       LaunchNonce
+	Code        linuxResultCode
+	Exit        ProcessExitResult
 }
 
 func encodeLinuxPacket(kind linuxPacketKind, id LinuxRequestID, ordinal LinuxLaunchOrdinal, body any) ([]byte, error) {
-	if kind < linuxInitPublic || kind > linuxRuntimeResult || ordinal == 0 {
+	if kind < linuxInitPublic || kind > linuxMemberReceiptsResult || ordinal == 0 {
 		return nil, ErrLinuxOwnerProtocol
 	}
 	raw, err := json.Marshal(body)
@@ -108,7 +114,7 @@ func decodeLinuxPacket(raw []byte) (linuxPacket, error) {
 	}
 	kind := linuxPacketKind(binary.BigEndian.Uint16(raw[6:8]))
 	ordinal := LinuxLaunchOrdinal(binary.BigEndian.Uint64(raw[24:32]))
-	if kind < linuxInitPublic || kind > linuxRuntimeResult || ordinal == 0 {
+	if kind < linuxInitPublic || kind > linuxMemberReceiptsResult || ordinal == 0 {
 		return linuxPacket{}, ErrLinuxOwnerProtocol
 	}
 	return linuxPacket{kind: kind, id: LinuxRequestID(binary.BigEndian.Uint64(raw[16:24])), ordinal: ordinal, body: append(json.RawMessage(nil), raw[linuxHeaderSize:]...)}, nil
@@ -224,4 +230,14 @@ func (c *linuxCorrelation) acceptTerminal(packet linuxPacket, terminal linuxTerm
 		c.stopObserved = true
 	}
 	return nil
+}
+
+type linuxMemberFinal struct {
+	Receipt          StartReceipt
+	Finality         Finality
+	Traffic          domain.TransportTrafficStats
+	Reason           FinalAccountingReason
+	PeersKnown       bool
+	PeerCount        int
+	MembershipSHA256 string
 }

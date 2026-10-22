@@ -586,7 +586,8 @@
             "enum": [
               "corsa-node",
               "sdkedge",
-              "linuxhelper"
+              "linuxhelper",
+              "fullnode"
             ]
           },
           "minItems": 1,
@@ -1005,7 +1006,8 @@
           "enum": [
             "corsa-node",
             "sdkedge",
-            "linuxhelper"
+            "linuxhelper",
+            "fullnode"
           ]
         },
         "size": {
@@ -1179,7 +1181,8 @@
             "enum": [
               "corsa-node",
               "sdkedge",
-              "linuxhelper"
+              "linuxhelper",
+              "fullnode"
             ]
           },
           "minItems": 0,

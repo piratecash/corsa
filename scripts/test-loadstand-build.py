@@ -784,6 +784,78 @@ class EvidenceEnvironmentControls(unittest.TestCase):
                 build.check_output_scope(request, output)
 
 
+class FullNodeTargetControls(unittest.TestCase):
+    def test_fullnode_request_is_fixed_and_three_target_bound_is_retained(self):
+        document = json.loads(SCHEMA.read_text()); defs = document['$defs']
+        request = sample('request')
+        request['targets'] = ['fullnode', 'sdkedge', 'linuxhelper']
+        build.validate('request', request)
+        self.assertTrue(schema_validate(request, defs['request'], defs))
+        self.assertEqual('./internal/testutil/loadstand/fullnode', build.TARGETS['fullnode'])
+        self.assertEqual('./cmd/corsa-node', build.TARGETS['corsa-node'])
+        for targets in (['./internal/testutil/loadstand/fullnode'], ['fullnode;other'],
+                        ['unknown'], ['fullnode', 'sdkedge', 'linuxhelper', 'corsa-node']):
+            bad = copy.deepcopy(request); bad['targets'] = targets
+            with self.subTest(targets=targets):
+                with self.assertRaises(build.Failure): build.validate('request', bad)
+                self.assertFalse(schema_validate(bad, defs['request'], defs))
+
+    def test_fullnode_metadata_and_receipt_bind_exact_target_not_node_alias(self):
+        raw = (b'/private/bin: go1.27.3\n'
+               b'\tpath\texample.org/corsa/internal/testutil/loadstand/fullnode\n'
+               b'\tmod\texample.org/corsa\t(devel)\t\n'
+               b'\tbuild\t-trimpath=true\n\tbuild\tCGO_ENABLED=1\n'
+               b'\tbuild\tGOARCH=arm64\n\tbuild\tGOOS=linux\n\tbuild\tGOARM64=v8.0\n')
+        parsed = build.parse_artifact_metadata(raw, b'build-id\n', 'fullnode')
+        self.assertEqual('example.org/corsa/internal/testutil/loadstand/fullnode', parsed['path'])
+        self.assertEqual('deferred_to_owned_runtime', parsed['runtime_exe_state'])
+        for wrong in ('corsa-node', 'sdkedge', 'linuxhelper'):
+            with self.subTest(wrong=wrong), self.assertRaises(build.Failure):
+                build.parse_artifact_metadata(raw, b'build-id\n', wrong)
+        receipt = sample('receipt'); targets = ['fullnode', 'sdkedge', 'linuxhelper']
+        receipt['artifacts'] = []
+        for n in (0, 1):
+            receipt['lanes'][n]['targets'] = list(targets)
+            for target in targets:
+                artifact = sample('artifact'); artifact.update(lane=n, target=target, sha256=sha(target.encode()))
+                receipt['artifacts'].append(artifact)
+        build.validate('receipt', receipt)
+        for case in ('missing', 'wrong-target', 'wrong-peer-lane-hash'):
+            bad = copy.deepcopy(receipt)
+            if case == 'missing': bad['artifacts'].pop()
+            elif case == 'wrong-target': bad['artifacts'][0]['target'] = 'corsa-node'
+            else: bad['artifacts'][3]['sha256'] = 'e'*64
+            with self.subTest(case=case), self.assertRaises(build.Failure): build.validate('receipt', bad)
+
+    def test_actual_lane_go_probe_uses_canonical_supported_version(self):
+        self.assertEqual('go1.27.3', build.GO_VERSION)
+        self.assertEqual('arm64', build.validate_go_probe(b'go version go1.27.3 linux/arm64\n'))
+        for raw in (b'go version go1.27.2 linux/arm64\n',
+                    b'go version go1.27.3 darwin/arm64\n',
+                    b'go version go1.27.3 linux/arm64',
+                    b'go version go1.27.3 linux/arm64\nextra\n'):
+            with self.subTest(raw=raw), self.assertRaises(build.Failure): build.validate_go_probe(raw)
+        tree = ast.parse(SCRIPT.read_text())
+        lane = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == '_lane_body')
+        calls = [n for n in ast.walk(lane) if isinstance(n, ast.Call) and
+                 isinstance(n.func, ast.Name) and n.func.id == 'validate_go_probe']
+        self.assertEqual(['version'], [ast.unparse(n.args[0]) for n in calls])
+        self.assertEqual(build.GO_VERSION, build.empty_receipt(sample('request'), build.canonical(sample('request')))['environment']['go_version'])
+        self.assertEqual([build.GO_VERSION], build.DEFS['environment']['go_version']['values'])
+
+    def test_fullnode_build_argv_stays_on_original_owned_fixed_edge(self):
+        tree = ast.parse(SCRIPT.read_text())
+        lane = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == '_lane_body')
+        argv = [n.value for n in ast.walk(lane) if isinstance(n, ast.Assign) and
+                any(isinstance(x, ast.Name) and x.id == 'argv' for x in n.targets)]
+        self.assertEqual(1, len(argv)); self.assertIsInstance(argv[0], ast.Tuple)
+        self.assertEqual(['self.go.path', "'build'", "'-mod=readonly'", "'-trimpath'", "'-buildvcs=false'",
+                          "'-ldflags'", "'-s -w'", "'-o'", 'output', 'TARGETS[target]'],
+                         [ast.unparse(x) for x in argv[0].elts])
+        # New fixed identity uses the same original package-closure and metadata
+        # binding. No requested path, new external edge or arbitrary flag exists.
+
+
 class ClosedLaunchControls(unittest.TestCase):
     def test_only_owned_launch_edges_no_external_fixture_switch(self):
         tree = ast.parse(SCRIPT.read_text())
@@ -816,7 +888,8 @@ class ClosedLaunchControls(unittest.TestCase):
         self.assertEqual(1, fd_preflights)
         # Fixed target and build arguments are a closed reviewed production edge.
         self.assertEqual({'corsa-node': './cmd/corsa-node', 'sdkedge': './internal/testutil/loadstand/sdkedge',
-                          'linuxhelper': './internal/testutil/loadstand/linuxhelper'}, build.TARGETS)
+                          'linuxhelper': './internal/testutil/loadstand/linuxhelper',
+                          'fullnode': './internal/testutil/loadstand/fullnode'}, build.TARGETS)
         main = next(x for x in tree.body if isinstance(x, ast.FunctionDef) and x.name == 'main')
         arguments = [x.args[0].value for x in ast.walk(main) if isinstance(x, ast.Call) and
                      isinstance(x.func, ast.Attribute) and x.func.attr == 'add_argument']

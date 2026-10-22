@@ -14,15 +14,17 @@ import (
 
 type linuxNamespaceIdentity struct{ device, inode uint64 }
 type linuxNamespaceOperation struct {
-	ctx    context.Context
-	owner  *LinuxFixture
-	dial   *linuxDialOffer
-	result chan error
+	ctx     context.Context
+	owner   *LinuxFixture
+	dial    *linuxDialOffer
+	planned *linuxPlannedNamespaceOperation
+	result  chan error
 }
 
 // OwnedNetNS is minted only by this locked worker's Unshare. Its descriptors
 // and operation queue are private: exactly one operation, zero waiting jobs.
 type OwnedNetNS struct {
+	plannedOwner                    *LinuxFixture // exact latest planned incarnation; not a resettable claim
 	mu                              sync.Mutex
 	fd, original                    int
 	identity, origin                linuxNamespaceIdentity
@@ -235,23 +237,23 @@ func (n *OwnedNetNS) runLockedWorker(ctx context.Context, ready chan<- error, ca
 			return
 		case operation := <-n.operations:
 			if operation.ctx.Err() != nil {
-				if operation.dial == nil {
+				if operation.owner != nil && operation.dial == nil {
 					operation.owner.resolveNeverStarted()
 				}
-				operation.result <- operation.ctx.Err()
-				n.releaseOperation()
+				n.finishOperation(operation, operation.ctx.Err())
 				continue
 			}
 			if unix.Setns(n.fd, unix.CLONE_NEWNET) != nil {
 				n.poison()
-				if operation.dial == nil {
+				if operation.owner != nil && operation.dial == nil {
 					operation.owner.resolveNeverStarted()
 				}
-				operation.result <- ErrLinuxOwnerPoisoned
-				n.releaseOperation()
+				n.finishOperation(operation, ErrLinuxOwnerPoisoned)
 				continue
 			}
-			if operation.dial != nil {
+			if operation.planned != nil {
+				err = n.plannedInNamespace(operation.ctx, operation.planned)
+			} else if operation.dial != nil {
 				err = n.dialInNamespace(operation)
 			} else {
 				err = operation.owner.spawnOnNamespaceThread(operation.ctx, n)
@@ -262,21 +264,27 @@ func (n *OwnedNetNS) runLockedWorker(ctx context.Context, ready chan<- error, ca
 					_ = operation.dial.conn.Close()
 				}
 				n.poison()
-				operation.owner.poison()
-				operation.result <- ErrLinuxOwnerPoisoned
-				n.releaseOperation()
+				if operation.owner != nil {
+					operation.owner.poison()
+				}
+				n.finishOperation(operation, ErrLinuxOwnerPoisoned)
 				return
 			}
 			if operation.dial != nil && err == nil {
 				err = operation.owner.offerDial(operation.ctx, operation.dial)
 			}
-			operation.result <- err
-			n.releaseOperation()
+			n.finishOperation(operation, err)
 		}
 	}
 }
 func (n *OwnedNetNS) poison()           { n.mu.Lock(); n.poisoned = true; n.mu.Unlock() }
 func (n *OwnedNetNS) releaseOperation() { n.mu.Lock(); n.busy = false; n.mu.Unlock() }
+
+// All effects and namespace restoration finish before the caller sees completion.
+func (n *OwnedNetNS) finishOperation(operation linuxNamespaceOperation, err error) {
+	n.releaseOperation()
+	operation.result <- err
+}
 func (n *OwnedNetNS) submit(ctx context.Context, operation linuxNamespaceOperation) error {
 	n.mu.Lock()
 	if n.closed || n.poisoned {

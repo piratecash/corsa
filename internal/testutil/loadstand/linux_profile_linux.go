@@ -128,7 +128,11 @@ func createLinuxPrivateProfile(ctx context.Context, parent *os.File, init linuxI
 	if filepath.Base(init.Config.DataDir) != "member-1" {
 		return nil, ErrLinuxOwnerUnsupported
 	}
-	if unix.Mkdirat(int(parent.Fd()), "member-1", 0700) != nil {
+	if init.Planned == nil || init.Planned.Ordinal == 1 {
+		if unix.Mkdirat(int(parent.Fd()), "member-1", 0700) != nil {
+			return nil, ErrLinuxOwnerUnsupported
+		}
+	} else if init.Planned.ProfileDevice == 0 || init.Planned.ProfileInode == 0 {
 		return nil, ErrLinuxOwnerUnsupported
 	}
 	fd, err := unix.Openat(int(parent.Fd()), "member-1", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
@@ -136,6 +140,12 @@ func createLinuxPrivateProfile(ctx context.Context, parent *os.File, init linuxI
 		return nil, ErrLinuxOwnerUnsupported
 	}
 	directory := os.NewFile(uintptr(fd), "private-member-profile")
+	if init.Planned != nil && init.Planned.Ordinal > 1 {
+		var original unix.Stat_t
+		if unix.Fstat(fd, &original) != nil || uint64(original.Dev) != init.Planned.ProfileDevice || original.Ino != init.Planned.ProfileInode || original.Uid != uint32(init.UID) || original.Mode&07777 != 0700 {
+			return nil, errors.Join(ErrLinuxOwnerUnsupported, directory.Close())
+		}
+	}
 	if err := auditPrivateFinalFD(directory, true); err != nil {
 		return nil, errors.Join(ErrLinuxOwnerUnsupported, directory.Close())
 	}

@@ -23,8 +23,9 @@ Execution needs a separately supplied complete, approved source/seed/toolchain i
 | `corsa-node` | `./cmd/corsa-node` | Headless node |
 | `sdkedge` | `./internal/testutil/loadstand/sdkedge` | Real DesktopClient/SQLite edge, not the GUI |
 | `linuxhelper` | `./internal/testutil/loadstand/linuxhelper` | Must exist in the supplied snapshot; absent in the initial frozen 374 baseline |
+| `fullnode` | `./internal/testutil/loadstand/fullnode` | Planned Full Member with the original headless Service/RPC/final-accounting lifecycle; distinct from `corsa-node` |
 
-One to three unique requested targets are all mandatory. Missing source is `TargetSourceMissing`, never a stub, moving checkout or smaller target set.
+The planned T5 Member build selects exactly `fullnode`, `sdkedge` and `linuxhelper`; the existing `corsa-node` identity and package remain unchanged. One to three unique requested targets are all mandatory. Missing source is `TargetSourceMissing`, never a stub, moving checkout or smaller target set.
 
 | Flavour | Fixed build settings | Claim |
 |---|---|---|
@@ -96,6 +97,9 @@ Portable tests cover strict parser/schema, real own-temp FD/no-follow/FIFO/hardl
 ---
 
 ## Русский
+
+Плановый T5 Member использует три точные цели `fullnode` → `./internal/testutil/loadstand/fullnode`, `sdkedge` и `linuxhelper`. `corsa-node` остаётся отдельной прежней целью `./cmd/corsa-node`; это не псевдоним Full Member. Четыре доступных имени не увеличивают предел запроса: не более трёх целей. Probe, schema/receipt и reader metadata используют одно ожидаемое значение Go1.27.3; исторические Unicode/table pins не меняются.
+
 
 Это неактивный инструмент сборки и provenance, отдельный от узла и допуска runtime. У `scripts/loadstand-build.py` один закрытый запрос и две независимые lane сборки. Он никогда не запускает собранный node, SDK edge или helper, включая предполагаемый запрос версии. `verified_equal` означает равенство исходных байтов артефактов на записанном хосте при записанных входах. Это не допуск T5, ресурсов, G2, D1, релиза, подлинности образа, герметичности, сетевой изоляции или воспроизводимости между хостами.
 
