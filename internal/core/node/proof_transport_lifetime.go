@@ -1,6 +1,7 @@
 package node
 
 import (
+	"github.com/piratecash/corsa/internal/core/findnode"
 	"sync"
 
 	"github.com/piratecash/corsa/internal/core/domain"
@@ -14,18 +15,19 @@ type proofTransportServiceToken struct{ _ byte }
 // One memory-only gate for observed terminal, N-in stage and canonical FindNode
 // publication. Never acquire peerMu/CM/store or perform diagnostics/I/O under mu.
 type proofTransportLifetime struct {
-	mu            sync.Mutex
-	ended         bool
-	token         *proofTransportServiceToken
-	role          sessionv2.Role
-	outbound      bool
-	id            domain.ConnID
-	entry         *connEntry
-	peer          *peerSession
-	evidence      *proofTransportEvidence
-	nin           *matureInboundWitness
-	findNode      *findNodeConnectionBinding
-	degreeWitness *degreeWitness
+	mu             sync.Mutex
+	ended          bool
+	token          *proofTransportServiceToken
+	role           sessionv2.Role
+	outbound       bool
+	id             domain.ConnID
+	entry          *connEntry
+	peer           *peerSession
+	evidence       *proofTransportEvidence
+	nin            *matureInboundWitness
+	findNode       *findNodeConnectionBinding
+	degreeWitness  *degreeWitness
+	bridgeTerminal *findNodeBridgeTerminal // immutable before literal publication
 }
 type proofTransportOwner struct {
 	life  *proofTransportLifetime
@@ -51,9 +53,28 @@ func (l *proofTransportLifetime) end() {
 	if l == nil {
 		return
 	}
+	var retiredIntake findnode.DormantIntake
+	var retiredLocal findnode.OwnedLocalTarget
+	var retiredSession findnode.Session
 	l.mu.Lock()
-	defer l.mu.Unlock()
+	defer func() {
+		l.mu.Unlock()
+		if retiredIntake != (findnode.DormantIntake{}) && retiredSession != (findnode.Session{}) {
+			_ = retiredIntake.EndOriginalSession(retiredSession)
+		}
+		if retiredLocal != (findnode.OwnedLocalTarget{}) && retiredSession != (findnode.Session{}) {
+			_ = retiredLocal.EndOriginalSession(retiredSession)
+		}
+	}()
+	if !l.ended && l.findNode != nil {
+		retiredIntake, retiredSession = l.findNode.retirement, l.findNode.session
+		retiredLocal = l.findNode.localRetirement
+	}
 	if l.ended {
+		return
+	}
+	if l.bridgeTerminal != nil {
+		l.endBridgeLocked()
 		return
 	}
 	l.ended = true

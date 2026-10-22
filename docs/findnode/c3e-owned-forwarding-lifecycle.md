@@ -1,0 +1,27 @@
+# C3e original forwarding lifecycle, inactive Source slice
+
+This slice continues C3d received requests through the original one-worker scheduler, actual C3b plan/C3c consumer, opaque accepted-work batch, original Node core queue, actual NetCore writer, and mandatory completion. Production Runtime construction remains Constructing. It does not call SealConstruction, enable Ready or advertise a new capability.
+
+The sole worker has one wake cell and one timer. Every completed OfferReceived attempt signals it, including the lawful refusal that opens an empty protected collection. Wakes do not refresh the fixed cut. Each attempt captures a fresh complete original Node cut. Every exact success retained by the actual consumer is queued to its original target or explicitly cancelled, including successes before a later refusal.
+
+The queued handle retains the exact original C3a success receipt, plan, forwarded bytes, Session, calendar alias and immutable received tuple. It is one use. Node resolves the concrete original core before queue publication. There is no ConnID resolution or queue hop after writer admission. A future alias waits before Take; the timer only wakes and cannot authorize it. Deadline syscall failure cancels before Take and closes that writer.
+
+Take obtains coordinator, pending and original calendar waits before the accepted-original clock claim. This preallocated existing commit-role lease acquires clock then auth.R, mints a CURRENT original stamp after both waits and samples once. It checks the exact retained source and target, receipt/alias identity, fixed expiry/latest and actual pair/target budgets. Historical class/degree membership boundaries and unrelated cleanup cannot revoke an already accepted original obligation. The bounded committed suffix drops the alias and marks Dispatching. Successful Take skips diagnostic publication, which could otherwise acquire another calendar mutex after the writer-start point. The next writer action is the raw Write syscall. This forwarding writer-start point is distinct from local TargetCoordinator AdmittedAtT.
+
+The writer treats only a complete byte count with nil error as success. It calls the original Finish exactly once before capture callbacks or deadline clearing. Deadline, partial/error writes and completion failures close the original endpoint and drain/cancel queued typed work. A panic after Take has a mandatory failed-Finish cleanup.
+
+Completion uses the Observer retained before construction escape. The constructor merely retains roles; it does not validate same-domain provenance. WaitDelay and Finish validate genuine samples with the original Consumer.Matches. Finish samples once after application waits using the existing clock-only ReserveClock, releases it immediately, and never treats completion as current-snapshot authority. An original End or closed done channel therefore cannot strand an in-flight writer. A foreign or poisoned observer refuses or terminally retires the exact original generation without fabricated time or accepted-debt/ID refund.
+
+The original transport End publishes Session.End under its existing publication/common path first. Only after that path releases common/W does the exact retained intake receive EndOriginalSession. Reserved work is retired; Dispatching becomes TerminalDispatch and stays until mandatory Finish. No new wait is added under W/common.
+
+## Verification boundary
+
+Source guards freeze thirteen production files, exact original caller/type/role inventories and the existing raw/body pin closures. Behavioral fixtures cover actual original registered-core idle forwarding and protected empty-sweep wake, one-use Take/Finish, future alias scheduling, cancellation/debt, End before and during writer start, foreign/poisoned completion and absence of diagnostic waits after Take. Fault-writer fixtures obtain opaque work from genuine Node/TLS originals and actual Offer/C3b/C3c, then use a separate fault endpoint to exercise the real NetCore writer; they do not establish original registered-socket provenance. That provenance is exercised separately by the idle original-core fixture.
+
+These are authored Source tests and guards. Native formatting, compile, ordinary/race and causal controls require ROOT execution against the exact composed artifact. No historical native facts transfer to this Source.
+
+## Explicit remaining product wiring
+
+Local self-target routing, TargetCoordinator AdmittedAtT/signing/answer writer, remote target discovery, answer matching/relay, caller and challenge terminal inverse closure, complete construction writer inventory and final sealConstructionReady remain separate work. The remote known-target forwarding path is coherent here; it does not assert full D1 readiness. Activation, resource thresholds, S6 release and final release decisions are unchanged.
+
+The accepted-current port is unavailable for first admission: C3a keeps the historical complete cut and TryReadClock law. Current forwarding Take is the sole production caller in this slice. A genuine start past fixed latest counts an explicit assumption violation and retires the exact row without returning debt or IDs. Done remains checked by the existing commit Sample AFTER actual raw clock/HWM, with no pre-Sample shortcut. The old exact-boundary future-slot fixture remains unchanged; additional fixtures cover unrelated W/old-member End and a newly ended unrelated pending row while its different calendar is held. No new resource or memory acceptance follows from this repair.

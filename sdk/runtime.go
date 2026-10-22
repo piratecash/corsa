@@ -47,9 +47,12 @@ type Runtime struct {
 	// The private dependency has no public override.
 	databaseCloser runtimeDatabaseCloser
 	client         *service.DesktopClient
-	router         *service.DMRouter
-	eventBus       *ebus.Bus
-	metrics        *metrics.Collector
+	// Bound original cleanup for constructor failure or Close before Start.
+	// Started Run retains its own last-defer background admission closure.
+	cancelConstruction context.CancelFunc
+	router             *service.DMRouter
+	eventBus           *ebus.Bus
+	metrics            *metrics.Collector
 
 	// managedTransportOrigin is immutable construction provenance for normal
 	// NewWithContext runtimes, whose Service unconditionally constructs CM.
@@ -234,6 +237,14 @@ func New(cfg Config) (*Runtime, error) {
 // runtime's life: the node runs under the context given to Start, and the
 // runtime is released by Close.
 func NewWithContext(ctx context.Context, cfg Config) (*Runtime, error) {
+	return newWithContext(ctx, cfg, nil)
+}
+
+// Explicit private candidate; all database/command/lifecycle code stays below.
+func newWithOwnDMRuntime(ctx context.Context, cfg Config, profile corsanode.OwnDMRuntimeProfile) (*Runtime, error) {
+	return newWithContext(ctx, cfg, &profile)
+}
+func newWithContext(ctx context.Context, cfg Config, profile *corsanode.OwnDMRuntimeProfile) (*Runtime, error) {
 	if cfg.Node.IdentityIntentsPath != nil && strings.TrimSpace(*cfg.Node.IdentityIntentsPath) == "" {
 		return nil, ErrInvalidIdentityIntentsPath
 	}
@@ -263,15 +274,51 @@ func NewWithContext(ctx context.Context, cfg Config) (*Runtime, error) {
 		return nil, fmt.Errorf("open state database: %w", err)
 	}
 
-	nodeService := corsanode.NewService(internalCfg.Node, id, eventBus)
+	var nodeService *corsanode.Service
+	var port corsanode.OwnDMProvenancePort
+	var cancelConstruction context.CancelFunc
+	var abandonOnce sync.Once
+	abandon := func() {
+		abandonOnce.Do(func() {
+			if cancelConstruction != nil {
+				cancelConstruction()
+				nodeService.WaitBackground()
+			}
+			abandonRuntime(eventBus, database, cancelSubscriptions, cancelCommands)
+		})
+	}
+	constructed := false
+	defer func() {
+		if profile != nil && !constructed {
+			abandon()
+		}
+	}()
+	if profile == nil {
+		nodeService, cancelConstruction = corsanode.NewServiceForRuntime(internalCfg.Node, id, eventBus)
+	} else {
+		nodeService, port, cancelConstruction, err = corsanode.NewInactiveOwnDMRuntimeCandidate(internalCfg.Node, id, eventBus, *profile)
+		if err != nil {
+			abandon()
+			return nil, fmt.Errorf("prepare own DM runtime: %w", err)
+		}
+	}
 	// A node that must not start (an unsafe or lost pin store, an unusable
 	// connection budget) fails New, before the RPC server exists: errors.Is
 	// ErrPinStoreRefused, with the path and the fix for the operator.
 	if err := nodeService.StartupRefusal(); err != nil {
-		abandonRuntime(eventBus, database, cancelSubscriptions, cancelCommands)
+		abandon()
 		return nil, fmt.Errorf("node refuses to start: %w", err)
 	}
-	client := service.NewDesktopClient(internalCfg.App, internalCfg.Node, id, nodeService, database)
+	var client *service.DesktopClient
+	if profile == nil {
+		client = service.NewDesktopClient(internalCfg.App, internalCfg.Node, id, nodeService, database)
+	} else {
+		client, err = service.NewDesktopClientWithOwnDMProvenance(internalCfg.App, internalCfg.Node, id, nodeService, database, port)
+		if err != nil {
+			abandon()
+			return nil, fmt.Errorf("prepare own DM desktop: %w", err)
+		}
+	}
 	// Best-effort, exactly as on desktop: the backfill only seeds facts for
 	// peers the user already messaged, and failing it degrades Sybil
 	// classification rather than persistence.
@@ -281,7 +328,7 @@ func NewWithContext(ctx context.Context, cfg Config) (*Runtime, error) {
 		// runtime, and degrading to a warning handed back a working one with
 		// its database open.
 		if ctx.Err() != nil {
-			abandonRuntime(eventBus, database, cancelSubscriptions, cancelCommands)
+			abandon()
 			return nil, fmt.Errorf("chatlog established backfill: %w", err)
 		}
 		log.Warn().Err(err).Msg("sdk: chatlog established backfill failed")
@@ -323,7 +370,7 @@ func NewWithContext(ctx context.Context, cfg Config) (*Runtime, error) {
 	if normalizeConfig(cfg).RPC.Enabled {
 		rpcServer, err = rpc.NewServer(internalCfg.RPC, cmdTable, nodeService)
 		if err != nil {
-			abandonRuntime(eventBus, database, cancelSubscriptions, cancelCommands)
+			abandon()
 			return nil, fmt.Errorf("create rpc server: %w", err)
 		}
 	}
@@ -341,6 +388,7 @@ func NewWithContext(ctx context.Context, cfg Config) (*Runtime, error) {
 		database:               database,
 		databaseCloser:         database,
 		client:                 client,
+		cancelConstruction:     cancelConstruction,
 		router:                 router,
 		eventBus:               eventBus,
 		metrics:                metricsCollector,
@@ -355,6 +403,7 @@ func NewWithContext(ctx context.Context, cfg Config) (*Runtime, error) {
 		cancelCommands:         cancelCommands,
 	}
 	rpc.RegisterGlobalPublisherCommand(cmdTable, globalRPCPublisher{runtime: runtime})
+	constructed = true
 	return runtime, nil
 }
 
@@ -701,6 +750,9 @@ func (r *Runtime) Close() error {
 	//    for Run to return before anything below it goes away.
 	if cancelNode != nil {
 		cancelNode()
+	}
+	if !nodeStarted && r.cancelConstruction != nil {
+		r.cancelConstruction()
 	}
 	if nodeStarted {
 		stage(&r.progress.node, "node-run", nodeStopTimeout, func() bool {

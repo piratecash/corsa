@@ -476,11 +476,11 @@ func TestCandidateSourceFinalJointSlotAndFinishMaximum(t *testing.T) {
 	source, _ := provenFixture(t, 10, "source", 0)
 	target, _ := provenFixture(t, 20, "target", 0)
 	// Explicit target-debt boundary fixture, separate from the reachable witness.
-	calendar, err := NewForwardCalendar(target.Identity(), 0, 0)
+	calendar, err := newOwnedForwardCalendar(target.Identity(), 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	o.calendars[target.Identity()] = calendar
+	calendarFixedSeed(t, o, calendar)
 	r, out := candidateSourceOfferSeal(t, o, source, target, 1, 0)
 	if out.reserved != 1 {
 		t.Fatal(out)
@@ -567,11 +567,11 @@ func TestCandidateSourceReachableDelayedActualRefusal(t *testing.T) {
 		t.Fatal("original deadline changed")
 	}
 	beforeRows := windows.rows
-	calendar := o.calendars[target.Identity()]
+	calendar := calendarFixedRead(t, o, target.Identity())
 	beforeP, beforeA, beforeID := calendar.projected, calendar.actual, target.state.nextID
-	beforeRecords, beforeNames := len(o.groups.records), len(o.groups.named)
+	beforeRecords, beforeNames := fixedGroupRecords(&o.groups), fixedGroupNames(&o.groups)
 	seal(origin+Instant(27400*time.Millisecond), 0)
-	if windows.rows != beforeRows || calendar.projected != beforeP || calendar.actual != beforeA || target.state.nextID != beforeID || len(calendar.slots) != 0 || len(o.groups.records) != beforeRecords || len(o.groups.named) != beforeNames || o.snapshot().pending != 0 {
+	if windows.rows != beforeRows || calendar.projected != beforeP || calendar.actual != beforeA || target.state.nextID != beforeID || calendar.forwardAliasCountLocked() != 0 || fixedGroupRecords(&o.groups) != beforeRecords || fixedGroupNames(&o.groups) != beforeNames || o.snapshot().pending != 0 {
 		t.Fatal("delayed-actual refusal published a commitment")
 	}
 }
@@ -673,24 +673,24 @@ func TestCandidateSourceCalendarAndGroupRefusalsDoNotBind(t *testing.T) {
 			target, _ := provenFixture(t, 2, "target", 0)
 			if kind == "calendar" {
 				o.profile.timing = TimingProfile{Target: time.Second, Network: time.Second, Runtime: 3250 * time.Millisecond}
-				calendar, err := NewForwardCalendar(target.Identity(), 0, 0)
+				calendar, err := newOwnedForwardCalendar(target.Identity(), 0, 0)
 				if err != nil {
 					t.Fatal(err)
 				}
-				o.calendars[target.Identity()] = calendar
+				calendarFixedSeed(t, o, calendar)
 			} else {
-				o.groups.named[source.state.group] = 0
+				fixedSeedName(t, &o.groups, source.state.group, 0)
 				if kind == "group" {
 					for i := range 512 {
-						o.groups.records[candidateRecordKey{0, candidateTarget(i + 100)}] = candidateGroupRecord{expires: candidateGroupWindow}
+						fixedSeedRecord(t, &o.groups, candidateRecordKey{0, candidateTarget(i + 100)}, candidateGroupRecord{expires: candidateGroupWindow})
 					}
 				} else {
-					o.groups.records[candidateRecordKey{0, target.Identity()}] = candidateGroupRecord{expires: candidateGroupWindow, refs: math.MaxInt}
+					fixedSeedRecord(t, &o.groups, candidateRecordKey{0, target.Identity()}, candidateGroupRecord{expires: candidateGroupWindow, refs: math.MaxInt})
 				}
 			}
-			beforeNames, beforeRecords, beforeCalendars := len(o.groups.named), len(o.groups.records), len(o.calendars)
+			beforeNames, beforeRecords, beforeCalendars := fixedGroupNames(&o.groups), fixedGroupRecords(&o.groups), calendarFixedCount(t, o)
 			_, out := candidateSourceOfferSeal(t, o, source, target, 1, 0)
-			if out.reserved != 0 || out.refused != 1 || source.state.sourceWindows.Load() != nil || target.state.nextID != 0 || len(o.groups.named) != beforeNames || len(o.groups.records) != beforeRecords || len(o.calendars) != beforeCalendars || len(o.pending.byTarget) != 0 {
+			if out.reserved != 0 || out.refused != 1 || source.state.sourceWindows.Load() != nil || target.state.nextID != 0 || fixedGroupNames(&o.groups) != beforeNames || fixedGroupRecords(&o.groups) != beforeRecords || calendarFixedCount(t, o) != beforeCalendars || len(pendingTestTargetMapLocked(o.pending)) != 0 {
 				t.Fatal("failed joint trial bound or published source", out)
 			}
 		})

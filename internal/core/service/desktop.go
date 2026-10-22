@@ -445,6 +445,19 @@ type ResourceUsage struct {
 // callers open it first so a storage failure aborts startup instead of
 // surfacing later as silently dropped messages.
 func NewDesktopClient(appCfg config.App, nodeCfg config.Node, id *identity.Identity, localNode *node.Service, database *storage.Database) *DesktopClient {
+	c, _ := newDesktopClient(appCfg, nodeCfg, id, localNode, database, nil)
+	return c
+}
+
+// Typed before-escape internal composition; normal callers retain zero origin.
+func NewDesktopClientWithOwnDMProvenance(appCfg config.App, nodeCfg config.Node, id *identity.Identity, localNode *node.Service, database *storage.Database, port node.OwnDMProvenancePort) (*DesktopClient, error) {
+	return newDesktopClient(appCfg, nodeCfg, id, localNode, database, &port)
+}
+
+func newDesktopClient(appCfg config.App, nodeCfg config.Node, id *identity.Identity, localNode *node.Service, database *storage.Database, port *node.OwnDMProvenancePort) (*DesktopClient, error) {
+	if port != nil && !port.ValidFor(localNode, id) {
+		return nil, errors.New("own DM desktop owner mismatch")
+	}
 	var store *chatlog.Store
 	if database != nil {
 		store = chatlog.NewStore(database.Executor(), domain.PeerIdentityFromWire(id.Address))
@@ -456,7 +469,9 @@ func NewDesktopClient(appCfg config.App, nodeCfg config.Node, id *identity.Ident
 		localNode: localNode,
 		chatLog:   store,
 	}
-	c.wireSubServices()
+	if err := c.wireSubServicesWithOwnDM(port); err != nil {
+		return nil, err
+	}
 	if localNode != nil {
 		localNode.RegisterMessageStore(c.store)
 		// Durable arm of the sender-side delivery retry: reseed the
@@ -464,7 +479,7 @@ func NewDesktopClient(appCfg config.App, nodeCfg config.Node, id *identity.Ident
 		// survives a restart of this node.
 		localNode.RegisterDeliveryOutbox(c.store)
 	}
-	return c
+	return c, nil
 }
 
 // wireSubServices constructs the composition-root sub-services from the
@@ -477,6 +492,9 @@ func NewDesktopClient(appCfg config.App, nodeCfg config.Node, id *identity.Ident
 // the current base-field snapshot. Test hooks that mutate chatLog should
 // call setChatLogForTest, which updates the gateway in place.
 func (c *DesktopClient) wireSubServices() {
+	_ = c.wireSubServicesWithOwnDM(nil)
+}
+func (c *DesktopClient) wireSubServicesWithOwnDM(port *node.OwnDMProvenancePort) error {
 	c.info = NewAppInfo(c.appCfg, c.nodeCfg, c.id)
 	c.rpc = NewLocalRPCClient(c.info, c.localNode)
 	c.chatlog = NewChatlogGateway(c.chatLog, c.info.Address())
@@ -504,8 +522,17 @@ func (c *DesktopClient) wireSubServices() {
 	c.reconcileOrphanAttachments(context.Background())
 	c.removals = newRemovalGate()
 	c.store = NewMessageStoreAdapter(c.chatlog, c.id, c.wipeTombstones, c.removals)
-	c.dm = NewDMCrypto(c.rpc, c.chatlog, c.id)
+	if port == nil {
+		c.dm = NewDMCrypto(c.rpc, c.chatlog, c.id)
+	} else {
+		var err error
+		c.dm, err = newDMCryptoWithOwnDMProvenance(c.rpc, c.chatlog, c.id, *port, nil)
+		if err != nil {
+			return err
+		}
+	}
 	c.prober = NewNodeProber(c.rpc, c.dm, c.info)
+	return nil
 }
 
 // setChatLogForTest replaces the owned chatlog.Store pointer and keeps the
@@ -846,6 +873,13 @@ func (c *DesktopClient) FetchMessage(ctx context.Context, topic, messageID strin
 // SendDirectMessage encrypts and submits a DM.
 func (c *DesktopClient) SendDirectMessage(ctx context.Context, to domain.PeerIdentity, msg domain.OutgoingDM) (*DirectMessage, error) {
 	return c.dm.SendDirectMessage(ctx, to, msg)
+}
+
+// Internal SDK composition only. The first context owns the actual operation;
+// the second is the original caller lifetime for optional accepted residence.
+// A default Desktop still has a zero provenance port and uses ordinary RPC.
+func (c *DesktopClient) SendDirectMessageWithOwnDMResidence(ctx, residence context.Context, to domain.PeerIdentity, msg domain.OutgoingDM) (*DirectMessage, error) {
+	return c.dm.sendDirectMessageWithResidence(ctx, residence, to, msg)
 }
 
 // CancelMessageDelivery asks the node to stop delivering a DM we sent

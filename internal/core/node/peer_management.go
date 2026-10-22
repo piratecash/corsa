@@ -21,6 +21,7 @@ import (
 	"github.com/piratecash/corsa/internal/core/datagram"
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/ebus"
+	"github.com/piratecash/corsa/internal/core/findnode"
 	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/netcore"
 	"github.com/piratecash/corsa/internal/core/protocol"
@@ -839,9 +840,13 @@ func (s *Service) ensurePeerSessions(ctx context.Context) {
 				s.peerMu.Lock()
 				log.Trace().Str("site", "ensurePeerSessions_cleanup").Str("phase", "lock_held").Str("address", string(c.address)).Msg("peer_mu_writer")
 				s.deliveryMu.Lock()
+				publication := s.beginRegistryPublication()
 				delete(s.sessions, c.address)
 				delete(s.upstream, c.address)
 				delete(s.dialOrigin, c.address)
+				if publication != nil {
+					publication.Complete()
+				}
 				s.deliveryMu.Unlock()
 				s.peerMu.Unlock()
 				log.Trace().Str("site", "ensurePeerSessions_cleanup").Str("phase", "lock_released").Str("address", string(c.address)).Msg("peer_mu_writer")
@@ -2547,6 +2552,12 @@ func (s *Service) peerIsClientNode(address domain.PeerAddress) bool {
 }
 
 func (s *Service) readPeerSession(reader *bufio.Reader, session *peerSession) {
+	var ownedReceiveOwner *proofTransportOwner
+	if s.bridgeCapture != nil && s.bridgeCapture.intake != (findnode.DormantIntake{}) && session != nil && session.common != nil {
+		session.common.mu.Lock()
+		ownedReceiveOwner = session.common.ownerLocked()
+		session.common.mu.Unlock()
+	}
 	defer crashlog.DeferRecover()
 	defer session.eligibilityEnded.Store(true)
 	defer session.endProofTransport()
@@ -2566,7 +2577,7 @@ func (s *Service) readPeerSession(reader *bufio.Reader, session *peerSession) {
 		// budgets replace each other rather than stack, so a datagram stream
 		// cannot empty the bucket the other planes on this session are paying
 		// from.
-		line, err := s.readAdmittedSessionLine(reader, session)
+		line, ownedReceive, ownedClaimed, ownedReceiveErr, err := s.readOutboundOwnedFindNodeLine(reader, session, ownedReceiveOwner)
 		if errors.Is(err, errPeerSessionLineRefused) {
 			// One line consumed and dropped on admission grounds. The violation
 			// is already recorded and logged; the session survives, because a
@@ -2642,6 +2653,16 @@ func (s *Service) readPeerSession(reader *bufio.Reader, session *peerSession) {
 		if isDatagramWireLine(line) {
 			s.dispatchSessionDatagramLine(session, line)
 			continue
+		}
+
+		if ownedClaimed {
+			if ownedReceiveErr != nil {
+				continue
+			}
+			if err := s.dispatchOutboundOwnedFindNode(session, ownedReceive); err != nil {
+				continue
+			}
+			continue // SAME original owned pending row, before universal parser/inbox
 		}
 
 		trimmed := strings.TrimSpace(line)

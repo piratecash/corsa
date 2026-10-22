@@ -141,7 +141,7 @@ func ninN1SourceErrors(sources map[string][]byte) []string {
 			"identity_pin_inbound_lifecycle.go:<package>":                            1,
 			"identity_pin_inbound_lifecycle.go:newInboundPinCandidateService":        1,
 			"identity_pin_inbound_lifecycle.go:newUnknownInboundPinCandidateService": 1,
-			"service.go:newServiceWithRecordAdmissionClasses":                        1,
+			"service.go:newServiceWithConstruction":                                  1,
 		},
 		"proofTransportArrivalKey": {
 			"identity_pin_inbound_lifecycle.go:<package>":                       1,
@@ -191,7 +191,7 @@ func ninN1SourceErrors(sources map[string][]byte) []string {
 			"session_secure.go:acceptProvenInboundOwned":                        1,
 		},
 		"proofTransportLifetime": {
-			"find_node_degree.go:<package>":                 1,
+			"find_node_degree.go:<package>":                 2,
 			"find_node_degree.go:publishDegreeTransport":    1,
 			"find_node_degree.go:degreeEndLocked":           1,
 			"find_node_connection.go:<package>":             1,
@@ -209,10 +209,10 @@ func ninN1SourceErrors(sources map[string][]byte) []string {
 			"session_secure.go:provenTransport":             1,
 		},
 		"proofTransportServiceToken": {
-			"find_node_degree.go:<package>":                   1,
-			"proof_transport_lifetime.go:<package>":           3,
-			"service.go:<package>":                            1,
-			"service.go:newServiceWithRecordAdmissionClasses": 1,
+			"find_node_degree.go:<package>":         1,
+			"proof_transport_lifetime.go:<package>": 3,
+			"service.go:<package>":                  1,
+			"service.go:newServiceWithConstruction": 1,
 		},
 		"proofTransportEvidence": {
 			"proof_transport_lifetime.go:<package>": 1,
@@ -229,7 +229,7 @@ func ninN1SourceErrors(sources map[string][]byte) []string {
 			"identity_pin_inbound_lifecycle.go:captureSessionTransportOwner": 1,
 			"proof_transport_lifetime.go:matchesTransportLocked":             1,
 			"service.go:<package>":                                           1,
-			"service.go:newServiceWithRecordAdmissionClasses":                1,
+			"service.go:newServiceWithConstruction":                          1,
 			"session_secure.go:acceptSecureInbound":                          1,
 			"session_secure.go:provenTransport":                              1,
 			"find_node_connection.go:findNodePriorityMemberLocked":           1,
@@ -267,7 +267,7 @@ func ninN1SourceErrors(sources map[string][]byte) []string {
 		},
 		"findNodeCMReceipt": {
 			"find_node_connection.go:<package>":                       1,
-			"find_node_connection.go:captureFindNodeCMAcceptedLocked": 1,
+			"find_node_connection.go:prepareFindNodeCMAcceptedLocked": 2,
 			"service.go:<package>":                                    1,
 		},
 		"newFindNodeCandidateService":        {},
@@ -283,7 +283,7 @@ func ninN1SourceErrors(sources map[string][]byte) []string {
 		"publishAcceptedProofTransport": {
 			"service.go:handleConn": 1,
 		},
-		"captureFindNodeCMAcceptedLocked": {
+		"prepareFindNodeCMAcceptedLocked": {
 			"peer_sessions.go:onCMSessionEstablished": 1,
 		},
 		"publishFindNodeCM": {
@@ -437,7 +437,7 @@ func ninN1SourceErrors(sources map[string][]byte) []string {
 			"session_secure.go:provenTransport":     1,
 		},
 		"proofTransportServiceToken": {
-			"service.go:newServiceWithRecordAdmissionClasses": 1,
+			"service.go:newServiceWithConstruction": 1,
 		},
 		"proofTransportEvidence": {
 			"session_secure.go:acceptSecureInbound": 1,
@@ -451,9 +451,127 @@ func ninN1SourceErrors(sources map[string][]byte) []string {
 			"find_node_connection.go:captureFindNodeSeed": 1,
 		},
 		"findNodeCMReceipt": {
-			"find_node_connection.go:captureFindNodeCMAcceptedLocked": 1,
+			"find_node_connection.go:prepareFindNodeCMAcceptedLocked": 1,
 		},
 	}
+	// Constructor body relocation plus exact immutable terminal additions.
+	expected["inboundPinClock"]["service.go:newServiceWithRecordAdmissionClasses"] = 1
+	expected["proofTransportLifetime"]["find_node_degree_terminal_bridge.go:endBridgeLocked"] = 1
+	expected["proofTransportLifetime"]["find_node_degree_terminal_bridge.go:clearBridgeTerminalLocked"] = 1
+	expected["proofTransportServiceToken"]["find_node_bridge_construction.go:<package>"] = 1
+	expected["proofTransportServiceToken"]["find_node_bridge_construction.go:newFindNodeTerminalConstruction"] = 1
+	expected["proofTransportServiceToken"]["find_node_degree_terminal_bridge.go:<package>"] = 1
+	expected["proofToken"]["service.go:newServiceWithConstruction"] = 4
+	expected["findNode"]["find_node_degree_terminal_bridge.go:clearBridgeTerminalLocked"] = 2
+	expected["inboundTerminal"]["find_node_degree_terminal_bridge.go:clearBridgeTerminalLocked"] = 1
+	constructors["proofTransportServiceToken"]["find_node_bridge_construction.go:newFindNodeTerminalConstruction"] = 1
+	expectedEnds["find_node_degree_terminal_bridge.go:clearBridgeTerminalLocked"] = 1
+	// S1: immutable optional same-domain F1 adapter and one owned open branch.
+	expected["proofToken"]["find_node_connection.go:publishFindNodeLocked"] = 1
+	expected["findNode"]["find_node_connection.go:publishFindNodeLocked"] = 5
+	expected["findNode"]["find_node_connection.go:findNodePrioritySnapshot"] = 5
+	expected["findNode"]["find_node_bridge_construction.go:<package>"] = 1
+	expected["findNode"]["find_node_bridge_construction.go:newFindNodeOwnedF1CandidateService"] = 1
+	expected["findNode"]["find_node_bridge_construction.go:claim"] = 4
+	expected["findNode"]["service.go:newServiceWithConstruction"] = 5
+	expected["findNodeAdapter"]["find_node_bridge_construction.go:<package>"] = 1
+	expected["findNodeAdapter"]["find_node_bridge_construction.go:newFindNodeOwnedF1CandidateService"] = 1
+	expected["findNodeAdapter"]["service.go:newServiceWithConstruction"] = 1
+	expected["findnode"]["find_node_connection.go:publishFindNodeLocked"] = 4
+	expected["findnode"]["find_node_connection.go:findNodePrioritySnapshot"] = 22
+	expected["Bind"]["find_node_connection.go:publishFindNodeLocked"] = 2
+	constructors["findNodeAdapter"]["find_node_bridge_construction.go:newFindNodeOwnedF1CandidateService"] = 1
+	// S3A: private unused raw originals/classes; no new publication or caller.
+	expected["proofToken"]["find_node_connection.go:collectOwnedFindNodeRawFacts"] = 1
+	expected["proofToken"]["find_node_connection.go:collectOwnedFindNodeRawMemberLocked"] = 1
+	expected["findNode"]["find_node_connection.go:collectOwnedFindNodeRawFacts"] = 3
+	expected["findNode"]["find_node_connection.go:collectOwnedFindNodeRawMemberLocked"] = 1
+	expected["findnode"]["find_node_connection.go:<package>"] = 6
+	expected["findnode"]["find_node_connection.go:captureFindNodePriorityClasses"] = 2
+	expected["findnode"]["find_node_connection.go:findNodePriorityClassLocked"] = 7
+	expected["findnode"]["find_node_connection.go:collectOwnedFindNodeRawFacts"] = 8
+	expected["findnode"]["find_node_connection.go:collectOwnedFindNodeRawMemberLocked"] = 13
+	expected["findnode"]["find_node_connection.go:collectOwnedFindNodeRawClasses"] = 4
+	// S3B2a: exact new original Node observation proof/adapter references.
+	expected["proofToken"]["find_node_bridge_capture.go:captureOwnedFindNodeObservation"] = 1
+	expected["proofToken"]["find_node_degree_bridge.go:captureBridgeDegreeProjection"] = 1
+	expected["findNode"]["find_node_bridge_construction.go:prepareFindNodeOwnedCaptureConstruction"] = 1
+	expected["findNode"]["find_node_bridge_capture.go:captureOwnedFindNodeObservation"] = 3
+	expected["findNode"]["find_node_bridge_construction.go:claim"] = 5
+	expected["findNodeAdapter"]["find_node_bridge_construction.go:prepareFindNodeOwnedCaptureConstruction"] = 1
+	expected["findnode"]["find_node_bridge_capture.go:captureOwnedFindNodeObservation"] = 4
+	constructors["findNodeAdapter"]["find_node_bridge_construction.go:prepareFindNodeOwnedCaptureConstruction"] = 1
+	// S3B2b: exact dormant pair and sole complete opaque-cut conversion.
+	expected["findnode"]["find_node_bridge_construction.go:<package>"] = 1
+	expected["findnode"]["find_node_bridge_construction.go:prepareFindNodeBridgeConstruction"] = 2
+	expected["findnode"]["find_node_bridge_construction.go:claim"] = 2
+	expected["findnode"]["find_node_bridge_capture.go:<package>"] = 2
+	expected["findnode"]["find_node_bridge_capture.go:captureOwnedFindNodeCut"] = 10
+
+	// C3d: original bounded receive lanes and dormant known-target owned offer.
+	expected["proofTransportOwner"]["find_node_owned_receive.go:<package>"] = 2
+	expected["proofTransportOwner"]["find_node_owned_receive.go:recordOwnedFindNodeReceive"] = 1
+	expected["proofTransportOwner"]["find_node_owned_receive.go:recordOwnedFindNodeLine"] = 1
+	expected["proofTransportOwner"]["find_node_owned_receive.go:readInboundOwnedFindNodeLine"] = 1
+	expected["proofTransportOwner"]["find_node_owned_receive.go:readOutboundOwnedFindNodeLine"] = 1
+	expected["proofTransportOwner"]["find_node_owned_receive.go:readOutboundOwnedFindNodeBeforeCharge"] = 1
+	expected["proofTransportOwner"]["peer_management.go:readPeerSession"] = 1
+	expected["ownerLocked"]["peer_management.go:readPeerSession"]++
+	expected["proofToken"]["find_node_owned_receive.go:recordOwnedFindNodeReceive"] = 1
+	expected["proofToken"]["find_node_owned_receive.go:takeOwnedFindNodeReceive"] = 1
+	expected["findnode"]["find_node_owned_receive.go:<package>"] = 1
+	expected["findnode"]["find_node_owned_receive.go:recordOwnedFindNodeReceive"] = 3
+	expected["findnode"]["find_node_owned_receive.go:takeOwnedFindNodeReceive"] = 5
+	expected["findnode"]["find_node_owned_receive.go:recordOwnedFindNodeLine"] = 2
+	expected["findnode"]["find_node_owned_receive.go:dispatchOwnedFindNodeReceive"] = 5
+	expected["findnode"]["peer_management.go:readPeerSession"] = 1
+	expected["findnode"]["find_node_bridge_capture.go:captureOwnedFindNodeCut"] = 2
+	expected["findnode"]["find_node_bridge_capture.go:sealOwnedFindNodeObservation"] = 9
+	// C3e: original scheduler and writer custody, before Ready.
+	expected["findnode"]["find_node_connection.go:<package>"] += 2
+	expected["findnode"]["proof_transport_lifetime.go:end"] = 4
+	expected["findnode"]["find_node_owned_round_loop.go:prepareFindNodeOwnedRoundConstruction"] = 1
+	expected["findnode"]["find_node_owned_write.go:queueOwnedFindNodeForward"] = 4
+	expected["findNode"]["find_node_connection.go:captureFindNodeSeed"] += 3
+	expected["findNode"]["proof_transport_lifetime.go:end"] += 3
+	expected["findNode"]["find_node_owned_round_loop.go:prepareFindNodeOwnedRoundConstruction"] = 1
+	expected["findNode"]["find_node_owned_write.go:queueOwnedFindNodeForward"] = 3
+	expected["proofToken"]["find_node_owned_write.go:queueOwnedFindNodeForward"] = 1
+	expected["findnode"]["find_node_owned_answer.go:dispatchOwnedFindNodeAnswer"] = 4
+	expected["findnode"]["find_node_owned_answer.go:queueOwnedFindNodeAnswer"] = 4
+	expected["findnode"]["find_node_owned_answer.go:dispatchOutboundOwnedFindNode"] = 2
+	expected["findNode"]["find_node_owned_answer.go:queueOwnedFindNodeAnswer"] = 3
+	expected["proofToken"]["find_node_owned_answer.go:dispatchOwnedFindNodeAnswer"] = 1
+	expected["proofToken"]["find_node_owned_answer.go:queueOwnedFindNodeAnswer"] = 1
+
+	expected["findnode"]["find_node_resources.go:<package>"] = 2
+	expected["findnode"]["find_node_owned_round_loop.go:<package>"] = 1
+	// Local target original custody, before Service/F1 escape; forwarding retained.
+	expected["findnode"]["find_node_connection.go:<package>"] += 2
+	expected["findnode"]["find_node_bridge_capture.go:<package>"] += 1
+	expected["findnode"]["proof_transport_lifetime.go:end"] += 3
+	expected["findNode"]["find_node_connection.go:captureFindNodeSeed"] += 2
+	expected["findNode"]["proof_transport_lifetime.go:end"] += 1
+	expected["findNode"]["find_node_owned_local_target.go:prepareFindNodeOwnedLocalTargetConstruction"] = 1
+	expected["findnode"]["find_node_owned_local_target.go:<package>"] = 1
+	expected["findnode"]["find_node_owned_local_target.go:newOwnedFindNodeLocalLoop"] = 1
+	expected["findnode"]["find_node_owned_local_target.go:newFindNodeOwnedLocalTargetCandidateService"] = 1
+	expected["findnode"]["find_node_owned_local_target.go:prepareFindNodeOwnedLocalTargetConstruction"] = 3
+	expected["findnode"]["find_node_owned_local_target.go:dispatchOwnedFindNodeLocalTarget"] = 10
+	expected["findnode"]["find_node_owned_local_target.go:runOwnedFindNodeLocalWork"] = 1
+	expected["findnode"]["find_node_owned_local_target.go:completeOwnedFindNodeLocalSignature"] = 3
+	// Exact private Ready constructor sites; all existing closures stay strict.
+	expected["proofTransportServiceToken"]["find_node_ready_construction.go:<package>"] = 1
+	expected["findNode"]["find_node_ready_construction.go:prepareFindNodeReadyConstruction"] = 2
+	expected["findnode"]["find_node_ready_construction.go:prepareFindNodeReadyConstruction"] = 4
+	expected["findnode"]["find_node_ready_construction.go:newFindNodeReadyCandidateService"] = 1
+	expected["findnode"]["find_node_ready_construction.go:buildWithOwnDM"] = 2
+	expected["proofToken"]["find_node_ready_construction.go:bindings"] = 1
+	expected["findNode"]["find_node_ready_construction.go:bindings"] = 8
+	expected["findnode"]["find_node_ready_construction.go:bindings"] = 3
+	expected["findnode"]["find_node_ready_construction.go:checkBeforeInstall"] = 2
+	expected["findnode"]["find_node_ready_construction.go:finalize"] = 3
+	expected["findnode"]["identity_pin_own_dm_runtime.go:<package>"] = 2
 	actual := map[string]map[string]int{}
 	made := map[string]map[string]int{}
 	ends := map[string]int{}
@@ -465,7 +583,7 @@ func ninN1SourceErrors(sources map[string][]byte) []string {
 		made[name] = map[string]int{}
 	}
 	var failures []string
-	directOnly := map[string]bool{"runWithFiles": true, "selectInboundSend": true, "selectInboundClose": true, "bindInboundLeafLocked": true, "inboundTerminalForWire": true, "transportTerminalLocked": true, "selectInboundPinAfterLocked": true, "endInboundLeavesLocked": true, "staleInboundTerminalsLocked": true, "condemnInboundSelected": true, "stageInboundPin": true, "publishInboundLifetime": true, "acceptedTransportArrivalContext": true, "transportArrivalOwner": true, "newServiceWithDatagramConstructor": true, "newInboundPinCandidateService": true, "newUnknownInboundPinCandidateService": true, "attachInboundPinCandidate": true, "installUnknownInboundPinJournal": true, "newFindNodeCandidateService": true, "newFindNodeInboundCandidateService": true, "captureFindNodeSeed": true, "publishFindNodeLocked": true, "publishAcceptedProofTransport": true, "captureFindNodeCMAcceptedLocked": true, "publishFindNodeCM": true, "findNodeMembers": true, "bindProofTransportLocked": true, "bindProofTransport": true, "endProofTransportIO": true, "endProofTransport": true, "ownerLocked": true, "captureSessionTransportOwner": true, "sessionTransportArrivalContext": true, "matchesTransportLocked": true, "PrepareSession": true, "Bind": true, "End": true, "NewSession": true}
+	directOnly := map[string]bool{"runWithFiles": true, "selectInboundSend": true, "selectInboundClose": true, "bindInboundLeafLocked": true, "inboundTerminalForWire": true, "transportTerminalLocked": true, "selectInboundPinAfterLocked": true, "endInboundLeavesLocked": true, "staleInboundTerminalsLocked": true, "condemnInboundSelected": true, "stageInboundPin": true, "publishInboundLifetime": true, "acceptedTransportArrivalContext": true, "transportArrivalOwner": true, "newServiceWithDatagramConstructor": true, "newInboundPinCandidateService": true, "newUnknownInboundPinCandidateService": true, "attachInboundPinCandidate": true, "installUnknownInboundPinJournal": true, "newFindNodeCandidateService": true, "newFindNodeInboundCandidateService": true, "captureFindNodeSeed": true, "publishFindNodeLocked": true, "publishAcceptedProofTransport": true, "prepareFindNodeCMAcceptedLocked": true, "publishFindNodeCM": true, "findNodeMembers": true, "bindProofTransportLocked": true, "bindProofTransport": true, "endProofTransportIO": true, "endProofTransport": true, "ownerLocked": true, "captureSessionTransportOwner": true, "sessionTransportArrivalContext": true, "matchesTransportLocked": true, "PrepareSession": true, "Bind": true, "End": true, "NewSession": true}
 	for path, raw := range sources {
 		f, err := parser.ParseFile(token.NewFileSet(), path, raw, 0)
 		if err != nil {
@@ -479,9 +597,14 @@ func ninN1SourceErrors(sources map[string][]byte) []string {
 				declaration = fn.Name
 			}
 			callees := map[ast.Node]bool{}
+			selectorParents := map[*ast.Ident][]*ast.SelectorExpr{}
 			ast.Inspect(decl, func(n ast.Node) bool {
 				if c, ok := n.(*ast.CallExpr); ok {
 					callees[c.Fun] = true
+				}
+				if parent, ok := n.(*ast.SelectorExpr); ok {
+					// Keep the original traversal order and parent multiplicity.
+					selectorParents[parent.Sel] = append(selectorParents[parent.Sel], parent)
 				}
 				return true
 			})
@@ -497,17 +620,13 @@ func ninN1SourceErrors(sources map[string][]byte) []string {
 					if directOnly[n.Name] {
 						// A selector's method identifier belongs to its parent selector;
 						// bare identifiers must themselves be a direct call target.
-						selector := false
-						ast.Inspect(decl, func(parent ast.Node) bool {
-							if v, ok := parent.(*ast.SelectorExpr); ok && v.Sel == n {
-								selector = true
-								if !callees[v] {
-									failures = append(failures, "method value escape "+site+":"+n.Name)
-								}
+						parents := selectorParents[n]
+						for _, parent := range parents {
+							if !callees[parent] {
+								failures = append(failures, "method value escape "+site+":"+n.Name)
 							}
-							return true
-						})
-						if !selector && !callees[n] {
+						}
+						if len(parents) == 0 && !callees[n] {
 							failures = append(failures, "function value escape "+site+":"+n.Name)
 						}
 					}

@@ -1,6 +1,6 @@
 module github.com/piratecash/corsa
 
-go 1.27.2
+go 1.27.3
 
 require (
 	gioui.org v0.10.3

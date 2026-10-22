@@ -18,6 +18,7 @@ import (
 
 	"github.com/piratecash/corsa/internal/core/config"
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/findnodebridge"
 	"github.com/piratecash/corsa/internal/core/secretfile"
 	"github.com/piratecash/corsa/internal/core/trustedclock"
 )
@@ -330,8 +331,11 @@ func protectedPoolRuleFor(pool domain.ProtectedBindingPool) protectedPoolRule {
 // and is a leaf: no I/O and no call out under it. writeMu serialises disk
 // writes and is held WITHOUT mu, so a slow disk never blocks a lookup.
 type secureSessionStore struct {
-	dir  string // "" — memory only (a Service built without a peers path)
-	name string
+	// Immutable constructor-only dependency. Ordinary stores use the zero Publisher.
+	// This dormant store slice does not install a Service or intake bridge.
+	pinPublisher findnodebridge.Publisher
+	dir          string // "" — memory only (a Service built without a peers path)
+	name         string
 	// clock is the trusted time every term and every time written to the
 	// file is read from: a wall clock set forward in this process does not
 	// end ordinary bindings early (trustedclock). It synchronises itself and
@@ -478,6 +482,7 @@ func secureSessionStorePath(cfg config.Node) string {
 
 // secureSessionStoreOptions is what a store is opened from.
 type secureSessionStoreOptions struct {
+	bridgePublisher findnodebridge.Publisher // immutable before marker/load/refusal
 	// path is the store file; "" keeps the store in memory only.
 	path string
 	// markerPath is the pin store marker (pinStoreMarkerPath); "" — the
@@ -501,7 +506,7 @@ type secureSessionStoreOptions struct {
 // pinned and nothing is written — so even a caller that ignored the refusal
 // would neither let v1 through nor overwrite the evidence.
 func openSecureSessionStore(opts secureSessionStoreOptions) *secureSessionStore {
-	store := newSecureSessionStore(opts.clock, opts.logger)
+	store := newSecureSessionStoreWithPublisher(opts.clock, opts.logger, opts.bridgePublisher)
 	if opts.ninElapsed != nil {
 		store.ninElapsed = opts.ninElapsed
 	}
@@ -530,7 +535,15 @@ func openSecureSessionStore(opts secureSessionStoreOptions) *secureSessionStore 
 }
 
 func newSecureSessionStore(clock *trustedclock.Clock, logger zerolog.Logger) *secureSessionStore {
+	return newSecureSessionStoreWithPublisher(clock, logger, findnodebridge.Publisher{})
+}
+
+// The only concrete Publisher attachment is this initial literal. The unused
+// terminal candidate passes its Constructing domain through Service/options
+// before load; ordinary wrappers pass zero. No late setter or Ready is added.
+func newSecureSessionStoreWithPublisher(clock *trustedclock.Clock, logger zerolog.Logger, publisher findnodebridge.Publisher) *secureSessionStore {
 	return &secureSessionStore{
+		pinPublisher:      publisher,
 		ninElapsed:        trustedclock.SinceBoot,
 		clock:             clock,
 		logger:            logger,
@@ -542,6 +555,16 @@ func newSecureSessionStore(clock *trustedclock.Clock, logger zerolog.Logger) *se
 		protectedByGiver:  make(map[domain.PeerIdentity]int),
 		protectedRefusals: make(map[domain.ProtectedBindingRefusalReason]uint64),
 	}
+}
+
+// beginPinPublication is memory-only. All callers already own store.mu after
+// their existing gate/writer/stage waits. No store acquisition occurs under R.
+// Zero avoids allocating a noop lease; it never skips the caller's mutation.
+func (s *secureSessionStore) beginPinPublication() *findnodebridge.Publication {
+	if s.pinPublisher == (findnodebridge.Publisher{}) {
+		return nil
+	}
+	return s.pinPublisher.BeginPublication()
 }
 
 // startFromDisk audits both locations, reads the marker and the store, and

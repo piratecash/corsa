@@ -38,6 +38,8 @@ type candidatePending struct {
 	alias             *forwardSlot
 	cell              candidateRecordKey
 	source            candidateSourceRef
+	ownedReceived     *ownedReceivedState
+	ownedIdentity     ownedReceivedIdentity
 }
 type candidateReservation struct {
 	owner      *intakeCoordinator
@@ -71,8 +73,8 @@ type candidateSnapshot struct {
 // No I/O, crypto or external callback runs within this ownership domain.
 type intakeCoordinator struct {
 	mu                sync.Mutex
-	pending           *PendingTable
-	calendars         map[domain.PeerIdentity]*ForwardCalendar
+	pending           *candidatePendingBook
+	calendars         [MaxPendingTotal]*ForwardCalendar
 	groups            candidateGroups
 	sourceOwner       *candidateSourceOwnerToken
 	profile           candidateProfile
@@ -100,9 +102,29 @@ func newIntakeCoordinator(profile candidateProfile, start Instant) (*intakeCoord
 	if _, err = profile.timing.LatestForward(start); err != nil {
 		return nil, err
 	}
-	o := &intakeCoordinator{pending: NewPendingTable(), calendars: make(map[domain.PeerIdentity]*ForwardCalendar), groups: newCandidateGroups(), sourceOwner: &candidateSourceOwnerToken{}, profile: profile, last: start}
+	o := &intakeCoordinator{pending: newCandidatePendingBook(), groups: newCandidateGroups(), sourceOwner: &candidateSourceOwnerToken{}, profile: profile, last: start}
 	o.publishLocked()
 	return o, nil
+}
+
+// Both read helpers require o.mu or sole constructor ownership. No table
+// index, view or copied mutex escapes; target belongs to the original object.
+func (o *intakeCoordinator) calendarLocked(target domain.PeerIdentity) *ForwardCalendar {
+	for _, calendar := range o.calendars {
+		if calendar != nil && calendar.target == target {
+			return calendar
+		}
+	}
+	return nil
+}
+func (o *intakeCoordinator) calendarCountLocked() int {
+	count := 0
+	for _, calendar := range o.calendars {
+		if calendar != nil {
+			count++
+		}
+	}
+	return count
 }
 func (o *intakeCoordinator) snapshot() candidateSnapshot {
 	if s := o.published.Load(); s != nil {
@@ -118,7 +140,11 @@ func (o *intakeCoordinator) count(counter *uint64) {
 	}
 }
 func (o *intakeCoordinator) currentLocked(r candidateReservation) bool {
-	if r.owner != o || r.entry == nil || r.entry.intake == nil || r.generation != r.entry.intake.generation || o.pending.bySource[pendingKey{r.entry.source, r.entry.request.ID}] != r.entry {
+	if r.owner != o || r.entry == nil || r.entry.intake == nil || r.generation != r.entry.intake.generation {
+		return false
+	}
+	index := o.pending.sourceIndexLocked(pendingKey{r.entry.source, r.entry.request.ID})
+	if index < 0 || o.pending.entries[index] != r.entry {
 		return false
 	}
 	if r.entry.intake.phase != candidateProvisional {
@@ -180,26 +206,31 @@ func (o *intakeCoordinator) offer(source, target Session, request protocol.FindN
 		return candidateReservation{}, ErrNotReady
 	}
 	key := pendingKey{source, request.ID}
-	if _, ok := o.pending.bySource[key]; ok {
+	if o.pending.sourceIndexLocked(key) >= 0 {
 		return candidateReservation{}, ErrDuplicateID
 	}
-	for _, entry := range o.pending.bySource {
+	for _, entry := range o.pending.entries {
+		if entry == nil {
+			continue
+		}
 		if entry.source == source && entry.intake.phase == candidateProvisional {
 			return candidateReservation{}, ErrCapacity
 		}
 	}
-	if o.pending.sources[source] >= MaxPendingPerSession {
+	if o.pending.sourceCountLocked(source) >= MaxPendingPerSession {
 		return candidateReservation{}, ErrCapacity
 	}
-	fullTarget := o.pending.targets[request.Target] >= MaxPendingPerTarget
-	if fullTarget || len(o.pending.bySource) >= MaxPendingTotal {
+	fullTarget := o.pending.targetCountLocked(request.Target) >= MaxPendingPerTarget
+	index := o.pending.vacancyLocked()
+	if fullTarget || o.pending.countLocked() >= MaxPendingTotal {
 		var victim *pendingEntry
-		for _, entry := range o.pending.bySource {
-			if entry.intake.phase != candidateProvisional || (fullTarget && entry.request.Target != request.Target) {
+		for candidateIndex, entry := range o.pending.entries {
+			if entry == nil || entry.intake.phase != candidateProvisional || (fullTarget && entry.request.Target != request.Target) {
 				continue
 			}
 			if victim == nil || o.less(victim.source, victim.intake.priority, entry.source, entry.intake.priority) {
 				victim = entry
+				index = candidateIndex
 			}
 		}
 		if victim == nil || !o.less(source, priority, victim.source, victim.intake.priority) {
@@ -219,9 +250,7 @@ func (o *intakeCoordinator) offer(source, target Session, request protocol.FindN
 	}
 	o.generation++
 	entry := &pendingEntry{source: source, target: target, request: request, expires: expires, intake: &candidatePending{phase: candidateProvisional, generation: o.generation, round: o.round, latest: latest, priority: priority}}
-	o.pending.bySource[key] = entry
-	o.pending.sources[source]++
-	o.pending.targets[request.Target]++
+	o.pending.entries[index] = entry
 	return o.handle(entry), nil
 }
 
@@ -281,7 +310,10 @@ func (o *intakeCoordinator) sealRound(view candidateMembership, now Instant, cut
 	// normal round path. It never resets or blocks accepted obligations.
 	_, capacityErr := o.selectCapacityLocked(now, cuts)
 	rows := make([]*pendingEntry, 0, MaxPendingTotal)
-	for _, entry := range o.pending.bySource {
+	for _, entry := range o.pending.entries {
+		if entry == nil {
+			continue
+		}
 		if entry.intake.phase == candidateProvisional {
 			rows = append(rows, entry)
 		}
@@ -399,35 +431,44 @@ func (o *intakeCoordinator) commitLocked(entry *pendingEntry, now Instant, prepa
 	if err != nil {
 		return err
 	}
-	calendar := o.calendars[entry.request.Target]
+	calendar := o.calendarLocked(entry.request.Target)
 	fresh := calendar == nil
-	var retire domain.PeerIdentity
+	calendarIndex := -1
 	if fresh {
-		if len(o.calendars) >= MaxPendingTotal {
-			for target, old := range o.calendars {
-				if o.pending.targets[target] != 0 {
+		for index, old := range o.calendars {
+			if old == nil {
+				calendarIndex = index
+				break
+			}
+		}
+		if calendarIndex < 0 {
+			for index, old := range o.calendars {
+				if o.pending.targetCountLocked(old.target) != 0 {
 					continue
 				}
 				old.mu.Lock()
 				safe := old.retireableLocked(now)
 				old.mu.Unlock()
 				if safe {
-					retire = target
+					calendarIndex = index
 					break
 				}
 			}
-			if retire.IsZero() {
+			if calendarIndex < 0 {
 				return ErrCapacity
 			}
 		}
 		var err error
-		calendar, err = NewForwardCalendar(entry.request.Target, now, o.profile.initialTokens)
+		calendar, err = newOwnedForwardCalendar(entry.request.Target, now, o.profile.initialTokens)
 		if err != nil {
 			return err
 		}
 	}
 	calendar.mu.Lock()
 	defer calendar.mu.Unlock()
+	if !calendar.ownedAliases || calendar.slots != nil {
+		return ErrInvalid
+	}
 	if !o.aliasesMatchLocked(calendar) {
 		return ErrInvalid
 	}
@@ -443,7 +484,8 @@ func (o *intakeCoordinator) commitLocked(entry *pendingEntry, now Instant, prepa
 	if err != nil {
 		return err
 	}
-	if o.groups.records[group.key].refs == math.MaxInt {
+	record, _ := o.groups.record(group.key)
+	if record.refs == math.MaxInt {
 		return ErrCapacity
 	}
 	entry.target.state.mu.Lock()
@@ -452,10 +494,11 @@ func (o *intakeCoordinator) commitLocked(entry *pendingEntry, now Instant, prepa
 	if err != nil {
 		return err
 	}
-	if !entry.source.valid() || o.pending.bySource[pendingKey{entry.source, entry.request.ID}] != entry {
+	sourceIndex := o.pending.sourceIndexLocked(pendingKey{entry.source, entry.request.ID})
+	if !entry.source.valid() || sourceIndex < 0 || o.pending.entries[sourceIndex] != entry {
 		return ErrStaleWork
 	}
-	if _, ok := o.pending.byTarget[pendingKey{entry.target, id}]; ok {
+	if o.pending.targetEntryLocked(pendingKey{entry.target, id}) != nil {
 		return ErrDuplicateID
 	}
 	if currentCapacity, capacityErr := o.frozenCapacityLocked(now); capacityErr != nil || currentCapacity != capacity {
@@ -473,10 +516,7 @@ func (o *intakeCoordinator) commitLocked(entry *pendingEntry, now Instant, prepa
 	entry.intake.source = candidateSourceRef{windows: source.windows, index: source.index, generation: source.row.generation}
 	entry.target.commitNextIDLocked(id)
 	if fresh {
-		if !retire.IsZero() {
-			delete(o.calendars, retire)
-		}
-		o.calendars[entry.request.Target] = calendar
+		o.calendars[calendarIndex] = calendar
 	}
 	o.groups.commit(group, now)
 	calendar.applyCombinedLocked(plan, slot, now)
@@ -485,22 +525,24 @@ func (o *intakeCoordinator) commitLocked(entry *pendingEntry, now Instant, prepa
 	entry.intake.alias = slot
 	entry.intake.cell = group.key
 	entry.intake.phase = candidateReserved
-	o.pending.byTarget[pendingKey{entry.target, id}] = entry
 	return nil
 }
 
 // aliasesMatchLocked requires o.mu, pending.mu and calendar.mu.
 func (o *intakeCoordinator) aliasesMatchLocked(calendar *ForwardCalendar) bool {
 	n := 0
-	for _, entry := range o.pending.bySource {
+	for _, entry := range o.pending.entries {
+		if entry == nil {
+			continue
+		}
 		if entry.intake.calendar == calendar && entry.intake.alias != nil {
-			if _, exists := calendar.slots[entry.intake.alias]; !exists || entry.intake.phase != candidateReserved || entry.request.Target != calendar.target || entry.intake.alias.latest != entry.intake.latest {
+			if !calendar.forwardHasAliasLocked(entry.intake.alias) || entry.intake.phase != candidateReserved || entry.request.Target != calendar.target || entry.intake.alias.latest != entry.intake.latest {
 				return false
 			}
 			n++
 		}
 	}
-	return n == len(calendar.slots)
+	return n == calendar.forwardAliasCountLocked()
 }
 
 func (o *intakeCoordinator) takeForward(r candidateReservation, now Instant) (candidateForwardPermit, immutableForwardInput, error) {
@@ -538,7 +580,7 @@ func (o *intakeCoordinator) takeForward(r candidateReservation, now Instant) (ca
 	row.actual = pair
 	calendar.actual = actual
 	calendar.last = now
-	delete(calendar.slots, state.alias)
+	calendar.forwardDropAliasLocked(state.alias)
 	state.alias = nil
 	state.phase = candidateDispatching
 	o.count(&o.counters.taken)
@@ -602,7 +644,7 @@ func (o *intakeCoordinator) answer(target Session, answer protocol.FindNodeAnswe
 	if err := o.advanceLocked(now); err != nil {
 		return Delivery{}, err
 	}
-	entry := o.pending.byTarget[pendingKey{target, answer.ID}]
+	entry := o.pending.targetEntryLocked(pendingKey{target, answer.ID})
 	if entry == nil || entry.request.Target != answer.Target || !entry.source.valid() || !target.valid() || (entry.intake.phase != candidateDispatching && entry.intake.phase != candidateAwaitingAnswer) {
 		return Delivery{}, ErrUnmatchedAnswer
 	}
@@ -614,7 +656,6 @@ func (o *intakeCoordinator) answer(target Session, answer protocol.FindNodeAnswe
 	o.count(&o.counters.answered)
 	if entry.intake.phase == candidateDispatching {
 		entry.intake.phase = candidateTerminalDispatch
-		delete(o.pending.byTarget, pendingKey{target, entry.forwarded.ID})
 	} else {
 		entry.intake.calendar.mu.Lock()
 		o.releaseLocked(entry)
@@ -643,7 +684,10 @@ func (o *intakeCoordinator) closeSession(source Session, now Instant) error {
 	defer o.pending.mu.Unlock()
 	err := o.advanceLocked(now)
 	source.close()
-	for _, entry := range o.pending.bySource {
+	for _, entry := range o.pending.entries {
+		if entry == nil {
+			continue
+		}
 		if entry.source == source || entry.target == source {
 			o.endLocked(entry)
 		}
@@ -664,7 +708,6 @@ func (o *intakeCoordinator) endLocked(entry *pendingEntry) {
 	state := entry.intake
 	if state.phase == candidateDispatching || state.phase == candidateTerminalDispatch {
 		state.phase = candidateTerminalDispatch
-		delete(o.pending.byTarget, pendingKey{entry.target, entry.forwarded.ID})
 		return
 	}
 	if state.calendar != nil {
@@ -679,7 +722,7 @@ func (o *intakeCoordinator) releaseLocked(entry *pendingEntry) {
 	state := entry.intake
 	if state.calendar != nil {
 		if state.alias != nil {
-			delete(state.calendar.slots, state.alias)
+			state.calendar.forwardDropAliasLocked(state.alias)
 			state.alias = nil
 		}
 		o.groups.release(state.cell)
@@ -691,7 +734,10 @@ func (o *intakeCoordinator) releaseLocked(entry *pendingEntry) {
 // advanceLocked requires o.mu and pending.mu; no invalid-time expiry authority.
 func (o *intakeCoordinator) advanceLocked(now Instant) error {
 	if now < 0 || now < o.last {
-		for _, entry := range o.pending.bySource {
+		for _, entry := range o.pending.entries {
+			if entry == nil {
+				continue
+			}
 			if !entry.source.valid() || !entry.target.valid() {
 				o.endLocked(entry)
 			}
@@ -699,7 +745,10 @@ func (o *intakeCoordinator) advanceLocked(now Instant) error {
 		return ErrClock
 	}
 	o.last = now
-	for _, entry := range o.pending.bySource {
+	for _, entry := range o.pending.entries {
+		if entry == nil {
+			continue
+		}
 		if now >= entry.expires || !entry.source.valid() || !entry.target.valid() || (entry.intake.phase == candidateReserved && now > entry.intake.latest) {
 			o.endLocked(entry)
 		}
@@ -716,7 +765,7 @@ func (o *intakeCoordinator) resetGroups(now Instant) bool {
 	if err := o.advanceLocked(now); err != nil {
 		return false
 	}
-	return o.groups.reset(now, len(o.pending.bySource))
+	return o.groups.reset(now, o.pending.countLocked())
 }
 
 // publishLocked requires o.mu, or sole constructor ownership. Call only after
@@ -728,12 +777,14 @@ func (o *intakeCoordinator) publishLocked() {
 	snapshot.generation = o.groups.generation
 	snapshot.cursor = o.cursor
 	snapshot.watermark = o.watermark
-	snapshot.calendars = len(o.calendars)
-	snapshot.records = len(o.groups.records)
-	snapshot.names = len(o.groups.named)
+	snapshot.calendars = o.calendarCountLocked()
+	snapshot.names, snapshot.records = o.groups.counts()
 	o.pending.mu.Lock()
-	snapshot.pending = len(o.pending.bySource)
-	for _, entry := range o.pending.bySource {
+	snapshot.pending = o.pending.countLocked()
+	for _, entry := range o.pending.entries {
+		if entry == nil {
+			continue
+		}
 		switch entry.intake.phase {
 		case candidateProvisional:
 			snapshot.provisional++
@@ -748,8 +799,11 @@ func (o *intakeCoordinator) publishLocked() {
 		}
 	}
 	for _, calendar := range o.calendars {
+		if calendar == nil {
+			continue
+		}
 		calendar.mu.Lock()
-		snapshot.aliases += len(calendar.slots)
+		snapshot.aliases += calendar.forwardAliasCountLocked()
 		calendar.mu.Unlock()
 	}
 	o.pending.mu.Unlock()

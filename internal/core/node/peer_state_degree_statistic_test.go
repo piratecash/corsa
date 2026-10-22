@@ -488,13 +488,13 @@ func degreeStatisticReferenceInventory() map[string]map[string]int {
 		"degreeStatisticProducer":            {"peer_state_degree_statistic.go:<package>": 1, "peer_state_degree_statistic.go:captureOverlayDWinForFlush": 2, "peer_state_degree_statistic.go:newDegreeStatisticCandidateService": 2, "service.go:<package>": 2},
 		"newDegreeStatisticCandidateService": {},
 		"sampleDegreeStatisticClockLocked":   {"peer_state_degree_statistic.go:captureOverlayDWinForFlush": 1, "peer_state_degree_statistic.go:newDegreeStatisticCandidateService": 1},
-		"degreeStatisticCoverageReady":       {"peer_state_degree_statistic.go:captureOverlayDWinForFlush": 1},
+		"degreeStatisticCoverageReady":       {"peer_state_degree_statistic.go:captureOverlayDWinForFlush": 1, "peer_state_owned_degree_statistic.go:captureOwnedOverlayDWinForFlush": 1},
 		"captureOverlayDWinForFlush":         {"peer_management.go:flushPeerState": 1},
-		"validDegreeStatisticKey":            {"peer_state_degree_statistic.go:projectDegreeStatisticLocked": 2},
-		"insertDegreeStatisticKey":           {"peer_state_degree_statistic.go:projectDegreeStatisticLocked": 1},
+		"validDegreeStatisticKey":            {"peer_state_degree_statistic.go:projectDegreeStatisticLocked": 2, "find_node_degree_terminal_bridge.go:endBridgeLocked": 1, "peer_state_owned_degree_statistic.go:projectOwnedDegreeBasisLocked": 2},
+		"insertDegreeStatisticKey":           {"peer_state_degree_statistic.go:projectDegreeStatisticLocked": 1, "peer_state_owned_degree_statistic.go:projectOwnedDegreeBasisLocked": 1},
 		"projectDegreeStatisticLocked":       {"peer_state_degree_statistic.go:captureOverlayDWinForFlush": 1},
 		"selectOverlayDegreeStatistic":       {"peer_management.go:flushPeerState": 1},
-		"validDegreeStatisticWall":           {"peer_state_degree_statistic.go:sampleDegreeStatisticClockLocked": 1, "peer_state_degree_statistic.go:selectOverlayDegreeStatistic": 1},
+		"validDegreeStatisticWall":           {"peer_state_degree_statistic.go:sampleDegreeStatisticClockLocked": 1, "peer_state_degree_statistic.go:selectOverlayDegreeStatistic": 1, "peer_state_owned_degree_statistic.go:captureOwnedOverlayDWinForFlush": 1},
 	}
 }
 
@@ -509,7 +509,7 @@ func TestDegreeStatisticClosedProducerClockProjectionAndWriter(t *testing.T) {
 }
 
 func TestDegreeStatisticConstructorGraphCannotEscapeBeforeOwner(t *testing.T) {
-	// Compact source pins freeze the actual concrete graph, including the
+	// Byte-exact source pins freeze the actual concrete graph, including the
 	// external constructors storing Service-bearing callbacks without running
 	// them. This does not authorize arbitrary replacement builders.
 	pins := degreeStatisticConstructionPins()
@@ -518,7 +518,7 @@ func TestDegreeStatisticConstructorGraphCannotEscapeBeforeOwner(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		sum := sha256.Sum256([]byte(strings.Join(strings.Fields(string(raw)), "")))
+		sum := sha256.Sum256(raw)
 		if hex.EncodeToString(sum[:]) != want {
 			t.Fatal("closed constructor graph source changed before observer installation", path)
 		}
@@ -526,33 +526,43 @@ func TestDegreeStatisticConstructorGraphCannotEscapeBeforeOwner(t *testing.T) {
 }
 func degreeStatisticConstructionPins() map[string]string {
 	return map[string]string{
-		"internal/core/node/service.go":                         "a26fa0022c6857720a2ca7c2c95d18242529a91f0dce536612c8ebcb6bf964cd",
-		"internal/core/node/find_node_degree.go":                "20b419376b2f6687db507cc7df75ffe74d8a6dedd11f288c82ef5206bc54e8f0",
-		"internal/core/node/datagram_runtime_state.go":          "7f8b75b1ff5998ffe6ebeeb43e975eeaa6f58b2121dd787e6d0483f08c3eaf7b",
-		"internal/core/node/datagram_layer.go":                  "6436e98109e483ddd769623175434c17d21653fbe97ddc7f45b9f6566ba66d34",
-		"internal/core/node/identity_discovery.go":              "aefc83c8cb9154c6fa53db3276295943c850c7e2abe6410b4c71f895c75dd3c0",
-		"internal/core/node/dm_control.go":                      "ce8cb1973ebfe8ae1bf857d026128fcb1810a69b4f51ddd9c1f097154334fa7e",
-		"internal/core/node/dm_control_send.go":                 "3db22b81c0a7d5830c75c3ed100b4b1ba7282a88fa1462113b2a821f1f363c09",
-		"internal/core/node/datagram_resolver.go":               "1540af57acade8d6fdfdef0859a294fc9eb8ca8e380a0ab7b01c00f83045d84c",
-		"internal/core/node/peer_provider.go":                   "6b8f3bf3d4b7d1be92378de5e0665de969416fdc47a104aa91a9b94d0cb37610",
-		"internal/core/node/connection_manager.go":              "d26f5bbf3c11867559d4818337463ffbcd0f5ebdcf1fc9229156a75ae3c8fabe",
-		"internal/core/node/dial_pacer.go":                      "dcfe581adb4c9b70a0978c69c19c80b54eb9e5a389d10b63e92c8c167bf9c206",
-		"internal/core/node/table_router.go":                    "3f5abfb597302d3e9ab7e4f6687e2f62ee51ebac8ea3118158ce99a9ba012465",
-		"internal/core/node/identity_resolver.go":               "ef6d489f0bfec8ae172b5415324072785017155cef8a219646f04cfc9af304b3",
-		"internal/core/node/identity_pin_selected_lifecycle.go": "19c6b1f49aa6ec5d5f1fa2bcf82974b0b35587d4533807e49e176939743377b9",
-		"internal/core/node/identity_pin_contact.go":            "372902826b744f3cddd4028bdf5fc814e51108f73e8e49dac811179c81f0cefa",
-		"internal/core/node/presence_prober.go":                 "acfef8a845330f775bb76306ebfdaa53fc4b42e8e9dbb73a55b0835f1451fef9",
-		"internal/core/node/routing_probe_loop.go":              "bdd2f189647ddf821bd1bf2486e4af4f11cc5ac2f23b712e39edb44f478d3594",
-		"internal/core/node/first_hop_guards.go":                "4ad9f9c6e1f1d3081714c100c9e5361be200f0dfcfc26e710fcb595bda2628b8",
-		"internal/core/node/traffic_capture_bridge.go":          "b7ec5423e60dc7f150f19c023ca1e98efd64e17c5863a5fc4850d5ec5de61643",
-		"internal/core/node/session_secure.go":                  "c2181b64d36effff1dac3f449c16ed18912e9ab21e76541b36c942029629614f",
-		"internal/core/node/proof_transport_lifetime.go":        "bcfde8a6cd6a8bc8b5e22b6494df15854c44d20f76ed944127f58ef0cea7ca6a",
-		"internal/core/node/datagram_integration.go":            "f295766d6d349c59b14810c35b5ab6fc4d63c926885e01a2c1df5bedfab37c4c",
-		"internal/core/capture/manager.go":                      "47ab9c32173a273258240b1251de2b22017a21387dd09d0e31b837c038dddd29",
-		"internal/core/routing/announce.go":                     "8e71419e4e1a5c4cd2eba4b936b2713b5f3bec3706c9de231a192a392a0220a4",
-		"internal/core/datagram/planner.go":                     "aa68213e9728cdcb3b17133d3cdec3360d4f5b89c5bdfebbd8ae317b5ecd33f5",
-		"internal/core/datagram/pipeline.go":                    "be5053c5d6be9afa25cc7b03c7e379b6346738156a77cab9b8fd3a59d22612b2",
-		"internal/core/datagram/composite_resolver.go":          "d908a8e352f3e336a1534bc741c8bd9ad021175048d5a9ee933719c03d0196a6",
+		"internal/core/node/find_node_ready_construction.go": "1bfd6241613845076f0b6dfd2e74137aa4771d78d47f982dfbd37418afa75dab", "internal/core/findnode/owned_bridge_bootstrap.go": "2ee7f6b13d859326bbd2fb00e487c9530737a2f722359d762202710d1a1cd827", "internal/core/findnode/owned_bridge.go": "b88656fb08a5dd33b0f2bdb7b9e52f636eb1b320291e1a390c2c9b683a593f57",
+		"internal/core/findnode/session.go":                       "8968f6d526239bc11510c4f091539dda84bed91c345d74a4606b397ddd525dc1",
+		"internal/core/node/find_node_connection.go":              "149ae30e487317e1d895786b704b151e22e2fa6062831ece31ead0788024a55a",
+		"internal/core/findnodebridge/clock.go":                   "d948de0986c528473672deee23aef2735793fbf1e6d4f70f7ac5768005ee2558",
+		"internal/core/findnodebridge/domain.go":                  "65baaa7284945055fb4a2967035baaa3f1567a2b9e4e5310029b877350d22a24",
+		"internal/core/node/peer_state_owned_degree_statistic.go": "d6fdf8fc431fcaa5b7645a353459ca385687174e9b0e6977c310776a13bc78ca",
+		"internal/core/node/trust.go":                             "8ff0a1b8ec71aa0138bd047c94c0a601ca669fa255c19bf64691e6e7fc001da7",
+		"internal/core/node/secure_session_store.go":              "56ab961cccccfc14ad586cf5c973960420995fe9b1986b99856c42a4e2e64228",
+		"internal/core/node/find_node_degree_terminal_bridge.go":  "e6c1022489eb1de4969683cecba0c40590fe5a3ffef14e272e5464b722677ef8",
+		"internal/core/node/find_node_bridge_construction.go":     "c068e0e0d7e742b39c5ae6d70051734f813e22ce6db7b4ec42ccf4594ffc5680",
+		"internal/core/node/service.go":                           "d99e39f1f30d7b9bf9e61f22cbc20c5f8c57e0e40e1a8468b6dfe477e50352f0",
+		"internal/core/node/find_node_degree.go":                  "5fd8c8fd9700cb63fd238bd9fb3255c7e434081258e4448d3febb89f4e0e35ea",
+		"internal/core/node/datagram_runtime_state.go":            "62817ed3c561f3eedbaa8baca6ded4c3696b8595a5c3a5345e35faada9ebcf64",
+		"internal/core/node/datagram_layer.go":                    "02b1e51faf940855fa9a366333a01b4aa681f6cf3fe97485bd317a782244549d",
+		"internal/core/node/identity_discovery.go":                "ba8d7a90b57d4199ac1dcf5a6546dc4633e621c601048f913562c3bf44cad44e",
+		"internal/core/node/dm_control.go":                        "3470289331b561253bf32ce0b4d9f31be14589ca39e07f6e753e6707a986b89f",
+		"internal/core/node/dm_control_send.go":                   "753ba1612511586cb4d66a3dd4ab60d799596e3fbd615286e1747c72ce194144",
+		"internal/core/node/datagram_resolver.go":                 "ffa15909b4e84a29783f2ef30a29a46feaf97d32101010a3efc652dc6b5d87b0",
+		"internal/core/node/peer_provider.go":                     "9268c592b85b2ad3796f1bc491b9757103ae9a9d5d5104926268e0b15cb74454",
+		"internal/core/node/connection_manager.go":                "eb656dd686468a09dc059a6bb15469926bf056414bc44356bab288e1a49d9150",
+		"internal/core/node/dial_pacer.go":                        "3125f36eeb159fbc7c576e86b893ebe6ea5e2cb65a5d41bcfbbb43bb156290f3",
+		"internal/core/node/table_router.go":                      "69b0f71a7a6d9aa616c8b78f79c2d3f472ed2898f8a24a3b3161f4ce05877fe7",
+		"internal/core/node/identity_resolver.go":                 "399cfcd845e46676972d36de1687693bce145f2e3c6adfc4ac7e07ce4d562d8d",
+		"internal/core/node/identity_pin_selected_lifecycle.go":   "4c7e2e1ed0c50810426e8a21aad533e5abcf4dc0cb64c01f95d8dedcb5791ab4",
+		"internal/core/node/identity_pin_contact.go":              "4d1d79f7b8804b91742aeec25246fecf715667f37cd4063235a2959dcdc44727",
+		"internal/core/node/presence_prober.go":                   "4e1e4c45738af4efcf5f364bc2a9078bf6e196d6a12d23f261eb87993cc4361e",
+		"internal/core/node/routing_probe_loop.go":                "0f2d686591241ea8a0dbae14df106a88178636f02f6edbb02419bc611f676fa0",
+		"internal/core/node/first_hop_guards.go":                  "2a5e84542d445dcbec23cd4656413cac866c4c6d431041e76ca54546bfa5d46b",
+		"internal/core/node/traffic_capture_bridge.go":            "8131bc4c65d451f3327b85cbf14dca6fb57b6094b188760b6b31de9e1c6ed4c0",
+		"internal/core/node/session_secure.go":                    "7211aa4a2a4e73665e1eab42d3a7158cb0b89a8aba282dc188fd230418e21fd5",
+		"internal/core/node/proof_transport_lifetime.go":          "5b12ec684cb095751c62c9b90e64593da266ed3a5e0ea50fc6801624c1939119",
+		"internal/core/node/datagram_integration.go":              "9fd79d0557706f0c24e8b385501549a8d36ad4da66ad6c7e2828e661837ee25c",
+		"internal/core/capture/manager.go":                        "b8678d19e181c3e41f2877e589029a2bdd7048c8890e77f0db7012112599732c",
+		"internal/core/routing/announce.go":                       "16d0a2daf9e98e82fcb045aa04b16410d938c5ff718f994ec15a35da09d7aaaf",
+		"internal/core/datagram/planner.go":                       "f2a9bc7737217e9e327efc6e8198296018de7514b63c632f9de3e3be1a280897",
+		"internal/core/datagram/pipeline.go":                      "6e7717927a897d753f0d62d0bc19047055699e8820431cbe30d5dd2074125303",
+		"internal/core/datagram/composite_resolver.go":            "ef0b69389cd4b078a0c71e4f7bb89807ad77fb285e25c3ffd7387aaf9b89ce55",
 	}
 }
 

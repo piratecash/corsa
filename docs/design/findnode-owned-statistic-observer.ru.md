@@ -1,0 +1,13 @@
+# Неактивный owned-наблюдатель degree
+
+SOURCE-кандидат добавляет отдельный неиспользуемый statistics root, остающийся Constructing. Ready/Seal, intake, публичная настройка, численные профили, каденс и активация не меняются. Новые тесты/контроли NOTRUN; настоящий600-секундный runtime-прогон не заявляется.
+
+Производитель создаётся до builder и передаётся первым Service literal. Owner/publisher неизменны; coverageStart/installed устанавливаются один раз под точным owner.mu и W. Ранние callbacks видят unready и сохраняют прежние value/date. Настоящий SampleRuntimePair start берётся после последнего aggregate unlock перед return, не от даты создания domain. После sample нет новых application waits/callback/IO. Root читает только собственный constructor outcome; позднего Service setter нет.
+
+Flush использует тот же domain, что настоящие P1/End: owner.mu→clock→W→один RuntimePair. HWM обновляется до отказов по покрытию/unknown/wall. Для успеха нужны тот же domain/kind, исходный start, полные600 секунд и полная bounded projection. Неполнота, unknown, poison, неверный owner, fixture wall и некорректный wall не превращаются в0 и не обновляют старую дату. Старый hint по-прежнему исключается через24 часа; fallback512 и первое окно не меняются. Полный настоящий0 заменяет прежнее значение без max.
+
+Отдельный pure owned projector копирует history64, применяет прежний fixed64+65 алгоритм ко всем bounded active rows и проверяет lifetime origin/owner/token/slot/generation. Он не пишет owner и не обходит legacy embargo. Новый fault публикуется W-held caller, без вложенного W и recursive degreePoison. Все результаты завершают Complete, включая частичные/no-change отказы; консервативное обновление generation может отвергнуть другой cut и не обещает доступность. ObservationClock capture этот срез не добавляет. Для будущего reader остаётся reviewed обязанность сначала отпустить ObservationClock и затем под owner.mu публиковать poison через nonclock W.
+
+Отдельный leaf delta переносит единственное выделение TryReadClock guard до TryR после immutable validation. API, ошибки, CAS и releases сохранены. Raw-origin/RuntimePair проверки не ослаблены; новый TYPE-plausible SOURCE selfcase переносит ту же декларацию после успешного TryR. Никакого reader/Ready это не включает.
+
+SOURCE fixtures используют настоящий runtime только для установки и короткого отказа, callback — для проверки unready до фактического start. Полные600/нулевой результат проверяются только как явно обозначенные arithmetic/fixture проекции, включая настоящий production mint и half-open history. Runtime origin не передвигается, точка600 не подделывается, fixture wall не выдаётся за runtime. MAIN/index/план не изменялись; полный bridge/G2/ресурсная приёмка/выпуск остаются открытыми.

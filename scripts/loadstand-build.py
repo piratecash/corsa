@@ -264,7 +264,7 @@ DEFS = {
               'closure_sha256': N(D), 'cache_initially_empty': N(B), 'joined': N(B),
               'targets': A(E(*TARGETS), 3, 0, True)},
     'host': {'system': S(), 'architecture': S()},
-    'environment': {'go_version': E('go1.27.2'), 'goos': E('linux'), 'goarch': E('arm64'),
+    'environment': {'go_version': E('go1.27.3'), 'goos': E('linux'), 'goarch': E('arm64'),
                      'goarm64': E('v8.0'), 'cgo': E(0, 1), 'goexperiment': E(''),
                      'vcs': E('disabled_archive'), 'network_isolation': E('not_established'),
                      'image': R('image')},
@@ -3637,7 +3637,7 @@ def empty_receipt(request, raw):
             'status': 'incomplete', 'source': evidence(), 'origins': [],
             'flavour': request['flavour'],
             'host': {'system': platform.system(), 'architecture': platform.machine()},
-            'environment': {'go_version': 'go1.27.2', 'goos': 'linux', 'goarch': 'arm64',
+            'environment': {'go_version': 'go1.27.3', 'goos': 'linux', 'goarch': 'arm64',
                 'goarm64': 'v8.0', 'cgo': 1 if request['flavour'] == 'native-linux-arm64' else 0,
                 'goexperiment': '', 'vcs': 'disabled_archive', 'network_isolation': 'not_established',
                 'image': request['image']},
@@ -3660,7 +3660,7 @@ def parse_artifact_metadata(version_raw, build_id_raw, target):
     except UnicodeError as exc:
         raise Failure('ArtifactMetadataInvalid') from exc
     lines = text.splitlines()
-    if not lines or not lines[0].endswith(': go1.27.2') or not build_id or len(build_id.encode()) > 4096 or any(ord(c) < 33 or ord(c) > 126 for c in build_id):
+    if not lines or not lines[0].endswith(': go1.27.3') or not build_id or len(build_id.encode()) > 4096 or any(ord(c) < 33 or ord(c) > 126 for c in build_id):
         fail('ArtifactMetadataInvalid')
     settings, path, module = {}, None, None
     for line in lines[1:]:

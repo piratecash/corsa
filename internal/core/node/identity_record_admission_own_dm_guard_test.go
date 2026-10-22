@@ -19,9 +19,9 @@ var ownDMAdmissionClosedReferences = map[string]map[r2aReferenceSite]int{
 	"r2PendingCursor": {{"node/identity_record_admission.go", "<package>"}: 1, {"node/identity_record_admission.go", "selectRelationSlotLocked"}: 2},
 
 	"NewInactiveOwnDMAdmissionCandidate":  {},
-	"captureOwnDMResidence":               {{"node/identity_pin_own_dm_port.go", "Submit"}: 1},
-	"bindOwnDMResidence":                  {{"node/identity_pin_own_dm_port.go", "Submit"}: 1},
-	"registerOwnDMRecordAdmission":        {{"node/identity_pin_own_dm_port.go", "Submit"}: 1},
+	"captureOwnDMResidence":               {{"node/identity_pin_own_dm_port.go", "submitWithResidence"}: 1},
+	"bindOwnDMResidence":                  {{"node/identity_pin_own_dm_port.go", "submitWithResidence"}: 1},
+	"registerOwnDMRecordAdmission":        {{"node/identity_pin_own_dm_port.go", "submitWithResidence"}: 1},
 	"prepareOwnDMRelation":                {{"node/identity_record_admission.go", "processRelationSlot"}: 1},
 	"stageOwnDMRelationAdmission":         {{"node/identity_record_admission_relation.go", "stageRelationAdmission"}: 1},
 	"stageOwnDMRelationRecordLocked":      {{"node/identity_record_admission_own_dm.go", "stageOwnDMRelationAdmission"}: 1},
@@ -31,14 +31,14 @@ var ownDMAdmissionClosedReferences = map[string]map[r2aReferenceSite]int{
 	"ownDMClaimCurrentLocked":             {{"node/identity_record_admission_own_dm.go", "prepareOwnDMRelation"}: 2, {"node/identity_record_admission_own_dm.go", "stageOwnDMRelationAdmission"}: 1},
 	"ownersMatchLocked":                   {{"node/identity_record_admission_own_dm.go", "registerOwnDMRecordAdmission"}: 1, {"node/identity_record_admission_own_dm.go", "ownDMClaimCurrentLocked"}: 1},
 	"ownDMObservation":                    {{"node/identity_record_admission_own_dm.go", "ownersMatchLocked"}: 1, {"node/identity_record_admission_own_dm.go", "registerOwnDMRecordAdmission"}: 2, {"node/identity_record_admission_own_dm.go", "verifyOwnDMRelationRecord"}: 1, {"node/identity_record_admission_own_dm.go", "stageOwnDMRelationRecordLocked"}: 1},
-	"r2Admission":                         {{"node/identity_pin_own_dm_port.go", "<package>"}: 1, {"node/identity_record_admission_own_dm.go", "NewInactiveOwnDMAdmissionCandidate"}: 1, {"node/identity_record_admission_own_dm.go", "captureOwnDMResidence"}: 2},
+	"r2Admission":                         {{"node/identity_pin_own_dm_runtime.go", "install"}: 1, {"node/identity_pin_own_dm_runtime.go", "bindings"}: 1, {"node/identity_pin_own_dm_port.go", "<package>"}: 1, {"node/identity_record_admission_own_dm.go", "newOwnDMAdmissionPort"}: 1, {"node/identity_record_admission_own_dm.go", "captureOwnDMResidence"}: 2},
 	"r2Residence":                         {{"node/identity_pin_outgoing_provenance.go", "<package>"}: 1, {"node/identity_record_admission_own_dm.go", "bindOwnDMResidence"}: 1, {"node/identity_record_admission_own_dm.go", "registerOwnDMRecordAdmission"}: 2, {"node/identity_record_admission_own_dm.go", "ownDMClaimCurrentLocked"}: 1, {"node/identity_record_admission_own_dm.go", "stageOwnDMRelationRecordLocked"}: 1, {"node/identity_record_admission.go", "expireRelationSlotsLocked"}: 1},
 }
 
 func ownDMAdmissionSourceErrors(sources map[string][]byte) []string {
 	failures := ownDMGuardErrors(sources, ownDMAdmissionClosedReferences)
 	constructors := map[string]r2aReferenceSite{
-		"ownDMRecordAdmission":        {"node/identity_record_admission_own_dm.go", "NewInactiveOwnDMAdmissionCandidate"},
+		"ownDMRecordAdmission":        {"node/identity_record_admission_own_dm.go", "newOwnDMAdmissionPort"},
 		"ownDMResidenceOrigin":        {"node/identity_record_admission_own_dm.go", "captureOwnDMResidence"},
 		"ownDMRelationClaim":          {"node/identity_record_admission_own_dm.go", "registerOwnDMRecordAdmission"},
 		"ownDMEarnedRole":             {"node/identity_record_admission_own_dm.go", "stageOwnDMRelationAdmission"},
@@ -108,12 +108,12 @@ func ownDMAdmissionSourceErrors(sources map[string][]byte) []string {
 		}
 	}
 	want := map[r2aReferenceSite]map[string]int{
-		{"node/identity_record_admission_own_dm.go", "NewInactiveOwnDMAdmissionCandidate"}: {"r2Admission": 1},
-		{"node/identity_record_admission_own_dm.go", "bindOwnDMResidence"}:                 {"r2Residence": 1},
-		{"node/identity_record_admission_own_dm.go", "registerOwnDMRecordAdmission"}:       {"r2Claim": 1},
-		{"node/identity_record_admission_own_dm.go", "prepareOwnDMRelation"}:               {"r2Verified": 1},
-		{"node/identity_record_admission_own_dm.go", "stageOwnDMRelationAdmission"}:        {"r2Verified": 1},
-		{"node/identity_record_admission.go", "retainStoppedRelationSlotLocked"}:           {"r2Claim": 1, "r2Verified": 1},
+		{"node/identity_record_admission_own_dm.go", "newOwnDMAdmissionPort"}:        {"r2Admission": 1},
+		{"node/identity_record_admission_own_dm.go", "bindOwnDMResidence"}:           {"r2Residence": 1},
+		{"node/identity_record_admission_own_dm.go", "registerOwnDMRecordAdmission"}: {"r2Claim": 1},
+		{"node/identity_record_admission_own_dm.go", "prepareOwnDMRelation"}:         {"r2Verified": 1},
+		{"node/identity_record_admission_own_dm.go", "stageOwnDMRelationAdmission"}:  {"r2Verified": 1},
+		{"node/identity_record_admission.go", "retainStoppedRelationSlotLocked"}:     {"r2Claim": 1, "r2Verified": 1},
 	}
 	if !reflect.DeepEqual(writes, want) {
 		failures = append(failures, fmt.Sprintf("own-DM admission private writes %v want %v", writes, want))
@@ -151,14 +151,18 @@ func TestOwnDMAdmissionSourceGuardRejectsEscapeAndLateMint(t *testing.T) {
 
 func TestOwnDMAdmissionClosedTypesAndFixedState(t *testing.T) {
 	types := map[string]map[r2aReferenceSite]int{
-		"OwnDMResidenceProfile":       {{"node/identity_record_admission_own_dm.go", "<package>"}: 1, {"node/identity_record_admission_own_dm.go", "valid"}: 1, {"node/identity_record_admission_own_dm.go", "NewInactiveOwnDMAdmissionCandidate"}: 1},
-		"ownDMRecordAdmission":        {{"node/identity_pin_own_dm_port.go", "<package>"}: 1, {"node/identity_record_admission_own_dm.go", "<package>"}: 1, {"node/identity_record_admission_own_dm.go", "NewInactiveOwnDMAdmissionCandidate"}: 1},
+		"OwnDMRuntimeProfile":         {{"node/identity_pin_own_dm_runtime.go", "NewInactiveOwnDMRuntimeCandidate"}: 1, {"sdk/runtime.go", "newWithOwnDMRuntime"}: 1, {"sdk/runtime.go", "newWithContext"}: 1},
+		"ownDMRuntimeConstruction":    {{"node/identity_pin_own_dm_runtime.go", "NewInactiveOwnDMRuntimeCandidate"}: 1, {"node/identity_pin_own_dm_runtime.go", "install"}: 1, {"node/identity_pin_own_dm_runtime.go", "bindings"}: 1, {"node/find_node_ready_construction.go", "<package>"}: 2, {"node/find_node_ready_construction.go", "buildWithOwnDM"}: 1},
+		"OwnDMResidenceProfile":       {{"node/identity_record_admission_own_dm.go", "<package>"}: 1, {"node/identity_record_admission_own_dm.go", "valid"}: 1, {"node/identity_record_admission_own_dm.go", "newOwnDMAdmissionPort"}: 1, {"node/identity_record_admission_own_dm.go", "NewInactiveOwnDMAdmissionCandidate"}: 1, {"node/identity_pin_own_dm_runtime.go", "<package>"}: 2},
+		"ownDMRecordAdmission":        {{"node/identity_pin_own_dm_port.go", "<package>"}: 1, {"node/identity_record_admission_own_dm.go", "<package>"}: 1, {"node/identity_record_admission_own_dm.go", "newOwnDMAdmissionPort"}: 1, {"node/identity_pin_own_dm_runtime.go", "<package>"}: 1},
 		"ownDMResidenceOrigin":        {{"node/identity_pin_outgoing_provenance.go", "<package>"}: 1, {"node/identity_record_admission_own_dm.go", "captureOwnDMResidence"}: 2, {"node/identity_record_admission_own_dm.go", "bindOwnDMResidence"}: 1, {"node/identity_record_admission_own_dm.go", "liveLocked"}: 1},
 		"ownDMRelationClaim":          {{"node/identity_pin_outgoing_provenance.go", "<package>"}: 1, {"node/identity_record_admission.go", "<package>"}: 1, {"node/identity_record_admission_own_dm.go", "<package>"}: 1, {"node/identity_record_admission_own_dm.go", "registerOwnDMRecordAdmission"}: 1, {"node/identity_record_admission_own_dm.go", "ownDMObservation"}: 1, {"node/identity_record_admission_own_dm.go", "ownersMatchLocked"}: 1, {"node/identity_record_admission_own_dm.go", "verifyOwnDMRelationRecord"}: 1},
 		"ownDMEarnedRole":             {{"node/identity_record_admission_own_dm.go", "<package>"}: 1, {"node/identity_record_admission_own_dm.go", "stageOwnDMRelationAdmission"}: 1},
 		"verifiedOwnDMRelationRecord": {{"node/identity_record_admission.go", "<package>"}: 1, {"node/identity_record_admission.go", "retainStoppedRelationSlotLocked"}: 1, {"node/identity_record_admission_own_dm.go", "verifyOwnDMRelationRecord"}: 4, {"node/identity_record_admission_own_dm.go", "stageOwnDMRelationRecordLocked"}: 1, {"node/identity_record_admission_own_dm.go", "stageOwnDMRelationAdmission"}: 1},
 	}
 	inventory := map[string][]string{
+		"OwnDMRuntimeProfile":         {"Residence", "MaxActive", "MaxMembers", "MaxRegistryVisits", "Intake", "Signing"},
+		"ownDMRuntimeConstruction":    {"profile", "owner", "resolver", "admission", "port"},
 		"OwnDMResidenceProfile":       {"MaxPrestage"},
 		"ownDMRecordAdmission":        {"service", "resolver", "admission", "profile"},
 		"ownDMResidenceOrigin":        {"owner", "started", "at", "deadline", "done", "ttlExpiry"},

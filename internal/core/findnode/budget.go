@@ -138,6 +138,9 @@ type ForwardCalendar struct {
 	projected, actual forwardBucket
 	last              Instant
 	slots             map[*forwardSlot]struct{}
+	ownedAliases      bool
+	aliases           [MaxPendingPerTarget]*forwardSlot
+	aliasCount        int
 }
 
 func NewForwardCalendar(target domain.PeerIdentity, now Instant, initialTokens uint32) (*ForwardCalendar, error) {
@@ -147,6 +150,66 @@ func NewForwardCalendar(target domain.PeerIdentity, now Instant, initialTokens u
 	bucket := forwardBucket{at: now, tokens: Instant(initialTokens) * forwardToken}
 	return &ForwardCalendar{target: target, projected: bucket, actual: bucket, last: now, slots: make(map[*forwardSlot]struct{})}, nil
 }
+
+// newOwnedForwardCalendar is construction-only. Public construction keeps its
+// original map; an owned calendar has exactly one fixed pointer-prefix book.
+func newOwnedForwardCalendar(target domain.PeerIdentity, now Instant, initialTokens uint32) (*ForwardCalendar, error) {
+	if target.IsZero() || now < 0 || initialTokens > 4 {
+		return nil, ErrInvalid
+	}
+	bucket := forwardBucket{at: now, tokens: Instant(initialTokens) * forwardToken}
+	return &ForwardCalendar{target: target, projected: bucket, actual: bucket, last: now, ownedAliases: true}, nil
+}
+
+// All four helpers require this calendar's mutex or exclusive unpublished ownership.
+func (c *ForwardCalendar) forwardAliasCountLocked() int {
+	if c.ownedAliases {
+		return c.aliasCount
+	}
+	return len(c.slots)
+}
+func (c *ForwardCalendar) forwardHasAliasLocked(slot *forwardSlot) bool {
+	if c.ownedAliases {
+		for i := 0; i < c.aliasCount; i++ {
+			if c.aliases[i] == slot {
+				return true
+			}
+		}
+		return false
+	}
+	_, ok := c.slots[slot]
+	return ok
+}
+func (c *ForwardCalendar) forwardDropAliasLocked(slot *forwardSlot) bool {
+	if c.ownedAliases {
+		for i := 0; i < c.aliasCount; i++ {
+			if c.aliases[i] == slot {
+				last := c.aliasCount - 1
+				c.aliases[i] = c.aliases[last]
+				c.aliases[last] = nil
+				c.aliasCount--
+				return true
+			}
+		}
+		return false
+	}
+	if _, ok := c.slots[slot]; !ok {
+		return false
+	}
+	delete(c.slots, slot)
+	return true
+}
+
+// Caller proves a fresh nonnil pointer and vacant prefix under the same mutex.
+func (c *ForwardCalendar) forwardInsertAliasLocked(slot *forwardSlot) {
+	if c.ownedAliases {
+		c.aliases[c.aliasCount] = slot
+		c.aliasCount++
+		return
+	}
+	c.slots[slot] = struct{}{}
+}
+
 func (c *ForwardCalendar) Reserve(now, latest Instant) (Reservation, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -158,7 +221,7 @@ func (c *ForwardCalendar) Reserve(now, latest Instant) (Reservation, error) {
 	if latest < now || latest-now > responderTimeout {
 		return Reservation{}, ErrBudget
 	}
-	if len(c.slots) >= MaxPendingPerTarget {
+	if c.forwardAliasCountLocked() >= MaxPendingPerTarget {
 		return Reservation{}, ErrCapacity
 	}
 	projected, at, err := c.projected.project(now)
@@ -169,7 +232,7 @@ func (c *ForwardCalendar) Reserve(now, latest Instant) (Reservation, error) {
 		return Reservation{}, ErrBudget
 	}
 	slot := &forwardSlot{at: at, latest: latest}
-	c.slots[slot] = struct{}{}
+	c.forwardInsertAliasLocked(slot)
 	c.projected = projected
 	return Reservation{calendar: c, slot: slot}, nil
 }
@@ -179,11 +242,7 @@ func (c *ForwardCalendar) Cancel(r Reservation) bool {
 	if r.calendar != c || r.slot == nil {
 		return false
 	}
-	if _, ok := c.slots[r.slot]; !ok {
-		return false
-	}
-	delete(c.slots, r.slot)
-	return true
+	return c.forwardDropAliasLocked(r.slot)
 }
 func (c *ForwardCalendar) Consume(r Reservation, now Instant) error {
 	c.mu.Lock()
@@ -196,11 +255,11 @@ func (c *ForwardCalendar) Consume(r Reservation, now Instant) error {
 	if r.calendar != c || r.slot == nil {
 		return ErrStaleWork
 	}
-	if _, ok := c.slots[r.slot]; !ok {
+	if !c.forwardHasAliasLocked(r.slot) {
 		return ErrStaleWork
 	}
 	if now > r.slot.latest {
-		delete(c.slots, r.slot)
+		c.forwardDropAliasLocked(r.slot)
 		return ErrBudget
 	}
 	if now < r.slot.at {
@@ -211,10 +270,14 @@ func (c *ForwardCalendar) Consume(r Reservation, now Instant) error {
 		return ErrNotReady
 	}
 	c.actual.tokens -= forwardToken
-	delete(c.slots, r.slot)
+	c.forwardDropAliasLocked(r.slot)
 	return nil
 }
-func (c *ForwardCalendar) Pending() int { c.mu.Lock(); defer c.mu.Unlock(); return len(c.slots) }
+func (c *ForwardCalendar) Pending() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.forwardAliasCountLocked()
+}
 
 // Expire releases overdue aliases without refunding projected or actual tokens.
 func (c *ForwardCalendar) Expire(now Instant) error {
@@ -228,6 +291,19 @@ func (c *ForwardCalendar) Expire(now Instant) error {
 	return nil
 }
 func (c *ForwardCalendar) expireSlots(now Instant) {
+	if c.ownedAliases {
+		for i := 0; i < c.aliasCount; {
+			if now > c.aliases[i].latest {
+				last := c.aliasCount - 1
+				c.aliases[i] = c.aliases[last]
+				c.aliases[last] = nil
+				c.aliasCount--
+				continue
+			}
+			i++
+		}
+		return
+	}
 	for slot := range c.slots {
 		if now > slot.latest {
 			delete(c.slots, slot)
@@ -260,18 +336,29 @@ func (c *ForwardCalendar) planCombinedFloorLocked(now, latest, sourceFloor Insta
 	if latest < now || latest-now > responderTimeout {
 		return combinedForwardPlan{}, ErrBudget
 	}
-	if len(c.slots) >= MaxPendingPerTarget {
+	count := c.forwardAliasCountLocked()
+	if count >= MaxPendingPerTarget {
 		return combinedForwardPlan{}, ErrCapacity
 	}
 	horizon := now
-	for slot := range c.slots {
-		if slot.latest < now || slot.at > slot.latest {
-			return combinedForwardPlan{}, ErrInvalid
+	if c.ownedAliases {
+		for i := 0; i < count; i++ {
+			slot := c.aliases[i]
+			if slot.latest < now || slot.at > slot.latest {
+				return combinedForwardPlan{}, ErrInvalid
+			}
+			horizon = max(horizon, slot.latest)
 		}
-		horizon = max(horizon, slot.latest)
+	} else {
+		for slot := range c.slots {
+			if slot.latest < now || slot.at > slot.latest {
+				return combinedForwardPlan{}, ErrInvalid
+			}
+			horizon = max(horizon, slot.latest)
+		}
 	}
 	actual := c.actual
-	for range len(c.slots) {
+	for range count {
 		var err error
 		actual, _, err = actual.project(horizon)
 		if err != nil {
@@ -292,16 +379,18 @@ func (c *ForwardCalendar) planCombinedFloorLocked(now, latest, sourceFloor Insta
 	return combinedForwardPlan{projected: projected, slot: forwardSlot{at: at, latest: latest}}, nil
 }
 
-// applyCombinedLocked requires c.mu and the unchanged successful trial state.
+// applyCombinedLocked requires the SAME c.mu, owned mode and the successful
+// vacant-prefix trial held continuously through the source claim.
 func (c *ForwardCalendar) applyCombinedLocked(plan combinedForwardPlan, slot *forwardSlot, now Instant) {
 	c.last = now
 	c.projected = plan.projected
-	c.slots[slot] = struct{}{}
+	c.aliases[c.aliasCount] = slot
+	c.aliasCount++
 }
 
 // retireableLocked requires c.mu. Physical alias release never refunds debt.
 func (c *ForwardCalendar) retireableLocked(now Instant) bool {
-	if len(c.slots) != 0 || now < c.last || now < c.projected.at || now < c.actual.at {
+	if c.forwardAliasCountLocked() != 0 || now < c.last || now < c.projected.at || now < c.actual.at {
 		return false
 	}
 	projected, actual := c.projected, c.actual

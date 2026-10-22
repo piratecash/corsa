@@ -33,18 +33,18 @@ func TestCandidateGroupsHardBoundOrdinaryPartialLedgerCommits(t *testing.T) {
 			count++
 		}
 	}
-	if len(g.records) != candidateMaxRecords {
-		t.Fatalf("hard reach=%d", len(g.records))
+	if fixedGroupRecords(&g) != candidateMaxRecords {
+		t.Fatalf("hard reach=%d", fixedGroupRecords(&g))
 	}
-	oldNames := len(g.named)
+	oldNames := fixedGroupNames(&g)
 	if _, err := g.plan("g3", candidateTarget(912), Instant(300*time.Second), 3840); !errors.Is(err, ErrCapacity) {
 		t.Fatal("hard H admitted below share")
 	}
-	if len(g.named) != oldNames || len(g.records) != 7952 {
+	if fixedGroupNames(&g) != oldNames || fixedGroupRecords(&g) != 7952 {
 		t.Fatal("refusal effects")
 	}
 	groupCommit(t, &g, "g0", candidateTarget(0), Instant(300*time.Second), 3840)
-	if len(g.records) != 7952 {
+	if fixedGroupRecords(&g) != 7952 {
 		t.Fatal("repeat grew records")
 	}
 	// This exercises the real ledger but not absent source/pair/degree gates.
@@ -62,7 +62,7 @@ func TestCandidateStickyFirst256SustainedAndLateOverflowCompetition(t *testing.T
 			groupCommit(t, &o.groups, domain.SourceGroup(fmt.Sprintf("named%d", i)), candidateTarget(i), at, 512)
 		}
 	}
-	if len(o.groups.named) != 256 || o.groups.prospective("overflow-late") != 256 {
+	if fixedGroupNames(&o.groups) != 256 || o.groups.prospective("overflow-late") != 256 {
 		t.Fatal("registry promoted overflow/changed names")
 	}
 	a, _ := provenFixture(t, 1, "overflow-late", 0)
@@ -122,7 +122,7 @@ func TestCandidateGroupsRefusalRefsExpiryAndSingleGeneration(t *testing.T) {
 	g.release(p.key)
 	g.expire(candidateGroupWindow)
 	generation := g.generation
-	if !g.reset(candidateGroupWindow, 0) || g.generation != generation+1 || len(g.named) != 0 {
+	if !g.reset(candidateGroupWindow, 0) || g.generation != generation+1 || fixedGroupNames(&g) != 0 {
 		t.Fatal("reset failed")
 	}
 	next, e := g.plan("other", candidateTarget(0), candidateGroupWindow, 512)
@@ -197,11 +197,11 @@ func TestCandidateTarget16ProvisionalAndCalendarDebtRetirement(t *testing.T) {
 	debt := candidateTestOwner(t)
 	// Explicit bounded registry fixture with no rows but nonrefundable debt.
 	for i := range MaxPendingTotal {
-		c, err := NewForwardCalendar(candidateTarget(i), 0, 0)
+		c, err := newOwnedForwardCalendar(candidateTarget(i), 0, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
-		debt.calendars[c.Target()] = c
+		calendarFixedSeed(t, debt, c)
 	}
 	source := sources[0]
 	if _, err := debt.offer(source, target, request(1, target.Identity(), 1), candidateView(t, debt, 0, []Session{source}, []Session{source}, target), 0); err != nil {
@@ -209,7 +209,7 @@ func TestCandidateTarget16ProvisionalAndCalendarDebtRetirement(t *testing.T) {
 	}
 	cut := debt.profile.round
 	out, err := debt.sealRound(candidateView(t, debt, cut, []Session{source}, []Session{source}, target), cut)
-	if err != nil || out.reserved != 0 || len(debt.calendars) != 512 {
+	if err != nil || out.reserved != 0 || calendarFixedCount(t, debt) != 512 {
 		t.Fatalf("minted fresh calendar %+v/%v", out, err)
 	}
 	// After genuine refill, an unused canonical entry may retire.
@@ -219,7 +219,7 @@ func TestCandidateTarget16ProvisionalAndCalendarDebtRetirement(t *testing.T) {
 	}
 	cut = at + debt.profile.round
 	out, err = debt.sealRound(candidateView(t, debt, cut, []Session{source}, []Session{source}, target), cut)
-	if err != nil || out.reserved != 1 || len(debt.calendars) != 512 {
+	if err != nil || out.reserved != 1 || calendarFixedCount(t, debt) != 512 {
 		t.Fatalf("honest retirement %+v/%v", out, err)
 	}
 }

@@ -886,3 +886,55 @@ func TestOwnDMAdmissionBoundedCopyPreservesSignedEnvelope(t *testing.T) {
 		}
 	}
 }
+
+// The SDK releases its operation context on successful return. That cleanup
+// must not cancel the separate original caller residence before real ACK/R.
+func TestOwnDMAdmissionOperationReleaseKeepsOriginalCallerResidence(t *testing.T) {
+	for _, kind := range []string{"operation_release", "caller_cancel"} {
+		t.Run(kind, func(t *testing.T) {
+			f := ownDMAdmissionManaged(t, nil)
+			x := ownDMRecipient(t)
+			ownDMAdmissionRecord(t, f.svc, x, domain.DeclaredMinSession(domain.SessionVersionSecure))
+			ownDMAdmissionRecord(t, f.svc, f.peer.identity, domain.DeclaredMinSession(domain.SessionVersionSecure))
+			e := r2aEnvelope(t, f.svc, x)
+			r2aRouteTo(t, f.svc, domain.PeerIdentityFromWire(e.Recipient), f.publication)
+			operation, release := context.WithCancel(t.Context())
+			defer release()
+			caller, cancelCaller := context.WithCancel(t.Context())
+			defer cancelCaller()
+			f.wire.armed.Store(true)
+			reply, receipt, err := f.port.SubmitWithResidence(operation, caller, e)
+			if err != nil || reply.Type != "message_stored" || receipt.r2Submission == nil {
+				t.Fatal("two-context genuine storage/admission missing", reply, err)
+			}
+			select {
+			case <-f.wire.entered:
+			case <-time.After(3 * time.Second):
+				t.Fatal("two-context original writer did not enter")
+			}
+			origin := receipt.r2Submission.r2Result.stamp.prepared.r2Residence
+			if origin == nil || origin.done != caller.Done() || origin.done == operation.Done() {
+				t.Fatal("accepted residence is not the original caller lifetime")
+			}
+			if rows, debits := ownDMAdmissionRows(f.svc); rows != 2 || debits != 0 {
+				t.Fatal("two-context pending rows or debit changed before ACK", rows, debits)
+			}
+			release()
+			if caller.Err() != nil || operation.Err() == nil {
+				t.Fatal("operation cleanup cancelled original caller")
+			}
+			if kind == "caller_cancel" {
+				cancelCaller()
+			}
+			f.wire.unblock()
+			if kind == "operation_release" {
+				ownDMAdmissionSettled(t, f, 2)
+			} else {
+				waitForConditionMsg(t, 4*time.Second, "original caller cancellation did not release unearned rows", func() bool { rows, debits := ownDMAdmissionRows(f.svc); return rows == 0 && debits == 0 })
+				if stats := f.svc.SecureSessionStoreStats(); stats.RelationAllocations != 0 || stats.RelationConfirmed != 0 {
+					t.Fatal("cancelled original caller earned R", stats)
+				}
+			}
+		})
+	}
+}

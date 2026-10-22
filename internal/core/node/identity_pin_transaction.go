@@ -267,8 +267,13 @@ func (s *secureSessionStore) rollbackIdentityPinRemoval(ctx context.Context, per
 	}
 	if err != nil {
 		failure := errors.Join(domain.ErrIdentityPinRecoveryRequired, cause, err)
+		nextRecovery := &identityPinRecoveryState{permit: &permit, cause: failure, fatal: true}
 		s.mu.Lock()
-		s.pinRecovery = &identityPinRecoveryState{permit: &permit, cause: failure, fatal: true}
+		publication := s.beginPinPublication()
+		s.pinRecovery = nextRecovery
+		if publication != nil {
+			publication.Complete()
+		}
 		s.mu.Unlock()
 		s.logIdentityPinOutcome(permit, result.Outcome, failure)
 		return result, failure

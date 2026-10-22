@@ -56,6 +56,10 @@ type NodeConfig struct {
 	// PeerPort.IsValid.
 	AdvertisePort  *uint16
 	BootstrapPeers []string
+	// EnableDatagramV1 mirrors the existing internal datagram transport choice.
+	// Zero and DefaultConfig keep it off; opting in does not enable own-DM R
+	// provenance or select an inactive D1 construction root.
+	EnableDatagramV1 bool
 	// PrivateKey is the Base64 Ed25519 signing key — the single most
 	// sensitive value in the whole config. json:"-" keeps it out of any
 	// marshalled NodeConfig, and NodeConfig.String/GoString keep it out of
@@ -377,6 +381,7 @@ func (c Config) internal() coreconfig.Config {
 			ListenAddress:       cfg.Node.ListenAddress,
 			AdvertisePort:       advertisePort,
 			BootstrapPeers:      append([]string(nil), cfg.Node.BootstrapPeers...),
+			EnableDatagramV1:    cfg.Node.EnableDatagramV1,
 			IdentityPath:        cfg.Node.IdentityPath,
 			IdentityIntentsPath: identityIntentsPath,
 			AllowPrivatePeers:   cfg.Node.AllowPrivatePeers,

@@ -47,7 +47,7 @@ Example external project:
 ```go
 module mybot
 
-go 1.26.1
+go 1.27.3
 
 require github.com/piratecash/corsa v0.0.0
 ```
@@ -484,7 +484,7 @@ import "github.com/piratecash/corsa/sdk"
 ```go
 module mybot
 
-go 1.26.1
+go 1.27.3
 
 require github.com/piratecash/corsa v0.0.0
 ```

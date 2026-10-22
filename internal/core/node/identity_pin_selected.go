@@ -99,6 +99,10 @@ func (s *secureSessionStore) selectedConfirmationNeeded() bool {
 
 // putPinEntryLocked requires the store mu and updates its derived counters atomically.
 func (s *secureSessionStore) putPinEntryLocked(id domain.PeerIdentity, entry identityPinEntry) {
+	publication := s.beginPinPublication()
+	if publication != nil {
+		defer publication.Complete()
+	}
 	old := s.identities[id]
 	if old.inboundMetadataConfirmed() {
 		s.inboundConfirmed--
@@ -130,6 +134,10 @@ func (s *secureSessionStore) putPinEntryLocked(id domain.PeerIdentity, entry ide
 
 // deletePinEntryLocked requires the store mu.
 func (s *secureSessionStore) deletePinEntryLocked(id domain.PeerIdentity) {
+	publication := s.beginPinPublication()
+	if publication != nil {
+		defer publication.Complete()
+	}
 	entry := s.identities[id]
 	if entry.inboundMetadataConfirmed() {
 		s.inboundConfirmed--

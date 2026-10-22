@@ -111,7 +111,10 @@ func (r *Runtime) SendDirectMessage(ctx context.Context, to, body string) (*Dire
 	sendCtx, release := r.commandContext(ctx)
 	defer release()
 
-	msg, err := r.client.SendDirectMessage(sendCtx, recipient, domain.OutgoingDM{
+	// Operation cleanup cancels sendCtx even on success. Optional accepted R
+	// residence retains the caller's original cancellation/deadline instead;
+	// the original Node lifetime is checked independently by its owner.
+	msg, err := r.client.SendDirectMessageWithOwnDMResidence(sendCtx, ctx, recipient, domain.OutgoingDM{
 		Body: body,
 	})
 	if err != nil {

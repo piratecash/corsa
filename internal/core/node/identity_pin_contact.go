@@ -265,7 +265,12 @@ func (p *contactPinProducer) promote(ctx context.Context, candidate *localContac
 			copy := *current
 			copy.proof = nil
 			row.LocalContact = &copy
-			s.trust.contacts[id.String()] = row
+			address := id.String()
+			publication := s.trust.beginTrustPublication()
+			s.trust.contacts[address] = row
+			if publication != nil {
+				publication.Complete()
+			}
 		}
 		s.trust.mu.Unlock()
 	}

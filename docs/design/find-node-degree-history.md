@@ -84,3 +84,33 @@ F1 или ConnID входящего соединения. Подпись док�
 правило 512/подсказка или сохранение peer-state. Окна ёмкости того же владельца
 и необязательная подсказка относятся к следующему отдельному срезу. Численные
 профили, G2, ресурсная приёмка и включение остаются отдельными условиями.
+
+## H7: immutable witness origin / Неизменяемый источник witness
+
+The private degree witness now retains its original `proofTransportLifetime`
+pointer. The sole authentic P1 mint sets it before selecting either the tracked
+or full-capacity untracked branch, and before attaching the witness to that
+lifetime. Existing raw legacy fixtures keep a zero origin. The focused genuine
+Accept/Dial test covers tracked and real full-capacity untracked witnesses from
+two distinct lifetimes of the same peer.
+
+This is only immutable origin retention. Legacy End and snapshot operations do
+not start consulting it, and this change does not claim rejection of a foreign
+witness. H1–H6 terminal publication, early Service construction, all writer
+conversion, clock/Ready composition and the complete bridge remain separate.
+There is no activation, new clock or capacity policy. The extra pointer has not
+received resource measurement or acceptance. This source-composed tree still
+requires independent review, formatting, fresh compiler and runtime checks.
+
+Приватный witness степени теперь хранит указатель на исходный
+`proofTransportLifetime`. Единственный подлинный P1 mint задаёт его до выбора
+ветви tracked или untracked при полной таблице и до прикрепления к lifetime.
+Старые сырые fixtures сохраняют нулевой origin. Подлинный тест Accept/Dial
+проверяет обе ветви на двух разных lifetime одного peer.
+
+Этот срез только сохраняет неизменяемый источник. Прежние End и snapshot не
+начинают его проверять; защита от чужого witness этим не заявляется. H1–H6,
+терминальная публикация, ранняя сборка Service, остальные writer, clock/Ready
+и полный bridge остаются отдельными работами. Дополнительный указатель не
+прошёл ресурсную приёмку. Включение и численные политики не меняются; проверка
+составной базы, форматирование, компиляция и исполнение ещё не выполнены.

@@ -288,7 +288,7 @@ func TestCandidateSourceOwnerClaimAndCheckedRefusals(t *testing.T) {
 			err = o.commitLocked(r.entry, o.profile.round, prepared)
 			o.pending.mu.Unlock()
 			o.mu.Unlock()
-			if err == nil || s.state.sourceWindows.Load() != nil || prepared.rows != before || target.state.nextID != 0 || len(o.calendars) != 0 || len(o.groups.records) != 0 || len(o.groups.named) != 0 {
+			if err == nil || s.state.sourceWindows.Load() != nil || prepared.rows != before || target.state.nextID != 0 || calendarFixedCount(t, o) != 0 || fixedGroupRecords(&o.groups) != 0 || fixedGroupNames(&o.groups) != 0 {
 				t.Fatal("checked trial published effects", err)
 			}
 		})
@@ -317,7 +317,7 @@ func TestCandidateSourceActualTakeAtomicityAndStaleGeneration(t *testing.T) {
 			if _, _, err := o.takeForward(r, at); !errors.Is(err, errCandidateAssumption) {
 				t.Fatal("assumption failure missing", err)
 			}
-			if *row != beforeRow || state.calendar.actual != beforeTarget || state.alias != beforeAlias || len(state.calendar.slots) != 1 || state.phase != candidateReserved {
+			if *row != beforeRow || state.calendar.actual != beforeTarget || state.alias != beforeAlias || state.calendar.forwardAliasCountLocked() != 1 || state.phase != candidateReserved {
 				t.Fatal("failed Take partially spent pair/target or alias")
 			}
 			state.source.generation++ // Explicit detached-reference fault, not a reachable reuse.

@@ -220,6 +220,7 @@ type sendItem struct {
 	data   []byte
 	ack    chan struct{}
 	ticket *WriteTicket
+	owned  *ownedFindNodeSend
 }
 
 // ConnID is a monotonic connection identifier. Using a typed integer instead
@@ -447,6 +448,9 @@ func (pc *NetCore) writerLoop() {
 			// finished": producers read it on both sides of their offer, the
 			// loop reads it here.
 			if pc.gateStatus() != SendOK {
+				if item.owned != nil {
+					item.owned.discardOwnedItem()
+				}
 				continue
 			}
 			if pc.writeItem(item) {
@@ -473,6 +477,13 @@ func (pc *NetCore) writerLoop() {
 // failure: the link is fine, this particular frame simply became worthless
 // while it waited, so the writer keeps going.
 func (pc *NetCore) writeItem(item sendItem) bool {
+	if item.owned != nil {
+		if !item.owned.claimOwnedConsumer() {
+			return true
+		}
+		defer item.owned.releaseOwnedResources() // AFTER actual write/Finish/capture return
+		return pc.writeOwnedFindNode(item.owned)
+	}
 	now := time.Now()
 	if item.ticket.expiredAt(now) {
 		return true
@@ -519,7 +530,10 @@ func (pc *NetCore) writeItem(item sendItem) bool {
 func (pc *NetCore) drainQueued() {
 	for {
 		select {
-		case <-pc.sendCh:
+		case item := <-pc.sendCh:
+			if item.owned != nil {
+				item.owned.discardOwnedItem()
+			}
 		default:
 			return
 		}
@@ -649,6 +663,15 @@ func (pc *NetCore) teardownStatus() SendStatus {
 // failure: the frame never entered the queue, and what back-pressure means is
 // the caller's policy.
 func (pc *NetCore) queueFrame(item sendItem) SendStatus {
+	offered := false
+	if item.owned != nil {
+		item.owned.holdOwnedResources(pc)
+		defer func() {
+			if !offered {
+				item.owned.retireUnclaimedOwnedItem()
+			}
+		}()
+	}
 	if st := pc.gateStatus(); st != SendOK {
 		return st
 	}
@@ -656,10 +679,15 @@ func (pc *NetCore) queueFrame(item sendItem) SendStatus {
 
 	select {
 	case pc.sendCh <- item:
+		offered = true // consumer or terminal producer must win the private item claim
 	default:
 		return SendBufferFull
 	}
-	return pc.settleEnqueuedFrame(item)
+	status := pc.settleEnqueuedFrame(item)
+	if status != SendOK && item.owned != nil {
+		item.owned.retireUnclaimedOwnedItem()
+	}
+	return status
 }
 
 // queueFrameBlocking is the enqueue half of the paths that wait for a slot

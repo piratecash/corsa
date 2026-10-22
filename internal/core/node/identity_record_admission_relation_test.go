@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -259,6 +260,17 @@ func TestRecordAdmissionCapacityProcessingAndSlotABA(t *testing.T) {
 	}
 }
 func TestRecordAdmissionPrestageOriginalOwnerKAndCancellation(t *testing.T) {
+	// The diagnostic must identify the actual original removal gate, not a
+	// different read lock or a stale source location after a prior refactor.
+	raw, err := os.ReadFile("identity_record_admission_relation.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gate := "\tstore.pinMutationGate.RLock()"
+	location := strings.Index(string(raw), gate)
+	if strings.Count(string(raw), gate) != 1 || location < 0 || strings.Count(string(raw[:location]), "\n")+1 != 137 {
+		t.Fatal("original removal-gate diagnostic location needs exact rebind")
+	}
 	for _, kind := range []string{"cancel-waitgate", "new-owner", "newer-min1", "K", "quota-full", "already-R"} {
 		t.Run(kind, func(t *testing.T) {
 			r, _ := admissionResolverFixture(t)
@@ -879,8 +891,8 @@ func (c *relationGateStackCapture) removalWait(gid uint64, deadline time.Time) b
 			if strings.Contains(lines[i], "(*identityResolver).stageRelationAdmission(") {
 				location := strings.Fields(lines[i+1])
 				// Exact unchanged R3 production removal gate; evidence/trust
-				// read locks at133/137 are intentionally not accepted.
-				return len(location) > 0 && strings.HasSuffix(location[0], "/identity_record_admission_relation.go:131")
+				// read locks at139/143 are intentionally not accepted.
+				return len(location) > 0 && strings.HasSuffix(location[0], "/identity_record_admission_relation.go:137")
 			}
 		}
 		return false

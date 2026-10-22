@@ -23,12 +23,12 @@ func newDMCryptoWithOwnDMProvenance(rpc *LocalRPCClient, chatlog *ChatlogGateway
 	return d, nil
 }
 
-func (d *DMCrypto) submitOwnDM(ctx context.Context, frame protocol.Frame, createdAt time.Time) (protocol.Frame, error) {
+func (d *DMCrypto) submitOwnDM(ctx, residence context.Context, frame protocol.Frame, createdAt time.Time) (protocol.Frame, error) {
 	if !d.ownDMPort.ValidFor(d.rpc.LocalNode(), d.id) {
 		return d.rpc.LocalRequestFrameCtx(ctx, frame)
 	}
 	input := protocol.Envelope{ID: protocol.MessageID(frame.ID), Sender: frame.Address, Recipient: frame.Recipient, Topic: frame.Topic, Flag: protocol.MessageFlag(frame.Flag), CreatedAt: createdAt, TTLSeconds: frame.TTLSeconds, Payload: []byte(frame.Body)}
-	reply, receipt, err := d.ownDMPort.Submit(ctx, input)
+	reply, receipt, err := d.ownDMPort.SubmitWithResidence(ctx, residence, input)
 	if err != nil {
 		return protocol.Frame{}, err
 	}

@@ -180,7 +180,7 @@ func TestProofTransportPublicationElapsedAfterCommonWait(t *testing.T) {
 	// Exact original publisher/common-mutex callsite in this frozen source.
 	// Mutex waits are NOT durable synctest blocking; use an actual GID/stack
 	// barrier and the existing immutable real-clock origin, without fake time.
-	n1WaitMutexFrame(t, publisherGID, "conn_registry.go:692")
+	n1WaitMutexFrame(t, publisherGID, "conn_registry.go:720")
 	releaseBoundary := findnode.Instant(time.Since(f.accepted.findNode.origin))
 	l.mu.Unlock()
 	held = false
@@ -232,7 +232,7 @@ func TestProofTransportOutboundArrivalCannotBorrowReplacement(t *testing.T) {
 func f1ShapeErrors(path string, raw []byte) []string {
 	expected := map[string]map[string]string{
 		"proof_transport_lifetime.go": {
-			"proofTransportLifetime":     `type proofTransportLifetime struct{mu sync.Mutex;ended bool;token *proofTransportServiceToken;role sessionv2.Role;outbound bool;id domain.ConnID;entry *connEntry;peer *peerSession;evidence *proofTransportEvidence;nin *matureInboundWitness;findNode *findNodeConnectionBinding;degreeWitness *degreeWitness}`,
+			"proofTransportLifetime":     `type proofTransportLifetime struct{mu sync.Mutex;ended bool;token *proofTransportServiceToken;role sessionv2.Role;outbound bool;id domain.ConnID;entry *connEntry;peer *peerSession;evidence *proofTransportEvidence;nin *matureInboundWitness;findNode *findNodeConnectionBinding;degreeWitness *degreeWitness;bridgeTerminal *findNodeBridgeTerminal}`,
 			"proofTransportOwner":        `type proofTransportOwner struct{life *proofTransportLifetime;id domain.ConnID;token *proofTransportServiceToken}`,
 			"proofTransportServiceToken": `type proofTransportServiceToken struct{_ byte}`,
 		},
@@ -242,9 +242,10 @@ func f1ShapeErrors(path string, raw []byte) []string {
 			"proofTransportEvidence": `type proofTransportEvidence struct{session sessionv2.ProvenSession;protected net.Conn;raw,wire *peekedConn;group domain.SourceGroup;identity domain.PeerIdentity}`,
 		},
 		"find_node_connection.go": {
-			"findNodeAdapter":           `type findNodeAdapter struct{origin time.Time}`,
+			"findNodeAdapter":           `type findNodeAdapter struct{origin time.Time;owned *findNodeOwnedAdapter}`,
+			"findNodeOwnedAdapter":      `type findNodeOwnedAdapter struct{terminal *findNodeBridgeTerminal;done <-chan struct{};retirement findnode.DormantIntake;localRetirement findnode.OwnedLocalTarget}`,
 			"findNodeCMReceipt":         `type findNodeCMReceipt struct{peer *peerSession;common *proofTransportLifetime;address domain.PeerAddress;generation uint64}`,
-			"findNodeConnectionBinding": `type findNodeConnectionBinding struct{seed findnode.SessionSeed;session findnode.Session;published bool;group domain.SourceGroup;identity domain.PeerIdentity}`,
+			"findNodeConnectionBinding": `type findNodeConnectionBinding struct{seed findnode.SessionSeed;session findnode.Session;published bool;group domain.SourceGroup;identity domain.PeerIdentity;retirement findnode.DormantIntake;localRetirement findnode.OwnedLocalTarget}`,
 		},
 	}
 	file, err := parser.ParseFile(token.NewFileSet(), path, raw, 0)
@@ -310,12 +311,45 @@ func TestProofTransportClosedShapesAndReferenceEscapes(t *testing.T) {
 			t.Fatal("allowed-file authority escape accepted", extra)
 		}
 	}
-	degreeField := []byte("degreeWitness *degreeWitness")
 	raw := sources["proof_transport_lifetime.go"]
-	if bytes.Count(raw, degreeField) != 1 {
+	fieldSet := token.NewFileSet()
+	fieldFile, err := parser.ParseFile(fieldSet, "proof_transport_lifetime.go", raw, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fieldMatches, start, end := 0, 0, 0
+	ast.Inspect(fieldFile, func(n ast.Node) bool {
+		typ, ok := n.(*ast.TypeSpec)
+		if !ok || typ.Name.Name != "proofTransportLifetime" {
+			return true
+		}
+		shape, ok := typ.Type.(*ast.StructType)
+		if !ok {
+			t.Fatal("original lifetime must remain a struct")
+		}
+		for _, field := range shape.Fields.List {
+			if len(field.Names) != 1 || field.Names[0].Name != "degreeWitness" {
+				continue
+			}
+			pointer, ok := field.Type.(*ast.StarExpr)
+			if !ok {
+				t.Fatal("degree witness field lost pointer type")
+			}
+			identifier, ok := pointer.X.(*ast.Ident)
+			if !ok || identifier.Name != "degreeWitness" {
+				t.Fatal("degree witness field lost exact named pointee")
+			}
+			fieldMatches++
+			start, end = fieldSet.Position(identifier.Pos()).Offset, fieldSet.Position(identifier.End()).Offset
+		}
+		return false
+	})
+	if fieldMatches != 1 || start < 0 || end > len(raw) || string(raw[start:end]) != "degreeWitness" {
 		t.Fatal("degree witness pointer field mutation did not match exactly once")
 	}
-	wrongDegreeWitness := bytes.Replace(raw, degreeField, []byte("degreeWitness *proofTransportLifetime"), 1)
+	wrongDegreeWitness := append([]byte(nil), raw[:start]...)
+	wrongDegreeWitness = append(wrongDegreeWitness, []byte("proofTransportLifetime")...)
+	wrongDegreeWitness = append(wrongDegreeWitness, raw[end:]...)
 	if failures := f1ShapeErrors("proof_transport_lifetime.go", wrongDegreeWitness); len(failures) != 1 || failures[0] != "F1 original authority shape changed:proofTransportLifetime" {
 		t.Fatal("wrong degree witness pointer type accepted", failures)
 	}

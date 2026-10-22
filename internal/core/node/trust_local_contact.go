@@ -197,11 +197,18 @@ func (s *trustStore) stageBoundLocalContact(ctx context.Context, applied localCo
 	if s.factRevision == math.MaxUint64 {
 		return localContactStamp{}, domain.ErrIdentityPinRevisionExhausted
 	}
+	wallAt := s.clock()
+	state := &localContactState{fact: localContactFact{Version: 1, ID: factID, Network: domain.NetworkID(networkName), Identity: id, At: wallAt}}
+	address := id.String()
+	publication := s.beginTrustPublication()
 	s.factRevision++
-	state := &localContactState{fact: localContactFact{Version: 1, ID: factID, Network: domain.NetworkID(networkName), Identity: id, At: s.clock()}, revision: s.factRevision}
+	state.revision = s.factRevision
 	row.LocalContact = state
-	s.contacts[id.String()] = row
+	s.contacts[address] = row
 	s.authorityObserved = true
+	if publication != nil {
+		publication.Complete()
+	}
 	return state.stamp(s), nil
 }
 func (s *trustStore) confirmLocalContacts(ctx context.Context, targets ...localContactStamp) error {
@@ -251,7 +258,11 @@ func (s *trustStore) confirmLocalContacts(ctx context.Context, targets ...localC
 		state := *current.LocalContact
 		state.confirmed = state.revision
 		current.LocalContact = &state
+		publication := s.beginTrustPublication()
 		s.contacts[address] = current
+		if publication != nil {
+			publication.Complete()
+		}
 	}
 
 	s.savedGen = snapshot.gen
@@ -283,7 +294,12 @@ func (s *trustStore) captureLocalContactProof(proof sessionv2.ProvenIdentity, bi
 	state := *row.LocalContact
 	state.proof = &localContactProof{proof: proof, binding: binding, fact: state.stamp(s)}
 	row.LocalContact = &state
-	s.contacts[id.String()] = row
+	address := id.String()
+	publication := s.beginTrustPublication()
+	s.contacts[address] = row
+	if publication != nil {
+		publication.Complete()
+	}
 	return true
 }
 func validateLocalContactRow(row trustedContact) error {

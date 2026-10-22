@@ -10,6 +10,7 @@ import (
 	"github.com/piratecash/corsa/internal/core/config"
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/ebus"
+	"github.com/piratecash/corsa/internal/core/findnodebridge"
 	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/sessionv2"
 )
@@ -54,6 +55,7 @@ type degreeActiveRow struct {
 	generation uint64
 }
 type degreeWitness struct {
+	origin            *proofTransportLifetime
 	owner             *degreeOwner
 	key               degreeKey
 	slot              int
@@ -61,16 +63,17 @@ type degreeWitness struct {
 	untracked, closed bool
 }
 type degreeOwner struct {
-	mu       sync.Mutex
-	token    *proofTransportServiceToken
-	clock    degreeClock
-	profile  degreeProfile
-	active   []degreeActiveRow
-	history  [degreeHistoryLimit]degreeHistoryRow
-	historyN int
-	unknown  uint64
-	last     time.Duration
-	poisoned bool
+	mu              sync.Mutex
+	token           *proofTransportServiceToken
+	clock           degreeClock
+	profile         degreeProfile
+	active          []degreeActiveRow
+	history         [degreeHistoryLimit]degreeHistoryRow
+	historyN        int
+	unknown         uint64
+	last            time.Duration
+	poisoned        bool
+	bridgePublisher findnodebridge.Publisher // immutable; zero selects legacy statistics
 }
 type degreeCut struct {
 	at                         time.Duration
@@ -114,6 +117,9 @@ func newDegreeService(cfg config.Node, id *identity.Identity, bus *ebus.Bus, pro
 // Requires owner.mu. Sample after waits. Negative/regressing time permanently
 // poisons new observations; ordinary connection/pin/queued work is unaffected.
 func (o *degreeOwner) degreeNowLocked() (time.Duration, bool) {
+	if o.bridgePublisher != (findnodebridge.Publisher{}) {
+		return 0, false
+	}
 	now := o.clock.elapsed()
 	if now < 0 || now < o.last {
 		o.poisoned = true
@@ -127,7 +133,13 @@ func (o *degreeOwner) degreePoison() {
 		return
 	}
 	o.mu.Lock()
-	o.poisoned = true
+	if o.bridgePublisher != (findnodebridge.Publisher{}) {
+		publication := o.bridgePublisher.BeginPublication()
+		o.poisoned = true
+		publication.Complete()
+	} else {
+		o.poisoned = true
+	}
 	o.mu.Unlock()
 }
 
@@ -241,16 +253,35 @@ func (s *Service) publishDegreeTransport(l *proofTransportLifetime) {
 	if !key.outgoing {
 		key.group = e.group
 	}
+	w := &degreeWitness{origin: l, owner: o, key: key, slot: -1}
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	if o.poisoned {
 		return
 	}
-	at, ok := o.degreeNowLocked()
-	if !ok {
-		return
+	var at time.Duration
+	if o.bridgePublisher != (findnodebridge.Publisher{}) {
+		publication := o.bridgePublisher.BeginClockedPublication()
+		defer publication.Complete()
+		t := l.bridgeTerminal
+		if t == nil || t != s.bridgeTerminal || t.owner != o || t.token != l.token || t.publisher != o.bridgePublisher {
+			o.poisoned = true
+			return
+		}
+		point, err := publication.Sample()
+		if err != nil || point.Elapsed() < o.last {
+			o.poisoned = true
+			return
+		}
+		at = point.Elapsed()
+		o.last = at
+	} else {
+		var ok bool
+		at, ok = o.degreeNowLocked()
+		if !ok {
+			return
+		}
 	}
-	w := &degreeWitness{owner: o, key: key, slot: -1}
 	for i := range o.active {
 		row := &o.active[i]
 		if row.life != nil {
@@ -285,6 +316,9 @@ func (l *proofTransportLifetime) degreeEndLocked() {
 		return
 	}
 	o := w.owner
+	if o == nil || o.bridgePublisher != (findnodebridge.Publisher{}) {
+		return // an owned owner never enters the legacy retirement clock
+	}
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	if w.closed {
@@ -319,7 +353,7 @@ func (l *proofTransportLifetime) degreeEndLocked() {
 // no common lock while owner.mu is held. Unknown active coverage returns no
 // partial answer, not a first-M truncation or a fictitious zero-degree fallback.
 func (o *degreeOwner) degreeSnapshot() (degreeCut, error) {
-	if o == nil {
+	if o == nil || o.bridgePublisher != (findnodebridge.Publisher{}) {
 		return degreeCut{}, errDegreeUnavailable
 	}
 	o.mu.Lock()

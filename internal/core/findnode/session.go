@@ -36,7 +36,7 @@ var (
 )
 
 // Instant is elapsed monotonic time in one state owner's clock domain. A caller
-// uses time.Since(processStart), never a wall timestamp or a persisted value.
+// uses its domain elapsed sample, never a wall timestamp or a persisted value.
 type Instant time.Duration
 
 func (at Instant) plus(delta Instant) (Instant, error) {
@@ -68,6 +68,7 @@ type SessionSeed struct{ state *sessionSeedState }
 type sessionSeedState struct {
 	identity domain.PeerIdentity
 	proof    sessionv2.ProvenIdentity
+	prepared *sessionState
 	consumed atomic.Bool
 }
 
@@ -80,10 +81,10 @@ func PrepareSession(proven sessionv2.ProvenSession, local []domain.Capability) (
 	if !ok || !slices.Contains(local, domain.CapOverlayFindNodeV1) || !slices.Contains(peer.Intro.Capabilities, string(domain.CapOverlayFindNodeV1)) {
 		return SessionSeed{}, ErrUnauthenticated
 	}
-	return SessionSeed{state: &sessionSeedState{identity: peer.Identity, proof: proof}}, nil
+	return SessionSeed{state: &sessionSeedState{identity: peer.Identity, proof: proof, prepared: &sessionState{}}}, nil
 }
 func (seed SessionSeed) Bind(connID domain.ConnID, group domain.SourceGroup, opened Instant) (Session, error) {
-	if seed.state == nil {
+	if seed.state == nil || seed.state.prepared == nil {
 		return Session{}, ErrUnauthenticated
 	}
 	if connID == 0 || group == "" || opened < 0 {
@@ -92,7 +93,11 @@ func (seed SessionSeed) Bind(connID domain.ConnID, group domain.SourceGroup, ope
 	if !seed.state.consumed.CompareAndSwap(false, true) {
 		return Session{}, ErrInvalid
 	}
-	return Session{state: &sessionState{connID: connID, identity: seed.state.identity, identityProof: seed.state.proof, group: group, opened: opened}}, nil
+	// Only the shared latch winner writes the unpublished preallocated state.
+	s := seed.state.prepared
+	s.connID, s.identity, s.identityProof = connID, seed.state.identity, seed.state.proof
+	s.group, s.opened = group, opened
+	return Session{state: s}, nil
 }
 
 // NewSession preserves proof/capability/argument validation of the original API.

@@ -24,6 +24,9 @@ type coordinatedSigning struct {
 	phase  coordinatedSigningPhase
 	alias  SigningReservation
 	signBy Instant
+	// Owned accepted L1 promises, bounded by the existing three recipients.
+	// Legacy inactive compositions leave this metadata empty.
+	protected [MaxChallengeSessions]Session
 }
 
 // targetChanges is one bounded cleanup phase. Callers release cache.mu before

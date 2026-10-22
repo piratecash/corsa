@@ -207,6 +207,10 @@ func NewDMCrypto(rpc *LocalRPCClient, chatlog *ChatlogGateway, id *identity.Iden
 // message in the active conversation without a round-trip through the
 // decrypt path.
 func (d *DMCrypto) SendDirectMessage(ctx context.Context, to domain.PeerIdentity, msg domain.OutgoingDM) (*DirectMessage, error) {
+	return d.sendDirectMessageWithResidence(ctx, ctx, to, msg)
+}
+
+func (d *DMCrypto) sendDirectMessageWithResidence(ctx, residence context.Context, to domain.PeerIdentity, msg domain.OutgoingDM) (*DirectMessage, error) {
 	to = domain.PeerIdentityFromWire(strings.TrimSpace(to.String()))
 	msg.Body = strings.TrimSpace(msg.Body)
 	msg.ReplyTo = domain.MessageID(strings.TrimSpace(string(msg.ReplyTo)))
@@ -324,7 +328,7 @@ func (d *DMCrypto) SendDirectMessage(ctx context.Context, to domain.PeerIdentity
 		TTLSeconds: 0,
 		Body:       ciphertext,
 	}
-	reply, err := d.submitOwnDM(ctx, frame, now)
+	reply, err := d.submitOwnDM(ctx, residence, frame, now)
 	if err != nil {
 		return nil, err
 	}

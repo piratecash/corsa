@@ -211,7 +211,7 @@ func f1PairOnOwned(t *testing.T, withCaps bool, writeGate *n1HeldWrite, s, d *Se
 	fixtureOwner.rawServer, fixtureOwner.rawClient = server, client
 	return f1PairOnRaw(t, withCaps, writeGate, s, d, fixtureOwner, server, client)
 }
-func f1PairOnRaw(t *testing.T, withCaps bool, writeGate *n1HeldWrite, s, d *Service, fixtureOwner *f1FixtureOwner, server, client net.Conn) f1ProofFixture {
+func f1PairOnRaw(t *testing.T, withCaps bool, writeGate *n1HeldWrite, s, d *Service, fixtureOwner *f1FixtureOwner, server, client net.Conn, extraCaps ...domain.Capability) f1ProofFixture {
 	t.Helper()
 	if server == nil || client == nil || fixtureOwner.rawServer != server || fixtureOwner.rawClient != client {
 		t.Fatal("fixture must finish on its exact original raw pair")
@@ -233,6 +233,12 @@ func f1PairOnRaw(t *testing.T, withCaps bool, writeGate *n1HeldWrite, s, d *Serv
 	rawS := &peekedConn{Conn: sm, reader: sm}
 	rawD := &peekedConn{Conn: cm, reader: cm}
 	welcome, hello := s.welcomeFrame("", ""), d.nodeHelloFrame()
+	// Test-only opt-in capabilities are part of the ORIGINAL authenticated
+	// handshake, never a post-proof mutation of a negotiated session.
+	for _, capability := range extraCaps {
+		welcome.Capabilities = append(welcome.Capabilities, string(capability))
+		hello.Capabilities = append(hello.Capabilities, string(capability))
+	}
 	if withCaps {
 		welcome.Capabilities = append(welcome.Capabilities, string(domain.CapOverlayFindNodeV1))
 		hello.Capabilities = append(hello.Capabilities, string(domain.CapOverlayFindNodeV1))
@@ -274,7 +280,7 @@ func f1PairOnRaw(t *testing.T, withCaps bool, writeGate *n1HeldWrite, s, d *Serv
 	if err != nil {
 		t.Fatal(err)
 	}
-	l := &proofTransportLifetime{token: s.proofToken, role: sessionv2.RoleListener}
+	l := &proofTransportLifetime{token: s.proofToken, bridgeTerminal: s.bridgeTerminal, role: sessionv2.RoleListener}
 	fixtureOwner.inboundLife = l
 	wire := &peekedConn{Conn: protected, reader: protected}
 	l.evidence = &proofTransportEvidence{session: ap.proof, protected: protected, raw: rawS, wire: wire, group: domain.SourceGroupLoopback, identity: peer.Identity}
@@ -285,6 +291,7 @@ func f1PairOnRaw(t *testing.T, withCaps bool, writeGate *n1HeldWrite, s, d *Serv
 	if !wire.bindProofTransport(l) || !rawS.bindProofTransport(l) {
 		t.Fatal("original tuple bind refused")
 	}
+	s.publishDegreeTransport(l) // genuine sole mint; legacy degree-nil fixtures remain inert
 	if err := s.registerInboundConn(wire, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -431,6 +438,15 @@ func TestFindNodeActualDefaultCapsWithholdSeed(t *testing.T) {
 
 func f1StartActualCM(t *testing.T, f f1ProofFixture, generation uint64) *f1FixtureOwner {
 	t.Helper()
+	start := f1PrepareActualCM(t, f, generation)
+	start()
+	return f.fixtureOwner
+}
+
+// All fixture ownership and cleanup registration precede asynchronous dispatch.
+// The returned thunk starts exactly the original CM event, never a fake receipt.
+func f1PrepareActualCM(t *testing.T, f f1ProofFixture, generation uint64) func() {
+	t.Helper()
 	p := f.outbound
 	owner := f.fixtureOwner
 	serverDone, readerDone := make(chan struct{}), make(chan struct{})
@@ -460,8 +476,9 @@ func f1StartActualCM(t *testing.T, f f1ProofFixture, generation uint64) *f1Fixtu
 	cm.generation = generation
 	cm.slots = []*slot{{Address: p.address, State: domain.SlotStateDialing, Generation: generation}}
 	cm.mu.Unlock()
-	cm.handleDialSucceeded(f.dialer.runCtx, DialSucceeded{Address: p.address, ConnectedAddress: p.address, SlotGeneration: generation, Session: p})
-	return owner
+	return func() {
+		cm.handleDialSucceeded(f.dialer.runCtx, DialSucceeded{Address: p.address, ConnectedAddress: p.address, SlotGeneration: generation, Session: p})
+	}
 }
 
 func f1Members(t *testing.T, s *Service) findNodeMemberSnapshot {

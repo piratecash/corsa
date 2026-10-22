@@ -98,11 +98,54 @@ func (c *SigningCalendar) Reserve(source Session, now, latest Instant) (SigningR
 func (c *SigningCalendar) Consume(r SigningReservation, now Instant) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	next, err := c.prepareConsumptionLocked(r, now)
+	if err != nil {
+		return err
+	}
+	r.slot.source.state.mu.Lock()
+	defer r.slot.source.state.mu.Unlock()
+	return c.consumeActualSourceLocked(r, now, next)
+}
+
+// prepareConsumptionLocked preserves the inactive wrapper's pre-source-lock
+// checks and expiry order. The owned caller already holds the source mutex.
+func (c *SigningCalendar) prepareConsumptionLocked(r SigningReservation, now Instant) (Instant, error) {
 	if now < 0 || now < c.last {
-		return ErrClock
+		return 0, ErrClock
 	}
 	c.last = now
 	c.expireSlots(now)
+	if r.calendar != c || r.slot == nil {
+		return 0, ErrStaleWork
+	}
+	if _, ok := c.slots[r.slot]; !ok {
+		return 0, ErrStaleWork
+	}
+	if now > r.slot.latest {
+		delete(c.slots, r.slot)
+		return 0, ErrBudget
+	}
+	if !r.slot.source.valid() {
+		delete(c.slots, r.slot)
+		return 0, ErrUnauthenticated
+	}
+	if now < r.slot.at || now < c.nextActual {
+		return 0, ErrNotReady
+	}
+	next, err := now.plus(c.spacing)
+	if err != nil {
+		return 0, err
+	}
+	return next, nil
+}
+
+// consumeSourceLocked requires calendar.mu and exact original source.mu.
+func (c *SigningCalendar) consumeSourceLocked(r SigningReservation, now Instant) error {
+	// Accepted original work consumes ONLY its exact alias. Global expireSlots
+	// belongs to ordinary maintenance before R, not a new admission condition.
+	if now < 0 || now < c.last {
+		return ErrClock
+	}
 	if r.calendar != c || r.slot == nil {
 		return ErrStaleWork
 	}
@@ -110,11 +153,9 @@ func (c *SigningCalendar) Consume(r SigningReservation, now Instant) error {
 		return ErrStaleWork
 	}
 	if now > r.slot.latest {
-		delete(c.slots, r.slot)
 		return ErrBudget
 	}
 	if !r.slot.source.valid() {
-		delete(c.slots, r.slot)
 		return ErrUnauthenticated
 	}
 	if now < r.slot.at || now < c.nextActual {
@@ -124,9 +165,13 @@ func (c *SigningCalendar) Consume(r SigningReservation, now Instant) error {
 	if err != nil {
 		return err
 	}
+	c.last = now
+	return c.consumeActualSourceLocked(r, now, next)
+}
+
+// No allocation, callback or lock acquisition occurs in the actual debt suffix.
+func (c *SigningCalendar) consumeActualSourceLocked(r SigningReservation, now, next Instant) error {
 	state := r.slot.source.state
-	state.mu.Lock()
-	defer state.mu.Unlock()
 	state.signingActual.refill(now)
 	if state.signingActual.tokens < forwardToken {
 		return ErrNotReady
@@ -136,6 +181,7 @@ func (c *SigningCalendar) Consume(r SigningReservation, now Instant) error {
 	delete(c.slots, r.slot)
 	return nil
 }
+
 func (c *SigningCalendar) Cancel(r SigningReservation) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()

@@ -266,3 +266,29 @@ func TestExplicitBlankIdentityIntentsPathRefusesBeforeIdentityIO(t *testing.T) {
 		}
 	}
 }
+
+func TestNodeConfigDatagramV1MappingKeepsDefaultOff(t *testing.T) {
+	explicitOff := DefaultConfig()
+	explicitOff.Node.EnableDatagramV1 = false
+	explicitOn := DefaultConfig()
+	explicitOn.Node.EnableDatagramV1 = true
+	for _, tc := range []struct {
+		name string
+		cfg  Config
+		want bool
+	}{
+		{"zero", Config{}, false},
+		{"default", DefaultConfig(), false},
+		{"explicit_off", explicitOff, false},
+		{"explicit_on", explicitOn, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if normalized := normalizeConfig(tc.cfg); normalized.Node.EnableDatagramV1 != tc.want {
+				t.Fatal("SDK datagram normalization changed explicit/default choice", normalized.Node.EnableDatagramV1, tc.want)
+			}
+			if got := tc.cfg.internal().Node.EnableDatagramV1; got != tc.want {
+				t.Fatal("SDK datagram mapping changed explicit/default choice", got, tc.want)
+			}
+		})
+	}
+}

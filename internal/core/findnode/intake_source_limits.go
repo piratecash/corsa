@@ -41,8 +41,11 @@ type candidateSourcePlan struct {
 func (o *intakeCoordinator) prepareSources() map[Session]*candidateSourceWindows {
 	o.mu.Lock()
 	o.pending.mu.Lock()
-	sources := make([]Session, 0, len(o.pending.bySource))
-	for _, entry := range o.pending.bySource {
+	sources := make([]Session, 0, o.pending.countLocked())
+	for _, entry := range o.pending.entries {
+		if entry == nil {
+			continue
+		}
 		if entry.intake.phase == candidateProvisional && entry.source.state.sourceWindows.Load() == nil {
 			sources = append(sources, entry.source)
 		}
@@ -104,7 +107,10 @@ func (o *intakeCoordinator) planSourceLocked(entry *pendingEntry, now Instant, p
 		return candidateSourcePlan{}, err
 	}
 	horizon, aliases := now, 0
-	for _, pending := range o.pending.bySource {
+	for _, pending := range o.pending.entries {
+		if pending == nil {
+			continue
+		}
 		if pending.source == entry.source && pending.request.Target == entry.request.Target && pending.intake.alias != nil {
 			existing, err := o.sourceRowLocked(pending)
 			if err != nil || existing != &windows.rows[index] {

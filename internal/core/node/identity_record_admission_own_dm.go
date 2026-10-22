@@ -68,10 +68,18 @@ func NewInactiveOwnDMAdmissionCandidate(cfg config.Node, id *identity.Identity, 
 		return nil, OwnDMProvenancePort{}, errOwnDMResidence
 	}
 	s := newServiceWithRecordAdmissionClasses(cfg, id, bus, nil, productionDatagramConstructor{}, recordAdmissionConstruction{classes: recordAdmissionChargedR})
-	owner := &ownDMProvenanceOwner{r2Service: s, r2Identity: id}
+	return s, newOwnDMAdmissionPort(s, profile), nil
+}
+
+// Sole charged-R own-DM owner mint, before either construction root escapes.
+func newOwnDMAdmissionPort(s *Service, profile OwnDMResidenceProfile) OwnDMProvenancePort {
+	if s == nil || !profile.valid() || s.identityResolver == nil || !s.identityResolver.recordAdmission.admitsR() || s.r2OwnDMOwner != nil {
+		panic("invalid own-DM construction binding")
+	}
+	owner := &ownDMProvenanceOwner{r2Service: s, r2Identity: s.identity}
 	owner.r2Admission = &ownDMRecordAdmission{service: s, resolver: s.identityResolver, admission: s.identityResolver.recordAdmission, profile: profile}
 	s.r2OwnDMOwner = owner
-	return s, OwnDMProvenancePort{r2Capability: owner}, nil
+	return OwnDMProvenancePort{r2Capability: owner}
 }
 
 // Called at NODE Submit entry, before its prepare/verification/store. Earlier

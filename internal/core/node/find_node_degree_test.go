@@ -42,6 +42,102 @@ type degreeActualResult struct {
 	err  error
 }
 
+// A completion is published once, after the actual inbound call returns. The
+// joined channel is a separate observation: a buffered result alone is no join.
+type degreeActualCompletion struct {
+	result     degreeActualResult
+	returnedAt time.Time
+}
+
+type degreeActualWorker struct {
+	ctx        context.Context
+	cancel     context.CancelFunc
+	deadline   time.Time
+	server     net.Conn
+	client     net.Conn
+	outbound   net.Conn // assigned/read only by the test goroutine
+	beforeStop func()   // release the fixture writer mutex before cancellation
+	stopOnce   sync.Once
+	joined     chan struct{}
+	completion atomic.Pointer[degreeActualCompletion]
+	owned      atomic.Pointer[peekedConn]
+	s, d       *Service
+}
+
+func degreeStartActualWorker(t *testing.T, s, d *Service, server, client net.Conn, metered *netcore.MeteredConn, beforeStop func(), entered chan<- uint64) *degreeActualWorker {
+	t.Helper()
+	// One original aggregate deadline; no phase restarts or completion grace.
+	deadline := time.Now().Add(5 * time.Second)
+	ctx, cancel := context.WithDeadline(t.Context(), deadline)
+	w := &degreeActualWorker{ctx: ctx, cancel: cancel, deadline: deadline, server: server, client: client, beforeStop: beforeStop, joined: make(chan struct{}), s: s, d: d}
+	t.Cleanup(func() { w.stop(t) })
+	go func() {
+		defer close(w.joined)
+		if entered != nil {
+			entered <- relationGateCurrentGID()
+		}
+		wire, _, _, err := s.openInboundTransport(metered, metered)
+		if owned, ok := wire.(*peekedConn); ok {
+			w.owned.Store(owned)
+		}
+		w.completion.Store(&degreeActualCompletion{result: degreeActualResult{wire, err}, returnedAt: time.Now()})
+	}()
+	return w
+}
+
+func (w *degreeActualWorker) stop(t *testing.T) {
+	t.Helper()
+	w.stopOnce.Do(func() {
+		// Fatal/Goexit must not leave persistence behind the fixture-held mutex.
+		if w.beforeStop != nil {
+			w.beforeStop()
+		}
+		w.cancel()
+		w.s.runCancel()
+		w.d.runCancel()
+		_ = w.server.Close()
+		_ = w.client.Close()
+		if w.outbound != nil {
+			_ = w.outbound.Close()
+		}
+		if wire := w.owned.Load(); wire != nil {
+			_ = wire.Close()
+		}
+		select {
+		case <-w.joined:
+		case <-time.After(2 * time.Second):
+			t.Error("degree actual worker did not join within cleanup watchdog")
+			// Keep the failure and fence TempDir/service cleanup. Only the
+			// unchanged package timeout may terminate an unjoined worker.
+			<-w.joined
+		}
+		// The worker may have published its original transport during abort.
+		if wire := w.owned.Load(); wire != nil {
+			_ = wire.Close()
+		}
+	})
+}
+
+func (w *degreeActualWorker) wait(t *testing.T, dialErr error) degreeActualResult {
+	t.Helper()
+	select {
+	case <-w.joined:
+	case <-w.ctx.Done():
+	}
+	// Check after observing join, never turn a late ready result into success.
+	// Completion time is diagnostic only; it cannot substitute for joined.
+	if w.ctx.Err() != nil || !time.Now().Before(w.deadline) {
+		w.stop(t)
+		t.Fatalf("degree actual deadline: dial=%v inbound=%+v context=%v", dialErr, w.completion.Load(), w.ctx.Err())
+	}
+	completed := w.completion.Load()
+	if completed == nil {
+		w.stop(t)
+		t.Fatal("degree actual worker joined without completion", dialErr)
+	}
+	return completed.result
+}
+
 // Actual Node Accept/Dial paths, no registry/auth/CM or negotiated F1. The
 // original accepted common has id0. A real TCP pair and both workers are owned
 // before any fallible handshake. No synthetic ProvenSession or late capability.
@@ -52,46 +148,16 @@ func degreeActualAttempt(t *testing.T, s, d *Service) (degreeActualResult, *dial
 	if err != nil {
 		t.Fatal(err)
 	}
-	result := make(chan degreeActualResult, 1)
-	joined := make(chan struct{})
-	var owned atomic.Pointer[peekedConn]
-	t.Cleanup(func() {
-		if w := owned.Load(); w != nil {
-			_ = w.Close()
-		}
-		_ = server.Close()
-		_ = client.Close()
-		select {
-		case <-joined:
-		case <-time.After(2 * time.Second):
-			t.Error("degree actual accept did not join")
-		}
-		if w := owned.Load(); w != nil {
-			_ = w.Close()
-		}
-	})
-	go func() {
-		defer close(joined)
-		wire, _, _, e := s.openInboundTransport(metered, metered)
-		if w, ok := wire.(*peekedConn); ok {
-			owned.Store(w)
-		}
-		result <- degreeActualResult{wire, e}
-	}()
-	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
-	defer cancel()
+	worker := degreeStartActualWorker(t, s, d, server, client, metered, nil, nil)
 	address := domain.PeerAddress(server.LocalAddr().String())
-	tr, de := d.dialPeerTransport(ctx, address, domain.DialToAddress(), func(context.Context) (net.Conn, error) { return client, nil })
+	tr, dialErr := d.dialPeerTransport(worker.ctx, address, domain.DialToAddress(), func(context.Context) (net.Conn, error) { return client, nil })
 	if tr != nil {
-		t.Cleanup(func() { _ = tr.wire.Close() })
+		worker.outbound = tr.wire
 	}
-	var got degreeActualResult
-	select {
-	case got = <-result:
-	case <-ctx.Done():
-		t.Fatal("degree actual accept deadline", ctx.Err())
-	}
-	return got, tr, de
+	got := worker.wait(t, dialErr)
+	// Preserve both actual outcomes, including the deliberate inbound mandatory
+	// pin refusal. Callers decide success only after this confirmed worker join.
+	return got, tr, dialErr
 }
 func degreeActualPair(t *testing.T, s, d *Service) (*peekedConn, *dialledTransport) {
 	t.Helper()
@@ -427,56 +493,34 @@ func TestDegreeActualPinWriterWaitHasNoEarlyP1(t *testing.T) {
 	store := s.secureSessions.store
 	store.writeMu.Lock()
 	held := true
-	result := make(chan degreeActualResult, 1)
-	joined := make(chan struct{})
-	gid := make(chan uint64, 1)
-	var owned atomic.Pointer[peekedConn]
-	t.Cleanup(func() {
+	releaseWriter := func() {
 		if held {
 			store.writeMu.Unlock()
+			held = false
 		}
-		_ = server.Close()
-		_ = client.Close()
-		select {
-		case <-joined:
-		case <-time.After(2 * time.Second):
-			t.Error("degree pin-wait worker not joined")
-		}
-		if wire := owned.Load(); wire != nil {
-			_ = wire.Close()
-		}
-	})
-	go func() {
-		defer close(joined)
-		gid <- relationGateCurrentGID()
-		wire, _, _, e := s.openInboundTransport(metered, metered)
-		if w, ok := wire.(*peekedConn); ok {
-			owned.Store(w)
-		}
-		result <- degreeActualResult{wire, e}
-	}()
-	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
-	defer cancel()
-	proof, err := sessionv2.Dial(ctx, client, d.secureSessions.local, d.nodeHelloFrame(), sessionv2.AnyPeer(), sessionv2.DefaultTimeouts)
-	if err != nil {
-		t.Fatal(err)
+	}
+	gid := make(chan uint64, 1)
+	worker := degreeStartActualWorker(t, s, d, server, client, metered, releaseWriter, gid)
+	proof, dialErr := sessionv2.Dial(worker.ctx, client, d.secureSessions.local, d.nodeHelloFrame(), sessionv2.AnyPeer(), sessionv2.DefaultTimeouts)
+	if dialErr != nil {
+		worker.stop(t)
+		t.Fatal("degree pin-wait dial", dialErr, worker.completion.Load())
 	}
 	protected, err := proof.Conn()
 	if err != nil {
-		t.Fatal(err)
+		worker.stop(t)
+		t.Fatal("degree pin-wait protected transport", err, dialErr, worker.completion.Load())
 	}
-	t.Cleanup(func() { _ = protected.Close() })
+	worker.outbound = protected
 	n1WaitMutexFrame(t, <-gid, "persist(")
+	if worker.ctx.Err() != nil || !time.Now().Before(worker.deadline) {
+		worker.stop(t)
+		t.Fatal("degree pin-wait deadline at mandatory writer barrier", worker.completion.Load())
+	}
 	degreeWant(t, s, 0)
 	c.Store(int64(time.Second))
-	store.writeMu.Unlock()
-	held = false
-	var got degreeActualResult
-	select {
-	case got = <-result:
-	case <-ctx.Done():
-		t.Fatal("degree pin-wait release failed")
-	}
+	releaseWriter()
+	got := worker.wait(t, dialErr)
 	if got.err != nil {
 		t.Fatal(got.err)
 	}
@@ -562,4 +606,41 @@ func TestDegreeProductionClockOwnsOriginalMonotonicReading(t *testing.T) {
 	if fixture.degree.clock.fixture != atomicClock || !fixture.degree.clock.origin.IsZero() {
 		t.Fatal("degree fixture and production clock modes mixed")
 	}
+}
+
+// Both witnesses come from the authentic Accept/Dial P1 mint. A full table
+// exercises the real untracked path; equal peer identity does not merge lifetimes.
+func TestDegreeWitnessOriginGenuineTrackedAndFullCapacity(t *testing.T) {
+	s, _ := degreeTestService(t, 1)
+	d, _ := degreeTestService(t, 2)
+	first, _ := degreeActualPair(t, s, d)
+	original := first.common.Load()
+	original.mu.Lock()
+	tracked := original.degreeWitness
+	trackedOrigin := tracked != nil && tracked.origin == original
+	trackedShape := tracked != nil && !tracked.untracked && tracked.slot == 0
+	original.mu.Unlock()
+	if !trackedOrigin || !trackedShape {
+		t.Fatal("genuine tracked witness lost original lifetime")
+	}
+	second, _ := degreeActualPair(t, s, d)
+	next := second.common.Load()
+	next.mu.Lock()
+	untracked := next.degreeWitness
+	untrackedOrigin := untracked != nil && untracked.origin == next
+	untrackedShape := untracked != nil && untracked.untracked && untracked.slot == -1
+	next.mu.Unlock()
+	if !untrackedOrigin || !untrackedShape {
+		t.Fatal("genuine full-capacity witness lost original lifetime")
+	}
+	if next == original || untracked == tracked || untracked.origin == original || tracked.origin == next {
+		t.Fatal("distinct genuine lifetimes shared witness origin")
+	}
+	s.degree.mu.Lock()
+	row, unknown := s.degree.active[0], s.degree.unknown
+	s.degree.mu.Unlock()
+	if row.life != original || row.witness != tracked || unknown != 1 {
+		t.Fatal("origin fixture did not reach actual full-capacity accounting")
+	}
+	degreeRefused(t, s)
 }

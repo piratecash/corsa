@@ -6,6 +6,7 @@ import (
 
 	"github.com/piratecash/corsa/internal/core/config"
 	"github.com/piratecash/corsa/internal/core/ebus"
+	"github.com/piratecash/corsa/internal/core/findnodebridge"
 	"github.com/piratecash/corsa/internal/core/identity"
 )
 
@@ -45,6 +46,9 @@ func newDegreeStatisticCandidateService(cfg config.Node, id *identity.Identity, 
 // ONE original monotonic+wall sample after lock acquisition, never a callback
 // or a caller Time. Record HWM BEFORE coverage/unknown/projection refusal.
 func sampleDegreeStatisticClockLocked(o *degreeOwner) (time.Duration, time.Time, bool) {
+	if o == nil || o.bridgePublisher != (findnodebridge.Publisher{}) {
+		return 0, time.Time{}, false
+	}
 	if o == nil || o.poisoned || o.token == nil || o.clock.fixture != nil || o.clock.origin.IsZero() {
 		return 0, time.Time{}, false
 	}
@@ -74,6 +78,9 @@ func degreeStatisticCoverageReady(start, q time.Duration) bool {
 // Optional observation only. The producer's immutable owner must still be
 // the Service owner. No common lock, provider, peer/IP/intake lock or IO here.
 func (s *Service) captureOverlayDWinForFlush() (overlayDegreeStatistic, error) {
+	if s != nil && s.ownedDegreeStatisticProducer != nil {
+		return s.captureOwnedOverlayDWinForFlush()
+	}
 	if s == nil || s.degreeStatisticProducer == nil {
 		return overlayDegreeStatistic{}, errDegreeUnavailable
 	}
@@ -149,6 +156,9 @@ func insertDegreeStatisticKey(rows *[degreeHistoryLimit]degreeHistoryRow, used *
 // are immutable or owned by degree.mu; common evidence/ended/peer are not read.
 // Unknown coverage never becomes zero. Invalid stored state poisons/refuses.
 func projectDegreeStatisticLocked(o *degreeOwner, q time.Duration) (int, int, int, error) {
+	if o == nil || o.bridgePublisher != (findnodebridge.Publisher{}) {
+		return 0, 0, 0, errDegreeUnavailable
+	}
 	if o == nil || o.poisoned || q < 0 || q == time.Duration(math.MaxInt64) || q < o.last || o.unknown != 0 {
 		return 0, 0, 0, errDegreeUnavailable
 	}

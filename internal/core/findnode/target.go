@@ -238,6 +238,13 @@ func (c *TargetCache) CloseSession(session Session) {
 func (c *TargetCache) closeSessionLocked(session Session, changes *targetChanges) {
 	session.close()
 	for _, entry := range c.entries {
+		if state := entry.coordinated; state != nil {
+			for index, original := range state.protected {
+				if original == session {
+					state.protected[index] = Session{}
+				}
+			}
+		}
 		if state := entry.coordinated; state != nil && state.phase == signingAliasPending && state.alias.slot.source == session {
 			changes.retireAlias(state)
 			state.phase = signingUnsignable
@@ -287,6 +294,18 @@ func (c *TargetCache) completePriorities(source Session, p PrioritySnapshot) boo
 	return true
 }
 func entryPriority(entry *targetEntry, p PrioritySnapshot) (Priority, Instant) {
+	// Current class redraw cannot revoke a live owned L1 signing promise.
+	// Protection is entry/recipient-specific, never a ConnID or group privilege.
+	if entry.phase == targetReserved && entry.coordinated != nil {
+		for _, original := range entry.coordinated.protected {
+			if original.valid() {
+				if _, retained := entry.recipients[original]; retained {
+					return PriorityProtected, original.state.opened
+				}
+			}
+		}
+	}
+
 	best := PriorityNew
 	oldest := Instant(1<<63 - 1)
 	for session := range entry.recipients {

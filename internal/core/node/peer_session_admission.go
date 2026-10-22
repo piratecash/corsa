@@ -630,6 +630,15 @@ func (e *peerSessionAdmissionError) Unwrap() error { return protocol.ErrRateLimi
 // It returns errPeerSessionLineRefused when one line was consumed and dropped
 // and the loop should continue, and any other error when the session is over.
 func (s *Service) readAdmittedSessionLine(reader *bufio.Reader, session *peerSession) (string, error) {
+	line, err := s.readSessionLineBeforeCharge(reader, session)
+	if err != nil {
+		return line, err
+	}
+	return s.admitReadSessionLine(session, line)
+}
+
+// Bounded original raw read only; no successful-line admission mutex wait.
+func (s *Service) readSessionLineBeforeCharge(reader *bufio.Reader, session *peerSession) (string, error) {
 	// The claim the gate read is kept: a line REFUSED during the read never
 	// becomes a parsed frame, so the pre-read claim is the only name its drop
 	// can ever be attributed to, and a drop with no type is a drop the
@@ -648,6 +657,11 @@ func (s *Service) readAdmittedSessionLine(reader *bufio.Reader, session *peerSes
 		return line, err
 	}
 
+	return line, nil
+}
+
+// The legacy successful-line admission tail, called on the SAME raw bytes.
+func (s *Service) admitReadSessionLine(session *peerSession, line string) (string, error) {
 	// The one line this budget does not meter. It is admitted UNCHARGED and
 	// handed on unchanged: the read loop's diversion takes it from here to the
 	// plane's ingress, which charges docs/protocol/datagram.md §5 on these same
@@ -672,7 +686,7 @@ func (s *Service) readAdmittedSessionLine(reader *bufio.Reader, session *peerSes
 	// only type name available before the parse the charge exists to protect.
 	// A line that lies about being a push is refused outright one gate later
 	// (admitFrameLinePreParse), so lying can only ever cost the liar more.
-	claimed, _ = claimedFrameTypeFromPrefix(line)
+	claimed, _ := claimedFrameTypeFromPrefix(line)
 	if session.admission.chargeLine(len(line), claimed == "push_message") {
 		return line, nil
 	}

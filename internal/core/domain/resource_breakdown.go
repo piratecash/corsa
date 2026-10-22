@@ -72,6 +72,9 @@ const (
 	// traced to ban maps that were only cleaned lazily.
 	ResourceSubsystemBans
 
+	// ResourceSubsystemOverlay is the inactive D1 responder ownership domain.
+	ResourceSubsystemOverlay
+
 	// resourceSubsystemBound is one past the last real subsystem. It is the
 	// range every walk over the enum stops at, so a new subsystem is declared
 	// ABOVE this line; one declared below it is not Valid and drops out of
@@ -88,6 +91,7 @@ var resourceSubsystemNames = map[ResourceSubsystem]string{
 	ResourceSubsystemSessions:   "sessions",
 	ResourceSubsystemKnowledge:  "knowledge",
 	ResourceSubsystemBans:       "bans",
+	ResourceSubsystemOverlay:    "overlay",
 }
 
 // String returns the stable metric label of the subsystem.

@@ -133,6 +133,7 @@ func (s *Service) ResourceBreakdown() domain.ResourceBreakdown {
 		s.deliveryUsage(),
 		s.knowledgeUsage(),
 		s.banUsage(),
+		s.ownedFindNodeUsage(),
 	}
 	return domain.NewResourceBreakdown(sampledAt, subsystems...)
 }
@@ -231,6 +232,7 @@ func (s *Service) FetchResourceBreakdown() (json.RawMessage, error) {
 	// sessions would leave out exactly what a ceiling is defeated by.
 	budget := s.connBudget.Snapshot()
 	answer := map[string]any{
+		"overlay":     s.ownedFindNodeDiagnostics(), // independent immutable/atomic diagnostic sample
 		"sampled_at":  breakdown.SampledAt().Format(time.RFC3339Nano),
 		"floor_bytes": breakdown.FloorBytes(),
 		"floor_human": formatBytes(breakdown.FloorBytes()),

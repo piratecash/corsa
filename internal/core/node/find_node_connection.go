@@ -15,14 +15,26 @@ import (
 )
 
 // Sole node/findnode import. No handlers, admission, signing or packet writer.
-// Ordinary constructors leave this nil. Its origin is independent of N-in.
-type findNodeAdapter struct{ origin time.Time }
+// Ordinary constructors leave this nil. Legacy origin is independent of N-in.
+// The optional owned adapter is immutable before the first Service literal.
+type findNodeAdapter struct {
+	origin time.Time
+	owned  *findNodeOwnedAdapter
+}
+type findNodeOwnedAdapter struct {
+	terminal        *findNodeBridgeTerminal
+	done            <-chan struct{}
+	retirement      findnode.DormantIntake
+	localRetirement findnode.OwnedLocalTarget
+}
 type findNodeConnectionBinding struct {
-	seed      findnode.SessionSeed
-	session   findnode.Session
-	published bool
-	group     domain.SourceGroup
-	identity  domain.PeerIdentity
+	seed            findnode.SessionSeed
+	session         findnode.Session
+	published       bool
+	group           domain.SourceGroup
+	identity        domain.PeerIdentity
+	retirement      findnode.DormantIntake
+	localRetirement findnode.OwnedLocalTarget
 }
 type findNodeCMReceipt struct {
 	peer       *peerSession
@@ -63,6 +75,10 @@ func (s *Service) captureFindNodeSeed(l *proofTransportLifetime, proof sessionv2
 		return
 	}
 	l.findNode = &findNodeConnectionBinding{seed: seed, group: l.evidence.group, identity: peer.Identity}
+	if s.findNode.owned != nil {
+		l.findNode.retirement = s.findNode.owned.retirement
+		l.findNode.localRetirement = s.findNode.owned.localRetirement
+	}
 }
 func (b *findNodeConnectionBinding) end() { b.session.End(); b.seed = findnode.SessionSeed{} }
 
@@ -73,6 +89,32 @@ func (s *Service) publishFindNodeLocked(l *proofTransportLifetime) bool {
 	}
 	b := l.findNode
 	if b.published {
+		return true
+	}
+	if a := s.findNode.owned; a != nil {
+		t := a.terminal
+		if t == nil || t != s.bridgeTerminal || t != l.bridgeTerminal || t.owner == nil || t.owner != s.degree || t.token == nil || t.token != s.proofToken || l.token != t.token || t.owner.token != t.token || t.owner.bridgePublisher != t.publisher || a.done == nil {
+			return false
+		}
+		publication := t.publisher.BeginClockedPublication()
+		point, err := publication.Sample()
+		if err != nil {
+			publication.Complete()
+			return false
+		}
+		select {
+		case <-a.done:
+			publication.Complete()
+			return false
+		default:
+		}
+		session, err := b.seed.Bind(l.id, b.group, findnode.Instant(point.Elapsed()))
+		if err != nil {
+			publication.Complete()
+			return false
+		}
+		b.session, b.published, b.seed = session, true, findnode.SessionSeed{}
+		publication.Complete()
 		return true
 	}
 	elapsed := time.Since(s.findNode.origin)
@@ -89,14 +131,15 @@ func (s *Service) publishFindNodeLocked(l *proofTransportLifetime) bool {
 	return true
 }
 
-// Receipt creation is exclusively the generation-accepted CM callback. The
-// selectedGeneration mirror alone cannot manufacture this receipt.
-func (s *Service) captureFindNodeCMAcceptedLocked(info SessionInfo) {
+// Receipt preparation is exclusive to the generation-accepted CM callback.
+// The caller holds peerMu and allocates before its final memory publication;
+// only that callback installs the receipt. A generation mirror is insufficient.
+func (s *Service) prepareFindNodeCMAcceptedLocked(info SessionInfo) *findNodeCMReceipt {
 	p := info.Session
 	if p == nil || p.common == nil || info.SlotGeneration == 0 {
-		return
+		return nil
 	}
-	p.findNodeReceipt = &findNodeCMReceipt{peer: p, common: p.common, address: info.Address, generation: info.SlotGeneration}
+	return &findNodeCMReceipt{peer: p, common: p.common, address: info.Address, generation: info.SlotGeneration}
 }
 func (s *Service) publishFindNodeCM(p *peerSession, address domain.PeerAddress, generation uint64) bool {
 	if p == nil || p.common == nil {
@@ -302,37 +345,215 @@ func (s *Service) captureFindNodePriorityClasses(ctx context.Context, members []
 	out := make(map[domain.ConnID]findNodePriorityClassFact, len(members))
 	for _, member := range members {
 		id := member.Identity()
-		class := findnode.ClassOrdinary
-		if entry, present := store.identities[id]; present {
-			if entry.incarnation == 0 || entry.evidenceRevision == 0 || entry.protectionRevision == 0 {
-				return nil, domain.ErrIdentityPinStoreUnavailable
-			}
-			metadata := entry.classMetadata()
-			if err := metadata.Validate(); err != nil {
-				return nil, err
-			}
-			contact := contacts[id]
-			strict := entry.metadata != nil && entry.metadata.confirmedRevision == entry.protectionRevision
-			complete := entry.metadata == nil || entry.metadata.recordOwner == nil || entry.metadata.recordMirror == contactRecordOwnerCompleted
-			hasK := metadata.Contact.State == domain.IdentityPinAllocationEligible
-			kReady := hasK && contact.applicable && contact.err == nil && contact.confirmed && strict && complete
-			kUnknown := hasK && (contact.err != nil || (contact.applicable && !kReady))
-			switch {
-			case kReady:
-				class = findnode.ClassContact
-			case entry.selectedConfirmed():
-				class = findnode.ClassSelected
-			case kUnknown || metadata.Selected.State == domain.IdentityPinAllocationEligible:
-				return nil, findnode.ErrNotReady
-			case entry.inboundMetadataConfirmed():
-				class = findnode.ClassIncomingPinned
-			case metadata.Inbound.State == domain.IdentityPinAllocationEligible:
-				return nil, findnode.ErrNotReady
-			}
+		entry, present := store.identities[id]
+		class, err := findNodePriorityClassLocked(entry, present, contacts[id])
+		if err != nil {
+			return nil, err
 		}
 		out[member.ConnID()] = findNodePriorityClassFact{identity: id, class: class}
 	}
 	return out, nil
+}
+
+// Requires the actual store.mu. Entry metadata may retain pointers protected
+// by that lock; this is shared classification, not a detached class authority.
+func findNodePriorityClassLocked(entry identityPinEntry, present bool, contact findNodePriorityContact) (findnode.SessionClass, error) {
+	class := findnode.ClassOrdinary
+	if present {
+		if entry.incarnation == 0 || entry.evidenceRevision == 0 || entry.protectionRevision == 0 {
+			return 0, domain.ErrIdentityPinStoreUnavailable
+		}
+		metadata := entry.classMetadata()
+		if err := metadata.Validate(); err != nil {
+			return 0, err
+		}
+		strict := entry.metadata != nil && entry.metadata.confirmedRevision == entry.protectionRevision
+		complete := entry.metadata == nil || entry.metadata.recordOwner == nil || entry.metadata.recordMirror == contactRecordOwnerCompleted
+		hasK := metadata.Contact.State == domain.IdentityPinAllocationEligible
+		kReady := hasK && contact.applicable && contact.err == nil && contact.confirmed && strict && complete
+		kUnknown := hasK && (contact.err != nil || (contact.applicable && !kReady))
+		switch {
+		case kReady:
+			class = findnode.ClassContact
+		case entry.selectedConfirmed():
+			class = findnode.ClassSelected
+		case kUnknown || metadata.Selected.State == domain.IdentityPinAllocationEligible:
+			return 0, findnode.ErrNotReady
+		case entry.inboundMetadataConfirmed():
+			class = findnode.ClassIncomingPinned
+		case metadata.Inbound.State == domain.IdentityPinAllocationEligible:
+			return 0, findnode.ErrNotReady
+		}
+	}
+	return class, nil
+}
+
+// Raw historical facts only. No production caller, stamp, clock, target filter,
+// cut, Ready flag or admission authority. Every original handle is retained.
+type ownedFindNodeRawFacts struct {
+	allOriginal []findnode.Session
+	classes     []findnode.SessionClass
+}
+
+// Allocation arithmetic, not a deployment limit or a total-memory guarantee.
+// One Session word + contact (two bools/error interface) + class fit five words
+// on supported 32/64-bit layouts; the closed layout is checked independently.
+const ownedFindNodeRawWordsPerMember = 5
+
+func (s *Service) collectOwnedFindNodeRawFacts(ctx context.Context, profile findNodePriorityProfile) (ownedFindNodeRawFacts, error) {
+	if ctx == nil || s == nil || !profile.valid() || profile.MaxMembers > int(^uint(0)>>1)/(ownedFindNodeRawWordsPerMember*(strconv.IntSize/8)) {
+		return ownedFindNodeRawFacts{}, findnode.ErrInvalid
+	}
+	if err := ctx.Err(); err != nil {
+		return ownedFindNodeRawFacts{}, err
+	}
+	if s.findNode == nil || s.findNode.owned == nil {
+		return ownedFindNodeRawFacts{}, findnode.ErrNotReady
+	}
+	a := s.findNode.owned
+	t := a.terminal
+	if t == nil || t != s.bridgeTerminal || t.owner == nil || t.owner != s.degree || t.token == nil || t.token != s.proofToken || t.owner.token != t.token || t.owner.bridgePublisher != t.publisher || a.done == nil {
+		return ownedFindNodeRawFacts{}, findnode.ErrUnauthenticated
+	}
+	originals := make([]findnode.Session, profile.MaxMembers)
+	classes := make([]findnode.SessionClass, profile.MaxMembers)
+	contacts := make([]findNodePriorityContact, profile.MaxMembers)
+	count, visits := 0, 0
+	var walkErr error
+	s.peerMu.RLock()
+	s.forEachConnIDLocked(func(id domain.ConnID) bool {
+		if walkErr = ctx.Err(); walkErr != nil {
+			return false
+		}
+		if visits == profile.MaxRegistryVisits {
+			walkErr = findnode.ErrCapacity
+			return false
+		}
+		visits++
+		var member findnode.Session
+		var found bool
+		member, found, walkErr = s.collectOwnedFindNodeRawMemberLocked(ctx, id)
+		if walkErr != nil {
+			return false
+		}
+		if !found {
+			return true
+		}
+		if count == profile.MaxMembers {
+			walkErr = findnode.ErrCapacity
+			return false
+		}
+		originals[count] = member
+		count++
+		return true
+	})
+	s.peerMu.RUnlock()
+	if walkErr != nil {
+		return ownedFindNodeRawFacts{}, walkErr
+	}
+	originals, classes, contacts = originals[:count], classes[:count], contacts[:count]
+	if err := s.collectOwnedFindNodeRawClasses(ctx, originals, contacts, classes); err != nil {
+		return ownedFindNodeRawFacts{}, err
+	}
+	if err := ctx.Err(); err != nil {
+		return ownedFindNodeRawFacts{}, err
+	}
+	return ownedFindNodeRawFacts{allOriginal: originals, classes: classes}, nil
+}
+
+// Caller owns peerMu.R. Never replace a captured handle by a current proof,
+// address, identity or ID. Published inconsistencies refuse the whole capture.
+func (s *Service) collectOwnedFindNodeRawMemberLocked(ctx context.Context, id domain.ConnID) (findnode.Session, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return findnode.Session{}, false, err
+	}
+	e := s.connEntryByIDLocked(id)
+	if e == nil || e.common == nil {
+		return findnode.Session{}, false, nil
+	}
+	l := e.common
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return findnode.Session{}, false, err
+	}
+	b := l.findNode
+	if l.ended || b == nil || !b.published {
+		return findnode.Session{}, false, nil
+	}
+	t := s.bridgeTerminal
+	if t == nil || t != l.bridgeTerminal || t.owner == nil || t.owner != s.degree || t.token == nil || t.token != s.proofToken || l.token != t.token || t.owner.token != t.token || t.owner.bridgePublisher != t.publisher || e.common != l || l.entry != e || l.id != id || id == 0 || b.session.ConnID() != id || b.identity.IsZero() || b.identity != b.session.Identity() {
+		return findnode.Session{}, false, findnode.ErrUnauthenticated
+	}
+	if l.outbound {
+		p := l.peer
+		if l.role != sessionv2.RoleDialer || p == nil || p.common != l || p.connID != id || e.core != p.netCore || s.sessions[p.address] != p || !p.authOK {
+			return findnode.Session{}, false, findnode.ErrUnauthenticated
+		}
+		r := p.findNodeReceipt
+		// Receipt.address is the genuine accepted CM slot, not necessarily
+		// p.address (a fallback dial). Its immutable provenance is source-closed.
+		if r == nil || r.peer != p || r.common != l || r.generation == 0 || r.generation != p.selectedGeneration {
+			return findnode.Session{}, false, findnode.ErrUnauthenticated
+		}
+	} else if l.role != sessionv2.RoleListener {
+		return findnode.Session{}, false, findnode.ErrUnauthenticated
+	}
+	return b.session, true, nil
+}
+
+// All buffers were allocated before application locks. Classes align by exact
+// original Session index; no current registry lookup or classifier callback.
+func (s *Service) collectOwnedFindNodeRawClasses(ctx context.Context, originals []findnode.Session, contacts []findNodePriorityContact, classes []findnode.SessionClass) error {
+	if len(originals) != len(contacts) || len(originals) != len(classes) {
+		return findnode.ErrInvalid
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	store, trust := s.localContactPinStore(), s.trust
+	if store == nil || trust == nil {
+		return findnode.ErrNotReady
+	}
+	store.pinMutationGate.RLock()
+	defer store.pinMutationGate.RUnlock()
+	trust.pinEvidenceMu.RLock()
+	defer trust.pinEvidenceMu.RUnlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	trust.mu.RLock()
+	for i, member := range originals {
+		id := member.Identity()
+		value := findNodePriorityContact{err: trust.authorityReadErr}
+		if fact := trust.contacts[id.String()].LocalContact; fact != nil {
+			value.applicable = true
+			if fact.revision == 0 || fact.fact.Version != 1 || fact.fact.At.IsZero() || fact.fact.Identity != id || fact.fact.Network != domain.NetworkID(networkName) || fact.fact.ID == (localContactFactID{}) {
+				value.err = domain.ErrLocalContactFactStale
+			} else {
+				value.confirmed = fact.confirmed == fact.revision
+			}
+		}
+		contacts[i] = value
+	}
+	trust.mu.RUnlock()
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := store.pinMetadataMutationRefusalLocked(); err != nil {
+		return err
+	}
+	for i, member := range originals {
+		entry, present := store.identities[member.Identity()]
+		class, err := findNodePriorityClassLocked(entry, present, contacts[i])
+		if err != nil {
+			return err
+		}
+		classes[i] = class
+	}
+	return nil
 }
 
 // A private historical observation, NOT R/T admission or a C3-immune permit.
@@ -340,6 +561,9 @@ func (s *Service) captureFindNodePriorityClasses(ctx context.Context, members []
 func (s *Service) findNodePrioritySnapshot(ctx context.Context, target domain.PeerIdentity, profile findNodePriorityProfile) (findnode.PrioritySnapshot, findNodeMemberCoverage, error) {
 	if err := ctx.Err(); err != nil {
 		return findnode.PrioritySnapshot{}, 0, err
+	}
+	if s.findNode != nil && s.findNode.owned != nil {
+		return findnode.PrioritySnapshot{}, 0, findnode.ErrNotReady
 	}
 	if s.findNode == nil || s.proofToken == nil || s.localContactPinStore() == nil || s.trust == nil || !profile.valid() || target.IsZero() {
 		return findnode.PrioritySnapshot{}, 0, findnode.ErrInvalid

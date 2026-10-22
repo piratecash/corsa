@@ -7,6 +7,7 @@ import (
 
 	"github.com/piratecash/corsa/internal/core/connbudget"
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/findnodebridge"
 	"github.com/piratecash/corsa/internal/core/netcore"
 	"github.com/piratecash/corsa/internal/core/routing"
 	"github.com/piratecash/corsa/internal/core/sessionv2"
@@ -523,6 +524,17 @@ func (s *Service) setTrackedByIDLocked(id domain.ConnID, tracked bool) {
 	}
 }
 
+// beginRegistryPublication uses only the original immutable Service binding.
+// Callers hold every application lock before W and complete their local lease
+// before any further lock, callback, clock, close or I/O. Cleanup is mandatory
+// even after lifecycle/clock/phase refusal. Ordinary constructors stay nil.
+func (s *Service) beginRegistryPublication() *findnodebridge.Publication {
+	if s.bridgeTerminal == nil {
+		return nil
+	}
+	return s.bridgeTerminal.publisher.BeginPublication()
+}
+
 // registerInboundConnLocked registers an inbound NetCore in the connection registry.
 // It writes to both the primary (ConnID-keyed) map and the secondary (net.Conn-keyed)
 // index in lock-step — the only place in the codebase where a (conn, id, entry)
@@ -537,8 +549,12 @@ func (s *Service) registerInboundConnLocked(conn net.Conn, core *netcore.NetCore
 	if wire, ok := conn.(*peekedConn); ok {
 		s.bindProofTransportLocked(entry, id, wire)
 	}
+	publication := s.beginRegistryPublication()
 	s.conns[id] = entry
 	s.connIDByNetConn[conn] = id
+	if publication != nil {
+		publication.Complete()
+	}
 }
 
 // attachOutboundCoreLocked registers an outbound NetCore in the connection registry.
@@ -552,8 +568,12 @@ func (s *Service) attachOutboundCoreLocked(conn net.Conn, core *netcore.NetCore)
 	if wire, ok := conn.(*peekedConn); ok {
 		s.bindProofTransportLocked(entry, id, wire)
 	}
+	publication := s.beginRegistryPublication()
 	s.conns[id] = entry
 	s.connIDByNetConn[conn] = id
+	if publication != nil {
+		publication.Complete()
+	}
 }
 
 // receiveForIDLocked returns only the receive owner of the registered ConnID.
@@ -586,8 +606,12 @@ func (s *Service) unregisterConnLocked(conn net.Conn) {
 		}
 		entry.budget.Release()
 	}
+	publication := s.beginRegistryPublication()
 	delete(s.conns, id)
 	delete(s.connIDByNetConn, conn)
+	if publication != nil {
+		publication.Complete()
+	}
 }
 
 // bindProofTransportLocked is the original registry attach. Tuple checks live
@@ -629,8 +653,12 @@ func (s *Service) bindProofTransportLocked(entry *connEntry, id domain.ConnID, w
 	if rawInput != e.raw {
 		return
 	}
+	publication := s.beginRegistryPublication()
 	l.entry, l.id = entry, id
 	entry.common = l
+	if publication != nil {
+		publication.Complete()
+	}
 	s.bindInboundLeafLocked(entry, id, wire)
 }
 

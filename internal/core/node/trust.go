@@ -15,6 +15,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/findnodebridge"
 	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/protocol"
 	"github.com/piratecash/corsa/internal/core/secretfile"
@@ -89,6 +90,9 @@ type trustedIdentityRecord struct {
 }
 
 type trustStore struct {
+	// Immutable initial dependency; ordinary construction passes concrete zero.
+	// No Service/Ready wiring is installed by this dormant trust-only slice.
+	trustPublisher findnodebridge.Publisher
 	// pinEvidenceMu serializes record/fact replacement against inactive K2
 	// eligibility through its pin stage. Never acquired with mu already held.
 	pinEvidenceMu sync.RWMutex
@@ -196,7 +200,14 @@ func loadTrustStore(path string, self trustedContact) (*trustStore, error) {
 	return loadTrustStoreWithFiles(path, self, func() (localContactDurableFiles, error) { return openLocalContactFiles(path) })
 }
 func loadTrustStoreWithFiles(path string, self trustedContact, files func() (localContactDurableFiles, error)) (*trustStore, error) {
+	return loadTrustStoreWithPublisher(path, self, files, findnodebridge.Publisher{})
+}
+
+// Constructor-only attachment before any load/refusal/save or callback. The
+// sole production caller forwards zero; nonzero composition is test-owned.
+func loadTrustStoreWithPublisher(path string, self trustedContact, files func() (localContactDurableFiles, error), publisher findnodebridge.Publisher) (*trustStore, error) {
 	store := &trustStore{
+		trustPublisher: publisher,
 		localFiles:     files,
 		path:           path,
 		contacts:       map[string]trustedContact{},
@@ -324,6 +335,16 @@ func loadTrustStoreWithFiles(path string, self trustedContact, files func() (loc
 	return store, nil
 }
 
+// beginTrustPublication is the last new wait in each bounded memory leaf.
+// All existing trust/save/evidence locks are already owned. No callback,
+// clock or availability check may veto a mutation. Zero skips lease only.
+func (s *trustStore) beginTrustPublication() *findnodebridge.Publication {
+	if s.trustPublisher == (findnodebridge.Publisher{}) {
+		return nil
+	}
+	return s.trustPublisher.BeginPublication()
+}
+
 // recordLastOnlineAt stores a locally observed presence moment for trusted
 // identities. It deliberately does not create contacts: route gossip can
 // mention identities the user has never trusted, while this JSON is the
@@ -360,8 +381,12 @@ func (s *trustStore) recordLastOnlineAt(identities []domain.PeerIdentity, at tim
 			continue
 		}
 		contact.LastOnlineAt = observedAt
+		publication := s.beginTrustPublication()
 		s.contacts[address] = contact
 		updated++
+		if publication != nil {
+			publication.Complete()
+		}
 	}
 	if updated == 0 {
 		s.mu.Unlock()
@@ -415,7 +440,11 @@ func (s *trustStore) rememberContactOrigin(ctx context.Context, contact trustedC
 		rowStamp = s.bindLocalContactRowLocked(&existing, origin)
 		existing.LastSeenAt = now
 		existing.Source = contact.Source
+		publication := s.beginTrustPublication()
 		s.contacts[contact.Address] = existing
+		if publication != nil {
+			publication.Complete()
+		}
 		snapshot := s.snapshotLocked()
 		s.mu.Unlock()
 		s.pinEvidenceMu.Unlock()
@@ -426,7 +455,11 @@ func (s *trustStore) rememberContactOrigin(ctx context.Context, contact trustedC
 	rowStamp = s.bindLocalContactRowLocked(&contact, origin)
 	contact.FirstSeenAt = now
 	contact.LastSeenAt = now
+	publication := s.beginTrustPublication()
 	s.contacts[contact.Address] = contact
+	if publication != nil {
+		publication.Complete()
+	}
 	s.promoteSessionRecordsLocked(contact.Address)
 	snapshot := s.snapshotLocked()
 	s.mu.Unlock()
@@ -519,8 +552,12 @@ func (s *trustStore) forget(identity domain.PeerIdentity) (removed bool, err err
 		s.pinEvidenceMu.Unlock()
 		return false, nil
 	}
+	publication := s.beginTrustPublication()
 	delete(s.contacts, address)
 	delete(s.conflicts, address)
+	if publication != nil {
+		publication.Complete()
+	}
 	// The stored record follows the contact out: it exists because there was
 	// a dialogue, and keeping the keys of a deleted contact on disk would
 	// contradict the deletion. The cache can hold nothing for a contact,
@@ -704,8 +741,12 @@ func (s *trustStore) mergeRecord(network domain.NetworkID, record protocol.Signe
 		contact.BoxSignature = string(body.BoxSig)
 		contact.Source = trustContactSourceRecord
 		contact.LastSeenAt = now
+		publication := s.beginTrustPublication()
 		s.contacts[key.address] = contact
 		delete(s.conflicts, key.address)
+		if publication != nil {
+			publication.Complete()
+		}
 	}
 	snapshot := s.snapshotLocked()
 	s.mu.Unlock()

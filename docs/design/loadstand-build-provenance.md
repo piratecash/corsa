@@ -28,7 +28,7 @@ One to three unique requested targets are all mandatory. Missing source is `Targ
 
 | Flavour | Fixed build settings | Claim |
 |---|---|---|
-| `native-linux-arm64` | Native Linux arm64, Go1.27.2, GOOS=linux, GOARCH=arm64, GOARM64=v8.0, CGO=1 | Recorded-input native compile only; requires supported direct native tools/inputs |
+| `native-linux-arm64` | Native Linux arm64, Go1.27.3, GOOS=linux, GOARCH=arm64, GOARM64=v8.0, CGO=1 | Recorded-input native compile only; requires supported direct native tools/inputs |
 | `cross-compile-cgo0` | Linux supervisor host, same Go and target settings, CGO=0 | CompileOnly; never a fallback for a native request |
 
 Every build uses `build -mod=readonly -trimpath -buildvcs=false -ldflags '-s -w' -o <fixed lane output> <fixed package>`. No custom tags, `-X`, build-ID edits, hidden concurrency tuning or artifact rewriting. VCS metadata is deliberately `disabled_archive`, not `vcs.modified=false`. The base commit timestamp supplies SOURCE_DATE_EPOCH; this is recorded input, not a normalization guarantee. An external image digest is declared/unverified; native-host absence is explicit.
@@ -123,7 +123,7 @@ python3 scripts/loadstand-build.py --request /absolute/regular/request.json --ou
 
 | Flavour | Фиксированные настройки | Допустимый вывод |
 |---|---|---|
-| `native-linux-arm64` | Native Linux arm64, Go1.27.2, GOOS=linux, GOARCH=arm64, GOARM64=v8.0, CGO=1 | Только native compile с записанными входами; необходимы поддерживаемые прямые native tools/inputs |
+| `native-linux-arm64` | Native Linux arm64, Go1.27.3, GOOS=linux, GOARCH=arm64, GOARM64=v8.0, CGO=1 | Только native compile с записанными входами; необходимы поддерживаемые прямые native tools/inputs |
 | `cross-compile-cgo0` | Linux supervisor host, те же Go/target settings, CGO=0 | CompileOnly; не fallback для native-запроса |
 
 Каждая сборка использует `build -mod=readonly -trimpath -buildvcs=false -ldflags '-s -w' -o <fixed lane output> <fixed package>`. Нет custom tags, `-X`, правки build-ID, скрытого изменения concurrency или переписывания binary. VCS — `disabled_archive`, а не `vcs.modified=false`. SOURCE_DATE_EPOCH равен timestamp base commit: это записанный вход, не гарантия нормализации. Внешний image digest остаётся declared/unverified; отсутствие образа у native host явно обозначено.

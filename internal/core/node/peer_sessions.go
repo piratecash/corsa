@@ -184,7 +184,11 @@ func (s *Service) runPeerSession(ctx context.Context, address domain.PeerAddress
 			s.peerMu.Lock()
 			log.Trace().Str("site", "runPeerSession_cleanup").Str("phase", "lock_held").Str("address", string(address)).Msg("peer_mu_writer")
 			closedSession := s.sessions[address]
+			publication := s.beginRegistryPublication()
 			delete(s.sessions, address)
+			if publication != nil {
+				publication.Complete()
+			}
 			s.peerMu.Unlock()
 			log.Trace().Str("site", "runPeerSession_cleanup").Str("phase", "lock_released").Str("address", string(address)).Msg("peer_mu_writer")
 
@@ -392,7 +396,11 @@ func (s *Service) openPeerSession(ctx context.Context, address domain.PeerAddres
 	log.Trace().Str("site", "openPeerSession_register").Str("phase", "lock_wait").Str("address", string(address)).Msg("peer_mu_writer")
 	s.peerMu.Lock()
 	log.Trace().Str("site", "openPeerSession_register").Str("phase", "lock_held").Str("address", string(address)).Msg("peer_mu_writer")
+	publication := s.beginRegistryPublication()
 	s.sessions[address] = session
+	if publication != nil {
+		publication.Complete()
+	}
 	s.peerMu.Unlock()
 	log.Trace().Str("site", "openPeerSession_register").Str("phase", "lock_released").Str("address", string(address)).Msg("peer_mu_writer")
 	s.markPeerConnected(address, peerDirectionOutbound)
@@ -775,7 +783,11 @@ func (s *Service) markSessionHandshakeComplete(session *peerSession) error {
 	s.peerMu.Lock()
 	defer s.peerMu.Unlock()
 	if session.readiness == nil {
+		publication := s.beginRegistryPublication()
 		session.authOK = true
+		if publication != nil {
+			publication.Complete()
+		}
 		return nil
 	}
 	session.readiness.mu.Lock()
@@ -783,7 +795,11 @@ func (s *Service) markSessionHandshakeComplete(session *peerSession) error {
 	if err := session.readiness.prepareReadyLocked(); err != nil {
 		return fmt.Errorf("%w: outbound handshake readiness: %w", errDialAbortedLocally, err)
 	}
+	publication := s.beginRegistryPublication()
 	session.authOK = true
+	if publication != nil {
+		publication.Complete()
+	}
 	session.readiness.publishReadyLocked()
 	return nil
 }
@@ -1181,7 +1197,11 @@ func (s *Service) finishPeerSessionForCM(ctx context.Context, address domain.Pee
 		l := session.common
 		l.mu.Lock()
 		if !l.ended && l.peer == nil && l.id == session.connID {
+			publication := s.beginRegistryPublication()
 			l.peer = session
+			if publication != nil {
+				publication.Complete()
+			}
 		}
 		l.mu.Unlock()
 	}
@@ -1317,8 +1337,15 @@ func (s *Service) onCMSessionEstablished(info SessionInfo) {
 		return
 	}
 	s.peerMu.Lock()
+	receipt := s.prepareFindNodeCMAcceptedLocked(info)
+	publication := s.beginRegistryPublication()
 	session.selectedGeneration = info.SlotGeneration
-	s.captureFindNodeCMAcceptedLocked(info)
+	if receipt != nil {
+		session.findNodeReceipt = receipt
+	}
+	if publication != nil {
+		publication.Complete()
+	}
 	s.peerMu.Unlock()
 	// dialAddress is the actual TCP address used for the connection (may be
 	// a fallback port). slotAddress is the CM slot's canonical address.
@@ -1591,8 +1618,12 @@ func (s *Service) registerCMSession(session *peerSession, slotAddress domain.Pee
 	log.Trace().Str("site", "registerCMSession").Str("phase", "lock_wait").Str("address", string(dialAddress)).Msg("delivery_mu_writer")
 	s.deliveryMu.Lock()
 	log.Trace().Str("site", "registerCMSession").Str("phase", "lock_held").Str("address", string(dialAddress)).Msg("delivery_mu_writer")
+	publication := s.beginRegistryPublication()
 	s.sessions[dialAddress] = session
 	s.upstream[dialAddress] = struct{}{}
+	if publication != nil {
+		publication.Complete()
+	}
 	s.deliveryMu.Unlock()
 	log.Trace().Str("site", "registerCMSession").Str("phase", "lock_released").Str("address", string(dialAddress)).Msg("delivery_mu_writer")
 	return true
@@ -1713,9 +1744,13 @@ func (s *Service) withdrawRefusedCMSession(session *peerSession, slotAddress dom
 	s.peerMu.Lock()
 	s.deliveryMu.Lock()
 	if s.sessions[dialAddress] == session {
+		publication := s.beginRegistryPublication()
 		delete(s.sessions, dialAddress)
 		delete(s.upstream, dialAddress)
 		delete(s.dialOrigin, dialAddress)
+		if publication != nil {
+			publication.Complete()
+		}
 	}
 	s.deliveryMu.Unlock()
 	s.peerMu.Unlock()
@@ -1757,9 +1792,13 @@ func (s *Service) withdrawServedCMSession(session *peerSession, slotAddress doma
 	log.Trace().Str("site", "withdrawServedCMSession").Str("phase", "lock_held").Str("address", string(dialAddress)).Msg("delivery_mu_writer")
 	ownedCleanup := s.sessions[dialAddress] == session
 	if ownedCleanup {
+		publication := s.beginRegistryPublication()
 		delete(s.sessions, dialAddress)
 		delete(s.upstream, dialAddress)
 		delete(s.dialOrigin, dialAddress)
+		if publication != nil {
+			publication.Complete()
+		}
 	}
 	s.deliveryMu.Unlock()
 	log.Trace().Str("site", "withdrawServedCMSession").Str("phase", "lock_released").Str("address", string(dialAddress)).Msg("delivery_mu_writer")
@@ -1851,9 +1890,13 @@ func (s *Service) onCMSessionTeardown(info SessionInfo) {
 	log.Trace().Str("site", "onCMSessionTeardown").Str("phase", "lock_held").Str("address", string(addr)).Msg("delivery_mu_writer")
 	ownedCleanup := info.Session != nil && s.sessions[addr] == info.Session
 	if ownedCleanup {
+		publication := s.beginRegistryPublication()
 		delete(s.sessions, addr)
 		delete(s.upstream, addr)
 		delete(s.dialOrigin, addr)
+		if publication != nil {
+			publication.Complete()
+		}
 	}
 	s.deliveryMu.Unlock()
 	log.Trace().Str("site", "onCMSessionTeardown").Str("phase", "lock_released").Str("address", string(addr)).Msg("delivery_mu_writer")

@@ -51,6 +51,16 @@ func (p OwnDMProvenancePort) ValidFor(s *Service, id *identity.Identity) bool {
 // Submit preserves the ordinary reply, including a performed storage effect
 // when optional provenance is refused after I/O. It never waits for wire ACK.
 func (p OwnDMProvenancePort) Submit(ctx context.Context, input protocol.Envelope) (protocol.Frame, OwnDMSubmission, error) {
+	return p.submitWithResidence(ctx, ctx, input)
+}
+
+// Only the typed SDK/service path supplies a distinct original caller lifetime.
+// The operation context still owns all prepare/store/send work and its refusal.
+func (p OwnDMProvenancePort) SubmitWithResidence(ctx, residence context.Context, input protocol.Envelope) (protocol.Frame, OwnDMSubmission, error) {
+	return p.submitWithResidence(ctx, residence, input)
+}
+
+func (p OwnDMProvenancePort) submitWithResidence(ctx, residence context.Context, input protocol.Envelope) (protocol.Frame, OwnDMSubmission, error) {
 	if p.r2Capability == nil || !p.ValidFor(p.r2Capability.r2Service, p.r2Capability.r2Identity) {
 		return protocol.Frame{}, OwnDMSubmission{}, errR2aOrigin
 	}
@@ -58,7 +68,7 @@ func (p OwnDMProvenancePort) Submit(ctx context.Context, input protocol.Envelope
 		return protocol.Frame{}, OwnDMSubmission{}, err
 	}
 	s := p.r2Capability.r2Service
-	originalResidence := p.captureOwnDMResidence(ctx)
+	originalResidence := p.captureOwnDMResidence(residence)
 	prepared, err := s.prepareR2aOwnDM(ctx, input)
 	if err != nil {
 		if ctx.Err() != nil {

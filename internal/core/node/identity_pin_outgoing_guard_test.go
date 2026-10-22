@@ -22,8 +22,8 @@ type r2aReferenceSite struct{ file, function string }
 var r2aClosedReferences = map[string]map[r2aReferenceSite]int{
 	"settleR2aOwnHopLocked":  {{"identity_pin_outgoing_provenance.go", "settleR2aOwnHop"}: 1, {"identity_record_admission_own_dm.go", "prepareOwnDMRelation"}: 1},
 	"prepareR2aFixtureOwnDM": {}, "submitR2aFixtureOwnDM": {}, "openR2aFixtureHop": {}, "settleR2aOwnHop": {{"identity_pin_own_dm_port.go", "TrySettle"}: 1},
-	"prepareR2aOwnDM":                      {{"identity_pin_outgoing_provenance.go", "prepareR2aFixtureOwnDM"}: 1, {"identity_pin_own_dm_port.go", "Submit"}: 1},
-	"submitR2aOwnDM":                       {{"identity_pin_outgoing_provenance.go", "submitR2aFixtureOwnDM"}: 1, {"identity_pin_own_dm_port.go", "Submit"}: 1},
+	"prepareR2aOwnDM":                      {{"identity_pin_outgoing_provenance.go", "prepareR2aFixtureOwnDM"}: 1, {"identity_pin_own_dm_port.go", "submitWithResidence"}: 1},
+	"submitR2aOwnDM":                       {{"identity_pin_outgoing_provenance.go", "submitR2aFixtureOwnDM"}: 1, {"identity_pin_own_dm_port.go", "submitWithResidence"}: 1},
 	"storeIncomingMessageWithR2a":          {{"service.go", "storeIncomingMessage"}: 1, {"identity_pin_outgoing_provenance.go", "submitR2aOwnDM"}: 1},
 	"finishPeerSessionForCM":               {{"peer_sessions.go", "openPeerSessionForCM"}: 1, {"identity_pin_outgoing_provenance.go", "openR2aFixtureHop"}: 1},
 	"captureR2aHopPublication":             {{"identity_pin_outgoing_provenance.go", "openR2aFixtureHop"}: 1, {"peer_sessions.go", "finishPeerSessionForCM"}: 1},
@@ -147,7 +147,7 @@ func r2aGuardErrors(sources map[string][]byte, expected map[string]map[r2aRefere
 		wantFields := map[string]map[r2aReferenceSite]int{
 			"outgoingProvenance": {{"identity_pin_outgoing_provenance.go", "registerR2aOrigin"}: 1, {"identity_pin_outgoing_provenance.go", "r2aCurrentLocked"}: 1, {"identity_pin_outgoing_provenance.go", "existingR2aOrigin"}: 2},
 			"ack":                {{"identity_pin_outgoing_provenance.go", "settleR2aOwnHopLocked"}: 1, {"relay.go", "sendTableRoutedRelayMessageWithR2a"}: 1},
-			"sealed":             {{"identity_record_admission_own_dm.go", "bindOwnDMResidence"}: 4, {"identity_pin_outgoing_provenance.go", "submitR2aOwnDM"}: 5, {"identity_pin_outgoing_provenance.go", "openR2aFixtureHop"}: 1, {"identity_pin_outgoing_provenance.go", "snapshotR2aDirectedSession"}: 1, {"peer_sessions.go", "finishPeerSessionForCM"}: 3, {"identity_pin_own_dm_port.go", "Submit"}: 3},
+			"sealed":             {{"identity_record_admission_own_dm.go", "bindOwnDMResidence"}: 4, {"identity_pin_outgoing_provenance.go", "submitR2aOwnDM"}: 5, {"identity_pin_outgoing_provenance.go", "openR2aFixtureHop"}: 1, {"identity_pin_outgoing_provenance.go", "snapshotR2aDirectedSession"}: 1, {"peer_sessions.go", "finishPeerSessionForCM"}: 3, {"identity_pin_own_dm_port.go", "submitWithResidence"}: 3},
 			"prepared":           {{"identity_pin_outgoing_provenance.go", "registerR2aOrigin"}: 3, {"identity_pin_outgoing_provenance.go", "r2aCurrentLocked"}: 4, {"identity_pin_outgoing_provenance.go", "claimR2aFirstDirectedItemLocked"}: 8, {"identity_pin_outgoing_provenance.go", "settleR2aOwnHop"}: 1, {"identity_pin_outgoing_provenance.go", "settleR2aOwnHopLocked"}: 5, {"identity_record_admission.go", "expireRelationSlotsLocked"}: 1, {"identity_record_admission_own_dm.go", "ownDMObservation"}: 1, {"identity_record_admission_own_dm.go", "registerOwnDMRecordAdmission"}: 3, {"identity_record_admission_own_dm.go", "ownDMClaimCurrentLocked"}: 2, {"identity_record_admission_own_dm.go", "stageOwnDMRelationRecordLocked"}: 3},
 		}
 

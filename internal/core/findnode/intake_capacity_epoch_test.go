@@ -88,7 +88,7 @@ func TestCandidateCapacityCompleteCurrentEpochAndOwnership(t *testing.T) {
 			if _, err := capacitySelect(o, now, cuts...); err == nil {
 				t.Fatal("invalid or incomplete boundary cut accepted", kind)
 			}
-			if o.capacity.epoch != 0 || o.capacity.cap != 512 || len(o.groups.records) != 0 {
+			if o.capacity.epoch != 0 || o.capacity.cap != 512 || fixedGroupRecords(&o.groups) != 0 {
 				t.Fatal("refused cut changed frozen cap or debt", kind)
 			}
 		})
@@ -170,10 +170,10 @@ func TestCandidateCapacityRefusedBoundaryKeepsAcceptedWriter(t *testing.T) {
 	if err := o.finishForward(permit, finish, candidateWriteFailed); err != nil {
 		t.Fatal("accepted completion blocked by missing new cut", err)
 	}
-	if o.groups.records[key].expires != finish+candidateGroupWindow || calendar.projected != projected || calendar.actual != actual {
+	if fixedMustRecord(t, &o.groups, key).expires != finish+candidateGroupWindow || calendar.projected != projected || calendar.actual != actual {
 		t.Fatal("writer finish lost expiry debt or refunded tokens")
 	}
-	if o.groups.records[key].refs != 0 || o.snapshot().pending != 0 {
+	if fixedMustRecord(t, &o.groups, key).refs != 0 || o.snapshot().pending != 0 {
 		t.Fatal("actual writer return not released")
 	}
 	at = finish + Instant(100*time.Millisecond)
@@ -207,27 +207,27 @@ func TestCandidateCapacityShrinkRetainsConservativeGlobalDebt(t *testing.T) {
 			o.groups.commit(plan, at)
 		}
 	}
-	count, names, generation, owner := len(o.groups.records), len(o.groups.named), o.groups.generation, o.sourceOwner
+	count, names, generation, owner := fixedGroupRecords(&o.groups), fixedGroupNames(&o.groups), o.groups.generation, o.sourceOwner
 	if count != 4640 || count <= 512+16*candidateGroupCells || count > candidateMaxRecords {
 		t.Fatal("shrink debt fixture not above new admission ceiling", count)
 	}
 	if cap, err := capacitySelect(o, candidateCapacityWindow, capacityCut(o, candidateCapacityWindow, 0)); err != nil || cap != 512 {
 		t.Fatal(err, cap)
 	}
-	if len(o.groups.records) != count || len(o.groups.named) != names || o.groups.generation != generation || o.sourceOwner != owner {
+	if fixedGroupRecords(&o.groups) != count || fixedGroupNames(&o.groups) != names || o.groups.generation != generation || o.sourceOwner != owner {
 		t.Fatal("capacity shrink evicted or reset old debt")
 	}
 	if _, err := o.groups.plan("late", domain.PeerIdentity{254, 1}, candidateCapacityWindow, 512); !errors.Is(err, ErrCapacity) {
 		t.Fatal("hard retained ceiling allowed new distinct debt after shrink", err)
 	}
 	key := candidateRecordKey{cell: 0, target: domain.PeerIdentity{1, 0, 0}}
-	refs := o.groups.records[key].refs
+	refs := fixedMustRecord(t, &o.groups, key).refs
 	plan, err := o.groups.plan("g0", key.target, candidateCapacityWindow, 512)
 	if err != nil {
 		t.Fatal("shrink changed existing-record reference policy", err)
 	}
 	o.groups.commit(plan, candidateCapacityWindow)
-	if o.groups.records[key].refs != refs+1 || len(o.groups.records) != count {
+	if fixedMustRecord(t, &o.groups, key).refs != refs+1 || fixedGroupRecords(&o.groups) != count {
 		t.Fatal("existing record lost retained reference")
 	}
 }
@@ -273,7 +273,7 @@ func TestCandidateCapacityForwardSlotKeepsFutureDebtAndOldPermit(t *testing.T) {
 		t.Fatal("future forwarding slot selected future degree epoch", slot, o.capacity.epoch)
 	}
 	key := last.entry.intake.cell
-	if o.groups.records[key].expires != slot+candidateGroupWindow || o.groups.records[key].expires <= seal+candidateGroupWindow {
+	if fixedMustRecord(t, &o.groups, key).expires != slot+candidateGroupWindow || fixedMustRecord(t, &o.groups, key).expires <= seal+candidateGroupWindow {
 		t.Fatal("future slot debt shortened to admission time")
 	}
 	permit, _, err := o.takeForward(last, slot)

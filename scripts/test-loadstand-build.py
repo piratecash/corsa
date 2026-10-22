@@ -748,7 +748,7 @@ class EvidenceEnvironmentControls(unittest.TestCase):
         self.assertEqual('-O2 -g', env['CGO_CFLAGS'])
 
     def test_fixed_artifact_inspection_and_deferred_runtime(self):
-        raw = (b'/private/bin: go1.27.2\n\tpath\tgithub.com/FastCorp/Corsa/cmd/corsa-node\n'
+        raw = (b'/private/bin: go1.27.3\n\tpath\tgithub.com/FastCorp/Corsa/cmd/corsa-node\n'
                b'\tmod\tgithub.com/FastCorp/Corsa\t(devel)\t\n'
                b'\tbuild\t-buildmode=exe\n\tbuild\t-compiler=gc\n\tbuild\t-trimpath=true\n'
                b'\tbuild\tCGO_ENABLED=0\n\tbuild\tGOARCH=arm64\n\tbuild\tGOOS=linux\n\tbuild\tGOARM64=v8.0\n')
@@ -757,7 +757,7 @@ class EvidenceEnvironmentControls(unittest.TestCase):
         raw = raw.replace(b'github.com/FastCorp/Corsa', text.encode())
         parsed = build.parse_artifact_metadata(raw, b'build-id\n', 'corsa-node')
         self.assertEqual('0', parsed['settings']['CGO_ENABLED'])
-        for bad in (raw.replace(b'go1.27.2', b'go1.27.1'), raw+b'\tbuild\tvcs.modified=false\n',
+        for bad in (raw.replace(b'go1.27.3', b'go1.27.2'), raw+b'\tbuild\tvcs.modified=false\n',
                     raw.replace(b'\tGOARCH=arm64', b'\tGOARCH=amd64')):
             with self.subTest(bad=sha(bad)), self.assertRaises(build.Failure):
                 build.parse_artifact_metadata(bad, b'build-id\n', 'corsa-node')

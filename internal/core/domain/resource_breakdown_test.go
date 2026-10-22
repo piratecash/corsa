@@ -140,6 +140,7 @@ func TestSubsystemNamesAreStable(t *testing.T) {
 		ResourceSubsystemSessions:   "sessions",
 		ResourceSubsystemKnowledge:  "knowledge",
 		ResourceSubsystemBans:       "bans",
+		ResourceSubsystemOverlay:    "overlay",
 	}
 	for subsystem, name := range want {
 		if got := subsystem.String(); got != name {

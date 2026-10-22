@@ -11,8 +11,9 @@ import (
 
 func c5SourceErrors(sources map[string][]byte) []string {
 	expected := map[string]map[string]int{
-		"findNodePriorityProfile":        {"find_node_connection.go:<package>": 1, "find_node_connection.go:valid": 1, "find_node_connection.go:findNodePriorityMembers": 1, "find_node_connection.go:findNodePrioritySnapshot": 1},
-		"findNodePriorityContact":        {"find_node_connection.go:<package>": 1, "find_node_connection.go:captureFindNodePriorityClasses": 2},
+		"findNodePriorityProfile":        {"find_node_connection.go:<package>": 1, "find_node_connection.go:valid": 1, "find_node_connection.go:findNodePriorityMembers": 1, "find_node_connection.go:findNodePrioritySnapshot": 1, "find_node_connection.go:collectOwnedFindNodeRawFacts": 1, "find_node_bridge_capture.go:<package>": 2},
+		"findNodePriorityContact":        {"find_node_connection.go:<package>": 1, "find_node_connection.go:captureFindNodePriorityClasses": 2, "find_node_connection.go:findNodePriorityClassLocked": 1, "find_node_connection.go:collectOwnedFindNodeRawFacts": 1, "find_node_connection.go:collectOwnedFindNodeRawClasses": 2},
+		"findNodePriorityClassLocked":    {"find_node_connection.go:captureFindNodePriorityClasses": 1, "find_node_connection.go:collectOwnedFindNodeRawClasses": 1},
 		"findNodePriorityClassFact":      {"find_node_connection.go:<package>": 1, "find_node_connection.go:captureFindNodePriorityClasses": 3},
 		"findNodePriorityMemberLocked":   {"find_node_connection.go:findNodePriorityMembers": 1, "find_node_connection.go:findNodePrioritySnapshot": 1},
 		"findNodePriorityMembers":        {"find_node_connection.go:findNodePrioritySnapshot": 1},
@@ -20,6 +21,7 @@ func c5SourceErrors(sources map[string][]byte) []string {
 		"findNodePrioritySnapshot":       {},
 		"NewPrioritySnapshot":            {"find_node_connection.go:findNodePrioritySnapshot": 1},
 	}
+	expected["findNodePriorityProfile"]["identity_pin_own_dm_runtime.go:NewInactiveOwnDMRuntimeCandidate"] = 1
 	actual := map[string]map[string]int{}
 	for name := range expected {
 		actual[name] = map[string]int{}

@@ -17,6 +17,7 @@ import (
 
 	"github.com/piratecash/corsa/internal/core/connauth"
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/findnodebridge"
 	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/netcore"
 	"github.com/piratecash/corsa/internal/core/protocol"
@@ -86,6 +87,7 @@ type secureSessions struct {
 // secureSessionsOptions is what a node's v2 state is built from besides its
 // identity.
 type secureSessionsOptions struct {
+	bridgePublisher findnodebridge.Publisher // immutable before store constructor/load
 	// ninElapsed is immutable before the store loads/anchors a journal.
 	ninElapsed func() (time.Duration, error)
 	// storePath is the downgrade-protection store's file.
@@ -143,12 +145,13 @@ func buildSecureSessions(id *identity.Identity, opts secureSessionsOptions, buil
 		return unavailableSessions(opts, fmt.Errorf("certificate source: %w", err))
 	}
 	store := openSecureSessionStore(secureSessionStoreOptions{
-		ninElapsed: opts.ninElapsed,
-		path:       opts.storePath,
-		markerPath: opts.markerPath,
-		clock:      trustedclock.New(trustedclock.Sources{Wall: opts.clock, SinceBoot: trustedclock.SinceBoot}),
-		logger:     log.Logger,
-		audit:      secretfile.AuditLocation,
+		bridgePublisher: opts.bridgePublisher,
+		ninElapsed:      opts.ninElapsed,
+		path:            opts.storePath,
+		markerPath:      opts.markerPath,
+		clock:           trustedclock.New(trustedclock.Sources{Wall: opts.clock, SinceBoot: trustedclock.SinceBoot}),
+		logger:          log.Logger,
+		audit:           secretfile.AuditLocation,
 	})
 	return &secureSessions{
 		mode:             mode,
@@ -375,7 +378,7 @@ func (s *Service) acceptSecureInbound(metered *netcore.MeteredConn, reader *bufi
 		s.noteLocalContactProof(proof, binding)
 	}
 	if s.inboundPins != nil || s.findNode != nil || s.degree != nil || s.hasContactRecordPushTransportCapability() {
-		l := &proofTransportLifetime{token: s.proofToken, role: sessionv2.RoleListener}
+		l := &proofTransportLifetime{token: s.proofToken, bridgeTerminal: s.bridgeTerminal, role: sessionv2.RoleListener}
 		wire := &peekedConn{Conn: conn, reader: conn}
 		l.evidence = &proofTransportEvidence{session: session, protected: conn, raw: replayed, wire: wire, group: sourceGroup(resolveRemoteIPFromAddr(metered.RemoteAddr())), identity: peer.Identity}
 		if s.inboundPins != nil {
@@ -915,7 +918,7 @@ func (s *Service) provenTransport(ctx context.Context, transport *dialledTranspo
 	}
 	transport.pinBinding, transport.pinGroup = result.pinBinding, result.pinGroup
 	if (s.findNode != nil || s.degree != nil || s.hasContactRecordPushTransportCapability()) && transport.proofRaw != nil {
-		l := &proofTransportLifetime{token: s.proofToken, role: sessionv2.RoleDialer, outbound: true, id: transport.connID}
+		l := &proofTransportLifetime{token: s.proofToken, bridgeTerminal: s.bridgeTerminal, role: sessionv2.RoleDialer, outbound: true, id: transport.connID}
 		wrapped := &peekedConn{Conn: wire, reader: wire}
 		l.evidence = &proofTransportEvidence{session: session, protected: wire, raw: transport.proofRaw, wire: wrapped, group: sourceGroup(resolveRemoteIPFromAddr(transport.raw.RemoteAddr())), identity: peer.Identity}
 		s.captureFindNodeSeed(l, session, intro)

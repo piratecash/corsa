@@ -341,14 +341,14 @@ func overlayHintSourceErrors(sources map[string][]byte) []string {
 		"overlayDegreeHint":           {"peer_state_overlay_hint.go:<package>": 1, "peer_state_overlay_hint.go:UnmarshalJSON": 2, "peer_state_overlay_hint.go:IsZero": 1, "peer_state_overlay_hint.go:MarshalJSON": 1, "peer_state.go:<package>": 1, "peer_state.go:loadPeerState": 1, "peer_management.go:flushPeerState": 1},
 		"overlayDegreeStatistic":      {"peer_state_overlay_hint.go:<package>": 2, "peer_state_overlay_hint.go:UnmarshalJSON": 1, "peer_state_overlay_hint.go:freshOverlayDegreeStatistic": 3, "service.go:<package>": 1},
 		"freshOverlayDegreeStatistic": {"peer_state_overlay_hint.go:freshOverlayDegreeStatistic": 1, "peer_state.go:loadPeerState": 1, "peer_management.go:flushPeerState": 1},
-		"overlayDWin":                 {"service.go:<package>": 1, "service.go:newServiceWithRecordAdmissionClasses": 1, "peer_management.go:flushPeerState": 1},
-		"OverlayDWin":                 {"peer_state.go:<package>": 1, "peer_state.go:loadPeerState": 2, "service.go:newServiceWithRecordAdmissionClasses": 1, "peer_management.go:flushPeerState": 1},
+		"overlayDWin":                 {"service.go:<package>": 1, "service.go:newServiceWithConstruction": 1, "peer_management.go:flushPeerState": 1},
+		"OverlayDWin":                 {"peer_state.go:<package>": 1, "peer_state.go:loadPeerState": 2, "service.go:newServiceWithConstruction": 1, "peer_management.go:flushPeerState": 1},
 		"savePeerState":               {"peer_state.go:savePeerState": 1, "peer_management.go:flushPeerState": 1},
 	}
 
 	// Only the unused producer and the same actual flush snapshot may add references.
 	for name, sites := range map[string]map[string]int{
-		"overlayDegreeStatistic":      {"peer_state_degree_statistic.go:captureOverlayDWinForFlush": 6, "peer_state_degree_statistic.go:selectOverlayDegreeStatistic": 2},
+		"overlayDegreeStatistic":      {"peer_state_degree_statistic.go:captureOverlayDWinForFlush": 6, "peer_state_degree_statistic.go:selectOverlayDegreeStatistic": 2, "peer_state_owned_degree_statistic.go:captureOwnedOverlayDWinForFlush": 8},
 		"freshOverlayDegreeStatistic": {"peer_state_degree_statistic.go:selectOverlayDegreeStatistic": 1},
 		"overlayDWin":                 {"peer_management.go:flushPeerState": 3},
 	} {
@@ -356,6 +356,9 @@ func overlayHintSourceErrors(sources map[string][]byte) []string {
 			expected[name][site] = count
 		}
 	}
+	// Exact private Ready constructor sites; all existing closures stay strict.
+	expected["freshOverlayDegreeStatistic"]["find_node_ready_construction.go:prepareFindNodeReadyConstruction"] = 1
+	expected["OverlayDWin"]["find_node_ready_construction.go:prepareFindNodeReadyConstruction"] = 1
 	actual := map[string]map[string]int{}
 	for name := range expected {
 		actual[name] = map[string]int{}

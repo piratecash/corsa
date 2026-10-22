@@ -94,11 +94,14 @@ type MessageStore interface {
 type Service struct {
 	r2OwnDMOwner *ownDMProvenanceOwner // immutable before candidate constructor returns; ordinary nil
 	// Immutable constructor/private-factory composition; no ordinary activation.
-	proofToken *proofTransportServiceToken
-	findNode   *findNodeAdapter
-	degree     *degreeOwner // immutable inactive statistical observer; ordinary nil
+	proofToken     *proofTransportServiceToken
+	findNode       *findNodeAdapter
+	degree         *degreeOwner                  // immutable inactive statistical observer; ordinary nil
+	bridgeTerminal *findNodeBridgeTerminal       // immutable first-literal Constructing candidate
+	bridgeCapture  *findNodeBridgeCaptureContext // immutable original roles, first literal
 	// Immutable optional statistics producer, assigned only by the unused root.
-	degreeStatisticProducer *degreeStatisticProducer
+	degreeStatisticProducer      *degreeStatisticProducer
+	ownedDegreeStatisticProducer *ownedDegreeStatisticProducer // immutable first-literal binding; start under degree.mu
 
 	// selectedPins is immutable after New; its joined worker owns passMu/retry pacing.
 	selectedPins *selectedPinProducer
@@ -775,6 +778,12 @@ type Service struct {
 	// other lock is taken under it.
 	backgroundMu     sync.Mutex
 	backgroundClosed bool
+	// ownedLoopsWg owns the two lazy FIND_NODE workers. Unlike runLoopsWg,
+	// its Add can originate before Run or from an arbitrary receive caller.
+	// backgroundMu serializes its Add with ownedLoopsClosed: shutdown closes
+	// this gate before waiting, so no zero-to-one Add can race that Wait.
+	ownedLoopsWg     sync.WaitGroup
+	ownedLoopsClosed bool
 	// conns is the single source of truth for live connection state (core,
 	// metered counters, tracked flag). It is keyed by netcore.ConnID so the
 	// key is a domain identifier, not a raw net.Conn handle. All reads and
@@ -1959,6 +1968,15 @@ func newRelationRecordCandidateService(cfg config.Node, id *identity.Identity, e
 }
 
 func newServiceWithRecordAdmissionClasses(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus, networkOverride netcore.Network, constructor datagramConstructor, admission recordAdmissionConstruction, inboundClocks ...inboundPinClock) *Service {
+	return newServiceWithConstruction(cfg, id, eventBus, networkOverride, constructor, serviceConstruction{record: admission}, inboundClocks...)
+}
+
+func newServiceWithConstruction(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus, networkOverride netcore.Network, constructor datagramConstructor, construction serviceConstruction, inboundClocks ...inboundPinClock) *Service {
+	admission := construction.record
+	bridge := construction.bridge
+	if bridge != nil {
+		bridge.claim()
+	}
 	classes := admission.classes
 	if !admission.kSource.valid() || classes != recordAdmissionImmediateK && admission.kSource != contactRecordPushSource {
 		panic("unsupported Service K provenance")
@@ -1974,10 +1992,18 @@ func newServiceWithRecordAdmissionClasses(cfg config.Node, id *identity.Identity
 	// Bootstrap peers always appear first; persisted peers are appended
 	// in score-descending order, skipping duplicates.
 	peersStatePath := cfg.EffectivePeersStatePath()
-	peerState, err := loadPeerState(peersStatePath)
-	if err != nil {
-		log.Error().Str("path", peersStatePath).Err(err).Msg("peer state load failed")
-		peerState = peerStateFile{Version: peerStateVersion, Peers: []peerEntry{}}
+	var peerState peerStateFile
+	var err error
+	if construction.ready != nil {
+		// Non-nil prepared input includes a supplied EMPTY decoded state. Never
+		// reread disk or refresh the original optional tuple/date in this path.
+		peerState = construction.ready.peerState
+	} else {
+		peerState, err = loadPeerState(peersStatePath)
+		if err != nil {
+			log.Error().Str("path", peersStatePath).Err(err).Msg("peer state load failed")
+			peerState = peerStateFile{Version: peerStateVersion, Peers: []peerEntry{}}
+		}
 	}
 
 	peers := make([]transport.Peer, 0, len(cfg.BootstrapPeers)+len(peerState.Peers))
@@ -2039,7 +2065,7 @@ func newServiceWithRecordAdmissionClasses(cfg config.Node, id *identity.Identity
 		selfContact.BoxKey = selfBoxKey
 		selfContact.BoxSignature = selfBoxSig
 	}
-	trust, err := loadTrustStore(cfg.TrustStorePath, selfContact)
+	trust, err := loadTrustStoreForConstruction(cfg.TrustStorePath, selfContact, bridge)
 	if err != nil {
 		panic(err)
 	}
@@ -2200,15 +2226,36 @@ func newServiceWithRecordAdmissionClasses(cfg config.Node, id *identity.Identity
 	// handlers that run before Run (the RPC server is serving by then) and
 	// unit tests that never call Run read it, and Run must not publish a new
 	// value to readers it has no synchronisation with. Run cancels it.
-	lifecycleCtx, lifecycleCancel := context.WithCancel(context.Background())
+	var lifecycleCtx context.Context
+	var lifecycleCancel context.CancelFunc
+	proofToken := &proofTransportServiceToken{}
+	var degree *degreeOwner
+	var terminal *findNodeBridgeTerminal
+	var ownedStatistic *ownedDegreeStatisticProducer
+	var findNode *findNodeAdapter
+	var bridgeCapture *findNodeBridgeCaptureContext
+	if bridge == nil {
+		lifecycleCtx, lifecycleCancel = context.WithCancel(context.Background())
+	} else {
+		lifecycleCtx, lifecycleCancel = bridge.ctx, bridge.cancel
+		proofToken, degree, terminal = bridge.token, bridge.owner, bridge.terminal
+		ownedStatistic = bridge.statistic
+		findNode = bridge.findNode
+		bridgeCapture = bridge.capture
+	}
 
 	svc := &Service{
-		proofToken:       &proofTransportServiceToken{},
-		recordProtection: recordProtection,
-		runCtx:           lifecycleCtx,
-		runCancel:        lifecycleCancel,
-		networkOverride:  networkOverride,
-		identity:         id,
+		proofToken:                   proofToken,
+		degree:                       degree,
+		bridgeTerminal:               terminal,
+		ownedDegreeStatisticProducer: ownedStatistic,
+		findNode:                     findNode,
+		bridgeCapture:                bridgeCapture,
+		recordProtection:             recordProtection,
+		runCtx:                       lifecycleCtx,
+		runCancel:                    lifecycleCancel,
+		networkOverride:              networkOverride,
+		identity:                     id,
 
 		connectOnlyResolver: net.DefaultResolver,
 		peerTCPDial:         dialTCPDirect,
@@ -2289,6 +2336,10 @@ func newServiceWithRecordAdmissionClasses(cfg config.Node, id *identity.Identity
 		setupFailures:            make(map[domain.PeerAddress]*setupFailureEntry),
 		aggregateStatus:          domain.AggregateStatusSnapshot{Status: domain.NetworkStatusOffline},
 		done:                     make(chan struct{}),
+	}
+	if construction.ready != nil {
+		// Retain cleanup custody before the first builder callback can escape.
+		construction.ready.service, construction.ready.trust = svc, trust
 	}
 	// Initialize PeerProvider (Stage 3: connection management integration).
 	svc.peerClock = time.Now
@@ -2659,12 +2710,16 @@ func newServiceWithRecordAdmissionClasses(cfg config.Node, id *identity.Identity
 		inboundElapsed = inboundClocks[0].elapsed
 	}
 	svc.secureSessions = newSecureSessions(id, secureSessionsOptions{
+		bridgePublisher:  constructionPublisher(bridge),
 		ninElapsed:       inboundElapsed,
 		storePath:        secureSessionStorePath(cfg),
 		markerPath:       pinStoreMarkerPath(cfg),
 		clock:            time.Now,
 		tlsFirstDisabled: cfg.DisableV2TLSFirst,
 	})
+	if construction.ready != nil {
+		construction.ready.sessions, construction.ready.store = svc.secureSessions, svc.secureSessions.store
+	}
 
 	svc.selectedPins = newSelectedPinProducer(selectedPinProducerOptions{service: svc, clock: time.Now})
 	svc.contactPins = newContactPinProducer(svc)
@@ -2712,6 +2767,9 @@ func newServiceWithRecordAdmissionClasses(cfg config.Node, id *identity.Identity
 		// Bind the immutable backend only after secureSessions and self-record.
 		// post_identity reads this final resolver through its Service at Handle.
 		svc.identityResolver = newIdentityResolverWithRecordAdmission(svc, loadIdentityIntentStore(cfg.IdentityIntentsPath), selfRecordNetwork)
+	}
+	if construction.ready != nil {
+		construction.ready.installOwnDM(svc)
 	}
 	// Built here, next to the resolver, because both consume post_identity
 	// and the ingest has to be able to ask each of them whose answer it is
@@ -2763,6 +2821,15 @@ func newServiceWithRecordAdmissionClasses(cfg config.Node, id *identity.Identity
 	svc.deliveryMu.RUnlock()
 	svc.peerMu.Unlock()
 
+	// Last constructor application wait is above. Actual coverage starts at
+	// the owned sample inside this one-time installation, never domain mint.
+	if construction.ready != nil {
+		// All mutable store/lifecycle checks finish BEFORE the observer install.
+		construction.ready.failure = construction.ready.checkBeforeInstall(svc)
+	}
+	if bridge != nil && bridge.statistic != nil && (construction.ready == nil || construction.ready.failure == nil) {
+		bridge.statisticInstalled = svc.installOwnedDegreeStatistic()
+	}
 	return svc
 }
 
@@ -2802,7 +2869,10 @@ func (s *Service) RegisterMessageStore(store MessageStore) {
 // (not a member, but joined by the CM event loop through cm.dialWg before it
 // returns), so none of them raises the counter from zero under the Wait.
 //
-// # It is the ONLY way Run may start a long-lived goroutine
+// # It is the lifecycle group for loops started by Run
+//
+// Lazy FIND_NODE workers use goOwnedFindNodeLoop instead: their arbitrary
+// receive callers require a gate before their separate Run-joined WaitGroup.
 //
 // Cancellation only ASKS a loop to finish. A loop that is merely cancelled can
 // still be inside a network send, a TTL drain or an event publication when Run
@@ -2822,6 +2892,47 @@ func (s *Service) goRunLoop(fn func()) {
 		defer crashlog.DeferRecover()
 		fn()
 	}()
+}
+
+// goOwnedFindNodeLoop admits a lazy worker under the same leaf admission
+// mutex used by background jobs, but gives it a separate, Run-joined lifetime.
+// Never join backgroundWg inside Run: its jobs may depend on Run's teardown.
+func (s *Service) goOwnedFindNodeLoop(done <-chan struct{}, fn func()) bool {
+	// The join cancels s.runCtx. Admit only that same original construction
+	// lifetime, never a caller-selected loop that cancellation cannot release.
+	if s.runCtx == nil || s.runCancel == nil || done == nil || done != s.runCtx.Done() {
+		return false
+	}
+	s.backgroundMu.Lock()
+	if s.backgroundClosed || s.ownedLoopsClosed {
+		s.backgroundMu.Unlock()
+		return false
+	}
+	select {
+	case <-done:
+		s.backgroundMu.Unlock()
+		return false
+	default:
+	}
+	s.ownedLoopsWg.Add(1)
+	s.backgroundMu.Unlock()
+	// lifecycle: ownedLoopsWg; stopRunLifecycle joins before subsystem teardown,
+	// Run's backstop joins on early refusal, WaitBackground joins no-Run fixtures.
+	go func() {
+		defer s.ownedLoopsWg.Done()
+		fn()
+	}()
+	return true
+}
+
+// stopOwnedFindNodeLoops fences every registration before the Wait. The
+// caller cancels the original Service context first; no lock is held while
+// workers release their original queue slots and pending obligations.
+func (s *Service) stopOwnedFindNodeLoops() {
+	s.backgroundMu.Lock()
+	s.ownedLoopsClosed = true
+	s.backgroundMu.Unlock()
+	s.ownedLoopsWg.Wait()
 }
 
 // stopRunLifecycle is the ONE ordered teardown of everything Run started: ASK
@@ -2876,12 +2987,12 @@ func (s *Service) goRunLoop(fn func()) {
 //     inside it, and the withdrawals the sessions unwinding here report
 //     afterwards are refused by the flag the cancel sets.
 //
-// One group and one wait, not a sequence of per-subsystem joins: every loop is
-// asked to stop by the same cancel, so `wait(A); wait(B)` and `wait(A ∪ B)`
-// release the caller at exactly the same instant, and a sequence invites the
-// reader to believe in an ordering it does not have.
+// The same cancel stops both the lazy owned workers and Run's loops. Their
+// separate counters express different registration rules, not subsystem
+// dependencies: both joins complete before any subsystem teardown.
 func (s *Service) stopRunLifecycle(cancel context.CancelFunc) {
 	cancel()
+	s.stopOwnedFindNodeLoops()
 	s.runLoopsWg.Wait()
 }
 
@@ -2931,7 +3042,13 @@ func (s *Service) Run(ctx context.Context) (runErr error) {
 	// unusable connection budget, a Network override). It is
 	// idempotent, so on every ordinary path the sequence has already done it
 	// and this is a no-op.
-	defer runCancel()
+	defer func() {
+		runCancel()
+		// Covers workers admitted before Run and every early startup refusal.
+		// On the normal path stopRunLifecycle already joined this group before
+		// subsystem teardown; closing and waiting again is idempotent.
+		s.stopOwnedFindNodeLoops()
+	}()
 	ctx = s.runCtx
 
 	if err := s.beginIdentityPinNetworkRun(); err != nil {
@@ -3223,15 +3340,16 @@ func (s *Service) Address() string {
 }
 
 // WaitBackground blocks until every goroutine this Service owns has finished:
-// the fire-and-forget jobs tracked by backgroundWg and the lifecycle loops
-// tracked by runLoopsWg. Tests call this before TempDir cleanup to avoid
+// the fire-and-forget jobs tracked by backgroundWg, the gated lazy workers
+// tracked by ownedLoopsWg, and the lifecycle loops tracked by runLoopsWg.
+// Tests call this before TempDir cleanup to avoid
 // "directory not empty" races caused by async disk writes.
 //
-// The two groups stay apart because RUN may only join one of them: backgroundWg
+// The groups stay apart because Run must not join backgroundWg: it
 // tracks fire-and-forget jobs across the whole Service, some of them started
 // during the very teardown Run is performing, so joining it from inside Run
 // would trade a use-after-teardown for a shutdown deadlock. This function is
-// the one place callers see both.
+// the one place callers see all three.
 //
 // PRECONDITION: Run is not executing — it either returned or was never called.
 // While Run executes, its goroutines may admit new jobs at any moment, and an
@@ -3246,6 +3364,7 @@ func (s *Service) Address() string {
 // scheduling work afterwards.
 func (s *Service) WaitBackground() {
 	s.backgroundWg.Wait()
+	s.ownedLoopsWg.Wait()
 	s.runLoopsWg.Wait()
 }
 
@@ -3535,7 +3654,7 @@ func (s *Service) handleConn(conn net.Conn, reservation *connbudget.Reservation)
 			return
 		}
 
-		line, err := s.readInboundCommandLineOwned(reader, connID, owner)
+		line, ownedReceive, ownedClaimed, ownedReceiveErr, err := s.readInboundOwnedFindNodeLine(reader, connID, owner)
 		if errors.Is(err, errInboundLineDropped) {
 			// One line consumed and dropped by admission; the connection lives
 			// on and the next line is read from where that one ended.
@@ -3577,6 +3696,15 @@ func (s *Service) handleConn(conn net.Conn, reservation *connbudget.Reservation)
 		// docs/protocol/datagram.md §3.5 requires the strict parser to read the
 		// same one (see rawLineForDispatch for the full argument and for why
 		// the announce-plane types stay on the trimmed form).
+		if ownedClaimed {
+			if ownedReceiveErr != nil {
+				continue
+			}
+			if err := s.dispatchOwnedFindNodeReceive(ownedReceive); err != nil {
+				continue
+			}
+			continue // original owned provisional row is retained, not a generic frame
+		}
 		if !s.handleCommandOwned(connID, line, owner) {
 			return
 		}

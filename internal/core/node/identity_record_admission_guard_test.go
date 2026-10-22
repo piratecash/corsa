@@ -43,7 +43,7 @@ func recordAdmissionClosedSource(name string, src []byte) error {
 			}
 			switch n := n.(type) {
 			case *ast.Ident:
-				if n.Name == "newIdentityResolverWithRecordAdmission" && (name != "service.go" || functionOwner != "newServiceWithRecordAdmissionClasses") {
+				if n.Name == "newIdentityResolverWithRecordAdmission" && (name != "service.go" || functionOwner != "newServiceWithConstruction") {
 					refused = fmt.Errorf("live opt-in reference in %s", functionOwner)
 				}
 			case *ast.CompositeLit:
@@ -278,10 +278,10 @@ func contactPushSourceErrors(sources map[string][]byte) []string {
 		"newContactRecordPushCandidateService":           {},
 		"newContactRecordReconciliationCandidateService": {},
 		"newRelationRecordCandidateService":              {},
-		"newIdentityResolverWithRecordAdmission":         {"service.go:newServiceWithRecordAdmissionClasses": 1},
+		"newIdentityResolverWithRecordAdmission":         {"service.go:newServiceWithConstruction": 1},
 		"hasContactRecordPushTransportCapability":        {"session_secure.go:acceptSecureInbound": 1, "session_secure.go:dialV2": 1, "session_secure.go:provenTransport": 1},
 		"newServiceWithRecordAdmissionClasses":           {"service.go:newServiceWithDatagramConstructor": 1, "service.go:newContactRecordPushCandidateService": 1, "service.go:newRelationRecordCandidateService": 1, "service.go:newContactRecordReconciliationCandidateService": 1, "identity_record_admission_own_dm.go:NewInactiveOwnDMAdmissionCandidate": 1},
-		"newIdentityResolverWithContactRecordAdmission":  {"service.go:newServiceWithRecordAdmissionClasses": 1},
+		"newIdentityResolverWithContactRecordAdmission":  {"service.go:newServiceWithConstruction": 1},
 		"prepareContactRecordPush":                       {"identity_discovery.go:Handle": 1},
 		"reserveContactRecordPush":                       {"identity_record_admission.go:prepareContactRecordPush": 1},
 		"finishContactRecordPush":                        {"identity_record_admission.go:prepareContactRecordPush": 2, "identity_discovery.go:Handle": 1},
@@ -310,7 +310,7 @@ func contactPushSourceErrors(sources map[string][]byte) []string {
 		"contactRecordReconciliationAuthority": {"identity_pin_contact_reconciliation.go:reserveContactRecordReconciliation": 1},
 		"preparedContactRecordStage":           {"identity_pin_contact_record.go:prepareContactRecordStageLocked": 1},
 		"contactRecordCandidate":               {"identity_pin_contact_record.go:observeContactRecord": 1, "identity_pin_contact_reconciliation.go:captureReconciliation": 1},
-		"recordAdmissionConstruction":          {"service.go:newServiceWithDatagramConstructor": 1, "service.go:newContactRecordPushCandidateService": 1, "service.go:newRelationRecordCandidateService": 1, "service.go:newContactRecordReconciliationCandidateService": 1, "identity_record_admission_own_dm.go:NewInactiveOwnDMAdmissionCandidate": 1},
+		"recordAdmissionConstruction":          {"find_node_ready_construction.go:buildWithOwnDM": 2, "service.go:newServiceWithDatagramConstructor": 1, "service.go:newContactRecordPushCandidateService": 1, "service.go:newRelationRecordCandidateService": 1, "service.go:newContactRecordReconciliationCandidateService": 1, "identity_record_admission_own_dm.go:NewInactiveOwnDMAdmissionCandidate": 1},
 		"relationRecordAdmission":              {"identity_record_admission.go:newIdentityResolverWithRecordAdmission": 1, "identity_record_admission.go:newIdentityResolverWithContactRecordAdmission": 1},
 	}
 	actual, made := map[string]map[string]int{}, map[string]map[string]int{}

@@ -128,7 +128,7 @@ func TestSessionSeedClosedConstructorRootsAndStateShapes(t *testing.T) {
 		typ   reflect.Type
 		names []string
 	}{
-		{reflect.TypeFor[sessionSeedState](), []string{"identity", "proof", "consumed"}},
+		{reflect.TypeFor[sessionSeedState](), []string{"identity", "proof", "prepared", "consumed"}},
 		{reflect.TypeFor[SessionSeed](), []string{"state"}},
 		{reflect.TypeFor[sessionState](), []string{"connID", "identity", "identityProof", "group", "opened", "closed", "sourceWindows", "mu", "nextID", "exhausted", "signer", "signingProjected", "signingActual"}},
 	} {
@@ -204,7 +204,7 @@ func TestSessionSeedClosedConstructorRootsAndStateShapes(t *testing.T) {
 			})
 		}
 	}
-	if !reflect.DeepEqual(made, map[string]map[string]int{"sessionSeedState": {"session.go:PrepareSession": 1}, "sessionState": {"session.go:Bind": 1}}) {
+	if !reflect.DeepEqual(made, map[string]map[string]int{"sessionSeedState": {"session.go:PrepareSession": 1}, "sessionState": {"session.go:PrepareSession": 1}}) {
 		t.Fatal("nonzero seed/session constructor escaped", made)
 	}
 	if !reflect.DeepEqual(refs, map[string]map[string]int{"PrepareSession": {"session.go:NewSession": 1}, "Bind": {"session.go:NewSession": 1}, "End": {"session.go:close": 1}}) {
