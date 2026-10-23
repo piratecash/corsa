@@ -49,7 +49,7 @@ func (s loadStandProcessSource) DatagramSummary(ctx context.Context) (loadStandR
 	if err != nil {
 		return loadStandReading[loadStandDatagramSample]{}, err
 	}
-	return loadStandReadingOf(loadStandDatagramSample{Metrics: sample.Metrics, Reverse: sample.Reverse}), nil
+	return loadStandReadingOf(loadStandDatagramSample{Metrics: sample.Metrics, Reverse: sample.Reverse, LocalSenders: loadstand.CloneLocalSendersSnapshot(sample.LocalSenders)}), nil
 }
 func (s loadStandProcessSource) Bans(ctx context.Context, now time.Time, policy loadStandBanPolicy) ([]loadStandBanFinding, error) {
 	readings, err := s.source.Bans(ctx, now, loadstand.BanPolicy{SelfIdentityCooldownInvalidates: policy.SelfIdentityCooldownInvalidates})

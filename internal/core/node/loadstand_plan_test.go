@@ -197,19 +197,31 @@ type loadStandDMOpts struct {
 	MeanInterval time.Duration
 }
 
+// A fixed opt-in functional payload, not an adjustable production limit.
+type loadStandGossipPayloadProfile string
+
+const (
+	loadStandC1Global32K96  loadStandGossipPayloadProfile = "c1-global-32k-96"
+	loadStandC1BodyBytes                                  = 32 * 1024
+	loadStandC1Publications                               = 96
+	loadStandC1SenderSetup                                = "original-sdk-contact-before-measurement"
+)
+
 type loadStandGossipOpts struct {
+	PayloadProfile loadStandGossipPayloadProfile
 	// Interval is the network-wide period of global-topic messages, each
 	// from one node picked among those up at that instant.
 	Interval time.Duration
 }
 
 type loadStandPlan struct {
-	params   []runjournal.Param
-	duration time.Duration
-	nodes    []loadStandPlanNode
-	timeline []loadStandPlanEvent
-	samples  []time.Duration
-	digest   loadStandPlanDigest
+	gossipPayloadProfile loadStandGossipPayloadProfile
+	params               []runjournal.Param
+	duration             time.Duration
+	nodes                []loadStandPlanNode
+	timeline             []loadStandPlanEvent
+	samples              []time.Duration
+	digest               loadStandPlanDigest
 }
 
 type loadStandPlanNode struct {
@@ -256,6 +268,9 @@ func buildLoadStandPlan(opts loadStandPlanOpts) (loadStandPlan, error) {
 		nodes:    nodes,
 		timeline: timeline,
 		samples:  scheduleLoadStandSamples(opts),
+	}
+	if opts.Traffic.Gossip != nil {
+		plan.gossipPayloadProfile = opts.Traffic.Gossip.PayloadProfile
 	}
 	plan.digest = plan.computeDigest()
 	return plan, nil
@@ -333,6 +348,13 @@ func (o loadStandPlanOpts) validateTraffic() error {
 			gossip.Interval > 0 && gossip.Interval <= o.Duration && loadStandWholeUnits(gossip.Interval),
 			"gossip interval must be a whole number of milliseconds inside the run",
 		})
+	}
+	if gossip := o.Traffic.Gossip; gossip != nil && gossip.PayloadProfile != "" {
+		rules = append(rules,
+			loadStandPlanRule{gossip.PayloadProfile == loadStandC1Global32K96, "unknown gossip payload profile"},
+			loadStandPlanRule{o.Churn.Profile == loadStandChurnQuiet && o.FullNodes == 2 && o.EdgeNodes == 1 && o.Contacts == 0 && o.Traffic.DirectMessages == nil, "C1 payload requires quiet two-Full one-SDK global-only fixture with Contacts0"},
+			loadStandPlanRule{gossip.Interval > 0 && (o.Duration-o.Settle-1)/gossip.Interval >= loadStandC1Publications, "C1 publications must fit strictly before duration"},
+		)
 	}
 	return firstBrokenLoadStandPlanRule(rules)
 }
@@ -662,6 +684,9 @@ func scheduleLoadStandGossip(o loadStandPlanOpts, nodes []loadStandPlanNode, ava
 		}
 		publisher := online[draws.below(len(online))]
 		events = append(events, loadStandPlanEvent{at: at, kind: loadStandEventGossip, node: publisher, topic: loadStandGlobalTopic})
+		if gossip.PayloadProfile == loadStandC1Global32K96 && len(events) == loadStandC1Publications {
+			break
+		}
 	}
 	return events
 }
@@ -814,6 +839,10 @@ func (o loadStandPlanOpts) params() []runjournal.Param {
 		loadStandOptionalParam("gossip_interval", gossipInterval),
 		loadStandParam("gossip_topic", string(loadStandGlobalTopic)),
 	}
+	if gossip := o.Traffic.Gossip; gossip != nil && gossip.PayloadProfile != "" {
+		params[0] = loadStandParam("plan_version", "4")
+		params = append(params, loadStandParam("gossip_payload_profile", string(gossip.PayloadProfile)), loadStandParam("gossip_body_bytes", strconv.Itoa(loadStandC1BodyBytes)), loadStandParam("gossip_publications", strconv.Itoa(loadStandC1Publications)), loadStandParam("gossip_sender_setup", loadStandC1SenderSetup))
+	}
 	return append(params, loadStandChurnProfiles[o.Churn.Profile].params(o.Churn)...)
 }
 
@@ -870,6 +899,11 @@ func (p loadStandPlan) computeDigest() loadStandPlanDigest {
 		w.field("k", string(param.Name))
 		w.field("v", string(param.Value))
 	}
+	// Nil-profile canonical v3 remains byte-identical. The private execution
+	// selector is independently bound, so changing it alone changes the digest.
+	if p.gossipPayloadProfile != "" {
+		w.field("gossip_payload_profile", string(p.gossipPayloadProfile))
+	}
 	w.field("duration", strconv.FormatInt(int64(p.duration), 10))
 	w.count("nodes", len(p.nodes))
 	for _, node := range p.nodes {
@@ -901,6 +935,12 @@ func (p loadStandPlan) computeDigest() loadStandPlanDigest {
 func (p loadStandPlan) Params() []runjournal.Param { return slices.Clone(p.params) }
 
 func (p loadStandPlan) Duration() time.Duration { return p.duration }
+func (p loadStandPlan) Version() string {
+	if p.gossipPayloadProfile != "" {
+		return "4"
+	}
+	return loadStandPlanVersion
+}
 
 // Nodes are full nodes first, then edges, each in index order — the order a
 // stand that builds them sequentially starts them in.

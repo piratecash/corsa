@@ -13,6 +13,8 @@ type OwnedLocalTarget struct{ local *ownedLocalTargetState }
 type ownedLocalTargetState struct {
 	owner  *dormantIntakeState
 	target *TargetCoordinator
+	timed  bool
+	timing OwnedTargetTimingProfile
 }
 type OwnedLocalSignWork struct{ work *ownedLocalSignState }
 type OwnedLocalSignPermit struct{ work *ownedLocalSignState }
@@ -42,6 +44,18 @@ type OwnedLocalResult struct {
 // NewLocalTarget is called during dedicated construction before Service escape.
 // A second call cannot mint a second per-identity calendar or reset source debt.
 func (intake DormantIntake) NewLocalTarget(self identity.PublicKey, network domain.NetworkID, profile SigningProfile) (OwnedLocalTarget, error) {
+	return intake.newLocalTarget(self, network, profile, OwnedTargetTimingProfile{}, false)
+}
+
+// Explicit owned-only construction: no setter or implicit timing default.
+func (intake DormantIntake) NewLocalTargetWithTiming(self identity.PublicKey, network domain.NetworkID, profile SigningProfile, timing OwnedTargetTimingProfile) (OwnedLocalTarget, error) {
+	if !timing.valid() {
+		return OwnedLocalTarget{}, ErrInvalid
+	}
+	return intake.newLocalTarget(self, network, profile, timing, true)
+}
+
+func (intake DormantIntake) newLocalTarget(self identity.PublicKey, network domain.NetworkID, profile SigningProfile, timing OwnedTargetTimingProfile, timed bool) (OwnedLocalTarget, error) {
 	owner := intake.dormantOwner
 	if owner == nil {
 		return OwnedLocalTarget{}, ErrUnauthenticated
@@ -67,7 +81,7 @@ func (intake DormantIntake) NewLocalTarget(self identity.PublicKey, network doma
 	if err != nil {
 		return OwnedLocalTarget{}, err
 	}
-	local := &ownedLocalTargetState{owner: owner, target: target}
+	local := &ownedLocalTargetState{owner: owner, target: target, timing: timing, timed: timed}
 	owner.localTarget = local
 	return OwnedLocalTarget{local: local}, nil
 }
@@ -116,6 +130,18 @@ func (local OwnedLocalTarget) ReserveReceived(input OwnedReceivedRequest, cut Ow
 		return OwnedLocalResult{}, err
 	}
 	work := &ownedLocalSignState{local: l, identity: id}
+	var serviceWindow ownedTargetServiceWindow
+	var refusal *OwnedTargetTimingRefusal
+	if l.timed {
+		readyBy, err := Instant(id.received.Elapsed()).plus(Instant(l.timing.ServiceBound))
+		if err != nil {
+			return OwnedLocalResult{}, err
+		}
+		serviceWindow = ownedTargetServiceWindow{enabled: true, latestSignStart: readyBy - Instant(l.timing.RuntimeReserve), signatureReadyBy: readyBy}
+		// The bounded diagnostic is allocated before owner locks and final R.
+		// It contains numeric observations only, never owner/receipt authority.
+		refusal = &OwnedTargetTimingRefusal{}
+	}
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	defer o.publishLocked()
@@ -157,7 +183,7 @@ func (local OwnedLocalTarget) ReserveReceived(input OwnedReceivedRequest, cut Ow
 	if plan.result.Kind == TargetNeedsSignature {
 		nextSlots[preparedSlot] = struct{}{}
 	}
-	preparedSigning := &coordinatedSigning{phase: signingAliasPending, alias: SigningReservation{calendar: o.calendar, slot: preparedSlot}, signBy: deadline}
+	preparedSigning := &coordinatedSigning{phase: signingAliasPending, alias: SigningReservation{calendar: o.calendar, slot: preparedSlot}, signBy: deadline, serviceWindow: serviceWindow}
 	if priorities.priorities[id.source] == PriorityProtected {
 		preparedSigning.protected[0] = id.source
 	}
@@ -204,6 +230,15 @@ func (local OwnedLocalTarget) ReserveReceived(input OwnedReceivedRequest, cut Ow
 		projected, slotAt, err = projected.project(max(f, o.calendar.nextProjected))
 		if err != nil {
 			return OwnedLocalResult{}, err
+		}
+		if serviceWindow.enabled && (f >= serviceWindow.latestSignStart || slotAt >= serviceWindow.latestSignStart) {
+			refusal.ReceivedNS = int64(id.received.Elapsed())
+			refusal.SampledNS = int64(f)
+			refusal.ProjectedNS = int64(slotAt)
+			refusal.LatestStartNS = int64(serviceWindow.latestSignStart)
+			refusal.SignatureReadyNS = int64(serviceWindow.signatureReadyBy)
+			refusal.AnswerDeadlineNS = int64(deadline)
+			return OwnedLocalResult{}, refusal
 		}
 		if slotAt >= deadline {
 			return OwnedLocalResult{}, ErrBudget
@@ -290,7 +325,7 @@ func (work OwnedLocalSignWork) WaitDelay() (time.Duration, error) {
 		return 0, err
 	}
 	earliest := max(f, w.entry.coordinated.alias.At(), o.calendar.nextActual, sourceAt)
-	if earliest >= w.entry.coordinated.signBy {
+	if earliest >= w.entry.coordinated.startBoundary() {
 		return 0, ErrBudget
 	}
 	return time.Duration(earliest - f), nil
@@ -355,7 +390,7 @@ func (work OwnedLocalSignWork) Take() (OwnedLocalSignPermit, PublicSigningInput,
 		terminal = true
 		return OwnedLocalSignPermit{}, PublicSigningInput{}, ErrStaleWork
 	}
-	if f >= entry.coordinated.signBy {
+	if f >= entry.coordinated.startBoundary() {
 		terminal = true
 		o.last = f
 		return OwnedLocalSignPermit{}, PublicSigningInput{}, ErrStaleWork
@@ -453,7 +488,7 @@ func (permit OwnedLocalSignPermit) Complete(signature *domain.FindNodeSignature)
 		retire()
 		return nil, ErrClock
 	}
-	if signature == nil || f >= w.entry.coordinated.signBy {
+	if signature == nil || f >= w.entry.coordinated.readyBoundary() {
 		retire()
 		return nil, ErrStaleWork
 	}

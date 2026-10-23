@@ -23,6 +23,7 @@ import struct
 import sys
 import tempfile
 import time
+import types
 import unittest
 import zipfile
 from unittest import mock
@@ -913,6 +914,108 @@ class ClosedLaunchControls(unittest.TestCase):
                 if write is not None: os.close(write)
 
 
+class HighFDControlWaitControls(unittest.TestCase):
+    """Real own nonblocking pipes above FD_SETSIZE; no child or tool launch."""
+    @contextlib.contextmanager
+    def high_pipe(self, writer=False):
+        import fcntl
+        import resource
+        limits = resource.getrlimit(resource.RLIMIT_NOFILE)
+        wanted = max(limits[0], 4096)
+        self.assertTrue(limits[1] == resource.RLIM_INFINITY or wanted <= limits[1],
+                        'fixture needs a permitted soft descriptor limit4096')
+        owned = []
+        try:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (wanted, limits[1]))
+            read, write = os.pipe(); owned.extend((read, write))
+            os.set_blocking(read, False); os.set_blocking(write, False)
+            high = fcntl.fcntl(write if writer else read, fcntl.F_DUPFD, 2048)
+            owned.append(high)
+            os.set_inheritable(high, False)
+            self.assertGreaterEqual(high, 2048)
+            self.assertFalse(os.get_blocking(high))
+            self.assertFalse(os.get_inheritable(high))
+            yield read, write, high
+        finally:
+            try:
+                for fd in reversed(owned): os.close(fd)
+                for fd in owned:
+                    with self.assertRaises(OSError) as closed: os.fstat(fd)
+                    self.assertEqual(9, closed.exception.errno)
+            finally:
+                resource.setrlimit(resource.RLIMIT_NOFILE, limits)
+            self.assertEqual(limits, resource.getrlimit(resource.RLIMIT_NOFILE))
+
+    def test_high_fd_receive_wait_preserves_exact_original_frame(self):
+        with self.high_pipe() as (_, write, high):
+            original_poll = build.select.poll
+            calls = []; frame = b'READY original-high-fd\n'
+            test = self
+            class Waiter:
+                def __init__(self): self.actual = original_poll()
+                def register(self, fd, events):
+                    test.assertEqual((high, build.select.POLLIN), (fd, events))
+                    self.actual.register(fd, events)
+                def poll(self, milliseconds):
+                    test.assertGreaterEqual(milliseconds, 0); test.assertLessEqual(milliseconds, 100)
+                    calls.append(milliseconds)
+                    test.assertEqual(len(frame), os.write(write, frame))
+                    result = self.actual.poll(milliseconds)
+                    test.assertTrue(any(fd == high and events & build.select.POLLIN for fd, events in result))
+                    return result
+            with mock.patch.object(build.select, 'poll', side_effect=Waiter):
+                build.LinuxSupervisor._receive(high, frame, build.Budget(time.monotonic()+1))
+            self.assertEqual(1, len(calls))
+
+    def test_high_fd_send_wait_preserves_exact_original_frame(self):
+        with self.high_pipe(writer=True) as (read, _, high):
+            filled = 0
+            while filled <= 1024*1024:
+                try: filled += os.write(high, b'x'*4096)
+                except BlockingIOError: break
+            self.assertGreater(filled, 0); self.assertLessEqual(filled, 1024*1024)
+            original_poll = build.select.poll
+            calls = []; frame = b'GO original-high-fd\n'
+            test = self
+            class Waiter:
+                def __init__(self): self.actual = original_poll()
+                def register(self, fd, events):
+                    test.assertEqual((high, build.select.POLLOUT), (fd, events))
+                    self.actual.register(fd, events)
+                def poll(self, milliseconds):
+                    test.assertGreaterEqual(milliseconds, 0); test.assertLessEqual(milliseconds, 100)
+                    calls.append(milliseconds)
+                    left = filled
+                    while left:
+                        part = os.read(read, min(65536, left))
+                        test.assertTrue(part); test.assertEqual(b'x'*len(part), part)
+                        left -= len(part)
+                    result = self.actual.poll(milliseconds)
+                    test.assertTrue(any(fd == high and events & build.select.POLLOUT for fd, events in result))
+                    return result
+            with mock.patch.object(build.select, 'poll', side_effect=Waiter):
+                build.LinuxSupervisor._send(high, frame, build.Budget(time.monotonic()+1))
+            self.assertEqual(1, len(calls))
+            self.assertEqual(frame, os.read(read, len(frame)+1))
+
+    def test_known_control_wait_valueerrors_preserve_original_cause(self):
+        for boundary in ('constructor', 'register', 'poll'):
+            with self.subTest(boundary=boundary), self.high_pipe() as (_, _, high):
+                cause = ValueError('fixture control-wait '+boundary)
+                class Waiter:
+                    def register(self, *_):
+                        if boundary == 'register': raise cause
+                    def poll(self, *_): raise cause
+                factory = mock.Mock(side_effect=cause) if boundary == 'constructor' else Waiter
+                with mock.patch.object(build.select, 'poll', side_effect=factory):
+                    with self.assertRaisesRegex(build.Failure, '^ControlWaitInvalid$') as observed:
+                        build.LinuxSupervisor._wait_control(high, build.select.POLLIN,
+                                                           build.Budget(time.monotonic()+1))
+                self.assertIs(cause, observed.exception.__cause__)
+                self.assertTrue(observed.exception.incomplete)
+                self.assertEqual('ready', observed.exception.phase)
+
+
 @unittest.skipUnless(platform.system() == 'Linux', 'PENDING: actual Linux kernel supervisor controls; Darwin contract fixtures are not Linux PASS')
 class LinuxSupervisorControls(unittest.TestCase):
     """Future bounded own-child controls; no Go/Git/compiler/new artifact launch.
@@ -982,6 +1085,26 @@ class LinuxSupervisorControls(unittest.TestCase):
         self.assertTrue(result.joined); self.assertEqual('Cancelled', result.failure)
         self.assertFalse((self.root/'must-not-exist').exists())
         self.assertEqual(('SIGTERM', 'sent'), result.signals[0])
+
+    def test_control_wait_construction_failure_joins_original_pre_go_owner(self):
+        def held_stub(*_):
+            signal.signal(signal.SIGTERM, signal.SIG_DFL)
+            while True: time.sleep(.05)
+        cause = ValueError('fixture poll construction')
+        with mock.patch.object(build.LinuxSupervisor, '_stub', staticmethod(held_stub)), \
+             mock.patch.object(build.select, 'poll', side_effect=cause), \
+             mock.patch.object(build.os, 'killpg', side_effect=AssertionError('unvalidated group')):
+            result = self.run_code("open('must-not-exec','w').write('bad')")
+        self.assertTrue(result.joined); self.assertEqual('ControlWaitInvalid', result.failure)
+        self.assertFalse((self.root/'must-not-exec').exists())
+        self.assertEqual(('SIGTERM', 'sent'), result.signals[0])
+        self.assertEqual([], build.LinuxSupervisor.children())
+        self.assertIsNone(self.supervisor.anchor); self.assertFalse(self.supervisor.poisoned)
+        self.assertEqual({}, self.store.open_files)
+        self.assertEqual(1, len(self.supervisor.records))
+        self.assertEqual(result, self.supervisor.records[0])
+        self.assertTrue((self.root/'out'/result.stdout).is_file())
+        self.assertTrue((self.root/'out'/result.stderr).is_file())
 
     def test_valid_ready_with_wrong_kernel_group_refuses_go_and_never_guesses_group(self):
         # Real child/nonce/control pipes, but deliberately NO setsid/setpgid.
@@ -1382,6 +1505,202 @@ class InterruptedObservationControls(unittest.TestCase):
 
 
 
+class LaneTelemetryControls(unittest.TestCase):
+    """Own temporary file/FD controls; no Go/Git/child/compiler execution."""
+    def test_fresh_modes_are_separate_private_exact_and_environment_bound(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            with build.Directory.open_absolute(str(pathlib.Path(temporary).resolve())) as root:
+                lanes=[]
+                try:
+                    identities=[]
+                    for name in ('A','B'):
+                        lane=build.new_lane(root,name,lanes)
+                        expected=build.initialize_lane_telemetry(lane['home'],build.Budget())
+                        build.verify_lane_telemetry(lane['home'],expected,build.Budget())
+                        mode=pathlib.Path(lane['home'].label)/'go/telemetry/mode'
+                        self.assertEqual(b'off\n',mode.read_bytes())
+                        st=mode.stat(); identities.append((st.st_dev,st.st_ino))
+                        self.assertEqual(os.getuid(),st.st_uid)
+                        self.assertEqual(0o600,stat.S_IMODE(st.st_mode)); self.assertEqual(1,st.st_nlink)
+                        env=build.environment_for_lane(sample('request'),lane,'/go','/tools',123)
+                        self.assertEqual(lane['home'].label,env['HOME'])
+                        self.assertEqual(env['HOME'],env['XDG_CONFIG_HOME'])
+                        self.assertNotIn('GOTELEMETRY',env); self.assertNotIn('GO_TELEMETRY_CHILD',env)
+                    self.assertNotEqual(*identities)
+                finally:
+                    for lane in reversed(lanes):
+                        for cap in reversed(list(lane.values())): cap.close()
+    def test_missing_replaced_symlink_mode_content_and_hardlink_refuse(self):
+        for change in ('missing','replaced','symlink','mode','content','hardlink'):
+            with tempfile.TemporaryDirectory() as temporary,self.subTest(change=change):
+                rootpath=pathlib.Path(temporary).resolve()
+                with build.Directory.open_absolute(str(rootpath)) as root:
+                    with root.directory('home',create=True) as home:
+                        expected=build.initialize_lane_telemetry(home,build.Budget())
+                        path=rootpath/'home/go/telemetry/mode'
+                        if change=='missing': path.unlink()
+                        elif change=='replaced':
+                            path.rename(path.with_name('original'))
+                            path.write_bytes(b'off\n'); path.chmod(0o600)
+                        elif change=='symlink':
+                            path.rename(path.with_name('original')); path.symlink_to('original')
+                        elif change=='mode': path.chmod(0o644)
+                        elif change=='content': path.write_bytes(b'on\n')
+                        else: os.link(path,path.with_name('alias'))
+                        error=FileNotFoundError if change=='missing' else OSError if change=='symlink' else build.Failure
+                        with self.assertRaises(error) as refusal:
+                            build.verify_lane_telemetry(home,expected,build.Budget())
+                        if isinstance(refusal.exception,build.Failure):
+                            wanted={'replaced':'TelemetryModeChanged','mode':'UnsafePrivateFile',
+                                    'content':'TelemetryModeChanged','hardlink':'UnsafeRegularFile'}[change]
+                            self.assertEqual(wanted,refusal.exception.code)
+    def test_initialization_never_reuses_or_overwrites_existing_home(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            with build.Directory.open_absolute(str(pathlib.Path(temporary).resolve())) as root:
+                with root.directory('home',create=True) as home:
+                    original=build.initialize_lane_telemetry(home,build.Budget())
+                    with self.assertRaisesRegex(build.Failure,'^TelemetryHomeNotFresh$'):
+                        build.initialize_lane_telemetry(home,build.Budget())
+                    build.verify_lane_telemetry(home,original,build.Budget())
+    def test_failed_readback_closes_original_created_mode_fd(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            with build.Directory.open_absolute(str(pathlib.Path(temporary).resolve())) as root:
+                with root.directory('home',create=True) as home:
+                    created=[]; original=build.Directory.file
+                    def capture(cap,relative,create=False,executable=False):
+                        fd=original(cap,relative,create,executable)
+                        if relative=='mode' and create: created.append(fd)
+                        return fd
+                    with mock.patch.object(build.Directory,'file',capture), \
+                         mock.patch.object(build,'read_fd',return_value=b'on\n'):
+                        with self.assertRaisesRegex(build.Failure,'^TelemetryModeChanged$'):
+                            build.initialize_lane_telemetry(home,build.Budget())
+                    self.assertEqual(1,len(created))
+                    with self.assertRaises(OSError): os.fstat(created[0])
+    def test_nested_trusted_root_owner_only_preserves_original_private_mode_file(self):
+        # Model only the observed guest metadata mapping, not real kernel/DAC.
+        # Fix the apparent process to501 so root-running unit environments also
+        # exercise HOME-root refusal rather than confusing root with ownUID.
+        for change in ('nested_root','foreign_go','foreign_telemetry','root_home',
+                       'go_755','telemetry_755','root_mode_file'):
+            with tempfile.TemporaryDirectory() as temporary,self.subTest(change=change):
+                rootpath=pathlib.Path(temporary).resolve()
+                with build.Directory.open_absolute(str(rootpath)) as root:
+                    with root.directory('home',create=True) as home:
+                        expected=list(build.initialize_lane_telemetry(home,build.Budget()))
+                        expected[4]=501
+                        paths={'home':rootpath/'home','go':rootpath/'home/go',
+                               'telemetry':rootpath/'home/go/telemetry',
+                               'mode':rootpath/'home/go/telemetry/mode'}
+                        byid={(p.stat().st_dev,p.stat().st_ino):name for name,p in paths.items()}
+                        original_fstat=build.os.fstat; original_stat=build.os.stat
+                        def observed(st):
+                            name=byid.get((st.st_dev,st.st_ino))
+                            if name is None:return st
+                            values={k:getattr(st,k) for k in dir(st) if k.startswith('st_')}
+                            values['st_uid']=501
+                            if change=='nested_root' and name in ('go','telemetry'):values['st_uid']=0
+                            if change=='foreign_go' and name=='go':values['st_uid']=502
+                            if change=='foreign_telemetry' and name=='telemetry':values['st_uid']=502
+                            if change=='root_home' and name=='home':values['st_uid']=0
+                            if change=='root_mode_file' and name=='mode':values['st_uid']=0
+                            if (change=='go_755' and name=='go') or (change=='telemetry_755' and name=='telemetry'):
+                                values['st_mode']=stat.S_IFMT(st.st_mode)|0o755
+                            return types.SimpleNamespace(**values)
+                        with mock.patch.object(build.os,'getuid',return_value=501), \
+                             mock.patch.object(build.os,'fstat',side_effect=lambda fd:observed(original_fstat(fd))), \
+                             mock.patch.object(build.os,'stat',side_effect=lambda *a,**kw:observed(original_stat(*a,**kw))):
+                            if change=='nested_root':
+                                build.verify_lane_telemetry(home,tuple(expected),build.Budget())
+                            else:
+                                wanted='UnsafeDirectoryOwnerOrMode' if change in ('foreign_go','foreign_telemetry') else 'UnsafePrivateFile' if change=='root_mode_file' else 'UnsafePrivateDirectory'
+                                with self.assertRaises(build.Failure) as refusal:
+                                    build.verify_lane_telemetry(home,tuple(expected),build.Budget())
+                                self.assertEqual(wanted,refusal.exception.code)
+
+    def test_real_lane_path_initializes_before_first_go_metadata_call(self):
+        class FirstGoObserved(Exception): pass
+        with tempfile.TemporaryDirectory() as temporary:
+            with build.Directory.open_absolute(str(pathlib.Path(temporary).resolve())) as root:
+                pair=build.BuildPair.__new__(build.BuildPair)
+                pair.receipt={'lanes':[build.not_started_lane(0),build.not_started_lane(1)]}
+                pair.lanes=[]; pair.telemetry_modes={}; pair.source_manifests=[]
+                pair.request=sample('request'); pair.native=None; pair.supervisor=None
+                pair.store=mock.Mock(root=root); pair.go=mock.Mock(path='/never-executed/go')
+                pair.goroot_cap=mock.Mock(label='/goroot'); pair.seed=mock.Mock()
+                pair.source_plan=mock.Mock(epoch=123)
+                pair.source_plan.materialize.return_value={'files':[{'path':'go.mod','mode':'100644',
+                                      'size':1,'sha256':sha(b'x')}]}
+                pair._before_after=mock.Mock(return_value=('a'*64,'b'*64,'c'*64))
+                def first(supervisor,go,argv,cwd,env,budget):
+                    self.assertEqual(['version'],argv)
+                    home=pair.lanes[0]['home']
+                    build.verify_lane_telemetry(home,pair.telemetry_modes[home.identity],budget)
+                    self.assertEqual(home.label,env['HOME']); self.assertEqual(home.label,env['XDG_CONFIG_HOME'])
+                    raise FirstGoObserved()
+                try:
+                    with mock.patch.object(build,'_command_bytes',side_effect=first):
+                        with self.assertRaises(FirstGoObserved): pair._lane_body(0,build.Budget())
+                    self.assertEqual(1,pair._before_after.call_count)
+                finally:
+                    for lane in pair.lanes:
+                        for cap in reversed(list(lane.values())): cap.close()
+
+
+class GoToolchainPresenceControls(unittest.TestCase):
+    """Original lane guard only; no Go/Git/compiler/child/native execution."""
+    def test_original_lane_accepts_source_builtin_buildid_but_requires_four_binary_tools(self):
+        class NativeInspectReached(Exception): pass
+        required=('compile','link','asm','cgo')
+        for missing in (None,)+required:
+            with self.subTest(missing=missing), tempfile.TemporaryDirectory() as temporary:
+                with build.Directory.open_absolute(str(pathlib.Path(temporary).resolve())) as root:
+                    pair=build.BuildPair.__new__(build.BuildPair)
+                    pair.receipt={'lanes':[build.not_started_lane(0),build.not_started_lane(1)]}
+                    pair.lanes=[]; pair.telemetry_modes={}; pair.source_manifests=[]
+                    pair.request=sample('request')
+                    pair.request.update(flavour='native-linux-arm64',native={
+                        name:{'path':'/not-executed/'+name} for name in ('cc','cxx','pkg_config')})
+                    pair.store=mock.Mock(root=root); pair.go=mock.Mock(path='/not-executed/go')
+                    pair.supervisor=object(); pair.seed=mock.Mock()
+                    pair.goroot_cap=mock.Mock(label='/goroot')
+                    # This is the official pinned Go1.27.3 layout: buildid is
+                    # a source-built builtin, absent from preinstalled tools.
+                    pair.goroot=types.SimpleNamespace(manifest={'files':[
+                        {'path':'pkg/tool/linux_arm64/'+name} for name in required if name!=missing]})
+                    pair.source_plan=mock.Mock(epoch=123)
+                    pair.source_plan.materialize.return_value={'files':[{'path':'go.mod','mode':'100644',
+                                            'size':1,'sha256':sha(b'x')}]}
+                    pair._before_after=mock.Mock(return_value=('a'*64,'b'*64,'c'*64))
+                    tools={name:types.SimpleNamespace(path='/not-executed/'+name) for name in ('cc','cxx','pkg_config')}
+                    def inspect(supervisor,cwd,env):
+                        self.assertIs(pair.supervisor,supervisor)
+                        self.assertEqual(pair.lanes[0]['source'].identity,cwd.identity)
+                        self.assertEqual('1',env['CGO_ENABLED'])
+                        raise NativeInspectReached()
+                    pair.native=types.SimpleNamespace(tools=tools,inspect=mock.Mock(side_effect=inspect))
+                    def first_go(supervisor,go,argv,cwd,env,budget):
+                        self.assertEqual(['version'],argv)
+                        self.assertIs(pair.go,go)
+                        home=pair.lanes[0]['home']
+                        build.verify_lane_telemetry(home,pair.telemetry_modes[home.identity],budget)
+                        return b'go version go1.27.3 linux/arm64\n',None
+                    try:
+                        with mock.patch.object(build,'_command_bytes',side_effect=first_go) as command:
+                            if missing is None:
+                                with self.assertRaises(NativeInspectReached): pair._lane_body(0,build.Budget())
+                                self.assertEqual(1,pair.native.inspect.call_count)
+                            else:
+                                with self.assertRaises(build.Failure) as refusal: pair._lane_body(0,build.Budget())
+                                self.assertEqual('GoToolchainIncomplete',refusal.exception.code)
+                                self.assertEqual(0,pair.native.inspect.call_count)
+                            self.assertEqual(1,command.call_count)
+                            self.assertEqual(1,pair._before_after.call_count)
+                    finally:
+                        for lane in reversed(pair.lanes):
+                            for cap in reversed(list(lane.values())): cap.close()
+
+
 class StandardNativeGateControls(unittest.TestCase):
     """Mock fixed go-list bytes through the REAL closure loop; no Go/tool runs."""
     def closure(self, root, standard_fields, native_enabled=True, pkg_flags=b'-I/usr/scoped/include -lm\n'):
@@ -1448,6 +1767,34 @@ class StandardNativeGateControls(unittest.TestCase):
             self.assertIn('runtime/cgo', closure['packages'])
             self.assertIn(('--cflags', '--libs', '--', 'standard_fixture'), self.observed_commands)
             self.assertEqual(('mod', 'verify'), self.observed_commands[-1])
+
+    def test_standard_go1273_exact_cgo_flags_are_validated_in_original_closure(self):
+        # Exact CFLAGS from pinned Go1.27.3 runtime/cgo/cgo.go; net also uses
+        # -fno-stack-protector. No generic -f*/-W* acceptance is introduced.
+        with tempfile.TemporaryDirectory() as temporary:
+            graph, closure, used = self.closure(pathlib.Path(temporary).resolve(),
+                {'CgoCFLAGS':['-Wall','-Werror','-fno-stack-protector','-Wdeclaration-after-statement']})
+            self.assertEqual(set(),used)
+            self.assertIn('runtime/cgo',closure['packages'])
+            self.assertEqual(('mod','verify'),self.observed_commands[-1])
+
+    def test_go1273_cgo_flag_lookalikes_and_native_path_guards_stay_closed(self):
+        lookalikes=('-fno-stack-protector=all','-fno-stack-protector-extra',
+                    '-fno-stack-protector=/undeclared/header',
+                    '-Wdeclaration-after-statement=error','-Wdeclaration-after-statement-extra',
+                    '-Wdeclaration-after-statement,/undeclared/header')
+        for flag in lookalikes:
+            with self.subTest(flag=flag),tempfile.TemporaryDirectory() as temporary:
+                with self.assertRaisesRegex(build.Failure,'^NativeFlagsUnsupported$'):
+                    self.closure(pathlib.Path(temporary).resolve(),
+                        {'CgoCFLAGS':['-fno-stack-protector','-Wdeclaration-after-statement',flag]})
+                self.assertNotIn(('mod','verify'),self.observed_commands)
+        for flags in (['-I','/undeclared/headers'],['-L/undeclared/lib']):
+            with self.subTest(path_flags=flags),tempfile.TemporaryDirectory() as temporary:
+                with self.assertRaisesRegex(build.Failure,'^NativePathEscape$'):
+                    self.closure(pathlib.Path(temporary).resolve(),
+                        {'CgoCFLAGS':['-fno-stack-protector','-Wdeclaration-after-statement']+flags})
+                self.assertNotIn(('mod','verify'),self.observed_commands)
 
     def test_standard_flags_without_native_support_refuse(self):
         with tempfile.TemporaryDirectory() as temporary:

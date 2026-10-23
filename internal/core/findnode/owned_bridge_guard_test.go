@@ -35,6 +35,8 @@ func ownedBridgeSourceErrors(sources map[string][]byte) []string {
 		"owned_bridge_forward_answer.go:MatchOwnedAnswer:DormantIntake":                 1,
 		"owned_bridge_local_target.go:<package>:dormantIntakeState":                     1,
 		"owned_bridge_local_target.go:NewLocalTarget:DormantIntake":                     1,
+		"owned_bridge_local_target.go:NewLocalTargetWithTiming:DormantIntake":           1,
+		"owned_bridge_local_target.go:newLocalTarget:DormantIntake":                     1,
 		"owned_bridge_local_target.go:ReserveReceived:OwnedCut":                         1,
 		"owned_bridge_answer.go:<package>:dormantIntakeState":                           1,
 		"owned_bridge_answer.go:mintOwnedAnswerWork:dormantIntakeState":                 1,

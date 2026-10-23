@@ -14,29 +14,46 @@ import (
 // Private inactive construction unit. No public factory/config/capability path
 // selects it. A supplied decoded peer state (including empty) is owned exactly
 // once; the builder may order its peers, but never rereads/renews the hint.
-type findNodeReadyConstruction struct {
-	bridge               *findNodeTerminalConstruction
-	originalContext      context.Context
-	originalCancel       context.CancelFunc
-	originalCapture      findNodeBridgeCaptureContext
-	originalTerminal     *findNodeBridgeTerminal
-	originalPublisher    findnodebridge.Publisher
-	originalOwner        *degreeOwner
-	originalToken        *proofTransportServiceToken
-	originalStatistic    *ownedDegreeStatisticProducer
-	peerState            peerStateFile
-	service              *Service
-	trust                *trustStore
-	store                *secureSessionStore
-	sessions             *secureSessions
-	failure              error
-	checked              bool
-	finalized            bool
-	ownDMRuntime         *ownDMRuntimeConstruction
-	originalOwnDMRuntime ownDMRuntimeConstruction
+// Copied selection is immutable through finalization. The optional clock uses
+// only the existing pre-store constructor seam; production leaves it absent.
+type findNodeReadyOptions struct {
+	ownDM         *ownDMRuntimeConstruction
+	loadedInbound bool
+	signingGate   *ownedFindNodeSigningTestGate
 }
 
-func prepareFindNodeReadyConstruction(cfg config.Node, id *identity.Identity, profile findNodeBridgeProfile, signing findnode.SigningProfile) (*findNodeReadyConstruction, error) {
+type findNodeReadyConstruction struct {
+	bridge                 *findNodeTerminalConstruction
+	originalContext        context.Context
+	originalCancel         context.CancelFunc
+	originalCapture        findNodeBridgeCaptureContext
+	originalTerminal       *findNodeBridgeTerminal
+	originalPublisher      findnodebridge.Publisher
+	originalOwner          *degreeOwner
+	originalToken          *proofTransportServiceToken
+	originalStatistic      *ownedDegreeStatisticProducer
+	peerState              peerStateFile
+	service                *Service
+	trust                  *trustStore
+	store                  *secureSessionStore
+	sessions               *secureSessions
+	failure                error
+	checked                bool
+	finalized              bool
+	ownDMRuntime           *ownDMRuntimeConstruction
+	originalOwnDMRuntime   ownDMRuntimeConstruction
+	options                findNodeReadyOptions
+	originalOptions        findNodeReadyOptions
+	originalInbound        *inboundPinProducer
+	originalInboundService *Service
+	originalInboundStore   *secureSessionStore
+	originalInboundWake    chan struct{}
+}
+
+func prepareFindNodeReadyConstruction(cfg config.Node, id *identity.Identity, profile findNodeBridgeProfile, signing findnode.SigningProfile, timing ...findnode.OwnedTargetTimingProfile) (*findNodeReadyConstruction, error) {
+	if len(timing) > 1 {
+		return nil, findnode.ErrInvalid
+	}
 	if id == nil {
 		return nil, findnode.ErrInvalid
 	}
@@ -77,7 +94,12 @@ func prepareFindNodeReadyConstruction(cfg config.Node, id *identity.Identity, pr
 	b.capture.intake, b.capture.sink = intake, sink
 	b.capture.roundLoop = newOwnedFindNodeRoundLoop(b.ctx.Done(), profile.Intake.Round)
 	b.findNode.owned.retirement = intake
-	local, err := intake.NewLocalTarget(key, domain.NetworkID(networkName), signing)
+	var local findnode.OwnedLocalTarget
+	if len(timing) == 0 {
+		local, err = intake.NewLocalTarget(key, domain.NetworkID(networkName), signing)
+	} else {
+		local, err = intake.NewLocalTargetWithTiming(key, domain.NetworkID(networkName), signing, timing[0])
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -102,10 +124,23 @@ func newFindNodeReadyCandidateService(cfg config.Node, id *identity.Identity, bu
 	}
 	return r.build(cfg, id, bus, productionDatagramConstructor{})
 }
+
+// Loaded-only private composition, never an Unknown installer or a public
+// configuration/default. Original production elapsed source remains trusted.
+func newFindNodeReadyLoadedInboundCandidateService(cfg config.Node, id *identity.Identity, bus *ebus.Bus, profile findNodeBridgeProfile, signing findnode.SigningProfile) (*Service, error) {
+	r, err := prepareFindNodeReadyConstruction(cfg, id, profile, signing)
+	if err != nil {
+		return nil, err
+	}
+	return r.buildWithOptions(cfg, id, bus, productionDatagramConstructor{}, findNodeReadyOptions{loadedInbound: true})
+}
 func (r *findNodeReadyConstruction) build(cfg config.Node, id *identity.Identity, bus *ebus.Bus, constructor datagramConstructor) (*Service, error) {
 	return r.buildWithOwnDM(cfg, id, bus, constructor, nil)
 }
 func (r *findNodeReadyConstruction) buildWithOwnDM(cfg config.Node, id *identity.Identity, bus *ebus.Bus, constructor datagramConstructor, own *ownDMRuntimeConstruction) (*Service, error) {
+	return r.buildWithOptions(cfg, id, bus, constructor, findNodeReadyOptions{ownDM: own})
+}
+func (r *findNodeReadyConstruction) buildWithOptions(cfg config.Node, id *identity.Identity, bus *ebus.Bus, constructor datagramConstructor, options findNodeReadyOptions, clocks ...inboundPinClock) (*Service, error) {
 	if r == nil || r.bridge == nil || r.originalContext == nil || r.finalized || r.service != nil || r.bridge.used.Load() {
 		return nil, findnode.ErrNotReady
 	}
@@ -115,15 +150,26 @@ func (r *findNodeReadyConstruction) buildWithOwnDM(cfg config.Node, id *identity
 			r.cleanup()
 		}
 	}()
+	if len(clocks) > 1 || len(clocks) != 0 && !options.loadedInbound {
+		return nil, findnode.ErrInvalid
+	}
 	if r.originalContext.Err() != nil {
 		return nil, findnode.ErrNotReady
 	}
-	r.ownDMRuntime = own
+	if options.signingGate != nil && !options.signingGate.bindings() {
+		return nil, findnode.ErrInvalid
+	}
+	r.options, r.originalOptions = options, options
+	r.bridge.capture.localLoop.signingGate = options.signingGate
+	r.ownDMRuntime = options.ownDM
 	record := recordAdmissionConstruction{}
-	if own != nil {
+	if options.ownDM != nil {
 		record = recordAdmissionConstruction{classes: recordAdmissionChargedR}
 	}
-	s := newServiceWithConstruction(cfg, id, bus, nil, constructor, serviceConstruction{record: record, bridge: r.bridge, ready: r})
+	s := newServiceWithConstruction(cfg, id, bus, nil, constructor, serviceConstruction{record: record, bridge: r.bridge, ready: r}, clocks...)
+	if r.failure != nil {
+		return nil, r.failure
+	}
 	if err := r.finalize(s); err != nil {
 		return nil, err
 	}
@@ -149,6 +195,17 @@ func (r *findNodeReadyConstruction) cleanup() {
 // application locks. The same exact check is repeated after installation.
 func (r *findNodeReadyConstruction) bindings(s *Service) bool {
 	if r == nil || r.bridge == nil || s == nil {
+		return false
+	}
+	if r.bridge.capture == nil || r.bridge.capture.localLoop == nil || r.options != r.originalOptions || r.ownDMRuntime != r.originalOptions.ownDM || r.bridge.capture.localLoop.signingGate != r.originalOptions.signingGate || (r.originalOptions.signingGate != nil && !r.originalOptions.signingGate.bindings()) {
+		return false
+	}
+	if r.originalOptions.loadedInbound {
+		p := r.originalInbound
+		if p == nil || s.inboundPins != p || p.service != r.originalInboundService || p.store != r.originalInboundStore || p.wake != r.originalInboundWake || p.service != s || p.store != r.store || p.wake == nil || cap(p.wake) != 1 {
+			return false
+		}
+	} else if s.inboundPins != nil {
 		return false
 	}
 	if r.ownDMRuntime != nil {
@@ -223,4 +280,31 @@ func (r *findNodeReadyConstruction) installOwnDM(s *Service) {
 		r.ownDMRuntime.install(s)
 		r.originalOwnDMRuntime = *r.ownDMRuntime
 	}
+}
+
+// All store/files/lifecycle checks finish here BEFORE the final Ready check,
+// statistic coverage sample and exclusive Seal. Loaded format3 may retain an
+// unconfirmed strict obligation for the existing original Run worker.
+func (r *findNodeReadyConstruction) installLoadedInbound(s *Service) error {
+	if r.options != r.originalOptions {
+		return findnode.ErrNotReady
+	}
+	if !r.originalOptions.loadedInbound {
+		return nil
+	}
+	if s != r.service || s == nil || s.secureSessions != r.sessions || s.secureSessions == nil || s.secureSessions.store != r.store {
+		return findnode.ErrNotReady
+	}
+	if err := r.originalContext.Err(); err != nil {
+		return err
+	}
+	if err := attachInboundPinCandidate(s, nil); err != nil {
+		return err
+	}
+	p := s.inboundPins
+	if p == nil || p.service != s || p.store != r.store || p.wake == nil || cap(p.wake) != 1 {
+		return findnode.ErrNotReady
+	}
+	r.originalInbound, r.originalInboundService, r.originalInboundStore, r.originalInboundWake = p, p.service, p.store, p.wake
+	return nil
 }

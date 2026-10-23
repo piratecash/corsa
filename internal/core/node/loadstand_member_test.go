@@ -357,7 +357,7 @@ func loadStandMemberSample(ctx context.Context, clock runjournal.Clock, r loadst
 		if errors.Is(readErr, errDatagramNotEnabled) {
 			s.Datagram.State = loadstand.ObservationDisabled
 		} else {
-			s.Datagram = loadstand.Observed(loadstand.DatagramSample{Metrics: value.Metrics, Reverse: value.Reverse}, readErr)
+			s.Datagram = loadstand.Observed(loadstand.DatagramSample{Metrics: value.Metrics, Reverse: value.Reverse, LocalSenders: loadstand.CloneLocalSendersSnapshot(value.LocalSenders)}, readErr)
 		}
 	} else {
 		s.Datagram = loadstand.Observed(loadstand.DatagramSample{}, err)

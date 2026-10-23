@@ -928,6 +928,19 @@ class LinuxSupervisor:
         self.cleanup_end = None
 
     @staticmethod
+    def _wait_control(fd, events, budget):
+        # poll has no FD_SETSIZE ceiling and owns no descriptor of its own.
+        # Keep the same 100ms/remaining-budget wait, rounding DOWN to millis.
+        try:
+            waiter = select.poll()
+            waiter.register(fd, events)
+            waiter.poll(min(100, max(0, int((budget.end-time.monotonic())*1000))))
+        except ValueError as exc:
+            # A known control-wait refusal must reach the existing pre-GO
+            # identity-bound stop/join path, never escape with an open anchor.
+            raise Failure('ControlWaitInvalid', 'ready', True) from exc
+
+    @staticmethod
     def _receive(fd, expected, budget):
         data = b''
         while b'\n' not in data:
@@ -935,7 +948,7 @@ class LinuxSupervisor:
             try:
                 part = os.read(fd, LIMITS['control']+1-len(data))
             except BlockingIOError:
-                select.select([fd], [], [], min(.1, max(0, budget.end-time.monotonic())))
+                LinuxSupervisor._wait_control(fd, select.POLLIN, budget)
                 continue
             if not part:
                 fail('ControlEOF', 'ready', True)
@@ -961,7 +974,7 @@ class LinuxSupervisor:
             try:
                 written = os.write(fd, frame[offset:])
             except BlockingIOError:
-                select.select([], [fd], [], min(.1, max(0, budget.end-time.monotonic())))
+                LinuxSupervisor._wait_control(fd, select.POLLOUT, budget)
                 continue
             if written <= 0:
                 fail('ControlEOF', 'ready', True)
@@ -3074,6 +3087,48 @@ def _json_stream(raw, maximum):
     return values
 
 
+def initialize_lane_telemetry(home, budget):
+    # The original isolated XDG_CONFIG_HOME, never the caller's global config.
+    # GOTELEMETRY is output-only in this Go version: its mode FILE controls the
+    # daemonized telemetry sidecar, which would violate owned group membership.
+    if home.names():
+        fail('TelemetryHomeNotFresh', 'toolchain')
+    with home.directory('go/telemetry', create=True) as directory:
+        fd = directory.file('mode', create=True)
+        try:
+            _write_all(fd, b'off\n', budget)
+            os.fsync(fd)
+            expected = stable_stat(check_regular(fd, 4, private=True))
+        finally:
+            os.close(fd)
+        os.fsync(directory.fd)
+    verify_lane_telemetry(home, expected, budget)
+    return expected
+
+
+def verify_lane_telemetry(home, expected, budget):
+    home.verify_name()
+    with home.directory('go') as go, go.directory('telemetry') as directory:
+        for cap in (home, go, directory):
+            st = os.fstat(cap.fd)
+            # HOME is the original own private root. Its nested config
+            # ancestors retain Directory's trusted-root-or-own owner law;
+            # mapped root ownership never permits another user's writes.
+            owners = (os.getuid(),) if cap is home else (0, os.getuid())
+            if st.st_uid not in owners or stat.S_IMODE(st.st_mode) != 0o700:
+                fail('UnsafePrivateDirectory', 'toolchain')
+            cap.verify_name()
+        fd = directory.file('mode')
+        try:
+            if read_fd(fd, 4, budget, private=True) != b'off\n' or stable_stat(os.fstat(fd)) != expected:
+                fail('TelemetryModeChanged', 'toolchain', True)
+            named = os.stat('mode', dir_fd=directory.fd, follow_symlinks=False)
+            if stable_stat(named) != expected:
+                fail('TelemetryModeChanged', 'toolchain', True)
+        finally:
+            os.close(fd)
+
+
 def environment_for_lane(request, lane, goroot, tools_path, epoch):
     # No inheritance. No CORSA_, proxy, credential or compiler-wrapper values.
     env = {'PATH': tools_path, 'HOME': lane['home'].label, 'XDG_CONFIG_HOME': lane['home'].label,
@@ -3203,7 +3258,7 @@ def check_native_flags(arguments, source_root, package_root, native_roots):
             continue
         elif flag.startswith(('-I', '-L')) and len(flag) > 2:
             path = flag[2:]
-        elif (flag in ('-pthread', '-static', '-shared', '-fPIC', '-fpic', '-fPIE', '-fpie', '-fno-strict-aliasing', '-fno-common') or
+        elif (flag in ('-pthread', '-static', '-shared', '-fPIC', '-fpic', '-fPIE', '-fpie', '-fno-strict-aliasing', '-fno-common', '-fno-stack-protector', '-Wdeclaration-after-statement') or
               re.fullmatch(r'-(?:O[0-3sg]|g[0-3]?|D[A-Za-z_][A-Za-z0-9_]*(?:=.*)?|U[A-Za-z_][A-Za-z0-9_]*|l:?[-A-Za-z0-9_.+]+|std=[A-Za-z0-9+]+|W(?:all|extra|error|no-[A-Za-z0-9-]+)|m(?:arch|cpu|tune)=[A-Za-z0-9_.+-]+)', flag)):
             continue
         else:
@@ -3752,6 +3807,7 @@ class BuildPair:
         self.receipt = empty_receipt(request, raw_request)
         self.supervisor = None
         self.resources, self.lanes, self.source_manifests, self.used = [], [], [], []
+        self.telemetry_modes = {}
         self.generated, self.go, self.git, self.goroot, self.seed, self.native = [], None, None, None, None, None
 
     def own(self, resource):
@@ -3834,6 +3890,7 @@ class BuildPair:
     def _before_after(self, lane, manifest, used):
         self.budget.check()
         check_root_names(lane)
+        verify_lane_telemetry(lane['home'], self.telemetry_modes[lane['home'].identity], self.budget)
         self._recheck_generator()
         self.git.recheck(self.budget)
         self.go.recheck(self.budget)
@@ -3874,6 +3931,7 @@ class BuildPair:
         record['state'] = 'incomplete'
         previous = tuple(self.lanes)
         lane = new_lane(self.store.root, ('lane-A', 'lane-B')[number], self.lanes)
+        self.telemetry_modes[lane['home'].identity] = initialize_lane_telemetry(lane['home'], lane_budget)
         if any(a.identity == b.identity for old in previous for a in old.values() for b in lane.values()):
             fail('AliasedLaneRoot')
         self.source_manifests.append(self.source_plan.materialize(lane['source']))
@@ -3900,7 +3958,7 @@ class BuildPair:
         self.store.json(f'checks/lane-{number}-before.json', record.copy(), 'lane_check')
         version, _ = _command_bytes(self.supervisor, self.go, ['version'], lane['source'], env, lane_budget)
         host_arch = validate_go_probe(version)
-        for tool in ('compile', 'link', 'asm', 'cgo', 'buildid'):
+        for tool in ('compile', 'link', 'asm', 'cgo'):
             path = f'pkg/tool/linux_{host_arch}/{tool}'
             if path not in {x['path'] for x in self.goroot.manifest['files']}:
                 fail('GoToolchainIncomplete')

@@ -122,8 +122,9 @@ type loadStandTrafficTotals struct {
 // reads: the pipeline counters with their period, and the reverse table's
 // local quota.
 type loadStandDatagramSample struct {
-	Metrics datagram.MetricsSnapshot    `json:"metrics"`
-	Reverse datagram.ReverseDiagnostics `json:"reverse"`
+	Metrics      datagram.MetricsSnapshot       `json:"metrics"`
+	Reverse      datagram.ReverseDiagnostics    `json:"reverse"`
+	LocalSenders *datagram.LocalSendersSnapshot `json:"local_senders,omitempty"`
 }
 
 // loadStandNodeSample is one node's state at ReadAt. Readiness is
@@ -330,6 +331,14 @@ func readLoadStandDatagram(ctx context.Context, svc *Service, binding loadstand.
 	}
 	if summary.Metrics.StartedAt == nil || !summary.Metrics.StartedAt.Equal(binding.StartedAt) {
 		return loadStandReading[loadStandDatagramSample]{}, loadstand.ErrInvalidSample
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return loadStandReading[loadStandDatagramSample]{}, err
+	}
+	summary.LocalSenders, err = loadstand.DecodeOptionalLocalSenders(fields, binding.StartedAt, time.Now().UTC())
+	if err != nil {
+		return loadStandReading[loadStandDatagramSample]{}, err
 	}
 	return loadStandReadingOf(summary), nil
 }

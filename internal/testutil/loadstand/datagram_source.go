@@ -22,6 +22,8 @@ func (r Reading[T]) Get() (T, error) { return r.sample, r.refusal }
 type DatagramSample struct {
 	Metrics datagram.MetricsSnapshot
 	Reverse datagram.ReverseDiagnostics
+	// Nil preserves older/absent attribution as not measured, never zero.
+	LocalSenders *datagram.LocalSendersSnapshot `json:",omitempty"`
 }
 
 func (s *ProcessSource) DatagramSummary(ctx context.Context) (Reading[DatagramSample], error) {
@@ -78,7 +80,11 @@ func (s *ProcessSource) DatagramSummary(ctx context.Context) (Reading[DatagramSa
 	if held < 0 || slots < 0 {
 		return Reading[DatagramSample]{}, ErrInvalidSample
 	}
-	return Reading[DatagramSample]{sample: DatagramSample{Metrics: metrics, Reverse: datagram.ReverseDiagnostics{LocalRefusals: refusals, Held: held, LocalSlots: slots}}}, nil
+	local, err := DecodeOptionalLocalSenders(fields, s.binding.StartedAt, s.clock.Now())
+	if err != nil {
+		return Reading[DatagramSample]{}, err
+	}
+	return Reading[DatagramSample]{sample: DatagramSample{LocalSenders: local, Metrics: metrics, Reverse: datagram.ReverseDiagnostics{LocalRefusals: refusals, Held: held, LocalSlots: slots}}}, nil
 }
 func decodeDatagramMetrics(raw json.RawMessage) (datagram.MetricsSnapshot, error) {
 	fields, err := object(raw, "Observed", "Accepted", "Delivered", "Forwarded", "Answered", "Dropped", "UnknownDType", "RefusedAnswers", "ByMode", "DropsByReason", "ReverseEvents", "SendRefusals", "StartedAt", "ReadAt")

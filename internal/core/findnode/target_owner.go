@@ -21,9 +21,10 @@ const (
 // This optional record belongs to an existing targetEntry, never a second job
 // inventory. Only a pending alias retains its original source Session.
 type coordinatedSigning struct {
-	phase  coordinatedSigningPhase
-	alias  SigningReservation
-	signBy Instant
+	phase         coordinatedSigningPhase
+	alias         SigningReservation
+	signBy        Instant // Original response deadline; owned service cutoffs are separate.
+	serviceWindow ownedTargetServiceWindow
 	// Owned accepted L1 promises, bounded by the existing three recipients.
 	// Legacy inactive compositions leave this metadata empty.
 	protected [MaxChallengeSessions]Session

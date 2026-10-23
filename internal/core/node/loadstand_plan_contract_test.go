@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/protocol"
+	"github.com/piratecash/corsa/internal/testutil/loadstand"
 	"github.com/piratecash/corsa/internal/testutil/runjournal"
 )
 
@@ -1068,6 +1070,139 @@ func testLoadStandPlanDirectMessagesGoOnlyToRolesThatAcceptThem(t *testing.T) {
 		}
 		if fullSenders != 0 {
 			t.Error("full node originates SDK user traffic")
+		}
+	})
+}
+
+// The old nil-profile fixture remains on the append-only pinned v3 table.
+func TestLoadStandPlanC1PayloadProfile(t *testing.T) {
+	t.Run("fixed-profile-and-old-v3", func(t *testing.T) {
+		old := mustBuildLoadStandPlan(t, loadStandPlanFixture(loadStandChurnQuiet, 13))
+		if old.Version() != "3" || old.Digest() != loadStandPinnedPlanDigests["3"][loadStandChurnQuiet] {
+			t.Fatal("old v3 fixture changed")
+		}
+		opts := loadStandC1Options()
+		plan := mustBuildLoadStandPlan(t, opts)
+		again := mustBuildLoadStandPlan(t, loadStandC1Options())
+		events := plan.Timeline()
+		if plan.Version() != "4" || plan.Digest() != again.Digest() || len(events) != 96 || len(plan.Samples()) != 30 {
+			t.Fatal("profile count/determinism", len(events), len(plan.Samples()))
+		}
+		for i, event := range events {
+			if event.kind != loadStandEventGossip || event.at != 2*time.Second+time.Duration(i+1)*250*time.Millisecond || event.node != loadStandEdgeNodeID(0) {
+				t.Fatal("wrong original timeline", i, event)
+			}
+		}
+		params := map[string]string{}
+		for _, param := range plan.Params() {
+			params[string(param.Name)] = string(param.Value)
+		}
+		if params["plan_version"] != "4" || params["gossip_payload_profile"] != "c1-global-32k-96" || params["gossip_body_bytes"] != "32768" || params["gossip_publications"] != "96" || params["gossip_sender_setup"] != "original-sdk-contact-before-measurement" {
+			t.Fatal("unbound payload profile", params)
+		}
+		opts.Traffic.Gossip.PayloadProfile = ""
+		plain := mustBuildLoadStandPlan(t, opts)
+		if plain.Version() != "3" || plain.Digest() == plan.Digest() || loadStandPlanConfigKey(plain).ID() == loadStandPlanConfigKey(plan).ID() || len(plain.Timeline()) <= len(events) {
+			t.Fatal("profile ignored by content/digest/key")
+		}
+		changed := plan
+		changed.gossipPayloadProfile = ""
+		if changed.computeDigest() == plan.Digest() {
+			t.Fatal("execution selector not bound independently")
+		}
+	})
+	for _, kind := range []string{"unknown", "short-duration", "no-sdk", "dm-enabled", "not-quiet", "wrong-graph"} {
+		t.Run(kind, func(t *testing.T) {
+			opts := loadStandC1Options()
+			switch kind {
+			case "unknown":
+				opts.Traffic.Gossip.PayloadProfile = "another"
+			case "short-duration":
+				opts.Duration = 26 * time.Second
+			case "no-sdk":
+				opts.EdgeNodes = 0
+			case "dm-enabled":
+				opts.Traffic.DirectMessages = &loadStandDMOpts{MeanInterval: time.Second}
+			case "not-quiet":
+				opts.Churn = loadStandFixtureChurn[loadStandChurnFlap]()
+			case "wrong-graph":
+				opts.FullNodes = 3
+			}
+			if _, err := buildLoadStandPlan(opts); !errors.Is(err, errLoadStandPlanInvalidOpts) {
+				t.Fatal("invalid profile accepted", err)
+			}
+		})
+	}
+	t.Run("actual-compile-before-start", func(t *testing.T) {
+		e := loadStandFunctionalExecutor(t, loadStandC1Options(), "")
+		actions, err := e.compile()
+		if err != nil || len(actions) != 127 {
+			t.Fatal("actual opt-in compile path refused", err, len(actions))
+		}
+		for _, m := range e.members {
+			if m.Owned() || len(m.EndedIncarnations()) != 0 {
+				t.Fatal("compile reached original Start", m.ID())
+			}
+		}
+		pristine := e.plan
+		for _, kind := range []string{"missing", "foreign"} {
+			e.plan = pristine
+			e.plan.params = slices.Clone(pristine.params)
+			for i, param := range e.plan.params {
+				if param.Name == "gossip_sender_setup" {
+					if kind == "missing" {
+						e.plan.params = append(e.plan.params[:i], e.plan.params[i+1:]...)
+					} else {
+						e.plan.params[i].Value = "unproven_sender"
+					}
+					break
+				}
+			}
+			e.plan.digest = e.plan.computeDigest()
+			if _, err := e.compile(); !errors.Is(err, loadstand.ErrUnsupportedPlan) {
+				t.Fatal("C1 sender precondition binding accepted", kind, err)
+			}
+		}
+		e.plan = pristine
+		for i := range e.plan.params {
+			if e.plan.params[i].Name == "plan_version" {
+				e.plan.params[i].Value = "3"
+			}
+		}
+		e.plan.digest = e.plan.computeDigest()
+		if _, err := e.compile(); !errors.Is(err, loadstand.ErrUnsupportedPlan) {
+			t.Fatal("v4 selector accepted version3 params", err)
+		}
+	})
+	t.Run("actual-body-and-wire", func(t *testing.T) {
+		e := &loadStandExecutor{plan: mustBuildLoadStandPlan(t, loadStandC1Options()), report: loadStandExecutionReport{ExecutionID: "00112233445566778899aabbccddeeff"}}
+		if err := e.validateGossipPayload(); err != nil {
+			t.Fatal(err)
+		}
+		first, err := e.globalBody(3)
+		if err != nil || len(first) != 32768 {
+			t.Fatal("body size", err, len(first))
+		}
+		next, err := e.globalBody(4)
+		if err != nil || first == next {
+			t.Fatal("event identity lost", err)
+		}
+		canonical, err := domain.CanonicalGlobalMessageBody(string(first))
+		if err != nil || string(canonical) != string(first) {
+			t.Fatal("body not canonical", err)
+		}
+		frame := gossipPushFrame(protocol.Envelope{ID: "11111111-1111-4111-8111-111111111111", Topic: "global", Sender: idNodeA.String(), Recipient: "*", Flag: protocol.MessageFlagImmutable, Payload: []byte(first), CreatedAt: time.Now().UTC()})
+		line, err := protocol.MarshalFrameLine(frame)
+		if err != nil || len(line) > protocol.MaxFrameLine || len(line) <= len(first) {
+			t.Fatal("supported real wire bound", err, len(line))
+		}
+		e.plan.gossipPayloadProfile = ""
+		legacy, err := e.globalBody(3)
+		if err != nil || string(legacy) != fmt.Sprintf("t5d/%s/%s/%d", e.plan.Digest(), e.report.ExecutionID, 3) {
+			t.Fatal("old body changed", err)
+		}
+		if err := e.validateGossipPayload(); !errors.Is(err, loadstand.ErrUnsupportedPlan) {
+			t.Fatal("selector/params mismatch accepted", err)
 		}
 	})
 }

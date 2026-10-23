@@ -448,7 +448,7 @@ func linuxAdversarialBlockedStack(ctx context.Context) error {
 	return linuxAdversarialStack(ctx, []string{".(*linuxHelperRuntime).sampleWork(", ".(*LinuxProcessSampler).Sample(", "sync.Mutex.Lock"})
 }
 func linuxAdversarialStack(ctx context.Context, required []string) error {
-	if runtime.Version() != "go1.27.2" {
+	if runtime.Version() != "go1.27.3" {
 		return ErrProcessObservation
 	}
 	var stack [processFileLimit]byte

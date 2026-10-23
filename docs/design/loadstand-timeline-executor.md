@@ -182,3 +182,94 @@ inode дескриптора и имени, ссылки и подмена от�
 nonblocking/no-follow, поэтому подменённый FIFO не ждёт writer. Context проверяется
 вокруг чтения и при разборе строк. Обычный файловый syscall, зависший внутри
 ядра, этим не прерывается; более сильная гарантия I/O deadline не заявляется.
+
+
+## C1 fixed known-load functional profile / Известная добавленная нагрузка
+
+The optional `c1-global-32k-96` gossip payload profile is plan version4. Empty
+payload profile retains all existing version3 params, canonical digest and short
+`t5d/<plan>/<execution>/<event>` bodies. Version4 additionally binds
+`gossip_payload_profile=c1-global-32k-96`, `gossip_body_bytes=32768` and
+`gossip_publications=96` and
+`gossip_sender_setup=original-sdk-contact-before-measurement` to the plan digest/config key. The deterministic ASCII
+body preserves that unique prefix, padded to exactly32768bytes; the existing
+ordinary SDK `PublishGlobal` path performs canonical/wire validation and local
+SQLite commit. No raw-frame sender or fake counter is used.
+
+The bounded scenario is two original Fulls plus one original SDK child, quiet,
+30seconds, settle2seconds, gossip every250ms capped at96 publications (2.25..26s),
+and the existing periodic sampling every1second, including zero and30s. This is
+3145728 authored body bytes and192 exact Full runtime-replica observations, not a
+predicted wire/heap value. There are31 complete network cuts,93 periodic member
+readings and4 fresh process-group preStop readings;127 scheduled entries. Existing
+256action/128sample/4MiB trace limits and operation/lateness/readiness/cleanup/drain
+bounds remain unchanged. Encoded trace size and throughput still require actual
+verification. This is a functional exercise, never T5 memory/CPU acceptance.
+
+An observation's optional `ObservedSweep` is its FIRST successful periodic poll.
+A drain observation has no index and is never retagged by a later poll. Global
+polling follows the traffic read, so only observations from an EARLIER periodic
+poll cover the selected later traffic edge. `CompletedActions` binds a traffic
+edge to the original sequential trace append order; scheduled or wall timestamps
+cannot prove a publication preceded it. Positive C1 requires all96 unique
+publications and192 exact observer/hash/incarnation matches before the final
+edge, an actual judged no-defect C3 result with unchanged default tolerance,
+original cleanup/finals, and the original completed journal. Lack of genuine
+volume/power or pre-edge delivery is INCONCLUSIVE, not PASS, and never silently
+increases payload/time/tolerance or triggers a retry.
+
+A later separately retained Source mutant may duplicate only the actual socket
+meter's `addSent(n)` and rebuild both measured test and SDK child from it. It is
+not applied by this profile. Expected arithmetic RED requires the typed
+`byte_balance` defect, actual computed volume/share/imbalance, and at least one
+genuine completed known-load dispatch inside the judged interval. It can happen
+before96/192 completion: retain the actual prefix, not invented future receipts.
+Original journal records one failed attempt with sanitized `ErrMemberState`
+reason, no completed Result; caller error/report retain the exact arithmetic
+cause. Setup, source-invalid, undefined and timeout errors are different outcomes.
+The baseline must be actually judged first; no mutant credit is transferred from
+synthetic math tests. Default tolerances remain BurstFactor2,64KiB per-node
+in-flight and10percent max allowance share. These provisional defaults are not
+new measured thresholds.
+
+Профиль включается явно, только для тихой SDK global-нагрузки. Обычный профиль
+v3 сохраняется. Все тела, ACK локальной SQLite и replica observations идут через
+исходные Runtime/Desktop/Service; «stored locally» не доказывает доставку, а Full
+runtime replica не объявляется подписью или устойчивой SQLite-копией получателя.
+Результат C1/C3 засчитывается только при реальном judged interval; undefined
+остаётся отдельным inconclusive. Проверяемое окно заканчивается на genuine
+ReadAt последней существующей periodic-границы. PreStopOf не является границей
+всей сети; drain/cleanup/terminal tail явно unjudged, все original Ended/final
+receipts сохраняются. Новых sampling calls или изменений tolerances нет.
+
+C1's fixed two-Full/one-SDK quiet graph keeps DM `Contacts=0`. Before the
+measurement clock is created, the existing contacts stage imports the one
+successful original SDK StartReceipt.Public (including its genuine BoxSignature)
+into each original Full through normal Member.ImportContacts. The retained
+successful incarnation and original RuntimeProcess custody are checked first.
+No Full row without a signed box key is imported. At the existing clock-factory
+frontier the C1 test reads each Full's exact SDK public key and normal verified-
+sender predicate with no relay shortcut; silent rejected imports therefore fail
+before measurement. No map writes, new barrier, sleep or additional sample is
+introduced. Other profiles retain their old contacts behavior and version3
+params. This explicit known-publisher fixture avoids treating a lawful unknown-
+author drop as guaranteed global delivery; it does not weaken sender admission.
+
+The initial Contacts0/no-introduction real attempt remains a failed predecessor:
+96 publications produced191 of192 Full replicas; the first forwarded message was
+explicitly dropped as an unattributed non-DM author on one Full. That observation
+is not a rate-limit or arithmetic-power verdict. Failed C1 attempts now log a
+bounded metadata-only JSON summary before fatal assertions: actual execution
+phase/action index, dispatch and missing replica IDs/hashes, first observation
+sweep indexes, last actions/checks, actual judged result and original cleanup
+counts. No raw body, key material, environment or SQL is logged. Diagnostic size
+is capped at64KiB without changing any acceptance bound. Receipt-drain timeout
+is explicitly inconclusive delivery and still fails; it never expands the run.
+
+Для C1 отдельно закреплён известный SDK-издатель до измерения: genuine Public
+квитанции успешного исходного Start с BoxSignature проходит обычный ImportContacts
+обоих Full. DM Contacts0 и роли не меняются. Read-only проверка исходных ключей
+и isVerifiedSender выполняется до возврата прежних часов. Это явная подготовка
+фикстуры, не обход production admission. Неуспешный исходный прогон с191/192
+репликами сохраняется; метаданные ошибки не превращают timeout/undefined в PASS
+и не увеличивают нагрузку, время или tolerance.

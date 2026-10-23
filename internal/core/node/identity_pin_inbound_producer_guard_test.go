@@ -560,18 +560,28 @@ func ninN1SourceErrors(sources map[string][]byte) []string {
 	expected["findnode"]["find_node_owned_local_target.go:dispatchOwnedFindNodeLocalTarget"] = 10
 	expected["findnode"]["find_node_owned_local_target.go:runOwnedFindNodeLocalWork"] = 1
 	expected["findnode"]["find_node_owned_local_target.go:completeOwnedFindNodeLocalSignature"] = 3
+	// Loaded-only Ready uses the same original producer and optional pre-load clock.
+	expected["inboundPinProducer"]["find_node_ready_construction.go:<package>"] = 1
+	expected["inboundPins"]["find_node_ready_construction.go:bindings"] = 2
+	expected["inboundPins"]["find_node_ready_construction.go:installLoadedInbound"] = 1
+	expected["inboundPinClock"]["find_node_ready_construction.go:buildWithOptions"] = 1
+	expected["attachInboundPinCandidate"]["find_node_ready_construction.go:installLoadedInbound"] = 1
 	// Exact private Ready constructor sites; all existing closures stay strict.
 	expected["proofTransportServiceToken"]["find_node_ready_construction.go:<package>"] = 1
 	expected["findNode"]["find_node_ready_construction.go:prepareFindNodeReadyConstruction"] = 2
-	expected["findnode"]["find_node_ready_construction.go:prepareFindNodeReadyConstruction"] = 4
+	expected["findnode"]["find_node_ready_construction.go:prepareFindNodeReadyConstruction"] = 7
 	expected["findnode"]["find_node_ready_construction.go:newFindNodeReadyCandidateService"] = 1
-	expected["findnode"]["find_node_ready_construction.go:buildWithOwnDM"] = 2
+	expected["findnode"]["find_node_ready_construction.go:buildWithOptions"] = 4
+	expected["findnode"]["find_node_ready_construction.go:installLoadedInbound"] = 3
+	expected["findnode"]["find_node_ready_construction.go:newFindNodeReadyLoadedInboundCandidateService"] = 1
 	expected["proofToken"]["find_node_ready_construction.go:bindings"] = 1
 	expected["findNode"]["find_node_ready_construction.go:bindings"] = 8
 	expected["findnode"]["find_node_ready_construction.go:bindings"] = 3
 	expected["findnode"]["find_node_ready_construction.go:checkBeforeInstall"] = 2
 	expected["findnode"]["find_node_ready_construction.go:finalize"] = 3
 	expected["findnode"]["identity_pin_own_dm_runtime.go:<package>"] = 2
+	expected["findnode"]["find_node_ready_target_timing.go:newFindNodeReadyTimedLoadedInboundCandidateService"] = 2
+	expected["findnode"]["find_node_ready_target_timing.go:prepareFindNodeReadyTimedTestConstruction"] = 3
 	actual := map[string]map[string]int{}
 	made := map[string]map[string]int{}
 	ends := map[string]int{}

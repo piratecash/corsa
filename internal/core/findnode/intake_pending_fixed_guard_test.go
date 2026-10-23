@@ -19,7 +19,7 @@ import (
 // package GenDecl changes, including new files. It does not infer dataflow,
 // compiler allocations or actual final-lease provenance from this syntax.
 func pendingFixedSourceErrors(sources map[string][]byte) []string {
-	pins := map[string]string{"owned_bridge_bootstrap.go": "2ee7f6b13d859326bbd2fb00e487c9530737a2f722359d762202710d1a1cd827", "owned_resources.go": "7b3347cbe548e78ab4a92ebcf4c857545edd33d81d3a3af39c25a079b3aa036a", "owned_bridge_forward_answer.go": "e95e514c3db17a5a552b6e7fc0cee154c34459b141f568e1f601e7db04c61265", "owned_bridge_local_target.go": "1d4b98c9da23c15b09a94aa7559f7a064e160d5420e540524449baf288063603", "owned_bridge_local_target_stage.go": "39fde17cdadd3dfa02bc97ef40f9d21d37f18ca865abde2fed2005e680baa0c3", "owned_bridge_answer.go": "e790d8240c15baab43fde9cc48a72fda8a4c82a8ce52d9f7fa92f8bc972d009a",
+	pins := map[string]string{"owned_bridge_local_target_timing.go": "69356ebd3196f7b042d465cb72eb880ded354cc49ed2e334c3aebb3f179e0a1d", "owned_bridge_bootstrap.go": "2ee7f6b13d859326bbd2fb00e487c9530737a2f722359d762202710d1a1cd827", "owned_resources.go": "7b3347cbe548e78ab4a92ebcf4c857545edd33d81d3a3af39c25a079b3aa036a", "owned_bridge_forward_answer.go": "e95e514c3db17a5a552b6e7fc0cee154c34459b141f568e1f601e7db04c61265", "owned_bridge_local_target.go": "f9a14258ded9e99bb4ef39e88e8f0e52712fd6b66aec32eae7952d56a9aa7812", "owned_bridge_local_target_stage.go": "39fde17cdadd3dfa02bc97ef40f9d21d37f18ca865abde2fed2005e680baa0c3", "owned_bridge_answer.go": "e790d8240c15baab43fde9cc48a72fda8a4c82a8ce52d9f7fa92f8bc972d009a",
 		"owned_bridge_dispatch.go":       "a1fe44fe774f855b4a663b8d3bb767864c6c4b52290a4157a2682d2156414f1b",
 		"owned_bridge_round_dispatch.go": "b9128ec6284560aea84441eab2b8619ba08297b66133139af4030a39d4478fcf",
 		"owned_bridge_receive.go":        "5de62b53e6ae476daf7563e4cede1e95ed9e1e7f30fbc4de1e06947bc4144671",
@@ -41,7 +41,7 @@ func pendingFixedSourceErrors(sources map[string][]byte) []string {
 		"session.go":                     "8968f6d526239bc11510c4f091539dda84bed91c345d74a4606b397ddd525dc1",
 		"signing.go":                     "c0389bb2c6e127ff266860eaf0eb24a429c7c1cee9081fad0844483a7938b40b",
 		"target.go":                      "15c107401df68ec9527f6ce46e4d6311c6cbd79ffea7ac42b3d3bbbe2fbe6d81",
-		"target_owner.go":                "60c33019594d5b031f00a8e92e36435089645750d0ab7f65969c3ca724ee1a5d",
+		"target_owner.go":                "f6f6f51e69ace1888584e95a5d09f08cf13e8b6936cb68e6d022549d726b5511",
 	}
 	var failures []string
 	if len(sources) != len(pins) {

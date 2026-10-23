@@ -2824,8 +2824,12 @@ func newServiceWithConstruction(cfg config.Node, id *identity.Identity, eventBus
 	// Last constructor application wait is above. Actual coverage starts at
 	// the owned sample inside this one-time installation, never domain mint.
 	if construction.ready != nil {
-		// All mutable store/lifecycle checks finish BEFORE the observer install.
-		construction.ready.failure = construction.ready.checkBeforeInstall(svc)
+		// The loaded-only optional producer uses this exact original store.
+		// Its files/locks precede the final check and last statistic sample.
+		construction.ready.failure = construction.ready.installLoadedInbound(svc)
+		if construction.ready.failure == nil {
+			construction.ready.failure = construction.ready.checkBeforeInstall(svc)
+		}
 	}
 	if bridge != nil && bridge.statistic != nil && (construction.ready == nil || construction.ready.failure == nil) {
 		bridge.statisticInstalled = svc.installOwnedDegreeStatistic()

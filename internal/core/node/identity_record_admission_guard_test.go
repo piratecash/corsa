@@ -310,7 +310,7 @@ func contactPushSourceErrors(sources map[string][]byte) []string {
 		"contactRecordReconciliationAuthority": {"identity_pin_contact_reconciliation.go:reserveContactRecordReconciliation": 1},
 		"preparedContactRecordStage":           {"identity_pin_contact_record.go:prepareContactRecordStageLocked": 1},
 		"contactRecordCandidate":               {"identity_pin_contact_record.go:observeContactRecord": 1, "identity_pin_contact_reconciliation.go:captureReconciliation": 1},
-		"recordAdmissionConstruction":          {"find_node_ready_construction.go:buildWithOwnDM": 2, "service.go:newServiceWithDatagramConstructor": 1, "service.go:newContactRecordPushCandidateService": 1, "service.go:newRelationRecordCandidateService": 1, "service.go:newContactRecordReconciliationCandidateService": 1, "identity_record_admission_own_dm.go:NewInactiveOwnDMAdmissionCandidate": 1},
+		"recordAdmissionConstruction":          {"find_node_ready_construction.go:buildWithOptions": 2, "service.go:newServiceWithDatagramConstructor": 1, "service.go:newContactRecordPushCandidateService": 1, "service.go:newRelationRecordCandidateService": 1, "service.go:newContactRecordReconciliationCandidateService": 1, "identity_record_admission_own_dm.go:NewInactiveOwnDMAdmissionCandidate": 1},
 		"relationRecordAdmission":              {"identity_record_admission.go:newIdentityResolverWithRecordAdmission": 1, "identity_record_admission.go:newIdentityResolverWithContactRecordAdmission": 1},
 	}
 	actual, made := map[string]map[string]int{}, map[string]map[string]int{}

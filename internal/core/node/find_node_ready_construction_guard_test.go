@@ -46,9 +46,9 @@ func ownedReadySources(t *testing.T) map[string][]byte {
 	return sources
 }
 func ownedReadySourceErrors(sources map[string][]byte) []string {
-	pins := map[string]string{"internal/core/node/identity_pin_own_dm_runtime.go": "39b178ddcdeb0ee8979a264484dd2f5eea37e3f9a869e9568a768a965a194abb", "internal/core/findnode/owned_bridge.go": "b88656fb08a5dd33b0f2bdb7b9e52f636eb1b320291e1a390c2c9b683a593f57", "internal/core/findnode/owned_bridge_bootstrap.go": "2ee7f6b13d859326bbd2fb00e487c9530737a2f722359d762202710d1a1cd827", "internal/core/node/find_node_bridge_construction.go": "c068e0e0d7e742b39c5ae6d70051734f813e22ce6db7b4ec42ccf4594ffc5680", "internal/core/node/find_node_ready_construction.go": "1bfd6241613845076f0b6dfd2e74137aa4771d78d47f982dfbd37418afa75dab", "internal/core/node/service.go": "d99e39f1f30d7b9bf9e61f22cbc20c5f8c57e0e40e1a8468b6dfe477e50352f0"}
-	closed := map[string]bool{"findNodeReadyConstruction": true, "ownDMRuntimeConstruction": true, "prepareFindNodeReadyConstruction": true, "newFindNodeReadyCandidateService": true, "NewExecutingBootstrapIntake": true, "newDormantIntakeAt": true}
-	tracked := map[string]bool{"prepareFindNodeReadyConstruction": true, "newFindNodeReadyCandidateService": true, "NewExecutingBootstrapIntake": true, "newDormantIntakeAt": true}
+	pins := map[string]string{"internal/core/node/find_node_owned_local_target.go": "62ef1272aca207e7b2f74e7f89e78469281c2abf43ba2cb9b7df05413dfe4004", "internal/core/node/find_node_ready_target_timing.go": "515455541e482579332a42535b4ed58ddab7633a8ef52a50e0c23138285d7667", "internal/core/node/identity_pin_own_dm_runtime.go": "39b178ddcdeb0ee8979a264484dd2f5eea37e3f9a869e9568a768a965a194abb", "internal/core/findnode/owned_bridge.go": "b88656fb08a5dd33b0f2bdb7b9e52f636eb1b320291e1a390c2c9b683a593f57", "internal/core/findnode/owned_bridge_bootstrap.go": "2ee7f6b13d859326bbd2fb00e487c9530737a2f722359d762202710d1a1cd827", "internal/core/node/find_node_bridge_construction.go": "c068e0e0d7e742b39c5ae6d70051734f813e22ce6db7b4ec42ccf4594ffc5680", "internal/core/node/find_node_ready_construction.go": "9d0318eb4799ec9b6df1ffe756c74ed7ae9a843f908cc7bd4e85856ebe8b9aad", "internal/core/node/service.go": "68841af478e783ec4f833092393f7ec2ebfe4270e6a3e1666066bbf66ec0ac4f"}
+	closed := map[string]bool{"ownedFindNodeSigningTestGate": true, "signingGate": true, "newFindNodeReadyTimedLoadedInboundCandidateService": true, "prepareFindNodeReadyTimedTestConstruction": true, "findNodeReadyConstruction": true, "findNodeReadyOptions": true, "buildWithOptions": true, "installLoadedInbound": true, "newFindNodeReadyLoadedInboundCandidateService": true, "ownDMRuntimeConstruction": true, "prepareFindNodeReadyConstruction": true, "newFindNodeReadyCandidateService": true, "NewExecutingBootstrapIntake": true, "newDormantIntakeAt": true}
+	tracked := map[string]bool{"newFindNodeReadyTimedLoadedInboundCandidateService": true, "prepareFindNodeReadyTimedTestConstruction": true, "buildWithOptions": true, "installLoadedInbound": true, "newFindNodeReadyLoadedInboundCandidateService": true, "prepareFindNodeReadyConstruction": true, "newFindNodeReadyCandidateService": true, "NewExecutingBootstrapIntake": true, "newDormantIntakeAt": true}
 	calls := map[string]int{}
 	declarations := map[string]string{}
 	var failures []string
@@ -109,18 +109,30 @@ func ownedReadySourceErrors(sources map[string][]byte) []string {
 		}
 	}
 	wantCalls := map[string]int{
-		"prepareFindNodeReadyConstruction:internal/core/node/identity_pin_own_dm_runtime.go:NewInactiveOwnDMRuntimeCandidate":  1,
-		"prepareFindNodeReadyConstruction:internal/core/node/find_node_ready_construction.go:newFindNodeReadyCandidateService": 1,
-		"NewExecutingBootstrapIntake:internal/core/node/find_node_ready_construction.go:prepareFindNodeReadyConstruction":      1,
-		"newDormantIntakeAt:internal/core/findnode/owned_bridge.go:newDormantIntake":                                           1,
-		"newDormantIntakeAt:internal/core/findnode/owned_bridge_bootstrap.go:NewExecutingBootstrapIntake":                      1,
-		"SealConstruction:internal/core/node/find_node_ready_construction.go:finalize":                                         1,
+		"prepareFindNodeReadyConstruction:internal/core/node/find_node_ready_target_timing.go:newFindNodeReadyTimedLoadedInboundCandidateService": 1,
+		"prepareFindNodeReadyConstruction:internal/core/node/find_node_ready_target_timing.go:prepareFindNodeReadyTimedTestConstruction":          1,
+		"buildWithOptions:internal/core/node/find_node_ready_target_timing.go:newFindNodeReadyTimedLoadedInboundCandidateService":                 1,
+		"prepareFindNodeReadyConstruction:internal/core/node/find_node_ready_construction.go:newFindNodeReadyLoadedInboundCandidateService":       1,
+		"buildWithOptions:internal/core/node/find_node_ready_construction.go:buildWithOwnDM":                                                      1,
+		"buildWithOptions:internal/core/node/find_node_ready_construction.go:newFindNodeReadyLoadedInboundCandidateService":                       1,
+		"installLoadedInbound:internal/core/node/service.go:newServiceWithConstruction":                                                           1,
+		"prepareFindNodeReadyConstruction:internal/core/node/identity_pin_own_dm_runtime.go:NewInactiveOwnDMRuntimeCandidate":                     1,
+		"prepareFindNodeReadyConstruction:internal/core/node/find_node_ready_construction.go:newFindNodeReadyCandidateService":                    1,
+		"NewExecutingBootstrapIntake:internal/core/node/find_node_ready_construction.go:prepareFindNodeReadyConstruction":                         1,
+		"newDormantIntakeAt:internal/core/findnode/owned_bridge.go:newDormantIntake":                                                              1,
+		"newDormantIntakeAt:internal/core/findnode/owned_bridge_bootstrap.go:NewExecutingBootstrapIntake":                                         1,
+		"SealConstruction:internal/core/node/find_node_ready_construction.go:finalize":                                                            1,
 	}
 	wantDeclarations := map[string]string{
-		"prepareFindNodeReadyConstruction": "internal/core/node/find_node_ready_construction.go:prepareFindNodeReadyConstruction",
-		"newFindNodeReadyCandidateService": "internal/core/node/find_node_ready_construction.go:newFindNodeReadyCandidateService",
-		"NewExecutingBootstrapIntake":      "internal/core/findnode/owned_bridge_bootstrap.go:NewExecutingBootstrapIntake",
-		"newDormantIntakeAt":               "internal/core/findnode/owned_bridge.go:newDormantIntakeAt",
+		"newFindNodeReadyTimedLoadedInboundCandidateService": "internal/core/node/find_node_ready_target_timing.go:newFindNodeReadyTimedLoadedInboundCandidateService",
+		"prepareFindNodeReadyTimedTestConstruction":          "internal/core/node/find_node_ready_target_timing.go:prepareFindNodeReadyTimedTestConstruction",
+		"buildWithOptions":                              "internal/core/node/find_node_ready_construction.go:buildWithOptions",
+		"installLoadedInbound":                          "internal/core/node/find_node_ready_construction.go:installLoadedInbound",
+		"newFindNodeReadyLoadedInboundCandidateService": "internal/core/node/find_node_ready_construction.go:newFindNodeReadyLoadedInboundCandidateService",
+		"prepareFindNodeReadyConstruction":              "internal/core/node/find_node_ready_construction.go:prepareFindNodeReadyConstruction",
+		"newFindNodeReadyCandidateService":              "internal/core/node/find_node_ready_construction.go:newFindNodeReadyCandidateService",
+		"NewExecutingBootstrapIntake":                   "internal/core/findnode/owned_bridge_bootstrap.go:NewExecutingBootstrapIntake",
+		"newDormantIntakeAt":                            "internal/core/findnode/owned_bridge.go:newDormantIntakeAt",
 	}
 	if !reflect.DeepEqual(calls, wantCalls) {
 		failures = append(failures, "Ready exclusive constructor/Seal direct callers changed")
@@ -137,6 +149,13 @@ func TestOwnedReadyClosedSource(t *testing.T) {
 }
 func TestOwnedReadySourceControls(t *testing.T) {
 	for _, tc := range []struct{ name, path, before, after string }{
+		{"lost-gate-binding", "internal/core/node/find_node_ready_construction.go", "r.bridge.capture.localLoop.signingGate != r.originalOptions.signingGate", "false"},
+		{"gate-lost-done", "internal/core/node/find_node_ready_target_timing.go", "case <-done:\n\t\treturn false", "case <-done:\n\t\treturn true"},
+		{"timed-normal-implicit-gate", "internal/core/node/find_node_ready_target_timing.go", "findNodeReadyOptions{loadedInbound: true})", "findNodeReadyOptions{loadedInbound: true, signingGate: new(ownedFindNodeSigningTestGate)})"},
+		{"lost-inbound-selection", "internal/core/node/find_node_ready_construction.go", "r.options != r.originalOptions || r.ownDMRuntime != r.originalOptions.ownDM", "false"},
+		{"lost-inbound-wake", "internal/core/node/find_node_ready_construction.go", "p.wake != r.originalInboundWake", "false"},
+		{"skip-loaded-attach", "internal/core/node/service.go", "construction.ready.failure = construction.ready.installLoadedInbound(svc)", "construction.ready.failure = nil"},
+		{"mask-attach-error", "internal/core/node/find_node_ready_construction.go", "if r.failure != nil {\n\t\treturn nil, r.failure\n\t}", "if r.failure != nil { return nil, findnode.ErrNotReady }"},
 		{"skip-Seal", "internal/core/node/find_node_ready_construction.go", "if err := b.terminal.publisher.SealConstruction(); err != nil {\n\t\treturn err\n\t}", "if false { return nil }"},
 		{"lost-original-capture", "internal/core/node/find_node_ready_construction.go", "*c == r.originalCapture", "true"},
 		{"missing-store-custody", "internal/core/node/service.go", "construction.ready.service, construction.ready.trust = svc, trust", "construction.ready.service = svc"},

@@ -137,7 +137,7 @@ func ownedStatisticSourceErrors(sources map[string][]byte) []string {
 	need("find_node_bridge_construction.go:newFindNodeTerminalStatisticCandidateService", "b.statistic = &ownedDegreeStatisticProducer{owner:b.owner,publisher:b.terminal.publisher} s := newServiceWithConstruction", "owned binding must precede builder callbacks")
 	need("service.go:newServiceWithConstruction", "ownedStatistic = bridge.statistic", "exact prepared owner binding")
 	need("service.go:newServiceWithConstruction", "svc := &Service{proofToken:proofToken,degree:degree,bridgeTerminal:terminal,ownedDegreeStatisticProducer:ownedStatistic,", "owned producer must be in FIRST Service literal")
-	if !strings.HasSuffix(bodies["service.go:newServiceWithConstruction"], compact("svc.peerMu.Unlock() if construction.ready != nil { construction.ready.failure = construction.ready.checkBeforeInstall(svc) } if bridge != nil && bridge.statistic != nil && (construction.ready == nil || construction.ready.failure == nil) { bridge.statisticInstalled = svc.installOwnedDegreeStatistic() } return svc }")) {
+	if !strings.HasSuffix(bodies["service.go:newServiceWithConstruction"], compact("svc.peerMu.Unlock() if construction.ready != nil { construction.ready.failure = construction.ready.installLoadedInbound(svc) if construction.ready.failure == nil { construction.ready.failure = construction.ready.checkBeforeInstall(svc) } } if bridge != nil && bridge.statistic != nil && (construction.ready == nil || construction.ready.failure == nil) { bridge.statisticInstalled = svc.installOwnedDegreeStatistic() } return svc }")) {
 		failures = append(failures, "coverage install must follow last constructor application wait")
 	}
 	need("peer_state_degree_statistic.go:captureOverlayDWinForFlush", "if s != nil && s.ownedDegreeStatisticProducer != nil { return s.captureOwnedOverlayDWinForFlush() }", "owned dispatch must not use legacy raw clock")
@@ -164,7 +164,24 @@ func TestOwnedStatisticClosedSourceContract(t *testing.T) {
 	}
 }
 func TestOwnedStatisticGuardRejectsBackdateLateInstallAndIndependentWall(t *testing.T) {
+	if failures := ownedStatisticSourceErrors(ninN1Sources(t)); len(failures) != 0 {
+		t.Fatal("owned statistic mutation baseline is not clean", failures)
+	}
+	wantFailure := map[string]string{
+		"backdate":              "owned actual paired install point or memory window changed",
+		"early-complete":        "owned capture HWM coverage original-wall or W poison window changed",
+		"independent-wall":      "owned capture HWM coverage original-wall or W poison window changed",
+		"skip-unknown":          "unknown owned coverage must remain unavailable",
+		"origin":                "owned pure projection provenance or legacy fallback",
+		"projection-write":      "owned pure projection writes authority",
+		"retime-install":        "owned actual paired install point or memory window changed",
+		"late-setter":           "owned producer late Service setter",
+		"late-inbound-attach":   "coverage install must follow last constructor application wait",
+		"skip-inbound-precheck": "coverage install must follow last constructor application wait",
+	}
 	for _, tc := range []struct{ name, path, before, after string }{
+		{"late-inbound-attach", "service.go", "bridge.statisticInstalled = svc.installOwnedDegreeStatistic()", "bridge.statisticInstalled = svc.installOwnedDegreeStatistic()\n\t_ = construction.ready.installLoadedInbound(svc)"},
+		{"skip-inbound-precheck", "service.go", "if construction.ready.failure == nil {\n\t\t\tconstruction.ready.failure = construction.ready.checkBeforeInstall(svc)\n\t\t}", "_ = construction.ready.checkBeforeInstall(svc)"},
 		{"backdate", "peer_state_owned_degree_statistic.go", "p.coverageStart = point", "p.coverageStart = findnodebridge.OwnedInstant{}"},
 		{"early-complete", "peer_state_owned_degree_statistic.go", "!degreeStatisticCoverageReady(p.coverageStart.Elapsed(), point.Elapsed())", "false && !degreeStatisticCoverageReady(p.coverageStart.Elapsed(), point.Elapsed())"},
 		{"independent-wall", "peer_state_owned_degree_statistic.go", "at: wall", "at: time.Now().UTC()"},
@@ -181,8 +198,13 @@ func TestOwnedStatisticGuardRejectsBackdateLateInstallAndIndependentWall(t *test
 				t.Fatal("owned statistic selfcase exact anchor changed", tc.name)
 			}
 			sources[tc.path] = []byte(strings.Replace(raw, tc.before, tc.after, 1))
-			if len(ownedStatisticSourceErrors(sources)) == 0 {
-				t.Fatal("owned statistic SOURCE escape accepted", tc.name)
+			failures := ownedStatisticSourceErrors(sources)
+			found := false
+			for _, failure := range failures {
+				found = found || failure == wantFailure[tc.name]
+			}
+			if !found {
+				t.Fatal("owned statistic SOURCE control missed its own failure", tc.name, failures)
 			}
 		})
 	}

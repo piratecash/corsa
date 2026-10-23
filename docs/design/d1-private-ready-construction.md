@@ -52,3 +52,52 @@ The D1 path remains A → R → T over existing ProvenSessions and exact known
 neighbors. Unknown-target silence, original response correlation and strict
 answer expiry are unchanged. There is no recursive D2 routing or public general
 initiator here.
+
+## Explicit loaded inbound composition
+
+A private Ready options path can additionally request the existing loaded-only
+N-in producer, with or without the existing own-DM candidate. Ordinary Ready,
+own-DM and public Service constructors keep N-in absent. No configuration,
+capability, installer, migration or Unknown-journal branch selects this option.
+The original secure-session store must already contain valid format3 state.
+Loaded state may still owe strict confirmation; it is serviced by the existing
+Run-owned worker, not treated as a new constructor ACK requirement.
+
+Attachment uses that same original Service/store after constructor callbacks
+and application waits, immediately before the final Ready precheck. An attach
+failure is preserved and returns no Service, with original cancellation and
+callback joins; statistics and Seal are skipped. Production retains the existing
+trusted elapsed clock. Tests use only the existing constructor clock seam before
+store loading, never a replacement clock or synthetic runtime evidence.
+
+The selected options and original producer pointer, Service, store and wake
+channel are retained separately. Both preinstall and final immutable checks
+refuse replacement, including same-pointer field changes; mutex/cursor worker
+state is not copied. All store/file/lock checks precede statistic installation.
+The original Run starts and joins the original N-in worker; no extra worker,
+context, limit, retry or post-statistic application lock is introduced.
+
+Directed tests reuse genuine TLS/F1 sessions and strict on-disk journals. The
+controlled elapsed fixture advances the N-in observation window without a real
+ten-minute wait; it does not represent measured elapsed-time/resource acceptance.
+The same original session earns confirmed N-in class and participates in genuine
+Runtime capture and local signed-answer writing. This remains inactive
+construction preparation, separate from G2/default advertisement and release.
+
+## Complete original-session chain coverage
+
+`TestD1OriginalInitiatorReadyRelayReadyTargetChain` composes the existing test
+initiator A with genuine Ready relay R and target T. Real TLS/F1 and the loaded
+N-in producer feed the original forwarding, target signing and return writers;
+the initiator verifies its retained challenge and restored source envelope. The
+cases cover three successful lookups and the fourth-start limit, foreign-reader
+and replay refusal, cancellation, deadline equality and a forged return copy.
+Cleanup closes both socket pairs before joining either original fixture owner.
+
+This fixture supplies Round and Slack of 100 ms before construction and Seal,
+within the unchanged one-second Runtime budget. These are test inputs, not an
+approved G2 timing profile or a service-time guarantee. Its controlled N-in and
+initiator clocks do not replace the relay/target Runtime clocks. The accepted
+ordinary/race checks exercise the original read/admission/dispatch paths and
+workers; they do not establish whole `Service.Run`, a public lookup API, resource
+acceptance or activation.

@@ -18,12 +18,13 @@ import (
 // ReserveReceived. A full Node queue therefore never revokes accepted local T.
 // Admission serialization preserves the calendar's projected FIFO order.
 type ownedFindNodeLocalLoop struct {
-	admission sync.Mutex
-	jobs      chan findnode.OwnedLocalSignWork
-	slots     chan struct{}
-	done      <-chan struct{}
-	retry     time.Duration
-	started   atomic.Bool
+	admission   sync.Mutex
+	jobs        chan findnode.OwnedLocalSignWork
+	slots       chan struct{}
+	done        <-chan struct{}
+	retry       time.Duration
+	started     atomic.Bool
+	signingGate *ownedFindNodeSigningTestGate
 }
 
 func newOwnedFindNodeLocalLoop(done <-chan struct{}, limit int, retry time.Duration) *ownedFindNodeLocalLoop {
@@ -234,6 +235,11 @@ func (s *Service) completeOwnedFindNodeLocalSignature(permit findnode.OwnedLocal
 			answers = nil
 		}
 	}()
+	// The original mandatory completion defer is installed BEFORE this wait.
+	// Only the dedicated test construction can install this close-only gate.
+	if loop := s.bridgeCapture.localLoop; loop.signingGate != nil && !loop.signingGate.wait(loop.done) {
+		return nil
+	}
 	transcript, err := input.Transcript()
 	if err != nil {
 		return nil

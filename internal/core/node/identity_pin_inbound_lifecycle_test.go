@@ -1304,7 +1304,13 @@ func n1CompleteStacks(t *testing.T) map[uint64]string {
 }
 
 func TestInboundN1ServiceRunOwnsActualBlockedProducerAndJoin(t *testing.T) {
-	f := n1AcceptedFixture(t)
+	n1AssertOriginalRunProducerJoin(t, n1AcceptedFixture(t))
+}
+
+// Shared unchanged blocked-original-worker oracle for standalone and Ready
+// composition. The caller supplies a real accepted original TLS fixture.
+func n1AssertOriginalRunProducerJoin(t *testing.T, f n1ConnectionFixture) {
+	t.Helper()
 	if !f.service.publishInboundLifetime(f.owner) {
 		t.Fatal("publish failed")
 	}
