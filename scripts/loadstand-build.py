@@ -3087,23 +3087,41 @@ def _json_stream(raw, maximum):
     return values
 
 
-def initialize_lane_telemetry(home, budget):
+class LaneTelemetryMode:
+    """Original mode FD, owned explicitly until the build/job closes resources."""
+    __slots__ = ('fd',)
+
+    def __init__(self):
+        self.fd = None
+
+    def close(self):
+        if self.fd is not None:
+            fd, self.fd = self.fd, None
+            os.close(fd)
+
+
+def initialize_lane_telemetry(home, budget, own):
     # The original isolated XDG_CONFIG_HOME, never the caller's global config.
     # GOTELEMETRY is output-only in this Go version: its mode FILE controls the
     # daemonized telemetry sidecar, which would violate owned group membership.
     if home.names():
         fail('TelemetryHomeNotFresh', 'toolchain')
-    with home.directory('go/telemetry', create=True) as directory:
-        fd = directory.file('mode', create=True)
-        try:
-            _write_all(fd, b'off\n', budget)
-            os.fsync(fd)
-            expected = stable_stat(check_regular(fd, 4, private=True))
-        finally:
-            os.close(fd)
-        os.fsync(directory.fd)
-    verify_lane_telemetry(home, expected, budget)
-    return expected
+    mode = LaneTelemetryMode()
+    try:
+        with home.directory('go/telemetry', create=True) as directory:
+            mode.fd = directory.file('mode', create=True)
+            _write_all(mode.fd, b'off\n', budget)
+            os.fsync(mode.fd)
+            expected = stable_stat(check_regular(mode.fd, 4, private=True))
+            os.fsync(directory.fd)
+        verify_lane_telemetry(home, expected, budget)
+        # Registration is mandatory; returning only a tuple must not abandon
+        # the original descriptor. No destructor or global owner registry.
+        own(mode)
+        return expected
+    except BaseException:
+        mode.close()
+        raise
 
 
 def verify_lane_telemetry(home, expected, budget):
@@ -3931,7 +3949,7 @@ class BuildPair:
         record['state'] = 'incomplete'
         previous = tuple(self.lanes)
         lane = new_lane(self.store.root, ('lane-A', 'lane-B')[number], self.lanes)
-        self.telemetry_modes[lane['home'].identity] = initialize_lane_telemetry(lane['home'], lane_budget)
+        self.telemetry_modes[lane['home'].identity] = initialize_lane_telemetry(lane['home'], lane_budget, self.own)
         if any(a.identity == b.identity for old in previous for a in old.values() for b in lane.values()):
             fail('AliasedLaneRoot')
         self.source_manifests.append(self.source_plan.materialize(lane['source']))

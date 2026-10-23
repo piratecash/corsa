@@ -265,7 +265,7 @@ func (s *Service) runPeerSession(ctx context.Context, address domain.PeerAddress
 	}
 }
 
-func (s *Service) openPeerSession(ctx context.Context, address domain.PeerAddress) (bool, error) {
+func (s *Service) openPeerSession(ctx context.Context, address domain.PeerAddress) (connected bool, outcomeErr error) {
 	// Budgeted. This is the legacy session path (ensurePeerSessions), inert
 	// while the connection manager is wired — but a dial path that is dead
 	// today and unbudgeted tomorrow is how a ceiling quietly stops holding.
@@ -283,6 +283,7 @@ func (s *Service) openPeerSession(ctx context.Context, address domain.PeerAddres
 		s.accumulateSessionTraffic(address, conn)
 		if session != nil {
 			_ = session.Close()
+			session.k10FinishReported(outcomeErr)
 			// The session ends here on every exit — an error, or the
 			// serve loop returning on a cancelled context — and this
 			// goroutine dispatched all of its frames, so the bucket they
@@ -1134,7 +1135,7 @@ func (s *Service) openPeerSessionForCM(ctx context.Context, address domain.PeerA
 	return s.finishPeerSessionForCM(ctx, address, transport)
 }
 
-func (s *Service) finishPeerSessionForCM(ctx context.Context, address domain.PeerAddress, transport *dialledTransport) (*peerSession, error) {
+func (s *Service) finishPeerSessionForCM(ctx context.Context, address domain.PeerAddress, transport *dialledTransport) (result *peerSession, outcomeErr error) {
 	// Capture the ORIGINAL transport binding before readiness/auth I/O waits.
 	var outgoing r2aHopPublication
 	if s.r2OwnDMOwner != nil {
@@ -1190,6 +1191,15 @@ func (s *Service) finishPeerSessionForCM(ctx context.Context, address domain.Pee
 		// see the peerSession field doc.
 		contactSyncCh: make(chan chan int),
 	}
+	defer func() {
+		if result == nil {
+			if outcomeErr != nil {
+				session.k10FinishReported(outcomeErr)
+			} else {
+				session.k10MissingIfUnfinished()
+			}
+		}
+	}() // Success hands the SAME capsule to CM; no premature final outcome.
 	if outgoing.sealed != nil {
 		outgoing.sealed.session = session
 	}
@@ -1340,6 +1350,7 @@ func (s *Service) onCMSessionEstablished(info SessionInfo) {
 	receipt := s.prepareFindNodeCMAcceptedLocked(info)
 	publication := s.beginRegistryPublication()
 	session.selectedGeneration = info.SlotGeneration
+	session.terminal.bindGeneration(info.SlotGeneration)
 	if receipt != nil {
 		session.findNodeReceipt = receipt
 	}
@@ -1456,6 +1467,7 @@ func classifyCMSessionSetup(session *peerSession, initErr error) cmSessionSetupO
 // session first (peerSession.closedBy): a session the ConnectionManager closed
 // on its own decision is never charged to the peer and never published.
 func (s *Service) runCMSession(session *peerSession, slotAddress domain.PeerAddress, slotGeneration uint64) {
+	defer session.k10MissingIfUnfinished()
 	if session.releaseAddressDial != nil {
 		defer session.releaseAddressDial()
 	}
@@ -1467,6 +1479,7 @@ func (s *Service) runCMSession(session *peerSession, slotAddress domain.PeerAddr
 		// after the ConnectionManager's close that came first and makes its
 		// reason visible. The close error adds nothing to the setup error.
 		_ = session.Close()
+		session.k10FinishReported(initErr)
 	}
 
 	switch classifyCMSessionSetup(session, initErr) {
@@ -1725,6 +1738,7 @@ func (s *Service) publishAndServeCMSession(session *peerSession, slotAddress dom
 	// exit of the serve loop leaves the session dead, so closing it here
 	// changes nothing for the peer; the close error adds nothing to err.
 	_ = session.Close()
+	session.k10FinishReported(err)
 
 	s.withdrawServedCMSession(session, slotAddress, slotGeneration, err)
 }

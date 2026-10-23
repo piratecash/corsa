@@ -536,7 +536,7 @@ func degreeStatisticConstructionPins() map[string]string {
 		"internal/core/node/secure_session_store.go":              "56ab961cccccfc14ad586cf5c973960420995fe9b1986b99856c42a4e2e64228",
 		"internal/core/node/find_node_degree_terminal_bridge.go":  "e6c1022489eb1de4969683cecba0c40590fe5a3ffef14e272e5464b722677ef8",
 		"internal/core/node/find_node_bridge_construction.go":     "c068e0e0d7e742b39c5ae6d70051734f813e22ce6db7b4ec42ccf4594ffc5680",
-		"internal/core/node/service.go":                           "283517bd09b09c11e77f799a285a90e97a0756bbc48b39c418657254cbcc73bf",
+		"internal/core/node/service.go":                           "e3e06e151503627256e0da77533d98885e91bf0f8a8cd6a3d178b4cc73f93f58",
 		"internal/core/node/find_node_degree.go":                  "5fd8c8fd9700cb63fd238bd9fb3255c7e434081258e4448d3febb89f4e0e35ea",
 		"internal/core/node/datagram_runtime_state.go":            "62817ed3c561f3eedbaa8baca6ded4c3696b8595a5c3a5345e35faada9ebcf64",
 		"internal/core/node/datagram_layer.go":                    "02b1e51faf940855fa9a366333a01b4aa681f6cf3fe97485bd317a782244549d",

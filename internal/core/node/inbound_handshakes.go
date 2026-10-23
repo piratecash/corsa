@@ -105,6 +105,8 @@ type inboundHandshakes struct {
 	bySource         map[string]int
 
 	loopbackGauge atomic.Int64
+	// Frozen only by the private prepublication observation constructor.
+	fullObservation *handshakeFullObservation
 }
 
 func newInboundHandshakes(bounds handshakeBounds) *inboundHandshakes {
@@ -144,6 +146,9 @@ func (h *inboundHandshakes) leaveSource(group string) {
 // release gives the slot back on every outcome of the handshake; a second
 // call gives nothing back.
 func (h *inboundHandshakes) enter(source handshakeSource) (func(), error) {
+	if h.fullObservation != nil {
+		return h.enterObserved(source)
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	switch {
@@ -162,6 +167,10 @@ func (h *inboundHandshakes) enter(source handshakeSource) (func(), error) {
 }
 
 func (h *inboundHandshakes) leave(loopback bool) {
+	if h.fullObservation != nil {
+		h.leaveObserved(loopback)
+		return
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.inFlight--

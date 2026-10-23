@@ -3203,6 +3203,7 @@ func (s *Service) failDelivery(envelope protocol.Envelope, status, reason string
 	log.Trace().Str("site", "failDelivery").Str("phase", "lock_held").Str("msg_id", string(envelope.ID)).Msg("peer_mu_writer")
 	log.Trace().Str("site", "failDelivery").Str("phase", "lock_wait").Str("msg_id", string(envelope.ID)).Msg("delivery_mu_writer")
 	s.deliveryMu.Lock()
+	s.beginPendingQueueObservationLocked()
 	log.Trace().Str("site", "failDelivery").Str("phase", "lock_held").Str("msg_id", string(envelope.ID)).Msg("delivery_mu_writer")
 	// Late-receipt re-check: the abandon decision was taken under a
 	// previous deliveryMu window; a delivered/seen receipt may have landed
@@ -3210,6 +3211,7 @@ func (s *Service) failDelivery(envelope protocol.Envelope, status, reason string
 	// Terminalizing or journaling on top of that would overwrite a
 	// confirmed delivery with failed/expired — skip entirely.
 	if s.hasReceiptForMessageLocked(messageIdentityOf(envelope)) {
+		s.commitPendingQueueObservationLocked()
 		s.deliveryMu.Unlock()
 		log.Trace().Str("site", "failDelivery").Str("phase", "lock_released_receipt_won").Str("msg_id", string(envelope.ID)).Msg("delivery_mu_writer")
 		s.peerMu.Unlock()
@@ -3228,6 +3230,7 @@ func (s *Service) failDelivery(envelope protocol.Envelope, status, reason string
 	}
 	aggSnap := s.aggregateStatus
 	s.statusMu.Unlock()
+	s.commitPendingQueueObservationLocked()
 	s.deliveryMu.Unlock()
 	log.Trace().Str("site", "failDelivery").Str("phase", "lock_released").Str("msg_id", string(envelope.ID)).Msg("delivery_mu_writer")
 	s.peerMu.Unlock()

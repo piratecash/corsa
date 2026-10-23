@@ -549,6 +549,7 @@ func (s *Service) registerInboundConnLocked(conn net.Conn, core *netcore.NetCore
 	if wire, ok := conn.(*peekedConn); ok {
 		s.bindProofTransportLocked(entry, id, wire)
 	}
+	s.k10RegisterLocked(conn, entry)
 	publication := s.beginRegistryPublication()
 	s.conns[id] = entry
 	s.connIDByNetConn[conn] = id
@@ -568,6 +569,7 @@ func (s *Service) attachOutboundCoreLocked(conn net.Conn, core *netcore.NetCore)
 	if wire, ok := conn.(*peekedConn); ok {
 		s.bindProofTransportLocked(entry, id, wire)
 	}
+	s.k10RegisterLocked(conn, entry)
 	publication := s.beginRegistryPublication()
 	s.conns[id] = entry
 	s.connIDByNetConn[conn] = id
@@ -605,6 +607,7 @@ func (s *Service) unregisterConnLocked(conn net.Conn) {
 			entry.receive.Close()
 		}
 		entry.budget.Release()
+		entry.terminal.remove(entry)
 	}
 	publication := s.beginRegistryPublication()
 	delete(s.conns, id)
@@ -875,4 +878,75 @@ func (s *Service) forEachConnIDLocked(fn func(domain.ConnID) bool) {
 			return
 		}
 	}
+}
+
+// K10 raw-connection access remains inside this original net-owning boundary.
+func (s *Service) k10RegisterLocked(conn net.Conn, entry *connEntry) {
+	o := s.terminalObservation
+	if o == nil {
+		return
+	}
+	id := entry.core.ConnID()
+	capsule := &k10TerminalCapsule{source: o, entry: entry, id: id}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.frozen != "" {
+		return
+	}
+	_, byID := s.conns[id]
+	_, byConn := s.connIDByNetConn[conn]
+	if id == 0 || byID || byConn {
+		o.failLocked("registry-identity-collision")
+		return
+	}
+	if o.registered == k10Max || o.active == k10Max || o.registrationSerial == k10Max || o.version == k10Max {
+		o.failLocked("registration-overflow")
+		return
+	}
+	direction := uint8(0)
+	if entry.core.Dir() == netcore.Outbound {
+		direction = 1
+	}
+	o.registered++
+	o.active++
+	o.registrationSerial++
+	o.version++
+	capsule.serial, capsule.direction = o.registrationSerial, direction
+	entry.terminal = capsule
+}
+func (s *Service) k10ForRegistered(conn net.Conn) *k10TerminalCapsule {
+	if s.terminalObservation == nil {
+		return nil
+	}
+	s.peerMu.RLock()
+	defer s.peerMu.RUnlock()
+	id, ok := s.connIDByNetConn[conn]
+	if !ok {
+		return nil
+	}
+	if entry := s.conns[id]; entry != nil {
+		return entry.terminal
+	}
+	return nil
+}
+
+func (s *Service) k10Request(id domain.ConnID, request k10CloseRequest) {
+	if s.terminalObservation == nil {
+		return
+	}
+	s.peerMu.RLock()
+	var capsule *k10TerminalCapsule
+	if entry := s.conns[id]; entry != nil {
+		capsule = entry.terminal
+	}
+	s.peerMu.RUnlock()
+	capsule.request(request)
+}
+
+// Caller holds peerMu; no raw registry access leaves the original boundary.
+func (s *Service) k10ForIDLocked(id domain.ConnID) *k10TerminalCapsule {
+	if entry := s.conns[id]; entry != nil {
+		return entry.terminal
+	}
+	return nil
 }

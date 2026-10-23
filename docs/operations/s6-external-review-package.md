@@ -249,3 +249,33 @@ loopback listener. Исходные ограниченные логи сохра
 указаны выше. Закрывается только этот POSIX startup-подслучай. Windows/DACL, остальные
 startup-проверки, release notes, final-candidate проверки и решение о выпуске S6 остаются;
 `unsafe_pin_store_refusal` сохраняет partial, release decision — null.
+
+## Owner decision of 2026-10-23 / Решение владельца от 2026-10-23
+
+### English
+
+A real Windows host is currently unavailable. Native Windows owner/DACL behaviour remains
+**UNVERIFIED**. Cross-compilation, synthetic fixtures and POSIX results cannot close this
+Windows obligation. Its absence blocks the S6 release under the existing admission terms;
+the requirement is not waived or relaxed. It does not prevent committing the current
+implementation area, and such a commit supplies no Windows evidence or S6 completion.
+
+Independent cryptographic review remains **OPEN**, without an expert verdict.
+`unsafe_pin_store_refusal` stays `partial`, `crypto_review` stays `not_done` with
+`evidence: null`, and `release_decision` stays `null`. The manifest still has
+**17 conditions: 7 done, 2 partial, 8 not_done**. The native Windows evidence specified
+above, the expert review and the remaining release conditions are still required.
+
+### Русский
+
+Настоящий Windows-хост сейчас недоступен. Поведение владельцев и DACL на Windows остаётся
+**НЕПРОВЕРЕННЫМ (UNVERIFIED)**. Cross-compile, синтетические fixture и POSIX-результаты
+не закрывают это Windows-требование. Отсутствие проверки блокирует выпуск S6 по действующим
+условиям допуска; требование не отменено и не ослаблено. Это не мешает закоммитить текущую
+область реализации; такой коммит не подтверждает Windows и не завершает S6.
+
+Независимая криптографическая экспертиза остаётся **ОТКРЫТОЙ (OPEN)**, заключения эксперта нет.
+`unsafe_pin_store_refusal` сохраняет `partial`, `crypto_review` — `not_done` и
+`evidence: null`, `release_decision` — `null`. В манифесте по-прежнему
+**17 условий: 7 done, 2 partial, 8 not_done**. Описанные выше настоящие Windows-свидетельства,
+экспертиза и остальные условия выпуска по-прежнему необходимы.

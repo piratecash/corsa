@@ -1507,6 +1507,21 @@ class InterruptedObservationControls(unittest.TestCase):
 
 class LaneTelemetryControls(unittest.TestCase):
     """Own temporary file/FD controls; no Go/Git/child/compiler execution."""
+    def setUp(self):
+        self.mode_resources=[]
+        self.addCleanup(self._close_modes)
+
+    def _own_mode(self, mode):
+        self.mode_resources.append(mode)
+        return mode
+
+    def _close_modes(self):
+        while self.mode_resources:
+            self.mode_resources.pop().close()
+
+    def _initialize(self, home, budget):
+        return build.initialize_lane_telemetry(home, budget, self._own_mode)
+
     def test_fresh_modes_are_separate_private_exact_and_environment_bound(self):
         with tempfile.TemporaryDirectory() as temporary:
             with build.Directory.open_absolute(str(pathlib.Path(temporary).resolve())) as root:
@@ -1515,7 +1530,7 @@ class LaneTelemetryControls(unittest.TestCase):
                     identities=[]
                     for name in ('A','B'):
                         lane=build.new_lane(root,name,lanes)
-                        expected=build.initialize_lane_telemetry(lane['home'],build.Budget())
+                        expected=self._initialize(lane['home'],build.Budget())
                         build.verify_lane_telemetry(lane['home'],expected,build.Budget())
                         mode=pathlib.Path(lane['home'].label)/'go/telemetry/mode'
                         self.assertEqual(b'off\n',mode.read_bytes())
@@ -1536,7 +1551,7 @@ class LaneTelemetryControls(unittest.TestCase):
                 rootpath=pathlib.Path(temporary).resolve()
                 with build.Directory.open_absolute(str(rootpath)) as root:
                     with root.directory('home',create=True) as home:
-                        expected=build.initialize_lane_telemetry(home,build.Budget())
+                        expected=self._initialize(home,build.Budget())
                         path=rootpath/'home/go/telemetry/mode'
                         if change=='missing': path.unlink()
                         elif change=='replaced':
@@ -1558,9 +1573,9 @@ class LaneTelemetryControls(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             with build.Directory.open_absolute(str(pathlib.Path(temporary).resolve())) as root:
                 with root.directory('home',create=True) as home:
-                    original=build.initialize_lane_telemetry(home,build.Budget())
+                    original=self._initialize(home,build.Budget())
                     with self.assertRaisesRegex(build.Failure,'^TelemetryHomeNotFresh$'):
-                        build.initialize_lane_telemetry(home,build.Budget())
+                        self._initialize(home,build.Budget())
                     build.verify_lane_telemetry(home,original,build.Budget())
     def test_failed_readback_closes_original_created_mode_fd(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -1574,7 +1589,7 @@ class LaneTelemetryControls(unittest.TestCase):
                     with mock.patch.object(build.Directory,'file',capture), \
                          mock.patch.object(build,'read_fd',return_value=b'on\n'):
                         with self.assertRaisesRegex(build.Failure,'^TelemetryModeChanged$'):
-                            build.initialize_lane_telemetry(home,build.Budget())
+                            self._initialize(home,build.Budget())
                     self.assertEqual(1,len(created))
                     with self.assertRaises(OSError): os.fstat(created[0])
     def test_nested_trusted_root_owner_only_preserves_original_private_mode_file(self):
@@ -1587,7 +1602,7 @@ class LaneTelemetryControls(unittest.TestCase):
                 rootpath=pathlib.Path(temporary).resolve()
                 with build.Directory.open_absolute(str(rootpath)) as root:
                     with root.directory('home',create=True) as home:
-                        expected=list(build.initialize_lane_telemetry(home,build.Budget()))
+                        expected=list(self._initialize(home,build.Budget()))
                         expected[4]=501
                         paths={'home':rootpath/'home','go':rootpath/'home/go',
                                'telemetry':rootpath/'home/go/telemetry',
@@ -1625,6 +1640,7 @@ class LaneTelemetryControls(unittest.TestCase):
                 pair=build.BuildPair.__new__(build.BuildPair)
                 pair.receipt={'lanes':[build.not_started_lane(0),build.not_started_lane(1)]}
                 pair.lanes=[]; pair.telemetry_modes={}; pair.source_manifests=[]
+                pair.resources=[]; pair.generated=[]
                 pair.request=sample('request'); pair.native=None; pair.supervisor=None
                 pair.store=mock.Mock(root=root); pair.go=mock.Mock(path='/never-executed/go')
                 pair.goroot_cap=mock.Mock(label='/goroot'); pair.seed=mock.Mock()
@@ -1643,8 +1659,126 @@ class LaneTelemetryControls(unittest.TestCase):
                         with self.assertRaises(FirstGoObserved): pair._lane_body(0,build.Budget())
                     self.assertEqual(1,pair._before_after.call_count)
                 finally:
-                    for lane in pair.lanes:
-                        for cap in reversed(list(lane.values())): cap.close()
+                    pair.close()
+
+    def test_original_mode_fd_retained_until_owner_close_and_close_idempotent(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            with build.Directory.open_absolute(str(pathlib.Path(temporary).resolve())) as root:
+                with root.directory('home',create=True) as home:
+                    created=[]; original=build.Directory.file
+                    def capture(cap, relative, create=False, executable=False):
+                        fd=original(cap,relative,create,executable)
+                        if relative=='mode' and create: created.append(fd)
+                        return fd
+                    with mock.patch.object(build.Directory,'file',capture):
+                        expected=self._initialize(home,build.Budget())
+                    mode=self.mode_resources[-1]
+                    self.assertEqual([mode.fd],created)
+                    original_fd=mode.fd
+                    self.assertEqual(expected,build.stable_stat(os.fstat(original_fd)))
+                    build.verify_lane_telemetry(home,expected,build.Budget())
+                    build.verify_lane_telemetry(home,expected,build.Budget())
+                    self.assertEqual(expected,build.stable_stat(os.fstat(original_fd)))
+                    mode.close(); mode.close()
+                    self.assertIsNone(mode.fd)
+                    with self.assertRaises(OSError): os.fstat(original_fd)
+
+    def test_write_sync_cancellation_and_owner_registration_failure_close_mode(self):
+        for failure in ('write','file-sync','directory-sync','cancelled','registration'):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temporary:
+                with build.Directory.open_absolute(str(pathlib.Path(temporary).resolve())) as root:
+                    with root.directory('home',create=True) as home:
+                        created=[]; original_file=build.Directory.file; original_sync=os.fsync
+                        def capture(cap, relative, create=False, executable=False):
+                            fd=original_file(cap,relative,create,executable)
+                            if relative=='mode' and create: created.append(fd)
+                            return fd
+                        def sync(fd):
+                            if created and ((failure=='file-sync' and fd==created[0]) or
+                                            (failure=='directory-sync' and fd!=created[0])):
+                                raise OSError('fixture sync failure')
+                            return original_sync(fd)
+                        def own(mode):
+                            self.assertEqual(created[0],mode.fd)
+                            os.fstat(mode.fd)
+                            raise OSError('fixture owner registration failure')
+                        budget=build.Budget(cancelled=[failure=='cancelled'])
+                        write=build._write_all
+                        def write_or_fail(fd,data,observed_budget):
+                            if failure=='write': raise OSError('fixture write failure')
+                            return write(fd,data,observed_budget)
+                        registrar=own if failure=='registration' else self._own_mode
+                        error=build.Failure if failure=='cancelled' else OSError
+                        with mock.patch.object(build.Directory,'file',capture), \
+                             mock.patch.object(build.os,'fsync',side_effect=sync), \
+                             mock.patch.object(build,'_write_all',side_effect=write_or_fail):
+                            with self.assertRaises(error):
+                                build.initialize_lane_telemetry(home,budget,registrar)
+                        self.assertEqual(1,len(created))
+                        self.assertEqual([],self.mode_resources)
+                        with self.assertRaises(OSError): os.fstat(created[0])
+
+    def test_atomic_same_content_replacement_still_refused_with_original_fd_open(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            rootpath=pathlib.Path(temporary).resolve()
+            with build.Directory.open_absolute(str(rootpath)) as root:
+                with root.directory('home',create=True) as home:
+                    expected=self._initialize(home,build.Budget())
+                    mode=self.mode_resources[-1]; original_fd=mode.fd
+                    path=rootpath/'home/go/telemetry/mode'; replacement=path.with_name('replacement')
+                    replacement.write_bytes(b'off\n'); replacement.chmod(0o600)
+                    os.replace(replacement,path)
+                    self.assertEqual(expected[1],os.fstat(original_fd).st_ino)
+                    self.assertNotEqual(expected[1],path.stat().st_ino)
+                    self.assertEqual(b'off\n',path.read_bytes())
+                    with self.assertRaises(build.Failure) as refused:
+                        build.verify_lane_telemetry(home,expected,build.Budget())
+                    self.assertEqual('TelemetryModeChanged',refused.exception.code)
+                    os.fstat(original_fd)
+                    mode.close()
+                    with self.assertRaises(OSError): os.fstat(original_fd)
+
+    def test_lane_partial_construction_command_failure_and_cancel_keep_fd_until_close(self):
+        for failure in ('materialize','command','cancelled-command'):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temporary:
+                with build.Directory.open_absolute(str(pathlib.Path(temporary).resolve())) as root:
+                    pair=build.BuildPair.__new__(build.BuildPair)
+                    pair.receipt={'lanes':[build.not_started_lane(0),build.not_started_lane(1)]}
+                    pair.lanes=[]; pair.telemetry_modes={}; pair.source_manifests=[]
+                    pair.resources=[]; pair.generated=[]
+                    pair.request=sample('request'); pair.native=None; pair.supervisor=None
+                    pair.store=mock.Mock(root=root); pair.go=mock.Mock(path='/never-executed/go')
+                    pair.goroot_cap=mock.Mock(label='/goroot'); pair.seed=mock.Mock()
+                    pair.source_plan=mock.Mock(epoch=123)
+                    pair.source_plan.materialize.return_value={'files':[{'path':'go.mod','mode':'100644',
+                                      'size':1,'sha256':sha(b'x')}]}
+                    pair._before_after=mock.Mock(return_value=('a'*64,'b'*64,'c'*64))
+                    if failure=='materialize':
+                        pair.source_plan.materialize.side_effect=build.Failure('FixtureMaterialize')
+                    def command(supervisor,go,argv,cwd,env,budget):
+                        self.assertEqual(['version'],argv)
+                        self.assertEqual(1,len(pair.resources))
+                        os.fstat(pair.resources[0].fd)
+                        if failure=='cancelled-command':
+                            budget.cancelled[0]=True
+                            budget.check()
+                        raise build.Failure('FixtureCommand')
+                    original_fd=None
+                    try:
+                        with mock.patch.object(build,'_command_bytes',side_effect=command):
+                            with self.assertRaises(build.Failure) as refused:
+                                pair._lane_body(0,build.Budget())
+                        wanted={'materialize':'FixtureMaterialize','command':'FixtureCommand',
+                                'cancelled-command':'Cancelled'}[failure]
+                        self.assertEqual(wanted,refused.exception.code)
+                        self.assertEqual(1,len(pair.resources))
+                        original_fd=pair.resources[0].fd
+                        os.fstat(original_fd)
+                    finally:
+                        pair.close()
+                    self.assertIsNotNone(original_fd)
+                    with self.assertRaises(OSError): os.fstat(original_fd)
+                    pair.close()
 
 
 class GoToolchainPresenceControls(unittest.TestCase):
@@ -1658,6 +1792,7 @@ class GoToolchainPresenceControls(unittest.TestCase):
                     pair=build.BuildPair.__new__(build.BuildPair)
                     pair.receipt={'lanes':[build.not_started_lane(0),build.not_started_lane(1)]}
                     pair.lanes=[]; pair.telemetry_modes={}; pair.source_manifests=[]
+                    pair.resources=[]; pair.generated=[]
                     pair.request=sample('request')
                     pair.request.update(flavour='native-linux-arm64',native={
                         name:{'path':'/not-executed/'+name} for name in ('cc','cxx','pkg_config')})
@@ -1697,8 +1832,7 @@ class GoToolchainPresenceControls(unittest.TestCase):
                             self.assertEqual(1,command.call_count)
                             self.assertEqual(1,pair._before_after.call_count)
                     finally:
-                        for lane in reversed(pair.lanes):
-                            for cap in reversed(list(lane.values())): cap.close()
+                        pair.close()
 
 
 class StandardNativeGateControls(unittest.TestCase):

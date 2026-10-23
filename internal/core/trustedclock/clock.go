@@ -105,6 +105,8 @@ type Clock struct {
 	jumpsDetected uint64
 	// unreported is the jump found and not yet handed out for the journal.
 	unreported *Jump
+	// observation is frozen at private construction; public New leaves it nil.
+	observation *guardObservation
 }
 
 // New reads both sources once, as the start of the trusted time.
@@ -136,6 +138,9 @@ func wallReading(at time.Time) time.Time { return at.Round(0) }
 // JumpTolerance ahead of the start plus the time since it on the clock since
 // boot — then that sum.
 func (c *Clock) Now() time.Time {
+	if c.observation != nil {
+		return c.observedNow()
+	}
 	wall := wallReading(c.wall())
 	if c.start == nil {
 		return wall
@@ -163,7 +168,12 @@ func (c *Clock) Now() time.Time {
 
 // Wall is the wall clock as it reads, for a figure that says when it was
 // read rather than one that decides a term.
-func (c *Clock) Wall() time.Time { return c.wall() }
+func (c *Clock) Wall() time.Time {
+	if c.observation != nil {
+		return c.observedWall()
+	}
+	return c.wall()
+}
 
 // TakeUnreportedJump hands out the jump found since the last call, once, so
 // the caller journals it outside its own locks.

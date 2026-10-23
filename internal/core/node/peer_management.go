@@ -419,6 +419,7 @@ func (s *Service) evictOrphanedHealthEntries() {
 	log.Trace().Str("site", "evictOrphanedHealthEntries").Str("phase", "lock_held").Msg("peer_mu_writer")
 	log.Trace().Str("site", "evictOrphanedHealthEntries").Str("phase", "lock_wait").Msg("delivery_mu_writer")
 	s.deliveryMu.Lock()
+	s.beginPendingQueueObservationLocked()
 	log.Trace().Str("site", "evictOrphanedHealthEntries").Str("phase", "lock_held").Msg("delivery_mu_writer")
 
 	// Rebuild peerAddrs under write lock — s.peers may have grown.
@@ -473,6 +474,7 @@ func (s *Service) evictOrphanedHealthEntries() {
 	// Must run under the peerMu hold, while the surviving s.peerIDs
 	// entries are still consistent with the deletions above.
 	evictIdentities = s.orphanedIdentitiesLocked(evictIdentities)
+	s.commitPendingQueueObservationLocked()
 	s.deliveryMu.Unlock()
 	log.Trace().Str("site", "evictOrphanedHealthEntries").Str("phase", "lock_released").Msg("delivery_mu_writer")
 	s.peerMu.Unlock()
@@ -4950,7 +4952,9 @@ func (s *Service) markPeerUsefulReceive(address domain.PeerAddress) {
 // Mutates s.connIDCounter, which is peer-domain state — caller MUST
 // hold s.peerMu write lock.
 func (s *Service) nextConnIDLocked() domain.ConnID {
+	k10Previous := s.connIDCounter
 	s.connIDCounter++
+	s.k10IssuedLocked(domain.ConnID(k10Previous), domain.ConnID(s.connIDCounter))
 	return domain.ConnID(s.connIDCounter)
 }
 
@@ -5713,6 +5717,7 @@ func (s *Service) capPendingRingLocked(primary domain.PeerAddress, ringSize int)
 		return
 	}
 	evictCount := len(queue) - ringSize
+	s.stagePendingQueueObservationLocked(-int64(evictCount))
 
 	// Fast path — the hot one: enqueue into a full queue evicts EXACTLY one
 	// frame. queuePeerFrame hits this on every append into a full ring, so it
@@ -5806,10 +5811,12 @@ func (s *Service) queuePeerFrame(address domain.PeerAddress, frame protocol.Fram
 
 	log.Trace().Str("site", "queuePeerFrame").Str("phase", "lock_wait").Str("address", string(address)).Str("frame_type", frame.Type).Msg("delivery_mu_writer")
 	s.deliveryMu.Lock()
+	s.beginPendingQueueObservationLocked()
 	log.Trace().Str("site", "queuePeerFrame").Str("phase", "lock_held").Str("address", string(address)).Str("frame_type", frame.Type).Msg("delivery_mu_writer")
 
 	key := pendingFrameKey(primary, frame)
 	if !key.IsValid() {
+		s.commitPendingQueueObservationLocked()
 		s.deliveryMu.Unlock()
 		log.Trace().Str("site", "queuePeerFrame").Str("phase", "lock_released_nokey").Str("address", string(address)).Msg("delivery_mu_writer")
 		s.peerMu.Unlock()
@@ -5827,6 +5834,7 @@ func (s *Service) queuePeerFrame(address domain.PeerAddress, frame protocol.Fram
 				break
 			}
 		}
+		s.commitPendingQueueObservationLocked()
 		s.deliveryMu.Unlock()
 		log.Trace().Str("site", "queuePeerFrame").Str("phase", "lock_released_dup").Str("address", string(address)).Msg("delivery_mu_writer")
 		s.peerMu.Unlock()
@@ -5849,6 +5857,7 @@ func (s *Service) queuePeerFrame(address domain.PeerAddress, frame protocol.Fram
 	// Global ceiling stays a hard reject: it is the absolute aggregate backstop
 	// across ALL peers (the per-peer ring only bounds one peer at a time).
 	if len(s.pendingKeys) >= maxPendingFramesTotal {
+		s.commitPendingQueueObservationLocked()
 		s.deliveryMu.Unlock()
 		log.Trace().Str("site", "queuePeerFrame").Str("phase", "lock_released_globalfull").Str("address", string(address)).Msg("delivery_mu_writer")
 		s.peerMu.Unlock()
@@ -5860,6 +5869,7 @@ func (s *Service) queuePeerFrame(address domain.PeerAddress, frame protocol.Fram
 		Frame:    frame,
 		QueuedAt: time.Now().UTC(),
 	})
+	s.stagePendingQueueObservationLocked(1)
 	s.pendingKeys[key] = struct{}{}
 	s.noteOutboundQueuedLocked(frame, "")
 	pendingCount := len(s.pending[primary])
@@ -5870,6 +5880,7 @@ func (s *Service) queuePeerFrame(address domain.PeerAddress, frame protocol.Fram
 	s.refreshAggregatePendingLocked()
 	aggSnap := s.aggregateStatus
 	s.statusMu.Unlock()
+	s.commitPendingQueueObservationLocked()
 	s.deliveryMu.Unlock()
 	log.Trace().Str("site", "queuePeerFrame").Str("phase", "lock_released").Str("address", string(address)).Msg("delivery_mu_writer")
 	s.peerMu.Unlock()
@@ -5967,12 +5978,15 @@ func (s *Service) flushPendingPeerFrames(address domain.PeerAddress) {
 	primary := s.resolveHealthAddress(address)
 	log.Trace().Str("site", "flushPendingPeerFrames_take").Str("phase", "lock_wait").Str("address", string(address)).Msg("delivery_mu_writer")
 	s.deliveryMu.Lock()
+	s.beginPendingQueueObservationLocked()
 	log.Trace().Str("site", "flushPendingPeerFrames_take").Str("phase", "lock_held").Str("address", string(address)).Msg("delivery_mu_writer")
 	frames := append([]pendingFrame(nil), s.pending[primary]...)
 	delete(s.pending, primary)
+	s.stagePendingQueueObservationLocked(-int64(len(frames)))
 	for _, frame := range frames {
 		delete(s.pendingKeys, pendingFrameKey(primary, frame.Frame))
 	}
+	s.commitPendingQueueObservationLocked()
 	s.deliveryMu.Unlock()
 	log.Trace().Str("site", "flushPendingPeerFrames_take").Str("phase", "lock_released").Str("address", string(address)).Msg("delivery_mu_writer")
 	s.peerMu.Unlock()
@@ -6031,8 +6045,10 @@ func (s *Service) flushPendingPeerFrames(address domain.PeerAddress) {
 	log.Trace().Str("site", "flushPendingPeerFrames_requeue").Str("phase", "lock_held").Str("address", string(address)).Msg("peer_mu_writer")
 	log.Trace().Str("site", "flushPendingPeerFrames_requeue").Str("phase", "lock_wait").Str("address", string(address)).Msg("delivery_mu_writer")
 	s.deliveryMu.Lock()
+	s.beginPendingQueueObservationLocked()
 	log.Trace().Str("site", "flushPendingPeerFrames_requeue").Str("phase", "lock_held").Str("address", string(address)).Msg("delivery_mu_writer")
 	s.pending[primary] = append(s.pending[primary], remaining...)
+	s.stagePendingQueueObservationLocked(int64(len(remaining)))
 	for _, item := range remaining {
 		s.pendingKeys[pendingFrameKey(primary, item.Frame)] = struct{}{}
 	}
@@ -6048,6 +6064,7 @@ func (s *Service) flushPendingPeerFrames(address domain.PeerAddress) {
 	s.refreshAggregatePendingLocked()
 	aggSnap := s.aggregateStatus
 	s.statusMu.Unlock()
+	s.commitPendingQueueObservationLocked()
 	s.deliveryMu.Unlock()
 	log.Trace().Str("site", "flushPendingPeerFrames_requeue").Str("phase", "lock_released").Str("address", string(address)).Msg("delivery_mu_writer")
 	s.peerMu.Unlock()
@@ -6089,9 +6106,11 @@ func (s *Service) flushPendingFireAndForget(id domain.ConnID, address domain.Pee
 	log.Trace().Str("site", "flushPendingFireAndForget").Str("phase", "lock_held").Str("address", string(address)).Msg("peer_mu_writer")
 	log.Trace().Str("site", "flushPendingFireAndForget").Str("phase", "lock_wait").Str("address", string(address)).Msg("delivery_mu_writer")
 	s.deliveryMu.Lock()
+	s.beginPendingQueueObservationLocked()
 	log.Trace().Str("site", "flushPendingFireAndForget").Str("phase", "lock_held").Str("address", string(address)).Msg("delivery_mu_writer")
 	frames := s.pending[address]
 	if len(frames) == 0 {
+		s.commitPendingQueueObservationLocked()
 		s.deliveryMu.Unlock()
 		log.Trace().Str("site", "flushPendingFireAndForget").Str("phase", "lock_released_empty").Str("address", string(address)).Msg("delivery_mu_writer")
 		s.peerMu.Unlock()
@@ -6114,6 +6133,7 @@ func (s *Service) flushPendingFireAndForget(id domain.ConnID, address domain.Pee
 		}
 	}
 	if len(toSend) == 0 {
+		s.commitPendingQueueObservationLocked()
 		s.deliveryMu.Unlock()
 		log.Trace().Str("site", "flushPendingFireAndForget").Str("phase", "lock_released_none").Str("address", string(address)).Msg("delivery_mu_writer")
 		s.peerMu.Unlock()
@@ -6121,6 +6141,7 @@ func (s *Service) flushPendingFireAndForget(id domain.ConnID, address domain.Pee
 		return
 	}
 	pendingCount := len(remaining)
+	s.stagePendingQueueObservationLocked(int64(len(remaining)) - int64(len(frames)))
 	if len(remaining) > 0 {
 		s.pending[address] = remaining
 	} else {
@@ -6132,6 +6153,7 @@ func (s *Service) flushPendingFireAndForget(id domain.ConnID, address domain.Pee
 	s.refreshAggregatePendingLocked()
 	aggSnap := s.aggregateStatus
 	s.statusMu.Unlock()
+	s.commitPendingQueueObservationLocked()
 	s.deliveryMu.Unlock()
 	log.Trace().Str("site", "flushPendingFireAndForget").Str("phase", "lock_released").Str("address", string(address)).Msg("delivery_mu_writer")
 	s.peerMu.Unlock()

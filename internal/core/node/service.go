@@ -481,7 +481,10 @@ type Service struct {
 	deliveryMu  sync.RWMutex
 	pending     map[domain.PeerAddress][]pendingFrame
 	pendingKeys map[pendingKey]struct{}
-	outbound    map[string]outboundDelivery
+	// Nil in ordinary roots. The candidate clock and source are fixed before use;
+	// all mutable source state is owned by deliveryMu, like pending itself.
+	pendingObservation *pendingQueueObservation
+	outbound           map[string]outboundDelivery
 	// lastOutboundTerminalSweep throttles sweepTerminalOutbound (guarded
 	// by deliveryMu like the map it sweeps).
 	lastOutboundTerminalSweep time.Time
@@ -790,7 +793,8 @@ type Service struct {
 	// writes go through the helpers in conn_registry.go — nothing outside
 	// that file touches this map directly. Lifecycle entry points:
 	// registerInboundConnLocked, attachOutboundCoreLocked, unregisterConnLocked.
-	conns map[netcore.ConnID]*connEntry
+	terminalObservation *k10TerminalSource // private immutable pre-registration binding; ordinary nil
+	conns               map[netcore.ConnID]*connEntry
 	// inboundClosed is set under peerMu by closeAllInboundConns at shutdown
 	// and never cleared (Run is single-shot). registerInboundConn refuses
 	// once it is set: a connection still between its first byte and its
@@ -1458,7 +1462,8 @@ type subscriber struct {
 }
 
 type peerSession struct {
-	r2OwnDMHop *r2aPublishedHop // original transport binding; pointer immutable before readers
+	terminal   *k10TerminalCapsule // same original attachment across setup -> CM -> serve
+	r2OwnDMHop *r2aPublishedHop    // original transport binding; pointer immutable before readers
 	// Original transport alias established before reader/background tasks start.
 	common          *proofTransportLifetime
 	findNodeReceipt *findNodeCMReceipt // peerMu, only CM acceptance callback mints
@@ -1641,6 +1646,7 @@ func (ps *peerSession) closeAs(closer peerSessionCloser) error {
 		// of the close from the transport (a read error, the writer exiting)
 		// does so after this store.
 		ps.closedBy.Store(&closer)
+		ps.k10CloseWinner(closer)
 		ps.readiness.stop()
 		// Fence and finalise the upper queue BEFORE the transport goes
 		// away. Sessions that die before servePeerSession ever runs (failed
@@ -3590,6 +3596,8 @@ func (s *Service) handleConn(conn net.Conn, reservation *connbudget.Reservation)
 	} else {
 		connID, _ = s.connIDFor(wire)
 	}
+	terminal := s.k10ForRegistered(wire)
+	terminalOutcome := k10Outcome{kind: k10Missing}
 	var peerOfflineEvidence *peerOfflineEvidence
 
 	// Capture lifecycle hook: notify manager about the new inbound
@@ -3613,6 +3621,7 @@ func (s *Service) handleConn(conn net.Conn, reservation *connbudget.Reservation)
 		// close is needed — a Service whose Network could not reach this
 		// core (an override) never got this far, registerInboundConn refused.
 		s.unregisterInboundConn(wire)
+		terminal.finish(terminalOutcome, false)
 		s.removeSubscriberConnID(connID)
 		s.clearConnAuth(connID)
 	}()
@@ -3621,6 +3630,7 @@ func (s *Service) handleConn(conn net.Conn, reservation *connbudget.Reservation)
 	enableTCPKeepAlive(conn)
 	conn = wire
 	if proven != nil && !s.acceptProvenInboundOwned(connID, *proven, conn.RemoteAddr().String(), owner) {
+		terminalOutcome = k10Outcome{kind: k10OwnerStopped}
 		return
 	}
 
@@ -3659,6 +3669,9 @@ func (s *Service) handleConn(conn net.Conn, reservation *connbudget.Reservation)
 		// bound — and, once its first byte is in, the frame itself.
 		// session_liveness.go has the schedule the two are fitted to.
 		if err := frames.awaitFrame(liveness.inboundIdle(heartbeatStop != nil), reader.Buffered() > 0); err != nil {
+			if terminal != nil {
+				terminalOutcome = k10ReportedOutcome(err)
+			}
 			owner.end()
 			s.endInboundReadLoop(connID, conn.RemoteAddr().String(), err)
 			return
@@ -3671,6 +3684,9 @@ func (s *Service) handleConn(conn net.Conn, reservation *connbudget.Reservation)
 			continue
 		}
 		if err != nil {
+			if terminal != nil {
+				terminalOutcome = k10ReportedOutcome(err)
+			}
 			owner.end()
 			if sessionCloseProvidesPeerOfflineEvidence(err) {
 				peerOfflineEvidence = s.observePeerOffline()
@@ -3690,6 +3706,9 @@ func (s *Service) handleConn(conn net.Conn, reservation *connbudget.Reservation)
 		// it, and why the question is asked of the whole line rather than of a
 		// peeked type, is frameLineExemptFromCommandLimit.
 		if !s.admitInboundCommandLine(connID, connKey, line) {
+			if terminal != nil {
+				terminalOutcome = k10ReportedOutcome(protocol.ErrRateLimited)
+			}
 			owner.end()
 			log.Debug().Str("addr", conn.RemoteAddr().String()).
 				Msg("inbound_read_loop: closing connection — command rate limit exceeded")
@@ -3716,12 +3735,14 @@ func (s *Service) handleConn(conn net.Conn, reservation *connbudget.Reservation)
 			continue // original owned provisional row is retained, not a generic frame
 		}
 		if !s.handleCommandOwned(connID, line, owner) {
+			terminalOutcome = k10Outcome{kind: k10CommandStopped}
 			return
 		}
 		// A loopback connection that committed a violation is ended here,
 		// after the reply to the frame that committed it went out
 		// (chargeLoopbackViolation): loopback is never banned by its IP.
 		if loopbackSource && s.loopbackInbound.isCondemned(connID) {
+			terminalOutcome = k10Outcome{kind: k10LoopbackCondemned}
 			log.Info().Uint64("conn_id", uint64(connID)).Str("addr", connKey).Msg("loopback_condemned_connection_closed")
 			return
 		}
@@ -6980,6 +7001,7 @@ func (s *Service) dropPendingForRecipient(recipient string) {
 	log.Trace().Str("site", "dropPendingForRecipient").Str("phase", "lock_held").Str("recipient", recipient).Msg("peer_mu_writer")
 	log.Trace().Str("site", "dropPendingForRecipient").Str("phase", "lock_wait").Str("recipient", recipient).Msg("delivery_mu_writer")
 	s.deliveryMu.Lock()
+	s.beginPendingQueueObservationLocked()
 	log.Trace().Str("site", "dropPendingForRecipient").Str("phase", "lock_held").Str("recipient", recipient).Msg("delivery_mu_writer")
 
 	var dropped int
@@ -7008,6 +7030,8 @@ func (s *Service) dropPendingForRecipient(recipient string) {
 		}
 	}
 
+	s.stagePendingQueueObservationLocked(-int64(dropped))
+
 	// Remove outbound delivery entries for the deleted recipient so the
 	// UI no longer shows stale "queued"/"retrying" statuses.
 	var outboundDropped int
@@ -7024,6 +7048,7 @@ func (s *Service) dropPendingForRecipient(recipient string) {
 	s.refreshAggregatePendingLocked()
 	aggSnap := s.aggregateStatus
 	s.statusMu.Unlock()
+	s.commitPendingQueueObservationLocked()
 	s.deliveryMu.Unlock()
 	log.Trace().Str("site", "dropPendingForRecipient").Str("phase", "lock_released").Str("recipient", recipient).Msg("delivery_mu_writer")
 	s.peerMu.Unlock()
@@ -8671,7 +8696,11 @@ func (s *Service) finishReceipt(key string, receipt protocol.DeliveryReceipt, en
 	id := receipt.MessageID
 	now := time.Now().UTC()
 	s.deliveryMu.Lock()
-	defer s.deliveryMu.Unlock()
+	s.beginPendingQueueObservationLocked()
+	defer func() {
+		s.commitPendingQueueObservationLocked()
+		s.deliveryMu.Unlock()
+	}()
 
 	// The commit is the serialisation point, so the conditions it was
 	// decided on are re-checked HERE, under the lock that makes it
@@ -9289,6 +9318,7 @@ func (s *Service) clearPendingMessageLocked(message messageIdentity) []ebus.Peer
 		if len(remaining) == origLen {
 			continue // nothing changed for this peer
 		}
+		s.stagePendingQueueObservationLocked(int64(len(remaining)) - int64(origLen))
 		if len(remaining) == 0 {
 			delete(s.pending, address)
 			affected = append(affected, ebus.PeerPendingDelta{Address: address, Count: 0})
@@ -9332,6 +9362,7 @@ func (s *Service) clearPendingReceiptLocked(target receiptIdentity) []ebus.PeerP
 		if len(remaining) == origLen {
 			continue // nothing changed for this peer
 		}
+		s.stagePendingQueueObservationLocked(int64(len(remaining)) - int64(origLen))
 		if len(remaining) == 0 {
 			delete(s.pending, address)
 			affected = append(affected, ebus.PeerPendingDelta{Address: address, Count: 0})
@@ -9535,7 +9566,9 @@ func (s *Service) registerInboundConn(conn net.Conn, reservation *connbudget.Res
 		return fmt.Errorf("%w (%d)", errInboundLimitReached, limit)
 	}
 
+	k10Previous := s.connIDCounter
 	s.connIDCounter++
+	s.k10IssuedLocked(domain.ConnID(k10Previous), domain.ConnID(s.connIDCounter))
 	pc := netcore.New(netcore.ConnID(s.connIDCounter), conn, netcore.Inbound, netcore.Options{})
 	if addr, ok := conn.RemoteAddr().(*net.TCPAddr); ok && addr.IP.IsLoopback() {
 		pc.SetLocal(true)
@@ -9578,6 +9611,7 @@ func (s *Service) attachOutboundNetCore(session *peerSession) error {
 	log.Trace().Str("site", "attachOutboundNetCore").Str("phase", "lock_held").Uint64("conn_id", uint64(session.connID)).Msg("peer_mu_writer")
 	s.attachOutboundCoreLocked(session.conn, pc)
 	session.receive = s.receiveForIDLocked(session.connID)
+	session.terminal = s.k10ForIDLocked(session.connID)
 	s.peerMu.Unlock()
 	log.Trace().Str("site", "attachOutboundNetCore").Str("phase", "lock_released").Uint64("conn_id", uint64(session.connID)).Msg("peer_mu_writer")
 
@@ -9666,6 +9700,7 @@ func (s *Service) closeRegisteredInboundCore(conn net.Conn) {
 		_ = conn.Close()
 		return
 	}
+	s.k10Request(id, k10HandlerCleanup)
 	if err := s.Network().Close(s.runCtx, id); err != nil {
 		log.Error().Err(err).Uint64("conn_id", uint64(id)).Str("addr", conn.RemoteAddr().String()).Msg("unregister_inbound_conn_close_failed")
 		s.closeRegistryCore(id, conn)
@@ -9707,6 +9742,7 @@ func (s *Service) closeAllInboundConns() {
 	})
 
 	for _, id := range ids {
+		s.k10Request(id, k10ShutdownRequest)
 		_ = network.Close(ctx, id)
 	}
 	if len(ids) > 0 {

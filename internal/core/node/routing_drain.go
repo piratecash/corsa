@@ -147,6 +147,7 @@ func (s *Service) drainPendingForIdentities(identities map[domain.PeerIdentity]s
 	// in-memory consistency across concurrent drains, not crash durability.
 	log.Trace().Str("site", "drainPendingForIdentities_extract").Str("phase", "lock_wait").Int("identities", len(identities)).Msg("delivery_mu_writer")
 	s.deliveryMu.Lock()
+	s.beginPendingQueueObservationLocked()
 	log.Trace().Str("site", "drainPendingForIdentities_extract").Str("phase", "lock_held").Int("identities", len(identities)).Msg("delivery_mu_writer")
 	var extracted []pendingMatch
 	// Lazily allocated on the FIRST matching address only. drainPendingForIdentities
@@ -228,6 +229,8 @@ func (s *Service) drainPendingForIdentities(identities map[domain.PeerIdentity]s
 			s.pending[addr] = kept
 		}
 	}
+	s.stagePendingQueueObservationLocked(-int64(len(extracted)))
+	s.commitPendingQueueObservationLocked()
 	s.deliveryMu.Unlock()
 	log.Trace().Str("site", "drainPendingForIdentities_extract").Str("phase", "lock_released").Int("extracted", len(extracted)).Msg("delivery_mu_writer")
 
@@ -370,6 +373,7 @@ returnFrames:
 	log.Trace().Str("site", "drainPendingForIdentities_return").Str("phase", "lock_held").Int("failed", len(failed)).Int("deferred", len(deferred)).Msg("peer_mu_writer")
 	log.Trace().Str("site", "drainPendingForIdentities_return").Str("phase", "lock_wait").Int("failed", len(failed)).Int("deferred", len(deferred)).Msg("delivery_mu_writer")
 	s.deliveryMu.Lock()
+	s.beginPendingQueueObservationLocked()
 	log.Trace().Str("site", "drainPendingForIdentities_return").Str("phase", "lock_held").Int("failed", len(failed)).Int("deferred", len(deferred)).Msg("delivery_mu_writer")
 
 	// Merge failed frames back into their original positions in the
@@ -406,6 +410,7 @@ returnFrames:
 	// for a frame the cap then evicts.
 	ringSize := s.pendingRingSize()
 	for addr, rets := range returningByAddr {
+		previousCount := len(s.pending[addr])
 		meta := extractMeta[addr]
 		if meta == nil {
 			// No metadata (defensive) — prepend as fallback.
@@ -414,6 +419,7 @@ returnFrames:
 				fallback = append(fallback, r.item)
 			}
 			s.pending[addr] = append(fallback, s.pending[addr]...)
+			s.stagePendingQueueObservationLocked(int64(len(s.pending[addr])) - int64(previousCount))
 			continue
 		}
 
@@ -469,6 +475,7 @@ returnFrames:
 		} else {
 			s.pending[addr] = merged
 		}
+		s.stagePendingQueueObservationLocked(int64(len(s.pending[addr])) - int64(previousCount))
 	}
 	for _, d := range deferred {
 		switch d.action {
@@ -510,6 +517,7 @@ returnFrames:
 	s.statusMu.Unlock()
 
 	drainDone := s.drainDone
+	s.commitPendingQueueObservationLocked()
 	s.deliveryMu.Unlock()
 	log.Trace().Str("site", "drainPendingForIdentities_return").Str("phase", "lock_released").Int("pending_deltas", len(pendingDeltas)).Msg("delivery_mu_writer")
 	s.peerMu.Unlock()

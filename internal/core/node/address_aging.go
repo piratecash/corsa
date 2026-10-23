@@ -256,12 +256,14 @@ func (s *Service) finishAddressEviction(eviction *addressEviction) {
 	delete(s.observedIPHistoryByPeer, address)
 	s.ipStateMu.Unlock()
 	s.deliveryMu.Lock()
+	s.beginPendingQueueObservationLocked()
 	if _, ok := s.pending[address]; ok {
 		s.capPendingRingLocked(address, 0)
 		s.statusMu.Lock()
 		s.refreshAggregatePendingLocked()
 		s.statusMu.Unlock()
 	}
+	s.commitPendingQueueObservationLocked()
 	s.deliveryMu.Unlock()
 	if s.peerProvider != nil {
 		s.peerProvider.Remove(address)

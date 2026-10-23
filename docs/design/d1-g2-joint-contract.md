@@ -257,3 +257,58 @@ answerDeadline = r + 6s
 | Joint anonymity design | D закрывает scoped O5; O6/O7 и требуемые field/privacy изменения записаны. | Совместная normative18a+21a-min, version/migration boundary и отдельный G2. Actual anonymity/21c отдельно. |
 
 Конкретный pre-G2 пакет: устранить противоречащие текущие обещания; предъявить один профиль с выбранными либо явно недоступными пунктами; привязать формулы к фактическим событиям/strict boundaries; составить сценарии→принятое QA/недостающие доказательства; передать точную совместную редакцию на решение G2. Общего разрешения будущих gates из проекта нет. [S6 review](../operations/s6-external-review-package.md), [build provenance](loadstand-build-provenance.md) и [порядок выпуска](../release.md) сохраняют свои области.
+
+## P0 numerical proposal: reconciled ledger / Предложение P0: единый бюджет
+
+### English — UNSELECTED, no activation
+
+This appendix is a proposal for a later joint revision, not a selected profile, measurement, G2 decision or permission to enable D1. It replaces P0's earlier allocation of the entire R-runtime allowance to post-answer work. The preceding general conditional theorem remains; the following one ledger gives P0's proposed meaning of each allowance.
+
+| Proposed P0 input | Value | Status |
+|---|---:|---|
+| R `TimingProfile.Target`, `Network`, `Runtime` |2s /2s /1s| Budget targets requiring evidence, not observed latency bounds |
+| Timed T `ServiceBound`, `RuntimeReserve` |2s /500ms| Applicable T profile and physical Take→Complete evidence required |
+| Collection Round / Slack |100ms /100ms| Configuration choices, charged inside pre-forward R work below |
+| Signer `NodeSpacing` / `MaxReservations` |250ms /8| Existing minimum spacing; no extra node-wide burst or promise to finish8 jobs |
+| R initial tokens |4| Existing maximum; reconnect/cancel never renew spent debt |
+| Degree `MaxActive` / Priority `MaxMembers` / `MaxRegistryVisits` |512 /512 /1024| Proposed coverage envelope, subject to actual connection limits, registry multiplicity and resource evidence; no new public default |
+
+**One nonoverlapping segment ledger.** Let `P_pre` be R's collection, scheduling, processing, application-lock and forward-writer-handoff time before the original forward Take `f`, excluding intentional waiting solely for the assigned future token/calendar slot. Propose `P_pre≤400ms`; Round100ms+Slack100ms are part of those400ms, leaving at most200ms for the other pre-forward work. Let `P_post=u−h` be original R answer-read/capture→processing/locks→answer-writer Take, with proposed `P_post≤600ms`. Thus R's aggregate runtime allowance is `D_R=400ms+600ms=1s`; it is not1s available independently on each side. These are unproved physical budget premises, not new enforced400/600ms subdeadlines.
+
+Let `Q` be the remaining pre-forward elapsed time spent solely waiting for the assigned calendar/token slot. In the proposed nonoverlapping trace, `f−a=P_pre+Q`. All actual queue delay is therefore already inside `f−a`; scheduler lateness and lock waits belong to `P_pre`, not an uncharged part of `Q`. `D_N=2s` bounds `(r−f)+(h−c)`, including T's entire post-Complete publication/unlock/return, marshal/queue, common-writer backlog/Take/Write and return transport/original R read. `D_T=2s` bounds `c−r` strictly, conditional on successful timed T admission/signing. No T-local tail is left outside the ledger.
+
+The unchanged R constructor gives `latestForward=a+1s`; every actual forward Take still checks `f≤a+1s` and real tokens. With the stated physical premises:
+
+```text
+u−a = (f−a) + (r−f) + (c−r) + (h−c) + (u−h)
+    < 1s + 2s + 2s + 600ms = 5.6s.
+```
+
+`P_pre` is not added again after using the complete `f−a` interval. The400ms difference to6s is nominal algebraic headroom only. It is not an accepted clock-error budget or a measured safety margin. If estimates on different clocks are used, an explicit physical-duration/clock-rate/offset-error model must cover every term, including the forward deadline interpretation. A proposed aggregate positive error bound would have to fit strictly inside that nominal400ms; no such bound is supplied or selected here. Raw Instants from different owners cannot be subtracted as evidence. Without those premises the arithmetic proves no physical latency guarantee. Answer Take remains distinct from Write completion or initiator delivery. Untimed/cached/coalesced paths need their own applicable-bound proof.
+
+Aggregate admission remains bounded option A. Empty-calendar beta4/W1 gives an upper bound5; collection at a+100ms gives upper bound4, not a guaranteed count. Existing lower-level debt/reservations, occupied places, other R/direct clients and actual elapsed time can reduce admission to zero. Preserve atomic debit only on acceptance, one provisional/session/round, rotating L1 admission, cancellation debt and first256/overflow limitations. Four idle target projections at0/.25/.5/.75s fit strictly before latestSignStart=r+1.5s, but calendar fit proves neither physical500ms completion nor T admission for each R admission.
+
+Only these evidence gaps remain for this proposal; no new framework or run is authorised:
+
+| Existing suitable scoped evidence | Necessary missing evidence |
+|---|---|
+| QA355/A/calendar/overflow, and original membership/raw-capture coverage controls in `find_node_connection.go` | Match maximum burst, occupied lower-level debt and genuine session rotation to this profile. For512/1024, bound the full visited registry population, including nonmembers/registered/accepted/CM-post-setup entries;512 eligible sessions alone does not prove1024 visits sufficient. Preserve complete-or-refuse, not first-M acceptance |
+| N-in→Ready142-event composition; original A→R→T→R→A chain5 events/mode (0a580eb9/7b78af2f) | Reuse original TLS/F1/read/writer/target-signature custody. These fixture-clock receipts do not supply one physical six-event duration record or this profile's clock/error bound |
+| Explicit target timing25 (c9ebf811/c7700734) | Qualify actual Take→Complete500ms, Complete→original target writer→R read tail and R pre/post work under the declared R/direct contention and supported environment. Inventory existing observations first; add only an indispensable missing observation after separate review |
+| Existing bounded constructors and degree/capacity/hint checks | Map512/512/1024 to actual session/connection limits and maximum registry multiplicity; inventory retained/transient allocations and obtain separately agreed CPU/RSS/churn evidence. Structural integer checks and d_win≤64 are not whole-node resource acceptance |
+
+No existing receipt is relabelled as a fresh P0 measurement. S6 Windows/crypto/resource admission, release/observation, final13b-D1, PR6 activation and D1 release remain separate. No typedlookup/Ready/N-in permutation is added as a new G2 gate.
+
+### Русский — профиль НЕ ВЫБРАН, активации нет
+
+Это предложение для последующей совместной редакции, а не замер, решение G2 или разрешение включить D1. Общая таблица выше задаёт кандидата2/2/1с, timed T2с/500мс, Round/Slack100/100мс, signer250мс/8, начальные4 токена и предлагаемый coverage512/512/1024. Все значения требуют отдельного выбора и необходимых свидетельств; defaults не меняются. Прежнее предложение отдать весь1с R-runtime только работе после ответа заменено единым бюджетом.
+
+`P_pre≤400мс` включает сбор раунда, планирование, обработку, ожидание application-lock и передачу исходному forward-writer до Take;100мс Round и100мс Slack входят в эти400мс, остальные pre-операции получают не более200мс. Исключено только намеренное ожидание будущего назначенного token/calendar slot (`Q`). `P_post=u−h≤600мс` включает исходное чтение/capture ответа R, обработку, locks и answer-writer Take. Итого `D_R=400+600=1000мс`, а не по секунде каждой стороне. Это пока недоказанные физические предпосылки, не новые enforced subdeadlines.
+
+Разбиение `f−a=P_pre+Q` учитывает всю очередь до forward Take. Scheduler lateness и locks относятся к `P_pre`; повторно прибавлять `P_pre` после полного `f−a` нельзя. `D_N=2с` покрывает оба остаточных интервала `(r−f)+(h−c)`, включая весь хвост T после sample Complete: publication/unlock/return, marshal/queue, общий writer с backlog/Take/Write и обратную сеть/исходное чтение R. `c−r<2с` требует успешного допуска и подписи применимым timed T. При фактическом `f≤a+1с` формула выше даёт `u−a<5,6с`.400мс до6с — только номинальный арифметический остаток, не принятый error budget и не измеренный запас.
+
+Для разных owner-clock нужен явный переход к физическим длительностям: rate/offset/error для каждого слагаемого и forward deadline. Положительная совокупная ошибка должна была бы строго поместиться в номинальные400мс; такого доказанного/выбранного предела здесь нет. Raw Instants разных owners не вычитаются как свидетельство. Без предпосылок физическая гарантия не доказана. Answer Take не равен завершению Write/доставке инициатору; untimed/cached/coalesced случаи требуют собственного applicable-bound доказательства.
+
+Вариант A сохраняется: предел5 при пустом календаре beta4/W1 и предел4 после100мс сбора — верхние оценки, не обещание допуска. Уже занятые lower-level токены/места, другие R/direct клиенты и время могут дать ноль. Списание атомарно при принятии; одна provisional/сессия/раунд, L1 rotation, долг после отмены и ограничения первых256/overflow прежние. Четыре idle signing slots0/.25/.5/.75с укладываются до r+1.5с, но это не замер500мс и не обещание T admission каждому принятому R запросу.
+
+Остаток свидетельств ровно из таблицы: привязать существующие QA355/coverage к профилю; не считать512 подходящих сессий доказательством достаточности1024 visits с nonmember/registered/accepted/CM-post-setup; сохранить complete-or-refuse. Принятые N-in/Ready142 и chain5 подтверждают исходные TLS/F1/read/writer/signature пути, но при fixture clocks не дают единого физического журнала шести событий. Target timing25 не заменяет физическое доказательство500мс, хвоста T, pre/post R при объявленной конкуренции и модели часов. Сначала инвентаризуются готовые observations; только необходимый отсутствующий observation обсуждается отдельно. Для coverage нужны реальные session/connection bounds, максимальная кратность registry, retained/transient allocation и отдельно согласованные CPU/RSS/churn данные. Новый framework, прогоны или permutation-тесты этим приложением не назначаются. Старые receipts не становятся свежими P0-замерами; S6/Windows/экспертиза/наблюдение/13b/PR6/выпуск D1 остаются отдельными.

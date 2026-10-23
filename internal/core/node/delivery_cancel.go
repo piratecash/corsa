@@ -118,6 +118,7 @@ func (s *Service) CancelOutgoingDelivery(messageID protocol.MessageID, recipient
 	log.Trace().Str("site", "CancelOutgoingDelivery").Str("phase", "lock_held").Str("msg_id", logid.Of(string(messageID))).Msg("peer_mu_reader")
 	log.Trace().Str("site", "CancelOutgoingDelivery").Str("phase", "lock_wait").Str("msg_id", logid.Of(string(messageID))).Msg("delivery_mu_writer")
 	s.deliveryMu.Lock()
+	s.beginPendingQueueObservationLocked()
 	log.Trace().Str("site", "CancelOutgoingDelivery").Str("phase", "lock_held").Str("msg_id", logid.Of(string(messageID))).Msg("delivery_mu_writer")
 	s.gossipMu.Lock()
 
@@ -126,6 +127,7 @@ func (s *Service) CancelOutgoingDelivery(messageID protocol.MessageID, recipient
 	// would leave the backlog truncated.
 	if foreign := s.backlogEnvelopeIsForeign(messageID, wireRecipient); foreign {
 		s.gossipMu.Unlock()
+		s.commitPendingQueueObservationLocked()
 		s.deliveryMu.Unlock()
 		log.Trace().Str("site", "CancelOutgoingDelivery").Str("phase", "lock_released_foreign").Str("msg_id", logid.Of(string(messageID))).Msg("delivery_mu_writer")
 		s.peerMu.RUnlock()
@@ -190,6 +192,7 @@ func (s *Service) CancelOutgoingDelivery(messageID protocol.MessageID, recipient
 	s.statusMu.Unlock()
 
 	s.gossipMu.Unlock()
+	s.commitPendingQueueObservationLocked()
 	s.deliveryMu.Unlock()
 	log.Trace().Str("site", "CancelOutgoingDelivery").Str("phase", "lock_released").Str("msg_id", logid.Of(string(messageID))).Msg("delivery_mu_writer")
 	s.peerMu.RUnlock()
@@ -273,6 +276,7 @@ func (s *Service) CancelOutgoingDeliveriesTo(recipient domain.PeerIdentity, scop
 	log.Trace().Str("site", "CancelOutgoingDeliveriesTo").Str("phase", "lock_wait").Str("recipient", logid.Of(wireRecipient)).Msg("peer_mu_reader")
 	s.peerMu.RLock()
 	s.deliveryMu.Lock()
+	s.beginPendingQueueObservationLocked()
 	s.gossipMu.Lock()
 
 	// Backlog first: it is the set that decides which ids this node still
@@ -372,6 +376,7 @@ func (s *Service) CancelOutgoingDeliveriesTo(recipient domain.PeerIdentity, scop
 	s.statusMu.Unlock()
 
 	s.gossipMu.Unlock()
+	s.commitPendingQueueObservationLocked()
 	s.deliveryMu.Unlock()
 	s.peerMu.RUnlock()
 	log.Trace().Str("site", "CancelOutgoingDeliveriesTo").Str("phase", "lock_released").Str("recipient", logid.Of(wireRecipient)).Msg("peer_mu_reader")

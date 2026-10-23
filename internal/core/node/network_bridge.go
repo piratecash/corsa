@@ -254,11 +254,15 @@ func (b *networkBridge) Enumerate(ctx context.Context, dir netcore.Direction, fn
 // nothing can reach the core, whose writer returns only on Close.
 // A close selection retains only the actual core, after its original leaf
 // was Ended under peerMu. Its completion cannot resolve a replacement by name.
-type inboundCloseSelection struct{ core *netcore.NetCore }
+type inboundCloseSelection struct {
+	core     *netcore.NetCore
+	terminal *k10TerminalCapsule
+}
 
 func (b *networkBridge) selectInboundClose(id domain.ConnID) inboundCloseSelection {
 	b.svc.peerMu.RLock()
 	selected := inboundCloseSelection{core: b.svc.coreForIDLocked(id)}
+	selected.terminal = b.svc.k10ForIDLocked(id)
 	owner := b.svc.transportTerminalLocked(id)
 	owner.end()
 	b.svc.peerMu.RUnlock()
@@ -268,6 +272,7 @@ func (selected inboundCloseSelection) closeCapturedInbound() error {
 	if selected.core == nil {
 		return netcore.ErrUnknownConn
 	}
+	selected.terminal.request(k10GenericClose)
 	selected.core.Close()
 	return nil
 }
