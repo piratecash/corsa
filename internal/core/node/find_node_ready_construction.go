@@ -17,37 +17,43 @@ import (
 // Copied selection is immutable through finalization. The optional clock uses
 // only the existing pre-store constructor seam; production leaves it absent.
 type findNodeReadyOptions struct {
-	ownDM         *ownDMRuntimeConstruction
-	loadedInbound bool
-	signingGate   *ownedFindNodeSigningTestGate
+	ownDM                 *ownDMRuntimeConstruction
+	loadedInbound         bool
+	contactReconciliation bool
+	signingGate           *ownedFindNodeSigningTestGate
 }
 
 type findNodeReadyConstruction struct {
-	bridge                 *findNodeTerminalConstruction
-	originalContext        context.Context
-	originalCancel         context.CancelFunc
-	originalCapture        findNodeBridgeCaptureContext
-	originalTerminal       *findNodeBridgeTerminal
-	originalPublisher      findnodebridge.Publisher
-	originalOwner          *degreeOwner
-	originalToken          *proofTransportServiceToken
-	originalStatistic      *ownedDegreeStatisticProducer
-	peerState              peerStateFile
-	service                *Service
-	trust                  *trustStore
-	store                  *secureSessionStore
-	sessions               *secureSessions
-	failure                error
-	checked                bool
-	finalized              bool
-	ownDMRuntime           *ownDMRuntimeConstruction
-	originalOwnDMRuntime   ownDMRuntimeConstruction
-	options                findNodeReadyOptions
-	originalOptions        findNodeReadyOptions
-	originalInbound        *inboundPinProducer
-	originalInboundService *Service
-	originalInboundStore   *secureSessionStore
-	originalInboundWake    chan struct{}
+	bridge                   *findNodeTerminalConstruction
+	originalContext          context.Context
+	originalCancel           context.CancelFunc
+	originalCapture          findNodeBridgeCaptureContext
+	originalTerminal         *findNodeBridgeTerminal
+	originalPublisher        findnodebridge.Publisher
+	originalOwner            *degreeOwner
+	originalToken            *proofTransportServiceToken
+	originalStatistic        *ownedDegreeStatisticProducer
+	peerState                peerStateFile
+	service                  *Service
+	trust                    *trustStore
+	store                    *secureSessionStore
+	sessions                 *secureSessions
+	failure                  error
+	checked                  bool
+	finalized                bool
+	ownDMRuntime             *ownDMRuntimeConstruction
+	originalOwnDMRuntime     ownDMRuntimeConstruction
+	options                  findNodeReadyOptions
+	originalOptions          findNodeReadyOptions
+	originalInbound          *inboundPinProducer
+	originalInboundService   *Service
+	originalInboundStore     *secureSessionStore
+	originalInboundWake      chan struct{}
+	originalContactResolver  *identityResolver
+	originalContactAdmission *relationRecordAdmission
+	originalContactProducer  *contactPinProducer
+	originalContactService   *Service
+	originalContactWake      chan struct{}
 }
 
 func prepareFindNodeReadyConstruction(cfg config.Node, id *identity.Identity, profile findNodeBridgeProfile, signing findnode.SigningProfile, timing ...findnode.OwnedTargetTimingProfile) (*findNodeReadyConstruction, error) {
@@ -134,6 +140,17 @@ func newFindNodeReadyLoadedInboundCandidateService(cfg config.Node, id *identity
 	}
 	return r.buildWithOptions(cfg, id, bus, productionDatagramConstructor{}, findNodeReadyOptions{loadedInbound: true})
 }
+
+// Private closed composition: loaded N-in and reconciliation-only K. No
+// public/config path selects it; existing R|K rejection stays unchanged.
+func newFindNodeReadyLoadedContactReconciliationCandidateService(cfg config.Node, id *identity.Identity, bus *ebus.Bus, profile findNodeBridgeProfile, signing findnode.SigningProfile) (*Service, error) {
+	r, err := prepareFindNodeReadyConstruction(cfg, id, profile, signing)
+	if err != nil {
+		return nil, err
+	}
+	return r.buildWithOptions(cfg, id, bus, productionDatagramConstructor{}, findNodeReadyOptions{loadedInbound: true, contactReconciliation: true})
+}
+
 func (r *findNodeReadyConstruction) build(cfg config.Node, id *identity.Identity, bus *ebus.Bus, constructor datagramConstructor) (*Service, error) {
 	return r.buildWithOwnDM(cfg, id, bus, constructor, nil)
 }
@@ -150,6 +167,9 @@ func (r *findNodeReadyConstruction) buildWithOptions(cfg config.Node, id *identi
 			r.cleanup()
 		}
 	}()
+	if options.contactReconciliation && (!options.loadedInbound || options.ownDM != nil) {
+		return nil, findnode.ErrInvalid
+	}
 	if len(clocks) > 1 || len(clocks) != 0 && !options.loadedInbound {
 		return nil, findnode.ErrInvalid
 	}
@@ -165,6 +185,9 @@ func (r *findNodeReadyConstruction) buildWithOptions(cfg config.Node, id *identi
 	record := recordAdmissionConstruction{}
 	if options.ownDM != nil {
 		record = recordAdmissionConstruction{classes: recordAdmissionChargedR}
+	}
+	if options.contactReconciliation {
+		record = recordAdmissionConstruction{classes: recordAdmissionImmediateK, kSource: contactRecordReconciliationSource}
 	}
 	s := newServiceWithConstruction(cfg, id, bus, nil, constructor, serviceConstruction{record: record, bridge: r.bridge, ready: r}, clocks...)
 	if r.failure != nil {
@@ -198,6 +221,17 @@ func (r *findNodeReadyConstruction) bindings(s *Service) bool {
 		return false
 	}
 	if r.bridge.capture == nil || r.bridge.capture.localLoop == nil || r.options != r.originalOptions || r.ownDMRuntime != r.originalOptions.ownDM || r.bridge.capture.localLoop.signingGate != r.originalOptions.signingGate || (r.originalOptions.signingGate != nil && !r.originalOptions.signingGate.bindings()) {
+		return false
+	}
+	if r.originalOptions.contactReconciliation {
+		resolver, admission, producer := r.originalContactResolver, r.originalContactAdmission, r.originalContactProducer
+		if resolver == nil || admission == nil || producer == nil || s.identityResolver != resolver || resolver.svc != s || resolver.recordAdmission != admission || admission.service != s || admission.resolver != resolver || admission.network != resolver.network || admission.network != domain.NetworkID(networkName) || admission.classes != recordAdmissionImmediateK || admission.kSource != contactRecordReconciliationSource || admission.kFiles != nil || admission.openFiles != nil || admission.clock != nil || admission.wake != nil {
+			return false
+		}
+		if s.contactPins != producer || producer.service != r.originalContactService || producer.service != s || producer.wake != r.originalContactWake || producer.wake == nil || cap(producer.wake) != 1 {
+			return false
+		}
+	} else if r.originalContactResolver != nil || r.originalContactAdmission != nil || r.originalContactProducer != nil || r.originalContactService != nil || r.originalContactWake != nil {
 		return false
 	}
 	if r.originalOptions.loadedInbound {
@@ -307,4 +341,35 @@ func (r *findNodeReadyConstruction) installLoadedInbound(s *Service) error {
 	}
 	r.originalInbound, r.originalInboundService, r.originalInboundStore, r.originalInboundWake = p, p.service, p.store, p.wake
 	return nil
+}
+
+// Capture BEFORE the datagram callback: a coherent replacement pair may not
+// become the original simply because its fields agree at a later snapshot.
+func (r *findNodeReadyConstruction) captureContactReconciliationResolver(s *Service) {
+	if !r.originalOptions.contactReconciliation {
+		return
+	}
+	if s != r.service || r.options != r.originalOptions || r.originalContactResolver != nil || r.originalContactAdmission != nil {
+		panic("contact reconciliation resolver capture reused")
+	}
+	r.originalContactResolver = s.identityResolver
+	if s.identityResolver != nil {
+		r.originalContactAdmission = s.identityResolver.recordAdmission
+	}
+}
+
+// The original store/contact producer exists only after datagram construction.
+// Retain immutable identities only; live worker state is never copied or read.
+func (r *findNodeReadyConstruction) captureContactReconciliationProducer(s *Service) {
+	if !r.originalOptions.contactReconciliation {
+		return
+	}
+	if s != r.service || r.options != r.originalOptions || r.originalContactProducer != nil {
+		panic("contact reconciliation producer capture reused")
+	}
+	p := s.contactPins
+	r.originalContactProducer = p
+	if p != nil {
+		r.originalContactService, r.originalContactWake = p.service, p.wake
+	}
 }

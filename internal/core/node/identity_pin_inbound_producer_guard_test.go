@@ -571,9 +571,10 @@ func ninN1SourceErrors(sources map[string][]byte) []string {
 	expected["findNode"]["find_node_ready_construction.go:prepareFindNodeReadyConstruction"] = 2
 	expected["findnode"]["find_node_ready_construction.go:prepareFindNodeReadyConstruction"] = 7
 	expected["findnode"]["find_node_ready_construction.go:newFindNodeReadyCandidateService"] = 1
-	expected["findnode"]["find_node_ready_construction.go:buildWithOptions"] = 4
+	expected["findnode"]["find_node_ready_construction.go:buildWithOptions"] = 5
 	expected["findnode"]["find_node_ready_construction.go:installLoadedInbound"] = 3
 	expected["findnode"]["find_node_ready_construction.go:newFindNodeReadyLoadedInboundCandidateService"] = 1
+	expected["findnode"]["find_node_ready_construction.go:newFindNodeReadyLoadedContactReconciliationCandidateService"] = 1
 	expected["proofToken"]["find_node_ready_construction.go:bindings"] = 1
 	expected["findNode"]["find_node_ready_construction.go:bindings"] = 8
 	expected["findnode"]["find_node_ready_construction.go:bindings"] = 3

@@ -310,7 +310,7 @@ func contactPushSourceErrors(sources map[string][]byte) []string {
 		"contactRecordReconciliationAuthority": {"identity_pin_contact_reconciliation.go:reserveContactRecordReconciliation": 1},
 		"preparedContactRecordStage":           {"identity_pin_contact_record.go:prepareContactRecordStageLocked": 1},
 		"contactRecordCandidate":               {"identity_pin_contact_record.go:observeContactRecord": 1, "identity_pin_contact_reconciliation.go:captureReconciliation": 1},
-		"recordAdmissionConstruction":          {"find_node_ready_construction.go:buildWithOptions": 2, "service.go:newServiceWithDatagramConstructor": 1, "service.go:newContactRecordPushCandidateService": 1, "service.go:newRelationRecordCandidateService": 1, "service.go:newContactRecordReconciliationCandidateService": 1, "identity_record_admission_own_dm.go:NewInactiveOwnDMAdmissionCandidate": 1},
+		"recordAdmissionConstruction":          {"find_node_ready_construction.go:buildWithOptions": 3, "service.go:newServiceWithDatagramConstructor": 1, "service.go:newContactRecordPushCandidateService": 1, "service.go:newRelationRecordCandidateService": 1, "service.go:newContactRecordReconciliationCandidateService": 1, "identity_record_admission_own_dm.go:NewInactiveOwnDMAdmissionCandidate": 1},
 		"relationRecordAdmission":              {"identity_record_admission.go:newIdentityResolverWithRecordAdmission": 1, "identity_record_admission.go:newIdentityResolverWithContactRecordAdmission": 1},
 	}
 	actual, made := map[string]map[string]int{}, map[string]map[string]int{}
@@ -375,6 +375,24 @@ func contactPushSourceErrors(sources map[string][]byte) []string {
 							refs[site]++
 						}
 						if typ.Name == "recordAdmissionConstruction" {
+							if name == "find_node_ready_construction.go" && owner == "buildWithOptions" {
+								fields := map[string]string{}
+								for _, elt := range n.Elts {
+									kv, ok := elt.(*ast.KeyValueExpr)
+									if !ok {
+										continue
+									}
+									key, k := kv.Key.(*ast.Ident)
+									value, v := kv.Value.(*ast.Ident)
+									if k && v {
+										fields[key.Name] = value.Name
+									}
+								}
+								valid := len(n.Elts) == 0 || len(n.Elts) == 1 && reflect.DeepEqual(fields, map[string]string{"classes": "recordAdmissionChargedR"}) || len(n.Elts) == 2 && reflect.DeepEqual(fields, map[string]string{"classes": "recordAdmissionImmediateK", "kSource": "contactRecordReconciliationSource"})
+								if !valid {
+									failures = append(failures, "Ready closed record option changed")
+								}
+							}
 							if owner == "newServiceWithDatagramConstructor" && len(n.Elts) != 0 {
 								failures = append(failures, "ordinary constructor selected admission")
 							}

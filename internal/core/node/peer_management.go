@@ -1229,6 +1229,12 @@ func (s *Service) syncPeerWelcome(pc *netcore.NetCore, reader *bufio.Reader, add
 // without the layer. TODO(fetch-contacts-floor): remove the leg when
 // nothing is left to bridge — see docs/protocol/identity-lookup.md.
 func (s *Service) syncPeer(ctx context.Context, address domain.PeerAddress, requestPeers bool) int {
+	return s.syncPeerWithIntent(ctx, address, requestPeers, domain.DialToAddress())
+}
+
+// syncPeerWithIntent is the same original narrow exchange; only the closed
+// private candidate below may supply a named intent. All defaults stay address.
+func (s *Service) syncPeerWithIntent(ctx context.Context, address domain.PeerAddress, requestPeers bool, intent domain.DialIntent) int {
 	// Budgeted: this is a real outbound socket and counts against the shared
 	// ceiling like any other. A refusal here means the sync does not happen —
 	// which is the point: recovering a sender key is worth a connection, but
@@ -1242,7 +1248,7 @@ func (s *Service) syncPeer(ctx context.Context, address domain.PeerAddress, requ
 	// Metered for the node-wide transport totals only. This dial never becomes
 	// a session, so its bytes stay out of the per-peer health totals, exactly
 	// as before; what it must not do is cross the wire uncounted.
-	transport, err := s.dialPeerTransport(ctx, address, domain.DialToAddress(), func(ctx context.Context) (net.Conn, error) {
+	transport, err := s.dialPeerTransport(ctx, address, intent, func(ctx context.Context) (net.Conn, error) {
 		return s.dialPeerWithBudget(ctx, address, syncHandshakeTimeout)
 	})
 	if err != nil {
@@ -3448,6 +3454,10 @@ const maxConcurrentSenderKeySyncPasses = 3
 // fan-out. Serving fetch_contacts on the peer-session dispatcher would be
 // a both-ends protocol addition; no protocol version implements it yet.
 func (s *Service) triggerSenderKeySyncAsync(prevHop domain.PeerAddress, sender string, ownedSession *peerSession) {
+	s.triggerSenderKeySyncWithPolicy(prevHop, sender, ownedSession, senderKeySyncAddress)
+}
+
+func (s *Service) triggerSenderKeySyncWithPolicy(prevHop domain.PeerAddress, sender string, ownedSession *peerSession, policy senderKeySyncPolicy) {
 	// Canonical-format gate on the wire-supplied sender string BEFORE it
 	// can become a map key: a keyless DM frame carries an arbitrary
 	// attacker-chosen sender that may approach the 8 MiB frame budget,
@@ -3519,7 +3529,7 @@ func (s *Service) triggerSenderKeySyncAsync(prevHop domain.PeerAddress, sender s
 	s.senderKeySyncInFlight[key] = struct{}{}
 	s.senderKeySyncMu.Unlock()
 
-	s.runSenderKeySyncPass(prevHop, sender, ownedSession, func() {
+	s.runSenderKeySyncPassWithPolicy(prevHop, sender, ownedSession, policy, func() {
 		s.senderKeySyncMu.Lock()
 		delete(s.senderKeySyncInFlight, key)
 		if hopKey != "" {
@@ -3556,6 +3566,10 @@ func (s *Service) senderKeySyncHopKey(prevHop domain.PeerAddress, ownedSession *
 // appears. release is called exactly once when the pass ends, whatever the
 // outcome — it returns the slot the caller's admission reserved.
 func (s *Service) runSenderKeySyncPass(prevHop domain.PeerAddress, sender string, ownedSession *peerSession, release func()) {
+	s.runSenderKeySyncPassWithPolicy(prevHop, sender, ownedSession, senderKeySyncAddress, release)
+}
+
+func (s *Service) runSenderKeySyncPassWithPolicy(prevHop domain.PeerAddress, sender string, ownedSession *peerSession, policy senderKeySyncPolicy, release func()) {
 	parent := s.runCtx
 	if parent == nil {
 		parent = context.Background()
@@ -3585,13 +3599,14 @@ func (s *Service) runSenderKeySyncPass(prevHop domain.PeerAddress, sender string
 			}
 		}
 
-		candidates := make([]domain.PeerAddress, 0, 1+senderKeySyncFanout)
+		candidates := make([]senderKeySyncCandidate, 0, 1+senderKeySyncFanout)
 		if prevHop != "" {
-			candidates = append(candidates, prevHop)
+			candidates = append(candidates, senderKeySyncCandidate{address: prevHop})
 		}
-		candidates = append(candidates, s.senderKeySyncCandidates(prevHop)...)
+		candidates = append(candidates, s.senderKeySyncCandidateSnapshot(prevHop, policy)...)
 
-		for _, addr := range candidates {
+		for _, candidate := range candidates {
+			addr := candidate.address
 			if ctx.Err() != nil {
 				return
 			}
@@ -3601,7 +3616,7 @@ func (s *Service) runSenderKeySyncPass(prevHop domain.PeerAddress, sender string
 				log.Info().Str("sender", sender).Msg("sender_key_sync_async_satisfied")
 				return
 			}
-			imported := s.syncSenderKeys(ctx, addr, nil)
+			imported := s.syncSenderKeyCandidate(ctx, candidate)
 			log.Info().Str("peer", string(addr)).Str("sender", sender).Int("imported", imported).Msg("sender_key_sync_async_pass")
 		}
 		if sender != "" && !s.hasSenderPubKey(sender) {
@@ -3708,6 +3723,15 @@ func (s *Service) hasSenderPubKey(sender string) bool {
 // dialable by construction; inbound-only peers are skipped — a fresh
 // dial to an unroutable source address would only burn the pass budget.
 func (s *Service) senderKeySyncCandidates(exclude domain.PeerAddress) []domain.PeerAddress {
+	candidates := s.senderKeySyncCandidateSnapshot(exclude, senderKeySyncAddress)
+	out := make([]domain.PeerAddress, 0, len(candidates))
+	for _, candidate := range candidates {
+		out = append(out, candidate.address)
+	}
+	return out
+}
+
+func (s *Service) senderKeySyncCandidateSnapshot(exclude domain.PeerAddress, policy senderKeySyncPolicy) []senderKeySyncCandidate {
 	s.peerMu.RLock()
 	defer s.peerMu.RUnlock()
 	excludeID := domain.PeerIdentity{}
@@ -3715,7 +3739,7 @@ func (s *Service) senderKeySyncCandidates(exclude domain.PeerAddress) []domain.P
 		excludeID = sess.peerIdentity
 	}
 	seenID := make(map[domain.PeerIdentity]struct{})
-	out := make([]domain.PeerAddress, 0, senderKeySyncFanout)
+	out := make([]senderKeySyncCandidate, 0, senderKeySyncFanout)
 	for addr, session := range s.sessions {
 		if session == nil || addr == exclude {
 			continue
@@ -3735,7 +3759,7 @@ func (s *Service) senderKeySyncCandidates(exclude domain.PeerAddress) []domain.P
 		if !session.peerIdentity.IsZero() {
 			seenID[session.peerIdentity] = struct{}{}
 		}
-		out = append(out, addr)
+		out = append(out, s.captureSenderKeySyncCandidateLocked(addr, session, policy))
 		if len(out) >= senderKeySyncFanout {
 			break
 		}

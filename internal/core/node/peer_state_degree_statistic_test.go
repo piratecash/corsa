@@ -526,7 +526,7 @@ func TestDegreeStatisticConstructorGraphCannotEscapeBeforeOwner(t *testing.T) {
 }
 func degreeStatisticConstructionPins() map[string]string {
 	return map[string]string{
-		"internal/core/node/find_node_ready_construction.go": "9d0318eb4799ec9b6df1ffe756c74ed7ae9a843f908cc7bd4e85856ebe8b9aad", "internal/core/findnode/owned_bridge_bootstrap.go": "2ee7f6b13d859326bbd2fb00e487c9530737a2f722359d762202710d1a1cd827", "internal/core/findnode/owned_bridge.go": "b88656fb08a5dd33b0f2bdb7b9e52f636eb1b320291e1a390c2c9b683a593f57",
+		"internal/core/node/find_node_ready_construction.go": "928f01bab660f066126117dee1b756869ad323b493fcdc83a0a53694db53f6c4", "internal/core/findnode/owned_bridge_bootstrap.go": "2ee7f6b13d859326bbd2fb00e487c9530737a2f722359d762202710d1a1cd827", "internal/core/findnode/owned_bridge.go": "b88656fb08a5dd33b0f2bdb7b9e52f636eb1b320291e1a390c2c9b683a593f57",
 		"internal/core/findnode/session.go":                       "8968f6d526239bc11510c4f091539dda84bed91c345d74a4606b397ddd525dc1",
 		"internal/core/node/find_node_connection.go":              "149ae30e487317e1d895786b704b151e22e2fa6062831ece31ead0788024a55a",
 		"internal/core/findnodebridge/clock.go":                   "d948de0986c528473672deee23aef2735793fbf1e6d4f70f7ac5768005ee2558",
@@ -536,7 +536,7 @@ func degreeStatisticConstructionPins() map[string]string {
 		"internal/core/node/secure_session_store.go":              "56ab961cccccfc14ad586cf5c973960420995fe9b1986b99856c42a4e2e64228",
 		"internal/core/node/find_node_degree_terminal_bridge.go":  "e6c1022489eb1de4969683cecba0c40590fe5a3ffef14e272e5464b722677ef8",
 		"internal/core/node/find_node_bridge_construction.go":     "c068e0e0d7e742b39c5ae6d70051734f813e22ce6db7b4ec42ccf4594ffc5680",
-		"internal/core/node/service.go":                           "68841af478e783ec4f833092393f7ec2ebfe4270e6a3e1666066bbf66ec0ac4f",
+		"internal/core/node/service.go":                           "283517bd09b09c11e77f799a285a90e97a0756bbc48b39c418657254cbcc73bf",
 		"internal/core/node/find_node_degree.go":                  "5fd8c8fd9700cb63fd238bd9fb3255c7e434081258e4448d3febb89f4e0e35ea",
 		"internal/core/node/datagram_runtime_state.go":            "62817ed3c561f3eedbaa8baca6ded4c3696b8595a5c3a5345e35faada9ebcf64",
 		"internal/core/node/datagram_layer.go":                    "02b1e51faf940855fa9a366333a01b4aa681f6cf3fe97485bd317a782244549d",

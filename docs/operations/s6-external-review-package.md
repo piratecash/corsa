@@ -209,3 +209,43 @@ release build до node/RPC/pprof listeners. Отсутствующие fixture/
 Windows durable-backend test доказывает отказ write/remove до мутации, а не допуск C3. POSIX
 real-owner receipt относится только к своей POSIX-части. Windows evidence дополняет partial
 `unsafe_pin_store_refusal`; итоговый статус требует всех подусловий, notes и candidate rechecks.
+
+
+## Additional POSIX Service.Run evidence / Дополнительная POSIX-проверка Service.Run
+
+A separate Linux arm64 Go1.27.3 CGO0 run tests the original
+`NewService → StartupRefusal → Run` with actual foreign owners. The source is the
+1794-file capture of `ecaebdca9b65e1dce681fea8a2791240ac5695d9` plus
+`internal/core/node/service_real_owner_refusal_linux_test.go`. A capless offline container
+creates the fixture as UID501, executes the sole selected parent as UID502, then checks
+it again as UID501. All five RUN/PASS events passed: foreign pin-store, foreign marker,
+foreign parent directory, and the own-owner first-start positive. The latter reaches a
+real occupied loopback listener; the foreign cases return the original typed refusal
+before listening. Original bounded service logs are retained and qualified, stderr is
+empty, original background work is joined, and the foreign fixture remains unchanged.
+
+The test is opt-in (`CORSA_S6_REAL_OWNER_SERVICE=1`) and requires the separately prepared
+UID501/502 fixture; a default skip supplies no runtime evidence. The private ELF is
+63,959,717 bytes, SHA256 `ec7267e9243d32015429b235107ff7d205d0df06fa0416fa79891558277a8a1c`.
+TESTER: `/private/tmp/corsa-D1-S6-service-real-owner-TESTER-DATA-v1/HANDOFF.TESTER.json`,
+SHA256 `7e467d3bbac8eaaa732a8ad275e40510e26371025f29fa15f9df13be0ae87f32`.
+This strengthens the POSIX startup subcase only. Windows/DACL, remaining startup cases,
+release notes, final-candidate checks and the S6 release decision remain required;
+`unsafe_pin_store_refusal` stays partial and the release decision stays null.
+
+Отдельный запуск Linux arm64 Go1.27.3 CGO0 проверил исходную цепочку
+`NewService → StartupRefusal → Run` с настоящими чужими владельцами. Исходники —
+1794 файла коммита `ecaebdca9b65e1dce681fea8a2791240ac5695d9` и новый
+`internal/core/node/service_real_owner_refusal_linux_test.go`. Изолированный контейнер
+без capabilities и сети создаёт fixture как UID501, выполняет единственного выбранного
+родителя как UID502 и снова проверяет fixture как UID501. Все пять RUN/PASS прошли:
+чужие pin-store, marker и каталог дают исходный типизированный отказ до listen;
+положительный первый запуск с собственным владельцем достигает настоящего занятого
+loopback listener. Исходные ограниченные логи сохранены и проверены, stderr пуст,
+фоновые работы joined, метаданные и содержимое чужого fixture не изменились.
+
+Тест требует `CORSA_S6_REAL_OWNER_SERVICE=1` и отдельно подготовленный UID501/502 fixture;
+обычный skip не подтверждает исполнение. Размер и SHA256 private ELF, TESTER и его SHA256
+указаны выше. Закрывается только этот POSIX startup-подслучай. Windows/DACL, остальные
+startup-проверки, release notes, final-candidate проверки и решение о выпуске S6 остаются;
+`unsafe_pin_store_refusal` сохраняет partial, release decision — null.

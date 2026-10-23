@@ -101,3 +101,41 @@ initiator clocks do not replace the relay/target Runtime clocks. The accepted
 ordinary/race checks exercise the original read/admission/dispatch paths and
 workers; they do not establish whole `Service.Run`, a public lookup API, resource
 acceptance or activation.
+
+
+## Private loaded K reconciliation composition (authored; QA pending)
+
+A closed private Ready option additionally composes the original K startup
+reconciliation with loaded-format3 N-in on one Service, trust store and secure
+store. It requires loaded inbound and excludes own-DM charged R. Public/default
+construction and the existing R|K refusal remain unchanged. It supplies no new
+producer, backend, clock, worker or completion policy.
+
+The original K resolver/admission pair is captured before the datagram callback;
+the original contact producer/service/wake is captured immediately after producer
+creation. Ready checks those immutable identities and exact reconciliation-only
+source before its final precheck/statistic/Seal and again at finalization, without
+copying mutable worker state or acquiring a post-statistic application lock.
+Actual Run remains the sole readiness and joined-worker owner. Authored functional
+checks use distinct K-contact and genuine TLS/N-in peers, real strict persistence
+and original writer/signature paths; they require independent CODE and ROOT QA.
+This component does not activate public policy or establish resource/G2/release
+acceptance.
+
+## Частная композиция loaded K reconciliation (написана; QA впереди)
+
+Замкнутая private Ready option соединяет прежнюю startup reconciliation K с
+loaded-format3 N-in на одном Service, trust store и secure store. Она требует
+loaded inbound и исключает own-DM charged R. Public/default construction и
+прежний отказ R|K не меняются. Новых producer/backend/часов/worker или политики
+completion нет.
+
+Исходные resolver/admission K захватываются до datagram callback; исходные
+contact producer/service/wake — сразу после создания producer. Ready сверяет
+эти immutable identities и точный reconciliation-only source перед финальными
+precheck/statistic/Seal и повторно при finalize, не копируя mutable worker state
+и не добавляя application lock после statistic. Только actual Run открывает
+readiness и владеет прежними joined workers. Написанные functional checks берут
+разных K-contact и genuine TLS/N-in peers, настоящее strict persistence и
+исходные writer/signature paths; независимые CODE и ROOT QA ещё обязательны.
+Публичная политика, resource/G2/release acceptance этим не включаются.

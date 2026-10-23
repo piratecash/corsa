@@ -676,3 +676,231 @@ G2, activation и release этим не принимаются.
 
 - Fixture TESTER: `/private/tmp/corsa-D1-root-bootstrap-fixture-VM-TESTER-DATA-v1/HANDOFF.TESTER.json` (SHA256 `e9c24ec63fcd53090d72052001f5d5ef443d7c8b3cfc3a4302a797bd985aff33`).
 - Fixture REVIEWER: `/private/tmp/corsa-D1-root-bootstrap-fixture-VM-REVIEWER-DATA-v1/HANDOFF.json` (SHA256 `6b41453a668cb16dbc01f633536fac5023705986dfbfa7bda2a9ae2c5b61b291`).
+
+## 2026-10-23: source fingerprint and kernel7 frontier / fingerprint и граница kernel7
+
+### English
+
+The first seven-case kernel run reached the planned 2 FullNode + 2 SDK parent
+but failed its source snapshot: the fixture working directory resolved the
+source base to `/`, which lacked `internal/core`. The test and its fingerprint
+checks were retained. The repaired guest packages the exact 1,108-file subset
+from the frozen SourcePlan1790/fee57 source, with 55 ancestor directories and a
+checksum manifest. `/source` is mounted read-only/nosuid/nodev/noexec before
+the common mount baseline; only the planned parent uses `/source/internal/core/node`
+as its working directory. Guest temporary storage is64MiB within the unchanged
+768MiB guest limit. Twelve fresh packaging controls passed; ten unchanged older
+controls were carried with their original evidence, rather than rerun.
+
+The resulting initramfs is83,639,136 bytes, SHA256
+`86ae57aba974bd5c62d655a5e848241f7e9be1236c305986c42129ce881d2fde`.
+Independent archive audits checked2,855 records, the complete source subset,
+checksums and all1,690 unchanged old raw records. The derived TAR is647,547,904
+bytes, SHA256 `4f19f7208562f64ab7e66e831b0913bf742e604f56eff0d4c64d7718d3f5ccab`;
+4,925 of4,929 entries remain raw-exact. Metadata-only import produced image
+`sha256:22dde8ee7527fc4a2a71a1d375cd76d2e448b29946e4ea8c9ba81c38ac6e1a3e`.
+Archive, TAR and import data were independently accepted by TESTER and REVIEWER.
+
+Two subsequent runs of this same image both remain functional failures. The
+first recorded16 RUN/15 PASS/1 FAIL: four completed cases, then the original
+five-second Pdeath Init/Ready timeout. The second recorded18 RUN/17 PASS/1 FAIL:
+fixture, runtime, forbidden-FD, restore, Pdeath and blocked-sample cases passed
+with their common postflight. The planned parent passed its source snapshot
+and Journal constructor precondition, then reported `cannot assign requested
+address` twice. This does not establish a persisted journal, a started target,
+or the precise failed network operation. Source analysis identifies competing
+frontiers: original-namespace negative connect probes run before network setup
+and are repeated during Close; later interface configuration can also return
+an unlabelled errno. A diagnostic must identify the stage, family and operation
+before any behavior change. No isolation predicate, timer or resource limit
+has been relaxed. The earlier timeout remains recorded independently.
+
+The VM profile remains1CPU,1536MiB/no-swap/64PID outside,768MiB inside,
+180seconds plus10seconds cleanup, offline without privileged/KVM/host mounts.
+In both runs the container exited0 without its OOMKilled flag and the exact
+owned container was removed with0; the test driver returned1. Container exit0
+is not functional acceptance or a guest memory-pressure measurement.
+Neither whole kernel7, Member4, T5/T6, final-candidate runtime nor release is accepted.
+
+### Русский
+
+Первый набор kernel7 дошёл до родителя с2 FullNode и2 SDK, но отказал на
+source snapshot: рабочий каталог fixture давал base `/` без `internal/core`.
+Тест и fingerprint сохранены. Теперь в госте размещены точные1 108 файлов
+замороженного SourcePlan1790/fee57,55 родительских каталогов и checksum manifest.
+`/source` подключён read-only/nosuid/nodev/noexec до общего mount baseline;
+только planned parent получает cwd `/source/internal/core/node`. Guest tmp64MiB
+входит в прежние768MiB памяти. Пройдены12 свежих packaging controls; десять
+неизменённых прежних controls сохранены со старыми свидетельствами, не перезапущены.
+
+Новый initramfs83 639 136байт и TAR647 547 904байта имеют полные SHA выше.
+Независимые аудиторы проверили2 855 записей initramfs, весь source subset и
+checksum,1 690 прежних raw records без изменений; в TAR сохранены4 925 из4 929
+raw entries. Архив, TAR и metadata-only import image22dde8ee приняты TESTER и
+REVIEWER отдельно от runtime.
+
+Два запуска этого образа остаются functional FAIL. Первый:16 RUN/15 PASS/1 FAIL,
+четыре завершённых cases и исходный5с Pdeath Init/Ready timeout. Второй:
+18 RUN/17 PASS/1 FAIL; fixture/runtime/forbidden-FD/restore/Pdeath/blocked-sample
+прошли вместе с общим postflight. Planned parent прошёл source snapshot и
+предусловие конструктора Journal, затем дважды вернул `cannot assign requested
+address`. Сохранение журнала, запуск target и точная сетевая операция этим не
+доказаны. Source показывает конкурирующие причины: отрицательные connect-пробы
+исходного namespace выполняются до настройки сети и повторяются в Close;
+поздние настройки интерфейсов тоже возвращают errno без стадии. Следующий шаг —
+диагностика stage/family/operation до изменения поведения. Predicate изоляции,
+таймеры и лимиты не ослаблены; первый timeout сохранён независимо.
+
+Профиль VM прежний:1CPU, внешний1536MiB/no-swap/64PID, guest768MiB,
+180с+10с очистки, offline, без privileged/KVM/host mounts. В обоих случаях
+container exit0/OOMKilled=false и ownCID remove0 отделены от driver1. Это не
+functional acceptance и не измерение давления памяти гостя. Whole kernel7,
+Member4, T5/T6, runtime финального кандидата и выпуск остаются открытыми.
+
+### Machine-local evidence / локальные свидетельства
+
+- Source bundle: `/private/tmp/corsa-D1-kernel7-fingerprint-bundle-ROOT-v1/`.
+- Archive: `/private/tmp/corsa-D1-kernel7-fingerprint-archive-final-ROOT-v1/HANDOFF.json`.
+- TAR: `/private/tmp/corsa-D1-kernel7-fingerprint-retar-final-ROOT-v1/HANDOFF.json`.
+- Import: `/private/tmp/corsa-D1-kernel7-fingerprint-image-import-final-ROOT-v1/HANDOFF.json`.
+- First failure: `/private/tmp/corsa-D1-kernel7-fingerprint-batch-VM-failure-ROOT-v1/HANDOFF.json`; TESTER28a5478e, REVIEWER49926e33.
+- Second failure: `/private/tmp/corsa-D1-kernel7-fingerprint-batch-VM-failure-ROOT-v2/HANDOFF-final.json`; TESTERef265ac5, REVIEWER093b90d3.
+- Network frontier: `/private/tmp/corsa-D1-member4-network-eaddr-frontier-ARCH-v1/HANDOFF.json` (analysis only).
+
+## Committed1794 app3, cold test2 and source bundle (2026-10-23)
+
+### English
+
+The newly accepted evidence is for the committed source **1794 files /
+54,208,582 bytes**, commit `ecaebdca9b65e1dce681fea8a2791240ac5695d9`,
+SourcePlan domain
+`73dd4b58fb71e04597446c27b7fbd2e470ab0642f45985673ca9fa360fb93432`.
+It does not retarget those artifacts to later MAIN/K2 Source2051 or private
+Intent-X Source2053. Earlier evidence and failures above remain historical.
+
+| Accepted step | Actual evidence | Qualification |
+|---|---|---|
+| app3: fullnode, linuxhelper, sdkedge | `be0437` / session9605;3,734 normal0/joined commands; TESTER `ed4a20ef`, REVIEWER `4a31fa76` | Original app receipt is `verified_equal`: all three app artifacts are byte-equal across two fresh cold lanes. This uses the instrumented diagnostic generator `ad31c479`, not the original `3b3aef30` generator identity. No app was executed. |
+| cold test2, separate attempt | `075dfe` / session73729;1,908 normal0/joined commands; TESTER `d6d0c3ba`, REVIEWER `e42394c4` | One fresh lane compiled Node and loadstand test ELFs with CGO1; compiler policy `-p=1`, GOMAXPROCS1/GOGC50/GOMEMLIMIT768MiB. Comparison is `not_requested`; it is not an app BuildPair rerun or a two-lane test reproducibility result. Neither test ELF was executed. |
+| source fingerprint bundle | `955aa0`, normal0/reaped; TESTER `60fa3493`, REVIEWER `5f0e6b54` | One gzip member/newc with exactly1,111 source files and55 directories:533 measured core files and578 stand/test files. All member body hashes match the canonical manifest and retained source; selected body16,808,176 bytes, conservative charge19,435,520 bytes. This is source-data preparation only. |
+
+The exact new payload bindings are:
+
+| Payload | Bytes | SHA256 |
+|---|---:|---|
+| `node.test` |45,613,319| `bb32ae0c5be1ecfa4f5eca265adfc3a17e3025d4fb2e35b978d48d8318d361cd` |
+| `loadstand.test` |15,073,543| `feb02ebb7d01b1aaea6b124e861276a9984d9a19ec735501dc9c7bf1ace8f21d` |
+| canonical Source1794 manifest |889,975| `a2064e8eb1735be3195443c436d7c9186a46f46d97591c4140df40645208c934` |
+| `source-fingerprint.cpio.gz` |4,388,206| `38d144fff608019455a5972c923df97881dc9cea6120ee9af41638b55354bcb8` |
+| `source.sha256.expected` |132,052| `c26e062d87257f0c860e7981f362b3583ee1aab0cc77599fab690b095ecf9c41` |
+
+The app receipt SHA is
+`238622864547ab3aec13e981ca12cbae9be2939e331bf4431ab521d2f546d204`.
+The separate test attempt verified its read-only app witness before and after
+compilation and computed `same_native_capture=true` over4,573 native records;
+its native domain is
+`446fb470ea2c95e1db6b45901cc05f972967757c46b2a46fecae602f75240b92`.
+Source, seed and toolchain domains join the accepted app receipt. These are
+**different CIDs**: `original_single_CID_five_output_proof=false` remains false.
+Static ELF inspection identified the AArch64 interpreter/DSO closure; it does
+not establish guest ABI execution. Docker's actual network-none profile does
+not rewrite the original builder's conservative non-hermetic receipt wording.
+
+The owner selected the smaller private disk profile:16GiB for observed total
+owned work and8GiB reserve. Admission requires **at least24GiB free on both the
+host and actual work storage before every applicable stage**. Preparation
+additionally accounts for the planned conservative input allocation and metadata
+before copying. Retained outputs are already charged through actual free-space
+observations; joined-work credit cannot lower admission below24GiB. These are
+observations, not a hard disk quota, physical reservation or peak-fit promise.
+The original72/64GiB profile and public builder API remain unchanged. The private
+build limits remain2CPU,1536MiB/no-swap/256PID, offline, heavy-lock ownership and
+6000seconds plus30seconds cleanup per separately admitted attempt. Exhaustion
+or failed custody/finality checks still STOP without automatic growth or retry.
+The source-only bundle prep used its own32MiB output bound and240+270second
+inner/outer fences; it performed no native compiler operation.
+
+The first cold-test2 attempt remains FAIL: `NonIntegerNumber` arose before
+native capture or Go because the strict subject JSON decoder was applied to an
+accepted TESTER report containing legitimate fractional durations. The repair
+kept those reports as bounded, SHA-bound opaque evidence, while preserving
+strict receipt/request/native JSON validation. Two actual constructor controls
+passed: the full14,914-file AppWitness accepted the genuine report, a wrong
+report SHA refused, and strict subject JSON still rejected a fractional number.
+The earlier `UnsafePrivateFile` and `TelemetryModeChanged` failures remain
+unreproduced here with cause UNKNOWN; successful instrumented attempts do not
+identify or repair their cause. No failed retained test binary is substituted
+for the accepted cold outputs.
+
+This acceptance covers compilation, static metadata/closure and source-bundle
+data only. It accepts no artifact execution, guest ABI, kernel7, Member4,
+resource/performance result, G2, whole S6, D1 activation or release. The new source
+bundle has not itself been admitted as a guest image or kernel-test result.
+
+### Русский
+
+Новые свидетельства относятся к committed Source1794:1 794 файла,
+54 208 582байта, commit `ecaebdca…`, SourcePlan `73dd4b58…` с полными
+привязками выше. Они не переносятся на последующий MAIN/K2 Source2051 или
+приватный Intent-X Source2053. Прежние результаты и FAIL сохранены.
+
+В app3 (`be0437`/9605, TESTER `ed4a20ef`, REVIEWER `4a31fa76`) все три
+артефакта побайтно совпали в двух свежих cold lanes; исходный receipt имеет
+`verified_equal`,3 734 команды завершились normal0/joined. Generator —
+диагностический `ad31c479`, не исходный `3b3aef30`; приложения не запускались.
+Отдельный cold test2 (`075dfe`/73729, T`d6d0c3ba`/R`e42394c4`) собрал два CGO1
+ELF в одной свежей lane:1 908 normal0/joined, `-p=1`, GOMAXPROCS1/GOGC50/
+GOMEMLIMIT768MiB. Это не повтор app BuildPair и не воспроизводимость test2
+между двумя lanes; `comparison=not_requested`. Оба ELF из таблицы не запускались.
+
+Source bundle (`955aa0`, T`60fa3493`/R`5f0e6b54`) содержит ровно1 111 файлов
+и55 каталогов в одном gzip/newc:533 measured core и578 stand/test files.
+Проверены все body SHA, канонический manifest `a2064e8e…`, retained source,
+checksum `c26e062d…`,0:0/nlink1 и режимы0444/0755; лишних записей или links нет.
+Полезные тела занимают16 808 176байт, conservative charge19 435 520байт.
+Размеры и полные SHA manifest/gzip/test ELF приведены в общей таблице.
+
+App witness проверен до и после отдельной test-компиляции; source/seed/toolchain
+согласованы с принятым app receipt. Для4 573 native records вычислено
+`same_native_capture=true` с domain `446fb470…`. CID разные;
+`original_single_CID_five_output_proof=false` не превращается в true.
+Статический ELF-разбор interpreter/DSO для AArch64 не доказывает выполнение
+ABI в госте. Фактический Docker network-none не переписывает консервативный
+non-hermetic статус исходного builder receipt.
+
+Владелец выбрал приватный disk profile16GiB observed total own work+8GiB
+reserve. Перед каждым применимым этапом заново нужны **минимум24GiB free
+и на host, и на фактическом work storage**. До подготовки отдельно учитывается
+плановый conservative объём входов и metadata. Retained outputs учитываются
+фактическим свободным местом; joined-work credit не снижает24GiB admission.
+Это не hard quota, резервирование физических блоков или обещание peak-fit.
+Прежний72/64GiB profile и публичный builder API не менялись. Приватные build
+ограничения:2CPU/1536MiB/no-swap/256PID, offline/heavy lock,6000+30с на каждую
+отдельно допущенную попытку. Нехватка или отказ custody/finality означает STOP,
+без автоматического роста лимитов или retry. Source-only bundle prep имел
+32MiB output bound и inner240/outer270с; native-компилятор в нём не запускался.
+
+Первый cold test2 остаётся FAIL до native capture/Go: `NonIntegerNumber` от
+subject JSON decoder на допустимых дробных длительностях отчёта TESTER.
+Ремонт сохраняет отчёты как bounded SHA-bound opaque evidence, не ослабляя
+строгие receipt/request/native JSON. Два actual constructor controls прошли:
+полный14 914-file witness принимает настоящий отчёт, неверный SHA отвергается,
+а дробный subject JSON по-прежнему отвергается. Прежние `UnsafePrivateFile`
+и `TelemetryModeChanged` здесь не воспроизведены, причина UNKNOWN; новые PASS
+не устанавливают и не исправляют её. Непринятые старые test binaries не
+подменяют новые cold outputs.
+
+Приняты только compile/static/closure/source-data. Artifact execution, guest
+ABI, kernel7, Member4, resource/performance, G2, whole S6, D1 activation и release
+этим не принимаются. Сам новый source bundle ещё не является принятым guest
+image или результатом kernel-тестов.
+
+### Machine-local evidence / локальные свидетельства
+
+The TESTER/REVIEWER prefixes above resolve to full hashes in these immutable
+ROOT acceptance records; исходные RAW и прежние отчёты не переписаны:
+
+- app3: `/private/tmp/corsa-D1-current1794-app-pair-final-ROOT-v1/HANDOFF.json` (`421fc039…`), with TESTER `ed4a20ef…` and REVIEWER `4a31fa76…`.
+- cold test2: `/private/tmp/corsa-D1-current1794-cold-test2-final-ROOT-v1/HANDOFF.json` (`bffe60cf…`), with TESTER `d6d0c3ba…` and REVIEWER `e42394c4…`.
+- source bundle: `/private/tmp/corsa-D1-current1794-kernel7-bundle-final-ROOT-v1/HANDOFF.json` (`d50ce0be…`), with TESTER `60fa3493…` and REVIEWER `5f0e6b54…`.
+- First cold-test2 failure: `/private/tmp/corsa-D1-current1794-cold-test2-failure-TESTER-DATA-v1/HANDOFF.TESTER.json` (`81be2aae…`); repair CODE `/private/tmp/corsa-D1-current1794-cold-test2-CODE-REVIEWER-v3/HANDOFF.json`; actual constructor controls `/private/tmp/corsa-D1-current1794-cold-test2-witness-light2-TESTER-DATA-v1/HANDOFF.TESTER.json` (`ae16e68a…`) and `/private/tmp/corsa-D1-current1794-cold-test2-actual-witness-light2-REVIEWER-DATA-v1/HANDOFF.json`.

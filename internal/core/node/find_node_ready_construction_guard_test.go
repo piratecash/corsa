@@ -46,9 +46,9 @@ func ownedReadySources(t *testing.T) map[string][]byte {
 	return sources
 }
 func ownedReadySourceErrors(sources map[string][]byte) []string {
-	pins := map[string]string{"internal/core/node/find_node_owned_local_target.go": "62ef1272aca207e7b2f74e7f89e78469281c2abf43ba2cb9b7df05413dfe4004", "internal/core/node/find_node_ready_target_timing.go": "515455541e482579332a42535b4ed58ddab7633a8ef52a50e0c23138285d7667", "internal/core/node/identity_pin_own_dm_runtime.go": "39b178ddcdeb0ee8979a264484dd2f5eea37e3f9a869e9568a768a965a194abb", "internal/core/findnode/owned_bridge.go": "b88656fb08a5dd33b0f2bdb7b9e52f636eb1b320291e1a390c2c9b683a593f57", "internal/core/findnode/owned_bridge_bootstrap.go": "2ee7f6b13d859326bbd2fb00e487c9530737a2f722359d762202710d1a1cd827", "internal/core/node/find_node_bridge_construction.go": "c068e0e0d7e742b39c5ae6d70051734f813e22ce6db7b4ec42ccf4594ffc5680", "internal/core/node/find_node_ready_construction.go": "9d0318eb4799ec9b6df1ffe756c74ed7ae9a843f908cc7bd4e85856ebe8b9aad", "internal/core/node/service.go": "68841af478e783ec4f833092393f7ec2ebfe4270e6a3e1666066bbf66ec0ac4f"}
-	closed := map[string]bool{"ownedFindNodeSigningTestGate": true, "signingGate": true, "newFindNodeReadyTimedLoadedInboundCandidateService": true, "prepareFindNodeReadyTimedTestConstruction": true, "findNodeReadyConstruction": true, "findNodeReadyOptions": true, "buildWithOptions": true, "installLoadedInbound": true, "newFindNodeReadyLoadedInboundCandidateService": true, "ownDMRuntimeConstruction": true, "prepareFindNodeReadyConstruction": true, "newFindNodeReadyCandidateService": true, "NewExecutingBootstrapIntake": true, "newDormantIntakeAt": true}
-	tracked := map[string]bool{"newFindNodeReadyTimedLoadedInboundCandidateService": true, "prepareFindNodeReadyTimedTestConstruction": true, "buildWithOptions": true, "installLoadedInbound": true, "newFindNodeReadyLoadedInboundCandidateService": true, "prepareFindNodeReadyConstruction": true, "newFindNodeReadyCandidateService": true, "NewExecutingBootstrapIntake": true, "newDormantIntakeAt": true}
+	pins := map[string]string{"internal/core/node/find_node_owned_local_target.go": "62ef1272aca207e7b2f74e7f89e78469281c2abf43ba2cb9b7df05413dfe4004", "internal/core/node/find_node_ready_target_timing.go": "515455541e482579332a42535b4ed58ddab7633a8ef52a50e0c23138285d7667", "internal/core/node/identity_pin_own_dm_runtime.go": "39b178ddcdeb0ee8979a264484dd2f5eea37e3f9a869e9568a768a965a194abb", "internal/core/findnode/owned_bridge.go": "b88656fb08a5dd33b0f2bdb7b9e52f636eb1b320291e1a390c2c9b683a593f57", "internal/core/findnode/owned_bridge_bootstrap.go": "2ee7f6b13d859326bbd2fb00e487c9530737a2f722359d762202710d1a1cd827", "internal/core/node/find_node_bridge_construction.go": "c068e0e0d7e742b39c5ae6d70051734f813e22ce6db7b4ec42ccf4594ffc5680", "internal/core/node/find_node_ready_construction.go": "928f01bab660f066126117dee1b756869ad323b493fcdc83a0a53694db53f6c4", "internal/core/node/service.go": "283517bd09b09c11e77f799a285a90e97a0756bbc48b39c418657254cbcc73bf"}
+	closed := map[string]bool{"ownedFindNodeSigningTestGate": true, "signingGate": true, "newFindNodeReadyTimedLoadedInboundCandidateService": true, "prepareFindNodeReadyTimedTestConstruction": true, "newFindNodeReadyLoadedContactReconciliationCandidateService": true, "captureContactReconciliationResolver": true, "captureContactReconciliationProducer": true, "contactReconciliation": true, "originalContactResolver": true, "originalContactAdmission": true, "originalContactProducer": true, "originalContactService": true, "originalContactWake": true, "findNodeReadyConstruction": true, "findNodeReadyOptions": true, "buildWithOptions": true, "installLoadedInbound": true, "newFindNodeReadyLoadedInboundCandidateService": true, "ownDMRuntimeConstruction": true, "prepareFindNodeReadyConstruction": true, "newFindNodeReadyCandidateService": true, "NewExecutingBootstrapIntake": true, "newDormantIntakeAt": true}
+	tracked := map[string]bool{"newFindNodeReadyLoadedContactReconciliationCandidateService": true, "captureContactReconciliationResolver": true, "captureContactReconciliationProducer": true, "newFindNodeReadyTimedLoadedInboundCandidateService": true, "prepareFindNodeReadyTimedTestConstruction": true, "buildWithOptions": true, "installLoadedInbound": true, "newFindNodeReadyLoadedInboundCandidateService": true, "prepareFindNodeReadyConstruction": true, "newFindNodeReadyCandidateService": true, "NewExecutingBootstrapIntake": true, "newDormantIntakeAt": true}
 	calls := map[string]int{}
 	declarations := map[string]string{}
 	var failures []string
@@ -109,23 +109,30 @@ func ownedReadySourceErrors(sources map[string][]byte) []string {
 		}
 	}
 	wantCalls := map[string]int{
-		"prepareFindNodeReadyConstruction:internal/core/node/find_node_ready_target_timing.go:newFindNodeReadyTimedLoadedInboundCandidateService": 1,
-		"prepareFindNodeReadyConstruction:internal/core/node/find_node_ready_target_timing.go:prepareFindNodeReadyTimedTestConstruction":          1,
-		"buildWithOptions:internal/core/node/find_node_ready_target_timing.go:newFindNodeReadyTimedLoadedInboundCandidateService":                 1,
-		"prepareFindNodeReadyConstruction:internal/core/node/find_node_ready_construction.go:newFindNodeReadyLoadedInboundCandidateService":       1,
-		"buildWithOptions:internal/core/node/find_node_ready_construction.go:buildWithOwnDM":                                                      1,
-		"buildWithOptions:internal/core/node/find_node_ready_construction.go:newFindNodeReadyLoadedInboundCandidateService":                       1,
-		"installLoadedInbound:internal/core/node/service.go:newServiceWithConstruction":                                                           1,
-		"prepareFindNodeReadyConstruction:internal/core/node/identity_pin_own_dm_runtime.go:NewInactiveOwnDMRuntimeCandidate":                     1,
-		"prepareFindNodeReadyConstruction:internal/core/node/find_node_ready_construction.go:newFindNodeReadyCandidateService":                    1,
-		"NewExecutingBootstrapIntake:internal/core/node/find_node_ready_construction.go:prepareFindNodeReadyConstruction":                         1,
-		"newDormantIntakeAt:internal/core/findnode/owned_bridge.go:newDormantIntake":                                                              1,
-		"newDormantIntakeAt:internal/core/findnode/owned_bridge_bootstrap.go:NewExecutingBootstrapIntake":                                         1,
-		"SealConstruction:internal/core/node/find_node_ready_construction.go:finalize":                                                            1,
+		"prepareFindNodeReadyConstruction:internal/core/node/find_node_ready_construction.go:newFindNodeReadyLoadedContactReconciliationCandidateService": 1,
+		"buildWithOptions:internal/core/node/find_node_ready_construction.go:newFindNodeReadyLoadedContactReconciliationCandidateService":                 1,
+		"captureContactReconciliationResolver:internal/core/node/service.go:newServiceWithConstruction":                                                   1,
+		"captureContactReconciliationProducer:internal/core/node/service.go:newServiceWithConstruction":                                                   1,
+		"prepareFindNodeReadyConstruction:internal/core/node/find_node_ready_target_timing.go:newFindNodeReadyTimedLoadedInboundCandidateService":         1,
+		"prepareFindNodeReadyConstruction:internal/core/node/find_node_ready_target_timing.go:prepareFindNodeReadyTimedTestConstruction":                  1,
+		"buildWithOptions:internal/core/node/find_node_ready_target_timing.go:newFindNodeReadyTimedLoadedInboundCandidateService":                         1,
+		"prepareFindNodeReadyConstruction:internal/core/node/find_node_ready_construction.go:newFindNodeReadyLoadedInboundCandidateService":               1,
+		"buildWithOptions:internal/core/node/find_node_ready_construction.go:buildWithOwnDM":                                                              1,
+		"buildWithOptions:internal/core/node/find_node_ready_construction.go:newFindNodeReadyLoadedInboundCandidateService":                               1,
+		"installLoadedInbound:internal/core/node/service.go:newServiceWithConstruction":                                                                   1,
+		"prepareFindNodeReadyConstruction:internal/core/node/identity_pin_own_dm_runtime.go:NewInactiveOwnDMRuntimeCandidate":                             1,
+		"prepareFindNodeReadyConstruction:internal/core/node/find_node_ready_construction.go:newFindNodeReadyCandidateService":                            1,
+		"NewExecutingBootstrapIntake:internal/core/node/find_node_ready_construction.go:prepareFindNodeReadyConstruction":                                 1,
+		"newDormantIntakeAt:internal/core/findnode/owned_bridge.go:newDormantIntake":                                                                      1,
+		"newDormantIntakeAt:internal/core/findnode/owned_bridge_bootstrap.go:NewExecutingBootstrapIntake":                                                 1,
+		"SealConstruction:internal/core/node/find_node_ready_construction.go:finalize":                                                                    1,
 	}
 	wantDeclarations := map[string]string{
-		"newFindNodeReadyTimedLoadedInboundCandidateService": "internal/core/node/find_node_ready_target_timing.go:newFindNodeReadyTimedLoadedInboundCandidateService",
-		"prepareFindNodeReadyTimedTestConstruction":          "internal/core/node/find_node_ready_target_timing.go:prepareFindNodeReadyTimedTestConstruction",
+		"newFindNodeReadyLoadedContactReconciliationCandidateService": "internal/core/node/find_node_ready_construction.go:newFindNodeReadyLoadedContactReconciliationCandidateService",
+		"captureContactReconciliationResolver":                        "internal/core/node/find_node_ready_construction.go:captureContactReconciliationResolver",
+		"captureContactReconciliationProducer":                        "internal/core/node/find_node_ready_construction.go:captureContactReconciliationProducer",
+		"newFindNodeReadyTimedLoadedInboundCandidateService":          "internal/core/node/find_node_ready_target_timing.go:newFindNodeReadyTimedLoadedInboundCandidateService",
+		"prepareFindNodeReadyTimedTestConstruction":                   "internal/core/node/find_node_ready_target_timing.go:prepareFindNodeReadyTimedTestConstruction",
 		"buildWithOptions":                              "internal/core/node/find_node_ready_construction.go:buildWithOptions",
 		"installLoadedInbound":                          "internal/core/node/find_node_ready_construction.go:installLoadedInbound",
 		"newFindNodeReadyLoadedInboundCandidateService": "internal/core/node/find_node_ready_construction.go:newFindNodeReadyLoadedInboundCandidateService",
@@ -149,6 +156,9 @@ func TestOwnedReadyClosedSource(t *testing.T) {
 }
 func TestOwnedReadySourceControls(t *testing.T) {
 	for _, tc := range []struct{ name, path, before, after string }{
+		{"lost-contact-source", "internal/core/node/find_node_ready_construction.go", "admission.kSource != contactRecordReconciliationSource", "false"},
+		{"lost-contact-wake", "internal/core/node/find_node_ready_construction.go", "producer.wake != r.originalContactWake", "false"},
+		{"late-contact-capture", "internal/core/node/service.go", "construction.ready.captureContactReconciliationResolver(svc)", "_ = svc"},
 		{"lost-gate-binding", "internal/core/node/find_node_ready_construction.go", "r.bridge.capture.localLoop.signingGate != r.originalOptions.signingGate", "false"},
 		{"gate-lost-done", "internal/core/node/find_node_ready_target_timing.go", "case <-done:\n\t\treturn false", "case <-done:\n\t\treturn true"},
 		{"timed-normal-implicit-gate", "internal/core/node/find_node_ready_target_timing.go", "findNodeReadyOptions{loadedInbound: true})", "findNodeReadyOptions{loadedInbound: true, signingGate: new(ownedFindNodeSigningTestGate)})"},

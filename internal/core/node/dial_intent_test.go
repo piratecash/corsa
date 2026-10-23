@@ -356,16 +356,13 @@ func TestADialWithoutAnIntentIsRefusedBeforeAnySocket(t *testing.T) {
 	}
 }
 
-// No production path dials "to X" yet: which paths carry the intent is a
-// network-visible decision (an endpoint protected for good), taken path by
-// path. The guard turns red on the first production call of
-// domain.DialToIdentity anywhere in the module, so that call comes with its
-// decision, its tests and docs/protocol/session_v2.md.
-func TestNoProductionPathDialsToAnIdentityYet(t *testing.T) {
+// No active/default path dials "to X". The sole construction site belongs to
+// an UNUSED private extra-fanout candidate; every direct reference is closed.
+// Function-value escape, an active caller, or another constructor site fails.
+func TestOnlyTheInactiveSenderKeyCandidateCanNameADialIdentity(t *testing.T) {
 	t.Parallel()
-	root := moduleRoot(t)
-	if calls := callsOfDialToIdentity(t, root); len(calls) > 0 {
-		t.Fatalf("a production path dials to an identity: %s — decide it in docs/protocol/session_v2.md (\"Dial intent\") and update this guard", strings.Join(calls, ", "))
+	if bad := inactiveSenderKeyIntentViolations(t, moduleRoot(t)); len(bad) != 0 {
+		t.Fatalf("named intent escaped inactive closed frontier: %v", bad)
 	}
 }
 
@@ -467,4 +464,147 @@ func calledName(fun ast.Expr) string {
 		return callee.Name
 	}
 	return ""
+}
+
+// Exact reference sites, including method values and bare same-package calls.
+// These are literal reviewed sites, never learned from the current module.
+func inactiveSenderKeyIntentViolations(t *testing.T, root string) []string {
+	t.Helper()
+	expected := map[string]int{
+		"sender_key_sync_intent_candidate.go:syncSenderKeyCandidate:DialToIdentity":                              1,
+		"peer_management.go:triggerSenderKeySyncAsync:triggerSenderKeySyncWithPolicy":                            1,
+		"sender_key_sync_intent_candidate.go:triggerSenderKeySyncIntentCandidate:triggerSenderKeySyncWithPolicy": 1,
+		"peer_management.go:triggerSenderKeySyncWithPolicy:runSenderKeySyncPassWithPolicy":                       1,
+		"peer_management.go:runSenderKeySyncPass:runSenderKeySyncPassWithPolicy":                                 1,
+		"peer_management.go:senderKeySyncCandidates:senderKeySyncCandidateSnapshot":                              1,
+		"peer_management.go:runSenderKeySyncPassWithPolicy:senderKeySyncCandidateSnapshot":                       1,
+		"peer_management.go:runSenderKeySyncPassWithPolicy:syncSenderKeyCandidate":                               1,
+		"peer_management.go:syncPeer:syncPeerWithIntent":                                                         1,
+		"sender_key_sync_intent_candidate.go:syncSenderKeyCandidate:syncPeerWithIntent":                          1,
+	}
+	tracked := map[string]bool{"DialToIdentity": true, "triggerSenderKeySyncIntentCandidate": true, "triggerSenderKeySyncWithPolicy": true, "runSenderKeySyncPassWithPolicy": true, "senderKeySyncCandidateSnapshot": true, "syncSenderKeyCandidate": true, "syncPeerWithIntent": true}
+	found := map[string]int{}
+	var bad []string
+	fset := token.NewFileSet()
+	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			if path != root && (strings.HasPrefix(entry.Name(), ".") || entry.Name() == "vendor" || entry.Name() == "testdata") {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		file, err := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
+		if err != nil {
+			return err
+		}
+		parents := map[ast.Node]ast.Node{}
+		var stack []ast.Node
+		ast.Inspect(file, func(n ast.Node) bool {
+			if n == nil {
+				stack = stack[:len(stack)-1]
+				return false
+			}
+			if len(stack) > 0 {
+				parents[n] = stack[len(stack)-1]
+			}
+			stack = append(stack, n)
+			return true
+		})
+		ast.Inspect(file, func(n ast.Node) bool {
+			id, ok := n.(*ast.Ident)
+			if !ok || !tracked[id.Name] {
+				return true
+			}
+			if fn, ok := parents[id].(*ast.FuncDecl); ok && fn.Name == id {
+				return true
+			}
+			var ref ast.Node = id
+			if sel, ok := parents[id].(*ast.SelectorExpr); ok && sel.Sel == id {
+				ref = sel
+			}
+			call, ok := parents[ref].(*ast.CallExpr)
+			rel, _ := filepath.Rel(root, path)
+			// Domain defines the API; only its declaration was skipped above.
+			// Every consumer must be in this exact node package, not a basename twin.
+			prefix := "internal/core/node/"
+			fnname := "<top-level>"
+			for _, decl := range file.Decls {
+				if fn, ok := decl.(*ast.FuncDecl); ok && fn.Body != nil && id.Pos() >= fn.Body.Pos() && id.End() <= fn.Body.End() {
+					fnname = fn.Name.Name
+				}
+			}
+			key := filepath.Base(path) + ":" + fnname + ":" + id.Name
+			if !ok || call.Fun != ref || filepath.ToSlash(rel) != prefix+filepath.Base(path) {
+				bad = append(bad, rel+":"+fnname+":"+id.Name+":escape")
+				return true
+			}
+			if (fnname == "triggerSenderKeySyncAsync" && id.Name == "triggerSenderKeySyncWithPolicy") || (fnname == "runSenderKeySyncPass" && id.Name == "runSenderKeySyncPassWithPolicy") {
+				index := len(call.Args) - 1
+				if fnname == "runSenderKeySyncPass" {
+					index--
+				}
+				if index < 0 {
+					bad = append(bad, key+":missing-default-policy")
+				} else if arg, ok := call.Args[index].(*ast.Ident); !ok || arg.Name != "senderKeySyncAddress" {
+					bad = append(bad, key+":active-policy")
+				}
+			}
+			found[key]++
+			if expected[key] == 0 {
+				bad = append(bad, rel+":"+fnname+":"+id.Name+":unexpected")
+			}
+			return true
+		})
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for key, want := range expected {
+		if found[key] != want {
+			bad = append(bad, fmt.Sprintf("%s count=%d want=%d", key, found[key], want))
+		}
+	}
+	return bad
+}
+
+func TestInactiveSenderKeyIntentGuardRejectsActiveAndAliasEscapes(t *testing.T) {
+	// Require the exact injected-site diagnostic, not merely missing baseline sites.
+	sources := map[string]string{
+		"active":              "package node\nfunc active(s *Service){s.triggerSenderKeySyncIntentCandidate(\"\",\"\",nil)}\n",
+		"alias":               "package node\nvar escaped=domain.DialToIdentity\n",
+		"same-package-domain": "package domain\nvar escaped=DialToIdentity\n",
+		"sdk":                 "package sdk\nfunc open(){_,_=domain.DialToIdentity(x)}\n",
+	}
+	for name, source := range sources {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			// The whole-module scan must expose the injected violation, even though
+			// a tiny probe naturally lacks all legitimate expected sites.
+			path := "internal/core/node/escape.go"
+			if name == "sdk" {
+				path = "sdk/escape.go"
+			}
+			if name == "same-package-domain" {
+				path = "internal/core/domain/escape.go"
+			}
+			writeProbeFile(t, root, path, source)
+			bad := inactiveSenderKeyIntentViolations(t, root)
+			matched := false
+			for _, row := range bad {
+				if strings.Contains(row, "escape.go:") {
+					matched = true
+				}
+			}
+			if !matched {
+				t.Fatalf("guard missed injected direct/alias escape: %v", bad)
+			}
+		})
+	}
 }

@@ -2691,6 +2691,9 @@ func newServiceWithConstruction(cfg config.Node, id *identity.Identity, eventBus
 		}
 		selfRecordNetwork = parsedNetwork
 		svc.identityResolver = newIdentityResolverWithContactRecordAdmission(svc, loadIdentityIntentStore(cfg.IdentityIntentsPath), selfRecordNetwork, admission.borrowedKFiles, admission.kSource)
+		if construction.ready != nil {
+			construction.ready.captureContactReconciliationResolver(svc)
+		}
 	}
 	requestedDatagram := svc.cfg.EnableDatagramV1
 	layer, constructionErr := constructor.Build(svc, svc.datagramMetrics)
@@ -2723,6 +2726,9 @@ func newServiceWithConstruction(cfg config.Node, id *identity.Identity, eventBus
 
 	svc.selectedPins = newSelectedPinProducer(selectedPinProducerOptions{service: svc, clock: time.Now})
 	svc.contactPins = newContactPinProducer(svc)
+	if construction.ready != nil {
+		construction.ready.captureContactReconciliationProducer(svc)
+	}
 
 	// The node's own signed identity record (docs/protocol/identity-lookup.md
 	// §4.1). Issued AFTER the datagram layer so the declared dtypes mirror

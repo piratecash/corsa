@@ -25,7 +25,7 @@ func ownedNodeObservationPins() map[string]string {
 		"find_node_bridge_construction.go:newFindNodeOwnedCaptureCandidateService": "01052f314728fba976f31147a9c46c6ffdb56b95e4176b4a8f9144f713222363",
 		"find_node_bridge_construction.go:prepareFindNodeOwnedCaptureConstruction": "2343b9c62954608a8368ff91477c7121a190ecbb82fc50277ca7684d38b4be44",
 		"find_node_bridge_construction.go:claim":                                   "9ccee7db98eb74261f9f0a63ef6f88e5ffd764996347698eaa83538247538547",
-		"service.go:newServiceWithConstruction":                                    "3283d107683995e98a10b8716a17129808c33ee04d04fe6416093b2d3356b9ff",
+		"service.go:newServiceWithConstruction":                                    "b29294ba298f94efa2a6f5eaa5d7943b7f3b0a72056a4663f7c8683db2ff5742",
 		"find_node_bridge_capture.go:captureOwnedFindNodeObservation":              "f5ff7ca923852bb269e9424b7ba23233b1a5fcdcce3b345b1f2e90051638c4f4",
 		"find_node_degree_bridge.go:captureBridgeDegreeProjection":                 "e71ba3a62ab7cf918bab392544da7c77adb51c1491e62e340cea51fa6456c9cb",
 		"find_node_degree_bridge.go:ownedDegreeProjectionFrontier":                 "79bea910912ac92bf3a85785614dbd6e25e17163fa6c697d656772c9c1070a9f",
@@ -61,6 +61,7 @@ func ownedNodeObservationSourceErrors(sources map[string][]byte) []string {
 	expected["findNodeBridgeProfile"]["find_node_ready_construction.go:prepareFindNodeReadyConstruction"] = 1
 	expected["findNodeBridgeProfile"]["find_node_ready_construction.go:newFindNodeReadyCandidateService"] = 1
 	expected["findNodeBridgeProfile"]["find_node_ready_construction.go:newFindNodeReadyLoadedInboundCandidateService"] = 1
+	expected["findNodeBridgeProfile"]["find_node_ready_construction.go:newFindNodeReadyLoadedContactReconciliationCandidateService"] = 1
 	expected["findNodeBridgeProfile"]["identity_pin_own_dm_runtime.go:NewInactiveOwnDMRuntimeCandidate"] = 1
 	expected["findNodeOwnedCaptureProfile"]["identity_pin_own_dm_runtime.go:NewInactiveOwnDMRuntimeCandidate"] = 1
 	expected["findNodeBridgeProfile"]["find_node_ready_target_timing.go:newFindNodeReadyTimedLoadedInboundCandidateService"] = 1
