@@ -1,5 +1,11 @@
 # Releases
 
+## Current verification scope / Текущая область проверки — 2026-10-23
+
+The [later owner decision](operations/d1-release-decision-proposal.md#measurement-scope-2026-10-23) defers real Windows/DACL and Tor measurements while work proceeds on macOS/Linux. Earlier unconditional Windows/Tor release prerequisites below are superseded only in that scope; the historical results are retained. Windows and Tor remain UNVERIFIED/UNKNOWN, never PASS. Schema 2 retains all 17 conditions: 7 done, 2 partial, 7 not_done and 1 deferred (`tor_phase_measurement`). The unsafe-store composite remains partial; clearnet/real-old-release first-contact timing and timeout derivation remain required. Proxy/no-direct-fallback, authentication, independent crypto review, other tests, G2 and separate release decisions remain required. The gate is closed. Any Tor observation role remains deferred; macOS/Linux data establishes no Tor threshold or guarantee.
+
+[Последнее решение владельца](operations/d1-release-decision-proposal.md#measurement-scope-2026-10-23) переносит реальные Windows/DACL и Tor замеры; работа идёт на macOS/Linux. Прежние безусловные требования Windows/Tor ниже заменены только в этой области, исторические результаты сохранены. Фактический статус — UNVERIFIED/UNKNOWN, не PASS. Schema 2 сохраняет 17 условий: 7 done, 2 partial, 7 not_done и 1 deferred (`tor_phase_measurement`). Условие небезопасного хранилища остаётся partial; clearnet/настоящие старые выпуски, замеры первого контакта и вывод timeout остаются обязательными. Proxy/no-direct-fallback, аутентификация, независимая криптоэкспертиза, остальные проверки, G2 и отдельные решения о выпуске сохраняются. Gate закрыт. Tor-роль наблюдения отложена; данные macOS/Linux не доказывают пороги или гарантии Tor.
+
 ## English
 
 ### What publishes a release
@@ -28,7 +34,8 @@ separately, to release that version. The gate is code, not a checklist:
   compiled with (`internal/core/config`: protocol versions and the release version) and derives the
   session mode exactly as the node does.
 - It reads `packaging/release-admission.json` and refuses — exit status 1, with the list of what is
-  outstanding — unless **every** condition has status `done` with evidence **and** `release_decision`
+  outstanding — unless every applicable condition has status `done` with evidence (only the exact recorded Tor
+  measurement may be `deferred`, separately reported as UNVERIFIED) **and** `release_decision`
   names the owner's decision to release **this** version.
 - A build whose protocol version is below the activation the manifest records is refused: turning the
   secure session off again is not a way around its conditions.
@@ -60,7 +67,7 @@ Manifest fields:
 
 | Field | Meaning |
 |---|---|
-| `schema` | format version, `1` |
+| `schema` | format version, `2` |
 | `activation_protocol_version` | protocol version at which the secure session activates; must match the build |
 | `release_decision` | `null`, or `{"number": N, "date": "YYYY-MM-DD", "version": "MAJOR.MINOR.BUILD"}` — the owner's decision to release that version |
 | `conditions[].id` | condition identifier known to the gate |
@@ -68,7 +75,7 @@ Manifest fields:
 | `conditions[].executor` | `owner`, `developer` or `external_expert` |
 | `conditions[].check` | how it is verified |
 | `conditions[].evidence` | `null`, or `{"report": "...", "commit": "<hex>" or null}` — what confirms it and the commit it was checked on |
-| `conditions[].status` | `not_done`, `partial` or `done`; only `done` counts |
+| `conditions[].status` | `not_done`, `partial`, `done` or the strictly scoped `deferred`; only the exact recorded Tor deferral is exempted, never reported done |
 
 ### How the gate is wired
 
@@ -120,11 +127,11 @@ version in the node's own record.
 
 Implemented, with checks still missing (a condition counts only when every check passes on the commit
 it names): refusal to start, before listening, on an unsafe pin store, directory or marker (the
-Windows tests still have to run on a real Windows host); a loopback inbound class (its budgets are not
+real Windows/DACL tests are deferred by the owner; their behaviour remains UNVERIFIED); a loopback inbound class (its budgets are not
 measured yet).
 
-Outstanding: an independent cryptographic review; a measurement of the handshake phases over Tor; a
-measurement of first-connection latency over Tor that sets the TLS probe timeout; measured loopback
+Outstanding: an independent cryptographic review; clearnet first-connection latency on real old releases
+that sets the TLS probe timeout; measured loopback
 budgets; a load run on the final candidate; implementation and verification of the owner's
 [operator pin-removal decision](design/identity-pin-removal-decision.md), including the external
 startup fence and confirmed recovery; an approved plan for observing the release in the
@@ -159,7 +166,8 @@ with checks and evidence is in `packaging/release-admission.json`.
   которыми собран узел (`internal/core/config`: версии протокола и версия выпуска), и выводит режим
   сессии так же, как узел.
 - Он читает `packaging/release-admission.json` и отказывает — код выхода 1 и список невыполненного —
-  если не **все** условия имеют статус `done` с подтверждением **или** в `release_decision` нет
+  если не все применимые условия имеют статус `done` с подтверждением (только точный записанный
+  перенос замера Tor допускает `deferred`, отдельно выводимый как UNVERIFIED) **или** в `release_decision` нет
   решения владельца о выпуске **этой** версии.
 - Сборка, у которой версия протокола ниже активации, записанной в манифесте, получает отказ: снова
   выключить защищённую сессию — не способ обойти её условия.
@@ -191,7 +199,7 @@ with checks and evidence is in `packaging/release-admission.json`.
 
 | Поле | Значение |
 |---|---|
-| `schema` | версия формата, `1` |
+| `schema` | версия формата, `2` |
 | `activation_protocol_version` | версия протокола, с которой включается защищённая сессия; должна совпадать со сборкой |
 | `release_decision` | `null` или `{"number": N, "date": "YYYY-MM-DD", "version": "MAJOR.MINOR.BUILD"}` — решение владельца о выпуске этой версии |
 | `conditions[].id` | идентификатор условия, известный гейту |
@@ -199,7 +207,7 @@ with checks and evidence is in `packaging/release-admission.json`.
 | `conditions[].executor` | `owner`, `developer` или `external_expert` |
 | `conditions[].check` | как это проверяется |
 | `conditions[].evidence` | `null` или `{"report": "...", "commit": "<hex>" или null}` — чем подтверждено и на каком коммите проверено |
-| `conditions[].status` | `not_done`, `partial` или `done`; засчитывается только `done` |
+| `conditions[].status` | `not_done`, `partial`, `done` или строго ограниченный `deferred`; исключается только точный записанный перенос Tor, без отметки done |
 
 ### Как подключён гейт
 
@@ -250,11 +258,11 @@ endpoint; ручной выключатель «TLS-первым»; минима
 
 Реализовано, но проверок ещё не хватает (условие засчитывается, только когда все проверки проходят на
 названном коммите): отказ старта до открытия слушателей при небезопасных хранилище pin,
-каталоге или маркере (Windows-тесты ещё должны пройти на настоящей Windows); отдельный класс
+каталоге или маркере (настоящие Windows/DACL тесты отложены владельцем, статус UNVERIFIED); отдельный класс
 loopback-входа (бюджеты пока не измерены).
 
-Не выполнено: независимая криптографическая экспертиза; замер фаз рукопожатия через Tor; замер
-задержки первого подключения через Tor, по которому выбирается таймаут TLS-пробы; измеренные бюджеты
+Не выполнено: независимая криптографическая экспертиза; замер задержки первого подключения clearnet
+на настоящих старых выпусках, по которому выбирается таймаут TLS-пробы; измеренные бюджеты
 loopback-класса; нагрузочный прогон финального кандидата; реализация и проверка принятого
 [решения владельца о снятии pin оператором](design/identity-pin-removal-decision.md), включая внешний
 запрет перезапуска и подтверждённое восстановление; утверждённый план наблюдения выпуска в сети;

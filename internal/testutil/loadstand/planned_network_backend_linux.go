@@ -132,11 +132,11 @@ func plannedContainerRestrictions() bool {
 func (b *linuxPlannedNetworkBackend) inspect(ctx context.Context) (plannedNetworkInventory, error) {
 	links, err := b.socket.links(ctx)
 	if err != nil {
-		return plannedNetworkInventory{}, err
+		return plannedNetworkInventory{}, plannedNetworkPhaseError("inspect-links", err)
 	}
 	routes, err := b.socket.routes(ctx)
 	if err != nil {
-		return plannedNetworkInventory{}, err
+		return plannedNetworkInventory{}, plannedNetworkPhaseError("inspect-routes", err)
 	}
 	restrictions := plannedContainerRestrictions()
 	result := plannedNetworkInventory{routes: routes, noForbiddenCapabilities: restrictions, noBlockDevices: restrictions}
@@ -165,7 +165,7 @@ func (b *linuxPlannedNetworkBackend) begin(op plannedNetworkOperation) (*linuxPl
 		name = op.member.hostLink
 	}
 	if b.resource(op.kind, name) != nil {
-		return nil, errPlannedNetwork
+		return nil, plannedNetworkPhaseError("planned_network_backend_linux:begin:guard1", errPlannedNetwork)
 	}
 	row := &linuxPlannedResource{handle: plannedNetworkHandle{kind: op.kind, name: name, identity: uint64(len(b.resources) + 1), nonce: b.plan.nonce}}
 	b.resources = append(b.resources, row)
@@ -181,14 +181,14 @@ func (b *linuxPlannedNetworkBackend) link(ctx context.Context, name string, inde
 	for _, link := range links {
 		if link.name == name || index != 0 && link.index == index {
 			if link.name != name || index != 0 && link.index != index || link.alias != plannedNetworkAlias(b.plan.nonce) {
-				return plannedKernelLink{}, false, errPlannedNetwork
+				return plannedKernelLink{}, false, plannedNetworkPhaseError("planned_network_backend_linux:link:guard1", errPlannedNetwork)
 			}
 			found = link
 			count++
 		}
 	}
 	if count > 1 {
-		return plannedKernelLink{}, false, errPlannedNetwork
+		return plannedKernelLink{}, false, plannedNetworkPhaseError("planned_network_backend_linux:link:guard2", errPlannedNetwork)
 	}
 	return found, count == 1, nil
 }
@@ -204,7 +204,7 @@ func (b *linuxPlannedNetworkBackend) retainLink(ctx context.Context, row *linuxP
 }
 func (b *linuxPlannedNetworkBackend) apply(ctx context.Context, op plannedNetworkOperation) (plannedNetworkHandle, error) {
 	if op.plan.nonce != b.plan.nonce || op.plan.bridge != b.plan.bridge || op.plan.prefix != b.plan.prefix {
-		return plannedNetworkHandle{}, errPlannedNetwork
+		return plannedNetworkHandle{}, plannedNetworkPhaseError("planned_network_backend_linux:apply:guard1", errPlannedNetwork)
 	}
 	var row *linuxPlannedResource
 	var err error
@@ -218,9 +218,15 @@ func (b *linuxPlannedNetworkBackend) apply(ctx context.Context, op plannedNetwor
 	if row != nil {
 		switch op.kind {
 		case plannedBridge:
-			err = b.retainLink(ctx, row, b.socket.createBridge(ctx, b.plan.bridge, plannedNetworkAlias(b.plan.nonce)))
+			err = b.socket.createBridge(ctx, b.plan.bridge, plannedNetworkAlias(b.plan.nonce))
+			if err == nil {
+				err = b.retainLink(ctx, row, nil)
+			}
 		case plannedVeth:
-			err = b.retainLink(ctx, row, b.socket.createVeth(ctx, op.member.hostLink, op.member.peerLink, plannedNetworkAlias(b.plan.nonce)))
+			err = b.socket.createVeth(ctx, op.member.hostLink, op.member.peerLink, plannedNetworkAlias(b.plan.nonce))
+			if err == nil {
+				err = b.retainLink(ctx, row, nil)
+			}
 		case plannedNamespace:
 			row.namespace, err = CreateOwnedNetNS(ctx)
 			if row.namespace != nil {
@@ -241,7 +247,7 @@ func (b *linuxPlannedNetworkBackend) apply(ctx context.Context, op plannedNetwor
 	veth := b.resource(plannedVeth, op.member.hostLink)
 	bridge := b.resource(plannedBridge, b.plan.bridge)
 	if ns == nil || ns.namespace == nil || veth == nil || bridge == nil || veth.kernelIndex == 0 || bridge.kernelIndex == 0 {
-		return plannedNetworkHandle{}, errPlannedNetwork
+		return plannedNetworkHandle{}, plannedNetworkPhaseError("planned_network_backend_linux:apply:guard2", errPlannedNetwork)
 	}
 	link, found, err := b.link(ctx, op.member.hostLink, veth.kernelIndex)
 	if err != nil || !found {
@@ -252,12 +258,12 @@ func (b *linuxPlannedNetworkBackend) apply(ctx context.Context, op plannedNetwor
 		if _, exists, e := b.link(ctx, b.plan.bridge, bridge.kernelIndex); e != nil || !exists {
 			return plannedNetworkHandle{}, errors.Join(errPlannedNetwork, e)
 		}
-		err = b.socket.disableIPv6(ctx, link.index)
+		err = plannedNetworkPhaseError(fmt.Sprintf("attach-disable-ipv6 index=%d", link.index), b.socket.disableIPv6(ctx, link.index))
 		if err == nil {
-			err = b.socket.setLink(ctx, link.index, unix.IFLA_MASTER, uint32(bridge.kernelIndex))
+			err = plannedNetworkPhaseError(fmt.Sprintf("attach-master index=%d", link.index), b.socket.setLink(ctx, link.index, unix.IFLA_MASTER, uint32(bridge.kernelIndex)))
 		}
 		if err == nil {
-			err = b.socket.up(ctx, link.index)
+			err = plannedNetworkPhaseError(fmt.Sprintf("attach-up index=%d", link.index), b.socket.up(ctx, link.index))
 		}
 	case plannedMove:
 		peer, exists, e := b.link(ctx, op.member.peerLink, 0)
@@ -268,8 +274,8 @@ func (b *linuxPlannedNetworkBackend) apply(ctx context.Context, op plannedNetwor
 		if e != nil {
 			return plannedNetworkHandle{}, e
 		}
-		err = b.socket.setLink(ctx, peer.index, unix.IFLA_NET_NS_FD, uint32(fd))
-		err = errors.Join(err, unix.Close(fd))
+		err = plannedNetworkPhaseError(fmt.Sprintf("move-netns index=%d", peer.index), b.socket.setLink(ctx, peer.index, unix.IFLA_NET_NS_FD, uint32(fd)))
+		err = errors.Join(err, plannedNetworkPhaseError("move-close-namespace-fd", unix.Close(fd)))
 	case plannedAddress:
 		_, err = ns.namespace.plannedOperation(ctx, b.plan, op.member, true)
 	default:
@@ -280,7 +286,7 @@ func (b *linuxPlannedNetworkBackend) apply(ctx context.Context, op plannedNetwor
 func (b *linuxPlannedNetworkBackend) verify(ctx context.Context, p plannedNetworkPlan) error {
 	bridge := b.resource(plannedBridge, p.bridge)
 	if bridge == nil || bridge.kernelIndex == 0 {
-		return errPlannedNetwork
+		return plannedNetworkPhaseError("planned_network_backend_linux:verify:guard1", errPlannedNetwork)
 	}
 	// The launcher retains sole kernel mutation custody for this owned network.
 	// Every index effect is preceded by exact name/index/nonce revalidation;
@@ -289,30 +295,38 @@ func (b *linuxPlannedNetworkBackend) verify(ctx context.Context, p plannedNetwor
 		return errors.Join(errPlannedNetwork, e)
 	}
 	if err := b.socket.disableIPv6(ctx, bridge.kernelIndex); err != nil {
-		return err
+		return plannedNetworkPhaseError(fmt.Sprintf("verify-bridge-disable-ipv6 index=%d", bridge.kernelIndex), err)
 	}
 	if _, exists, e := b.link(ctx, p.bridge, bridge.kernelIndex); e != nil || !exists {
 		return errors.Join(errPlannedNetwork, e)
 	}
 	if err := b.socket.up(ctx, bridge.kernelIndex); err != nil {
-		return err
+		return plannedNetworkPhaseError(fmt.Sprintf("verify-bridge-up index=%d", bridge.kernelIndex), err)
 	}
 	links, err := b.socket.links(ctx)
 	if err != nil || len(links) != len(p.members)+2 {
 		return errors.Join(errPlannedNetwork, err)
 	}
+	// All member peer/carrier operations and bridge UP precede this ONE
+	// final setup reconciliation. An early attach-UP cleanup could miss a
+	// route created by a later NETDEV_CHANGE when its peer becomes ready.
+	owned := []plannedKernelLink{{index: bridge.kernelIndex, name: p.bridge, alias: plannedNetworkAlias(p.nonce)}}
 	for _, member := range p.members {
 		veth := b.resource(plannedVeth, member.hostLink)
 		ns := b.resource(plannedNamespace, string(member.id))
 		if veth == nil || ns == nil || ns.namespace == nil {
-			return errPlannedNetwork
+			return plannedNetworkPhaseError("planned_network_backend_linux:verify:guard2", errPlannedNetwork)
 		}
 		if _, exists, e := b.link(ctx, member.hostLink, veth.kernelIndex); e != nil || !exists {
 			return errors.Join(errPlannedNetwork, e)
 		}
+		owned = append(owned, plannedKernelLink{index: veth.kernelIndex, name: member.hostLink, alias: plannedNetworkAlias(p.nonce)})
 		if _, e := ns.namespace.plannedOperation(ctx, p, member, false); e != nil {
 			return e
 		}
+	}
+	if err := reconcilePlannedMulticast(ctx, b.socket, owned); err != nil {
+		return plannedNetworkPhaseError("verify-owned-multicast", err)
 	}
 	routes, err := b.socket.routes(ctx)
 	if err != nil {
@@ -320,23 +334,28 @@ func (b *linuxPlannedNetworkBackend) verify(ctx context.Context, p plannedNetwor
 	}
 	for _, route := range routes {
 		if !plannedLoopbackRoute(route.prefix) {
-			return errPlannedNetwork
+			return plannedNetworkPhaseError("planned_network_backend_linux:verify:guard3", errPlannedNetwork)
 		}
 	}
 	firewall := b.resource(plannedFirewall, p.bridge)
 	if firewall == nil {
-		return errPlannedNetwork
+		return plannedNetworkPhaseError("planned_network_backend_linux:verify:guard4", errPlannedNetwork)
 	}
 	return b.nft.verify(ctx, p, firewall.nftHandle)
 }
 func (b *linuxPlannedNetworkBackend) remove(ctx context.Context, h plannedNetworkHandle) error {
 	row := b.resource(h.kind, h.name)
 	if row == nil || row.handle != h {
-		return errPlannedNetwork
+		return plannedNetworkPhaseError("planned_network_backend_linux:remove:guard1", errPlannedNetwork)
 	}
 	var err error
 	switch h.kind {
 	case plannedBridge, plannedVeth:
+		// A failed/uncertain create or partial first-alias finalization has no
+		// deletion authority. Disposal of the enclosing owned guest is separate.
+		if row.kernelIndex <= 0 {
+			return ErrStopUnconfirmed
+		}
 		link, found, e := b.link(ctx, h.name, row.kernelIndex)
 		if e != nil {
 			return e
@@ -350,7 +369,7 @@ func (b *linuxPlannedNetworkBackend) remove(ctx context.Context, h plannedNetwor
 			identity := row.namespace.identity
 			row.namespace.mu.Unlock()
 			if row.namespaceIdentity.inode != 0 && identity != row.namespaceIdentity {
-				return errPlannedNetwork
+				return plannedNetworkPhaseError("planned_network_backend_linux:remove:guard2", errPlannedNetwork)
 			}
 			err = row.namespace.Close(ctx)
 		}
@@ -386,7 +405,7 @@ func (b *linuxPlannedNetworkBackend) release() error {
 func (b *linuxPlannedNetworkBackend) memberPostflight(ctx context.Context, m plannedNetworkMember) error {
 	ns := b.resource(plannedNamespace, string(m.id))
 	if ns == nil || ns.namespace == nil {
-		return errPlannedNetwork
+		return plannedNetworkPhaseError("planned_network_backend_linux:memberPostflight:guard1", errPlannedNetwork)
 	}
 	if _, err := ns.namespace.plannedOperation(ctx, b.plan, m, false); err != nil {
 		return err
@@ -405,7 +424,7 @@ func (b *linuxPlannedNetworkBackend) memberPostflight(ctx context.Context, m pla
 		}
 		row := b.resource(kind, link.name)
 		if row == nil || row.kernelIndex != link.index || link.alias != plannedNetworkAlias(b.plan.nonce) {
-			return errPlannedNetwork
+			return plannedNetworkPhaseError("planned_network_backend_linux:memberPostflight:guard2", errPlannedNetwork)
 		}
 	}
 	routes, err := b.socket.routes(ctx)
@@ -414,12 +433,12 @@ func (b *linuxPlannedNetworkBackend) memberPostflight(ctx context.Context, m pla
 	}
 	for _, route := range routes {
 		if !plannedLoopbackRoute(route.prefix) {
-			return errPlannedNetwork
+			return plannedNetworkPhaseError("planned_network_backend_linux:memberPostflight:guard3", errPlannedNetwork)
 		}
 	}
 	firewall := b.resource(plannedFirewall, b.plan.bridge)
 	if firewall == nil {
-		return errPlannedNetwork
+		return plannedNetworkPhaseError("planned_network_backend_linux:memberPostflight:guard4", errPlannedNetwork)
 	}
 	return b.nft.verify(ctx, b.plan, firewall.nftHandle)
 }

@@ -149,7 +149,7 @@ func TestCandidateInactiveCallGraphAndInventories(t *testing.T) {
 		"candidateCapacityHint":     {"value", "age", "present"},
 		"candidateCapacityCut":      {"owner", "domain", "at", "degree", "complete"},
 		"candidateCapacityEpoch":    {"owner", "domain", "origin", "last", "epoch", "cap"},
-		"candidatePending":          {"phase", "generation", "round", "latest", "priority", "calendar", "alias", "cell", "source", "ownedReceived", "ownedIdentity"},
+		"candidatePending":          {"phase", "generation", "round", "latest", "priority", "calendar", "alias", "cell", "source", "ownedReceived", "ownedIdentity", "forwardEndpointNS", "forwardEndpointKnown"},
 		"candidatePendingBook":      {"mu", "entries", "last", "counters", "published"},
 		"candidateMembership":       {"owner", "at", "maximum", "classes", "aged"},
 		"candidateSourceOwnerToken": {"_"},

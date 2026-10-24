@@ -23,6 +23,128 @@ type ownedLocalSignState struct {
 	identity ownedReceivedIdentity
 	entry    *targetEntry
 	phase    atomic.Uint32
+	timing   ownedLocalTimingEndpoints // diagnostic only; guarded by target.mu
+}
+
+// These endpoints belong only to this exact original work. No history/ring or
+// authority escapes; Take and Complete retain their existing clock samples.
+type ownedLocalTimingEndpoints struct {
+	takeNS, completeNS       int64
+	takeKnown, completeKnown bool
+}
+
+type ownedLocalTimingClock uint8
+
+const (
+	ownedLocalTimingClockUnknown ownedLocalTimingClock = iota
+	ownedLocalTimingClockFixture
+	ownedLocalTimingClockRuntime
+)
+
+// Package-private value-copy diagnostic. Runtime marks clock provenance only,
+// never calibration, boot identity, physical accuracy, or a latency guarantee.
+// CompleteNS is the successful Complete SAMPLE before its cache/publication
+// tail, not function return, writer Take, Write completion or delivery.
+type ownedLocalTimingObservation struct {
+	clock                               ownedLocalTimingClock
+	takeKnown, completeKnown, pairKnown bool
+	takeNS, completeNS, spanNS          int64
+	observedReserveExceeded             bool
+	// Immutable ingress of the original fresh signing work, never a recipient lookup.
+	receivedKnown                  bool
+	receivedNS                     int64
+	requestID, sourceConnID        uint64
+	sourceOpenedNS                 int64
+	sourceIdentity, targetIdentity [20]byte
+	challenge                      [32]byte
+}
+
+func (work OwnedLocalSignWork) timingObservation() ownedLocalTimingObservation {
+	w := work.work
+	if !ownedLocalOriginal(w) || !w.local.timed {
+		return ownedLocalTimingObservation{}
+	}
+	o := w.local.target
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	identity := w.identity
+	// Historical immutable provenance only; End/current generation is not a
+	// permission check on retained evidence. Never sample or look up a ConnID.
+	if identity.source.state == nil || identity.source.state.connID == 0 || identity.source.state.identity.IsZero() || identity.source.state.opened < 0 || identity.source.state.opened > Instant(identity.received.Elapsed()) || !w.local.owner.consumer.Matches(identity.stamp, identity.received) {
+		return ownedLocalTimingObservation{}
+	}
+	endpoints := w.timing
+	out := ownedLocalTimingObservation{takeKnown: endpoints.takeKnown, completeKnown: endpoints.completeKnown, takeNS: endpoints.takeNS, completeNS: endpoints.completeNS,
+		receivedNS: int64(identity.received.Elapsed()), requestID: uint64(identity.request.ID),
+		sourceConnID: uint64(identity.source.state.connID), sourceOpenedNS: int64(identity.source.state.opened),
+		sourceIdentity: identity.source.state.identity, targetIdentity: identity.request.Target, challenge: identity.request.Challenge}
+	if w.local.owner.consumer.IsRuntime() {
+		out.clock = ownedLocalTimingClockRuntime
+	} else if w.local.owner.consumer.IsFixture() {
+		out.clock = ownedLocalTimingClockFixture
+	}
+	out.receivedKnown = out.clock != ownedLocalTimingClockUnknown && out.receivedNS >= 0
+	if out.clock != ownedLocalTimingClockUnknown && out.takeKnown && out.completeKnown && out.takeNS >= 0 && out.completeNS >= out.takeNS {
+		out.pairKnown = true
+		out.spanNS = out.completeNS - out.takeNS
+		out.observedReserveExceeded = out.spanNS > int64(w.local.timing.RuntimeReserve)
+	}
+	return out
+}
+
+// OwnedTargetEndpointClock reports provenance only, not calibration or a
+// process/boot/domain identity. No clock capability is returned.
+type OwnedTargetEndpointClock uint8
+
+const (
+	OwnedTargetEndpointClockUnknown OwnedTargetEndpointClock = iota
+	OwnedTargetEndpointClockFixture
+	OwnedTargetEndpointClockRuntime
+)
+
+// OwnedTargetEndpointObservation contains finite historical scalar copies of
+// one original fresh timed signing work. Tuple equality is not lookup, cross-
+// process identity or authority. Waiting/cache recipients have no new Work.
+// CompleteNS is the successful Complete SAMPLE before cache/mint/publication,
+// not Complete return, writer start, byte completion or delivery.
+type OwnedTargetEndpointObservation struct {
+	Clock                                   OwnedTargetEndpointClock
+	ReceivedKnown, CompleteKnown, PairKnown bool
+	ReceivedNS, CompleteNS, SpanNS          int64
+	RequestID, SourceConnID                 uint64
+	SourceOpenedNS                          int64
+	SourceIdentity, TargetIdentity          [20]byte
+	Challenge                               [32]byte
+}
+
+// TargetEndpointObservation reads the existing target-mutex snapshot once.
+// It never samples, mutates, returns an owner/Session/permit/domain handle or
+// resolves a numeric identifier. Untimed/zero/foreign input remains UNKNOWN.
+func (work OwnedLocalSignWork) TargetEndpointObservation() OwnedTargetEndpointObservation {
+	observed := work.timingObservation()
+	if !observed.receivedKnown {
+		return OwnedTargetEndpointObservation{}
+	}
+	out := OwnedTargetEndpointObservation{
+		ReceivedKnown: true, ReceivedNS: observed.receivedNS,
+		CompleteKnown: observed.completeKnown && observed.takeKnown && observed.completeNS >= 0,
+		CompleteNS:    observed.completeNS,
+		RequestID:     observed.requestID, SourceConnID: observed.sourceConnID,
+		SourceOpenedNS: observed.sourceOpenedNS, SourceIdentity: observed.sourceIdentity,
+		TargetIdentity: observed.targetIdentity, Challenge: observed.challenge,
+	}
+	switch observed.clock {
+	case ownedLocalTimingClockFixture:
+		out.Clock = OwnedTargetEndpointClockFixture
+	case ownedLocalTimingClockRuntime:
+		out.Clock = OwnedTargetEndpointClockRuntime
+	}
+	if out.CompleteKnown && out.CompleteNS >= out.ReceivedNS {
+		out.PairKnown = true
+		// Both points nonnegative and ordered, so int64 subtraction is safe.
+		out.SpanNS = out.CompleteNS - out.ReceivedNS
+	}
+	return out
 }
 
 const (
@@ -414,6 +536,9 @@ func (work OwnedLocalSignWork) Take() (OwnedLocalSignPermit, PublicSigningInput,
 	entry.coordinated.phase = signingConsumed
 	o.counters.Consumed++
 	w.phase.Store(ownedLocalSignConsumed)
+	if w.local.timed {
+		w.timing.takeNS, w.timing.takeKnown = int64(f), true
+	}
 	return OwnedLocalSignPermit{work: w}, PublicSigningInput{network: o.network, target: o.cache.self, challenge: entry.challenge}, nil
 }
 
@@ -506,6 +631,9 @@ func (permit OwnedLocalSignPermit) Complete(signature *domain.FindNodeSignature)
 		out = append(out, mintOwnedAnswerWork(owner, delivery.Session, delivery.Answer, answerExpires))
 	}
 	o.counters.Completed++
+	if w.local.timed && w.timing.takeKnown {
+		w.timing.completeNS, w.timing.completeKnown = int64(f), true
+	}
 	return out, nil
 }
 

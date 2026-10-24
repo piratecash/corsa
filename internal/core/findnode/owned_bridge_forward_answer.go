@@ -78,6 +78,31 @@ func (intake DormantIntake) MatchOwnedAnswer(input OwnedReceivedAnswer) (OwnedAn
 	if _, err := o.sourceRowLocked(entry); err != nil {
 		return OwnedAnswerWork{}, ErrUnmatchedAnswer
 	}
+	// Diagnostic qualification only. Missing/inconsistent ingress or legacy
+	// starts leave UNKNOWN; they never change this already successful Match.
+	state := entry.intake
+	identity := state.ownedIdentity
+	if state.forwardEndpointKnown && state.ownedReceived != nil && state.generation == reservation.generation &&
+		identity.owner == owner && identity.source == source && identity.request == request && ownedReceivedMatches(owner, entry) {
+		observation := ownedRelayEndpointObservation{
+			relayKnown: true, generation: reservation.generation,
+			sourceConnID: uint64(source.state.connID), targetConnID: uint64(target.state.connID),
+			sourceOpenedNS: int64(source.state.opened), targetOpenedNS: int64(target.state.opened),
+			sourceIdentity: source.state.identity, targetIdentity: target.state.identity,
+			request: request, forwarded: forwarded, expiresNS: int64(expires),
+			receivedNS: int64(identity.received.Elapsed()), forwardNS: state.forwardEndpointNS,
+			answerReceivedNS: int64(cell.received.Elapsed()),
+		}
+		if owner.consumer.IsRuntime() {
+			observation.clock = ownedForwardObservationClockRuntime
+		} else if owner.consumer.IsFixture() {
+			observation.clock = ownedForwardObservationClockFixture
+		}
+		observation.receivedKnown = observation.clock != ownedForwardObservationClockUnknown && observation.receivedNS >= 0
+		observation.forwardKnown = observation.clock != ownedForwardObservationClockUnknown && observation.forwardNS >= 0
+		observation.answerReceivedKnown = observation.clock != ownedForwardObservationClockUnknown && observation.answerReceivedNS >= 0
+		result.answer.relayObservation = observation
+	}
 	o.last = f
 	o.count(&o.counters.answered)
 	if phase == candidateDispatching {

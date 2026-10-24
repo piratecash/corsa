@@ -54,6 +54,9 @@ func run(ctx context.Context, args []string, out io.Writer, manifestPath string,
 		return err
 	}
 	verdict, err := admission.Admit(ctx, manifestPath, req, history)
+	if reportErr := reportDeferred(out, verdict); reportErr != nil {
+		return errors.Join(err, reportErr)
+	}
 	if errors.Is(err, admission.ErrAdmissionNotGranted) {
 		if reportErr := reportRefusal(out, req.Build, verdict, manifestPath); reportErr != nil {
 			return errors.Join(err, reportErr)
@@ -63,9 +66,18 @@ func run(ctx context.Context, args []string, out io.Writer, manifestPath string,
 	if err != nil {
 		return err
 	}
-	_, err = fmt.Fprintf(out, "release admitted: %s, every condition is done; owner release decision %d of %s\n",
+	_, err = fmt.Fprintf(out, "release admitted: %s, applicable checks complete with any deferrals listed above; owner release decision %d of %s\n",
 		req.Build.Release, verdict.ReleaseDecision.Number, verdict.ReleaseDecision.Date)
 	return err
+}
+
+func reportDeferred(out io.Writer, verdict admission.Admission) error {
+	for _, id := range verdict.Deferred {
+		if _, err := fmt.Fprintf(out, "  deferred condition: %s (UNVERIFIED; owner decision 2026-10-23, %s)\n", id, admission.TorDeferralDecision); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func parseRequest(args []string) (admission.Request, error) {

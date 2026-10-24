@@ -78,7 +78,7 @@ func validManifestDoc() manifestDoc {
 		})
 	}
 	return manifestDoc{
-		"schema":                      1,
+		"schema":                      2,
 		"activation_protocol_version": 31,
 		"release_decision":            nil,
 		"conditions":                  conditions,
@@ -162,7 +162,7 @@ func TestCommittedManifestKeepsReleaseClosed(t *testing.T) {
 	}
 	var want []ConditionID
 	for _, id := range RequiredConditions() {
-		if !slices.Contains(doneToday, id) {
+		if !slices.Contains(doneToday, id) && id != "tor_phase_measurement" {
 			want = append(want, id)
 		}
 	}
@@ -473,7 +473,7 @@ func TestCorruptManifestIsRefused(t *testing.T) {
 			return d.encode(t)
 		}},
 		{name: "duplicate top-level key", raw: func(t *testing.T) []byte {
-			return rewriteFirst(t, validManifestDoc().encode(t), `"schema":1`, `"schema":1,"schema":1`)
+			return rewriteFirst(t, validManifestDoc().encode(t), `"schema":2`, `"schema":2,"schema":2`)
 		}},
 		{name: "duplicate condition key", raw: func(t *testing.T) []byte {
 			return rewriteFirst(t, validManifestDoc().encode(t), `"status":"not_done"`, `"status":"done","status":"not_done"`)
@@ -486,7 +486,7 @@ func TestCorruptManifestIsRefused(t *testing.T) {
 		}},
 		{name: "wrong schema", raw: func(t *testing.T) []byte {
 			d := validManifestDoc()
-			d["schema"] = 2
+			d["schema"] = 3
 			return d.encode(t)
 		}},
 		{name: "schema missing", raw: func(t *testing.T) []byte {

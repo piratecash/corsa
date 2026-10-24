@@ -2,6 +2,7 @@ package loadstand
 
 import (
 	"context"
+	"encoding/json"
 	"math"
 	"time"
 
@@ -16,8 +17,16 @@ type trafficDTO struct {
 }
 
 func (s *ProcessSource) TransportTraffic(ctx context.Context) (domain.TransportTrafficStats, error) {
+	summary, err := s.RouteSummary(ctx)
+	return transportTrafficFromSummary(summary, err)
+}
+
+func transportTrafficFromSummary(summary map[string]json.RawMessage, summaryErr error) (domain.TransportTrafficStats, error) {
+	if summaryErr != nil {
+		return domain.TransportTrafficStats{}, summaryErr
+	}
 	var wire trafficDTO
-	if err := s.ReadFamily(ctx, "transport_traffic", &wire); err != nil {
+	if err := decodeRequired(summary, "transport_traffic", &wire); err != nil {
 		return domain.TransportTrafficStats{}, err
 	}
 	if wire.BytesSent == nil || wire.BytesReceived == nil {
@@ -40,8 +49,16 @@ type sessionsDTO struct {
 }
 
 func (s *ProcessSource) SessionOutcomes(ctx context.Context) (domain.SessionOutcomeStats, error) {
+	summary, err := s.RouteSummary(ctx)
+	return sessionOutcomesFromSummary(summary, err)
+}
+
+func sessionOutcomesFromSummary(summary map[string]json.RawMessage, summaryErr error) (domain.SessionOutcomeStats, error) {
+	if summaryErr != nil {
+		return domain.SessionOutcomeStats{}, summaryErr
+	}
 	var wire sessionsDTO
-	if err := s.ReadFamily(ctx, "session_outcomes", &wire); err != nil {
+	if err := decodeRequired(summary, "session_outcomes", &wire); err != nil {
 		return domain.SessionOutcomeStats{}, err
 	}
 	if wire.Attempts == nil || wire.Succeeded == nil || wire.ErrorsConnect == nil || wire.ErrorsCompat == nil || wire.ErrorsOther == nil {
@@ -64,8 +81,12 @@ func (s *ProcessSource) SessionOutcomes(ctx context.Context) (domain.SessionOutc
 }
 func (s *ProcessSource) RouteEntries(ctx context.Context) (int, error) {
 	summary, err := s.RouteSummary(ctx)
-	if err != nil {
-		return 0, err
+	return routeEntriesFromSummary(summary, err)
+}
+
+func routeEntriesFromSummary(summary map[string]json.RawMessage, summaryErr error) (int, error) {
+	if summaryErr != nil {
+		return 0, summaryErr
 	}
 	var value *int
 	if err := decodeRequired(summary, "total_entries", &value); err != nil {

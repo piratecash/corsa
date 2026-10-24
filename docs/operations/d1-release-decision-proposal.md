@@ -1,5 +1,13 @@
 # D1: observation calendar decision proposal / Предложение решения о календаре наблюдения
 
+<a id="measurement-scope-2026-10-23"></a>
+
+## Current measurement scope / Текущая область измерений — 2026-10-23
+
+The owner subsequently resumed D1 and directed measurements on macOS/Linux, deferring real Windows/DACL and Tor checks and handling issues in those environments as they arise. This supersedes the earlier owner instruction to retain those unavailable checks as unconditional release blockers. It supplies no successful Windows or Tor evidence: their actual results remain UNVERIFIED/UNKNOWN. Schema 2 records only `tor_phase_measurement` as `deferred`, tied to this exact decision, separately from `done`. Windows is removed only from the native-Windows prerequisite of the composite unsafe-store check; POSIX and final-candidate checks remain required. Clearnet first-contact measurements and timeout derivation remain required. The gate remains closed on the other incomplete conditions and missing release decision. Independent cryptographic review, the remaining checks, numerical profiles, G2, activation and release decisions remain open. This scope decision alone authorises no new workload configuration or resource limit.
+
+Владелец позднее возобновил D1 и указал выполнять замеры на macOS/Linux, отложив реальные Windows/DACL и Tor проверки; проблемы этих окружений решаются по мере поступления. Это заменяет прежнее указание сохранять недоступные проверки как безусловные препятствия выпуску. Свидетельств их успешного прохождения нет: фактические результаты остаются UNVERIFIED/UNKNOWN. Schema 2 записывает только `tor_phase_measurement` как `deferred` со ссылкой именно на это решение, отдельно от `done`. Windows исключается только из обязательной native-Windows части составного условия небезопасного хранилища; POSIX и проверки кандидата сохраняются. Замеры первого контакта clearnet и обоснование timeout сохраняются. Gate остаётся закрыт по остальным незавершённым условиям и отсутствующему решению о выпуске. Независимая криптоэкспертиза, остальные проверки, численные профили, G2, активация и решения о выпуске остаются открытыми. Это решение само по себе не разрешает новую конфигурацию нагрузки или ресурсные лимиты.
+
 ## English summary — calendar and spread approved on 2026-10-23
 
 On 2026-10-23 the owner approved only the future S6 observation calendar and spread threshold. This is not a release decision, authorisation to tag, deployment, live polling, a measurement budget or G2/profile approval. The current secure-session admission remains17conditions, with Windows owner/DACL UNVERIFIED and independent cryptographic review OPEN. Implementing or committing verified work can continue.

@@ -20,6 +20,7 @@ import (
 	"github.com/piratecash/corsa/internal/core/node"
 	"github.com/piratecash/corsa/internal/core/rpc"
 	"github.com/piratecash/corsa/internal/testutil/loadstand"
+	"github.com/piratecash/corsa/internal/testutil/loadstand/fullwitness"
 	"golang.org/x/sys/unix"
 )
 
@@ -101,6 +102,12 @@ func run(ctx context.Context) (result error) {
 	defer func() { cancelMetrics(); <-metricDone }()
 	table := rpc.NewCommandTable()
 	rpc.RegisterAllCommands(table, service, nil, nil, collector)
+	// This exact identity was passed to the Service above. Keep relay-only
+	// contact policy unchanged; the fixture-only local witness is public data.
+	public := fullwitness.PublicIdentity{Identity: domain.PeerIdentityFromWire(own.Address), PublicKey: identity.PublicKeyBase64(own.PublicKey), BoxPublicKey: identity.BoxPublicKeyBase64(own.BoxPublicKey), BoxSignature: identity.SignBoxKeyBinding(own)}
+	if err = fullwitness.RegisterPlannedFullPublicIdentity(table, public); err != nil {
+		return err
+	}
 	rpcAddress, _ := netip.ParseAddrPort(string(child.RPC))
 	rpcConfig := config.RPC{Host: rpcAddress.Addr().String(), Port: fmt.Sprint(rpcAddress.Port()), Username: os.Getenv("LOADSTAND_RPC_USER"), Password: os.Getenv("LOADSTAND_RPC_PASSWORD")}
 	server, err := rpc.NewServer(rpcConfig, table, service)

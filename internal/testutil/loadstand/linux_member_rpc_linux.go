@@ -92,16 +92,26 @@ func (m *linuxMember) Sample(ctx context.Context) (sample MemberSample, result e
 		return sample, err
 	}
 	before, osErr := m.fixture.Sample(ctx)
-	traffic, trafficErr := source.TransportTraffic(ctx)
+	// One fresh response belongs only to this Sample and its original OS bracket.
+	// No failed fetch is retried by a later family; cancellation never admits
+	// an already fetched response at a subsequent observation point.
+	summary, summaryErr := source.RouteSummary(ctx)
+	observationError := func() error {
+		if summaryErr != nil {
+			return summaryErr
+		}
+		return ctx.Err()
+	}
+	traffic, trafficErr := transportTrafficFromSummary(summary, observationError())
 	sample.Traffic = Observed(traffic, trafficErr)
 	m.highWater.Observe(traffic, trafficErr)
-	sessions, err := source.SessionOutcomes(ctx)
+	sessions, err := sessionOutcomesFromSummary(summary, observationError())
 	sample.Sessions = Observed(sessions, err)
-	modes, err := source.ModeSelection(ctx)
+	modes, err := source.modeSelectionFromSummary(summary, observationError())
 	sample.Modes = Observed(modes, err)
-	neighbours, err := source.Neighbours(ctx)
+	neighbours, err := source.neighboursFromSummary(summary, observationError())
 	sample.Neighbours = Observed(neighbours, err)
-	routes, err := source.RouteEntries(ctx)
+	routes, err := routeEntriesFromSummary(summary, observationError())
 	sample.RouteEntries = Observed(routes, err)
 	resources, err := source.Resources(ctx)
 	sample.Resources = Observed(resources, err)

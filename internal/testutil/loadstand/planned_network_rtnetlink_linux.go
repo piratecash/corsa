@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"math"
 	"net/netip"
 	"strings"
@@ -71,7 +72,7 @@ func plannedLinkInfo(index int, flags, change uint32) []byte {
 }
 func plannedNetlinkCurrentSequence(received, current uint32) (bool, error) {
 	if received == 0 || current == 0 || received > current {
-		return false, errPlannedNetwork
+		return false, plannedNetworkPhaseError("planned_network_rtnetlink_linux:plannedNetlinkCurrentSequence:guard1", errPlannedNetwork)
 	}
 	return received == current, nil
 }
@@ -81,7 +82,7 @@ func (s *plannedRouteSocket) exchange(ctx context.Context, kind, flags uint16, b
 		return nil, ErrLinuxOwnerBound
 	}
 	if s.fd < 0 || s.seq == math.MaxUint32 {
-		return nil, errPlannedNetwork
+		return nil, plannedNetworkPhaseError("planned_network_rtnetlink_linux:exchange:guard1", errPlannedNetwork)
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -93,6 +94,21 @@ func (s *plannedRouteSocket) exchange(ctx context.Context, kind, flags uint16, b
 	binary.NativeEndian.PutUint16(packet[6:], flags|unix.NLM_F_REQUEST)
 	binary.NativeEndian.PutUint32(packet[8:], s.seq)
 	copy(packet[unix.NLMSG_HDRLEN:], body)
+	var creation *plannedCreateReplies
+	if flags&unix.NLM_F_ECHO != 0 {
+		if dump || kind != unix.RTM_NEWLINK || flags != unix.NLM_F_CREATE|unix.NLM_F_EXCL|unix.NLM_F_ACK|unix.NLM_F_ECHO {
+			return nil, errPlannedNetwork
+		}
+		bound, err := unix.Getsockname(s.fd)
+		if err != nil {
+			return nil, err
+		}
+		local, ok := bound.(*unix.SockaddrNetlink)
+		if !ok || local.Family != unix.AF_NETLINK || local.Pid == 0 {
+			return nil, errPlannedNetwork
+		}
+		creation = &plannedCreateReplies{request: append([]byte(nil), packet[:unix.NLMSG_HDRLEN]...), port: local.Pid}
+	}
 	remaining := time.Until(deadline)
 	if remaining <= 0 {
 		return nil, context.DeadlineExceeded
@@ -127,7 +143,7 @@ func (s *plannedRouteSocket) exchange(ctx context.Context, kind, flags uint16, b
 		}
 		peer, ok := from.(*unix.SockaddrNetlink)
 		if !ok || peer.Pid != 0 || n == len(buffer) {
-			return nil, errPlannedNetwork
+			return nil, plannedNetworkPhaseError("planned_network_rtnetlink_linux:exchange:guard2", errPlannedNetwork)
 		}
 		messages, err := syscall.ParseNetlinkMessage(buffer[:n])
 		if err != nil {
@@ -142,16 +158,22 @@ func (s *plannedRouteSocket) exchange(ctx context.Context, kind, flags uint16, b
 				continue
 			}
 			if m.Header.Flags&unix.NLM_F_DUMP_INTR != 0 {
-				return nil, errPlannedNetwork
+				return nil, plannedNetworkPhaseError("planned_network_rtnetlink_linux:exchange:guard3", errPlannedNetwork)
+			}
+			if creation != nil {
+				if err := creation.accept(m); err != nil {
+					return nil, err
+				}
+				continue
 			}
 			switch m.Header.Type {
 			case unix.NLMSG_ERROR:
 				if len(m.Data) < 4 {
-					return nil, errPlannedNetwork
+					return nil, plannedNetworkPhaseError("planned_network_rtnetlink_linux:exchange:guard4", errPlannedNetwork)
 				}
 				code := int32(binary.NativeEndian.Uint32(m.Data))
 				if code > 0 {
-					return nil, errPlannedNetwork
+					return nil, plannedNetworkPhaseError("planned_network_rtnetlink_linux:exchange:guard5", errPlannedNetwork)
 				}
 				if code != 0 {
 					return nil, syscall.Errno(-code)
@@ -161,15 +183,15 @@ func (s *plannedRouteSocket) exchange(ctx context.Context, kind, flags uint16, b
 				}
 			case unix.NLMSG_DONE:
 				if !dump {
-					return nil, errPlannedNetwork
+					return nil, plannedNetworkPhaseError("planned_network_rtnetlink_linux:exchange:guard6", errPlannedNetwork)
 				}
 				if len(m.Data) != 0 {
 					if len(m.Data) < 4 {
-						return nil, errPlannedNetwork
+						return nil, plannedNetworkPhaseError("planned_network_rtnetlink_linux:exchange:guard7", errPlannedNetwork)
 					}
 					code := int32(binary.NativeEndian.Uint32(m.Data))
 					if code > 0 {
-						return nil, errPlannedNetwork
+						return nil, plannedNetworkPhaseError("planned_network_rtnetlink_linux:exchange:guard8", errPlannedNetwork)
 					}
 					if code != 0 {
 						return nil, syscall.Errno(-code)
@@ -180,6 +202,11 @@ func (s *plannedRouteSocket) exchange(ctx context.Context, kind, flags uint16, b
 				result = append(result, m)
 			}
 		}
+		// Never stop halfway through a datagram: a duplicate/conflicting reply
+		// after ACK/ECHO must invalidate the same creation attempt.
+		if creation != nil && creation.complete() {
+			return []syscall.NetlinkMessage{creation.echo}, nil
+		}
 	}
 }
 func plannedLinkAttributes(raw []byte) (string, string, error) {
@@ -187,31 +214,31 @@ func plannedLinkAttributes(raw []byte) (string, string, error) {
 	var seenName, seenAlias bool
 	for len(raw) != 0 {
 		if len(raw) < 4 {
-			return "", "", errPlannedNetwork
+			return "", "", plannedNetworkPhaseError("planned_network_rtnetlink_linux:plannedLinkAttributes:guard1", errPlannedNetwork)
 		}
 		n := int(binary.NativeEndian.Uint16(raw))
 		if n < 4 || n > len(raw) {
-			return "", "", errPlannedNetwork
+			return "", "", plannedNetworkPhaseError("planned_network_rtnetlink_linux:plannedLinkAttributes:guard2", errPlannedNetwork)
 		}
 		kind := binary.NativeEndian.Uint16(raw[2:]) & 0x3fff
 		if kind == unix.IFLA_IFNAME || kind == unix.IFLA_IFALIAS {
 			value := raw[4:n]
 			if len(value) == 0 || value[len(value)-1] != 0 {
-				return "", "", errPlannedNetwork
+				return "", "", plannedNetworkPhaseError("planned_network_rtnetlink_linux:plannedLinkAttributes:guard3", errPlannedNetwork)
 			}
 			text := string(value[:len(value)-1])
 			if strings.ContainsRune(text, 0) {
-				return "", "", errPlannedNetwork
+				return "", "", plannedNetworkPhaseError("planned_network_rtnetlink_linux:plannedLinkAttributes:guard4", errPlannedNetwork)
 			}
 			if kind == unix.IFLA_IFNAME {
 				if seenName {
-					return "", "", errPlannedNetwork
+					return "", "", plannedNetworkPhaseError("planned_network_rtnetlink_linux:plannedLinkAttributes:guard5", errPlannedNetwork)
 				}
 				seenName = true
 				name = text
 			} else {
 				if seenAlias {
-					return "", "", errPlannedNetwork
+					return "", "", plannedNetworkPhaseError("planned_network_rtnetlink_linux:plannedLinkAttributes:guard6", errPlannedNetwork)
 				}
 				seenAlias = true
 				alias = text
@@ -219,7 +246,7 @@ func plannedLinkAttributes(raw []byte) (string, string, error) {
 		}
 		step := plannedAlign(n)
 		if step > len(raw) {
-			return "", "", errPlannedNetwork
+			return "", "", plannedNetworkPhaseError("planned_network_rtnetlink_linux:plannedLinkAttributes:guard7", errPlannedNetwork)
 		}
 		raw = raw[step:]
 	}
@@ -233,7 +260,7 @@ func (s *plannedRouteSocket) links(ctx context.Context) ([]plannedKernelLink, er
 	var result []plannedKernelLink
 	for _, m := range messages {
 		if m.Header.Type != unix.RTM_NEWLINK || len(m.Data) < unix.SizeofIfInfomsg {
-			return nil, errPlannedNetwork
+			return nil, plannedNetworkPhaseError("planned_network_rtnetlink_linux:links:guard1", errPlannedNetwork)
 		}
 		name, alias, err := plannedLinkAttributes(m.Data[unix.SizeofIfInfomsg:])
 		if err != nil {
@@ -241,7 +268,7 @@ func (s *plannedRouteSocket) links(ctx context.Context) ([]plannedKernelLink, er
 		}
 		index := int(int32(binary.NativeEndian.Uint32(m.Data[4:])))
 		if index <= 0 || name == "" {
-			return nil, errPlannedNetwork
+			return nil, plannedNetworkPhaseError("planned_network_rtnetlink_linux:links:guard2", errPlannedNetwork)
 		}
 		result = append(result, plannedKernelLink{index: index, name: name, alias: alias})
 	}
@@ -253,8 +280,7 @@ func (s *plannedRouteSocket) createBridge(ctx context.Context, name, alias strin
 	body = append(body, plannedStringAttribute(unix.IFLA_IFALIAS, alias)...)
 	info := plannedStringAttribute(unix.IFLA_INFO_KIND, "bridge")
 	body = append(body, plannedAttribute(unix.IFLA_LINKINFO|unix.NLA_F_NESTED, info)...)
-	_, err := s.exchange(ctx, unix.RTM_NEWLINK, unix.NLM_F_CREATE|unix.NLM_F_EXCL|unix.NLM_F_ACK, body, false)
-	return err
+	return s.createTaggedLink(ctx, body, name, "", alias)
 }
 func (s *plannedRouteSocket) createVeth(ctx context.Context, host, peer, alias string) error {
 	body := plannedLinkInfo(0, 0, 0)
@@ -267,8 +293,7 @@ func (s *plannedRouteSocket) createVeth(ctx context.Context, host, peer, alias s
 	info := plannedStringAttribute(unix.IFLA_INFO_KIND, "veth")
 	info = append(info, plannedAttribute(unix.IFLA_INFO_DATA|unix.NLA_F_NESTED, plannedAttribute(1|unix.NLA_F_NESTED, peerBody))...)
 	body = append(body, plannedAttribute(unix.IFLA_LINKINFO|unix.NLA_F_NESTED, info)...)
-	_, err := s.exchange(ctx, unix.RTM_NEWLINK, unix.NLM_F_CREATE|unix.NLM_F_EXCL|unix.NLM_F_ACK, body, false)
-	return err
+	return s.createTaggedLink(ctx, body, host, peer, alias)
 }
 func (s *plannedRouteSocket) setLink(ctx context.Context, index int, kind uint16, value uint32) error {
 	body := plannedLinkInfo(index, 0, 0)
@@ -291,7 +316,7 @@ func (s *plannedRouteSocket) removeLink(ctx context.Context, index int) error {
 // file can install a gateway or default route.
 func (s *plannedRouteSocket) address(ctx context.Context, index int, address netip.Addr, bits int) error {
 	if index <= 0 || !plannedApprovedAddress(address) || bits < 4 || bits > 32 {
-		return errPlannedNetwork
+		return plannedNetworkPhaseError("planned_network_rtnetlink_linux:address:guard1", errPlannedNetwork)
 	}
 	body := make([]byte, unix.SizeofIfAddrmsg)
 	body[0] = unix.AF_INET
@@ -314,7 +339,7 @@ func (s *plannedRouteSocket) routes(ctx context.Context) ([]plannedNetworkRoute,
 		}
 		for _, m := range messages {
 			if m.Header.Type != unix.RTM_NEWROUTE || len(m.Data) < unix.SizeofRtMsg || m.Data[0] != family {
-				return nil, errPlannedNetwork
+				return nil, plannedNetworkPhaseError("planned_network_rtnetlink_linux:routes:guard1", errPlannedNetwork)
 			}
 			bits := int(m.Data[1])
 			var address netip.Addr
@@ -327,19 +352,19 @@ func (s *plannedRouteSocket) routes(ctx context.Context) ([]plannedNetworkRoute,
 			seen := false
 			for len(attrs) != 0 {
 				if len(attrs) < 4 {
-					return nil, errPlannedNetwork
+					return nil, plannedNetworkPhaseError("planned_network_rtnetlink_linux:routes:guard2", errPlannedNetwork)
 				}
 				size := int(binary.NativeEndian.Uint16(attrs))
 				if size < 4 || size > len(attrs) {
-					return nil, errPlannedNetwork
+					return nil, plannedNetworkPhaseError("planned_network_rtnetlink_linux:routes:guard3", errPlannedNetwork)
 				}
 				kind := binary.NativeEndian.Uint16(attrs[2:]) & 0x3fff
 				if kind == unix.RTA_GATEWAY || kind == unix.RTA_MULTIPATH || kind == unix.RTA_VIA {
-					return nil, errPlannedNetwork
+					return nil, plannedNetworkPhaseError("planned_network_rtnetlink_linux:routes:guard4", errPlannedNetwork)
 				}
 				if kind == unix.RTA_DST {
 					if seen {
-						return nil, errPlannedNetwork
+						return nil, plannedNetworkPhaseError("planned_network_rtnetlink_linux:routes:guard5", errPlannedNetwork)
 					}
 					seen = true
 					if family == unix.AF_INET && size == 8 {
@@ -351,18 +376,18 @@ func (s *plannedRouteSocket) routes(ctx context.Context) ([]plannedNetworkRoute,
 						copy(a[:], attrs[4:size])
 						address = netip.AddrFrom16(a)
 					} else {
-						return nil, errPlannedNetwork
+						return nil, plannedNetworkPhaseError("planned_network_rtnetlink_linux:routes:guard6", errPlannedNetwork)
 					}
 				}
 				step := plannedAlign(size)
 				if step > len(attrs) {
-					return nil, errPlannedNetwork
+					return nil, plannedNetworkPhaseError("planned_network_rtnetlink_linux:routes:guard7", errPlannedNetwork)
 				}
 				attrs = attrs[step:]
 			}
 			prefix := netip.PrefixFrom(address, bits)
 			if !prefix.IsValid() || prefix != prefix.Masked() {
-				return nil, errPlannedNetwork
+				return nil, plannedNetworkPhaseError("planned_network_rtnetlink_linux:routes:guard8", errPlannedNetwork)
 			}
 			result = append(result, plannedNetworkRoute{prefix: prefix})
 		}
@@ -383,25 +408,25 @@ func (s *plannedRouteSocket) addresses(ctx context.Context) ([]plannedKernelAddr
 	var result []plannedKernelAddress
 	for _, message := range messages {
 		if message.Header.Type != unix.RTM_NEWADDR || len(message.Data) < unix.SizeofIfAddrmsg {
-			return nil, errPlannedNetwork
+			return nil, plannedNetworkPhaseError("planned_network_rtnetlink_linux:addresses:guard1", errPlannedNetwork)
 		}
 		body := message.Data
 		family := body[0]
 		bits := int(body[1])
 		index := int(binary.NativeEndian.Uint32(body[4:]))
 		if index <= 0 || family != unix.AF_INET && family != unix.AF_INET6 {
-			return nil, errPlannedNetwork
+			return nil, plannedNetworkPhaseError("planned_network_rtnetlink_linux:addresses:guard2", errPlannedNetwork)
 		}
 		attrs := body[unix.SizeofIfAddrmsg:]
 		var address netip.Addr
 		var local netip.Addr
 		for len(attrs) != 0 {
 			if len(attrs) < 4 {
-				return nil, errPlannedNetwork
+				return nil, plannedNetworkPhaseError("planned_network_rtnetlink_linux:addresses:guard3", errPlannedNetwork)
 			}
 			size := int(binary.NativeEndian.Uint16(attrs))
 			if size < 4 || size > len(attrs) {
-				return nil, errPlannedNetwork
+				return nil, plannedNetworkPhaseError("planned_network_rtnetlink_linux:addresses:guard4", errPlannedNetwork)
 			}
 			kind := binary.NativeEndian.Uint16(attrs[2:]) & 0x3fff
 			if kind == unix.IFA_ADDRESS || kind == unix.IFA_LOCAL {
@@ -415,23 +440,23 @@ func (s *plannedRouteSocket) addresses(ctx context.Context) ([]plannedKernelAddr
 					copy(a[:], attrs[4:size])
 					value = netip.AddrFrom16(a)
 				} else {
-					return nil, errPlannedNetwork
+					return nil, plannedNetworkPhaseError("planned_network_rtnetlink_linux:addresses:guard5", errPlannedNetwork)
 				}
 				if kind == unix.IFA_ADDRESS {
 					if address.IsValid() {
-						return nil, errPlannedNetwork
+						return nil, plannedNetworkPhaseError("planned_network_rtnetlink_linux:addresses:guard6", errPlannedNetwork)
 					}
 					address = value
 				} else {
 					if local.IsValid() {
-						return nil, errPlannedNetwork
+						return nil, plannedNetworkPhaseError("planned_network_rtnetlink_linux:addresses:guard7", errPlannedNetwork)
 					}
 					local = value
 				}
 			}
 			step := plannedAlign(size)
 			if step > len(attrs) {
-				return nil, errPlannedNetwork
+				return nil, plannedNetworkPhaseError("planned_network_rtnetlink_linux:addresses:guard8", errPlannedNetwork)
 			}
 			attrs = attrs[step:]
 		}
@@ -439,11 +464,11 @@ func (s *plannedRouteSocket) addresses(ctx context.Context) ([]plannedKernelAddr
 			address = local
 		}
 		if local.IsValid() && local != address {
-			return nil, errPlannedNetwork
+			return nil, plannedNetworkPhaseError("planned_network_rtnetlink_linux:addresses:guard9", errPlannedNetwork)
 		}
 		prefix := netip.PrefixFrom(address, bits)
 		if !prefix.IsValid() {
-			return nil, errPlannedNetwork
+			return nil, plannedNetworkPhaseError("planned_network_rtnetlink_linux:addresses:guard10", errPlannedNetwork)
 		}
 		result = append(result, plannedKernelAddress{index: index, prefix: prefix})
 	}
@@ -456,11 +481,11 @@ func (s *plannedRouteSocket) disableIPv6(ctx context.Context, index int) error {
 	ipv6 := plannedAttribute(unix.IFLA_INET6_ADDR_GEN_MODE, []byte{1})
 	body = append(body, plannedAttribute(unix.IFLA_AF_SPEC|unix.NLA_F_NESTED, plannedAttribute(unix.AF_INET6|unix.NLA_F_NESTED, ipv6))...)
 	if _, err := s.exchange(ctx, unix.RTM_NEWLINK, unix.NLM_F_ACK, body, false); err != nil {
-		return err
+		return plannedNetworkPhaseError(fmt.Sprintf("ipv6-addrgen-RTM_NEWLINK index=%d", index), err)
 	}
 	addresses, err := s.addresses(ctx)
 	if err != nil {
-		return err
+		return plannedNetworkPhaseError(fmt.Sprintf("ipv6-dump-addresses index=%d", index), err)
 	}
 	for _, address := range addresses {
 		if address.index != index || !address.prefix.Addr().Is6() {
@@ -473,7 +498,7 @@ func (s *plannedRouteSocket) disableIPv6(ctx context.Context, index int) error {
 		raw := address.prefix.Addr().As16()
 		body = append(body, plannedAttribute(unix.IFA_ADDRESS, raw[:])...)
 		if _, err = s.exchange(ctx, unix.RTM_DELADDR, unix.NLM_F_ACK, body, false); err != nil {
-			return err
+			return plannedNetworkPhaseError(fmt.Sprintf("ipv6-delete-RTM_DELADDR index=%d", index), err)
 		}
 	}
 	return nil

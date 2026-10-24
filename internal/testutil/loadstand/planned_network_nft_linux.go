@@ -7,9 +7,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os/exec"
-	"reflect"
+	"runtime"
 	"strconv"
 	"time"
 )
@@ -62,13 +63,13 @@ func (n linuxPlannedNFT) runTracked(ctx context.Context, input []byte, args ...s
 	// Reuse the caller's existing bound; no new runtime/profile numeric limit.
 	command.WaitDelay = time.Until(deadline)
 	if err := command.Start(); err != nil {
-		return nil, false, errors.Join(errPlannedNetwork, err)
+		return nil, false, plannedNetworkPhaseError(fmt.Sprintf("nft-command-start args=%q", args), errors.Join(errPlannedNetwork, err))
 	}
 	if err := command.Wait(); err != nil {
-		return nil, true, errors.Join(errPlannedNetwork, err)
+		return nil, true, plannedNetworkPhaseError(fmt.Sprintf("nft-command-wait args=%q stdout_bytes=%d stderr_bytes=%d stderr_prefix=%q", args, len(output.data), len(diagnostic.data), diagnostic.data[:min(len(diagnostic.data), 2048)]), errors.Join(errPlannedNetwork, err))
 	}
 	if output.overflow || diagnostic.overflow || len(diagnostic.data) != 0 {
-		return nil, true, errPlannedNetwork
+		return nil, true, plannedNetworkPhaseError(fmt.Sprintf("nft-command-output args=%q stdout_bytes=%d stderr_bytes=%d stdout_overflow=%t stderr_overflow=%t stderr_prefix=%q", args, len(output.data), len(diagnostic.data), output.overflow, diagnostic.overflow, diagnostic.data[:min(len(diagnostic.data), 2048)]), errPlannedNetwork)
 	}
 	return output.data, true, nil
 }
@@ -182,8 +183,8 @@ func (n linuxPlannedNFT) tables(ctx context.Context, name string) (uint64, bool,
 	return found, found != 0, nil
 }
 func (n linuxPlannedNFT) create(ctx context.Context, p plannedNetworkPlan) (uint64, bool, error) {
-	if _, exists, err := n.tables(ctx, p.bridge); err != nil || exists {
-		return 0, false, errors.Join(errPlannedNetwork, err)
+	if handle, exists, err := n.tables(ctx, p.bridge); err != nil || exists {
+		return 0, false, plannedNetworkPhaseError(fmt.Sprintf("nft-create-preflight table=%s handle=%d exists=%t", p.bridge, handle, exists), errors.Join(errPlannedNetwork, err))
 	}
 	objects := plannedNFTObjects(p)
 	commands := make([]map[string]any, 0, len(objects))
@@ -192,17 +193,17 @@ func (n linuxPlannedNFT) create(ctx context.Context, p plannedNetworkPlan) (uint
 	}
 	raw, err := json.Marshal(map[string]any{"nftables": commands})
 	if err != nil {
-		return 0, false, err
+		return 0, false, plannedNetworkPhaseError("nft-create-marshal", err)
 	}
 	_, attempted, createErr := n.runTracked(ctx, raw, "--json", "--file", "-")
 	if !attempted {
-		return 0, false, createErr
+		return 0, false, plannedNetworkPhaseError("nft-create-not-started", createErr)
 	}
 	handle, exists, lookupErr := n.tables(ctx, p.bridge)
 	if createErr != nil || lookupErr != nil || !exists {
-		return handle, true, errors.Join(errPlannedNetwork, createErr, lookupErr)
+		return handle, true, plannedNetworkPhaseError(fmt.Sprintf("nft-create-readback table=%s handle=%d exists=%t", p.bridge, handle, exists), errors.Join(errPlannedNetwork, createErr, lookupErr))
 	}
-	return handle, true, n.verify(ctx, p, handle)
+	return handle, true, plannedNetworkPhaseError("nft-create-verify", n.verify(ctx, p, handle))
 }
 func normalizePlannedNFT(value any) (any, error) {
 	switch v := value.(type) {
@@ -334,49 +335,76 @@ func (n linuxPlannedNFT) verify(ctx context.Context, p plannedNetworkPlan, expec
 	return n.verifyOwned(ctx, p, expected, true)
 }
 func (n linuxPlannedNFT) verifyOwned(ctx context.Context, p plannedNetworkPlan, expected uint64, requireClear bool) error {
-	actual, exists, err := n.tables(ctx, p.bridge)
-	if err != nil || !exists || expected == 0 || actual != expected {
-		return errors.Join(errPlannedNetwork, err)
-	}
-	raw, err := n.run(ctx, nil, "--json", "--handle", "list", "table", "bridge", p.bridge)
+	// Keep the CLI child and read-only witness in the same original namespace.
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	return n.verifyOwnedRead(ctx, p, expected, requireClear, plannedNFTRealRead{nft: n})
+}
+func (n linuxPlannedNFT) verifyOwnedRead(ctx context.Context, p plannedNetworkPlan, expected uint64, requireClear bool, ops plannedNFTReadbackOps) (resultErr error) {
+	wire, err := ops.openWire(ctx)
 	if err != nil {
-		return err
+		return plannedNetworkPhaseError("nft-wire-open", err)
+	}
+	defer func() { resultErr = errors.Join(resultErr, wire.close()) }()
+	before, err := wire.generation(ctx)
+	if err != nil {
+		return plannedNetworkPhaseError("nft-wire-generation-before", err)
+	}
+	actual, exists, err := ops.tables(ctx, p.bridge)
+	if err != nil || !exists || expected == 0 || actual != expected {
+		return plannedNetworkPhaseError(fmt.Sprintf("nft-verify-table table=%s actual_handle=%d expected_handle=%d exists=%t", p.bridge, actual, expected, exists), errors.Join(errPlannedNetwork, err))
+	}
+	raw, err := ops.list(ctx, p.bridge)
+	if err != nil {
+		return plannedNetworkPhaseError("nft-verify-list-table", err)
 	}
 	objects, err := plannedNFTJSON(raw)
 	if err != nil {
-		return err
+		return plannedNetworkPhaseError(fmt.Sprintf("nft-verify-json raw_bytes=%d raw_prefix=%q", len(raw), raw[:min(len(raw), 4096)]), err)
 	}
 	filtered := []map[string]any{}
 	for _, object := range objects {
 		if _, meta := object["metainfo"]; meta {
 			if len(object) != 1 {
-				return errPlannedNetwork
+				return plannedNetworkPhaseError("nft-verify-metainfo-object", errPlannedNetwork)
 			}
 			continue
 		}
 		filtered = append(filtered, object)
 	}
 	if !n.retainBlockedEvidence(filtered) {
-		return errPlannedNetwork
+		return plannedNetworkPhaseError(fmt.Sprintf("nft-verify-blocked-counter-shape raw_bytes=%d raw_prefix=%q", len(raw), raw[:min(len(raw), 4096)]), errPlannedNetwork)
 	}
 	if requireClear && !n.operationallyClear(filtered) {
-		return errPlannedNetwork
+		return plannedNetworkPhaseError(fmt.Sprintf("nft-verify-blocked-counter-not-clear evidence=%+v raw_bytes=%d raw_prefix=%q", n.blocked, len(raw), raw[:min(len(raw), 4096)]), errPlannedNetwork)
 	}
-	actualObjects, err := normalizePlannedNFT(filtered)
+	// One unchanged generation brackets the original table/JSON reads and
+	// the raw witness. A changed/incomplete cut refuses without retry.
+	count := 1
+	if len(p.members) != 0 {
+		count = 3
+	}
+	rows, err := wire.rules(ctx, p.bridge, count)
 	if err != nil {
-		return err
+		return plannedNetworkPhaseError("nft-wire-rules", err)
 	}
-	expectedObjects, err := normalizePlannedNFT(plannedNFTObjects(p))
+	after, err := wire.generation(ctx)
 	if err != nil {
-		return err
+		return plannedNetworkPhaseError("nft-wire-generation-after", err)
 	}
-	if !reflect.DeepEqual(actualObjects, expectedObjects) {
-		return errPlannedNetwork
+	if err = plannedNFTExactReadback(p, filtered, rows, before, after); err != nil {
+		return plannedNetworkPhaseError(fmt.Sprintf("nft-verify-exact-object-or-wire-mismatch raw_bytes=%d raw_prefix=%q", len(raw), raw[:min(len(raw), 4096)]), err)
 	}
+
 	return nil
 }
 func (n linuxPlannedNFT) remove(ctx context.Context, p plannedNetworkPlan, expected uint64) error {
-	actual, exists, err := n.tables(ctx, p.bridge)
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	return n.removeRead(ctx, p, expected, plannedNFTRealRead{nft: n})
+}
+func (n linuxPlannedNFT) removeRead(ctx context.Context, p plannedNetworkPlan, expected uint64, ops plannedNFTReadbackOps) error {
+	actual, exists, err := ops.tables(ctx, p.bridge)
 	if err != nil {
 		return err
 	}
@@ -388,13 +416,12 @@ func (n linuxPlannedNFT) remove(ctx context.Context, p plannedNetworkPlan, expec
 	if expected != 0 && actual != expected {
 		return errPlannedNetwork
 	}
-	if err = n.verifyOwned(ctx, p, actual, false); err != nil {
+	if err = n.verifyOwnedRead(ctx, p, actual, false, ops); err != nil {
 		return err
 	}
 	raw, err := json.Marshal(map[string]any{"nftables": []any{map[string]any{"delete": map[string]any{"table": map[string]any{"family": "bridge", "name": p.bridge, "handle": actual}}}}})
 	if err != nil {
 		return err
 	}
-	_, err = n.run(ctx, raw, "--json", "--file", "-")
-	return err
+	return ops.delete(ctx, raw)
 }

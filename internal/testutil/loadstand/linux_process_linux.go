@@ -59,6 +59,19 @@ type linuxInitializationResult struct {
 	err   error
 }
 
+// Diagnostic-only first work-owner bind outcome. It never authorizes Ready or
+// changes the original exchange/poison/send order; zero means UNKNOWN.
+type linuxMemberBindDiagnostic struct {
+	known                      bool
+	err                        error
+	phase                      string
+	replyKnown                 bool
+	replyCode                  linuxResultCode
+	mismatch                   uint16
+	publicChecked, helperKnown bool
+	helper                     linuxBindHelperDiagnostic
+}
+
 type linuxSampleExchange struct {
 	receiptLimit   int
 	receiptsResult chan linuxMemberReceiptsOutcome
@@ -95,6 +108,7 @@ type LinuxFixture struct {
 	childLife, childWork, childNS                                 *os.File
 	command                                                       *exec.Cmd
 	initResult                                                    linuxInitializationResult
+	memberBindDiagnostic                                          linuxMemberBindDiagnostic
 	initialized                                                   chan struct{}
 	startResolved                                                 chan struct{}
 	helperWaitDone                                                chan struct{}

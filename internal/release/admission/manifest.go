@@ -31,7 +31,7 @@ type ManifestSchema int
 
 // CurrentManifestSchema is the only schema this gate reads. A manifest in a
 // newer format is refused rather than half-understood.
-const CurrentManifestSchema ManifestSchema = 1
+const CurrentManifestSchema ManifestSchema = 2
 
 // ConditionID names one release condition. The set the gate requires lives
 // in code (RequiredConditions), so dropping a condition from the manifest
@@ -53,20 +53,33 @@ var knownExecutors = map[Executor]bool{
 	ExecutorExternalExpert: true,
 }
 
-// ConditionStatus is how far a condition has got. Only ConditionDone counts
-// towards admission; partial work is tracked but admits nothing.
+// ConditionStatus distinguishes completed checks from incomplete work and the
+// single Tor measurement explicitly deferred by the owner. Deferred is not done.
 type ConditionStatus string
 
 const (
-	ConditionNotDone ConditionStatus = "not_done"
-	ConditionPartial ConditionStatus = "partial"
-	ConditionDone    ConditionStatus = "done"
+	ConditionNotDone  ConditionStatus = "not_done"
+	ConditionPartial  ConditionStatus = "partial"
+	ConditionDone     ConditionStatus = "done"
+	ConditionDeferred ConditionStatus = "deferred"
 )
 
 var knownStatuses = map[ConditionStatus]bool{
-	ConditionNotDone: true,
-	ConditionPartial: true,
-	ConditionDone:    true,
+	ConditionNotDone:  true,
+	ConditionPartial:  true,
+	ConditionDone:     true,
+	ConditionDeferred: true,
+}
+
+// TorDeferralDecision is the recorded owner decision, not a measurement report.
+// Only this exact decision and condition may use deferred; no general waiver is
+// accepted from a manifest. Changing this scope requires a reviewed code change.
+const TorDeferralDecision EvidenceRef = "docs/operations/d1-release-decision-proposal.md#measurement-scope-2026-10-23"
+
+func (c Condition) ownerDeferred() bool {
+	return c.ID == "tor_phase_measurement" && c.Status == ConditionDeferred &&
+		c.Executor == ExecutorDeveloper && c.Evidence != nil &&
+		c.Evidence.Report == TorDeferralDecision && c.Evidence.Commit == nil
 }
 
 // EvidenceRef points at what confirms a condition: a report, a test run, a
@@ -229,6 +242,12 @@ func (c Condition) validate() error {
 		if err := c.Evidence.validate(); err != nil {
 			return fmt.Errorf("evidence: %w", err)
 		}
+	}
+	if c.Status == ConditionDeferred {
+		if !c.ownerDeferred() {
+			return errors.New("deferred is restricted to the recorded owner Tor measurement decision")
+		}
+		return nil
 	}
 	if c.Status != ConditionDone {
 		return nil

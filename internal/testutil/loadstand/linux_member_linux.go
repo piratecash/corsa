@@ -5,6 +5,7 @@ package loadstand
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/netip"
 	"strconv"
 	"time"
@@ -117,7 +118,7 @@ func PrepareLinuxMemberGroup(ctx context.Context, prefix netip.Prefix, binaries 
 	// All input tuples and exact bootstrap roles are checked before kernel work.
 	plan, err = copyPlannedNetwork(plan)
 	if err != nil {
-		return nil, err
+		return nil, plannedNetworkPhaseError("prepare-plan-copy", err)
 	}
 	group := &LinuxMemberGroup{plan: plan, binaries: binaries, probes: probes}
 	for i, spec := range copied {
@@ -147,7 +148,7 @@ func CreateLinuxMemberGroup(ctx context.Context, prefix netip.Prefix, binaries L
 // Setup. This is only the effectful half of the same concrete constructor.
 func (g *LinuxMemberGroup) Setup(ctx context.Context) error {
 	if g == nil || g.setupCalled || g.network != nil {
-		return ErrMemberState
+		return plannedNetworkPhaseError("setup-group-state", ErrMemberState)
 	}
 	g.setupCalled = true
 	binaries, plan, probes := g.binaries, g.plan, g.probes
@@ -156,33 +157,33 @@ func (g *LinuxMemberGroup) Setup(ctx context.Context) error {
 		hash ExecutableSHA256
 	}{{binaries.Helper, binaries.HelperSHA}, {binaries.Full, binaries.FullSHA}, {binaries.SDK, binaries.SDKSHA}} {
 		if err := auditLinuxExecutable(ctx, target.path, target.hash); err != nil {
-			return err
+			return plannedNetworkPhaseError("setup-artifact-audit", err)
 		}
 	}
 	membership, err := newLinuxMemberMembership(ctx, plan)
 	if err != nil {
-		return err
+		return plannedNetworkPhaseError("setup-membership", err)
 	}
 	g.membership = membership
 	network, err := newLinuxPlannedNetwork(ctx, plan, binaries.NFT, binaries.NFTSHA)
 	if err != nil {
-		return err
+		return plannedNetworkPhaseError("setup-network-constructor", err)
 	}
 	g.network = network
 	g.backend = network.backend.(*linuxPlannedNetworkBackend)
 	if err = g.backend.originalUnreachable(ctx, probes); err != nil {
-		return err
+		return plannedNetworkPhaseError("setup-original-preprobe", err)
 	}
 	if err = network.setup(ctx); err != nil {
-		return err
+		return plannedNetworkPhaseError("setup-network", err)
 	}
 	for _, member := range plan.members {
 		row := g.backend.resource(plannedNamespace, string(member.id))
 		if row == nil || row.namespace == nil {
-			return ErrMemberState
+			return plannedNetworkPhaseError(fmt.Sprintf("setup-namespace-owner member=%s", member.id), ErrMemberState)
 		}
 		if err = row.namespace.plannedProbe(ctx, probes); err != nil {
-			return err
+			return fmt.Errorf("planned-network stage=setup-namespace-postprobe member=%s: %w", member.id, err)
 		}
 	}
 	return nil
@@ -199,13 +200,13 @@ func (g *LinuxMemberGroup) Close(ctx context.Context) error {
 		return nil
 	}
 	if g.network == nil || g.network.closed {
-		return g.membership.close()
+		return plannedNetworkPhaseError("close-membership", g.membership.close())
 	}
 	var result error
 	for _, member := range g.owners {
 		if member.Owned() {
 			_, err := member.Stop(ctx)
-			result = errors.Join(result, err)
+			result = errors.Join(result, plannedNetworkPhaseError(fmt.Sprintf("close-member member=%s", member.id), err))
 		}
 	}
 	for _, member := range g.owners {
@@ -214,7 +215,7 @@ func (g *LinuxMemberGroup) Close(ctx context.Context) error {
 		}
 	}
 	postErr := g.backend.originalUnreachable(ctx, g.probes)
-	return errors.Join(result, postErr, g.network.close(ctx), g.membership.close())
+	return errors.Join(result, plannedNetworkPhaseError("close-original-postprobe", postErr), plannedNetworkPhaseError("close-network", g.network.close(ctx)), plannedNetworkPhaseError("close-membership", g.membership.close()))
 }
 func (m *linuxMember) ID() MemberID     { return m.id }
 func (m *linuxMember) Role() MemberRole { return m.role }
@@ -236,14 +237,14 @@ func (m *linuxMember) Done() <-chan struct{} {
 }
 func (m *linuxMember) Start(lifetime, readiness context.Context) (StartReceipt, error) {
 	if m.Owned() || lifetime.Err() != nil || m.group.network == nil || !m.group.network.ready {
-		return StartReceipt{}, ErrMemberState
+		return StartReceipt{}, m.startFailure("precondition", ErrMemberState)
 	}
 	m.attempted = true
 	m.current = nil
 	m.highWater = TransportHighWater{}
 	row := m.group.backend.resource(plannedNamespace, string(m.id))
 	if row == nil || row.namespace == nil {
-		return StartReceipt{}, ErrMemberState
+		return StartReceipt{}, m.startFailure("namespace-owner", ErrMemberState)
 	}
 	row.namespace.mu.Lock()
 	namespaceIdentity := row.namespace.identity
@@ -252,41 +253,41 @@ func (m *linuxMember) Start(lifetime, readiness context.Context) (StartReceipt, 
 		m.originalNamespace = row.namespace
 		m.originalNamespaceIdentity = namespaceIdentity
 	} else if m.originalNamespace != row.namespace || m.originalNamespaceIdentity != namespaceIdentity {
-		return StartReceipt{}, ErrMemberState
+		return StartReceipt{}, m.startFailure("namespace-identity", ErrMemberState)
 	}
 	ordinal := IncarnationOrdinal(len(m.ended) + 1)
 	binding, err := newPlannedLaunchBinding(m.config, m.planned, m.spec.TargetSHA256, ordinal)
 	if err != nil {
-		return StartReceipt{}, err
+		return StartReceipt{}, m.startFailure("launch-binding", err)
 	}
 	m.spec.planned = &linuxPlannedLaunch{network: m.group.network, member: m.physical, plan: m.planned, ordinal: ordinal, binding: binding, profileDevice: m.profileDevice, profileInode: m.profileInode, previous: m.previousFixture, membership: m.group.membership}
 	fixture, err := CreateLinuxFixture(readiness, m.spec, m.parent, row.namespace)
 	m.fixture = fixture
 	if err != nil {
-		return StartReceipt{}, err
+		return StartReceipt{}, m.startFailure("create-fixture", err)
 	}
 	m.stopWatch = make(chan struct{})
 	m.watchDone = make(chan struct{})
 	go m.watchLifetime(lifetime, fixture, m.stopWatch, m.watchDone)
 	if err = fixture.Start(readiness); err != nil {
-		return StartReceipt{}, err
+		return StartReceipt{}, m.startFailure("fixture-start", err)
 	}
 	receipt, err := fixture.completePlannedMemberStart(readiness)
 	if err != nil {
-		return StartReceipt{}, err
+		return StartReceipt{}, m.startFailure("member-bind", err)
 	}
 	if !m.previous.Identity.IsZero() && m.previous != receipt.Public {
-		return StartReceipt{}, ErrMemberState
+		return StartReceipt{}, m.startFailure("receipt-identity", ErrMemberState)
 	}
 	m.parent.mu.Lock()
 	var profile unix.Stat_t
 	statErr := unix.Fstatat(int(m.parent.file.Fd()), "member-1", &profile, unix.AT_SYMLINK_NOFOLLOW)
 	m.parent.mu.Unlock()
 	if statErr != nil || profile.Uid != uint32(m.spec.UID) || profile.Mode&07777 != 0700 || profile.Mode&unix.S_IFMT != unix.S_IFDIR {
-		return StartReceipt{}, ErrMemberState
+		return StartReceipt{}, m.startFailure("profile-stat", ErrMemberState)
 	}
 	if m.profileInode != 0 && (m.profileDevice != uint64(profile.Dev) || m.profileInode != profile.Ino) {
-		return StartReceipt{}, ErrMemberState
+		return StartReceipt{}, m.startFailure("profile-identity", ErrMemberState)
 	}
 	m.profileDevice, m.profileInode = uint64(profile.Dev), profile.Ino
 	m.previous = receipt.Public
@@ -294,6 +295,69 @@ func (m *linuxMember) Start(lifetime, readiness context.Context) (StartReceipt, 
 	m.highWater = NewTransportHighWater(RuntimeBinding{Identity: receipt.Public.Identity, StartedAt: receipt.Incarnation.StartedAt})
 	return receipt, nil
 }
+
+// startFailure reads only already retained owner state. The observation can be
+// later than the failure decision and must not be treated as its causal origin.
+func (m *linuxMember) startFailure(stage string, err error) error {
+	if err == nil {
+		return nil
+	}
+	fixture := m.fixture
+	if fixture == nil {
+		return fmt.Errorf("planned-member-start member=%q stage=%s fixture=none: %w", m.id, stage, err)
+	}
+	fixture.mu.Lock()
+	initResult, bindResult := fixture.initResult, fixture.memberBindDiagnostic
+	startCalled, running, stopping, workBusy := fixture.startCalled, fixture.running, fixture.stopping, fixture.workBusy
+	refused, poisoned := fixture.beforeTargetRefused, fixture.correlation.poisoned
+	helperState, helperJoined := fixture.helperState, fixture.helperJoined
+	helperKnown, helperExit := fixture.helperWaitKnown, fixture.helperWait
+	targetKnown, targetExit := fixture.targetKnown, fixture.targetExit
+	fixture.mu.Unlock()
+	return fmt.Errorf("planned-member-start member=%q stage=%s observation=after_failure_decision start_called=%t running=%t stopping=%t work_busy=%t before_target_refused=%t poisoned=%t init_known=%t init_error=%q bind_known=%t bind_error=%q bind_context=%q helper_state=%d helper_joined=%t helper_wait_known=%t helper_exit=%q target_known=%t target_exit=%q: %w", m.id, stage, startCalled, running, stopping, workBusy, refused, poisoned, initResult.known, plannedMemberDiagnosticError(initResult.known, initResult.err), bindResult.known, plannedMemberDiagnosticError(bindResult.known, bindResult.err), plannedMemberBindContext(bindResult), helperState, helperJoined, helperKnown, plannedMemberDiagnosticExit(helperKnown, helperExit), targetKnown, plannedMemberDiagnosticExit(targetKnown, targetExit), err)
+}
+
+// Text only: diagnostic errors never extend the returned error's Is/As chain.
+// Error() and formatting run outside every fixture/profile/namespace mutex.
+func plannedMemberDiagnosticError(known bool, err error) string {
+	if !known {
+		return "UNKNOWN"
+	}
+	if err == nil {
+		return "<nil>"
+	}
+	text := err.Error()
+	if len(text) > 2048 {
+		return text[:2045] + "..."
+	}
+	return text
+}
+
+func plannedMemberBindContext(result linuxMemberBindDiagnostic) string {
+	if !result.known {
+		return "UNKNOWN"
+	}
+	helper := "UNKNOWN"
+	if result.helperKnown {
+		helper = linuxBindHelperContext(result.helper)
+	}
+	replyCode := "UNKNOWN"
+	if result.replyKnown {
+		replyCode = fmt.Sprint(result.replyCode)
+	}
+	return linuxBindDiagnosticText(fmt.Sprintf("phase=%s reply_known=%t reply_code=%q mismatch_known=%t mismatch_bits=%#x public_checked=%t helper_known=%t helper=%q", result.phase, result.replyKnown, replyCode, result.replyKnown, result.mismatch, result.publicChecked, result.helperKnown, helper))
+}
+
+func plannedMemberDiagnosticExit(known bool, result ProcessExitResult) string {
+	if !known {
+		return "UNKNOWN"
+	}
+	if result.Kind == WaitUnknown {
+		return fmt.Sprintf("UNKNOWN(kind=%d wait_failed=%t)", result.Kind, result.WaitFailed)
+	}
+	return fmt.Sprintf("kind=%d code=%d signal=%d wait_failed=%t", result.Kind, result.Code, result.Signal, result.WaitFailed)
+}
+
 func (m *linuxMember) watchLifetime(lifetime context.Context, fixture *LinuxFixture, stop <-chan struct{}, done chan<- struct{}) {
 	defer close(done)
 	select {
@@ -330,7 +394,11 @@ func (m *linuxMember) Stop(ctx context.Context) (StopReceipt, error) {
 	state := m.fixture.Snapshot()
 	m.fixture.mu.Lock()
 	refused := m.fixture.beforeTargetRefused
+	initResult, bindResult := m.fixture.initResult, m.fixture.memberBindDiagnostic
 	m.fixture.mu.Unlock()
+	if stopErr != nil {
+		stopErr = fmt.Errorf("planned-member-stop member=%q observation=post_stop_not_primary_cause helper_state=%d helper_joined=%t helper_wait_known=%t helper_exit=%q target_known=%t target_exit=%q poisoned=%t before_target_refused=%t init_known=%t init_error=%q bind_known=%t bind_error=%q bind_context=%q: %w", m.id, state.HelperState, state.HelperJoined, state.HelperWaitKnown, plannedMemberDiagnosticExit(state.HelperWaitKnown, state.HelperWait), state.TargetKnown, plannedMemberDiagnosticExit(state.TargetKnown, state.TargetExit), state.Poisoned, refused, initResult.known, plannedMemberDiagnosticError(initResult.known, initResult.err), bindResult.known, plannedMemberDiagnosticError(bindResult.known, bindResult.err), plannedMemberBindContext(bindResult), stopErr)
+	}
 	if !plannedMemberTerminationConfirmed(state, refused, m.current != nil) {
 		return StopReceipt{}, errors.Join(stopErr, ErrStopUnconfirmed)
 	}

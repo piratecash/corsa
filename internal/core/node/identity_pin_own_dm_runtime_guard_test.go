@@ -16,7 +16,7 @@ func ownDMRuntimeSourceErrors(sources map[string][]byte) []string {
 		"node/identity_record_admission_own_dm.go": "80542c362e3abf08da6463869ff1402a19b475754a3f164f2c88d999c35c3ade",
 		"node/identity_pin_own_dm_runtime.go":      "39b178ddcdeb0ee8979a264484dd2f5eea37e3f9a869e9568a768a965a194abb",
 		"node/find_node_ready_construction.go":     "928f01bab660f066126117dee1b756869ad323b493fcdc83a0a53694db53f6c4",
-		"node/service.go":                          "e3e06e151503627256e0da77533d98885e91bf0f8a8cd6a3d178b4cc73f93f58",
+		"node/service.go":                          "abfca881ccc465f4f85c7e1b85eed1f65b91c96267fe1caa74e501dada7083de",
 		"service/desktop.go":                       "86ca0fbe70740c5210d64fd19dda0d5d87f0c7f89a736afab142038bef076735",
 		"sdk/runtime.go":                           "2a3c1184b8c411bdd034933564fa68a0e0131115660adbcef8cb815b9080fd1f",
 	}

@@ -103,6 +103,10 @@ type Service struct {
 	degreeStatisticProducer      *degreeStatisticProducer
 	ownedDegreeStatisticProducer *ownedDegreeStatisticProducer // immutable first-literal binding; start under degree.mu
 
+	// TEST-ONLY: set solely by the closed loopback pilot factory before Run.
+	// Every production constructor leaves false; existing Ready roots stay inactive.
+	ownedFindNodeAdvertiseTest bool
+
 	// selectedPins is immutable after New; its joined worker owns passMu/retry pacing.
 	selectedPins *selectedPinProducer
 	// Immutable producer pointer; its joined worker owns retries, row state stays under trust.mu.

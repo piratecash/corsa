@@ -56,7 +56,7 @@ func TestClosedGateExitsNonZeroAndNamesWhatIsMissing(t *testing.T) {
 	// a condition the output forgets or wrongly lists still does.
 	for _, condition := range committedConditions(t) {
 		named := strings.Contains(stdout.String(), "outstanding condition: "+string(condition.ID)+"\n")
-		outstanding := condition.Status != admission.ConditionDone
+		outstanding := condition.Status != admission.ConditionDone && condition.Status != admission.ConditionDeferred
 		if named != outstanding {
 			t.Errorf("condition %q (status %q): named as outstanding = %t, want %t:\n%s",
 				condition.ID, condition.Status, named, outstanding, stdout.String())
@@ -98,7 +98,7 @@ func openManifestAt(t *testing.T, commit string) string {
 		})
 	}
 	raw, err := json.Marshal(map[string]any{
-		"schema":                      1,
+		"schema":                      2,
 		"activation_protocol_version": config.ProtocolVersionSecureSession,
 		"release_decision":            map[string]any{"number": 70, "date": "2026-11-02", "version": config.CorsaVersion},
 		"conditions":                  conditions,
@@ -146,6 +146,48 @@ func TestOpenGateExitsZero(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "release admitted") {
 		t.Fatalf("stdout does not report the admission:\n%s", stdout.String())
+	}
+}
+
+func TestTorDeferralIsReportedWithoutClaimingSuccessfulMeasurement(t *testing.T) {
+	for _, open := range []bool{false, true} {
+		t.Run(map[bool]string{false: "closed", true: "open"}[open], func(t *testing.T) {
+			path := openManifestAt(t, candidateCommit)
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var doc map[string]any
+			if err = json.Unmarshal(raw, &doc); err != nil {
+				t.Fatal(err)
+			}
+			for _, row := range doc["conditions"].([]any) {
+				c := row.(map[string]any)
+				if c["id"] == "tor_phase_measurement" {
+					c["status"] = "deferred"
+					c["evidence"] = map[string]any{"report": string(admission.TorDeferralDecision), "commit": nil}
+				}
+			}
+			if !open {
+				doc["release_decision"] = nil
+			}
+			raw, err = json.Marshal(doc)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = os.WriteFile(path, raw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			var stdout, stderr bytes.Buffer
+			code := execute(context.Background(), nil, &stdout, &stderr, path, candidateHistory(t, nil))
+			wantCode := 1
+			if open {
+				wantCode = 0
+			}
+			if code != wantCode || !strings.Contains(stdout.String(), "deferred condition: tor_phase_measurement (UNVERIFIED; owner decision 2026-10-23") || strings.Contains(stdout.String(), "every condition is done") || strings.Contains(stdout.String(), "outstanding condition: tor_phase_measurement") {
+				t.Fatalf("deferral misreported: code%d stdout=%s stderr=%s", code, &stdout, &stderr)
+			}
+		})
 	}
 }
 

@@ -158,6 +158,58 @@ func TestOwnedRawF1CompleteMemberAndVisitBounds(t *testing.T) {
 	}
 }
 
+// Registry-only adversarial keys exercise the explicit P0 visit boundary.
+// They mint no F1 members, active-lifetime witnesses, Ready cut or admission.
+func TestOwnedRawP0RegistryVisitBoundaryHasNoPartialCoverage(t *testing.T) {
+	s, _, _ := ownedF1TestService(t)
+	profile := findNodePriorityProfile{MaxMembers: 512, MaxRegistryVisits: 1024}
+	const firstKey domain.ConnID = 9001
+	s.peerMu.Lock()
+	if s.conns == nil || len(s.conns) != 0 {
+		s.peerMu.Unlock()
+		t.Fatal("P0 registry boundary fixture did not start empty")
+	}
+	for i := 0; i <= profile.MaxRegistryVisits; i++ {
+		s.conns[firstKey+domain.ConnID(i)] = nil
+	}
+	count := len(s.conns)
+	s.peerMu.Unlock()
+	t.Cleanup(func() {
+		s.peerMu.Lock()
+		defer s.peerMu.Unlock()
+		for i := 0; i <= profile.MaxRegistryVisits; i++ {
+			delete(s.conns, firstKey+domain.ConnID(i))
+		}
+	})
+	if count != 1025 {
+		t.Fatal("P0 overflow population was not exact", count)
+	}
+	members, err := s.findNodePriorityMembers(t.Context(), profile)
+	if !errors.Is(err, findnode.ErrCapacity) || members.coverage != 0 || members.sessions != nil {
+		t.Fatal("P0 visit overflow returned partial priority coverage", members, err)
+	}
+	facts, err := s.collectOwnedFindNodeRawFacts(t.Context(), profile)
+	ownedRawAssertEmpty(t, facts, err, findnode.ErrCapacity)
+
+	s.peerMu.Lock()
+	delete(s.conns, firstKey+domain.ConnID(profile.MaxRegistryVisits))
+	count = len(s.conns)
+	s.peerMu.Unlock()
+	if count != 1024 {
+		t.Fatal("P0 exact visit population was not exact", count)
+	}
+	members, err = s.findNodePriorityMembers(t.Context(), profile)
+	if err != nil || members.coverage != registeredAcceptedAndCMPostSetup || len(members.sessions) != 0 || cap(members.sessions) != profile.MaxMembers {
+		t.Fatal("P0 exact visits did not complete empty priority traversal", members, err)
+	}
+	facts, err = s.collectOwnedFindNodeRawFacts(t.Context(), profile)
+	if err != nil || len(facts.allOriginal) != 0 || len(facts.classes) != 0 || cap(facts.allOriginal) != profile.MaxMembers || cap(facts.classes) != profile.MaxMembers {
+		t.Fatal("P0 exact visits did not complete empty raw traversal", facts, err)
+	}
+	// Empty eligible output is traversal completeness only, never positive
+	// admission or a bound on live sockets/active lifetimes in deployment.
+}
+
 func TestOwnedRawF1NilCoreListenerAndOriginalTuple(t *testing.T) {
 	s, _, _ := ownedF1TestService(t)
 	d, _, _ := ownedF1TestService(t)

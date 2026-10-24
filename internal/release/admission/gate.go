@@ -147,6 +147,8 @@ type Admission struct {
 	// Outstanding are the required conditions not yet done, in the order
 	// of RequiredConditions.
 	Outstanding []ConditionID
+	// Deferred lists explicitly deferred work separately from successful checks.
+	Deferred []ConditionID
 	// ReleaseDecision is the owner's decision to release, nil if none.
 	ReleaseDecision *OwnerDecision
 }
@@ -155,6 +157,9 @@ type Admission struct {
 // is consulted only once everything else admits the release, to prove the
 // tree is the final candidate plus release inputs; a refusal never needs it.
 func Evaluate(ctx context.Context, req Request, m Manifest, history ReleaseTree) (Admission, error) {
+	if m.Schema != CurrentManifestSchema {
+		return Admission{}, fmt.Errorf("%w: schema %d, this gate reads schema %d", ErrManifestInvalid, m.Schema, CurrentManifestSchema)
+	}
 	build := req.Build
 	if m.ActivationProtocolVersion != build.Activation {
 		return Admission{}, fmt.Errorf("%w: manifest covers activation at protocol %d, the build activates at %d",
@@ -170,6 +175,7 @@ func Evaluate(ctx context.Context, req Request, m Manifest, history ReleaseTree)
 	admission := Admission{
 		SessionV2Active: active,
 		Outstanding:     outstandingConditions(m.Conditions),
+		Deferred:        deferredConditions(m.Conditions),
 		ReleaseDecision: m.ReleaseDecision,
 	}
 	if !active {
@@ -199,7 +205,7 @@ func Evaluate(ctx context.Context, req Request, m Manifest, history ReleaseTree)
 func outstandingConditions(conditions []Condition) []ConditionID {
 	done := make(map[ConditionID]bool, len(conditions))
 	for _, c := range conditions {
-		done[c.ID] = c.Status == ConditionDone
+		done[c.ID] = c.Status == ConditionDone || c.ownerDeferred()
 	}
 	var outstanding []ConditionID
 	for _, id := range requiredConditions {
@@ -208,6 +214,16 @@ func outstandingConditions(conditions []Condition) []ConditionID {
 		}
 	}
 	return outstanding
+}
+
+func deferredConditions(conditions []Condition) []ConditionID {
+	var deferred []ConditionID
+	for _, c := range conditions {
+		if c.ownerDeferred() {
+			deferred = append(deferred, c.ID)
+		}
+	}
+	return deferred
 }
 
 // verifyFinalCandidate requires the released tree to differ from the final

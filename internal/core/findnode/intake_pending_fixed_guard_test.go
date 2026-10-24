@@ -19,8 +19,8 @@ import (
 // package GenDecl changes, including new files. It does not infer dataflow,
 // compiler allocations or actual final-lease provenance from this syntax.
 func pendingFixedSourceErrors(sources map[string][]byte) []string {
-	pins := map[string]string{"owned_bridge_local_target_timing.go": "69356ebd3196f7b042d465cb72eb880ded354cc49ed2e334c3aebb3f179e0a1d", "owned_bridge_bootstrap.go": "2ee7f6b13d859326bbd2fb00e487c9530737a2f722359d762202710d1a1cd827", "owned_resources.go": "7b3347cbe548e78ab4a92ebcf4c857545edd33d81d3a3af39c25a079b3aa036a", "owned_bridge_forward_answer.go": "e95e514c3db17a5a552b6e7fc0cee154c34459b141f568e1f601e7db04c61265", "owned_bridge_local_target.go": "f9a14258ded9e99bb4ef39e88e8f0e52712fd6b66aec32eae7952d56a9aa7812", "owned_bridge_local_target_stage.go": "39fde17cdadd3dfa02bc97ef40f9d21d37f18ca865abde2fed2005e680baa0c3", "owned_bridge_answer.go": "e790d8240c15baab43fde9cc48a72fda8a4c82a8ce52d9f7fa92f8bc972d009a",
-		"owned_bridge_dispatch.go":       "a1fe44fe774f855b4a663b8d3bb767864c6c4b52290a4157a2682d2156414f1b",
+	pins := map[string]string{"owned_bridge_local_target_timing.go": "69356ebd3196f7b042d465cb72eb880ded354cc49ed2e334c3aebb3f179e0a1d", "owned_bridge_bootstrap.go": "2ee7f6b13d859326bbd2fb00e487c9530737a2f722359d762202710d1a1cd827", "owned_resources.go": "7b3347cbe548e78ab4a92ebcf4c857545edd33d81d3a3af39c25a079b3aa036a", "owned_bridge_forward_answer.go": "189a2b6a66e0b582b303f8adb36e24a826125583a4d1b4a0f21782b0870e4f2f", "owned_bridge_local_target.go": "dd2e3eea3ba16ffd60e057afb4c61a46d98a74cd872776e76882a6b0b4835e2d", "owned_bridge_local_target_stage.go": "39fde17cdadd3dfa02bc97ef40f9d21d37f18ca865abde2fed2005e680baa0c3", "owned_bridge_answer.go": "6f0a1c3c7129cfd838d2cd4599ee25e7c2e9eee451e28b1addf970cb5509952e",
+		"owned_bridge_dispatch.go":       "3a6495784029c780e6cca5fa3d439a7d99fd34ddbc54fce5d97a75242d608732",
 		"owned_bridge_round_dispatch.go": "b9128ec6284560aea84441eab2b8619ba08297b66133139af4030a39d4478fcf",
 		"owned_bridge_receive.go":        "5de62b53e6ae476daf7563e4cede1e95ed9e1e7f30fbc4de1e06947bc4144671",
 		"owned_bridge_round_execute.go":  "dedd956801a9a14580f4e22634d3a5eb579ebe22520eb45eedce564209d7eec4",
@@ -30,7 +30,7 @@ func pendingFixedSourceErrors(sources map[string][]byte) []string {
 		"intake_capacity_epoch.go":       "b3b1453ed9a017bbaf1a528e18c55d93bc9c0ac4f1a78428a6b287424ebfb302",
 		"intake_groups.go":               "40311189acc0513c1d1486e445629bc312f5f419dc032cd50358c2f408223734",
 		"intake_membership.go":           "638df96cd6913445c472142abf8635ea21f141d38efd3cd52f3f1b740c396a6f",
-		"intake_owner.go":                "0f413c74384d17db45866461c6bef5e2340f650ee50646eadc6e3d6e3efafe53",
+		"intake_owner.go":                "464c803f0c96ef419752c9965b217ba0d0b74c9ff0469c6b3e08efb2df60fe18",
 		"intake_pending_fixed.go":        "05d24971ea6863543099cb5dbe57e11eb5c0bbd1381012355755590e6aad4ffb",
 		"intake_source_limits.go":        "592bedf2ab49cb7e60622a2d11f3ebd119a1c4f4d5c87cfe128922de83872004",
 		"owned_bridge.go":                "b88656fb08a5dd33b0f2bdb7b9e52f636eb1b320291e1a390c2c9b683a593f57",

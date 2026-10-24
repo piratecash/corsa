@@ -20,6 +20,9 @@ type ownedForwardState struct {
 	request, forwarded protocol.FindNodeRequest
 	phase              atomic.Uint32
 	payload            []byte
+	// Diagnostic only: written/read under owner.coordinator.mu.
+	forwardEndpointNS    int64
+	forwardEndpointKnown bool
 }
 
 const (
@@ -46,6 +49,55 @@ func ownedForwardOriginal(w *ownedForwardState) bool {
 	forwarded := row.request
 	forwarded.ID = r.forwarded
 	return r.reservation == row.reservation && r.target == row.target && w.source == row.source && w.target == row.target && w.request == row.request && w.forwarded == forwarded
+}
+
+// Private historical endpoints of this exact original work, not permission to
+// start/finish/write. ForwardNS is the successful Take SAMPLE, not a timer wake,
+// projected slot, raw Write or delivery. Finish/error/End never turn this a/f
+// pair into a completion claim. No domain/Session/receipt handle escapes.
+type ownedForwardObservationClock uint8
+
+const (
+	ownedForwardObservationClockUnknown ownedForwardObservationClock = iota
+	ownedForwardObservationClockFixture
+	ownedForwardObservationClockRuntime
+)
+
+type ownedForwardEndpointObservation struct {
+	clock                         ownedForwardObservationClock
+	receivedKnown, forwardKnown   bool
+	pairKnown                     bool
+	receivedNS, forwardNS, spanNS int64
+}
+
+func (work OwnedForwardWork) endpointObservation() ownedForwardEndpointObservation {
+	w := work.work
+	if !ownedForwardOriginal(w) {
+		return ownedForwardEndpointObservation{}
+	}
+	o := w.owner.coordinator
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	// The accepted execution plan retains this original immutable ingress.
+	// Matches is immutable provenance only; neither a new Sample nor liveness.
+	r := w.receipt
+	identity := r.execution.plan.rows[r.execution.plan.order[r.ordinal]].receivedIdentity
+	if identity.owner != w.owner || identity.source != w.source || identity.request != w.request || !w.owner.consumer.Matches(identity.stamp, identity.received) {
+		return ownedForwardEndpointObservation{}
+	}
+	out := ownedForwardEndpointObservation{receivedNS: int64(identity.received.Elapsed()), forwardNS: w.forwardEndpointNS}
+	if w.owner.consumer.IsRuntime() {
+		out.clock = ownedForwardObservationClockRuntime
+	} else if w.owner.consumer.IsFixture() {
+		out.clock = ownedForwardObservationClockFixture
+	}
+	out.receivedKnown = out.clock != ownedForwardObservationClockUnknown && out.receivedNS >= 0
+	out.forwardKnown = out.clock != ownedForwardObservationClockUnknown && w.forwardEndpointKnown && out.forwardNS >= 0
+	if out.receivedKnown && out.forwardKnown && out.forwardNS >= out.receivedNS {
+		out.pairKnown = true
+		out.spanNS = out.forwardNS - out.receivedNS
+	}
+	return out
 }
 
 // RouteTarget is immutable routing metadata, never a writer-start permit.
@@ -223,6 +275,8 @@ func (queued OwnedQueuedForward) Take() ([]byte, OwnedWritePermit, error) {
 	o.last = f
 	state.phase = candidateDispatching
 	o.count(&o.counters.taken)
+	state.forwardEndpointNS, state.forwardEndpointKnown = int64(f), true
+	w.forwardEndpointNS, w.forwardEndpointKnown = int64(f), true
 	w.phase.Store(ownedForwardStarted)
 	return w.payload, OwnedWritePermit{work: w}, nil
 }

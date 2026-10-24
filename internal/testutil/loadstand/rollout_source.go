@@ -23,7 +23,15 @@ func parseName[T interface{ String() string }](name string, known []T) (T, error
 	return zero, ErrInvalidSample
 }
 func (s *ProcessSource) ModeSelection(ctx context.Context) (routing.ModeSelectionStats, error) {
-	fields, err := s.familyObject(ctx, "mode_selection", "started_at", "read_at", "decisions")
+	summary, err := s.RouteSummary(ctx)
+	return s.modeSelectionFromSummary(summary, err)
+}
+
+func (s *ProcessSource) modeSelectionFromSummary(summary map[string]json.RawMessage, summaryErr error) (routing.ModeSelectionStats, error) {
+	if summaryErr != nil {
+		return routing.ModeSelectionStats{}, summaryErr
+	}
+	fields, err := familyObjectFromSummary(summary, "mode_selection", "started_at", "read_at", "decisions")
 	if err != nil {
 		return routing.ModeSelectionStats{}, err
 	}
@@ -94,7 +102,15 @@ func decodeModeDecision(raw json.RawMessage) (routing.ModeDecision, error) {
 	return routing.ModeDecision{Operation: operation, Mode: mode, Reason: reason, Count: count}, nil
 }
 func (s *ProcessSource) Neighbours(ctx context.Context) (domain.NeighbourComposition, error) {
-	fields, err := s.familyObject(ctx, "neighbours", "ready", "updated_at", "connections", "peers", "identity_unproven", "identity_unknown", "capabilities", "routing_v3_triplet")
+	summary, err := s.RouteSummary(ctx)
+	return s.neighboursFromSummary(summary, err)
+}
+
+func (s *ProcessSource) neighboursFromSummary(summary map[string]json.RawMessage, summaryErr error) (domain.NeighbourComposition, error) {
+	if summaryErr != nil {
+		return domain.NeighbourComposition{}, summaryErr
+	}
+	fields, err := familyObjectFromSummary(summary, "neighbours", "ready", "updated_at", "connections", "peers", "identity_unproven", "identity_unknown", "capabilities", "routing_v3_triplet")
 	if err != nil {
 		return domain.NeighbourComposition{}, err
 	}

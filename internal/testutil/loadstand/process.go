@@ -202,40 +202,130 @@ func hashLaunchFile(path string) (string, error) {
 	}
 	return hex.EncodeToString(digest.Sum(nil)), nil
 }
-func (p *Process) awaitReady(ctx context.Context, listener bool, address domain.ListenAddress, expected *domain.PeerIdentity) error {
+
+// Optional per-call diagnostics retain source-specific observations and their
+// poll ordinals. They are not a coherent cross-source snapshot or authority.
+// Error values are formatted by the caller after all original operations return.
+type processReadinessFailure struct {
+	known bool
+	poll  uint64
+	phase string
+	err   error
+}
+
+type processReadinessDiagnostic struct {
+	stage, terminal, listenerPhase                                    string
+	poll, statusPoll, banPoll, listenerPoll                           uint64
+	statusKnown, statusOK, banKnown, banOK, listenerKnown, listenerOK bool
+	statusErr, banErr, listenerErr                                    error
+	statusFailure, banFailure, listenerFailure                        processReadinessFailure
+}
+
+// Preserve one historical non-context failure per source even if a later
+// outcome succeeds or reports the terminal context. No poll history is kept.
+func retainProcessReadinessFailure(dst *processReadinessFailure, poll uint64, phase string, err error) {
+	if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+		*dst = processReadinessFailure{known: true, poll: poll, phase: phase, err: err}
+	}
+}
+
+func (p *Process) awaitReady(ctx context.Context, listener bool, address domain.ListenAddress, expected *domain.PeerIdentity, diagnostics ...*processReadinessDiagnostic) error {
+	var diagnostic *processReadinessDiagnostic
+	if len(diagnostics) != 0 {
+		diagnostic = diagnostics[0]
+	}
+	if diagnostic != nil {
+		*diagnostic = processReadinessDiagnostic{}
+	}
 	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()
 	for {
+		if diagnostic != nil {
+			diagnostic.poll++
+			diagnostic.stage = "status"
+		}
 		status, err := NewProcessSource(p.rpc).Status(ctx)
+		if diagnostic != nil {
+			diagnostic.statusKnown, diagnostic.statusOK, diagnostic.statusErr = true, err == nil, err
+			diagnostic.statusPoll = diagnostic.poll
+			retainProcessReadinessFailure(&diagnostic.statusFailure, diagnostic.poll, "status", err)
+		}
 		if err == nil {
 			actual, parseErr := domain.ParsePeerIdentity(status.Address)
 			if parseErr != nil || actual.IsZero() {
+				if diagnostic != nil {
+					diagnostic.stage, diagnostic.terminal = "identity", "invalid"
+				}
 				return ErrInvalidSample
 			}
 			if expected != nil && actual != *expected {
+				if diagnostic != nil {
+					diagnostic.stage, diagnostic.terminal = "expected-identity", "invalid"
+				}
 				return fmt.Errorf("%w: restarted identity changed", ErrInvalidSample)
 			}
 			_, banErr := NewProcessSource(p.rpc).BanObservation(ctx)
-			if banErr == nil && (!listener || loopbackListenerReady(ctx, address)) {
-				return nil
+			if diagnostic != nil {
+				diagnostic.stage = "ban"
+				diagnostic.banKnown, diagnostic.banOK, diagnostic.banErr = true, banErr == nil, banErr
+				diagnostic.banPoll = diagnostic.poll
+				retainProcessReadinessFailure(&diagnostic.banFailure, diagnostic.poll, "ban", banErr)
+			}
+			if banErr == nil {
+				if !listener {
+					if diagnostic != nil {
+						diagnostic.terminal = "ready"
+					}
+					return nil
+				}
+				listenerOK := loopbackListenerReady(ctx, address, diagnostic)
+				if diagnostic != nil {
+					diagnostic.stage = "listener"
+					diagnostic.listenerKnown, diagnostic.listenerOK = true, listenerOK
+					diagnostic.listenerPoll = diagnostic.poll
+					retainProcessReadinessFailure(&diagnostic.listenerFailure, diagnostic.poll, diagnostic.listenerPhase, diagnostic.listenerErr)
+				}
+				if listenerOK {
+					if diagnostic != nil {
+						diagnostic.terminal = "ready"
+					}
+					return nil
+				}
 			}
 		}
 		select {
 		case <-p.done:
+			if diagnostic != nil {
+				diagnostic.terminal = "child-exit"
+			}
 			return errors.Join(errors.New("child exited before readiness"), p.waitError())
 		case <-ctx.Done():
+			if diagnostic != nil {
+				diagnostic.terminal = "context"
+			}
 			return ctx.Err()
 		case <-ticker.C:
 		}
 	}
 }
-func loopbackListenerReady(ctx context.Context, address domain.ListenAddress) bool {
+func loopbackListenerReady(ctx context.Context, address domain.ListenAddress, diagnostics ...*processReadinessDiagnostic) bool {
+	var diagnostic *processReadinessDiagnostic
+	if len(diagnostics) != 0 {
+		diagnostic = diagnostics[0]
+	}
 	dialer := net.Dialer{Timeout: 100 * time.Millisecond}
 	conn, err := dialer.DialContext(ctx, "tcp", string(address))
 	if err != nil {
+		if diagnostic != nil {
+			diagnostic.listenerPhase, diagnostic.listenerErr = "dial", err
+		}
 		return false
 	}
-	return conn.Close() == nil
+	err = conn.Close()
+	if diagnostic != nil {
+		diagnostic.listenerPhase, diagnostic.listenerErr = "close", err
+	}
+	return err == nil
 }
 func (p *Process) Stop(ctx context.Context) error {
 	p.rpc.Close()

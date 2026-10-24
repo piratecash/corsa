@@ -118,11 +118,7 @@ func (s *ProcessSource) commandObject(ctx context.Context, command string, requi
 	}
 	return object(raw, required...)
 }
-func (s *ProcessSource) familyObject(ctx context.Context, name string, required ...string) (map[string]json.RawMessage, error) {
-	fields, err := s.RouteSummary(ctx)
-	if err != nil {
-		return nil, err
-	}
+func familyObjectFromSummary(fields map[string]json.RawMessage, name string, required ...string) (map[string]json.RawMessage, error) {
 	raw, ok := fields[name]
 	if !ok || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
 		return nil, ErrFamilyUnavailable

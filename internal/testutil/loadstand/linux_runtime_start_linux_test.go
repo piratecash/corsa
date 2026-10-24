@@ -341,6 +341,7 @@ func linuxRuntimeAuthorityExpected() map[linuxRuntimeAuthoritySite]int {
 		{"linux_member_rpc_linux.go", "*linuxFullMember.GlobalReplica", "call", "m.fixture.RPC()"}:                                                                                                                 1,
 		{"linux_member_rpc_linux.go", "*linuxFullMember.GlobalReplica", "call", "NewProcessSource(m.fixture.RPC())"}:                                                                                               1,
 		{"planned_child_config.go", "copyPlannedChild", "reference", "c.RPC"}:                                                                                                                                      2,
+		{"fullnode/main.go", "run", "call", "fullwitness.RegisterPlannedFullPublicIdentity(table, public)"}:                                                                                                        1,
 		{"fullnode/main.go", "run", "reference", "child.RPC"}:                                                                                                                                                      1,
 		{"fullnode/main.go", "run", "reference", "config.RPC"}:                                                                                                                                                     1,
 		{"planned_network_nft_linux.go", "linuxPlannedNFT.runTracked", "call", "command.Start()"}:                                                                                                                  1,
@@ -384,16 +385,17 @@ func linuxRuntimeAuthorityExpected() map[linuxRuntimeAuthoritySite]int {
 		{"linux_runtime_start_linux.go", "*LinuxFixture.ObserveOwnedRuntime", "call", "ctx.Done()"}:                                                                                                                2,
 		{"linux_runtime_start_linux.go", "*LinuxFixture.observeOnWorkOwner", "call", "exchange.ctx.Done()"}:                                                                                                        1,
 		{"linux_runtime_start_linux.go", "*linuxHelperRuntime.observeOriginalRuntime", "call", "r.process.Done()"}:                                                                                                 2,
-		{"linux_runtime_start_linux.go", "*linuxHelperRuntime.observeOriginalRuntime", "reference", "r.process"}:                                                                                                   4,
+		{"linux_runtime_start_linux.go", "*linuxHelperRuntime.observeOriginalRuntime", "reference", "r.process"}:                                                                                                   5,
 		{"linux_runtime_start_linux.go", "*linuxHelperRuntime.observeOriginalRuntime", "call", "NewProcessSource(r.process.RPC())"}:                                                                                1,
-		{"linux_runtime_start_linux.go", "*linuxHelperRuntime.observeOriginalRuntime", "call", "r.process.RPC()"}:                                                                                                  2,
+		{"linux_runtime_start_linux.go", "*linuxHelperRuntime.observeOriginalRuntime", "call", "r.process.RPC()"}:                                                                                                  3,
 		{"linux_runtime_start_linux.go", "*linuxHelperRuntime.observeOriginalRuntime", "call", "source.Status(ctx)"}:                                                                                               2,
 		{"linux_runtime_start_linux.go", "*linuxHelperRuntime.observeOriginalRuntime", "call", `r.process.RPC().Call(ctx, "fetchContacts", nil, &contacts)`}:                                                       1,
+		{"linux_runtime_start_linux.go", "*linuxHelperRuntime.observeOriginalRuntime", "call", `r.process.RPC().Call(ctx, "loadstandFullPublicIdentity", nil, &witness)`}:                                          1,
 	}
 }
 func linuxRuntimeAuthorityName(name string) bool {
 	switch name {
-	case "newLinuxFixtureResources", "CreateLinuxFixture", "CreateOwnedNetNS", "RunLinuxHelper", "NewRPCClient", "RPCClient", "NewProcessSource", "NewProcessSourceWithClock", "NewBoundProcessSource", "ObserveOwnedRuntime", "readRuntimeReply", "readRuntimeObservation", "publishRuntimeObservation", "Wait", "Start", "CompletedStart", "FinalAccounting", "RPC", "claimed":
+	case "RegisterPlannedFullPublicIdentity", "newLinuxFixtureResources", "CreateLinuxFixture", "CreateOwnedNetNS", "RunLinuxHelper", "NewRPCClient", "RPCClient", "NewProcessSource", "NewProcessSourceWithClock", "NewBoundProcessSource", "ObserveOwnedRuntime", "readRuntimeReply", "readRuntimeObservation", "publishRuntimeObservation", "Wait", "Start", "CompletedStart", "FinalAccounting", "RPC", "claimed":
 		return true
 	}
 	return false

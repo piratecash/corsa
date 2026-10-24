@@ -190,9 +190,16 @@ func canonicalLinuxBase64(value string, size int, encoding *base64.Encoding) boo
 func validLinuxRuntimePublic(p PublicIdentity) bool {
 	return !p.Identity.IsZero() && canonicalLinuxBase64(p.PublicKey, ed25519.PublicKeySize, base64.StdEncoding) && canonicalLinuxBase64(p.BoxPublicKey, 32, base64.StdEncoding) && canonicalLinuxBase64(p.BoxSignature, ed25519.SignatureSize, base64.RawURLEncoding) && identity.VerifyPublicKeyFingerprint(p.Identity.String(), p.PublicKey) == nil && identity.VerifyBoxKeyBinding(p.Identity.String(), p.PublicKey, p.BoxPublicKey, p.BoxSignature) == nil
 }
-func linuxRuntimePublic(before, after domain.NodeStatus, contacts []protocol.ContactFrame) (PublicIdentity, error) {
+func linuxRuntimePublic(before, after domain.NodeStatus, contacts []protocol.ContactFrame, diagnostics ...*linuxBindRuntimeDiagnostic) (PublicIdentity, error) {
+	var diagnostic *linuxBindRuntimeDiagnostic
+	if len(diagnostics) != 0 {
+		diagnostic = diagnostics[0]
+	}
 	id, err := domain.ParsePeerIdentity(before.Identity)
 	if err != nil || id.IsZero() || before.Address != before.Identity || before.StartedAt.IsZero() || before.Identity != after.Identity || before.Address != after.Address || before.PublicKey != after.PublicKey || before.BoxPublicKey != after.BoxPublicKey || !before.StartedAt.Equal(after.StartedAt) {
+		if diagnostic != nil {
+			diagnostic.detail, diagnostic.err = "public-status-pair", ErrProcessObservation
+		}
 		return PublicIdentity{}, ErrProcessObservation
 	}
 	var found PublicIdentity
@@ -203,35 +210,98 @@ func linuxRuntimePublic(before, after domain.NodeStatus, contacts []protocol.Con
 		}
 		count++
 		if row.PubKey != before.PublicKey || row.BoxKey != before.BoxPublicKey {
+			if diagnostic != nil {
+				diagnostic.detail, diagnostic.err = "public-contact-keys", ErrProcessObservation
+			}
 			return PublicIdentity{}, ErrProcessObservation
 		}
 		found = PublicIdentity{Identity: id, PublicKey: row.PubKey, BoxPublicKey: row.BoxKey, BoxSignature: row.BoxSig}
 	}
 	if count != 1 || !validLinuxRuntimePublic(found) {
+		if diagnostic != nil {
+			diagnostic.detail, diagnostic.err = "public-self-count-or-proof", ErrProcessObservation
+		}
 		return PublicIdentity{}, ErrProcessObservation
 	}
 	return found, nil
 }
 
+// Full fixtures deliberately omit their box binding from the contact plane.
+// Only the fixed, trusted Full role may use its fixture-local signed witness.
+// It must agree with both existing status snapshots and one signing-only self
+// contact. This is scoped RPC testimony, not PID/boot/launch attestation.
+func linuxRuntimeFullPublic(role MemberRole, before, after domain.NodeStatus, contacts []protocol.ContactFrame, witness PublicIdentity, diagnostics ...*linuxBindRuntimeDiagnostic) (PublicIdentity, error) {
+	var diagnostic *linuxBindRuntimeDiagnostic
+	if len(diagnostics) != 0 {
+		diagnostic = diagnostics[0]
+	}
+	refuse := func(detail string) (PublicIdentity, error) {
+		if diagnostic != nil {
+			diagnostic.detail, diagnostic.err = detail, ErrProcessObservation
+		}
+		return PublicIdentity{}, ErrProcessObservation
+	}
+	if role != MemberFull {
+		return refuse("full-witness-role")
+	}
+	id, err := domain.ParsePeerIdentity(before.Identity)
+	if err != nil || id.IsZero() || before.Address != before.Identity || before.StartedAt.IsZero() || before.Identity != after.Identity || before.Address != after.Address || before.PublicKey != after.PublicKey || before.BoxPublicKey != after.BoxPublicKey || !before.StartedAt.Equal(after.StartedAt) {
+		return refuse("full-witness-status-pair")
+	}
+	if witness.Identity != id || witness.PublicKey != before.PublicKey || witness.BoxPublicKey != before.BoxPublicKey || !validLinuxRuntimePublic(witness) {
+		return refuse("full-witness-public-proof")
+	}
+	count := 0
+	for _, row := range contacts {
+		if row.Address != before.Address {
+			continue
+		}
+		count++
+		if row.PubKey != before.PublicKey || row.BoxKey != "" || row.BoxSig != "" {
+			return refuse("full-witness-self-contact")
+		}
+	}
+	if count != 1 {
+		return refuse("full-witness-self-count")
+	}
+	return witness, nil
+}
+
 // readTargetRuntimeNS uses only the original pinned sampler directory. It
 // intentionally follows proc's ns/net magic link, then validates the NS FD.
-func (r *linuxHelperRuntime) readTargetRuntimeNS(ctx context.Context) (value linuxRuntimeNamespace, resultErr error) {
+func (r *linuxHelperRuntime) readTargetRuntimeNS(ctx context.Context, diagnostics ...*linuxBindRuntimeDiagnostic) (value linuxRuntimeNamespace, resultErr error) {
+	var diagnostic *linuxBindRuntimeDiagnostic
+	if len(diagnostics) != 0 {
+		diagnostic = diagnostics[0]
+	}
 	s := r.sampler
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.state != processSamplerOpen {
+		if diagnostic != nil {
+			diagnostic.detail, diagnostic.err = "ns-sampler-state", ErrProcessObservation
+		}
 		return value, ErrProcessObservation
 	}
 	before, _, err := readProcessIdentity(ctx, s.directory, s.expected.Incarnation.PID, s.expected.UID)
 	if err != nil || before.ID != s.expected.Incarnation {
+		if diagnostic != nil {
+			diagnostic.detail, diagnostic.err = "ns-process-before", err
+		}
 		return value, ErrProcessObservation
 	}
 	fd, err := unix.Openat(s.directory, "ns/net", unix.O_RDONLY|unix.O_CLOEXEC, 0)
 	if err != nil {
+		if diagnostic != nil {
+			diagnostic.detail, diagnostic.err = "ns-open", err
+		}
 		return value, ErrProcessObservation
 	}
 	defer func() {
-		if unix.Close(fd) != nil {
+		if err := unix.Close(fd); err != nil {
+			if diagnostic != nil {
+				diagnostic.detail, diagnostic.err = "ns-close", err
+			}
 			value = linuxRuntimeNamespace{}
 			resultErr = ErrProcessObservation
 		}
@@ -239,57 +309,138 @@ func (r *linuxHelperRuntime) readTargetRuntimeNS(ctx context.Context) (value lin
 	ns, err := namespaceIdentity(fd)
 	after, _, afterErr := readProcessIdentity(ctx, s.directory, s.expected.Incarnation.PID, s.expected.UID)
 	if err != nil || afterErr != nil || before.ID != after.ID || ns.device != r.init.NSDevice || ns.inode != r.init.NSInode {
+		if diagnostic != nil {
+			switch {
+			case err != nil:
+				diagnostic.detail, diagnostic.err = "ns-stat", err
+			case afterErr != nil:
+				diagnostic.detail, diagnostic.err = "ns-process-after", afterErr
+			case before.ID != after.ID:
+				diagnostic.detail, diagnostic.err = "ns-process-changed", ErrProcessObservation
+			default:
+				diagnostic.detail, diagnostic.err = "ns-identity", ErrProcessObservation
+			}
+		}
 		return value, ErrProcessObservation
 	}
 	return linuxRuntimeNamespace{Device: ns.device, Inode: ns.inode}, nil
 }
-func (r *linuxHelperRuntime) observeOriginalRuntime(ctx context.Context) (linuxRuntimeFacts, error) {
+func (r *linuxHelperRuntime) observeOriginalRuntime(ctx context.Context, diagnostics ...*linuxBindRuntimeDiagnostic) (linuxRuntimeFacts, error) {
+	var diagnostic *linuxBindRuntimeDiagnostic
+	if len(diagnostics) != 0 {
+		diagnostic = diagnostics[0]
+	}
 	var empty linuxRuntimeFacts
 	select {
 	case <-r.process.Done():
+		if diagnostic != nil {
+			diagnostic.stage, diagnostic.err = "process-before", ErrProcessObservation
+		}
 		return empty, ErrProcessObservation
 	default:
 	}
 	before, err := r.sampler.Sample(ctx)
 	if err != nil {
+		if diagnostic != nil {
+			diagnostic.stage, diagnostic.err = "sampler-before", err
+		}
 		return empty, ErrProcessObservation
 	}
-	ns, err := r.readTargetRuntimeNS(ctx)
+	if diagnostic != nil {
+		diagnostic.stage, diagnostic.detail = "namespace-before", ""
+	}
+	ns, err := r.readTargetRuntimeNS(ctx, diagnostic)
 	if err != nil {
 		return empty, ErrProcessObservation
 	}
 	source := NewProcessSource(r.process.RPC())
 	first, err := source.Status(ctx)
 	if err != nil {
+		if diagnostic != nil {
+			diagnostic.stage, diagnostic.detail, diagnostic.err = "status1", "", err
+		}
 		return empty, ErrProcessObservation
 	}
 	var contacts protocol.Frame
 	if err = r.process.RPC().Call(ctx, "fetchContacts", nil, &contacts); err != nil {
+		if diagnostic != nil {
+			diagnostic.stage, diagnostic.detail, diagnostic.err = "contacts", "", err
+		}
 		return empty, ErrProcessObservation
+	}
+	// Role comes from the already validated, fixed planned init, never the
+	// witness response or a failed contact lookup. SDK uses its original path.
+	fullWitness := r.init.Planned != nil && r.init.Planned.Plan.Role == MemberFull
+	var witness PublicIdentity
+	if fullWitness {
+		if err = r.process.RPC().Call(ctx, "loadstandFullPublicIdentity", nil, &witness); err != nil {
+			if diagnostic != nil {
+				diagnostic.stage, diagnostic.detail, diagnostic.err = "full-witness", "rpc", err
+			}
+			return empty, ErrProcessObservation
+		}
 	}
 	last, err := source.Status(ctx)
 	if err != nil {
+		if diagnostic != nil {
+			diagnostic.stage, diagnostic.detail, diagnostic.err = "status2", "", err
+		}
 		return empty, ErrProcessObservation
 	}
-	public, err := linuxRuntimePublic(first, last, contacts.Contacts)
+	if diagnostic != nil {
+		diagnostic.stage, diagnostic.detail = "public", ""
+	}
+	var public PublicIdentity
+	if fullWitness {
+		public, err = linuxRuntimeFullPublic(r.init.Planned.Plan.Role, first, last, contacts.Contacts, witness, diagnostic)
+	} else {
+		public, err = linuxRuntimePublic(first, last, contacts.Contacts, diagnostic)
+	}
 	if err != nil {
 		return empty, err
 	}
-	afterNS, err := r.readTargetRuntimeNS(ctx)
+	if diagnostic != nil {
+		diagnostic.stage, diagnostic.detail = "namespace-after", ""
+	}
+	afterNS, err := r.readTargetRuntimeNS(ctx, diagnostic)
 	if err != nil || ns != afterNS {
+		if diagnostic != nil && err == nil {
+			diagnostic.detail, diagnostic.err = "ns-changed", ErrProcessObservation
+		}
 		return empty, ErrProcessObservation
 	}
 	after, err := r.sampler.Sample(ctx)
-	if err != nil || before.Provenance != after.Provenance || ctx.Err() != nil {
+	if err != nil {
+		if diagnostic != nil {
+			diagnostic.stage, diagnostic.detail, diagnostic.err = "sampler-after", "", err
+		}
+		return empty, ErrProcessObservation
+	}
+	if before.Provenance != after.Provenance {
+		if diagnostic != nil {
+			diagnostic.stage, diagnostic.detail, diagnostic.err = "provenance-changed", "", ErrProcessObservation
+		}
+		return empty, ErrProcessObservation
+	}
+	if err := ctx.Err(); err != nil {
+		if diagnostic != nil {
+			diagnostic.stage, diagnostic.detail, diagnostic.err = "context-after", "", err
+		}
 		return empty, ErrProcessObservation
 	}
 	select {
 	case <-r.process.Done():
+		if diagnostic != nil {
+			diagnostic.stage, diagnostic.detail, diagnostic.err = "process-after", "", ErrProcessObservation
+		}
 		return empty, ErrProcessObservation
 	default:
 	}
 	facts := linuxRuntimeFacts{Provenance: after.Provenance, Namespace: ns, Public: public, StartedAt: first.StartedAt.UTC(), BeganAt: before.ReadStartedAt.UTC(), EndedAt: after.ReadCompletedAt.UTC()}
 	if !validLinuxRuntimeFacts(facts) {
+		if diagnostic != nil {
+			diagnostic.stage, diagnostic.detail, diagnostic.err = "facts", "", ErrProcessObservation
+		}
 		return empty, ErrProcessObservation
 	}
 	return facts, nil

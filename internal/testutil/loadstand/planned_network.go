@@ -3,6 +3,7 @@ package loadstand
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/netip"
 )
 
@@ -176,27 +177,42 @@ func cleanPlannedNetwork(i plannedNetworkInventory) bool {
 func newPlannedNetwork(ctx context.Context, p plannedNetworkPlan, backend plannedNetworkBackend) (*plannedNetwork, error) {
 	p, err := copyPlannedNetwork(p)
 	if err != nil || backend == nil {
-		return nil, errPlannedNetwork
+		return nil, plannedNetworkPhaseError("construct-validate-plan-or-backend", errPlannedNetwork)
 	}
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil, plannedNetworkPhaseError("construct-context", err)
 	}
 	i, err := backend.inspect(ctx)
 	if err != nil || !cleanPlannedNetwork(i) {
-		return nil, errors.Join(errPlannedNetwork, err)
+		return nil, plannedNetworkInventoryFailure("construct-inspect", i, errors.Join(errPlannedNetwork, err))
 	}
 	return &plannedNetwork{plan: p, backend: backend}, nil
 }
+
+// Private diagnostic overlay: preserves every original error identity and nil result.
+func plannedNetworkPhaseError(stage string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("planned-network stage=%s: %w", stage, err)
+}
+func plannedNetworkInventoryFailure(stage string, inventory plannedNetworkInventory, err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("planned-network stage=%s network_none=%t capabilities_ok=%t devices_ok=%t links=%d routes=%d: %w", stage, inventory.networkNone, inventory.noForbiddenCapabilities, inventory.noBlockDevices, len(inventory.links), len(inventory.routes), err)
+}
+
 func (n *plannedNetwork) setup(ctx context.Context) error {
 	if n == nil || n.backend == nil || n.closed || n.ready || n.attempted || len(n.owned) != 0 {
-		return errPlannedNetwork
+		return plannedNetworkPhaseError("setup-owner-state", errPlannedNetwork)
 	}
 	n.attempted = true
 	// Repeat preflight immediately before the first mutation. No constructor
 	// snapshot can authorize a changed host or foreign colliding resources.
 	i, err := n.backend.inspect(ctx)
 	if err != nil || !cleanPlannedNetwork(i) {
-		return errors.Join(errPlannedNetwork, err)
+		return plannedNetworkInventoryFailure("setup-inspect", i, errors.Join(errPlannedNetwork, err))
 	}
 	operations := []plannedNetworkOperation{{kind: plannedBridge, plan: n.plan}}
 	for _, m := range n.plan.members {
@@ -210,26 +226,29 @@ func (n *plannedNetwork) setup(ctx context.Context) error {
 			return err
 		}
 		handle, applyErr := n.backend.apply(ctx, op)
+		if applyErr != nil {
+			applyErr = fmt.Errorf("planned-network stage=setup-apply kind=%d member=%s: %w", op.kind, op.member.id, applyErr)
+		}
 		creates := op.kind == plannedBridge || op.kind == plannedNamespace || op.kind == plannedVeth || op.kind == plannedFirewall
 		if !handle.empty() {
 			if !creates || !handle.matchesOperation(op) {
-				return errors.Join(errPlannedNetwork, applyErr)
+				return plannedNetworkPhaseError(fmt.Sprintf("setup-handle-mismatch kind=%d member=%s", op.kind, op.member.id), errors.Join(errPlannedNetwork, applyErr))
 			}
 			for _, prior := range n.owned {
 				if prior == handle {
-					return errors.Join(errPlannedNetwork, applyErr)
+					return plannedNetworkPhaseError(fmt.Sprintf("setup-handle-duplicate kind=%d member=%s", op.kind, op.member.id), errors.Join(errPlannedNetwork, applyErr))
 				}
 			}
 			n.owned = append(n.owned, handle)
 		} else if creates && applyErr == nil {
-			return errPlannedNetwork
+			return plannedNetworkPhaseError(fmt.Sprintf("setup-handle-missing kind=%d member=%s", op.kind, op.member.id), errPlannedNetwork)
 		}
 		if applyErr != nil {
 			return applyErr
 		}
 	}
 	if err := n.backend.verify(ctx, n.plan); err != nil {
-		return err
+		return plannedNetworkPhaseError("setup-verify", err)
 	}
 	n.ready = true
 	return nil
@@ -240,7 +259,7 @@ func (n *plannedNetwork) setup(ctx context.Context) error {
 // No automatic rollback uses a cancelled setup context or touches other runs.
 func (n *plannedNetwork) close(ctx context.Context) error {
 	if n == nil || n.backend == nil {
-		return errPlannedNetwork
+		return plannedNetworkPhaseError("close-owner-state", errPlannedNetwork)
 	}
 	n.ready = false
 	for len(n.owned) != 0 {
@@ -250,18 +269,18 @@ func (n *plannedNetwork) close(ctx context.Context) error {
 		i := len(n.owned) - 1
 		handle := n.owned[i]
 		if !handle.belongs(n.plan) {
-			return errPlannedNetwork
+			return plannedNetworkPhaseError("close-handle-foreign", errPlannedNetwork)
 		}
 		// remove must recheck exact kernel identity+nonce/alias. A replacement
 		// at the same name is foreign; on refusal retain ownership for diagnosis.
 		if err := n.backend.remove(ctx, handle); err != nil {
-			return err
+			return plannedNetworkPhaseError(fmt.Sprintf("close-remove kind=%d name=%s", handle.kind, handle.name), err)
 		}
 		n.owned = n.owned[:i]
 	}
 	if release, ok := n.backend.(interface{ release() error }); ok {
 		if err := release.release(); err != nil {
-			return err
+			return plannedNetworkPhaseError("close-backend-release", err)
 		}
 	}
 	n.closed = true

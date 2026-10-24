@@ -114,7 +114,8 @@ func (s *Service) localDatagramAdvertise() datagramAdvertise {
 }
 
 // localHandshakeCapabilityNames is the COMPLETE raw capability set this node
-// puts on the wire: the role names localCapabilities builds, and nothing else.
+// puts on the wire: ordinary Services use only localCapabilities role names.
+// The closed small2 test selection adds its one explicit authenticated name.
 //
 // There used to be a second half — the PROFILE capabilities a registry honoured
 // at that instant — and it went with the registry. A stateless forwarder
@@ -136,6 +137,11 @@ func (s *Service) localHandshakeCapabilityNames() []domain.CapabilityName {
 	names := make([]domain.CapabilityName, 0, len(roles))
 	for _, capability := range roles {
 		names = append(names, domain.CapabilityName(capability))
+	}
+	// The test-only per-Service selection precedes the ORIGINAL authenticated
+	// hello/welcome; no ordinary or existing Ready constructor enables it.
+	if s.ownedFindNodeAdvertiseTest {
+		names = append(names, domain.CapabilityName(domain.CapOverlayFindNodeV1))
 	}
 	return names
 }

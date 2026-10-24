@@ -40,6 +40,9 @@ type candidatePending struct {
 	source            candidateSourceRef
 	ownedReceived     *ownedReceivedState
 	ownedIdentity     ownedReceivedIdentity
+	// Passive scalar copy of genuine owned Forward.Take; no work/graph link.
+	forwardEndpointNS    int64
+	forwardEndpointKnown bool
 }
 type candidateReservation struct {
 	owner      *intakeCoordinator
