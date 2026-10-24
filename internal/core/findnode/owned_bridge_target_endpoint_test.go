@@ -24,7 +24,7 @@ func TestOwnedTargetOriginalReceiveCompleteReadout(t *testing.T) {
 		result := f.reserve(t, f.sources[0], 11, 1)
 		targetEndpointReadoutCleanup(t, result.Work)
 		got := result.Work.TargetEndpointObservation()
-		if got.Clock != OwnedTargetEndpointClockFixture || !got.ReceivedKnown || got.ReceivedNS != 0 || got.CompleteKnown || got.PairKnown {
+		if got.Clock != OwnedTargetEndpointClockFixture || !got.ReceivedKnown || got.ReceivedNS != 0 || got.TakeKnown || got.TakeNS != 0 || got.CompleteKnown || got.PairKnown {
 			t.Fatal("original known-zero r lost or c fabricated before Take", got)
 		}
 	})
@@ -40,7 +40,7 @@ func TestOwnedTargetOriginalReceiveCompleteReadout(t *testing.T) {
 		}
 		targetEndpointReadoutCleanup(t, result.Work)
 		before := result.Work.TargetEndpointObservation()
-		if !before.ReceivedKnown || before.ReceivedNS != int64(original.received.Elapsed()) || before.ReceivedNS == f.clock.Load() || before.RequestID != uint64(original.request.ID) || before.TargetIdentity != original.request.Target || before.Challenge != original.request.Challenge || before.SourceConnID != uint64(original.source.state.connID) || before.SourceOpenedNS != int64(original.source.state.opened) || before.SourceIdentity != original.source.state.identity || before.CompleteKnown || before.PairKnown {
+		if !before.ReceivedKnown || before.ReceivedNS != int64(original.received.Elapsed()) || before.ReceivedNS == f.clock.Load() || before.RequestID != uint64(original.request.ID) || before.TargetIdentity != original.request.Target || before.Challenge != original.request.Challenge || before.SourceConnID != uint64(original.source.state.connID) || before.SourceOpenedNS != int64(original.source.state.opened) || before.SourceIdentity != original.source.state.identity || before.TakeKnown || before.TakeNS != 0 || before.CompleteKnown || before.PairKnown {
 			t.Fatal("target r/tuple refreshed or rebound at admission", before)
 		}
 		f.clock.Store(int64(100 * time.Millisecond))
@@ -53,6 +53,10 @@ func TestOwnedTargetOriginalReceiveCompleteReadout(t *testing.T) {
 				t.Error("mandatory original Complete", err)
 			}
 		}()
+		taken := result.Work.TargetEndpointObservation()
+		if !taken.TakeKnown || taken.TakeNS != int64(100*time.Millisecond) || taken.ReceivedNS != before.ReceivedNS || taken.CompleteKnown || taken.PairKnown {
+			t.Fatal("successful original Take lost its own Sample", before, taken)
+		}
 		signature := targetOwnerSignature(t, f.key, input)
 		f.clock.Store(int64(850 * time.Millisecond))
 		answers, err := permit.Complete(&signature)
@@ -61,11 +65,12 @@ func TestOwnedTargetOriginalReceiveCompleteReadout(t *testing.T) {
 		}
 		got := result.Work.TargetEndpointObservation()
 		old := result.Work.timingObservation()
-		if got.Clock != OwnedTargetEndpointClockFixture || !got.PairKnown || !got.CompleteKnown || got.ReceivedNS != before.ReceivedNS || got.CompleteNS != old.completeNS || got.SpanNS != got.CompleteNS-got.ReceivedNS || got.SpanNS == old.spanNS || old.takeNS != int64(100*time.Millisecond) || old.spanNS != int64(750*time.Millisecond) || !old.observedReserveExceeded {
+		if got.Clock != OwnedTargetEndpointClockFixture || !got.PairKnown || !got.CompleteKnown || !got.TakeKnown || got.TakeNS != taken.TakeNS || got.TakeNS < got.ReceivedNS || got.CompleteNS < got.TakeNS || got.ReceivedNS != before.ReceivedNS || got.CompleteNS != old.completeNS || got.SpanNS != got.CompleteNS-got.ReceivedNS || got.SpanNS == got.CompleteNS-got.TakeNS || got.CompleteNS-got.TakeNS != old.spanNS || old.takeNS != int64(100*time.Millisecond) || old.spanNS != int64(750*time.Millisecond) || !old.observedReserveExceeded {
 			t.Fatal("r replaced by Take or c moved from original Sample", got, old)
 		}
 		copy := got
 		copy.ReceivedNS = -1
+		copy.TakeNS = -1
 		copy.Challenge[0]++
 		if result.Work.TargetEndpointObservation() != got {
 			t.Fatal("value-copy readout aliased original state", copy)
@@ -89,6 +94,9 @@ func TestOwnedTargetOriginalReceiveCompleteReadout(t *testing.T) {
 			}
 		}()
 		before := result.Work.TargetEndpointObservation()
+		if !before.TakeKnown || before.TakeNS != 0 || before.CompleteKnown || before.PairKnown {
+			t.Fatal("genuine known-zero Take was treated as missing", before)
+		}
 		publication := f.domain.Publisher().BeginPublication()
 		f.sources[0].End()
 		publication.Complete()
@@ -102,7 +110,7 @@ func TestOwnedTargetOriginalReceiveCompleteReadout(t *testing.T) {
 			t.Fatal("historical readout added live-source completion gate", err)
 		}
 		got := result.Work.TargetEndpointObservation()
-		if !got.PairKnown || got.ReceivedNS != before.ReceivedNS || got.RequestID != before.RequestID || got.SourceIdentity != before.SourceIdentity || got.SourceConnID != before.SourceConnID || got.CompleteNS != int64(750*time.Millisecond) {
+		if !got.PairKnown || !got.TakeKnown || got.TakeNS != before.TakeNS || got.ReceivedNS != before.ReceivedNS || got.RequestID != before.RequestID || got.SourceIdentity != before.SourceIdentity || got.SourceConnID != before.SourceConnID || got.CompleteNS != int64(750*time.Millisecond) {
 			t.Fatal("End lost original target r/c", got)
 		}
 	})
@@ -189,7 +197,7 @@ func TestOwnedTargetOriginalReceiveCompleteReadout(t *testing.T) {
 			result := f.reserve(t, f.sources[0], 11, 1)
 			targetEndpointReadoutCleanup(t, result.Work)
 			before := result.Work.TargetEndpointObservation()
-			if !before.ReceivedKnown || before.ReceivedNS != int64(37*time.Millisecond) || before.CompleteKnown || before.PairKnown {
+			if !before.ReceivedKnown || before.ReceivedNS != int64(37*time.Millisecond) || before.TakeKnown || before.TakeNS != 0 || before.CompleteKnown || before.PairKnown {
 				t.Fatal("original receive evidence missing before refusal", before)
 			}
 			if kind == "cancelled-retains-r-without-c" {
@@ -224,11 +232,29 @@ func TestOwnedTargetOriginalReceiveCompleteReadout(t *testing.T) {
 				}
 			}
 			got := result.Work.TargetEndpointObservation()
-			if !got.ReceivedKnown || got.CompleteKnown || got.PairKnown || got != before {
-				t.Fatal("original refusal fabricated c or replaced historical r/tuple", before, got)
+			want := before
+			if kind != "cancelled-retains-r-without-c" {
+				want.TakeKnown, want.TakeNS = true, int64(100*time.Millisecond)
+			}
+			if !got.ReceivedKnown || got.CompleteKnown || got.PairKnown || got != want {
+				t.Fatal("original refusal lost a genuine Take or fabricated completion/tuple", want, got)
 			}
 		})
 	}
+	t.Run("refused-take-does-not-fabricate-endpoint", func(t *testing.T) {
+		f := p0TargetObservationFixture(t)
+		result := f.reserve(t, f.sources[0], 11, 1)
+		targetEndpointReadoutCleanup(t, result.Work)
+		before := result.Work.TargetEndpointObservation()
+		// Existing strict start boundary: received+2s-500ms, not a new limit.
+		f.clock.Store(int64(1500 * time.Millisecond))
+		if _, _, err := result.Work.Take(); !errors.Is(err, ErrStaleWork) {
+			t.Fatal("original strict start refusal changed", err)
+		}
+		if got := result.Work.TargetEndpointObservation(); got != before || got.TakeKnown || got.CompleteKnown || got.PairKnown {
+			t.Fatal("refused original Take fabricated a Sample", before, got)
+		}
+	})
 	t.Run("untimed-original-remains-unknown", func(t *testing.T) {
 		f := ownedLocalFixture(t, 1)
 		result := f.reserve(t, f.sources[0], 11, 1)

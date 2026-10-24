@@ -105,16 +105,18 @@ const (
 // OwnedTargetEndpointObservation contains finite historical scalar copies of
 // one original fresh timed signing work. Tuple equality is not lookup, cross-
 // process identity or authority. Waiting/cache recipients have no new Work.
+// TakeNS is the existing Take sample, retained only after successful budget debit.
+// SpanNS remains CompleteNS-ReceivedNS; CompleteNS-TakeNS is a separate reserve span.
 // CompleteNS is the successful Complete SAMPLE before cache/mint/publication,
 // not Complete return, writer start, byte completion or delivery.
 type OwnedTargetEndpointObservation struct {
-	Clock                                   OwnedTargetEndpointClock
-	ReceivedKnown, CompleteKnown, PairKnown bool
-	ReceivedNS, CompleteNS, SpanNS          int64
-	RequestID, SourceConnID                 uint64
-	SourceOpenedNS                          int64
-	SourceIdentity, TargetIdentity          [20]byte
-	Challenge                               [32]byte
+	Clock                                              OwnedTargetEndpointClock
+	ReceivedKnown, TakeKnown, CompleteKnown, PairKnown bool
+	ReceivedNS, TakeNS, CompleteNS, SpanNS             int64
+	RequestID, SourceConnID                            uint64
+	SourceOpenedNS                                     int64
+	SourceIdentity, TargetIdentity                     [20]byte
+	Challenge                                          [32]byte
 }
 
 // TargetEndpointObservation reads the existing target-mutex snapshot once.
@@ -127,6 +129,7 @@ func (work OwnedLocalSignWork) TargetEndpointObservation() OwnedTargetEndpointOb
 	}
 	out := OwnedTargetEndpointObservation{
 		ReceivedKnown: true, ReceivedNS: observed.receivedNS,
+		TakeKnown: observed.takeKnown && observed.takeNS >= 0, TakeNS: observed.takeNS,
 		CompleteKnown: observed.completeKnown && observed.takeKnown && observed.completeNS >= 0,
 		CompleteNS:    observed.completeNS,
 		RequestID:     observed.requestID, SourceConnID: observed.sourceConnID,

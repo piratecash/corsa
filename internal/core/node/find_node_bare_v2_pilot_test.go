@@ -100,6 +100,7 @@ type ownedBareV2PilotClient struct {
 	cancel   context.CancelFunc
 	done     chan struct{}
 	requests chan protocol.FindNodeRequest
+	answers  chan protocol.FindNodeAnswer
 	pongs    chan struct{}
 	errors   chan error
 }
@@ -176,7 +177,7 @@ func dialOwnedBareV2PilotClient(t *testing.T, s *Service, address string, capabi
 		t.Fatal(err)
 	}
 	clientCtx, clientCancel := context.WithCancel(t.Context())
-	c := &ownedBareV2PilotClient{id: domain.PeerIdentityFromWire(id.Address), wire: wire, cancel: clientCancel, done: make(chan struct{}), requests: make(chan protocol.FindNodeRequest, 1), pongs: make(chan struct{}, 1), errors: make(chan error, 1)}
+	c := &ownedBareV2PilotClient{id: domain.PeerIdentityFromWire(id.Address), wire: wire, cancel: clientCancel, done: make(chan struct{}), requests: make(chan protocol.FindNodeRequest, 1), answers: make(chan protocol.FindNodeAnswer, 1), pongs: make(chan struct{}, 1), errors: make(chan error, 1)}
 	t.Cleanup(func() { c.stop(t) })
 	transferred = true
 	go func() {
@@ -201,6 +202,15 @@ func dialOwnedBareV2PilotClient(t *testing.T, s *Service, address string, capabi
 				case c.requests <- request:
 				default:
 					report(fmt.Errorf("unexpected second forwarded request"))
+					return
+				}
+				continue
+			}
+			if answer, err := protocol.ParseFindNodeAnswer(line); err == nil {
+				select {
+				case c.answers <- answer:
+				default:
+					report(fmt.Errorf("unexpected second original answer"))
 					return
 				}
 				continue
@@ -423,6 +433,9 @@ func bareV2PilotSourceErrors(sources map[string][]byte) []string {
 			allowed := map[*ast.Ident]bool{}
 			if fn, ok := declaration.(*ast.FuncDecl); ok {
 				site = path + ":" + fn.Name.Name
+				if site == "find_node_automatic_endpoint_trace_test.go:newOwnedAutomaticTraceService" && fmt.Sprintf("%x", sha256.Sum256(raw[int(fn.Pos())-1:int(fn.End())-1])) != "6f6d1dc32de5e34cdadff8ee53ff87f546f16366688ab5170488df7ed8669426" {
+					failures = append(failures, "automatic trace fixed factory changed")
+				}
 				if fn.Name.Name == factory {
 					factories++
 					allowed[fn.Name] = true
@@ -456,7 +469,7 @@ func bareV2PilotSourceErrors(sources map[string][]byte) []string {
 							if len(n.Rhs) == 1 {
 								value, _ = n.Rhs[0].(*ast.Ident)
 							}
-							if site != "find_node_bare_v2_pilot_test.go:"+factory || len(n.Lhs) != 1 || len(n.Rhs) != 1 || value == nil || value.Name != "true" {
+							if (site != "find_node_bare_v2_pilot_test.go:"+factory && site != "find_node_automatic_endpoint_trace_test.go:newOwnedAutomaticTraceService") || len(n.Lhs) != 1 || len(n.Rhs) != 1 || value == nil || value.Name != "true" {
 								failures = append(failures, "pilot unclosed setter")
 							}
 						}
@@ -497,7 +510,7 @@ func bareV2PilotSourceErrors(sources map[string][]byte) []string {
 			})
 		}
 	}
-	if declared != 1 || read != 1 || written != 1 || called != 2 || factories != 1 {
+	if declared != 1 || read != 1 || written != 2 || called != 2 || factories != 1 {
 		failures = append(failures, "pilot exact declaration/read/write/call inventory")
 	}
 	return failures

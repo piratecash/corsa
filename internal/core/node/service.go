@@ -107,6 +107,10 @@ type Service struct {
 	// Every production constructor leaves false; existing Ready roots stay inactive.
 	ownedFindNodeAdvertiseTest bool
 
+	// TEST-ONLY: one preallocated relay/target cell; assigned before Run only.
+	// Ordinary and every Ready constructor leave nil; never reset or exposed.
+	ownedFindNodeEndpointTest *ownedFindNodeEndpointTestSlot
+
 	// selectedPins is immutable after New; its joined worker owns passMu/retry pacing.
 	selectedPins *selectedPinProducer
 	// Immutable producer pointer; its joined worker owns retries, row state stays under trust.mu.

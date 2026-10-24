@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -312,6 +313,75 @@ func TestLoadStandExecutorCancellationAndOverrunCleanup(t *testing.T) {
 		})
 	}
 }
+
+// This finite schedule advances only the two existing executor Elapsed reads.
+// It is a fault control, not a physical clock or VM timing observation.
+type loadStandDispatchOverrunSchedule struct {
+	end   time.Duration
+	reads int
+	waits []time.Duration
+}
+
+func (c *loadStandDispatchOverrunSchedule) Elapsed() time.Duration {
+	c.reads++
+	if c.reads == 1 {
+		return 0
+	}
+	return c.end
+}
+
+func (c *loadStandDispatchOverrunSchedule) WaitUntil(ctx context.Context, at time.Duration) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	c.waits = append(c.waits, at)
+	return nil
+}
+
+func TestLoadStandExecutorScheduleMissAttribution(t *testing.T) {
+	for _, site := range []string{"scheduled_elapsed", "dispatch_lateness"} {
+		t.Run(site, func(t *testing.T) {
+			e := loadStandFunctionalExecutor(t, loadStandFullOnlyOptions(), "")
+			pre := &loadStandControlledSchedule{overshoot: e.limits.AllowedLateness + time.Nanosecond}
+			post := &loadStandDispatchOverrunSchedule{end: e.limits.AllowedLateness + time.Nanosecond}
+			e.schedule = func() loadstand.ScheduleClock {
+				if site == "scheduled_elapsed" {
+					return pre
+				}
+				return post
+			}
+			report, err := e.run(t.Context())
+			if !errors.Is(err, loadstand.ErrScheduleMissed) || report.FunctionalLifecycleComplete {
+				t.Fatal("original schedule refusal lost", err)
+			}
+			if !strings.Contains(err.Error(), "site="+site+" action_index=0 scheduled_ns=0 ") || e.diagnosticStage != site || e.diagnosticActionIndex == nil || *e.diagnosticActionIndex != 0 {
+				t.Fatal("wrong original refusal site/index", e.diagnosticStage, err)
+			}
+			if site == "scheduled_elapsed" {
+				if len(report.Actions) != 0 || !slices.Equal(pre.waits, []time.Duration{0}) || !strings.Contains(err.Error(), "elapsed_ns=3000000001 last_elapsed_ns=0 allowed_lateness_ns=3000000000") {
+					t.Fatal("pre-dispatch refusal lost original operands or dispatched", err)
+				}
+			} else {
+				if len(report.Actions) != 1 || post.reads != 2 || !slices.Equal(post.waits, []time.Duration{0}) || !strings.Contains(err.Error(), "begin_ns=0 end_ns=3000000001 allowed_lateness_ns=3000000000") {
+					t.Fatal("post-dispatch refusal lost original operands/read count", err)
+				}
+				trace := report.Actions[0]
+				if trace.Kind != "sample" || trace.Scheduled != 0 || trace.Begin != 0 || trace.End != post.end || len(report.TrafficSweeps) != 1 || report.TrafficSweeps[0].CompletedActions != 0 || report.TrafficSweeps[0].SampleCount != 2 {
+					t.Fatal("post refusal did not retain the actual first full-only sweep", trace)
+				}
+			}
+			if len(report.OwnedAfterCleanup) != 0 {
+				t.Fatal("failed schedule retained owned members", report.OwnedAfterCleanup)
+			}
+			for _, member := range e.members {
+				if member.Owned() {
+					t.Fatal("failed schedule leaked original member")
+				}
+			}
+		})
+	}
+}
+
 func TestLoadStandExecutorPreflightBeforeStart(t *testing.T) {
 	for _, kind := range []string{"old-version", "gossip", "unknown-role", "bootstrap-empty", "bad-digest", "bound"} {
 		t.Run(kind, func(t *testing.T) {

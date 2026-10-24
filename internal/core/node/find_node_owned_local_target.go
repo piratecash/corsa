@@ -125,6 +125,12 @@ func (s *Service) dispatchOwnedFindNodeLocalTarget(ingress ownedFindNodeIngress,
 		loop.admission.Lock()
 		return err
 	case findnode.LocalReserved:
+		// Reserve has returned without its R lease; one immutable original work
+		// is retained before the existing jobs publication, never substituted.
+		if slot := s.ownedFindNodeEndpointTest; slot != nil && slot.targetTraceClaim.CompareAndSwap(false, true) {
+			slot.targetTraceWork = result.Work
+			slot.targetTraceReady.Store(true)
+		}
 		select {
 		case <-loop.done:
 			_ = result.Work.Cancel()

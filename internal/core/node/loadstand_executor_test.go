@@ -474,7 +474,7 @@ func (e *loadStandExecutor) run(ctx context.Context) (report loadStandExecutionR
 		}
 		e.diagnosticStage = "dispatch_lateness"
 		if trace.End < begin || trace.End-action.At > e.limits.AllowedLateness {
-			return e.report, loadstand.ErrScheduleMissed
+			return e.report, fmt.Errorf("%w: site=dispatch_lateness action_index=%d scheduled_ns=%d begin_ns=%d end_ns=%d allowed_lateness_ns=%d", loadstand.ErrScheduleMissed, index, action.At, begin, trace.End, e.limits.AllowedLateness)
 		}
 		e.lastElapsed = trace.End
 		e.diagnosticStage = "trace_bound"
@@ -605,7 +605,11 @@ func (e *loadStandExecutor) contacts(ctx context.Context) error {
 func (e *loadStandExecutor) elapsed(at time.Duration) (time.Duration, error) {
 	elapsed := e.clock.Elapsed()
 	if elapsed < e.lastElapsed || elapsed < at || elapsed-at > e.limits.AllowedLateness {
-		return elapsed, loadstand.ErrScheduleMissed
+		index := -1
+		if e.diagnosticActionIndex != nil {
+			index = *e.diagnosticActionIndex
+		}
+		return elapsed, fmt.Errorf("%w: site=scheduled_elapsed action_index=%d scheduled_ns=%d elapsed_ns=%d last_elapsed_ns=%d allowed_lateness_ns=%d", loadstand.ErrScheduleMissed, index, at, elapsed, e.lastElapsed, e.limits.AllowedLateness)
 	}
 	return elapsed, nil
 }

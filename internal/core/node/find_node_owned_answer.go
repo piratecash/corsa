@@ -3,7 +3,22 @@ package node
 import (
 	"github.com/piratecash/corsa/internal/core/findnode"
 	"github.com/piratecash/corsa/internal/core/netcore"
+	"sync/atomic"
 )
+
+// Test-only single-attempt retention. Each successful CAS writer stores one
+// genuine original opaque handle before publishing ready. No callback, clock,
+// allocation, relookup, reset or operational method is added to the live path.
+// The Service field is nil in every normal construction; only the closed test
+// factory allocates these two cells before the original Run starts.
+type ownedFindNodeEndpointTestSlot struct {
+	relayTraceClaim  atomic.Bool
+	relayTraceReady  atomic.Bool
+	relayTraceWork   findnode.OwnedAnswerWork
+	targetTraceClaim atomic.Bool
+	targetTraceReady atomic.Bool
+	targetTraceWork  findnode.OwnedLocalSignWork
+}
 
 // This takes the same raw-only receive cell AFTER the original raw/command
 // admission gates, keeping the successful-read point historical and unrefreshed.
@@ -40,6 +55,11 @@ func (s *Service) dispatchOwnedFindNodeAnswer(receipt ownedFindNodeReceive) erro
 	work, err := cell.capture.intake.MatchOwnedAnswer(input)
 	if err != nil {
 		return err
+	}
+	// Match has released its original R lease before this fixed-value handoff.
+	if slot := s.ownedFindNodeEndpointTest; slot != nil && slot.relayTraceClaim.CompareAndSwap(false, true) {
+		slot.relayTraceWork = work
+		slot.relayTraceReady.Store(true)
 	}
 	return s.queueOwnedFindNodeAnswer(work)
 }

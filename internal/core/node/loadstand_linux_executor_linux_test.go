@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/netip"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -93,6 +94,108 @@ func runLoadStandLinuxPlan(ctx context.Context, plan loadStandPlan, binaries loa
 	return report, nil
 }
 
+// loadStandLinuxRetainedFailureSummary formats only already retained evidence.
+// It never identifies a last action as the cause, subtracts clock domains, or
+// treats the unset runtime-unavailable floor as a measured zero.
+func loadStandLinuxRetainedFailureSummary(report loadStandExecutionReport) string {
+	const limit = 4 << 10
+	finish := func(text string) string {
+		const tail = "...TRUNCATED"
+		if len(text) > limit {
+			return text[:limit-len(tail)] + tail
+		}
+		return text
+	}
+	label := func(text string) string {
+		if len(text) > 128 {
+			return text[:128]
+		}
+		return text
+	}
+	wall := func(at time.Time) string {
+		if at.IsZero() {
+			return "UNKNOWN"
+		}
+		return at.UTC().Format(time.RFC3339Nano)
+	}
+	text := "retained_failure_v1 raw_wall_not_schedule_clock actual_deadline=UNKNOWN first_failed_read=UNKNOWN physical_clock=UNKNOWN"
+	if len(report.Actions) == 0 {
+		text += " last_retained_action=UNKNOWN"
+	} else {
+		last := report.Actions[len(report.Actions)-1]
+		text += fmt.Sprintf(" last_retained_action={index=%d kind=%+q node=%+q scheduled_ns=%d begin_ns=%d end_ns=%d wall_at=%s}", len(report.Actions)-1, label(last.Kind), label(string(last.Node)), last.Scheduled, last.Begin, last.End, wall(last.WallAt))
+	}
+	failed := -1
+	for i, check := range report.RuntimeChecks {
+		if check.PreStopOf == "" && check.Verdict != "pass" {
+			failed = i
+			break
+		}
+	}
+	if failed < 0 {
+		return finish(text + " first_regular_failed_runtime_check=UNKNOWN sample_join=UNKNOWN prefix=UNKNOWN")
+	}
+	check := report.RuntimeChecks[failed]
+	text += fmt.Sprintf(" first_regular_failed_runtime_check={index=%d at_ns=%d group=%d provider=%+q ordinal=%d started_at=%s verdict=%+q}", failed, check.At, check.Group, label(string(check.Provider)), check.ProviderIncarnation.Ordinal, wall(check.ProviderIncarnation.StartedAt), label(check.Verdict))
+	if check.Verdict != "runtime_unavailable" {
+		return finish(text + " sample_join=UNKNOWN(reason=other-first-verdict) prefix=UNKNOWN")
+	}
+	text += " floor=UNKNOWN(uncomputed-before-runtime-availability) runtime_read_at=UNKNOWN"
+	if check.At < 0 || check.Group == 0 || check.Provider == "" || check.ProviderIncarnation.Ordinal == 0 || check.ProviderIncarnation.StartedAt.IsZero() || len(check.Members) != 1 || check.Members[0] != check.Provider {
+		return finish(text + " sample_join=UNKNOWN(reason=malformed-check) prefix=UNKNOWN")
+	}
+	matched, matches := -1, 0
+	for i, row := range report.Samples {
+		if !row.PreStop && row.PreStopOf == "" && row.At == check.At && row.Node == check.Provider && row.Sample.Incarnation == check.ProviderIncarnation {
+			matched, matches = i, matches+1
+		}
+	}
+	if matches != 1 {
+		return finish(text + fmt.Sprintf(" sample_join=UNKNOWN(matches=%d) prefix=UNKNOWN", matches))
+	}
+	if report.Samples[matched].Sample.Runtime.State != loadstand.ObservationUnavailable || report.Samples[matched].Sample.Runtime.Value != nil {
+		return finish(text + " sample_join=UNKNOWN(reason=runtime-state-conflict) prefix=UNKNOWN")
+	}
+	// compile() admits strictly increasing periodic sample At values. The
+	// collector appends a row before its check and stops at the first refusal.
+	// Cleanup rows have a nonempty PreStopOf and cannot fill this prefix.
+	var prefix [4]int
+	count := 0
+	for i, row := range report.Samples {
+		if row.PreStop || row.PreStopOf != "" || row.At != check.At {
+			continue
+		}
+		if i > matched || count == len(prefix) || row.Node == "" || row.Sample.Incarnation.Ordinal == 0 || row.Sample.Incarnation.StartedAt.IsZero() {
+			return finish(text + " sample_join=UNKNOWN(reason=malformed-or-overbound-prefix) prefix=UNKNOWN")
+		}
+		for j := 0; j < count; j++ {
+			prior := report.Samples[prefix[j]]
+			if prior.Node == row.Node {
+				return finish(text + " sample_join=UNKNOWN(reason=duplicate-or-reused-member-prefix) prefix=UNKNOWN")
+			}
+		}
+		prefix[count] = i
+		count++
+	}
+	correlated := len(report.Actions) > 0 && report.Actions[len(report.Actions)-1].Kind == "sample" && report.Actions[len(report.Actions)-1].Scheduled == check.At
+	text += fmt.Sprintf(" sample_join=unique sample_index=%d last_retained_action_matches_sample_at=%t regular_prefix_count=%d", matched, correlated, count)
+	for i := 0; i < count; i++ {
+		row := report.Samples[prefix[i]]
+		s := row.Sample
+		osState, osBegin, osEnd, osValid := "UNKNOWN", "UNKNOWN", "UNKNOWN", "UNKNOWN"
+		if s.LinuxProcess != nil {
+			osState = string(s.LinuxProcess.State)
+			if s.LinuxProcess.Available() {
+				value := s.LinuxProcess.Value
+				osBegin, osEnd = wall(value.ReadStartedAt), wall(value.ReadCompletedAt)
+				osValid = fmt.Sprint(!value.ReadStartedAt.IsZero() && !value.ReadCompletedAt.IsZero() && !value.ReadCompletedAt.Before(value.ReadStartedAt))
+			}
+		}
+		text += fmt.Sprintf(" prefix[%d]={sample_index=%d node=%+q ordinal=%d started_at=%s read_at=%s states={Runtime=%+q LinuxProcess=%+q Resources=%+q Traffic=%+q Sessions=%+q Modes=%+q Neighbours=%+q RouteEntries=%+q Datagram=%+q Bans=%+q} os_after_begin=%s os_after_end=%s os_after_valid=%s}", i, prefix[i], label(string(row.Node)), s.Incarnation.Ordinal, wall(s.Incarnation.StartedAt), wall(s.ReadAt), label(string(s.Runtime.State)), label(osState), label(string(s.Resources.State)), label(string(s.Traffic.State)), label(string(s.Sessions.State)), label(string(s.Modes.State)), label(string(s.Neighbours.State)), label(string(s.RouteEntries.State)), label(string(s.Datagram.State)), label(string(s.Bans.State)), osBegin, osEnd, osValid)
+	}
+	return finish(text)
+}
+
 // This is an explicitly admitted native entry. Ordinary/short tests never
 // create namespaces, alter links, launch targets or send isolation probes.
 func TestLoadStandLinuxPlannedFullSDKTimelineNative(t *testing.T) {
@@ -151,7 +254,7 @@ func TestLoadStandLinuxPlannedFullSDKTimelineNative(t *testing.T) {
 	}
 	report, err := runLoadStandLinuxPlan(ctx, plan, binaries, specs, probes, loadStandExecutorJournal(t, ctx), runjournal.SystemClock{}, func() loadstand.ScheduleClock { return loadstand.NewMonotonicSchedule() }, loadStandFunctionalLimits())
 	if err != nil {
-		t.Fatal("actual planned Full/SDK executor failed", err)
+		t.Fatalf("actual planned Full/SDK executor failed %v; %s", err, loadStandLinuxRetainedFailureSummary(report))
 	}
 	if !report.FunctionalLifecycleComplete || !report.FullSampleAvailable || report.AcceptanceEligible || len(report.Receipts) == 0 || len(report.GlobalObservations) == 0 {
 		t.Fatal("missing actual functional receipts/OS sample/global/finality or overstated resource acceptance")
@@ -225,4 +328,120 @@ func TestLoadStandLinuxCompositionValidatesOriginalAddressesBeforeEffects(t *tes
 	if err = validateLoadStandLinuxSpecs(plan, specs); err == nil {
 		t.Fatal("same-source-group plan reached kernel constructor")
 	}
+}
+
+// Pure retained-data controls: no original member, clock, RPC or kernel work.
+func TestLoadStandLinuxRetainedFailureSummary(t *testing.T) {
+	fixture := func() loadStandExecutionReport {
+		incarnation := loadstand.Incarnation{Ordinal: 1, StartedAt: time.Unix(11, 0).UTC()}
+		sample := loadstand.MemberSample{Incarnation: incarnation, ReadAt: time.Unix(0, 0).UTC()}
+		sample.Runtime.State = loadstand.ObservationUnavailable
+		os := loadstand.Observed(loadstand.LinuxProcessSample{ReadStartedAt: time.Unix(0, 0).UTC(), ReadCompletedAt: time.Unix(0, 0).UTC()}, nil)
+		sample.LinuxProcess = &os
+		return loadStandExecutionReport{
+			Actions:       []loadStandActionTrace{{Kind: "sample", Scheduled: 0, Begin: 0, End: 7}},
+			RuntimeChecks: []loadStandRuntimeCheck{{At: 0, Group: 3, Provider: "edge-000", Members: []loadstand.MemberID{"edge-000"}, ProviderIncarnation: incarnation, Verdict: "runtime_unavailable"}},
+			Samples:       []loadStandMemberObservation{{At: 0, Node: "edge-000", Sample: sample}},
+		}
+	}
+	t.Run("known-zero-and-existing-wall-metadata", func(t *testing.T) {
+		text := loadStandLinuxRetainedFailureSummary(fixture())
+		for _, expected := range []string{"sample_join=unique", "scheduled_ns=0 begin_ns=0", "at_ns=0", "read_at=1970-01-01T00:00:00Z", "os_after_begin=1970-01-01T00:00:00Z", "os_after_end=1970-01-01T00:00:00Z", "os_after_valid=true", "floor=UNKNOWN(uncomputed-before-runtime-availability)", "actual_deadline=UNKNOWN", "physical_clock=UNKNOWN"} {
+			if !strings.Contains(text, expected) {
+				t.Fatal("missing original scalar/UNKNOWN distinction", expected, text)
+			}
+		}
+	})
+	t.Run("missing-ambiguous-and-cleanup-are-unknown", func(t *testing.T) {
+		for _, change := range []string{"missing", "duplicate", "cleanup", "different-incarnation", "runtime-conflict"} {
+			report := fixture()
+			switch change {
+			case "missing":
+				report.Samples = nil
+			case "duplicate":
+				report.Samples = append(report.Samples, report.Samples[0])
+			case "cleanup":
+				report.Samples[0].PreStop, report.Samples[0].PreStopOf = true, "edge-000"
+			case "different-incarnation":
+				report.Samples[0].Sample.Incarnation.StartedAt = time.Unix(12, 0).UTC()
+			case "runtime-conflict":
+				report.Samples[0].Sample.Runtime = loadstand.Observed(domain.RuntimeMetrics{}, nil)
+			}
+			text := loadStandLinuxRetainedFailureSummary(report)
+			if !strings.Contains(text, "sample_join=UNKNOWN") || strings.Contains(text, "prefix[0]=") {
+				t.Fatal("fabricated original sample join", change, text)
+			}
+		}
+	})
+	t.Run("first-regular-failure-and-retained-action-label", func(t *testing.T) {
+		report := fixture()
+		cleanup := report.RuntimeChecks[0]
+		cleanup.PreStopOf = "edge-000"
+		report.RuntimeChecks = append([]loadStandRuntimeCheck{cleanup}, report.RuntimeChecks...)
+		report.Actions[0].Kind = "direct_message"
+		text := loadStandLinuxRetainedFailureSummary(report)
+		if !strings.Contains(text, "index=1 at_ns=0 group=3") || !strings.Contains(text, "last_retained_action_matches_sample_at=false") || !strings.Contains(text, "sample_join=unique") {
+			t.Fatal("cleanup displaced regular check or action misidentified", text)
+		}
+		report.RuntimeChecks[1].Verdict = "resource_floor_unavailable"
+		report.RuntimeChecks = append(report.RuntimeChecks, fixture().RuntimeChecks[0])
+		text = loadStandLinuxRetainedFailureSummary(report)
+		if !strings.Contains(text, "reason=other-first-verdict") || strings.Contains(text, "sample_join=unique") {
+			t.Fatal("later check replaced first regular failure", text)
+		}
+	})
+	t.Run("prefix-is-ordered-bounded-and-not-incarnation-only", func(t *testing.T) {
+		report := fixture()
+		prior := report.Samples[0]
+		prior.Node = "full-000" // The same scalar incarnation on another member is not a duplicate tuple.
+		report.Samples = append([]loadStandMemberObservation{prior}, report.Samples...)
+		text := loadStandLinuxRetainedFailureSummary(report)
+		if !strings.Contains(text, "regular_prefix_count=2") || !strings.Contains(text, "prefix[0]={sample_index=0 node=\"full-000\"") || !strings.Contains(text, "prefix[1]={sample_index=1 node=\"edge-000\"") {
+			t.Fatal("lost retained order or conflated member incarnations", text)
+		}
+		for _, change := range []string{"duplicate-prefix", "overbound", "later-regular"} {
+			report := fixture()
+			prior := report.Samples[0]
+			prior.Node = "full-000"
+			switch change {
+			case "duplicate-prefix":
+				report.Samples = append([]loadStandMemberObservation{prior, prior}, report.Samples...)
+			case "overbound":
+				for i := 0; i < 4; i++ {
+					prior.Node = loadstand.MemberID(fmt.Sprintf("full-%03d", i))
+					report.Samples = append([]loadStandMemberObservation{prior}, report.Samples...)
+				}
+			case "later-regular":
+				report.Samples = append(report.Samples, prior)
+			}
+			text := loadStandLinuxRetainedFailureSummary(report)
+			if !strings.Contains(text, "prefix=UNKNOWN") || strings.Contains(text, "prefix[0]=") {
+				t.Fatal("ambiguous/overbound prefix was published", change, text)
+			}
+		}
+	})
+	t.Run("malformed-and-post-format-byte-bound", func(t *testing.T) {
+		if text := loadStandLinuxRetainedFailureSummary(loadStandExecutionReport{}); !strings.Contains(text, "sample_join=UNKNOWN") || len(text) > 4<<10 {
+			t.Fatal("empty report was not bounded UNKNOWN", text)
+		}
+		report := fixture()
+		check := report.RuntimeChecks[0]
+		check.Members = nil
+		report.RuntimeChecks[0] = check
+		if text := loadStandLinuxRetainedFailureSummary(report); !strings.Contains(text, "reason=malformed-check") {
+			t.Fatal("malformed provider tuple accepted", text)
+		}
+		report = fixture()
+		row := report.Samples[0]
+		long := strings.Repeat("\x00", 4096)
+		row.Sample.Resources.State, row.Sample.Traffic.State = loadstand.ObservationState(long), loadstand.ObservationState(long)
+		row.Sample.Sessions.State, row.Sample.Modes.State = loadstand.ObservationState(long), loadstand.ObservationState(long)
+		row.Sample.Neighbours.State, row.Sample.RouteEntries.State = loadstand.ObservationState(long), loadstand.ObservationState(long)
+		row.Sample.Datagram.State, row.Sample.Bans.State = loadstand.ObservationState(long), loadstand.ObservationState(long)
+		report.Samples[0] = row
+		text := loadStandLinuxRetainedFailureSummary(report)
+		if len(text) != 4<<10 || !strings.HasSuffix(text, "...TRUNCATED") {
+			t.Fatal("post-quote byte bound not applied", len(text))
+		}
+	})
 }
