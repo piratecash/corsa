@@ -13,7 +13,7 @@ import (
 // Finite Source closure. Raw pins bind exact constructor, staging, T and
 // completion bodies; functional tests independently check observable causality.
 func ownedLocalTargetSourceErrors(sources map[string][]byte) []string {
-	pins := map[string]string{"owned_bridge_local_target_timing.go": "69356ebd3196f7b042d465cb72eb880ded354cc49ed2e334c3aebb3f179e0a1d", "owned_resources.go": "7b3347cbe548e78ab4a92ebcf4c857545edd33d81d3a3af39c25a079b3aa036a", "owned_bridge_forward_answer.go": "c96366c955ce0c2ae5f90e1caee46c697d7672c7ed0bb7e852833bd97eb5e139", "owned_bridge.go": "b88656fb08a5dd33b0f2bdb7b9e52f636eb1b320291e1a390c2c9b683a593f57", "signing.go": "c0389bb2c6e127ff266860eaf0eb24a429c7c1cee9081fad0844483a7938b40b", "target.go": "15c107401df68ec9527f6ce46e4d6311c6cbd79ffea7ac42b3d3bbbe2fbe6d81", "target_owner.go": "f6f6f51e69ace1888584e95a5d09f08cf13e8b6936cb68e6d022549d726b5511", "owned_bridge_local_target.go": "19e3da9a1091b13d60f7cd9998cfdd5b9f9ed143339e6858d9e44490e63b9769", "owned_bridge_local_target_stage.go": "39fde17cdadd3dfa02bc97ef40f9d21d37f18ca865abde2fed2005e680baa0c3", "owned_bridge_answer.go": "6cf27edfd3d0f5ce5595dd602cd8aac74f7848a3e85392dd20377affe8f6043e"}
+	pins := map[string]string{"owned_bridge_local_target_timing.go": "69356ebd3196f7b042d465cb72eb880ded354cc49ed2e334c3aebb3f179e0a1d", "owned_resources.go": "7b3347cbe548e78ab4a92ebcf4c857545edd33d81d3a3af39c25a079b3aa036a", "owned_bridge_forward_answer.go": "c96366c955ce0c2ae5f90e1caee46c697d7672c7ed0bb7e852833bd97eb5e139", "owned_bridge.go": "b88656fb08a5dd33b0f2bdb7b9e52f636eb1b320291e1a390c2c9b683a593f57", "signing.go": "c0389bb2c6e127ff266860eaf0eb24a429c7c1cee9081fad0844483a7938b40b", "target.go": "15c107401df68ec9527f6ce46e4d6311c6cbd79ffea7ac42b3d3bbbe2fbe6d81", "target_owner.go": "f6f6f51e69ace1888584e95a5d09f08cf13e8b6936cb68e6d022549d726b5511", "owned_bridge_local_target.go": "0c317edc5b3de6f36014ff2a8c195fd786e03596615d9869d77149452f3a7ed5", "owned_bridge_local_target_stage.go": "39fde17cdadd3dfa02bc97ef40f9d21d37f18ca865abde2fed2005e680baa0c3", "owned_bridge_answer.go": "6cf27edfd3d0f5ce5595dd602cd8aac74f7848a3e85392dd20377affe8f6043e"}
 	var failures []string
 	for path, want := range pins {
 		if fmt.Sprintf("%x", sha256.Sum256(sources[path])) != want {
@@ -43,6 +43,11 @@ func TestOwnedLocalTargetClosedSource(t *testing.T) {
 }
 func TestOwnedLocalTargetSourceControls(t *testing.T) {
 	for _, tc := range []struct{ name, path, before, after string }{
+		{"timed-cache-ready-equality", "owned_bridge_local_target.go", "max(Instant(id.received.Elapsed()), completed) >= serviceWindow.signatureReadyBy", "max(Instant(id.received.Elapsed()), completed) > serviceWindow.signatureReadyBy"},
+		{"timed-cache-original-ingress", "owned_bridge_local_target.go", "max(Instant(id.received.Elapsed()), completed)", "max(Instant(c.at.Elapsed()), completed)"},
+		{"timed-cache-complete-origin", "owned_bridge_local_target.go", "completed := ready.expires - cacheLifetime", "completed := ready.received"},
+		{"timed-cache-untimed-isolation", "owned_bridge_local_target.go", "if l.timed && plan.result.Kind == TargetAnswerReady {", "if plan.result.Kind == TargetAnswerReady {"},
+		{"timed-cache-check-omitted", "owned_bridge_local_target.go", "if l.timed && plan.result.Kind == TargetAnswerReady {", "if false && l.timed && plan.result.Kind == TargetAnswerReady {"},
 		{"timed-projected-equality", "owned_bridge_local_target.go", "slotAt >= serviceWindow.latestSignStart", "slotAt > serviceWindow.latestSignStart"},
 		{"timed-start-fallback", "owned_bridge_local_target_timing.go", "return c.serviceWindow.latestSignStart", "return c.signBy"},
 		{"timed-ready-fallback", "owned_bridge_local_target_timing.go", "return c.serviceWindow.signatureReadyBy", "return c.signBy"},

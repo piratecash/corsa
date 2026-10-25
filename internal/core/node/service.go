@@ -2351,6 +2351,12 @@ func newServiceWithConstruction(cfg config.Node, id *identity.Identity, eventBus
 		aggregateStatus:          domain.AggregateStatusSnapshot{Status: domain.NetworkStatusOffline},
 		done:                     make(chan struct{}),
 	}
+	if construction.pendingObservation != nil {
+		construction.pendingObservation.install(svc)
+	}
+	if construction.terminalObservation != nil {
+		construction.terminalObservation.install(svc)
+	}
 	if construction.ready != nil {
 		// Retain cleanup custody before the first builder callback can escape.
 		construction.ready.service, construction.ready.trust = svc, trust

@@ -1,0 +1,64 @@
+# D1 to DHT: resource checkpoints
+
+[Русская версия](d1-dht-resource-checkpoints.ru.md)
+
+Status: engineering plan,2026-10-25. The owner requested `corsad` at most **512MB, preferably less**, verified by our own runtime measurements. C1 measured a 35,913,728-byte service-group peak; the bounded C2a eight-peer TLS/get_peers/churn case measured 35,516,416 bytes on the same fixed binary; **full D1 compliance remains UNKNOWN**. See the [exact C1/C2a results and limits](../operations/d1-corsad-memory-screen.md). This plan does not approve a new run, G2, activation or release.
+
+## Direction and scope
+
+D1 introduces the responder role and its admission/security foundations. D2 introduces the publisher, D3 observes the consumer in shadow mode, and later phases move through fallback and primary lookup before retiring the mesh. D1 alone does not establish the final DHT footprint or remove the cost of the existing mesh. Measurements must include the transition where old and new state coexist.
+
+The measured production CLI is from `6421c8110a4c668fcf688bec6eb4c957ae37b852`. Stream8 checks80+80 and previous293+293 retain their scopes; the later inactive ready-cache correction has separate330-case QA and is not in that CLI binary. Native9 completed the five-ELF build/package/import chain, then original Member4 failed at32.85s (dispatch_lateness action2/sample); its read/SHA-update spans do not prove hash CPU, physical I/O or an emulation cause. See the [Member4 diagnostic](../operations/d1-linux-member4-diagnostic.md). These functional results do not replace daemon memory measurements.
+
+The resource subject is the production headless entry point, [`cmd/corsa-node`](../../cmd/corsa-node/main.go), together with its service-owned descendants. The benchmark FullNode, SDK instance, `node.test`, DesktopClient, build process and whole QEMU guest are separate subjects. Desktop and SDK costs remain explicit work items; a small headless result cannot qualify the graphical client.
+
+`piratecashd` is only context for sharing a host. Do not launch, benchmark, inspect or obtain sizing figures for it as part of this work. Do not infer safe host coexistence from a Corsa-only test.
+
+## Evidence contract
+
+Record the ceiling in bytes before execution. Declare which whole-service peak metric is compared with B; report the other metrics separately, without substituting PSS or Go heap for that metric. For the owner's MB wording, use the conservative decimal interpretation `B = 512000000` bytes; do not silently substitute the larger `512 MiB`. Prefer a measured footprint below B with stated headroom. Neither a GC setting nor a container limit is a measured footprint.
+
+Each eligible receipt identifies the exact binary SHA-256, source commit, OS/architecture, native or emulated execution, configuration, data/state cardinalities, workload, process incarnations, collector, interval and cleanup. Keep client drivers and the collector outside the budgeted service. Capture startup, useful work, state growth, recovery and shutdown, not just a post-GC or idle snapshot.
+
+On Linux, establish the actual service cgroup and its membership, not just the mounted hierarchy root. Retain service `memory.current`, a kernel peak with its observation scope, event deltas including OOM, and RSS/HWM/PSS observations for attribution. Preserve final readings before deleting the cgroup. Cgroup charge and PSS are different metrics; report both scopes. Adding shared RSS across processes does not produce an accurate physical total. Missing permissions, process/cgroup identity, exited-child coverage or peak evidence remain UNKNOWN. Do not change access restrictions just to obtain a green result. These are interface definitions, not external memory-consumption data. [Linux cgroups](https://docs.kernel.org/admin-guide/cgroup-v2.html), [proc metrics](https://docs.kernel.org/filesystems/proc.html).
+
+On macOS, report its own process/descendant measurements and peak coverage. Do not label them Linux cgroup evidence. A sampled maximum is not a continuous kernel peak. Platform, execution mode and coverage limitations stay attached to every conclusion.
+
+`GOMEMLIMIT` manages Go runtime memory softly and excludes some process memory. It is not an RSS ceiling or an OOM guarantee. Choose runtime headroom from our measured non-runtime costs and CPU/GC behaviour; no automatic fraction or default is approved here. [Go memory-limit semantics](https://go.dev/doc/gc-guide#Memory_limit).
+
+## Checkpoints within the existing work
+
+| Point | Question and required evidence | Decision |
+|---|---|---|
+| C0 — before a resource run | Is this the exact production daemon, with a declared configuration, byte budget, process boundary and working peak collector? Verify collector refusal and missing-data handling before using it. | Missing scope or evidence: UNKNOWN; repair the measurement before resource qualification. Existing implementation work may continue. |
+| C1 — early small-server screen | Measure cold startup, idle, one genuinely useful existing action and shutdown of the real daemon. Include descendants and retained state; drivers are separate. | Exceeding B, OOM or inability to complete the action fails this profile. An eligible small PASS qualifies progression to the next separately authorized case, not a scale or release claim. |
+| C2 — bounded useful admission | Exercise actual accepted work, cancellation, overload and recovery with the declared queue, peer and state limits. Prove complete-or-refuse and useful admission. Full P0 coverage still needs 512 active / 512 members / 1024 visits and its +1 refusal cases. | Never substitute an empty cut, nil registry entries, a two-peer example, or a shared server+1024-client RSS measurement. Zero admission is a limitation, not proof of practical suitability. |
+| C3 — before large T7/13b campaigns | With C0–C2 established, measure the declared route/state sizes, churn, maximum accepted bursts and repeated growth/release cycles. Observe peak, retained memory, CPU/GC, descriptors, delivery and refusal behaviour. | The server must remain within B while preserving the original functional/security requirements. Do not raise the budget, drop state protections or weaken timing oracles to pass. Workloads, durations and other thresholds require the existing concrete run approval. |
+| C4 — final D1 candidate | Repeat the required resource cases on the final binary/configuration, alongside the existing T5/T6/T7, G2, security and release evidence. | A previous build or a narrow memory PASS does not close D1. Missing evidence stays UNKNOWN; separate approvals remain separate. |
+| C5 — each later migration phase | Compare the same eligible platform/configuration/workload before and after publisher, shadow, fallback, primary lookup and mesh retirement. Include simultaneous old/new state and rollback. | Claim an improvement only from our comparable measurements. Revisit the design when the intended savings or B are not achieved. |
+
+Absolute compliance with B and a before/after improvement are separate findings. A missing eligible baseline prevents an improvement claim; it does not erase a valid absolute measurement. Thresholds for workload, CPU, latency, persistence and sustained growth are not invented by this document.
+
+## Findings that determine the next work
+
+The independent architect, critic and reviewer agreed that the staged migration direction remains coherent, but whole-daemon compliance with B is unproven. The current implementation exposes several specific gaps:
+
+- [`cgroup_memory.go`](../../internal/core/node/cgroup_memory.go) intentionally reads the mounted hierarchy root. On a bare host or under systemd this can describe a broader group than Corsa.
+- [`ProcessMemory`](../../internal/testutil/loadstand/proc_types.go) provides RSS, high-water RSS and anonymous RSS, without a complete service PSS/descendant/cgroup-peak receipt.
+- The RSS plausibility oracle in [`loadstand_sample_test.go`](../../internal/core/node/loadstand_sample_test.go) allows `8 × GoMemory + 512 MiB`. This checks consistency; it does not implement B.
+- [`ResourceBreakdown`](../../internal/core/domain/resource_breakdown.go) exposes attribution floors and structural counts. A floor below heap usage does not bound whole-process memory.
+- The CLI soft-memory helper is not automatically executed by the SDK or benchmark FullNode. Their entry points and environments must be checked explicitly.
+
+The declared early C1 screen is complete; keep its exact scope and collector/preparer costs attached. The separately admitted C2a slice is complete:8→4→8→0 TLSv2 channels, four new identities, separate driver/observer groups and no observed OOM. This does not close the broader C2 row: overload, F1/FindNode, full coverage and current/final-candidate resource cases remain open. See the exact C2a result in the linked memory report before preparing the next concrete profile. Full P0 coverage and resource acceptance remain open. Native9 localizes substantial time inside read/SHA-update; investigate that specific operation without weakening file checks or timing oracles. The original directory-guard failure still lacks an exact causal record. Do not turn bounded diagnosis into unlimited instrumentation or silently switch hypervisors.
+
+## Comparison with open Go DHT implementations
+
+Sources were checked on 2026-10-25. This is an architectural comparison, with no imported RAM figures, downloads, dependency changes or comparative benchmarks.
+
+| Implementation | Useful source-level reference | Boundary for Corsa |
+|---|---|---|
+| [go-libp2p-kad-dht](https://github.com/libp2p/go-libp2p-kad-dht), [resource manager](https://github.com/libp2p/go-libp2p/tree/master/p2p/host/resource-manager) | Reserve bounded resources before allocation; aggregate transient, service, peer, connection and stream scopes. Its DHT also bounds peer-record size. | Accounting is useful, but its resource manager does not establish honest-peer fairness, whole-process RAM or Corsa's F1/identity/delivery guarantees. Host-wide autoscaling is not an assigned co-tenant budget. [Source](https://raw.githubusercontent.com/libp2p/go-libp2p/master/p2p/host/resource-manager/README.md), [record bounds](https://raw.githubusercontent.com/libp2p/go-libp2p-kad-dht/master/optimizations.md). |
+| [anacrolix/dht](https://github.com/anacrolix/dht) | Inspect transaction lifetimes, cancellation, routing-table state and send limiting. | Its UDP BitTorrent DHT and records have different identity, transport and application semantics. A smaller protocol or table does not prove an equivalent Corsa implementation uses less memory. [Server source](https://raw.githubusercontent.com/anacrolix/dht/master/server.go). |
+| [Zikade](https://github.com/probe-lab/zikade) | A coordinator/state-machine design and explicit backpressure are relevant to controlled work scheduling. | The project describes itself as incomplete and not yet optimized. It is an investigation reference, not a demonstrated low-memory replacement. |
+
+Any reuse proposal must name the replaced component, retained wire/identity/security semantics, new dependencies, bounded state and cancellation behaviour, and a falsifiable validation case. Library adoption is not a substitute for measuring the actual daemon.

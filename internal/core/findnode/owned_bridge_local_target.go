@@ -295,6 +295,19 @@ func (local OwnedLocalTarget) ReserveReceived(input OwnedReceivedRequest, cut Ow
 	if err != nil {
 		return OwnedLocalResult{}, err
 	}
+	// Ready expiry retains the SAME successful Complete sample plus60s.
+	// Admission staging is detached: preserve its original refusal precedence,
+	// then check recipient-relative availability before publishing any copy.
+	if l.timed && plan.result.Kind == TargetAnswerReady {
+		ready := o.cache.entries[id.request.Challenge]
+		if ready == nil || ready.phase != targetReady || ready.expires < cacheLifetime {
+			return OwnedLocalResult{}, ErrStaleWork
+		}
+		completed := ready.expires - cacheLifetime
+		if max(Instant(id.received.Elapsed()), completed) >= serviceWindow.signatureReadyBy {
+			return OwnedLocalResult{}, ErrBudget
+		}
+	}
 	work.entry = plan.result.Work.entry
 	copyResult := mintOwnedAnswerWork(l.owner, id.source, plan.result.Answer, deadline)
 	preparedSlot := &signingSlot{source: id.source}

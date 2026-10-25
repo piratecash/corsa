@@ -17,11 +17,55 @@ import (
 )
 
 type App struct {
-	cfg     config.Config
-	service *node.Service
+	cfg                 config.Config
+	service             *node.Service
+	pendingObservation  *node.PendingObservation
+	terminalObservation *node.TerminalObservation
 }
 
 func New() *App {
+	a, err := newApp(nil)
+	if err != nil {
+		panic(err)
+	}
+	return a
+}
+
+// NewWithPendingObservation explicitly composes the existing K12 source into
+// the real headless Service. Key references remain unverified caller assertions.
+// There is no configuration flag, listener, collector or policy activation.
+func NewWithPendingObservation(key node.PendingObservationKey) (*App, error) {
+	return newApp(&key)
+}
+
+// PendingObservation returns only the handle bound to this App's Service.
+// Ordinary New returns nil; callers decide when to read, without a new worker.
+func (a *App) PendingObservation() *node.PendingObservation {
+	if a == nil {
+		return nil
+	}
+	return a.pendingObservation
+}
+
+// NewWithTerminalObservation opts into only the restricted registry source.
+// It does not activate a network policy, RPC, collector or duration clock.
+func NewWithTerminalObservation(key node.TerminalObservationKey) (*App, error) {
+	return newAppWithObservations(node.ObservationOptions{Terminal: &key})
+}
+
+func (a *App) TerminalObservation() *node.TerminalObservation {
+	if a == nil {
+		return nil
+	}
+	return a.terminalObservation
+}
+
+func newApp(key *node.PendingObservationKey) (*App, error) {
+	return newAppWithObservations(node.ObservationOptions{Pending: key})
+}
+
+// One fixed construction envelope; no public combination-factory family.
+func newAppWithObservations(options node.ObservationOptions) (*App, error) {
 	cfg := config.Default()
 	// Headless override: the shared config zero value keeps DMs enabled
 	// for the desktop client, but a console node has no user reading
@@ -36,12 +80,19 @@ func New() *App {
 	cfg.Node.DisableDirectMessages = !config.AcceptDirectMessagesFromEnv()
 	id, err := identity.LoadOrCreate(cfg.Node.IdentityPath)
 	if err != nil {
-		panic(err)
+		return nil, err
+	}
+	bus := ebus.New()
+	service, readouts, err := node.NewServiceWithObservations(cfg.Node, id, bus, options)
+	if err != nil {
+		bus.Shutdown()
+		return nil, err
 	}
 	return &App{
-		cfg:     cfg,
-		service: node.NewService(cfg.Node, id, ebus.New()),
-	}
+		cfg: cfg, service: service,
+		pendingObservation:  readouts.Pending,
+		terminalObservation: readouts.Terminal,
+	}, nil
 }
 
 func (a *App) Run(ctx context.Context) error {

@@ -144,8 +144,8 @@ type Budget struct {
 	// cfg is immutable after New — see Config.
 	cfg Config
 
-	// mu guards everything below. It is a LEAF: no call under it leaves
-	// this file.
+	// mu guards everything below. It remains a LEAF: observation bookkeeping
+	// is local; no duration provider or other component lock runs under it.
 	mu        sync.Mutex
 	outbound  int
 	inbound   int
@@ -157,6 +157,9 @@ type Budget struct {
 	refusedReserved  uint64
 	refusedDirection uint64
 	refusedUnknown   uint64
+
+	// Frozen only by private newObservedBudget before publication.
+	fullObservation *totalFullObservation
 }
 
 // Used returns the total capacity in use, including attempts in flight.
@@ -214,6 +217,10 @@ func (b *Budget) Reserve(direction Direction) (*Reservation, error) {
 	if direction != DirectionOutbound && direction != DirectionInbound && direction != DirectionAuxiliary {
 		atomic.AddUint64(&b.refusedUnknown, 1)
 		return nil, fmt.Errorf("%w: %d", ErrUnknownDirection, uint8(direction))
+	}
+
+	if b.fullObservation != nil && !b.fullObservation.disabled {
+		return b.reserveObserved(direction)
 	}
 
 	b.mu.Lock()
@@ -288,6 +295,10 @@ func (b *Budget) admitLocked(direction Direction) error {
 
 // release returns one unit. Only Reservation.Release calls it, and only once.
 func (b *Budget) release(direction Direction) {
+	if b.fullObservation != nil && !b.fullObservation.disabled {
+		b.releaseObserved(direction)
+		return
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 

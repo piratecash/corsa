@@ -13,9 +13,11 @@ import (
 )
 
 type serviceConstruction struct {
-	record recordAdmissionConstruction
-	bridge *findNodeTerminalConstruction
-	ready  *findNodeReadyConstruction
+	record              recordAdmissionConstruction
+	bridge              *findNodeTerminalConstruction
+	ready               *findNodeReadyConstruction
+	pendingObservation  *pendingObservationConstruction
+	terminalObservation *terminalObservationConstruction
 }
 
 type findNodeBridgeProfile struct {
