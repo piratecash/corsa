@@ -16,7 +16,7 @@ func candidateFixedCalendarsSourceErrors(sources map[string][]byte) []string {
 	failures := []string{}
 	rawPins := map[string]string{
 		"owned_bridge_commit.go": "61dfd28229d06a03012b4a0276e1bf3961e7aa05a6aca80154ae672bd3be5255",
-		"intake_owner.go":        "464c803f0c96ef419752c9965b217ba0d0b74c9ff0469c6b3e08efb2df60fe18",
+		"intake_owner.go":        "d46df9daabe08dd79f0fb8026c816f15e41694239b32eaed8522a678cb03dbbc",
 		"budget.go":              "9a9b95192bd6928694d23cac19550dbb3a29ef9113151130d0d545f19d7fe4fa",
 		"pending.go":             "ecd63fca64c9d921e35bf4e990bdc9934918787b902ce298244884540500c9e0",
 	}

@@ -3,6 +3,8 @@
 package loadstand
 
 import (
+	"bytes"
+	"encoding/binary"
 	"errors"
 	"io"
 	"net"
@@ -183,4 +185,114 @@ func TestLinuxPacketManagedCloseInterruptsBackpressuredWrite(t *testing.T) {
 		<-blocked
 		t.Fatal("managed Close did not evict backpressured writer")
 	}
+}
+
+// Synthetic wire values qualify the closed Sample reply schema, not OS custody.
+func TestLinuxSampleReadElapsedProtocol(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		ns    int64
+		known bool
+	}{{"known-zero", 0, true}, {"positive", 17, true}, {"unavailable", 0, false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			original := linuxSampleReply{Nonce: LaunchNonce{1}, Code: linuxResultReady, Sample: LinuxProcessSample{ReadElapsedNS: tc.ns, ReadElapsedKnown: tc.known, ExecutableReadBrackets: ProcessExecutableReadBrackets{First: ProcessExecutableReadBracket{ElapsedNS: tc.ns, ElapsedKnown: tc.known, VerifiedBytes: 19}, Last: ProcessExecutableReadBracket{ElapsedNS: tc.ns, ElapsedKnown: tc.known, VerifiedBytes: 23}}}}
+			encoded, err := encodeLinuxPacket(linuxSampleResult, 1, 1, original)
+			if err != nil || len(encoded) > linuxPacketLimit {
+				t.Fatal("original packet bound", err, len(encoded))
+			}
+			packet, err := decodeLinuxPacket(encoded)
+			if err != nil {
+				t.Fatal(err)
+			}
+			reply, err := decodeLinuxBody[linuxSampleReply](packet)
+			if err != nil || reply.Sample.ReadElapsedNS != tc.ns || reply.Sample.ReadElapsedKnown != tc.known || reply.Sample.ExecutableReadBrackets != original.Sample.ExecutableReadBrackets {
+				t.Fatal("elapsed wire scalar", err, reply)
+			}
+		})
+	}
+	t.Run("malformed", func(t *testing.T) {
+		oversize := linuxSampleReply{Nonce: LaunchNonce{1}, Code: linuxResultReady, Sample: LinuxProcessSample{ReadElapsedKnown: true}}
+		oversize.Sample.Descriptors.Reason = ProcessUnavailableReason(string(bytes.Repeat([]byte{'x'}, linuxPacketLimit)))
+		if encoded, err := encodeLinuxPacket(linuxSampleResult, 1, 1, oversize); !errors.Is(err, ErrLinuxOwnerProtocol) || encoded != nil {
+			t.Fatal("oversize typed elapsed Sample reply accepted", len(encoded), err)
+		}
+		raw, err := encodeLinuxPacket(linuxSampleResult, 1, 1, linuxSampleReply{Nonce: LaunchNonce{1}, Code: linuxResultReady, Sample: LinuxProcessSample{ReadElapsedKnown: true, ExecutableReadBrackets: ProcessExecutableReadBrackets{First: ProcessExecutableReadBracket{ElapsedNS: 3, ElapsedKnown: true, VerifiedBytes: 111}, Last: ProcessExecutableReadBracket{ElapsedNS: 7, ElapsedKnown: true, VerifiedBytes: 222}}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		p, err := decodeLinuxPacket(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// Exact pre-stream DTO shape: the new pair is the sole schema difference.
+		type oldProcessSample struct {
+			Provenance       LinuxProcessProvenance           `json:"provenance"`
+			ReadStartedAt    time.Time                        `json:"read_started_at"`
+			ReadCompletedAt  time.Time                        `json:"read_completed_at"`
+			ReadElapsedNS    int64                            `json:"read_elapsed_ns"`
+			ReadElapsedKnown bool                             `json:"read_elapsed_known"`
+			CPU              ProcessCPU                       `json:"cpu"`
+			Memory           ProcessMemory                    `json:"memory"`
+			Descriptors      ProcessMetric[ProcessFDCount]    `json:"descriptors"`
+			Scheduler        ProcessScheduler                 `json:"scheduler"`
+			FinalWait4       ProcessMetric[ProcessFinalUsage] `json:"final_wait4"`
+		}
+		type oldSampleReply struct {
+			Nonce  LaunchNonce
+			Code   linuxResultCode
+			Sample oldProcessSample
+		}
+		if _, err := decodeLinuxBody[oldSampleReply](p); !errors.Is(err, ErrLinuxOwnerProtocol) {
+			t.Fatal("new reply accepted by old decoder", err)
+		}
+		tooLarge := make([]byte, linuxPacketLimit+1)
+		copy(tooLarge, raw)
+		binary.BigEndian.PutUint32(tooLarge[8:12], uint32(len(tooLarge)-linuxHeaderSize))
+		if _, err := decodeLinuxPacket(tooLarge); !errors.Is(err, ErrLinuxOwnerProtocol) {
+			t.Fatal("original16KiB decode bound weakened", err)
+		}
+		negative := p
+		negative.body = bytes.Replace(p.body, []byte(`"elapsed_ns":3`), []byte(`"elapsed_ns":-1`), 1)
+		if reply, err := decodeLinuxBody[linuxSampleReply](negative); err != nil || reply.Sample.ExecutableReadBrackets.First.ElapsedNS != -1 {
+			t.Fatal("typed negative diagnostic became protocol authority", err)
+		}
+		for _, change := range []struct{ from, to string }{
+			{`"read_elapsed_ns":0,`, ``},
+			{`"read_elapsed_known":true,`, ``},
+			{`"read_elapsed_ns":0`, `"read_elapsed_ns":0,"read_elapsed_ns":0`},
+			{`"read_elapsed_ns":0`, `"Read_Elapsed_NS":0`},
+			{`"read_elapsed_ns":0`, `"read_elapsed_ns":null`},
+			{`"read_elapsed_known":true`, `"read_elapsed_known":null`},
+			{`"read_elapsed_ns":0`, `"read_elapsed_ns":9223372036854775808`},
+			{`"executable_read_brackets":{"first":{"elapsed_ns":3,"elapsed_known":true,"verified_bytes":111},"last":{"elapsed_ns":7,"elapsed_known":true,"verified_bytes":222}},`, ``},
+			{`"first":{"elapsed_ns":3,"elapsed_known":true,"verified_bytes":111},`, ``},
+			{`,"last":{"elapsed_ns":7,"elapsed_known":true,"verified_bytes":222}`, ``},
+			{`"first":{"elapsed_ns":3,"elapsed_known":true,"verified_bytes":111}`, `"first":null`},
+			{`"first":{"elapsed_ns":3,"elapsed_known":true,"verified_bytes":111}`, `"First":{"elapsed_ns":3,"elapsed_known":true,"verified_bytes":111}`},
+			{`"first":{"elapsed_ns":3,"elapsed_known":true,"verified_bytes":111}`, `"first":{"elapsed_known":true,"verified_bytes":111}`},
+			{`"first":{"elapsed_ns":3,"elapsed_known":true,"verified_bytes":111}`, `"first":{"elapsed_ns":3,"verified_bytes":111}`},
+			{`"first":{"elapsed_ns":3,"elapsed_known":true,"verified_bytes":111}`, `"first":{"elapsed_ns":3,"elapsed_known":true}`},
+			{`"first":{"elapsed_ns":3,"elapsed_known":true,"verified_bytes":111}`, `"first":{"elapsed_ns":3,"elapsed_known":true,"verified_bytes":null}`},
+			{`"first":{"elapsed_ns":3,"elapsed_known":true,"verified_bytes":111}`, `"first":{"elapsed_ns":3,"elapsed_known":null,"verified_bytes":111}`},
+			{`"first":{"elapsed_ns":3,"elapsed_known":true,"verified_bytes":111}`, `"first":{"elapsed_ns":null,"elapsed_known":true,"verified_bytes":111}`},
+			{`"first":{"elapsed_ns":3,"elapsed_known":true,"verified_bytes":111}`, `"first":{"elapsed_ns":3,"elapsed_ns":3,"elapsed_known":true,"verified_bytes":111}`},
+			{`"first":{"elapsed_ns":3,"elapsed_known":true,"verified_bytes":111}`, `"first":{"elapsed_ns":9223372036854775808,"elapsed_known":true,"verified_bytes":111}`},
+			{`"first":{"elapsed_ns":3,"elapsed_known":true,"verified_bytes":111}`, `"first":{"elapsed_ns":3,"elapsed_known":true,"verified_bytes":9223372036854775808}`},
+			{`"first":{"elapsed_ns":3,"elapsed_known":true,"verified_bytes":111}`, `"first":[]`},
+			{`"first":{"elapsed_ns":3,"elapsed_known":true,"verified_bytes":111}`, `"first":{"elapsed_ns":3.5,"elapsed_known":true,"verified_bytes":111}`},
+			{`"first":{"elapsed_ns":3,"elapsed_known":true,"verified_bytes":111}`, `"first":{"elapsed_ns":3,"elapsed_known":1,"verified_bytes":111}`},
+			{`"first":{"elapsed_ns":3,"elapsed_known":true,"verified_bytes":111}`, `"first":{"elapsed_ns":3,"elapsed_known":true,"verified_bytes":111,"cpu":0}`},
+			{`"first":{"elapsed_ns":3,"elapsed_known":true,"verified_bytes":111}`, `"first":{"elapsed_ns":3,"elapsed_known":true,"verified_bytes":111},"first":{"elapsed_ns":3,"elapsed_known":true,"verified_bytes":111}`},
+		} {
+			if bytes.Count(p.body, []byte(change.from)) != 1 {
+				t.Fatal("closed wire control not applicable", change.from)
+			}
+			bad := p
+			bad.body = bytes.Replace(p.body, []byte(change.from), []byte(change.to), 1)
+			if _, err := decodeLinuxBody[linuxSampleReply](bad); !errors.Is(err, ErrLinuxOwnerProtocol) {
+				t.Fatal("malformed elapsed schema accepted", change, err)
+			}
+		}
+	})
 }

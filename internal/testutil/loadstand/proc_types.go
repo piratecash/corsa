@@ -102,13 +102,32 @@ type LinuxProcessProvenance struct {
 	RunningExecutableVerified bool               `json:"running_executable_verified"`
 	KernelStartTimeAvailable  bool               `json:"kernel_start_time_available"`
 }
+
+// ProcessExecutableReadBracket describes a successful full-ELF stream read and
+// SHA-update bracket. It includes waits and scheduling, not just hash CPU.
+type ProcessExecutableReadBracket struct {
+	ElapsedNS     int64 `json:"elapsed_ns"`
+	ElapsedKnown  bool  `json:"elapsed_known"`
+	VerifiedBytes int64 `json:"verified_bytes"`
+}
+
+// ProcessExecutableReadBrackets retains the original first/last verification positions.
+type ProcessExecutableReadBrackets struct {
+	First ProcessExecutableReadBracket `json:"first"`
+	Last  ProcessExecutableReadBracket `json:"last"`
+}
 type LinuxProcessSample struct {
-	Provenance      LinuxProcessProvenance           `json:"provenance"`
-	ReadStartedAt   time.Time                        `json:"read_started_at"`
-	ReadCompletedAt time.Time                        `json:"read_completed_at"`
-	CPU             ProcessCPU                       `json:"cpu"`
-	Memory          ProcessMemory                    `json:"memory"`
-	Descriptors     ProcessMetric[ProcessFDCount]    `json:"descriptors"`
-	Scheduler       ProcessScheduler                 `json:"scheduler"`
-	FinalWait4      ProcessMetric[ProcessFinalUsage] `json:"final_wait4"`
+	Provenance      LinuxProcessProvenance `json:"provenance"`
+	ReadStartedAt   time.Time              `json:"read_started_at"`
+	ReadCompletedAt time.Time              `json:"read_completed_at"`
+	// Successful helper-owned read bracket only: excludes the sampler lock,
+	// trailing clock-frequency lookup, encoding and parent exchange. Not CPU.
+	ReadElapsedNS          int64                            `json:"read_elapsed_ns"`
+	ReadElapsedKnown       bool                             `json:"read_elapsed_known"`
+	ExecutableReadBrackets ProcessExecutableReadBrackets    `json:"executable_read_brackets"`
+	CPU                    ProcessCPU                       `json:"cpu"`
+	Memory                 ProcessMemory                    `json:"memory"`
+	Descriptors            ProcessMetric[ProcessFDCount]    `json:"descriptors"`
+	Scheduler              ProcessScheduler                 `json:"scheduler"`
+	FinalWait4             ProcessMetric[ProcessFinalUsage] `json:"final_wait4"`
 }

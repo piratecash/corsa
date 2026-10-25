@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -133,8 +134,20 @@ func summaryMemberFixture(t *testing.T, failure string) *summaryMemberTest {
 				owner.mu.Unlock()
 			}
 			at := time.Now().UTC()
-			sample := LinuxProcessSample{Provenance: facts.Provenance, ReadStartedAt: at, ReadCompletedAt: at}
-			packet, err := encodeLinuxPacket(linuxSampleResult, request.id, 1, linuxSampleReply{Nonce: owner.correlation.nonce, Code: linuxResultReady, Sample: sample})
+			sample := LinuxProcessSample{Provenance: facts.Provenance, ReadStartedAt: at, ReadCompletedAt: at, ReadElapsedNS: int64(index+1) * 11, ReadElapsedKnown: true,
+				ExecutableReadBrackets: ProcessExecutableReadBrackets{First: ProcessExecutableReadBracket{ElapsedNS: int64(index*2 + 1), ElapsedKnown: true, VerifiedBytes: int64(index+1)*100 + 1}, Last: ProcessExecutableReadBracket{ElapsedNS: int64(index*2 + 2), ElapsedKnown: true, VerifiedBytes: int64(index+1)*100 + 2}}}
+			if failure == "elapsed-"+point+"-unknown" {
+				sample.ReadElapsedKnown = false
+			}
+			if failure == "elapsed-"+point+"-negative" {
+				sample.ReadElapsedNS = -1
+			}
+			code := linuxResultReady
+			if failure == "stream-after-unavailable-second" && index == 3 {
+				code = linuxResultUnavailable
+				sample = LinuxProcessSample{}
+			}
+			packet, err := encodeLinuxPacket(linuxSampleResult, request.id, 1, linuxSampleReply{Nonce: owner.correlation.nonce, Code: code, Sample: sample})
 			if err != nil {
 				t.Error(err)
 				return
@@ -266,4 +279,241 @@ func TestLinuxMemberSummaryCancellationCannotReuseFetchedPayload(t *testing.T) {
 	if !errors.Is(err, context.Canceled) || calls != 1 || !reflect.DeepEqual(trace, []string{"before", "fetchRouteSummary"}) || sample.Traffic.Available() || sample.Sessions.Available() || sample.Modes.Available() || sample.Neighbours.Available() || sample.RouteEntries.Available() || sample.Runtime.Available() || sample.LinuxProcess == nil || sample.LinuxProcess.Available() || sample.ReadAt.IsZero() || !fixture.member.highWater.invalid {
 		t.Fatal("cancelled fetched summary admitted, retried, or bypassed AFTER/final cancellation", err, trace)
 	}
+}
+
+// This failure is injected only by the test HTTP response's Close, after the
+// original reply is read. It is not a process observation or a native fault.
+type summaryHiddenCloseFailure struct{}
+
+func (*summaryHiddenCloseFailure) Error() string { return "hidden-test-close-failure" }
+
+type summaryHiddenCloseBody struct {
+	io.ReadCloser
+	hidden *summaryHiddenCloseFailure
+}
+
+func (body summaryHiddenCloseBody) Close() error {
+	return errors.Join(body.ReadCloser.Close(), body.hidden)
+}
+
+type summaryHiddenCloseTransport struct {
+	next   http.RoundTripper
+	hidden *summaryHiddenCloseFailure
+}
+
+func (transport summaryHiddenCloseTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	response, err := transport.next.RoundTrip(request)
+	if err == nil {
+		response.Body = summaryHiddenCloseBody{ReadCloser: response.Body, hidden: transport.hidden}
+	}
+	return response, err
+}
+
+func TestLinuxMemberSampleFailureLabelsPreserveOriginalCause(t *testing.T) {
+	wantTrace := []string{"before", "fetchRouteSummary", "getResourceBreakdown", "getDatagramRuntimeState", "listBanned", "getRuntimeMetrics", "after"}
+	t.Run("success", func(t *testing.T) {
+		fixture := summaryMemberFixture(t, "")
+		ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+		defer cancel()
+		sample, err := fixture.member.Sample(ctx)
+		trace, calls := fixture.snapshot()
+		if err != nil || !sample.FullSampleAvailable() || calls != 1 || !reflect.DeepEqual(trace, wantTrace) || fixture.member.highWater.invalid || !fixture.member.highWater.seen {
+			t.Fatal("labels changed successful sample/custody", err, trace)
+		}
+	})
+	t.Run("initial-running", func(t *testing.T) {
+		fixture := summaryMemberFixture(t, "")
+		fixture.member.fixture.mu.Lock()
+		fixture.member.fixture.targetKnown = true
+		fixture.member.fixture.mu.Unlock()
+		sample, err := fixture.member.Sample(t.Context())
+		failure, ok := err.(*linuxSampleFailure)
+		trace, calls := fixture.snapshot()
+		if !ok || failure.firstObservedFailedStage != linuxSampleInitialRunning || failure.returnSite != linuxSampleInitialRunning || failure.firstObservedFailureClass != linuxSampleMemberState || failure.Unwrap() != ErrMemberState || !errors.Is(err, ErrMemberState) || sample.ReadAt != (time.Time{}) || len(trace) != 0 || calls != 0 {
+			t.Fatal("initial refusal changed or performed reads", err, trace)
+		}
+	})
+	t.Run("final-running", func(t *testing.T) {
+		fixture := summaryMemberFixture(t, "final-running")
+		ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+		defer cancel()
+		sample, err := fixture.member.Sample(ctx)
+		failure, ok := err.(*linuxSampleFailure)
+		trace, calls := fixture.snapshot()
+		if !ok || failure.firstObservedFailedStage != linuxSampleFinalRunning || failure.returnSite != linuxSampleFinalRunning || failure.firstObservedFailureClass != linuxSampleMemberState || failure.Unwrap() != ErrMemberState || !sample.FullSampleAvailable() || calls != 1 || !reflect.DeepEqual(trace, wantTrace) {
+			t.Fatal("final refusal changed original observations", err, trace)
+		}
+	})
+	t.Run("family-full-sample", func(t *testing.T) {
+		fixture := summaryMemberFixture(t, "unavailable")
+		ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+		defer cancel()
+		sample, err := fixture.member.Sample(ctx)
+		failure, ok := err.(*linuxSampleFailure)
+		trace, calls := fixture.snapshot()
+		if !ok || failure.firstObservedFailedStage != linuxSampleRouteSummary || failure.returnSite != linuxSampleFullSample || failure.firstObservedFailureClass != linuxSampleFamilyUnavailable || !errors.Is(err, ErrFamilyUnavailable) || !errors.Is(err, ErrMemberState) || sample.FullSampleAvailable() || sample.LinuxProcess == nil || !sample.LinuxProcess.Available() || calls != 1 || !reflect.DeepEqual(trace, wantTrace) {
+			t.Fatal("original full-sample join or observation order changed", err, trace)
+		}
+		// Original joined causes retain their order; no earlier cause is added.
+		joined, ok := failure.Unwrap().(interface{ Unwrap() []error })
+		if !ok {
+			t.Fatal("original joined return lost", err)
+		}
+		causes := joined.Unwrap()
+		if len(causes) != 2 || causes[0] != ErrMemberState || causes[1] != ErrFamilyUnavailable {
+			t.Fatal("original cause order changed", causes)
+		}
+	})
+	for _, reason := range []string{"cancel-after-summary", "family-before-final-cancel", "malformed-before-final-cancel", "typed-before-final-cancel"} {
+		t.Run(reason, func(t *testing.T) {
+			fixtureReason := ""
+			if reason == "family-before-final-cancel" {
+				fixtureReason = "unauthorized"
+			}
+			if reason == "malformed-before-final-cancel" {
+				fixtureReason = "malformed-frame"
+			}
+			fixture := summaryMemberFixture(t, fixtureReason)
+			ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+			defer cancel()
+			client := fixture.member.fixture.RPC()
+			next := client.http.Transport
+			hidden := &summaryHiddenCloseFailure{}
+			if reason == "typed-before-final-cancel" {
+				next = summaryHiddenCloseTransport{next: next, hidden: hidden}
+			}
+			client.http.Transport = summaryCancelTransport{next: next, cancel: cancel}
+			sample, err := fixture.member.Sample(ctx)
+			failure, ok := err.(*linuxSampleFailure)
+			trace, calls := fixture.snapshot()
+			wantFirst := linuxSampleRouteSummary
+			if reason == "cancel-after-summary" {
+				wantFirst = linuxSampleTraffic
+			}
+			wantClass := linuxSampleContextCancelled
+			if reason == "family-before-final-cancel" {
+				wantClass = linuxSampleRPCAccess
+			}
+			if reason == "malformed-before-final-cancel" {
+				wantClass = linuxSampleInvalidSample
+			}
+			if reason == "typed-before-final-cancel" {
+				wantClass = linuxSampleOtherFailure
+			}
+			if !ok || failure.firstObservedFailedStage != wantFirst || failure.firstObservedFailureClass != wantClass || failure.returnSite != linuxSampleFinalRunning || failure.Unwrap() != context.Canceled || !errors.Is(err, context.Canceled) || errors.Is(err, ErrRPCAccess) || errors.Is(err, ErrInvalidSample) || errors.Is(err, hidden) || sample.FullSampleAvailable() || sample.ReadAt.IsZero() || calls != 1 || !reflect.DeepEqual(trace, []string{"before", "fetchRouteSummary"}) || !fixture.member.highWater.invalid {
+				t.Fatal("hidden earlier failure changed original final cancellation", err, trace)
+			}
+			var hiddenCause *summaryHiddenCloseFailure
+			if errors.As(err, &hiddenCause) || strings.Contains(err.Error(), hidden.Error()) {
+				t.Fatal("hidden cause leaked into returned tree or text", err)
+			}
+			prefix := "linux-member-sample first_observed_failed_stage=" + string(wantFirst) + " first_observed_failure_class=" + string(wantClass) + " return_site=final_running: "
+			if !strings.HasPrefix(err.Error(), prefix) || len(prefix) > 256 {
+				t.Fatal("unbounded or inaccurate fixed diagnostic prefix", err)
+			}
+		})
+	}
+	t.Run("original-typed-cause", func(t *testing.T) {
+		original := &summaryHiddenCloseFailure{}
+		first := linuxSampleFirstFailure{stage: linuxSampleBeforeOS, class: linuxSampleOtherFailure}
+		err := first.at(linuxSampleFullSample, errors.Join(ErrMemberState, original))
+		var retained *summaryHiddenCloseFailure
+		if classifyLinuxSampleFailure(errors.Join(ErrMemberState, context.Canceled)) != linuxSampleContextCancelled || classifyLinuxSampleFailure(errors.Join(context.Canceled, ErrMemberState)) != linuxSampleContextCancelled {
+			t.Fatal("fixed class precedence changed")
+		}
+		if !errors.Is(err, original) || !errors.As(err, &retained) || retained != original || !errors.Is(err, ErrMemberState) {
+			t.Fatal("original typed/sentinel traversal changed", err)
+		}
+	})
+}
+
+func TestLinuxMemberRetainsBothReadBracketScalars(t *testing.T) {
+	for _, reason := range []string{"", "elapsed-before-unknown", "elapsed-after-unknown", "elapsed-before-negative", "elapsed-after-negative"} {
+		name := reason
+		if name == "" {
+			name = "both"
+		}
+		t.Run(name, func(t *testing.T) {
+			fixture := summaryMemberFixture(t, reason)
+			ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+			defer cancel()
+			s, err := fixture.member.Sample(ctx)
+			trace, calls := fixture.snapshot()
+			want := []string{"before", "fetchRouteSummary", "getResourceBreakdown", "getDatagramRuntimeState", "listBanned", "getRuntimeMetrics", "after"}
+			if err != nil || !s.FullSampleAvailable() || calls != 1 || !reflect.DeepEqual(trace, want) || fixture.member.highWater.invalid || !fixture.member.highWater.seen {
+				t.Fatal("diagnostic changed original sample", err, trace)
+			}
+			beforeKnown := reason != "elapsed-before-unknown" && reason != "elapsed-before-negative"
+			if s.LinuxBeforeElapsedKnown != beforeKnown || beforeKnown && s.LinuxBeforeElapsedNS != 11 || !beforeKnown && s.LinuxBeforeElapsedNS != 0 {
+				t.Fatal("BEFORE scalar lost or fabricated", s)
+			}
+			expectedBefore := ProcessExecutableReadBrackets{First: ProcessExecutableReadBracket{ElapsedNS: 1, ElapsedKnown: true, VerifiedBytes: 101}, Last: ProcessExecutableReadBracket{ElapsedNS: 2, ElapsedKnown: true, VerifiedBytes: 102}}
+			expectedAfter := ProcessExecutableReadBrackets{First: ProcessExecutableReadBracket{ElapsedNS: 3, ElapsedKnown: true, VerifiedBytes: 201}, Last: ProcessExecutableReadBracket{ElapsedNS: 4, ElapsedKnown: true, VerifiedBytes: 202}}
+			if s.LinuxBeforeExecutableReadBrackets != expectedBefore || s.LinuxProcess.Value.ExecutableReadBrackets != expectedAfter {
+				t.Fatal("fresh before/after stream pair lost", s)
+			}
+			after := s.LinuxProcess.Value
+			if after.ReadElapsedKnown != (reason != "elapsed-after-unknown") || reason == "elapsed-after-negative" && after.ReadElapsedNS != -1 || reason != "elapsed-after-negative" && after.ReadElapsedNS != 22 {
+				t.Fatal("AFTER original reply changed", after)
+			}
+			if reason == "" {
+				firstJSON, err := json.Marshal(s)
+				if err != nil {
+					t.Fatal(err)
+				}
+				secondCtx, secondCancel := context.WithTimeout(t.Context(), 2*time.Second)
+				defer secondCancel()
+				second, err := fixture.member.Sample(secondCtx)
+				trace, calls = fixture.snapshot()
+				if err != nil || !second.FullSampleAvailable() || !second.LinuxBeforeElapsedKnown || second.LinuxBeforeElapsedNS != 33 || second.LinuxProcess == nil || !second.LinuxProcess.Available() || !second.LinuxProcess.Value.ReadElapsedKnown || second.LinuxProcess.Value.ReadElapsedNS != 44 || calls != 2 || !reflect.DeepEqual(trace, append(append([]string(nil), want...), want...)) {
+					t.Fatal("second call reused first diagnostic", err, trace, second)
+				}
+				if second.LinuxBeforeExecutableReadBrackets != (ProcessExecutableReadBrackets{First: ProcessExecutableReadBracket{ElapsedNS: 5, ElapsedKnown: true, VerifiedBytes: 301}, Last: ProcessExecutableReadBracket{ElapsedNS: 6, ElapsedKnown: true, VerifiedBytes: 302}}) || second.LinuxProcess.Value.ExecutableReadBrackets != (ProcessExecutableReadBrackets{First: ProcessExecutableReadBracket{ElapsedNS: 7, ElapsedKnown: true, VerifiedBytes: 401}, Last: ProcessExecutableReadBracket{ElapsedNS: 8, ElapsedKnown: true, VerifiedBytes: 402}}) {
+					t.Fatal("stream pairs reused from prior call", second)
+				}
+				other := summaryMemberFixture(t, "")
+				otherCtx, otherCancel := context.WithTimeout(t.Context(), 2*time.Second)
+				defer otherCancel()
+				fresh, err := other.member.Sample(otherCtx)
+				otherTrace, otherCalls := other.snapshot()
+				if err != nil || !fresh.FullSampleAvailable() || !fresh.LinuxBeforeElapsedKnown || fresh.LinuxBeforeElapsedNS != 11 || fresh.LinuxProcess == nil || !fresh.LinuxProcess.Available() || !fresh.LinuxProcess.Value.ReadElapsedKnown || fresh.LinuxProcess.Value.ReadElapsedNS != 22 || otherCalls != 1 || !reflect.DeepEqual(otherTrace, want) {
+					t.Fatal("diagnostics crossed owner", err, otherTrace, fresh)
+				}
+				if fresh.LinuxBeforeExecutableReadBrackets != expectedBefore || fresh.LinuxProcess.Value.ExecutableReadBrackets != expectedAfter {
+					t.Fatal("stream pairs crossed owners", fresh)
+				}
+				retainedJSON, err := json.Marshal(s)
+				if err != nil || string(retainedJSON) != string(firstJSON) {
+					t.Fatal("prior sample snapshot mutated", err)
+				}
+			}
+		})
+	}
+	t.Run("unavailable-after-success", func(t *testing.T) {
+		fixture := summaryMemberFixture(t, "stream-after-unavailable-second")
+		ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+		defer cancel()
+		first, err := fixture.member.Sample(ctx)
+		if err != nil || !first.FullSampleAvailable() {
+			t.Fatal(err)
+		}
+		frozen, err := json.Marshal(first)
+		if err != nil {
+			t.Fatal(err)
+		}
+		nextCtx, nextCancel := context.WithTimeout(t.Context(), 2*time.Second)
+		defer nextCancel()
+		next, err := fixture.member.Sample(nextCtx)
+		failure, ok := err.(*linuxSampleFailure)
+		trace, calls := fixture.snapshot()
+		want := []string{"before", "fetchRouteSummary", "getResourceBreakdown", "getDatagramRuntimeState", "listBanned", "getRuntimeMetrics", "after"}
+		if !ok || failure.firstObservedFailedStage != linuxSampleAfterOS || failure.returnSite != linuxSampleFinalRunning || failure.Unwrap() != ErrMemberState || errors.Is(err, ErrLinuxOwnerProtocol) || next.FullSampleAvailable() || next.LinuxProcess == nil || next.LinuxProcess.Available() || next.LinuxProcess.Value != nil || next.LinuxBeforeExecutableReadBrackets.First.ElapsedNS != 5 || next.LinuxBeforeExecutableReadBrackets.Last.ElapsedNS != 6 || !next.Traffic.Available() || calls != 2 || !reflect.DeepEqual(trace, append(append([]string(nil), want...), want...)) {
+			t.Fatal("failed AFTER reused pair or altered original cause", next, err, trace)
+		}
+		retained, err := json.Marshal(first)
+		if err != nil || string(retained) != string(frozen) {
+			t.Fatal("failed later call mutated first stream pair", err)
+		}
+	})
+
 }

@@ -276,6 +276,10 @@ func (queued OwnedQueuedForward) Take() ([]byte, OwnedWritePermit, error) {
 	state.phase = candidateDispatching
 	o.count(&o.counters.taken)
 	state.forwardEndpointNS, state.forwardEndpointKnown = int64(f), true
+	state.forwardAssignmentAtNS = int64(w.receipt.at)
+	state.forwardAssignedSlotNS = int64(w.receipt.scheduled)
+	state.forwardLatestNS = int64(w.receipt.latest)
+	state.forwardAssignmentKnown = true
 	w.forwardEndpointNS, w.forwardEndpointKnown = int64(f), true
 	w.phase.Store(ownedForwardStarted)
 	return w.payload, OwnedWritePermit{work: w}, nil

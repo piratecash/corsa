@@ -94,6 +94,179 @@ func runLoadStandLinuxPlan(ctx context.Context, plan loadStandPlan, binaries loa
 	return report, nil
 }
 
+// Formats two retained full-ELF read/SHA-update spans, never hash CPU.
+func loadStandLinuxExecutableReadBracketSummary(pair loadstand.ProcessExecutableReadBrackets, outer int64, outerKnown bool) (string, int64, bool) {
+	const max = int64(1<<63 - 1)
+	text := ""
+	total, all := int64(0), true
+	for i, bracket := range []loadstand.ProcessExecutableReadBracket{pair.First, pair.Last} {
+		name := "first"
+		if i == 1 {
+			name = "last"
+		}
+		ns, bytes := "UNKNOWN", "UNKNOWN"
+		bytesKnown := bracket.VerifiedBytes >= 4 && bracket.VerifiedBytes <= 128<<20
+		if bytesKnown {
+			bytes = fmt.Sprint(bracket.VerifiedBytes)
+		}
+		if bytesKnown && bracket.ElapsedKnown && bracket.ElapsedNS >= 0 && bracket.ElapsedNS < max {
+			ns = fmt.Sprint(bracket.ElapsedNS)
+			if bracket.ElapsedNS > max-total {
+				all = false
+			} else {
+				total += bracket.ElapsedNS
+			}
+		} else {
+			all = false
+		}
+		if i != 0 {
+			text += " "
+		}
+		text += fmt.Sprintf("%s_ns=%s %s_bytes=%s", name, ns, name, bytes)
+	}
+	sum, uncovered, contained := "UNKNOWN", "UNKNOWN", "UNKNOWN"
+	if all {
+		sum = fmt.Sprint(total)
+		if outerKnown && outer >= 0 && outer < max && total <= outer {
+			uncovered = fmt.Sprint(outer - total)
+			contained = "true"
+		}
+	}
+	text += fmt.Sprintf(" sum_ns=%s contained=%s uncovered_ns=%s", sum, contained, uncovered)
+	return text, total, all
+}
+
+// Existing helper sampler read brackets only: not CPU, hash cost or parent IPC.
+func loadStandLinuxReadBracketSummary(report loadStandExecutionReport) string {
+	const unknown = "sampler_read_brackets_v1=UNKNOWN"
+	if len(report.Actions) == 0 {
+		return unknown
+	}
+	index := len(report.Actions) - 1
+	action := report.Actions[index]
+	if action.Kind != "sample" || action.Scheduled < 0 || action.Begin < action.Scheduled || action.End < action.Begin {
+		return unknown
+	}
+	for i, a := range report.Actions {
+		if i != index && a.Kind == "sample" && a.Scheduled == action.Scheduled {
+			return unknown
+		}
+	}
+	matched, matches := -1, 0
+	for i, edge := range report.TrafficSweeps {
+		if edge.CompletedActions == index && edge.At == action.Scheduled {
+			matched = i
+			matches++
+		}
+	}
+	if matches != 1 {
+		return unknown
+	}
+	edge := report.TrafficSweeps[matched]
+	if edge.SampleCount < 1 || edge.SampleCount > 4 || edge.SampleBegin < 0 || edge.SampleBegin > len(report.Samples)-edge.SampleCount || edge.Begin.IsZero() || edge.End.Before(edge.Begin) {
+		return unknown
+	}
+	end := edge.SampleBegin + edge.SampleCount
+	for i, row := range report.Samples {
+		if i < edge.SampleBegin || i >= end {
+			if !row.PreStop && row.PreStopOf == "" && row.At == edge.At {
+				return unknown
+			}
+			continue
+		}
+		if row.PreStop || row.PreStopOf != "" || row.At != edge.At || row.Node == "" || row.Sample.Incarnation.Ordinal == 0 || row.Sample.Incarnation.StartedAt.IsZero() {
+			return unknown
+		}
+		for j := edge.SampleBegin; j < i; j++ {
+			if report.Samples[j].Node == row.Node {
+				return unknown
+			}
+		}
+	}
+	const max = int64(1<<63 - 1)
+	beforeTotal, afterTotal := int64(0), int64(0)
+	beforeAll, afterAll := true, true
+	elfBeforeTotal, elfAfterTotal := int64(0), int64(0)
+	elfBeforeAll, elfAfterAll := true, true
+	text := fmt.Sprintf("sampler_read_brackets_v1=unique action_index=%d sweep_index=%d rows=%d", index, matched, edge.SampleCount)
+	for i := edge.SampleBegin; i < end; i++ {
+		row := report.Samples[i]
+		s := row.Sample
+		before, after := "UNKNOWN", "UNKNOWN"
+		if s.LinuxBeforeElapsedKnown && s.LinuxBeforeElapsedNS >= 0 && s.LinuxBeforeElapsedNS < max {
+			before = fmt.Sprint(s.LinuxBeforeElapsedNS)
+			if s.LinuxBeforeElapsedNS > max-beforeTotal {
+				beforeAll = false
+			} else {
+				beforeTotal += s.LinuxBeforeElapsedNS
+			}
+		} else {
+			beforeAll = false
+		}
+		if s.LinuxProcess != nil && s.LinuxProcess.Available() && s.LinuxProcess.Value.ReadElapsedKnown && s.LinuxProcess.Value.ReadElapsedNS >= 0 && s.LinuxProcess.Value.ReadElapsedNS < max {
+			n := s.LinuxProcess.Value.ReadElapsedNS
+			after = fmt.Sprint(n)
+			if n > max-afterTotal {
+				afterAll = false
+			} else {
+				afterTotal += n
+			}
+		} else {
+			afterAll = false
+		}
+		elfBefore, beforeStreamTotal, beforeStreamKnown := loadStandLinuxExecutableReadBracketSummary(s.LinuxBeforeExecutableReadBrackets, s.LinuxBeforeElapsedNS, s.LinuxBeforeElapsedKnown)
+		afterPair := loadstand.ProcessExecutableReadBrackets{}
+		afterOuter, afterOuterKnown := int64(0), false
+		if s.LinuxProcess != nil && s.LinuxProcess.Available() {
+			afterPair = s.LinuxProcess.Value.ExecutableReadBrackets
+			afterOuter = s.LinuxProcess.Value.ReadElapsedNS
+			afterOuterKnown = s.LinuxProcess.Value.ReadElapsedKnown
+		}
+		elfAfter, afterStreamTotal, afterStreamKnown := loadStandLinuxExecutableReadBracketSummary(afterPair, afterOuter, afterOuterKnown)
+		if beforeStreamKnown && beforeStreamTotal <= max-elfBeforeTotal {
+			elfBeforeTotal += beforeStreamTotal
+		} else {
+			elfBeforeAll = false
+		}
+		if afterStreamKnown && afterStreamTotal <= max-elfAfterTotal {
+			elfAfterTotal += afterStreamTotal
+		} else {
+			elfAfterAll = false
+		}
+		label := string(row.Node)
+		if len(label) > 128 {
+			label = label[:128]
+		}
+		text += fmt.Sprintf(" read_bracket[%d]={sample_index=%d node=%+q ordinal=%d started_at=%s before_ns=%s after_ns=%s elf_before={%s} elf_after={%s}}", i-edge.SampleBegin, i, label, s.Incarnation.Ordinal, s.Incarnation.StartedAt.UTC().Format(time.RFC3339Nano), before, after, elfBefore, elfAfter)
+	}
+	beforeSum, afterSum, total := "UNKNOWN", "UNKNOWN", "UNKNOWN"
+	if beforeAll {
+		beforeSum = fmt.Sprint(beforeTotal)
+	}
+	if afterAll {
+		afterSum = fmt.Sprint(afterTotal)
+	}
+	if beforeAll && afterAll && beforeTotal <= max-afterTotal {
+		total = fmt.Sprint(beforeTotal + afterTotal)
+	}
+	text += fmt.Sprintf(" before_sum_ns=%s after_sum_ns=%s combined_sum_ns=%s scope=successful_sampler_read_brackets_not_cpu_or_hash", beforeSum, afterSum, total)
+	elfBeforeSum, elfAfterSum, elfSum := "UNKNOWN", "UNKNOWN", "UNKNOWN"
+	if elfBeforeAll {
+		elfBeforeSum = fmt.Sprint(elfBeforeTotal)
+	}
+	if elfAfterAll {
+		elfAfterSum = fmt.Sprint(elfAfterTotal)
+	}
+	if elfBeforeAll && elfAfterAll && elfBeforeTotal <= max-elfAfterTotal {
+		elfSum = fmt.Sprint(elfBeforeTotal + elfAfterTotal)
+	}
+	text += fmt.Sprintf(" elf_before_sum_ns=%s elf_after_sum_ns=%s elf_combined_sum_ns=%s elf_scope=full_elf_read_sha_update_not_cpu", elfBeforeSum, elfAfterSum, elfSum)
+	if len(text) > 3000 {
+		return unknown
+	}
+	return text
+}
+
 // loadStandLinuxRetainedFailureSummary formats only already retained evidence.
 // It never identifies a last action as the cause, subtracts clock domains, or
 // treats the unset runtime-unavailable floor as a measured zero.
@@ -125,6 +298,7 @@ func loadStandLinuxRetainedFailureSummary(report loadStandExecutionReport) strin
 		last := report.Actions[len(report.Actions)-1]
 		text += fmt.Sprintf(" last_retained_action={index=%d kind=%+q node=%+q scheduled_ns=%d begin_ns=%d end_ns=%d wall_at=%s}", len(report.Actions)-1, label(last.Kind), label(string(last.Node)), last.Scheduled, last.Begin, last.End, wall(last.WallAt))
 	}
+	text += " " + loadStandLinuxReadBracketSummary(report)
 	failed := -1
 	for i, check := range report.RuntimeChecks {
 		if check.PreStopOf == "" && check.Verdict != "pass" {
@@ -442,6 +616,225 @@ func TestLoadStandLinuxRetainedFailureSummary(t *testing.T) {
 		text := loadStandLinuxRetainedFailureSummary(report)
 		if len(text) != 4<<10 || !strings.HasSuffix(text, "...TRUNCATED") {
 			t.Fatal("post-quote byte bound not applied", len(text))
+		}
+	})
+}
+
+func TestLoadStandLinuxSamplerReadBracketSummary(t *testing.T) {
+	fixture := func() loadStandExecutionReport {
+		r := loadStandExecutionReport{Actions: []loadStandActionTrace{{Kind: "sample"}, {Kind: "gossip"}, {Kind: "sample", Scheduled: 500 * time.Millisecond, Begin: 2495027680, End: 5239379760}}, TrafficSweeps: []loadStandTrafficSweep{{Begin: time.Unix(1, 0), End: time.Unix(2, 0), SampleCount: 4, CompletedActions: 0}, {At: 500 * time.Millisecond, Begin: time.Unix(3, 0), End: time.Unix(4, 0), SampleBegin: 4, SampleCount: 4, CompletedActions: 2}}}
+		var prior, current []loadStandMemberObservation
+		ids := []loadstand.MemberID{"full-000", "full-001", "edge-000", "edge-001"}
+		for i := 0; i < 4; i++ {
+			bytes := int64(20709639)
+			if i >= 2 {
+				bytes = 22675719
+			}
+			first := int64(i*4 + 1)
+			beforePair := loadstand.ProcessExecutableReadBrackets{First: loadstand.ProcessExecutableReadBracket{ElapsedNS: first, ElapsedKnown: true, VerifiedBytes: bytes}, Last: loadstand.ProcessExecutableReadBracket{ElapsedNS: first + 1, ElapsedKnown: true, VerifiedBytes: bytes}}
+			afterPair := loadstand.ProcessExecutableReadBrackets{First: loadstand.ProcessExecutableReadBracket{ElapsedNS: first + 2, ElapsedKnown: true, VerifiedBytes: bytes}, Last: loadstand.ProcessExecutableReadBracket{ElapsedNS: first + 3, ElapsedKnown: true, VerifiedBytes: bytes}}
+			osSample := loadstand.LinuxProcessSample{ReadElapsedNS: int64(i+1) * 200, ReadElapsedKnown: true, ExecutableReadBrackets: afterPair}
+			o := loadstand.Observed(osSample, nil)
+			row := loadStandMemberObservation{At: 500 * time.Millisecond, Node: ids[i], Sample: loadstand.MemberSample{Incarnation: loadstand.Incarnation{Ordinal: 1, StartedAt: time.Unix(int64(11+i), 0)}, LinuxBeforeElapsedNS: int64(i+1) * 100, LinuxBeforeElapsedKnown: true, LinuxBeforeExecutableReadBrackets: beforePair, LinuxProcess: &o}}
+			current = append(current, row)
+			previous := row
+			previous.At = 0
+			previous.Sample.LinuxBeforeElapsedNS = 10000
+			previous.Sample.LinuxBeforeExecutableReadBrackets.First.ElapsedNS = 999
+			osSample.ReadElapsedNS = 20000
+			osSample.ExecutableReadBrackets.First.ElapsedNS = 888
+			previousOS := loadstand.Observed(osSample, nil)
+			previous.Sample.LinuxProcess = &previousOS
+			prior = append(prior, previous)
+			heap := uint64(100)
+			r.RuntimeChecks = append(r.RuntimeChecks, loadStandRuntimeCheck{At: row.At, Group: uint64(i + 1), Members: []loadstand.MemberID{row.Node}, Provider: row.Node, ProviderIncarnation: row.Sample.Incarnation, RuntimeReadAt: time.Unix(int64(21+i), 0), FloorBytes: 1, HeapObjectsBytes: &heap, Verdict: "pass"})
+		}
+		r.Samples = append(prior, current...)
+		return r
+	}
+
+	t.Run("completed-without-runtime-failure", func(t *testing.T) {
+		r := fixture()
+		text := loadStandLinuxRetainedFailureSummary(r)
+		for _, want := range []string{"sampler_read_brackets_v1=unique action_index=2 sweep_index=1 rows=4", "before_ns=100 after_ns=200", "before_ns=400 after_ns=800", "before_sum_ns=1000 after_sum_ns=2000 combined_sum_ns=3000", "first_regular_failed_runtime_check=UNKNOWN", "elf_before={first_ns=1 first_bytes=20709639 last_ns=2 last_bytes=20709639 sum_ns=3 contained=true uncovered_ns=97}", "elf_before_sum_ns=60 elf_after_sum_ns=76 elf_combined_sum_ns=136"} {
+			if !strings.Contains(text, want) {
+				t.Fatal("completed exact sweep missing", want, text)
+			}
+		}
+		if strings.Count(text, " read_bracket[") != 4 {
+			t.Fatal("completed current sweep not four rows", text)
+		}
+		r.RuntimeChecks = nil
+		if withoutChecks := loadStandLinuxRetainedFailureSummary(r); withoutChecks != text {
+			t.Fatal("read bracket depends on runtime check failure", withoutChecks, text)
+		}
+	})
+	t.Run("ambiguous-edges-and-stops", func(t *testing.T) {
+		for _, kind := range []string{"missing", "duplicate", "wrong-action", "same-time-action", "bounds", "overlap", "overbound", "duplicate-node", "reused-node", "prestop", "sibling", "outside-regular", "wrong-at", "missing-incarnation"} {
+			r := fixture()
+			switch kind {
+			case "missing":
+				r.TrafficSweeps = nil
+			case "duplicate":
+				r.TrafficSweeps = append(r.TrafficSweeps, r.TrafficSweeps[1])
+			case "wrong-action":
+				r.TrafficSweeps[1].CompletedActions = 1
+			case "same-time-action":
+				r.Actions[0] = r.Actions[2]
+			case "bounds":
+				r.TrafficSweeps[1].SampleBegin = int(^uint(0) >> 1)
+			case "overlap":
+				r.TrafficSweeps[1].SampleBegin = 3
+			case "overbound":
+				r.TrafficSweeps[1].SampleCount = 5
+			case "duplicate-node":
+				r.Samples[5] = r.Samples[4]
+			case "reused-node":
+				r.Samples[5].Node = r.Samples[4].Node
+			case "prestop":
+				r.Samples[5].PreStop = true
+			case "sibling":
+				r.Samples[5].PreStopOf = "member-0"
+			case "outside-regular":
+				r.Samples = append(r.Samples, r.Samples[4])
+			case "wrong-at":
+				r.Samples[5].At++
+			case "missing-incarnation":
+				r.Samples[5].Sample.Incarnation.StartedAt = time.Time{}
+			}
+			text := loadStandLinuxRetainedFailureSummary(r)
+			if !strings.Contains(text, "sampler_read_brackets_v1=UNKNOWN") || strings.Contains(text, "read_bracket[0]=") {
+				t.Fatal("ambiguous elapsed join", kind, text)
+			}
+		}
+	})
+	t.Run("zero-unavailable-and-overflow", func(t *testing.T) {
+		r := fixture()
+		r.Samples[4].Sample.LinuxBeforeElapsedNS = 0
+		r.Samples[4].Sample.LinuxProcess.Value.ReadElapsedNS = 0
+		if text := loadStandLinuxReadBracketSummary(r); !strings.Contains(text, "before_ns=0 after_ns=0") {
+			t.Fatal("known zero lost", text)
+		}
+		r.Samples[4].Sample.LinuxBeforeElapsedKnown = false
+		r.Samples[5].Sample.LinuxProcess.Value.ReadElapsedNS = -1
+		if text := loadStandLinuxReadBracketSummary(r); !strings.Contains(text, "before_ns=UNKNOWN") || !strings.Contains(text, "after_ns=UNKNOWN") || !strings.Contains(text, "combined_sum_ns=UNKNOWN") {
+			t.Fatal("missing metric became zero", text)
+		}
+		r = fixture()
+		r.Samples[4].Sample.LinuxBeforeElapsedNS = 1<<63 - 2
+		if text := loadStandLinuxReadBracketSummary(r); !strings.Contains(text, "before_sum_ns=UNKNOWN") || !strings.Contains(text, "combined_sum_ns=UNKNOWN") {
+			t.Fatal("total overflow", text)
+		}
+		r = fixture()
+		r.Samples[4].Sample.LinuxProcess.Value.ReadElapsedNS = 1<<63 - 2
+		if text := loadStandLinuxReadBracketSummary(r); !strings.Contains(text, "before_sum_ns=1000 after_sum_ns=UNKNOWN combined_sum_ns=UNKNOWN") {
+			t.Fatal("AFTER sum overflow", text)
+		}
+		r = fixture()
+		for i := range r.Samples {
+			r.Samples[i].Sample.LinuxBeforeElapsedNS = 0
+			r.Samples[i].Sample.LinuxProcess.Value.ReadElapsedNS = 0
+		}
+		r.Samples[4].Sample.LinuxBeforeElapsedNS = 1<<63 - 2
+		r.Samples[4].Sample.LinuxProcess.Value.ReadElapsedNS = 2
+		if text := loadStandLinuxReadBracketSummary(r); !strings.Contains(text, "before_sum_ns=9223372036854775806 after_sum_ns=2 combined_sum_ns=UNKNOWN") {
+			t.Fatal("combined-only overflow", text)
+		}
+		r = fixture()
+		r.Samples[4].Sample.LinuxBeforeExecutableReadBrackets.First.ElapsedKnown = false
+		if text := loadStandLinuxReadBracketSummary(r); !strings.Contains(text, "elf_before={first_ns=UNKNOWN first_bytes=20709639") || !strings.Contains(text, "elf_before_sum_ns=UNKNOWN elf_after_sum_ns=76 elf_combined_sum_ns=UNKNOWN") {
+			t.Fatal("unknown elapsed lost valid bytes", text)
+		}
+		r = fixture()
+		r.Samples[4].Sample.LinuxProcess.Value.ExecutableReadBrackets.First.ElapsedNS = 1<<63 - 2
+		r.Samples[4].Sample.LinuxProcess.Value.ExecutableReadBrackets.Last.ElapsedNS = 0
+		r.Samples[4].Sample.LinuxProcess.Value.ReadElapsedNS = 1<<63 - 2
+		if text := loadStandLinuxReadBracketSummary(r); !strings.Contains(text, "elf_before_sum_ns=60 elf_after_sum_ns=UNKNOWN elf_combined_sum_ns=UNKNOWN") {
+			t.Fatal("stream AFTER side overflow", text)
+		}
+		r = fixture()
+		for i := 4; i < 8; i++ {
+			r.Samples[i].Sample.LinuxBeforeExecutableReadBrackets.First.ElapsedNS = 0
+			r.Samples[i].Sample.LinuxBeforeExecutableReadBrackets.Last.ElapsedNS = 0
+			r.Samples[i].Sample.LinuxProcess.Value.ExecutableReadBrackets.First.ElapsedNS = 0
+			r.Samples[i].Sample.LinuxProcess.Value.ExecutableReadBrackets.Last.ElapsedNS = 0
+		}
+		r.Samples[4].Sample.LinuxBeforeExecutableReadBrackets.First.ElapsedNS = 1<<63 - 2
+		r.Samples[4].Sample.LinuxBeforeElapsedNS = 1<<63 - 2
+		r.Samples[4].Sample.LinuxProcess.Value.ExecutableReadBrackets.First.ElapsedNS = 2
+		r.Samples[4].Sample.LinuxProcess.Value.ReadElapsedNS = 2
+		if text := loadStandLinuxReadBracketSummary(r); !strings.Contains(text, "elf_before_sum_ns=9223372036854775806 elf_after_sum_ns=2 elf_combined_sum_ns=UNKNOWN") {
+			t.Fatal("stream combined-only overflow", text)
+		}
+	})
+	t.Run("bounded-labels-and-cleanup", func(t *testing.T) {
+		r := fixture()
+		r.Samples[4].Node = loadstand.MemberID(strings.Repeat("\x00", 4096))
+		r.Samples[4].Sample.LinuxBeforeExecutableReadBrackets.First.VerifiedBytes = 128 << 20
+		r.Samples[4].Sample.LinuxBeforeExecutableReadBrackets.First.ElapsedNS = 1<<63 - 2
+		r.Samples[4].Sample.LinuxBeforeExecutableReadBrackets.Last.ElapsedNS = 0
+		r.Samples[4].Sample.LinuxBeforeElapsedNS = 1<<63 - 2
+		text := loadStandLinuxRetainedFailureSummary(r)
+		if len(text) > 4<<10 || strings.Count(text, " read_bracket[") > 4 {
+			t.Fatal("elapsed output bound", len(text), text)
+		}
+		r = fixture()
+		cleanup := r.Samples[4]
+		cleanup.PreStopOf = "member-0"
+		r.Samples = append(r.Samples, cleanup)
+		if text := loadStandLinuxReadBracketSummary(r); !strings.Contains(text, "sampler_read_brackets_v1=unique") {
+			t.Fatal("cleanup replaced exact completed edge", text)
+		}
+	})
+}
+
+func TestLoadStandLinuxExecutableReadBrackets(t *testing.T) {
+	pair := func(a, b int64) loadstand.ProcessExecutableReadBrackets {
+		return loadstand.ProcessExecutableReadBrackets{First: loadstand.ProcessExecutableReadBracket{ElapsedNS: a, ElapsedKnown: true, VerifiedBytes: 4}, Last: loadstand.ProcessExecutableReadBracket{ElapsedNS: b, ElapsedKnown: true, VerifiedBytes: 8}}
+	}
+	for _, tc := range []struct {
+		name       string
+		value      loadstand.ProcessExecutableReadBrackets
+		outer      int64
+		outerKnown bool
+		sum        int64
+		known      bool
+		want       string
+	}{
+		{"zero", pair(0, 0), 0, true, 0, true, "sum_ns=0 contained=true uncovered_ns=0"},
+		{"positive", pair(2, 3), 7, true, 5, true, "sum_ns=5 contained=true uncovered_ns=2"},
+		{"outer-unavailable", pair(2, 3), 0, false, 5, true, "sum_ns=5 contained=UNKNOWN uncovered_ns=UNKNOWN"},
+		{"outside-read-bracket", pair(2, 3), 4, true, 5, true, "sum_ns=5 contained=UNKNOWN uncovered_ns=UNKNOWN"},
+		{"negative", pair(-1, 3), 7, true, 3, false, "first_ns=UNKNOWN"},
+		{"saturated", pair(1<<63-1, 3), 7, true, 3, false, "sum_ns=UNKNOWN"},
+		{"overflow", pair(1<<63-2, 3), 1<<63 - 2, true, 1<<63 - 2, false, "sum_ns=UNKNOWN"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			text, total, known := loadStandLinuxExecutableReadBracketSummary(tc.value, tc.outer, tc.outerKnown)
+			if total != tc.sum || known != tc.known || !strings.Contains(text, tc.want) {
+				t.Fatal("stream diagnostic", text, total, known)
+			}
+		})
+	}
+	t.Run("missing-and-malformed", func(t *testing.T) {
+		for _, kind := range []string{"missing-first", "missing-last", "invalid-bytes", "oversized-bytes", "missing-mono"} {
+			value := pair(2, 3)
+			switch kind {
+			case "missing-first":
+				value.First = loadstand.ProcessExecutableReadBracket{}
+			case "missing-last":
+				value.Last = loadstand.ProcessExecutableReadBracket{}
+			case "invalid-bytes":
+				value.First.VerifiedBytes = -1
+			case "oversized-bytes":
+				value.First.VerifiedBytes = 1 << 30
+			case "missing-mono":
+				value.First.ElapsedKnown = false
+			}
+			text, _, known := loadStandLinuxExecutableReadBracketSummary(value, 7, true)
+			if known || !strings.Contains(text, "sum_ns=UNKNOWN") {
+				t.Fatal("invalid stream metric became measured", kind, text)
+			}
 		}
 	})
 }

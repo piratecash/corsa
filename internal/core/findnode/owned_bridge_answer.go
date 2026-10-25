@@ -34,15 +34,18 @@ type ownedRelayEndpointObservation struct {
 	clock                                                              ownedForwardObservationClock
 	receivedKnown, forwardKnown, answerReceivedKnown, answerStartKnown bool
 	receivedNS, forwardNS, answerReceivedNS, answerStartNS             int64
-	chainKnown                                                         bool
-	spanNS                                                             int64
-	generation                                                         uint64
-	sourceConnID, targetConnID                                         uint64
-	sourceOpenedNS, targetOpenedNS                                     int64
-	sourceIdentity, targetIdentity                                     [20]byte
-	request, forwarded                                                 protocol.FindNodeRequest
-	expiresNS                                                          int64
-	writeOutcome                                                       ownedAnswerWriteObservation
+	// Original R reservation commit/slot/deadline, not timer arm or exact Q.
+	assignmentKnown                                  bool
+	reservationAtNS, assignedSlotNS, latestForwardNS int64
+	chainKnown                                       bool
+	spanNS                                           int64
+	generation                                       uint64
+	sourceConnID, targetConnID                       uint64
+	sourceOpenedNS, targetOpenedNS                   int64
+	sourceIdentity, targetIdentity                   [20]byte
+	request, forwarded                               protocol.FindNodeRequest
+	expiresNS                                        int64
+	writeOutcome                                     ownedAnswerWriteObservation
 }
 
 type ownedAnswerWriteObservation uint32
@@ -113,17 +116,20 @@ type OwnedRelayEndpointObservation struct {
 	RelayKnown                                                         bool
 	ReceivedKnown, ForwardKnown, AnswerReceivedKnown, AnswerStartKnown bool
 	ReceivedNS, ForwardNS, AnswerReceivedNS, AnswerStartNS             int64
-	ChainKnown                                                         bool
-	SpanNS                                                             int64
-	Generation                                                         uint64
-	SourceConnID, TargetConnID                                         uint64
-	SourceOpenedNS, TargetOpenedNS                                     int64
-	SourceIdentity, TargetIdentity                                     [20]byte
-	RequestID, ForwardedID                                             uint64
-	RequestTarget, ForwardedTarget                                     [20]byte
-	RequestChallenge, ForwardedChallenge                               [32]byte
-	ExpiresNS                                                          int64
-	WriteOutcome                                                       OwnedRelayWriteOutcome
+	// Same R owner domain as ReceivedNS/ForwardNS. No exact wake or Q claim.
+	AssignmentKnown                                  bool
+	ReservationAtNS, AssignedSlotNS, LatestForwardNS int64
+	ChainKnown                                       bool
+	SpanNS                                           int64
+	Generation                                       uint64
+	SourceConnID, TargetConnID                       uint64
+	SourceOpenedNS, TargetOpenedNS                   int64
+	SourceIdentity, TargetIdentity                   [20]byte
+	RequestID, ForwardedID                           uint64
+	RequestTarget, ForwardedTarget                   [20]byte
+	RequestChallenge, ForwardedChallenge             [32]byte
+	ExpiresNS                                        int64
+	WriteOutcome                                     OwnedRelayWriteOutcome
 }
 
 // RelayEndpointObservation copies the existing private reader once. It adds
@@ -138,7 +144,10 @@ func (work OwnedAnswerWork) RelayEndpointObservation() OwnedRelayEndpointObserva
 		AnswerReceivedKnown: observed.answerReceivedKnown, AnswerStartKnown: observed.answerStartKnown,
 		ReceivedNS: observed.receivedNS, ForwardNS: observed.forwardNS,
 		AnswerReceivedNS: observed.answerReceivedNS, AnswerStartNS: observed.answerStartNS,
-		ChainKnown: observed.chainKnown, SpanNS: observed.spanNS,
+		AssignmentKnown: observed.assignmentKnown,
+		ReservationAtNS: observed.reservationAtNS, AssignedSlotNS: observed.assignedSlotNS,
+		LatestForwardNS: observed.latestForwardNS,
+		ChainKnown:      observed.chainKnown, SpanNS: observed.spanNS,
 		Generation:   observed.generation,
 		SourceConnID: observed.sourceConnID, TargetConnID: observed.targetConnID,
 		SourceOpenedNS: observed.sourceOpenedNS, TargetOpenedNS: observed.targetOpenedNS,

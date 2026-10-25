@@ -20,7 +20,7 @@ func candidateFixedGroupsSourceErrors(sources map[string][]byte) []string {
 		"owned_bridge_round_plan.go": "8948ec210326d25339c8475b8d7a2889c01ab15dbf3b320d9be4ab65c403cb51",
 		"owned_bridge_commit.go":     "61dfd28229d06a03012b4a0276e1bf3961e7aa05a6aca80154ae672bd3be5255",
 		"intake_groups.go":           "40311189acc0513c1d1486e445629bc312f5f419dc032cd50358c2f408223734",
-		"intake_owner.go":            "464c803f0c96ef419752c9965b217ba0d0b74c9ff0469c6b3e08efb2df60fe18",
+		"intake_owner.go":            "d46df9daabe08dd79f0fb8026c816f15e41694239b32eaed8522a678cb03dbbc",
 	}
 	types := map[string]string{
 		"candidateRecordKey":   "candidateRecordKeystruct{cellinttargetdomain.PeerIdentity}",

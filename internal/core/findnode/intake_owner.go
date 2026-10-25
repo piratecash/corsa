@@ -43,6 +43,9 @@ type candidatePending struct {
 	// Passive scalar copy of genuine owned Forward.Take; no work/graph link.
 	forwardEndpointNS    int64
 	forwardEndpointKnown bool
+	// Successful original R receipt scalars only; no receipt/calendar authority.
+	forwardAssignmentAtNS, forwardAssignedSlotNS, forwardLatestNS int64
+	forwardAssignmentKnown                                        bool
 }
 type candidateReservation struct {
 	owner      *intakeCoordinator

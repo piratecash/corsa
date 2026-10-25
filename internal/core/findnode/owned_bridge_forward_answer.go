@@ -101,6 +101,17 @@ func (intake DormantIntake) MatchOwnedAnswer(input OwnedReceivedAnswer) (OwnedAn
 		observation.receivedKnown = observation.clock != ownedForwardObservationClockUnknown && observation.receivedNS >= 0
 		observation.forwardKnown = observation.clock != ownedForwardObservationClockUnknown && observation.forwardNS >= 0
 		observation.answerReceivedKnown = observation.clock != ownedForwardObservationClockUnknown && observation.answerReceivedNS >= 0
+		// Passive qualification only: never refuse Match or alter the existing
+		// relay/chain endpoints when assignment history is absent/inconsistent.
+		if state.forwardAssignmentKnown && observation.receivedKnown && observation.forwardKnown &&
+			observation.receivedNS <= state.forwardAssignmentAtNS &&
+			state.forwardAssignmentAtNS <= state.forwardAssignedSlotNS &&
+			state.forwardAssignedSlotNS <= observation.forwardNS && observation.forwardNS <= state.forwardLatestNS {
+			observation.assignmentKnown = true
+			observation.reservationAtNS = state.forwardAssignmentAtNS
+			observation.assignedSlotNS = state.forwardAssignedSlotNS
+			observation.latestForwardNS = state.forwardLatestNS
+		}
 		result.answer.relayObservation = observation
 	}
 	o.last = f

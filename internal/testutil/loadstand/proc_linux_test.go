@@ -5,6 +5,8 @@ package loadstand
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -437,4 +439,148 @@ func TestLinuxProcHelperDeathFunctional(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 	t.Fatal("helper death left its old child running")
+}
+
+func TestLinuxProcessReadElapsedProjection(t *testing.T) {
+	base := time.Now()
+	mono := base != base.Round(0)
+	for _, tc := range []struct {
+		name       string
+		start, end time.Time
+		want       int64
+		known      bool
+	}{
+		{"zero", base, base, 0, mono},
+		{"positive", base, base.Add(17 * time.Nanosecond), 17, mono},
+		{"missing-start", base.Round(0), base.Add(time.Second), 0, false},
+		{"missing-end", base, base.Add(time.Second).Round(0), 0, false},
+		{"wall-only", time.Unix(1, 0), time.Unix(2, 0), 0, false},
+		{"zero-times", time.Time{}, time.Time{}, 0, false},
+		{"backwards", base.Add(time.Second), base, 0, false},
+		{"saturated-or-stripped", base, base.Add(time.Duration(1<<63 - 1)), 0, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, known := processSampleReadElapsed(tc.start, tc.end)
+			want := tc.want
+			if !tc.known {
+				want = 0
+			}
+			if got != want || known != tc.known {
+				t.Fatal("read-bracket projection", got, known, want, tc.known)
+			}
+		})
+	}
+}
+
+// Uses only the current same-UID test process and original /proc binding APIs.
+func TestLinuxProcessExecutableReadBrackets(t *testing.T) {
+	uid := ProcessUID(os.Geteuid())
+	if uid == 0 {
+		t.Fatal("same nonroot UID fixture required")
+	}
+	file, err := os.Open("/proc/self/exe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if info.Size() < 4 || info.Size() > 128<<20 {
+		_ = file.Close()
+		t.Fatal("self executable outside original cap", info.Size())
+	}
+	h := sha256.New()
+	n, readErr := io.Copy(h, io.LimitReader(file, (128<<20)+1))
+	closeErr := file.Close()
+	if readErr != nil || closeErr != nil || n != info.Size() {
+		t.Fatal("bound current executable", n, readErr, closeErr)
+	}
+	incarnation, err := ReadLinuxIncarnation(t.Context(), ProcessID(os.Getpid()), uid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := LinuxProcessExpectation{Incarnation: incarnation, UID: uid, ExecutableSHA256: ExecutableSHA256(hex.EncodeToString(h.Sum(nil))), MaxExecutableBytes: 128 << 20}
+	sampler, err := OpenLinuxProcess(t.Context(), expected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := sampler.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
+	t.Run("observed-and-legacy", func(t *testing.T) {
+		sample, err := sampler.Sample(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		first, last := sample.ExecutableReadBrackets.First, sample.ExecutableReadBrackets.Last
+		if !sample.ReadElapsedKnown || !first.ElapsedKnown || !last.ElapsedKnown {
+			t.Fatal("admitted Linux monotonic read/stream diagnostics unavailable", sample)
+		}
+		if first.VerifiedBytes != info.Size() || last.VerifiedBytes != info.Size() || first.ElapsedNS < 0 || last.ElapsedNS < 0 {
+			t.Fatal("completed stream diagnostics", first, last)
+		}
+		if sample.ReadElapsedKnown && first.ElapsedKnown && last.ElapsedKnown && (first.ElapsedNS > sample.ReadElapsedNS || last.ElapsedNS > sample.ReadElapsedNS-first.ElapsedNS) {
+			t.Fatal("stream brackets escape containing read", sample)
+		}
+		identity, err := sampler.verifyExecutable(t.Context())
+		if err != nil || identity.size != info.Size() {
+			t.Fatal("legacy verification changed", identity, err)
+		}
+	})
+	t.Run("wrong-expectations", func(t *testing.T) {
+		wrong := expected
+		wrong.ExecutableSHA256 = ExecutableSHA256(strings.Repeat("0", 64))
+		if refused, err := OpenLinuxProcess(t.Context(), wrong); !errors.Is(err, ErrProcessObservation) || refused != nil {
+			if refused != nil {
+				_ = refused.Close()
+			}
+			t.Fatal("wrong digest published sampler", err)
+		}
+		bounded := expected
+		bounded.MaxExecutableBytes = info.Size() - 1
+		if refused, err := OpenLinuxProcess(t.Context(), bounded); !errors.Is(err, ErrProcessObservation) || refused != nil {
+			if refused != nil {
+				_ = refused.Close()
+			}
+			t.Fatal("original size guard bypassed", err)
+		}
+		wrongIncarnation := expected
+		wrongIncarnation.Incarnation.StartTicks++
+		if refused, err := OpenLinuxProcess(t.Context(), wrongIncarnation); !errors.Is(err, ErrProcessObservation) || refused != nil {
+			if refused != nil {
+				_ = refused.Close()
+			}
+			t.Fatal("wrong incarnation admitted", err)
+		}
+		wrongUID := expected
+		wrongUID.UID++
+		if refused, err := OpenLinuxProcess(t.Context(), wrongUID); !errors.Is(err, ErrInvalidConfiguration) || refused != nil {
+			if refused != nil {
+				_ = refused.Close()
+			}
+			t.Fatal("foreign UID admitted", err)
+		}
+	})
+	t.Run("canceled", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+		sample, err := sampler.Sample(ctx)
+		if !errors.Is(err, context.Canceled) || sample != (LinuxProcessSample{}) {
+			t.Fatal("failed sample published metrics", sample, err)
+		}
+	})
+	t.Run("closed", func(t *testing.T) {
+		if err := sampler.Close(); err != nil {
+			t.Fatal(err)
+		}
+		sample, err := sampler.Sample(t.Context())
+		if !errors.Is(err, ErrProcessObservation) || sample != (LinuxProcessSample{}) {
+			t.Fatal("closed sampler reused metrics", sample, err)
+		}
+	})
+
 }

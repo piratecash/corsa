@@ -103,12 +103,14 @@ func (s *LinuxProcessSampler) Sample(ctx context.Context) (LinuxProcessSample, e
 	if err := ctx.Err(); err != nil {
 		return LinuxProcessSample{}, err
 	}
-	started := time.Now().UTC()
+	startedRaw := time.Now()
+	started := startedRaw.UTC()
 	before, status, err := readProcessIdentity(ctx, s.directory, s.expected.Incarnation.PID, s.expected.UID)
 	if err != nil || before.ID != s.expected.Incarnation {
 		return LinuxProcessSample{}, ErrProcessObservation
 	}
-	firstExe, err := s.verifyExecutable(ctx)
+	var executableReadBrackets ProcessExecutableReadBrackets
+	firstExe, err := s.verifyExecutableReadBracket(ctx, &executableReadBrackets.First)
 	if err != nil {
 		return LinuxProcessSample{}, err
 	}
@@ -123,7 +125,7 @@ func (s *LinuxProcessSampler) Sample(ctx context.Context) (LinuxProcessSample, e
 	if err != nil || after.ID != before.ID || after.User < before.User || after.System < before.System {
 		return LinuxProcessSample{}, ErrProcessObservation
 	}
-	lastExe, err := s.verifyExecutable(ctx)
+	lastExe, err := s.verifyExecutableReadBracket(ctx, &executableReadBrackets.Last)
 	if err != nil || lastExe != firstExe {
 		return LinuxProcessSample{}, ErrProcessObservation
 	}
@@ -135,13 +137,29 @@ func (s *LinuxProcessSampler) Sample(ctx context.Context) (LinuxProcessSample, e
 	if err = ctx.Err(); err != nil {
 		return LinuxProcessSample{}, err
 	}
-	completed := time.Now().UTC()
+	completedRaw := time.Now()
+	completed := completedRaw.UTC()
 	if completed.Before(started) {
 		return LinuxProcessSample{}, ErrProcessObservation
 	}
 	hz := linuxClockFrequency()
-	return LinuxProcessSample{Provenance: LinuxProcessProvenance{Incarnation: after.ID, UID: s.expected.UID, RunningExecutableSHA256: s.expected.ExecutableSHA256, RunningExecutableVerified: true, KernelStartTimeAvailable: true}, ReadStartedAt: started, ReadCompletedAt: completed, CPU: ProcessCPU{UserTicks: after.User, SystemTicks: after.System, Frequency: hz, UserNanoseconds: processTickDuration(after.User, hz), SystemNanoseconds: processTickDuration(after.System, hz)}, Memory: memory, Descriptors: descriptors, Scheduler: scheduler, FinalWait4: unavailableProcessMetric[ProcessFinalUsage](ProcessNotWaitOwner)}, nil
+	readElapsedNS, readElapsedKnown := processSampleReadElapsed(startedRaw, completedRaw)
+	return LinuxProcessSample{Provenance: LinuxProcessProvenance{Incarnation: after.ID, UID: s.expected.UID, RunningExecutableSHA256: s.expected.ExecutableSHA256, RunningExecutableVerified: true, KernelStartTimeAvailable: true}, ReadStartedAt: started, ReadCompletedAt: completed, ReadElapsedNS: readElapsedNS, ReadElapsedKnown: readElapsedKnown, ExecutableReadBrackets: executableReadBrackets, CPU: ProcessCPU{UserTicks: after.User, SystemTicks: after.System, Frequency: hz, UserNanoseconds: processTickDuration(after.User, hz), SystemNanoseconds: processTickDuration(after.System, hz)}, Memory: memory, Descriptors: descriptors, Scheduler: scheduler, FinalWait4: unavailableProcessMetric[ProcessFinalUsage](ProcessNotWaitOwner)}, nil
 }
+
+// processSampleReadElapsed projects only the existing successful read bracket.
+// No wall-clock fallback, extra clock read, or sampler acceptance decision.
+func processSampleReadElapsed(started, completed time.Time) (int64, bool) {
+	if started == started.Round(0) || completed == completed.Round(0) { //nolint:staticcheck // QF1009: == deliberately detects monotonic data; Time.Equal ignores it.
+		return 0, false
+	}
+	elapsed := completed.Sub(started)
+	if elapsed < 0 || elapsed == time.Duration(1<<63-1) {
+		return 0, false
+	}
+	return int64(elapsed), true
+}
+
 func openProcessDirectory(pid ProcessID) (int, int, error) {
 	root, err := unix.Open("/proc", unix.O_PATH|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
@@ -234,6 +252,15 @@ func readProcessBounded(ctx context.Context, file *os.File, limit int64) ([]byte
 	}
 }
 func (s *LinuxProcessSampler) verifyExecutable(ctx context.Context) (processExecutableID, error) {
+	return s.verifyExecutableReadBracket(ctx, nil)
+}
+
+// A nil observation preserves the legacy audit path without new clock reads.
+// The diagnostic never participates in executable identity or acceptance.
+func (s *LinuxProcessSampler) verifyExecutableReadBracket(ctx context.Context, observation *ProcessExecutableReadBracket) (processExecutableID, error) {
+	if observation != nil {
+		*observation = ProcessExecutableReadBracket{}
+	}
 	if err := ctx.Err(); err != nil {
 		return processExecutableID{}, err
 	}
@@ -248,6 +275,10 @@ func (s *LinuxProcessSampler) verifyExecutable(ctx context.Context) (processExec
 	if err != nil || before.size <= 0 || before.size > s.expected.MaxExecutableBytes {
 		_ = file.Close()
 		return processExecutableID{}, ErrProcessObservation
+	}
+	var streamStartedRaw, streamCompletedRaw time.Time
+	if observation != nil {
+		streamStartedRaw = time.Now()
 	}
 	hash := sha256.New()
 	header := make([]byte, 4)
@@ -280,10 +311,17 @@ func (s *LinuxProcessSampler) verifyExecutable(ctx context.Context) (processExec
 			return processExecutableID{}, ErrProcessObservation
 		}
 	}
+	if observation != nil {
+		streamCompletedRaw = time.Now()
+	}
 	after, e := processExecutableIdentity(fd)
 	closeErr := file.Close()
 	if e != nil || closeErr != nil || before != after || total != before.size || hex.EncodeToString(hash.Sum(nil)) != string(s.expected.ExecutableSHA256) {
 		return processExecutableID{}, ErrProcessObservation
+	}
+	if observation != nil {
+		elapsed, known := processSampleReadElapsed(streamStartedRaw, streamCompletedRaw)
+		*observation = ProcessExecutableReadBracket{ElapsedNS: elapsed, ElapsedKnown: known, VerifiedBytes: total}
 	}
 	return before, nil
 }

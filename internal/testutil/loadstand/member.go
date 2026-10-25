@@ -64,17 +64,22 @@ type MemberSample struct {
 	// Non-nil only for actual external Linux members; unsupported/failed reads
 	// remain explicit unavailable, never in-process heap or measured zero.
 	LinuxProcess *Observation[LinuxProcessSample] `json:",omitempty"`
-	Incarnation  Incarnation
-	Identity     domain.PeerIdentity
-	ReadAt       time.Time
-	Traffic      Observation[domain.TransportTrafficStats]
-	Sessions     Observation[domain.SessionOutcomeStats]
-	Modes        Observation[routing.ModeSelectionStats]
-	Neighbours   Observation[domain.NeighbourComposition]
-	RouteEntries Observation[int]
-	Resources    Observation[domain.ResourceBreakdown]
-	Datagram     Observation[DatagramSample]
-	Bans         Observation[[]BanFinding]
+	// Only the original successful BEFORE reply's read-bracket scalars.
+	// AFTER remains in LinuxProcess; neither is a whole member-call duration.
+	LinuxBeforeElapsedNS              int64
+	LinuxBeforeElapsedKnown           bool
+	LinuxBeforeExecutableReadBrackets ProcessExecutableReadBrackets
+	Incarnation                       Incarnation
+	Identity                          domain.PeerIdentity
+	ReadAt                            time.Time
+	Traffic                           Observation[domain.TransportTrafficStats]
+	Sessions                          Observation[domain.SessionOutcomeStats]
+	Modes                             Observation[routing.ModeSelectionStats]
+	Neighbours                        Observation[domain.NeighbourComposition]
+	RouteEntries                      Observation[int]
+	Resources                         Observation[domain.ResourceBreakdown]
+	Datagram                          Observation[DatagramSample]
+	Bans                              Observation[[]BanFinding]
 }
 
 func (s MemberSample) FullSampleAvailable() bool {

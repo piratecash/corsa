@@ -182,6 +182,10 @@ func TestOwnedAutomaticEndpointTraceOriginalSixPoints(t *testing.T) {
 	if r.Clock != findnode.OwnedRelayEndpointClockRuntime || !r.RelayKnown || !r.ReceivedKnown || !r.ForwardKnown || !r.AnswerReceivedKnown || !r.AnswerStartKnown || !r.ChainKnown || r.Generation == 0 || r.ReceivedNS < 0 || r.ReceivedNS > r.ForwardNS || r.ForwardNS > r.AnswerReceivedNS || r.AnswerReceivedNS > r.AnswerStartNS || r.SpanNS != r.AnswerStartNS-r.ReceivedNS {
 		t.Fatal("original R a/f/h/u provenance/order absent", r)
 	}
+	// Original R assigned slot, not a wake timestamp or an exact queue split.
+	if !r.AssignmentKnown || r.ReceivedNS > r.ReservationAtNS || r.ReservationAtNS > r.AssignedSlotNS || r.AssignedSlotNS > r.ForwardNS || r.ForwardNS > r.LatestForwardNS || r.LatestForwardNS != r.ReceivedNS+int64(time.Second) {
+		t.Fatal("original R assignment/deadline provenance/order absent", r)
+	}
 	if x.Clock != findnode.OwnedTargetEndpointClockRuntime || !x.ReceivedKnown || !x.TakeKnown || !x.CompleteKnown || !x.PairKnown || x.ReceivedNS < 0 || x.TakeNS < x.ReceivedNS || x.CompleteNS < x.TakeNS || x.SpanNS != x.CompleteNS-x.ReceivedNS {
 		t.Fatal("original T r/Take/c provenance/order absent", x)
 	}
@@ -226,13 +230,13 @@ func TestOwnedAutomaticEndpointTraceOriginalSixPoints(t *testing.T) {
 		Relay    findnode.OwnedRelayEndpointObservation  `json:"relay"`
 		Target   findnode.OwnedTargetEndpointObservation `json:"target"`
 	}{
-		Version:  "corsa.d1.p0.R4-T3.v1",
+		Version:  "corsa.d1.p0.R4-T3-S1.v1",
 		Case:     "TestOwnedAutomaticEndpointTraceOriginalSixPoints",
 		Profile:  "small2-active2-members2-visits4",
 		Complete: true, Request: request, Relay: r, Target: x,
 	})
-	if err != nil || len(record)+len("D1_P0_R4_T3_V1 ") >= 8*1024 {
+	if err != nil || len(record)+len("D1_P0_R4_T3_S1_V1 ") >= 8*1024 {
 		t.Fatal("original endpoint value record is not bounded", len(record), err)
 	}
-	t.Logf("D1_P0_R4_T3_V1 %s", record)
+	t.Logf("D1_P0_R4_T3_S1_V1 %s", record)
 }
