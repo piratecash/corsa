@@ -40,6 +40,7 @@ type totalFullObservation struct {
 	start, maximum                     time.Duration
 	nextRead, reads, sequence, pending uint64
 	sealed                             totalFullCut
+	segment                            *totalSegmentState // explicit private V2, frozen before publication
 }
 type totalFullRead struct {
 	owner            *totalFullObservation
@@ -51,6 +52,7 @@ type totalFullCompletion struct {
 	owner                   *totalFullObservation
 	index                   int
 	sequence                uint64
+	generation              uint64 // zero on unchanged V1 path
 	lower                   time.Duration
 	valid, registered, done bool
 }
@@ -220,13 +222,29 @@ func (h *Budget) fullMutationLocked(at time.Duration, valid bool) totalFullCompl
 		o.fail("transition-capacity-gap")
 		return p
 	}
+	index, generation := o.used, uint64(0)
+	if o.segment != nil {
+		index = o.segment.slot(o.used, len(o.rows))
+		if o.segment.generations[index] == totalMaxUint {
+			o.fail("segment-slot-generation-overflow")
+			return p
+		}
+		o.segment.generations[index]++
+		generation = o.segment.generations[index]
+	}
 	o.sequence++
 	o.pending++
-	index := o.used
 	o.used++
 	lower := at - o.start
 	o.rows[index] = totalFullTransition{sequence: o.sequence, full: full, count: used, lower: lower}
-	return totalFullCompletion{owner: o, index: index, sequence: o.sequence, lower: lower, valid: true, registered: true}
+	if o.segment != nil {
+		if full {
+			o.segment.liveCarry = totalSegmentCarry{full: true, entry: o.rows[index]}
+		} else {
+			o.segment.liveCarry = totalSegmentCarry{}
+		}
+	}
+	return totalFullCompletion{owner: o, index: index, sequence: o.sequence, generation: generation, lower: lower, valid: true, registered: true}
 }
 func (h *Budget) finishFullTransition(p *totalFullCompletion) {
 	if !p.registered {
@@ -242,13 +260,13 @@ func (h *Budget) finishFullTransition(p *totalFullCompletion) {
 }
 func (h *Budget) completeFullRowLocked(p *totalFullCompletion, at time.Duration, valid bool) {
 	o := h.fullObservation
-	if p.owner != o || p.done || !p.registered || p.index < 0 || p.index >= o.used {
+	if p.owner != o || p.done || !p.registered || p.index < 0 || p.index >= len(o.rows) || (o.segment == nil && p.index >= o.used) {
 		o.fail("invalid-completion-owner")
 		return
 	}
 	p.done = true
 	row := &o.rows[p.index]
-	if row.sequence != p.sequence || row.done {
+	if row.sequence != p.sequence || row.done || (o.segment != nil && o.segment.generations[p.index] != p.generation) {
 		o.fail("completion-sequence-mismatch")
 		return
 	}
@@ -264,6 +282,9 @@ func (h *Budget) completeFullRowLocked(p *totalFullCompletion, at time.Duration,
 	row.done, row.valid = true, valid
 	if valid {
 		row.upper = at - o.start
+	}
+	if o.segment != nil && o.segment.liveCarry.full && o.segment.liveCarry.entry.sequence == row.sequence {
+		o.segment.liveCarry.entry = *row
 	}
 }
 
@@ -337,6 +358,13 @@ func (h *Budget) fullSnapshot() totalFullSnapshot {
 	h.mu.Lock()
 	o := h.fullObservation
 	h.checkFullOwnerLocked()
+	if o.segment != nil {
+		// A reused V2 window is never a V1 whole-epoch prefix. Refuse before
+		// copyFullPrefix: no unleased read of cells that may be reused.
+		result := totalFullSnapshot{status: "UNKNOWN", reason: "segmented-source-requires-v2", key: o.key, cfg: o.cfg, coverageStart: o.start, pastOnly: true}
+		h.mu.Unlock()
+		return result
+	}
 	status, reason := "", o.invalid
 	if o.invalid != "" || !o.initialized {
 		status = "UNKNOWN"

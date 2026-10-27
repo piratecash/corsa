@@ -233,6 +233,9 @@ type Service struct {
 	// domain mutex held and with nothing called under it. See
 	// docs/locking.md.
 	inboundHandshakes *inboundHandshakes
+	// Optional immutable construction binding; Service owns only issuer/lease.
+	handshakeFileObservation       *HandshakeFileObservation
+	connectionTotalFileObservation *ConnectionTotalFileObservation
 	// loopbackInbound is the loopback inbound class (loopback_inbound.go):
 	// the connection budgets of every loopback source together, the
 	// connections it condemned for a violation and the penalties of the
@@ -438,8 +441,13 @@ type Service struct {
 	relayDeliveredMu sync.Mutex
 	relayDeliveredTo map[protocol.MessageID]map[domain.PeerIdentity]struct{}
 
-	peerMu sync.RWMutex
-	peers  []transport.Peer // dial candidates (typed: Address + Source)
+	peerMu                     sync.RWMutex
+	k3Advertised               *k3AdvertisedSource
+	k3AdvertisedActive         *k3AdvertisedTicket                    // peerMu, mutation-local nesting only
+	k3AdvertisedClaims         map[domain.ConnID]k3AdvertisedRawClaim // peerMu; bounded raw input, no Core refs
+	k3AdvertisedGenerations    map[k3AdvertisedPeerKey]uint64         // peerMu; observation values only
+	k3AdvertisedNextGeneration uint64
+	peers                      []transport.Peer // dial candidates (typed: Address + Source)
 
 	// deliveryMu guards the "message-delivery" domain: the per-recipient
 	// pending queues, outbound delivery state, relay retry bookkeeping,
@@ -801,7 +809,8 @@ type Service struct {
 	// writes go through the helpers in conn_registry.go — nothing outside
 	// that file touches this map directly. Lifecycle entry points:
 	// registerInboundConnLocked, attachOutboundCoreLocked, unregisterConnLocked.
-	terminalObservation *k10TerminalSource // private immutable pre-registration binding; ordinary nil
+	terminalObservation *k10TerminalSource  // private immutable pre-registration binding; ordinary nil
+	k3Registered        *k3RegisteredSource // private pre-publication registered-proof source; ordinary nil
 	conns               map[netcore.ConnID]*connEntry
 	// inboundClosed is set under peerMu by closeAllInboundConns at shutdown
 	// and never cleared (Run is single-shot). registerInboundConn refuses
@@ -1986,6 +1995,10 @@ func newServiceWithRecordAdmissionClasses(cfg config.Node, id *identity.Identity
 }
 
 func newServiceWithConstruction(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus, networkOverride netcore.Network, constructor datagramConstructor, construction serviceConstruction, inboundClocks ...inboundPinClock) *Service {
+	if construction.k3Advertised != nil {
+		request := *construction.k3Advertised
+		construction.k3Advertised = &request
+	}
 	admission := construction.record
 	bridge := construction.bridge
 	if bridge != nil {
@@ -2351,11 +2364,23 @@ func newServiceWithConstruction(cfg config.Node, id *identity.Identity, eventBus
 		aggregateStatus:          domain.AggregateStatusSnapshot{Status: domain.NetworkStatusOffline},
 		done:                     make(chan struct{}),
 	}
+	if construction.k3Advertised != nil {
+		svc.k3Advertised = newK3AdvertisedSource(*construction.k3Advertised)
+	}
+	if construction.k3Registered != nil {
+		svc.k3Registered = newK3RegisteredSource(*construction.k3Registered)
+		if len(svc.sessions) != 0 || len(svc.conns) != 0 {
+			svc.k3Registered.fail("nonempty-construction-baseline")
+		}
+	}
 	if construction.pendingObservation != nil {
 		construction.pendingObservation.install(svc)
 	}
 	if construction.terminalObservation != nil {
 		construction.terminalObservation.install(svc)
+	}
+	if construction.guardObservation != nil {
+		construction.guardObservation.install(svc)
 	}
 	if construction.ready != nil {
 		// Retain cleanup custody before the first builder callback can escape.
@@ -2517,13 +2542,18 @@ func newServiceWithConstruction(cfg config.Node, id *identity.Identity, eventBus
 	// because the manager takes a reservation before every dial it starts.
 	// A configuration that cannot be honoured is carried to Run rather than
 	// dropped: see connBudgetErr.
-	svc.connBudget, svc.connBudgetErr = connbudget.New(connbudget.Config{
+	totalConfig := connbudget.Config{
 		Total:           cfg.EffectiveMaxTotalConnections(),
 		OutboundReserve: cfg.EffectiveOutboundConnectionReserve(),
 		MaxOutbound:     cfg.EffectiveMaxOutgoingPeers(),
 		MaxInbound:      cfg.EffectiveMaxIncomingPeers(),
 		MaxAuxiliary:    cfg.EffectiveMaxAuxiliaryConnections(),
-	})
+	}
+	if construction.connectionTotalFileObservation != nil {
+		svc.connBudget, svc.connBudgetErr = construction.connectionTotalFileObservation.newFileBudget(svc, totalConfig)
+	} else {
+		svc.connBudget, svc.connBudgetErr = construction.connectionTotalObservation.newBudget(svc, totalConfig)
+	}
 	if svc.connBudgetErr != nil {
 		log.Error().Err(svc.connBudgetErr).Msg("connection budget configuration is invalid; node will refuse to start")
 	} else if snap := svc.connBudget.Snapshot(); snap.Enabled {
@@ -2536,6 +2566,7 @@ func newServiceWithConstruction(cfg config.Node, id *identity.Identity, eventBus
 
 	// Initialize ConnectionManager (Stage 3: connection management integration).
 	svc.connManager = NewConnectionManager(ConnectionManagerConfig{
+		advertised: svc.k3Advertised,
 		Budget:     svc.connBudget,
 		MaxSlotsFn: func() int { return svc.cfg.EffectiveMaxOutgoingPeers() },
 		Provider:   svc.peerProvider,
@@ -2575,6 +2606,7 @@ func newServiceWithConstruction(cfg config.Node, id *identity.Identity, eventBus
 		// and when an add_peer asks to dial someone else.
 		ConnectOnlyFn: svc.connectOnlyTarget,
 	})
+	svc.bindK3AdvertisedConstruction()
 
 	// Initialize distance-vector routing table (Phase 1.2).
 	//
@@ -2734,6 +2766,8 @@ func newServiceWithConstruction(cfg config.Node, id *identity.Identity, eventBus
 	}
 	svc.secureSessions = newSecureSessions(id, secureSessionsOptions{
 		bridgePublisher:  constructionPublisher(bridge),
+		pinMembership:    construction.pinMembership,
+		guardObservation: construction.guardObservation,
 		ninElapsed:       inboundElapsed,
 		storePath:        secureSessionStorePath(cfg),
 		markerPath:       pinStoreMarkerPath(cfg),
@@ -2821,7 +2855,14 @@ func newServiceWithConstruction(cfg config.Node, id *identity.Identity, eventBus
 	svc.announceLimiter = newAnnounceRateLimiter(time.Now)
 	svc.connLimiter = newConnRateLimiter(time.Now)
 	svc.listenerRefusals = newListenerRefusals(productionAlertPoolBounds(), svc.startedAt)
-	svc.inboundHandshakes = newInboundHandshakes(productionHandshakeBounds())
+	if construction.handshakeFileObservation != nil {
+		if construction.handshakeObservation != nil {
+			panic("ambiguous handshake observation construction")
+		}
+		svc.inboundHandshakes = construction.handshakeFileObservation.newFileGate(svc, productionHandshakeBounds())
+	} else {
+		svc.inboundHandshakes = construction.handshakeObservation.newGate(svc, productionHandshakeBounds())
+	}
 	svc.loopbackInbound = newLoopbackInboundClass(
 		productionLoopbackInboundBounds(inboundCapacityOf(svc.connBudget.Snapshot())),
 		productionIdentityPenaltyPolicy(), time.Now)
@@ -3034,6 +3075,12 @@ func (s *Service) Run(ctx context.Context) (runErr error) {
 			runErr = fatal
 		}
 	}()
+	// Registered before the existing producer defers: they drain/join first.
+	// No Service/gate lock is held while Close fences and joins sync captures.
+	// Observation close errors stay available on its handle; original Run and
+	// fatal pin-storage policy are unchanged. Explicit Close covers never-Run.
+	defer func() { _ = s.CloseHandshakeFileObservation() }()
+	defer func() { _ = s.CloseConnectionTotalFileObservation() }()
 	// The Service lifecycle context FOLLOWS the caller's and is cancelled on
 	// ANY exit from Run, not only on the caller cancelling.
 	//
@@ -5895,8 +5942,12 @@ func (s *Service) completeInboundAuth(id domain.ConnID, verified *connauth.State
 		// teardown on this same goroutine, which has not run yet. The nil
 		// check is defensive only.
 		if core := s.netCoreForID(id); core != nil {
-			core.SetIdentity(domain.PeerIdentityFromWire(verified.Hello.Address))
-			core.SetAddress(addr)
+			if s.k3Advertised != nil {
+				s.mirrorK3AdvertisedInboundIdentity(id, core, domain.PeerIdentityFromWire(verified.Hello.Address), addr)
+			} else {
+				core.SetIdentity(domain.PeerIdentityFromWire(verified.Hello.Address))
+				core.SetAddress(addr)
+			}
 		}
 	} else {
 		log.Trace().Uint64("conn_id", uint64(id)).Msg("handle_auth_session_no_inbound_addr")
@@ -5990,6 +6041,18 @@ func (s *Service) authenticatedAddressForConn(id domain.ConnID) (protocol.Frame,
 // clearConnAuth drops the auth state from the NetCore owning id. No-op if
 // the connection is not registered or has no auth state.
 func (s *Service) clearConnAuth(id domain.ConnID) {
+	// Enabled observation linearizes the ORIGINAL Auth write with registry
+	// membership. The nil branch below retains its original lock/read path.
+	if s.k3Registered != nil {
+		s.peerMu.Lock()
+		if entry := s.connEntryByIDLocked(id); entry != nil && entry.core != nil {
+			k3 := s.k3BeginRegistryLocked(id)
+			entry.core.ClearAuth()
+			s.k3FinishRegistryLocked(k3)
+		}
+		s.peerMu.Unlock()
+		return
+	}
 	if pc := s.netCoreForID(id); pc != nil {
 		pc.ClearAuth()
 	}
@@ -6011,6 +6074,18 @@ func (s *Service) connAuthStateByID(id domain.ConnID) *connauth.State {
 // No-op when the connection is not registered. SetConnAuthState is a thin
 // wrapper over this helper retained only to honor connauth.AuthStore.
 func (s *Service) setConnAuthStateByID(id domain.ConnID, state *connauth.State) {
+	// Enabled observation linearizes the ORIGINAL Auth write with registry
+	// membership. The nil branch below retains its original lock/read path.
+	if s.k3Registered != nil {
+		s.peerMu.Lock()
+		if entry := s.connEntryByIDLocked(id); entry != nil && entry.core != nil {
+			k3 := s.k3BeginRegistryLocked(id)
+			entry.core.SetAuth(state)
+			s.k3FinishRegistryLocked(k3)
+		}
+		s.peerMu.Unlock()
+		return
+	}
 	if pc := s.netCoreForID(id); pc != nil {
 		pc.SetAuth(state)
 	}
@@ -6087,15 +6162,20 @@ func (s *Service) rememberConnPeerAddr(id domain.ConnID, hello protocol.Frame, t
 	// from one hello and whose raw set came from another would be two
 	// conflicting views of one handshake.
 	declarations := declarationsFromHandshake(hello)
-	pc.ApplyOpts(netcore.Options{
+	opts := netcore.Options{
 		Address:         domain.PeerAddress(addr),
 		Identity:        domain.PeerIdentityFromWire(strings.TrimSpace(hello.Address)),
 		LastActivity:    time.Now().UTC(),
 		Networks:        domain.ParseNetGroups(hello.Networks),
-		Caps:            intersectCapabilities(localCapabilities(s.cfg.EnableMeshRoutingV3, s.localDatagramAdvertise()), hello.Capabilities),
+		Caps:            intersectCapabilities(s.localHandshakeCapabilities(), hello.Capabilities),
 		ProtocolVersion: domain.ProtocolVersion(hello.Version),
 		Declarations:    &declarations,
-	})
+	}
+	if s.k3Advertised != nil {
+		s.applyK3AdvertisedInboundOpts(id, pc, opts, k3AdvertisedRawClaim{Seen: true, Identity: domain.PeerIdentityFromWire(strings.TrimSpace(hello.Address)), Version: hello.Version, Address: domain.PeerAddress(addr)})
+		return
+	}
+	pc.ApplyOpts(opts)
 }
 
 // inboundPeerAddress returns the sanitised overlay address for health
@@ -9622,10 +9702,24 @@ func (s *Service) attachOutboundNetCore(session *peerSession) error {
 
 	log.Trace().Str("site", "attachOutboundNetCore").Str("phase", "lock_wait").Uint64("conn_id", uint64(session.connID)).Msg("peer_mu_writer")
 	s.peerMu.Lock()
+	var adTicket *k3AdvertisedTicket
+	adLocked := true
+	if s.k3Advertised != nil {
+		defer func() {
+			if adLocked {
+				s.guardK3AdvertisedPeerLocked(adTicket)
+				s.peerMu.Unlock()
+			}
+		}()
+	}
+	adTicket = s.beginK3AdvertisedPeerLocked()
 	log.Trace().Str("site", "attachOutboundNetCore").Str("phase", "lock_held").Uint64("conn_id", uint64(session.connID)).Msg("peer_mu_writer")
 	s.attachOutboundCoreLocked(session.conn, pc)
+	s.seedK3AdvertisedDialLocked(session.connID, session.address)
 	session.receive = s.receiveForIDLocked(session.connID)
 	session.terminal = s.k10ForIDLocked(session.connID)
+	s.finishK3AdvertisedPeerLocked(adTicket)
+	adLocked = false
 	s.peerMu.Unlock()
 	log.Trace().Str("site", "attachOutboundNetCore").Str("phase", "lock_released").Uint64("conn_id", uint64(session.connID)).Msg("peer_mu_writer")
 
@@ -9646,8 +9740,18 @@ func (s *Service) attachOutboundNetCore(session *peerSession) error {
 		s.notifyCaptureConnClosed(connID)
 		log.Trace().Str("site", "attachOutboundNetCore_onClose").Str("phase", "lock_wait").Uint64("conn_id", uint64(connID)).Msg("peer_mu_writer")
 		s.peerMu.Lock()
+		adCloseLocked := true
+		if s.k3Advertised != nil {
+			defer func() {
+				if adCloseLocked {
+					s.guardK3AdvertisedPeerLocked(s.k3AdvertisedActive)
+					s.peerMu.Unlock()
+				}
+			}()
+		}
 		log.Trace().Str("site", "attachOutboundNetCore_onClose").Str("phase", "lock_held").Uint64("conn_id", uint64(connID)).Msg("peer_mu_writer")
 		s.unregisterConnLocked(conn)
+		adCloseLocked = false
 		s.peerMu.Unlock()
 		log.Trace().Str("site", "attachOutboundNetCore_onClose").Str("phase", "lock_released").Uint64("conn_id", uint64(connID)).Msg("peer_mu_writer")
 	}
@@ -9679,8 +9783,18 @@ func (s *Service) unregisterInboundConn(conn net.Conn) {
 
 	log.Trace().Str("site", "unregisterInboundConn").Str("phase", "lock_wait").Msg("peer_mu_writer")
 	s.peerMu.Lock()
+	adLocked := true
+	if s.k3Advertised != nil {
+		defer func() {
+			if adLocked {
+				s.guardK3AdvertisedPeerLocked(s.k3AdvertisedActive)
+				s.peerMu.Unlock()
+			}
+		}()
+	}
 	log.Trace().Str("site", "unregisterInboundConn").Str("phase", "lock_held").Msg("peer_mu_writer")
 	s.unregisterConnLocked(conn)
+	adLocked = false
 	s.peerMu.Unlock()
 	log.Trace().Str("site", "unregisterInboundConn").Str("phase", "lock_released").Msg("peer_mu_writer")
 }

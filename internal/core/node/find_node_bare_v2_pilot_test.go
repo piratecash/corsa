@@ -443,8 +443,14 @@ func bareV2PilotSourceErrors(sources map[string][]byte) []string {
 						failures = append(failures, "pilot fixed factory changed")
 					}
 				}
-				if site == "datagram_integration.go:localHandshakeCapabilityNames" && fmt.Sprintf("%x", sha256.Sum256(raw[int(fn.Pos())-1:int(fn.End())-1])) != "11859c27e2a95d2b8592c119204c4db9644290e5f4f29f4d06e3d5a47e4d1bce" {
+				if site == "datagram_integration.go:localHandshakeCapabilityNames" && fmt.Sprintf("%x", sha256.Sum256(raw[int(fn.Pos())-1:int(fn.End())-1])) != "af61e48321ba810c4904c8cd4f9f0dd32c84af30cfb0d37828734a6ccb06df54" {
 					failures = append(failures, "pilot advertisement projection changed")
+				}
+				if site == "capabilities.go:localHandshakeCapabilities" && fmt.Sprintf("%x", sha256.Sum256(raw[int(fn.Pos())-1:int(fn.End())-1])) != "250f5a5f371b5c3db05e0c1f488c56e3c0308533bca5b194fe0c09d7378815b6" {
+					failures = append(failures, "pilot typed selection changed")
+				}
+				if site == "find_node_capability_selection_test.go:TestOwnedFindNodeHandshakeCapabilitySelection" && fmt.Sprintf("%x", sha256.Sum256(raw[int(fn.Pos())-1:int(fn.End())-1])) != "b176d545f234f948050560c9ed689e83a8671c7410d8d25b52f43a8900683e11" {
+					failures = append(failures, "pilot fixed capability regression changed")
 				}
 			}
 			ast.Inspect(declaration, func(n ast.Node) bool {
@@ -469,7 +475,7 @@ func bareV2PilotSourceErrors(sources map[string][]byte) []string {
 							if len(n.Rhs) == 1 {
 								value, _ = n.Rhs[0].(*ast.Ident)
 							}
-							if (site != "find_node_bare_v2_pilot_test.go:"+factory && site != "find_node_automatic_endpoint_trace_test.go:newOwnedAutomaticTraceService") || len(n.Lhs) != 1 || len(n.Rhs) != 1 || value == nil || value.Name != "true" {
+							if (site != "find_node_bare_v2_pilot_test.go:"+factory && site != "find_node_automatic_endpoint_trace_test.go:newOwnedAutomaticTraceService" && site != "find_node_capability_selection_test.go:TestOwnedFindNodeHandshakeCapabilitySelection") || len(n.Lhs) != 1 || len(n.Rhs) != 1 || value == nil || value.Name != "true" {
 								failures = append(failures, "pilot unclosed setter")
 							}
 						}
@@ -478,7 +484,7 @@ func bareV2PilotSourceErrors(sources map[string][]byte) []string {
 					if n.Sel.Name == field && !allowed[n.Sel] {
 						allowed[n.Sel] = true
 						read++
-						if site != "datagram_integration.go:localHandshakeCapabilityNames" {
+						if site != "capabilities.go:localHandshakeCapabilities" {
 							failures = append(failures, "pilot unclosed field read")
 						}
 					}
@@ -510,7 +516,7 @@ func bareV2PilotSourceErrors(sources map[string][]byte) []string {
 			})
 		}
 	}
-	if declared != 1 || read != 1 || written != 2 || called != 2 || factories != 1 {
+	if declared != 1 || read != 1 || written != 3 || called != 2 || factories != 1 {
 		failures = append(failures, "pilot exact declaration/read/write/call inventory")
 	}
 	return failures
@@ -555,21 +561,21 @@ func TestOwnedBareV2PilotAdvertisementSourceControls(t *testing.T) {
 	}
 	for _, tc := range []struct{ name, before, after string }{
 		{"ungated-advertisement", "if s.ownedFindNodeAdvertiseTest {", "if true {"},
-		{"extra-responder", "domain.CapabilityName(domain.CapOverlayFindNodeV1)", "domain.CapabilityName(domain.CapOverlayResponderV1)"},
+		{"extra-responder", "caps = append(caps, domain.CapOverlayFindNodeV1)", "caps = append(caps, domain.CapOverlayResponderV1)"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			sources := map[string][]byte{}
 			for path, raw := range baseline {
 				sources[path] = bytes.Clone(raw)
 			}
-			raw := string(sources["datagram_integration.go"])
+			raw := string(sources["capabilities.go"])
 			if strings.Count(raw, tc.before) != 1 {
 				t.Fatal("pilot exact projection control anchor")
 			}
-			sources["datagram_integration.go"] = []byte(strings.Replace(raw, tc.before, tc.after, 1))
+			sources["capabilities.go"] = []byte(strings.Replace(raw, tc.before, tc.after, 1))
 			found := false
 			for _, failure := range bareV2PilotSourceErrors(sources) {
-				found = found || failure == "pilot advertisement projection changed"
+				found = found || failure == "pilot typed selection changed"
 			}
 			if !found {
 				t.Fatal("pilot wire projection escaped Source closure", tc.name)

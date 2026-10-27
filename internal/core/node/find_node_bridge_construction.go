@@ -13,11 +13,19 @@ import (
 )
 
 type serviceConstruction struct {
-	record              recordAdmissionConstruction
-	bridge              *findNodeTerminalConstruction
-	ready               *findNodeReadyConstruction
-	pendingObservation  *pendingObservationConstruction
-	terminalObservation *terminalObservationConstruction
+	k3Advertised                   *k3AdvertisedRequest
+	pinMembership                  *pinMembershipRequest
+	k3Registered                   *k3RegisteredRequest
+	record                         recordAdmissionConstruction
+	bridge                         *findNodeTerminalConstruction
+	ready                          *findNodeReadyConstruction
+	pendingObservation             *pendingObservationConstruction
+	terminalObservation            *terminalObservationConstruction
+	guardObservation               *guardObservationConstruction
+	handshakeObservation           *handshakeObservationConstruction
+	handshakeFileObservation       *handshakeFileObservationConstruction
+	connectionTotalObservation     *connectionTotalObservationConstruction
+	connectionTotalFileObservation *connectionTotalFileObservationConstruction
 }
 
 type findNodeBridgeProfile struct {

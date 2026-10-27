@@ -369,6 +369,16 @@ func (s *Service) orphanedIdentitiesLocked(ids []domain.PeerIdentity) []domain.P
 // The sweep runs on the same tick as evictStalePeers (bootstrapLoop, every
 // 2 s); orphan lifetimes are independent of automatic address aging.
 func (s *Service) evictOrphanedHealthEntries() {
+	var adTicket *k3AdvertisedTicket
+	var adLocked bool
+	if s.k3Advertised != nil {
+		defer func() {
+			if adLocked {
+				s.guardK3AdvertisedPeerLocked(adTicket)
+				s.peerMu.Unlock()
+			}
+		}()
+	}
 	now := time.Now().UTC()
 
 	// ---------------------------------------------------------------
@@ -416,6 +426,8 @@ func (s *Service) evictOrphanedHealthEntries() {
 	// ---------------------------------------------------------------
 	log.Trace().Str("site", "evictOrphanedHealthEntries").Str("phase", "lock_wait").Msg("peer_mu_writer")
 	s.peerMu.Lock()
+	adLocked = true
+	adTicket = s.beginK3AdvertisedPeerLocked()
 	log.Trace().Str("site", "evictOrphanedHealthEntries").Str("phase", "lock_held").Msg("peer_mu_writer")
 	log.Trace().Str("site", "evictOrphanedHealthEntries").Str("phase", "lock_wait").Msg("delivery_mu_writer")
 	s.deliveryMu.Lock()
@@ -477,6 +489,9 @@ func (s *Service) evictOrphanedHealthEntries() {
 	s.commitPendingQueueObservationLocked()
 	s.deliveryMu.Unlock()
 	log.Trace().Str("site", "evictOrphanedHealthEntries").Str("phase", "lock_released").Msg("delivery_mu_writer")
+	s.finishK3AdvertisedPeerLocked(adTicket)
+	adTicket = nil
+	adLocked = false
 	s.peerMu.Unlock()
 	log.Trace().Str("site", "evictOrphanedHealthEntries").Str("phase", "lock_released").Msg("peer_mu_writer")
 
@@ -807,15 +822,30 @@ func peerSource(id string) domain.PeerSource {
 }
 
 func (s *Service) ensurePeerSessions(ctx context.Context) {
+	var adTicket *k3AdvertisedTicket
+	var adLocked bool
+	if s.k3Advertised != nil {
+		defer func() {
+			if adLocked {
+				s.guardK3AdvertisedPeerLocked(adTicket)
+				s.peerMu.Unlock()
+			}
+		}()
+	}
 	for _, candidate := range s.peerDialCandidates() {
 		// Cross-domain: s.upstream lives under s.deliveryMu, s.dialOrigin
 		// under s.peerMu.  Canonical s.peerMu OUTER → s.deliveryMu INNER.
 		log.Trace().Str("site", "ensurePeerSessions_register").Str("phase", "lock_wait").Str("address", string(candidate.address)).Msg("peer_mu_writer")
 		s.peerMu.Lock()
+		adLocked = true
+		adTicket = s.beginK3AdvertisedPeerLocked()
 		log.Trace().Str("site", "ensurePeerSessions_register").Str("phase", "lock_held").Str("address", string(candidate.address)).Msg("peer_mu_writer")
 		s.deliveryMu.Lock()
 		if _, ok := s.upstream[candidate.address]; ok {
 			s.deliveryMu.Unlock()
+			s.finishK3AdvertisedPeerLocked(adTicket)
+			adTicket = nil
+			adLocked = false
 			s.peerMu.Unlock()
 			log.Trace().Str("site", "ensurePeerSessions_register").Str("phase", "lock_released_dup").Str("address", string(candidate.address)).Msg("peer_mu_writer")
 			continue
@@ -828,6 +858,9 @@ func (s *Service) ensurePeerSessions(ctx context.Context) {
 			s.dialOrigin[candidate.address] = candidate.primary
 		}
 		s.deliveryMu.Unlock()
+		s.finishK3AdvertisedPeerLocked(adTicket)
+		adTicket = nil
+		adLocked = false
 		s.peerMu.Unlock()
 		log.Trace().Str("site", "ensurePeerSessions_register").Str("phase", "lock_released").Str("address", string(candidate.address)).Msg("peer_mu_writer")
 		// lifecycle: NOT joined by Run — a known exception, listed in
@@ -838,10 +871,27 @@ func (s *Service) ensurePeerSessions(ctx context.Context) {
 		// stopRunLifecycle's Wait.
 		go func(c peerDialCandidate) {
 			defer func() {
+				var adTicket *k3AdvertisedTicket
+				var adLocked bool
+				if s.k3Advertised != nil {
+					defer func() {
+						if adLocked {
+							s.guardK3AdvertisedPeerLocked(adTicket)
+							s.peerMu.Unlock()
+						}
+					}()
+				}
 				log.Trace().Str("site", "ensurePeerSessions_cleanup").Str("phase", "lock_wait").Str("address", string(c.address)).Msg("peer_mu_writer")
 				s.peerMu.Lock()
+				adLocked = true
+				adTicket = s.beginK3AdvertisedPeerLocked()
 				log.Trace().Str("site", "ensurePeerSessions_cleanup").Str("phase", "lock_held").Str("address", string(c.address)).Msg("peer_mu_writer")
 				s.deliveryMu.Lock()
+				var k3 k3RegisteredTicket
+				if s.k3Registered != nil {
+					k3 = s.k3BeginSessionLocked(c.address)
+				}
+				s.k3AdvertisedSessionChangingLocked(c.address, nil)
 				publication := s.beginRegistryPublication()
 				delete(s.sessions, c.address)
 				delete(s.upstream, c.address)
@@ -849,7 +899,13 @@ func (s *Service) ensurePeerSessions(ctx context.Context) {
 				if publication != nil {
 					publication.Complete()
 				}
+				if s.k3Registered != nil {
+					s.k3FinishSessionLocked(k3)
+				}
 				s.deliveryMu.Unlock()
+				s.finishK3AdvertisedPeerLocked(adTicket)
+				adTicket = nil
+				adLocked = false
 				s.peerMu.Unlock()
 				log.Trace().Str("site", "ensurePeerSessions_cleanup").Str("phase", "lock_released").Str("address", string(c.address)).Msg("peer_mu_writer")
 			}()
@@ -2329,6 +2385,15 @@ func (s *Service) addPeerAddress(address domain.PeerAddress, nodeType string, pe
 
 	log.Trace().Str("site", "addPeerAddress").Str("phase", "lock_wait").Str("address", string(address)).Msg("peer_mu_writer")
 	s.peerMu.Lock()
+	adLocked := true
+	if s.k3Advertised != nil {
+		defer func() {
+			if adLocked {
+				s.guardK3AdvertisedPeerLocked(s.k3AdvertisedActive)
+				s.peerMu.Unlock()
+			}
+		}()
+	}
 	log.Trace().Str("site", "addPeerAddress").Str("phase", "lock_held").Str("address", string(address)).Msg("peer_mu_writer")
 	if existing, exists := s.findKnownPeerByIPLocked(address); exists {
 		if existing == address {
@@ -2340,6 +2405,7 @@ func (s *Service) addPeerAddress(address domain.PeerAddress, nodeType string, pe
 			if !peerID.IsZero() && s.recordAddressIdentityLocked(address, claimedAddressIdentity(peerID)) {
 				s.notePersistedIdentityLocked(address)
 			}
+			adLocked = false
 			s.peerMu.Unlock()
 			log.Trace().Str("site", "addPeerAddress").Str("phase", "lock_released_exists").Str("address", string(address)).Msg("peer_mu_writer")
 			return false
@@ -2347,6 +2413,7 @@ func (s *Service) addPeerAddress(address domain.PeerAddress, nodeType string, pe
 		// Peer exchange keeps only one stored address per IP. Alternative
 		// ports learned from the network are ignored to avoid peer-list
 		// poisoning via many addresses on the same host.
+		adLocked = false
 		s.peerMu.Unlock()
 		log.Trace().Str("site", "addPeerAddress").Str("phase", "lock_released_sameIP").Str("address", string(address)).Msg("peer_mu_writer")
 		return false
@@ -2354,6 +2421,7 @@ func (s *Service) addPeerAddress(address domain.PeerAddress, nodeType string, pe
 
 	evicted, admitted := s.makeAutomaticAddressRoomLocked(s.peerNow())
 	if !admitted {
+		adLocked = false
 		s.peerMu.Unlock()
 		return false
 	}
@@ -2378,6 +2446,7 @@ func (s *Service) addPeerAddress(address domain.PeerAddress, nodeType string, pe
 			AddedAt:  &now,
 		}
 	}
+	adLocked = false
 	s.peerMu.Unlock()
 	log.Trace().Str("site", "addPeerAddress").Str("phase", "lock_released").Str("address", string(address)).Msg("peer_mu_writer")
 
@@ -2402,11 +2471,21 @@ func (s *Service) promotePeerAddress(address domain.PeerAddress) {
 	var evicted *addressEviction
 	log.Trace().Str("site", "promotePeerAddress").Str("phase", "lock_wait").Str("address", string(address)).Msg("peer_mu_writer")
 	s.peerMu.Lock()
+	adLocked := true
+	if s.k3Advertised != nil {
+		defer func() {
+			if adLocked {
+				s.guardK3AdvertisedPeerLocked(s.k3AdvertisedActive)
+				s.peerMu.Unlock()
+			}
+		}()
+	}
 	log.Trace().Str("site", "promotePeerAddress").Str("phase", "lock_held").Str("address", string(address)).Msg("peer_mu_writer")
 	existing, found := s.findKnownPeerByIPLocked(address)
 	if found && existing != address {
 		// Network-learned/promoted peers keep a single stored address per IP.
 		// Manual/bootstrap paths are intentionally exempt and do not call here.
+		adLocked = false
 		s.peerMu.Unlock()
 		log.Trace().Str("site", "promotePeerAddress").Str("phase", "lock_released_sameIP").Str("address", string(address)).Msg("peer_mu_writer")
 		return
@@ -2416,6 +2495,7 @@ func (s *Service) promotePeerAddress(address domain.PeerAddress) {
 		var admitted bool
 		evicted, admitted = s.makeAutomaticAddressRoomLocked(s.peerNow())
 		if !admitted {
+			adLocked = false
 			s.peerMu.Unlock()
 			return
 		}
@@ -2434,6 +2514,7 @@ func (s *Service) promotePeerAddress(address domain.PeerAddress) {
 		}
 		shouldMarkFresh = true
 	}
+	adLocked = false
 	s.peerMu.Unlock()
 	log.Trace().Str("site", "promotePeerAddress").Str("phase", "lock_released").Str("address", string(address)).Msg("peer_mu_writer")
 
@@ -4560,6 +4641,15 @@ func (s *Service) hasOutboundSessionForInbound(address domain.PeerAddress) bool 
 func (s *Service) penalizeOldProtocolPeer(address domain.PeerAddress, peerVersion, peerMinimum domain.ProtocolVersion, clientVersion domain.ClientVersion) {
 	log.Trace().Str("site", "penalizeOldProtocolPeer").Str("phase", "lock_wait").Str("address", string(address)).Msg("peer_mu_writer")
 	s.peerMu.Lock()
+	adLocked := true
+	if s.k3Advertised != nil {
+		defer func() {
+			if adLocked {
+				s.guardK3AdvertisedPeerLocked(s.k3AdvertisedActive)
+				s.peerMu.Unlock()
+			}
+		}()
+	}
 	log.Trace().Str("site", "penalizeOldProtocolPeer").Str("phase", "lock_held").Str("address", string(address)).Msg("peer_mu_writer")
 	address = s.resolveHealthAddress(address)
 	health := s.ensurePeerHealthLocked(address)
@@ -4616,6 +4706,7 @@ func (s *Service) penalizeOldProtocolPeer(address domain.PeerAddress, peerVersio
 	s.deliveryMu.RLock()
 	s.emitPeerHealthDeltaLocked(health)
 	s.deliveryMu.RUnlock()
+	adLocked = false
 	s.peerMu.Unlock()
 	log.Trace().Str("site", "penalizeOldProtocolPeer").Str("phase", "lock_released").Str("address", string(address)).Msg("peer_mu_writer")
 }
@@ -4664,6 +4755,15 @@ func (s *Service) recordIncompatibleVersionLocked(address domain.PeerAddress, he
 // (reactToIncompatibleDial).
 func (s *Service) noteClaimedIncompatibleVersion(address domain.PeerAddress, claim incompatibleVersionClaim) {
 	s.peerMu.Lock()
+	adLocked := true
+	if s.k3Advertised != nil {
+		defer func() {
+			if adLocked {
+				s.guardK3AdvertisedPeerLocked(s.k3AdvertisedActive)
+				s.peerMu.Unlock()
+			}
+		}()
+	}
 	address = s.resolveHealthAddress(address)
 	health := s.ensurePeerHealthLocked(address)
 	s.recordIncompatibleVersionLocked(address, health, claim, "protocol version incompatible (unproven claim)", time.Now().UTC())
@@ -4672,6 +4772,7 @@ func (s *Service) noteClaimedIncompatibleVersion(address domain.PeerAddress, cla
 	s.deliveryMu.RLock()
 	s.emitPeerHealthDeltaLocked(health)
 	s.deliveryMu.RUnlock()
+	adLocked = false
 	s.peerMu.Unlock()
 	log.Debug().Str("peer", string(address)).Int("version", int(claim.peerVersion)).Int("minimum", int(claim.peerMinimum)).Msg("peer_incompatible_version_claimed")
 }
@@ -5024,11 +5125,16 @@ func (s *Service) inboundConnIDForAddressLocked(address domain.PeerAddress) (dom
 func (s *Service) ensurePeerHealthLocked(address domain.PeerAddress) *peerHealth {
 	health := s.health[address]
 	if health == nil {
+		adTicket := s.beginK3AdvertisedPeerLocked()
+		if adTicket != nil {
+			defer s.guardK3AdvertisedPeerLocked(adTicket)
+		}
 		health = &peerHealth{
 			Address: address,
 			State:   peerStateReconnecting,
 		}
 		s.health[address] = health
+		s.finishK3AdvertisedPeerLocked(adTicket)
 	}
 	return health
 }
@@ -6761,6 +6867,16 @@ func (s *Service) resolveSessionLocked(address domain.PeerAddress) *peerSession 
 // does the same registration; without it markPeerConnected, peerHealthFrames
 // and ActiveSessionLost would all operate on the wrong key.
 func (s *Service) dialForCM(ctx context.Context, addresses []domain.PeerAddress) (result DialResult, err error) {
+	var adTicket *k3AdvertisedTicket
+	var adLocked bool
+	if s.k3Advertised != nil {
+		defer func() {
+			if adLocked {
+				s.guardK3AdvertisedPeerLocked(adTicket)
+				s.peerMu.Unlock()
+			}
+		}()
+	}
 	if len(addresses) == 0 {
 		return DialResult{}, errors.New("no addresses to dial")
 	}
@@ -6795,10 +6911,15 @@ func (s *Service) dialForCM(ctx context.Context, addresses []domain.PeerAddress)
 			s.recordAddressDialFailure(primary)
 		} else if err == nil && ctx.Err() == nil && attempt.performed {
 			s.peerMu.Lock()
+			adLocked = true
+			adTicket = s.beginK3AdvertisedPeerLocked()
 			if entry := s.persistedMeta[primary]; entry != nil {
 				now := s.peerNow()
 				entry.LastDialAttemptAt = &now
 			}
+			s.finishK3AdvertisedPeerLocked(adTicket)
+			adTicket = nil
+			adLocked = false
 			s.peerMu.Unlock()
 		}
 	}()
@@ -6819,7 +6940,12 @@ func (s *Service) dialForCM(ctx context.Context, addresses []domain.PeerAddress)
 		// which port the TCP connection used.
 		if address != primary {
 			s.peerMu.Lock()
+			adLocked = true
+			adTicket = s.beginK3AdvertisedPeerLocked()
 			s.dialOrigin[address] = primary
+			s.finishK3AdvertisedPeerLocked(adTicket)
+			adTicket = nil
+			adLocked = false
 			s.peerMu.Unlock()
 		}
 		attempt.performed = false
@@ -6834,9 +6960,14 @@ func (s *Service) dialForCM(ctx context.Context, addresses []domain.PeerAddress)
 			// concurrently-established session (same key) is never orphaned.
 			if address != primary {
 				s.peerMu.Lock()
+				adLocked = true
+				adTicket = s.beginK3AdvertisedPeerLocked()
 				if s.sessions[address] == nil {
 					delete(s.dialOrigin, address)
 				}
+				s.finishK3AdvertisedPeerLocked(adTicket)
+				adTicket = nil
+				adLocked = false
 				s.peerMu.Unlock()
 			}
 			lastErr = err

@@ -31,6 +31,7 @@ const (
 	endpoint    = "127.0.0.1:64646"
 	rpcURL      = "http://127.0.0.1:46464/rpc/v1/exec"
 	cliSHA      = "9ba93241a3f717fb50a6221957e4e3146f982ef5fc7b68a37f90bfe7a49e55bf"
+	c2bCLISHA   = "ae61fc926e7f5c2353a21075041300fb722f2c8346389344a6e2e145931632c7" // Inert until the exact qualified current CLI artifact is bound.
 	maxLine     = 64 * 1024
 	maxFrames   = 2048
 	maxBytes    = 8 * 1024 * 1024
@@ -52,6 +53,37 @@ type activation struct {
 	StartedAt   string `json:"server_started_at"`
 	WorkMillis  int64  `json:"work_millis"`
 }
+
+// These are two closed experiments, not an arbitrary cardinality option.
+// Returned values cannot mutate the definitions; no profile dimensions arrive
+// through argv, environment or activation JSON. Old C2A8 retains its old ELF.
+type fixedCase struct {
+	name, kind, cli       string
+	initial, churn, total int
+	phases                [4]string
+}
+
+func fixedProfile(name, currentCLI string) (fixedCase, bool) {
+	switch name {
+	case "C2A8-v1":
+		return fixedCase{name, "c2a", cliSHA, 8, 4, 12, [4]string{"eight-proven", "four-survivors", "eight-recovered", "zero-drained"}}, true
+	case "C2B32-v1":
+		return fixedCase{name, "c2b", currentCLI, 32, 16, 48, [4]string{"thirty-two-proven", "sixteen-survivors", "thirty-two-recovered", "zero-drained"}}, true
+	default:
+		return fixedCase{}, false
+	}
+}
+func profileRunEnabled(profile, run8, run32 string, run8Present bool) bool {
+	switch profile {
+	case "C2A8-v1":
+		return run8 == "1"
+	case "C2B32-v1":
+		return run32 == "1" && run8 == "" && !run8Present
+	default:
+		return false
+	}
+}
+
 type credentials struct {
 	Username string `json:"username"`
 	Password string `json:"password"`
@@ -132,8 +164,18 @@ func decode(raw []byte, maximum int, dst any, closed bool) error {
 	return nil
 }
 func parseActivation(raw []byte) (activation, error) {
+	return parseActivationForCLI(raw, c2bCLISHA)
+}
+
+// The current-CLI argument is a package-private parser control; the production
+// entry always supplies its fixed compiled literal above, never caller input.
+func parseActivationForCLI(raw []byte, currentCLI string) (activation, error) {
 	var a activation
-	if decode(raw, 4096, &a, true) != nil || !a.Ready || a.Profile != "C2A8-v1" || !lower32.MatchString(a.Nonce) || !lower64.MatchString(a.ApprovalSHA) || a.CLISHA != cliSHA || !lower40.MatchString(a.Server) || a.Server == "0000000000000000000000000000000000000000" || a.WorkMillis <= 0 || a.WorkMillis > 80000 {
+	if decode(raw, 4096, &a, true) != nil {
+		return a, errRefused
+	}
+	profile, ok := fixedProfile(a.Profile, currentCLI)
+	if !ok || (profile.name == "C2B32-v1" && profile.cli == cliSHA) || !lower64.MatchString(profile.cli) || profile.cli == strings.Repeat("0", 64) || !a.Ready || !lower32.MatchString(a.Nonce) || !lower64.MatchString(a.ApprovalSHA) || a.CLISHA != profile.cli || !lower40.MatchString(a.Server) || a.Server == "0000000000000000000000000000000000000000" || a.WorkMillis <= 0 || a.WorkMillis > 80000 {
 		return a, errRefused
 	}
 	var fields map[string]json.RawMessage
@@ -258,6 +300,7 @@ type population struct {
 	failures   chan error
 	peers      []*peer
 	identities map[domain.PeerIdentity]bool
+	profile    fixedCase
 }
 
 func (g *population) fail() {
@@ -440,7 +483,7 @@ func (p *peer) close(ctx context.Context) error {
 	}
 }
 func (g *population) dial(server domain.PeerIdentity) error {
-	if g.check() != nil || len(g.peers) >= 12 {
+	if g.check() != nil || g.profile.total <= 0 || len(g.peers) >= g.profile.total {
 		return errRefused
 	}
 	id, e := identity.Generate()
@@ -622,7 +665,11 @@ func (c *control) active(ctx context.Context, want int) (routeReply, error) {
 		}
 	}
 }
-func emit(nonce, phase string, active int, diag census, g *population) error {
+func encodeRecord(profileName, nonce, phase string, active int, diag census, g *population) ([]byte, error) {
+	profile, ok := fixedProfile(profileName, c2bCLISHA)
+	if !ok {
+		return nil, errRefused
+	}
 	// Cached live census is diagnostic only. It never authorizes a transition.
 	var count *int
 	if active >= 0 {
@@ -649,7 +696,7 @@ func emit(nonce, phase string, active int, diag census, g *population) error {
 			}
 		}
 		if active >= 0 && len(peers) != active {
-			return errRefused
+			return nil, errRefused
 		}
 	}
 	row := struct {
@@ -661,12 +708,18 @@ func emit(nonce, phase string, active int, diag census, g *population) error {
 		CachedLive           census         `json:"cached_live"`
 		CachedLiveAcceptance bool           `json:"cached_live_acceptance"`
 		ApplicationCharge    any            `json:"application_charge"`
-	}{"c2a", nonce, phase, count, peers, diag, false, charge}
+	}{profile.kind, nonce, phase, count, peers, diag, false, charge}
 	raw, e := json.Marshal(row)
 	if e != nil || len(raw) > 16383 {
-		return errRefused
+		return nil, errRefused
 	}
-	raw = append(raw, '\n')
+	return append(raw, '\n'), nil
+}
+func emit(profileName, nonce, phase string, active int, diag census, g *population) error {
+	raw, e := encodeRecord(profileName, nonce, phase, active, diag, g)
+	if e != nil {
+		return e
+	}
 	n, e := os.Stdout.Write(raw)
 	if e != nil || n != len(raw) {
 		return errRefused
@@ -677,7 +730,11 @@ func work(ctx context.Context, a activation, s credentials) (err error) {
 	transport := &http.Transport{Proxy: nil, DisableKeepAlives: true, DialContext: (&net.Dialer{Timeout: operation}).DialContext}
 	defer transport.CloseIdleConnections()
 	c := &control{a: a, secret: s, http: &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return errRefused }}}
-	g := &population{ctx: ctx, failures: make(chan error, 1), identities: map[domain.PeerIdentity]bool{}}
+	profile, ok := fixedProfile(a.Profile, c2bCLISHA)
+	if !ok {
+		return errRefused
+	}
+	g := &population{ctx: ctx, failures: make(chan error, 1), identities: map[domain.PeerIdentity]bool{}, profile: profile}
 	defer func() {
 		cleanup, stop := context.WithTimeout(context.Background(), 10*time.Second)
 		defer stop()
@@ -697,16 +754,16 @@ func work(ctx context.Context, a activation, s credentials) (err error) {
 	if _, e = c.active(ctx, 0); e != nil {
 		return e
 	}
-	for i := 0; i < 8; i++ {
+	for i := 0; i < profile.initial; i++ {
 		if g.dial(server) != nil {
 			return errRefused
 		}
 	}
-	snap, e := c.active(ctx, 8)
+	snap, e := c.active(ctx, profile.initial)
 	if e != nil {
 		return e
 	}
-	if emit(a.Nonce, "eight-proven", 8, snap.Kinds.Live, g) != nil {
+	if emit(a.Profile, a.Nonce, profile.phases[0], profile.initial, snap.Kinds.Live, g) != nil {
 		return errRefused
 	}
 	for tick := 0; tick < 4; tick++ {
@@ -722,40 +779,40 @@ func work(ctx context.Context, a activation, s credentials) (err error) {
 		}
 	}
 	cleanup, stop := context.WithTimeout(ctx, operation)
-	for _, p := range g.peers[:4] {
+	for _, p := range g.peers[:profile.churn] {
 		if p.close(cleanup) != nil {
 			stop()
 			return errRefused
 		}
 	}
 	stop()
-	snap, e = c.active(ctx, 4)
+	snap, e = c.active(ctx, profile.initial-profile.churn)
 	if e != nil {
 		return e
 	}
-	for _, p := range g.peers[4:8] {
+	for _, p := range g.peers[profile.churn:profile.initial] {
 		if p.useful() != nil {
 			return errRefused
 		}
 	}
-	if emit(a.Nonce, "four-survivors", 4, snap.Kinds.Live, g) != nil {
+	if emit(a.Profile, a.Nonce, profile.phases[1], profile.initial-profile.churn, snap.Kinds.Live, g) != nil {
 		return errRefused
 	}
-	for i := 0; i < 4; i++ {
+	for i := 0; i < profile.churn; i++ {
 		if g.dial(server) != nil {
 			return errRefused
 		}
 	}
-	snap, e = c.active(ctx, 8)
+	snap, e = c.active(ctx, profile.initial)
 	if e != nil {
 		return e
 	}
-	for _, p := range g.peers[4:] {
+	for _, p := range g.peers[profile.churn:] {
 		if p.useful() != nil {
 			return errRefused
 		}
 	}
-	if emit(a.Nonce, "eight-recovered", 8, snap.Kinds.Live, g) != nil {
+	if emit(a.Profile, a.Nonce, profile.phases[2], profile.initial, snap.Kinds.Live, g) != nil {
 		return errRefused
 	}
 	cleanup, stop = context.WithTimeout(ctx, operation)
@@ -773,11 +830,11 @@ func work(ctx context.Context, a activation, s credentials) (err error) {
 	if e != nil {
 		return e
 	}
-	return emit(a.Nonce, "zero-drained", 0, snap.Kinds.Live, g)
+	return emit(a.Profile, a.Nonce, profile.phases[3], 0, snap.Kinds.Live, g)
 }
 func main() {
 	// No source execution/activation by default. Future host must bind owner input.
-	if len(os.Args) != 1 || os.Getenv("CORSA_C2A_RUN") != "1" {
+	if len(os.Args) != 1 || (os.Getenv("CORSA_C2A_RUN") != "1" && os.Getenv("CORSA_C2B32_RUN") != "1") {
 		os.Exit(2)
 	}
 	raw, e := io.ReadAll(io.LimitReader(os.Stdin, 4097))
@@ -785,7 +842,8 @@ func main() {
 		os.Exit(2)
 	}
 	a, e := parseActivation(raw)
-	if e != nil {
+	run8, run8Present := os.LookupEnv("CORSA_C2A_RUN")
+	if e != nil || !profileRunEnabled(a.Profile, run8, os.Getenv("CORSA_C2B32_RUN"), run8Present) {
 		os.Exit(2)
 	}
 	if os.Getuid() != 501 || os.Getgid() != 20 || syscall.Setrlimit(syscall.RLIMIT_CORE, &syscall.Rlimit{Cur: 0, Max: 0}) != nil {
@@ -800,7 +858,7 @@ func main() {
 	ctx, cancel := context.WithTimeout(signalCtx, time.Duration(a.WorkMillis)*time.Millisecond)
 	defer cancel()
 	if work(ctx, a, s) != nil {
-		_ = emit(a.Nonce, "STOP", -1, census{}, nil)
+		_ = emit(a.Profile, a.Nonce, "STOP", -1, census{}, nil)
 		os.Exit(2)
 	}
 }

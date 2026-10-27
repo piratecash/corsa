@@ -346,7 +346,7 @@ func f1PairOnRaw(t *testing.T, withCaps bool, writeGate *n1HeldWrite, s, d *Serv
 	t.Cleanup(func() { fixtureOwner.stopAndJoin(t) }) // BEFORE fallible auth
 	advertise := d.localDatagramAdvertise()
 	d.peerMu.Lock()
-	applyWelcomeMetadata(p, tr.proven.Intro, d.cfg.EnableMeshRoutingV3, advertise)
+	applyWelcomeMetadata(p, tr.proven.Intro, localCapabilities(d.cfg.EnableMeshRoutingV3, advertise))
 	d.peerMu.Unlock()
 	if err := d.completeOutboundAuth(p); err != nil {
 		t.Fatal("actual outbound auth completion", err)

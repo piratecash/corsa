@@ -17,10 +17,18 @@ import (
 )
 
 type App struct {
-	cfg                 config.Config
-	service             *node.Service
-	pendingObservation  *node.PendingObservation
-	terminalObservation *node.TerminalObservation
+	advertisedConnectionObservation *node.AdvertisedConnectionObservation
+	rawPinMembershipObservation     *node.RawPinMembershipObservation
+	registeredProvenV2Observation   *node.RegisteredProvenV2Observation
+	cfg                             config.Config
+	service                         *node.Service
+	pendingObservation              *node.PendingObservation
+	terminalObservation             *node.TerminalObservation
+	guardObservation                *node.GuardObservation
+	handshakeObservation            *node.HandshakeObservation
+	handshakeFileObservation        *node.HandshakeFileObservation
+	connectionTotalObservation      *node.ConnectionTotalObservation
+	connectionTotalFileObservation  *node.ConnectionTotalFileObservation
 }
 
 func New() *App {
@@ -29,6 +37,44 @@ func New() *App {
 		panic(err)
 	}
 	return a
+}
+
+// NewWithAdvertisedConnectionObservation selects only the original typed
+// source in this App. Instance remains an unverified label; no Run work is added.
+func NewWithAdvertisedConnectionObservation(request node.AdvertisedConnectionObservationRequest) (*App, error) {
+	return newAppWithObservations(node.ObservationOptions{AdvertisedConnections: &request})
+}
+
+func (a *App) AdvertisedConnectionObservation() *node.AdvertisedConnectionObservation {
+	if a == nil {
+		return nil
+	}
+	return a.advertisedConnectionObservation
+}
+
+// NewWithRawPinMembershipObservation selects the original store's raw-memory
+// source only. No configuration, persistence policy or Run resource is added.
+func NewWithRawPinMembershipObservation(request node.RawPinMembershipObservationRequest) (*App, error) {
+	return newAppWithObservations(node.ObservationOptions{RawPinMembership: &request})
+}
+
+func (a *App) RawPinMembershipObservation() *node.RawPinMembershipObservation {
+	if a == nil {
+		return nil
+	}
+	return a.rawPinMembershipObservation
+}
+
+// NewWithRegisteredProvenV2Observation selects only the existing typed core
+// source. No configuration, worker, resource ownership or Run policy is added.
+func NewWithRegisteredProvenV2Observation(request node.RegisteredProvenV2ObservationRequest) (*App, error) {
+	return newAppWithObservations(node.ObservationOptions{RegisteredProvenV2: &request})
+}
+func (a *App) RegisteredProvenV2Observation() *node.RegisteredProvenV2Observation {
+	if a == nil {
+		return nil
+	}
+	return a.registeredProvenV2Observation
 }
 
 // NewWithPendingObservation explicitly composes the existing K12 source into
@@ -60,12 +106,108 @@ func (a *App) TerminalObservation() *node.TerminalObservation {
 	return a.terminalObservation
 }
 
+// NewWithGuardObservation composes only the actual secure-store clock source.
+// It does not activate a policy, collector, RPC or global clock replacement.
+func NewWithGuardObservation(key node.GuardObservationKey) (*App, error) {
+	return newAppWithObservations(node.ObservationOptions{Guard: &key})
+}
+
+func (a *App) GuardObservation() *node.GuardObservation {
+	if a == nil {
+		return nil
+	}
+	return a.guardObservation
+}
+
+// NewWithHandshakeObservation acquires only the existing node-handshake source.
+// Capacity is an explicit caller allocation request, not a deployment budget.
+func NewWithHandshakeObservation(key node.HandshakeObservationKey, capacity int) (*App, error) {
+	request := node.HandshakeObservationRequest{Key: key, Capacity: capacity}
+	return newAppWithObservations(node.ObservationOptions{Handshake: &request})
+}
+
+func (a *App) HandshakeObservation() *node.HandshakeObservation {
+	if a == nil {
+		return nil
+	}
+	return a.handshakeObservation
+}
+
+// NewWithHandshakeFileObservation selects one explicit file-backed source.
+// The caller keeps the supplied Dir open until the handle has closed; no
+// path/config/worker/cadence is chosen here. Ordinary New remains off.
+func NewWithHandshakeFileObservation(request node.HandshakeFileObservationRequest) (*App, error) {
+	return newAppWithObservations(node.ObservationOptions{HandshakeFile: &request})
+}
+func (a *App) HandshakeFileObservation() *node.HandshakeFileObservation {
+	if a == nil {
+		return nil
+	}
+	return a.handshakeFileObservation
+}
+
+// Explicit unstarted cleanup. This closes only observation resources, not the
+// Service or the caller's borrowed directory. Run also calls it idempotently.
+func (a *App) CloseHandshakeFileObservation() error {
+	if a == nil {
+		return nil
+	}
+	return a.handshakeFileObservation.Close()
+}
+
+// NewWithConnectionTotalObservation acquires the original shared budget source.
+// It selects neither a connection limit nor a deployment observation capacity.
+func NewWithConnectionTotalObservation(key node.ConnectionTotalObservationKey, capacity int) (*App, error) {
+	request := node.ConnectionTotalObservationRequest{Key: key, Capacity: capacity}
+	return newAppWithObservations(node.ObservationOptions{ConnectionTotal: &request})
+}
+
+func (a *App) ConnectionTotalObservation() *node.ConnectionTotalObservation {
+	if a == nil {
+		return nil
+	}
+	return a.connectionTotalObservation
+}
+
+// Explicit inactive typed acquisition. Directory remains caller-owned.
+func NewWithConnectionTotalFileObservation(request node.ConnectionTotalFileObservationRequest) (*App, error) {
+	return newAppWithObservations(node.ObservationOptions{ConnectionTotalFile: &request})
+}
+func (a *App) ConnectionTotalFileObservation() *node.ConnectionTotalFileObservation {
+	if a == nil {
+		return nil
+	}
+	return a.connectionTotalFileObservation
+}
+func (a *App) CloseConnectionTotalFileObservation() error {
+	if a == nil {
+		return nil
+	}
+	return a.connectionTotalFileObservation.Close()
+}
+
 func newApp(key *node.PendingObservationKey) (*App, error) {
 	return newAppWithObservations(node.ObservationOptions{Pending: key})
 }
 
 // One fixed construction envelope; no public combination-factory family.
 func newAppWithObservations(options node.ObservationOptions) (*App, error) {
+	// Freeze before config/identity I/O; only scalar values are retained.
+	if options.AdvertisedConnections != nil {
+		request := *options.AdvertisedConnections
+		options.AdvertisedConnections = &request
+	}
+	// Freeze the scalar request before config/identity I/O.
+	if options.RawPinMembership != nil {
+		request := *options.RawPinMembership
+		options.RawPinMembership = &request
+	}
+	// Freeze only the new value request before config/identity I/O. Nil adds
+	// no observer work; the original App constructor/lifetime remains intact.
+	if options.RegisteredProvenV2 != nil {
+		request := *options.RegisteredProvenV2
+		options.RegisteredProvenV2 = &request
+	}
 	cfg := config.Default()
 	// Headless override: the shared config zero value keeps DMs enabled
 	// for the desktop client, but a console node has no user reading
@@ -90,12 +232,23 @@ func newAppWithObservations(options node.ObservationOptions) (*App, error) {
 	}
 	return &App{
 		cfg: cfg, service: service,
-		pendingObservation:  readouts.Pending,
-		terminalObservation: readouts.Terminal,
+		advertisedConnectionObservation: readouts.AdvertisedConnections,
+		rawPinMembershipObservation:     readouts.RawPinMembership,
+		registeredProvenV2Observation:   readouts.RegisteredProvenV2,
+		pendingObservation:              readouts.Pending,
+		terminalObservation:             readouts.Terminal,
+		guardObservation:                readouts.Guard,
+		handshakeObservation:            readouts.Handshake,
+		handshakeFileObservation:        readouts.HandshakeFile,
+		connectionTotalObservation:      readouts.ConnectionTotal,
+		connectionTotalFileObservation:  readouts.ConnectionTotalFile,
 	}, nil
 }
 
 func (a *App) Run(ctx context.Context) error {
+	// Arm before startup/RPC early returns; errors remain on observer status.
+	defer func() { _ = a.CloseHandshakeFileObservation() }()
+	defer func() { _ = a.CloseConnectionTotalFileObservation() }()
 	log.Info().
 		Str("version", config.CorsaVersion).
 		Str("listen", a.service.ListenAddress()).

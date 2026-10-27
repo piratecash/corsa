@@ -1,6 +1,8 @@
-# C2a wire driver: component reproduction
+# C2a/C2b32 wire driver: component reproduction
 
 [Русский](c2a-wire-driver-component.ru.md)
+
+The original2026-10-25 C2a recipe below is preserved as history. The current two-profile extension and45-event inventory are recorded in the dated section at the end.
 
 The four files in [c2driver](../../internal/testutil/loadstand/c2driver/main.go) retain the fixed C2a experiment component. They use the production identity/session-v2 APIs to prove eight TLS channels, exchange `get_peers`, close four, rejoin four with fresh identities, and drain. They are neither eight SDK/storage clients nor an F1/FindNode, overload or full 512-node test.
 
@@ -37,3 +39,16 @@ Execution is inert unless `CORSA_C2A_RUN=1`, no extra argv, and a closed stdin a
 Endpoints remain loopback TCP 64646/RPC 46464 on `gazeta-devnet`. Fresh instantaneous loopback active gauges support 8→4→8→0; cached live census is diagnostic only. Bounds remain 64KiB per frame, 2048 application frames and 8MiB application bytes, not TLS-wire byte accounting. Four 5s holds also include exchange time; they are not exact 20s wall-clock.
 
 This recipe publishes the Go component only. The private host/keeper/observer/preparation and held-cgroup/flush/cleanup code is still needed to reproduce the [scoped memory result](d1-corsad-memory-screen.md). Building or testing this package does not reproduce that complete measurement, its resource isolation, a full 512MB workload, G2 or release admission. Local-only proof availability outside the original workspace is not assumed.
+
+
+## Current retained two-profile component — 2026-10-26
+
+The reviewed extension preserves `C2A8-v1`/8→4→8→0/12identities and adds only `C2B32-v1`/32→16→32→0/48identities. There is no free-N option. The two unchanged credential files and qualified main/test updates retain production identity/session-v2 APIs and original bounded reader/write/close ownership. Fixed Source2806/CLI-literal binding: `/private/tmp/corsa-D1-C2b32-wire-driver-QA-ROOT-v1/BINDING.json`; manifest `2806e1feef432c56b4db0824ea5cfe6b9e6694178c4df7d37a890b24599cd734`. Local artifacts/proof are not assumed available elsewhere.
+
+The current package passed **45 RUN/45 PASS per ordinary/race mode** (10parents/35children), no FAIL/SKIP; scoped Darwin/Linux CGO0 lints each0issues. All32 original events remain, plus13 closed-profile/activation/receipt controls, including fixed phase dimensions and recovered ordinal order, the present-empty old flag and bounded records. `TestStockSourceClosure` retains eight exact stock pins for reviewed K9 App/Service; do not delete or blindly refresh the guard. These tests and a component build are not resource-runtime acceptance.
+
+Legacy8 still binds CLI9ba93241… and `CORSA_C2A_RUN=1`. Profile32 requires `CORSA_C2B32_RUN=1` **and CORSA_C2A_RUN absent, including not present-empty**, with distinct activation `C2B32-v1`. Its compiled CLI is `ae61fc926e7f5c2353a21075041300fb722f2c8346389344a6e2e145931632c7`; old8 flags/grants cannot enable32. Linux-only/RO501:20/0600 credential checks, loopback endpoints, exact40hex server binding,80s residual+10s cleanup,2s operations, four5s waits plus exchanges,64KiB/frame and2048application frames/8MiB remain unchanged. Activation declarations alone never grant permission; no unbudgeted launch command is supplied.
+
+Current driver ELF `90d1c2d68524a5507aa09d4e443cb70cf3c52fb6fe936a1d9280917bad7f7aa7` (6750368bytes) and CLIae61… (21627040bytes) are Go1.27.3/Linuxarm64v8.0/**CGO0 static self-only** artifacts, no interpreter/needed DSO. CLI source is basee50f97511d88d7ffd7a08daa3490bee7d63f0f6a **plus19 staged paths**, snapshot1fcca8012a39015fcc377472d2e56cdb82cbedef0562f07ee6acf8f6895f9f29 (2119files/70186204bytes); driver2806 adds four component posts and the actual CLI literal (2119files/70197026bytes). Host cross-build and later native Linux Docker execution are separate facts; rebuilding may change bytes. A static component build variant of the example above uses `GOOS=linux GOARCH=arm64 GOARM64=v8.0 CGO_ENABLED=0`, `-trimpath -buildvcs=false -mod=readonly -p=1 -ldflags='-s -w'`; it does not execute the artifact or reconstruct the private resource harness.
+
+The accepted C2b32 run completed32→16→32→0,48 distinct identities,1344application frames/41216bytes. Fresh authenticated `getNodeStatus`/`fetchRouteSummary` verified the same server incarnation and instantaneous atomic `active==0` **before** `zero-drained`; child exit was not the zero witness. The final RPC body/atomic field/read timestamp was not separately retained as RAW; qualification is source-bound to the executed driver. Cached live census remains diagnostic only. See the [exact memory scopes and proof](d1-corsad-memory-screen.md). K9/K10/K12 opt-ins were OFF; old9ba memory is not a current baseline/per-peer delta. Private host/keeper/observer/secret/cgroup custody remains necessary for full measurement reproduction. Full512/F1/overload/G2/release remain open; this result does not authorize another run.

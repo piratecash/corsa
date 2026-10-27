@@ -762,7 +762,7 @@ func TestApplyWelcomeMetadata_MirrorsDeclarationsOnSession(t *testing.T) {
 		DTypes:       &[]string{"chunk_response"},
 	}
 
-	applyWelcomeMetadata(session, welcome, false, datagramAdvertise{Endpoint: true, Transit: true})
+	applyWelcomeMetadata(session, welcome, localCapabilities(false, datagramAdvertise{Endpoint: true, Transit: true}))
 
 	if !datagramAdvertisedCapabilities(session.declarations).Has("mesh_datagram_durable_v1") {
 		t.Fatalf("session mirror lost the raw name: %v", session.declarations.AdvertisedNames)
@@ -795,7 +795,7 @@ func TestSessionDeclarations_ReadsTheRegisteredSession(t *testing.T) {
 		Address:      datagramTestDstHex,
 		Capabilities: []string{"mesh_datagram_durable_v1"},
 		DTypes:       &[]string{"chunk_response"},
-	}, false, datagramAdvertise{Endpoint: true})
+	}, localCapabilities(false, datagramAdvertise{Endpoint: true}))
 
 	got := svc.sessionDeclarations(address)
 	if !datagramAdvertisedCapabilities(got).Has("mesh_datagram_durable_v1") {

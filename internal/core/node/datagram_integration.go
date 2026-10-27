@@ -132,16 +132,11 @@ func (s *Service) localDatagramAdvertise() datagramAdvertise {
 // advertised a name it was withdrawing, and a stateless forwarder withdraws
 // nothing: the set moves only when the plane itself starts or stops.
 func (s *Service) localHandshakeCapabilityNames() []domain.CapabilityName {
-	roles := localCapabilities(s.cfg.EnableMeshRoutingV3, s.localDatagramAdvertise())
+	roles := s.localHandshakeCapabilities()
 
 	names := make([]domain.CapabilityName, 0, len(roles))
 	for _, capability := range roles {
 		names = append(names, domain.CapabilityName(capability))
-	}
-	// The test-only per-Service selection precedes the ORIGINAL authenticated
-	// hello/welcome; no ordinary or existing Ready constructor enables it.
-	if s.ownedFindNodeAdvertiseTest {
-		names = append(names, domain.CapabilityName(domain.CapOverlayFindNodeV1))
 	}
 	return names
 }

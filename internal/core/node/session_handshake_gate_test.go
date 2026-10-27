@@ -234,7 +234,7 @@ func TestSessionCapabilityRequiresACompletedHandshake(t *testing.T) {
 		Version:      config.ProtocolVersion,
 		Address:      datagramTestDstHex,
 		Capabilities: names,
-	}, svc.cfg.EnableMeshRoutingV3, advertise)
+	}, localCapabilities(svc.cfg.EnableMeshRoutingV3, advertise))
 	svc.peerMu.Unlock()
 
 	svc.peerMu.RLock()

@@ -24,13 +24,29 @@ type TerminalObservationKey struct {
 // ObservationOptions is the fixed cross-package construction envelope. Keys
 // are copied before the one original Service builder is invoked. Nil stays off.
 type ObservationOptions struct {
-	Pending  *PendingObservationKey
-	Terminal *TerminalObservationKey
+	AdvertisedConnections *AdvertisedConnectionObservationRequest
+	RawPinMembership      *RawPinMembershipObservationRequest
+	RegisteredProvenV2    *RegisteredProvenV2ObservationRequest
+	Pending               *PendingObservationKey
+	Terminal              *TerminalObservationKey
+	Guard                 *GuardObservationKey
+	Handshake             *HandshakeObservationRequest
+	HandshakeFile         *HandshakeFileObservationRequest
+	ConnectionTotal       *ConnectionTotalObservationRequest
+	ConnectionTotalFile   *ConnectionTotalFileObservationRequest
 }
 
 type ObservationReadouts struct {
-	Pending  *PendingObservation
-	Terminal *TerminalObservation
+	AdvertisedConnections *AdvertisedConnectionObservation
+	RawPinMembership      *RawPinMembershipObservation
+	RegisteredProvenV2    *RegisteredProvenV2Observation
+	Pending               *PendingObservation
+	Terminal              *TerminalObservation
+	Guard                 *GuardObservation
+	Handshake             *HandshakeObservation
+	HandshakeFile         *HandshakeFileObservation
+	ConnectionTotal       *ConnectionTotalObservation
+	ConnectionTotalFile   *ConnectionTotalFileObservation
 }
 
 // TerminalObservationSnapshot copies the original restricted source by value.
@@ -115,8 +131,33 @@ func NewServiceWithTerminalObservation(cfg config.Node, id *identity.Identity, b
 }
 
 func newServiceWithObservations(cfg config.Node, id *identity.Identity, bus *ebus.Bus, options ObservationOptions, clock func() (time.Duration, error)) (*Service, ObservationReadouts, error) {
-	if options.Pending == nil && options.Terminal == nil {
+	// Freeze the advertised scalar request before ANY observer callback.
+	var advertised *k3AdvertisedRequest
+	if options.AdvertisedConnections != nil {
+		request := *options.AdvertisedConnections
+		advertised = &k3AdvertisedRequest{ConnectionCapacity: request.ConnectionCapacity, SlotCapacity: request.SlotCapacity, HistoryCapacity: request.HistoryCapacity, Instance: request.Instance, elapsed: clock}
+	}
+	// Freeze before ANY other observation clock/RNG/build callback.
+	var membership *pinMembershipRequest
+	if options.RawPinMembership != nil {
+		request := *options.RawPinMembership
+		membership = &pinMembershipRequest{BaselineCapacity: request.BaselineCapacity, HistoryCapacity: request.HistoryCapacity, Instance: request.Instance, elapsed: clock}
+	}
+	// Freeze this request before any other observer clock/RNG/build callback.
+	// Public input has only scalars/value tokens; elapsed remains private.
+	var registered *k3RegisteredRequest
+	if options.RegisteredProvenV2 != nil {
+		request := *options.RegisteredProvenV2
+		registered = &k3RegisteredRequest{OwnerCapacity: request.OwnerCapacity, HistoryCapacity: request.HistoryCapacity, Instance: request.Instance, elapsed: clock}
+	}
+	if advertised == nil && membership == nil && registered == nil && options.Pending == nil && options.Terminal == nil && options.Guard == nil && options.Handshake == nil && options.HandshakeFile == nil && options.ConnectionTotal == nil && options.ConnectionTotalFile == nil {
 		return NewService(cfg, id, bus), ObservationReadouts{}, nil
+	}
+	if options.Handshake != nil && options.HandshakeFile != nil {
+		return nil, ObservationReadouts{}, errors.New("handshake observation: memory and file modes are mutually exclusive")
+	}
+	if options.ConnectionTotal != nil && options.ConnectionTotalFile != nil {
+		return nil, ObservationReadouts{}, errors.New("connection-total observation: memory and file modes are mutually exclusive")
 	}
 	if id == nil || domain.PeerIdentityFromWire(id.Address).IsZero() {
 		return nil, ObservationReadouts{}, errors.New("observation: invalid node identity")
@@ -124,6 +165,11 @@ func newServiceWithObservations(cfg config.Node, id *identity.Identity, bus *ebu
 	owner := domain.PeerIdentityFromWire(id.Address)
 	var pending *pendingObservationConstruction
 	var terminal *terminalObservationConstruction
+	var guard *guardObservationConstruction
+	var handshake *handshakeObservationConstruction
+	var handshakeFile *handshakeFileObservationConstruction
+	var connectionTotal *connectionTotalObservationConstruction
+	var connectionTotalFile *connectionTotalFileObservationConstruction
 	if options.Pending != nil {
 		key := *options.Pending
 		if !validPendingObservationKey(key) {
@@ -141,13 +187,94 @@ func newServiceWithObservations(cfg config.Node, id *identity.Identity, bus *ebu
 			terminal.unavailable = "initial_source_unavailable"
 		}
 	}
-	s := newServiceWithConstruction(cfg, id, bus, nil, productionDatagramConstructor{}, serviceConstruction{pendingObservation: pending, terminalObservation: terminal})
+	if options.Guard != nil {
+		key := *options.Guard
+		if !validGuardObservationKey(key) {
+			return nil, ObservationReadouts{}, errors.New("guard observation: invalid key")
+		}
+		guard = prepareGuardObservation(key, owner)
+	}
+	if options.Handshake != nil {
+		request := *options.Handshake
+		if !validHandshakeObservationKey(request.Key) {
+			return nil, ObservationReadouts{}, errors.New("handshake observation: invalid key references")
+		}
+		handshake = prepareHandshakeObservation(request, owner, clock)
+	}
+	if options.HandshakeFile != nil {
+		request := *options.HandshakeFile
+		if !validHandshakeObservationKey(request.Key) {
+			return nil, ObservationReadouts{}, errors.New("file handshake observation: invalid key references")
+		}
+		handshakeFile = prepareHandshakeFileObservation(request, owner, clock)
+	}
+	if options.ConnectionTotal != nil {
+		request := *options.ConnectionTotal
+		if !validConnectionTotalObservationKey(request.Key) {
+			return nil, ObservationReadouts{}, errors.New("connection-total observation: invalid key references")
+		}
+		connectionTotal = prepareConnectionTotalObservation(request, owner, clock)
+	}
+	if options.ConnectionTotalFile != nil {
+		request := *options.ConnectionTotalFile
+		if !validConnectionTotalObservationKey(request.Key) {
+			return nil, ObservationReadouts{}, errors.New("file connection-total observation: invalid key references")
+		}
+		connectionTotalFile = prepareConnectionTotalFileObservation(request, owner, clock)
+	}
+	// Any construction panic after the file factory returned its lease must
+	// release it. Normal observation I/O errors remain on the returned handle,
+	// owned by the Service, rather than becoming startup/admission policy.
+	constructed := false
+	defer func() {
+		if !constructed && connectionTotalFile != nil {
+			_ = connectionTotalFile.readout.Close()
+		}
+		if !constructed && handshakeFile != nil {
+			_ = handshakeFile.readout.Close()
+		}
+	}()
+	s := newServiceWithConstruction(cfg, id, bus, nil, productionDatagramConstructor{}, serviceConstruction{k3Advertised: advertised, pinMembership: membership, k3Registered: registered, pendingObservation: pending, terminalObservation: terminal, guardObservation: guard, handshakeObservation: handshake, handshakeFileObservation: handshakeFile, connectionTotalObservation: connectionTotal, connectionTotalFileObservation: connectionTotalFile})
+	constructed = true
 	var readouts ObservationReadouts
+	if advertised != nil {
+		readouts.AdvertisedConnections = &AdvertisedConnectionObservation{service: s, source: s.k3Advertised, manager: s.connManager, identity: domain.PeerIdentityFromWire(s.Address()), key: AdvertisedConnectionObservationKey{Instance: advertised.Instance}}
+	}
+	if membership != nil {
+		readout := &RawPinMembershipObservation{service: s, identity: domain.PeerIdentityFromWire(s.Address()), key: RawPinMembershipObservationKey{Instance: membership.Instance}}
+		if s.secureSessions != nil {
+			readout.store = s.secureSessions.store
+			if readout.store != nil {
+				readout.source = readout.store.pinMembership
+			}
+		}
+		readouts.RawPinMembership = readout
+	}
+	if registered != nil {
+		readouts.RegisteredProvenV2 = &RegisteredProvenV2Observation{service: s, source: s.k3Registered, identity: domain.PeerIdentityFromWire(s.Address()), key: RegisteredProvenV2ObservationKey{Instance: registered.Instance}}
+	}
 	if pending != nil {
 		readouts.Pending = pending.readout
 	}
 	if terminal != nil {
 		readouts.Terminal = terminal.readout
+	}
+	if guard != nil {
+		readouts.Guard = guard.readout
+	}
+	if handshake != nil {
+		readouts.Handshake = handshake.readout
+	}
+	if handshakeFile != nil {
+		readouts.HandshakeFile = handshakeFile.readout
+		readouts.Handshake = handshakeFile.legacy
+	}
+	if connectionTotal != nil {
+		readouts.ConnectionTotal = connectionTotal.readout
+	}
+	if connectionTotalFile != nil {
+		readouts.ConnectionTotalFile = connectionTotalFile.readout
+		readouts.ConnectionTotal = connectionTotalFile.legacy
 	}
 	return s, readouts, nil
 }

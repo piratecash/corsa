@@ -68,10 +68,10 @@ import (
 // receive path therefore asks sessionHasCapability, which additionally requires
 // the completed handshake (markSessionHandshakeComplete); see its doc for the
 // window that would otherwise stay open between this write and auth_ok.
-func applyWelcomeMetadata(session *peerSession, welcome protocol.Frame, enableV3 bool, datagrams datagramAdvertise) {
+func applyWelcomeMetadata(session *peerSession, welcome protocol.Frame, local []domain.Capability) {
 	session.version = welcome.Version
 	session.peerIdentity = domain.PeerIdentityFromWire(welcome.Address)
-	session.capabilities = intersectCapabilities(localCapabilities(enableV3, datagrams), welcome.Capabilities)
+	session.capabilities = intersectCapabilities(local, welcome.Capabilities)
 	// The raw declarations (docs/protocol/datagram.md §2.3 raw capability
 	// names, docs/protocol/datagram.md §6.1 dtypes) are mirrored beside the
 	// typed set, derived from the SAME welcome frame, for the same reason the
@@ -170,6 +170,16 @@ func sessionCloseProvidesPeerOfflineEvidence(err error) bool {
 }
 
 func (s *Service) runPeerSession(ctx context.Context, address domain.PeerAddress) {
+	var adTicket *k3AdvertisedTicket
+	var adLocked bool
+	if s.k3Advertised != nil {
+		defer func() {
+			if adLocked {
+				s.guardK3AdvertisedPeerLocked(adTicket)
+				s.peerMu.Unlock()
+			}
+		}()
+	}
 	defer crashlog.DeferRecover()
 	for {
 		select {
@@ -182,13 +192,26 @@ func (s *Service) runPeerSession(ctx context.Context, address domain.PeerAddress
 		if err != nil {
 			log.Trace().Str("site", "runPeerSession_cleanup").Str("phase", "lock_wait").Str("address", string(address)).Msg("peer_mu_writer")
 			s.peerMu.Lock()
+			adLocked = true
+			adTicket = s.beginK3AdvertisedPeerLocked()
 			log.Trace().Str("site", "runPeerSession_cleanup").Str("phase", "lock_held").Str("address", string(address)).Msg("peer_mu_writer")
 			closedSession := s.sessions[address]
+			var k3 k3RegisteredTicket
+			if s.k3Registered != nil {
+				k3 = s.k3BeginSessionLocked(address)
+			}
+			s.k3AdvertisedSessionChangingLocked(address, nil)
 			publication := s.beginRegistryPublication()
 			delete(s.sessions, address)
 			if publication != nil {
 				publication.Complete()
 			}
+			if s.k3Registered != nil {
+				s.k3FinishSessionLocked(k3)
+			}
+			s.finishK3AdvertisedPeerLocked(adTicket)
+			adTicket = nil
+			adLocked = false
 			s.peerMu.Unlock()
 			log.Trace().Str("site", "runPeerSession_cleanup").Str("phase", "lock_released").Str("address", string(address)).Msg("peer_mu_writer")
 
@@ -266,6 +289,16 @@ func (s *Service) runPeerSession(ctx context.Context, address domain.PeerAddress
 }
 
 func (s *Service) openPeerSession(ctx context.Context, address domain.PeerAddress) (connected bool, outcomeErr error) {
+	var adTicket *k3AdvertisedTicket
+	var adLocked bool
+	if s.k3Advertised != nil {
+		defer func() {
+			if adLocked {
+				s.guardK3AdvertisedPeerLocked(adTicket)
+				s.peerMu.Unlock()
+			}
+		}()
+	}
 	// Budgeted. This is the legacy session path (ensurePeerSessions), inert
 	// while the connection manager is wired — but a dial path that is dead
 	// today and unbudgeted tomorrow is how a ceiling quietly stops holding.
@@ -358,11 +391,20 @@ func (s *Service) openPeerSession(ctx context.Context, address domain.PeerAddres
 	// pipelines a frame behind its own welcome puts a reader on
 	// session.capabilities at the instant this line assigns it. The field doc
 	// on peerSession already declares peerMu as its guard — this is the write
-	// side honouring it. The advertise is resolved BEFORE the lock: it consults
-	// the datagram layer, and no domain mutex is held across that.
-	advertise := s.localDatagramAdvertise()
+	// side honouring it. The typed local set is resolved BEFORE the lock: it
+	// consults the datagram layer, and no domain mutex is held across that.
+	local := s.localHandshakeCapabilities()
 	s.peerMu.Lock()
-	applyWelcomeMetadata(session, welcome, s.cfg.EnableMeshRoutingV3, advertise)
+	adLocked = true
+	adTicket = s.beginK3AdvertisedPeerLocked()
+	if s.k3Advertised != nil {
+		s.applyK3AdvertisedWelcomeLocked(session, welcome, local)
+	} else {
+		applyWelcomeMetadata(session, welcome, local)
+	}
+	s.finishK3AdvertisedPeerLocked(adTicket)
+	adTicket = nil
+	adLocked = false
 	s.peerMu.Unlock()
 	_, proven := session.provenIdentity()
 	s.learnIdentityFromWelcome(welcome, address, identityOriginOf(proven))
@@ -396,12 +438,25 @@ func (s *Service) openPeerSession(ctx context.Context, address domain.PeerAddres
 
 	log.Trace().Str("site", "openPeerSession_register").Str("phase", "lock_wait").Str("address", string(address)).Msg("peer_mu_writer")
 	s.peerMu.Lock()
+	adLocked = true
+	adTicket = s.beginK3AdvertisedPeerLocked()
 	log.Trace().Str("site", "openPeerSession_register").Str("phase", "lock_held").Str("address", string(address)).Msg("peer_mu_writer")
+	var k3 k3RegisteredTicket
+	if s.k3Registered != nil {
+		k3 = s.k3BeginSessionLocked(address)
+	}
+	s.k3AdvertisedSessionChangingLocked(address, session)
 	publication := s.beginRegistryPublication()
 	s.sessions[address] = session
 	if publication != nil {
 		publication.Complete()
 	}
+	if s.k3Registered != nil {
+		s.k3FinishSessionLocked(k3)
+	}
+	s.finishK3AdvertisedPeerLocked(adTicket)
+	adTicket = nil
+	adLocked = false
 	s.peerMu.Unlock()
 	log.Trace().Str("site", "openPeerSession_register").Str("phase", "lock_released").Str("address", string(address)).Msg("peer_mu_writer")
 	s.markPeerConnected(address, peerDirectionOutbound)
@@ -806,8 +861,20 @@ func (s *Service) markSessionHandshakeComplete(session *peerSession) error {
 }
 
 func (s *Service) markPeerConnected(address domain.PeerAddress, direction domain.PeerDirection) {
+	var adTicket *k3AdvertisedTicket
+	var adLocked bool
+	if s.k3Advertised != nil {
+		defer func() {
+			if adLocked {
+				s.guardK3AdvertisedPeerLocked(adTicket)
+				s.peerMu.Unlock()
+			}
+		}()
+	}
 	log.Trace().Str("site", "markPeerConnected").Str("phase", "lock_wait").Str("address", string(address)).Msg("peer_mu_writer")
 	s.peerMu.Lock()
+	adLocked = true
+	adTicket = s.beginK3AdvertisedPeerLocked()
 	log.Trace().Str("site", "markPeerConnected").Str("phase", "lock_held").Str("address", string(address)).Msg("peer_mu_writer")
 
 	s.noteAddressSessionLocked(address, direction)
@@ -898,6 +965,11 @@ func (s *Service) markPeerConnected(address domain.PeerAddress, direction domain
 	s.statusMu.Lock()
 	s.recomputeVersionPolicyLocked(now)
 	s.statusMu.Unlock()
+
+	s.finishK3AdvertisedPeerLocked(adTicket)
+
+	adTicket = nil
+	adLocked = false
 
 	s.peerMu.Unlock()
 	log.Trace().Str("site", "markPeerConnected").Str("phase", "lock_released").Str("address", string(address)).Msg("peer_mu_writer")
@@ -1063,8 +1135,20 @@ func (localDecisionDisconnect) applyLocked(*peerHealth) {}
 // publishPeerDisconnected is the body shared by markPeerDisconnected and
 // markPeerDisconnectedByLocalDecision; charge is the only part that differs.
 func (s *Service) publishPeerDisconnected(address domain.PeerAddress, charge peerDisconnectCharge) {
+	var adTicket *k3AdvertisedTicket
+	var adLocked bool
+	if s.k3Advertised != nil {
+		defer func() {
+			if adLocked {
+				s.guardK3AdvertisedPeerLocked(adTicket)
+				s.peerMu.Unlock()
+			}
+		}()
+	}
 	log.Trace().Str("site", "markPeerDisconnected").Str("phase", "lock_wait").Str("address", string(address)).Msg("peer_mu_writer")
 	s.peerMu.Lock()
+	adLocked = true
+	adTicket = s.beginK3AdvertisedPeerLocked()
 	log.Trace().Str("site", "markPeerDisconnected").Str("phase", "lock_held").Str("address", string(address)).Msg("peer_mu_writer")
 
 	address = s.resolveHealthAddress(address)
@@ -1097,6 +1181,11 @@ func (s *Service) publishPeerDisconnected(address domain.PeerAddress, charge pee
 	s.statusMu.Lock()
 	s.recomputeVersionPolicyLocked(time.Now().UTC())
 	s.statusMu.Unlock()
+
+	s.finishK3AdvertisedPeerLocked(adTicket)
+
+	adTicket = nil
+	adLocked = false
 
 	s.peerMu.Unlock()
 	log.Trace().Str("site", "markPeerDisconnected").Str("phase", "lock_released").Str("address", string(address)).Msg("peer_mu_writer")
@@ -1136,6 +1225,16 @@ func (s *Service) openPeerSessionForCM(ctx context.Context, address domain.PeerA
 }
 
 func (s *Service) finishPeerSessionForCM(ctx context.Context, address domain.PeerAddress, transport *dialledTransport) (result *peerSession, outcomeErr error) {
+	var adTicket *k3AdvertisedTicket
+	var adLocked bool
+	if s.k3Advertised != nil {
+		defer func() {
+			if adLocked {
+				s.guardK3AdvertisedPeerLocked(adTicket)
+				s.peerMu.Unlock()
+			}
+		}()
+	}
 	// Capture the ORIGINAL transport binding before readiness/auth I/O waits.
 	var outgoing r2aHopPublication
 	if s.r2OwnDMOwner != nil {
@@ -1287,11 +1386,20 @@ func (s *Service) finishPeerSessionForCM(ctx context.Context, address domain.Pee
 	// pipelines a frame behind its own welcome puts a reader on
 	// session.capabilities at the instant this line assigns it. The field doc
 	// on peerSession already declares peerMu as its guard — this is the write
-	// side honouring it. The advertise is resolved BEFORE the lock: it consults
-	// the datagram layer, and no domain mutex is held across that.
-	advertise := s.localDatagramAdvertise()
+	// side honouring it. The typed local set is resolved BEFORE the lock: it
+	// consults the datagram layer, and no domain mutex is held across that.
+	local := s.localHandshakeCapabilities()
 	s.peerMu.Lock()
-	applyWelcomeMetadata(session, welcome, s.cfg.EnableMeshRoutingV3, advertise)
+	adLocked = true
+	adTicket = s.beginK3AdvertisedPeerLocked()
+	if s.k3Advertised != nil {
+		s.applyK3AdvertisedWelcomeLocked(session, welcome, local)
+	} else {
+		applyWelcomeMetadata(session, welcome, local)
+	}
+	s.finishK3AdvertisedPeerLocked(adTicket)
+	adTicket = nil
+	adLocked = false
 	s.peerMu.Unlock()
 
 	// Stash welcome metadata for deferred application in
@@ -1508,8 +1616,18 @@ func (s *Service) abortLocallyEvictedCMSession(session *peerSession, slotAddress
 	dialAddress := session.address
 	log.Trace().Str("site", "abortLocallyEvictedCMSession").Str("phase", "lock_wait").Str("address", string(dialAddress)).Msg("peer_mu_writer")
 	s.peerMu.Lock()
+	adLocked := true
+	if s.k3Advertised != nil {
+		defer func() {
+			if adLocked {
+				s.guardK3AdvertisedPeerLocked(s.k3AdvertisedActive)
+				s.peerMu.Unlock()
+			}
+		}()
+	}
 	log.Trace().Str("site", "abortLocallyEvictedCMSession").Str("phase", "lock_held").Str("address", string(dialAddress)).Msg("peer_mu_writer")
 	s.forgetUnpublishedDialOriginLocked(session)
+	adLocked = false
 	s.peerMu.Unlock()
 	log.Trace().Str("site", "abortLocallyEvictedCMSession").Str("phase", "lock_released").Str("address", string(dialAddress)).Msg("peer_mu_writer")
 	s.dropOutboundControlFrameBucket(session.connID)
@@ -1540,6 +1658,15 @@ func (s *Service) failCMSessionSetup(session *peerSession, slotAddress domain.Pe
 	// whose handshake reply keeps failing during session setup.
 	log.Trace().Str("site", "failCMSessionSetup").Str("phase", "lock_wait").Str("address", string(dialAddress)).Msg("peer_mu_writer")
 	s.peerMu.Lock()
+	adLocked := true
+	if s.k3Advertised != nil {
+		defer func() {
+			if adLocked {
+				s.guardK3AdvertisedPeerLocked(s.k3AdvertisedActive)
+				s.peerMu.Unlock()
+			}
+		}()
+	}
 	log.Trace().Str("site", "failCMSessionSetup").Str("phase", "lock_held").Str("address", string(dialAddress)).Msg("peer_mu_writer")
 	s.forgetUnpublishedDialOriginLocked(session)
 	// Record failure against the slot's canonical address (slotAddress)
@@ -1564,6 +1691,7 @@ func (s *Service) failCMSessionSetup(session *peerSession, slotAddress domain.Pe
 	if !session.peerIdentity.IsZero() && s.setupFailureExceedsThresholdLocked(slotAddress) {
 		s.armRouteQuarantineLocked(session.penaltySubject(), quarantineReasonSetupFailureCycle, now)
 	}
+	adLocked = false
 	s.peerMu.Unlock()
 	log.Trace().Str("site", "failCMSessionSetup").Str("phase", "lock_released").Str("address", string(dialAddress)).Msg("peer_mu_writer")
 	s.dropOutboundControlFrameBucket(session.connID)
@@ -1584,10 +1712,16 @@ func (s *Service) failCMSessionSetup(session *peerSession, slotAddress domain.Pe
 // session's, and deleting it would fold its fallback-port health back onto the
 // wrong key. Caller holds s.peerMu.Lock.
 func (s *Service) forgetUnpublishedDialOriginLocked(session *peerSession) {
+	adTicket := s.beginK3AdvertisedPeerLocked()
+	if adTicket != nil {
+		defer s.guardK3AdvertisedPeerLocked(adTicket)
+	}
 	if registered, ok := s.sessions[session.address]; ok && registered != session {
+		s.finishK3AdvertisedPeerLocked(adTicket)
 		return
 	}
 	delete(s.dialOrigin, session.address)
+	s.finishK3AdvertisedPeerLocked(adTicket)
 }
 
 // registerCMSession enters a session whose setup succeeded into s.sessions /
@@ -1616,29 +1750,66 @@ func (s *Service) forgetUnpublishedDialOriginLocked(session *peerSession) {
 // (s.peerMu), s.upstream to the delivery domain (s.deliveryMu). Canonical
 // s.peerMu OUTER → s.deliveryMu INNER.
 func (s *Service) registerCMSession(session *peerSession, slotAddress domain.PeerAddress) bool {
+	adNormalReturn := false
+	adDeliveryLocked := false
+	var adTicket *k3AdvertisedTicket
+	var adLocked bool
+	if s.k3Advertised != nil {
+		defer func() {
+			if adLocked {
+				s.guardK3AdvertisedPeerLocked(adTicket)
+				s.peerMu.Unlock()
+			}
+		}()
+	}
 	dialAddress := session.address
 	log.Trace().Str("site", "registerCMSession").Str("phase", "lock_wait").Str("address", string(dialAddress)).Msg("peer_mu_writer")
 	s.peerMu.Lock()
+	adLocked = true
+	adTicket = s.beginK3AdvertisedPeerLocked()
 	log.Trace().Str("site", "registerCMSession").Str("phase", "lock_held").Str("address", string(dialAddress)).Msg("peer_mu_writer")
 	defer func() {
+		if adNormalReturn {
+			s.finishK3AdvertisedPeerLocked(adTicket)
+		} else {
+			s.guardK3AdvertisedPeerLocked(adTicket)
+		}
+		if s.k3Advertised != nil && adDeliveryLocked {
+			s.deliveryMu.Unlock()
+			adDeliveryLocked = false
+		}
+		adTicket = nil
+		adLocked = false
 		s.peerMu.Unlock()
 		log.Trace().Str("site", "registerCMSession").Str("phase", "lock_released").Str("address", string(dialAddress)).Msg("peer_mu_writer")
 	}()
 	if session.closedByLocalEviction() {
+		adNormalReturn = true
 		return false
 	}
 
 	log.Trace().Str("site", "registerCMSession").Str("phase", "lock_wait").Str("address", string(dialAddress)).Msg("delivery_mu_writer")
 	s.deliveryMu.Lock()
+	adDeliveryLocked = true
 	log.Trace().Str("site", "registerCMSession").Str("phase", "lock_held").Str("address", string(dialAddress)).Msg("delivery_mu_writer")
+	var k3 k3RegisteredTicket
+	if s.k3Registered != nil {
+		k3 = s.k3BeginSessionLocked(dialAddress)
+	}
+	s.k3AdvertisedSessionChangingLocked(dialAddress, session)
 	publication := s.beginRegistryPublication()
 	s.sessions[dialAddress] = session
 	s.upstream[dialAddress] = struct{}{}
 	if publication != nil {
 		publication.Complete()
 	}
+	if s.k3Registered != nil {
+		s.k3FinishSessionLocked(k3)
+	}
+	adDeliveryLocked = false
 	s.deliveryMu.Unlock()
 	log.Trace().Str("site", "registerCMSession").Str("phase", "lock_released").Str("address", string(dialAddress)).Msg("delivery_mu_writer")
+	adNormalReturn = true
 	return true
 }
 
@@ -1751,13 +1922,30 @@ func (s *Service) publishAndServeCMSession(session *peerSession, slotAddress dom
 // ConnectionManager as a failed setup carrying the refusal, which
 // onCMDialFailed does not charge to the address.
 func (s *Service) withdrawRefusedCMSession(session *peerSession, slotAddress domain.PeerAddress, slotGeneration uint64, refusal error) {
+	var adTicket *k3AdvertisedTicket
+	var adLocked bool
+	if s.k3Advertised != nil {
+		defer func() {
+			if adLocked {
+				s.guardK3AdvertisedPeerLocked(adTicket)
+				s.peerMu.Unlock()
+			}
+		}()
+	}
 	dialAddress := session.address
 	_ = session.closeAs(peerSessionClosedByLegacyRefusal)
 	// Cross-domain: s.sessions / s.dialOrigin → s.peerMu; s.upstream →
 	// s.deliveryMu. Canonical s.peerMu OUTER → s.deliveryMu INNER.
 	s.peerMu.Lock()
+	adLocked = true
+	adTicket = s.beginK3AdvertisedPeerLocked()
 	s.deliveryMu.Lock()
 	if s.sessions[dialAddress] == session {
+		var k3 k3RegisteredTicket
+		if s.k3Registered != nil {
+			k3 = s.k3BeginSessionLocked(dialAddress)
+		}
+		s.k3AdvertisedSessionChangingLocked(dialAddress, nil)
 		publication := s.beginRegistryPublication()
 		delete(s.sessions, dialAddress)
 		delete(s.upstream, dialAddress)
@@ -1765,8 +1953,14 @@ func (s *Service) withdrawRefusedCMSession(session *peerSession, slotAddress dom
 		if publication != nil {
 			publication.Complete()
 		}
+		if s.k3Registered != nil {
+			s.k3FinishSessionLocked(k3)
+		}
 	}
 	s.deliveryMu.Unlock()
+	s.finishK3AdvertisedPeerLocked(adTicket)
+	adTicket = nil
+	adLocked = false
 	s.peerMu.Unlock()
 	s.dropOutboundControlFrameBucket(session.connID)
 	if session.metered != nil {
@@ -1793,6 +1987,16 @@ func (s *Service) withdrawRefusedCMSession(session *peerSession, slotAddress dom
 // when the ConnectionManager closed the session on its own decision, and from
 // the serve loop's error otherwise.
 func (s *Service) withdrawServedCMSession(session *peerSession, slotAddress domain.PeerAddress, slotGeneration uint64, err error) {
+	var adTicket *k3AdvertisedTicket
+	var adLocked bool
+	if s.k3Advertised != nil {
+		defer func() {
+			if adLocked {
+				s.guardK3AdvertisedPeerLocked(adTicket)
+				s.peerMu.Unlock()
+			}
+		}()
+	}
 	dialAddress := session.address
 
 	// Cross-domain cleanup: s.sessions / s.dialOrigin → s.peerMu;
@@ -1800,12 +2004,19 @@ func (s *Service) withdrawServedCMSession(session *peerSession, slotAddress doma
 	// s.deliveryMu INNER.
 	log.Trace().Str("site", "withdrawServedCMSession").Str("phase", "lock_wait").Str("address", string(dialAddress)).Msg("peer_mu_writer")
 	s.peerMu.Lock()
+	adLocked = true
+	adTicket = s.beginK3AdvertisedPeerLocked()
 	log.Trace().Str("site", "withdrawServedCMSession").Str("phase", "lock_held").Str("address", string(dialAddress)).Msg("peer_mu_writer")
 	log.Trace().Str("site", "withdrawServedCMSession").Str("phase", "lock_wait").Str("address", string(dialAddress)).Msg("delivery_mu_writer")
 	s.deliveryMu.Lock()
 	log.Trace().Str("site", "withdrawServedCMSession").Str("phase", "lock_held").Str("address", string(dialAddress)).Msg("delivery_mu_writer")
 	ownedCleanup := s.sessions[dialAddress] == session
 	if ownedCleanup {
+		var k3 k3RegisteredTicket
+		if s.k3Registered != nil {
+			k3 = s.k3BeginSessionLocked(dialAddress)
+		}
+		s.k3AdvertisedSessionChangingLocked(dialAddress, nil)
 		publication := s.beginRegistryPublication()
 		delete(s.sessions, dialAddress)
 		delete(s.upstream, dialAddress)
@@ -1813,9 +2024,15 @@ func (s *Service) withdrawServedCMSession(session *peerSession, slotAddress doma
 		if publication != nil {
 			publication.Complete()
 		}
+		if s.k3Registered != nil {
+			s.k3FinishSessionLocked(k3)
+		}
 	}
 	s.deliveryMu.Unlock()
 	log.Trace().Str("site", "withdrawServedCMSession").Str("phase", "lock_released").Str("address", string(dialAddress)).Msg("delivery_mu_writer")
+	s.finishK3AdvertisedPeerLocked(adTicket)
+	adTicket = nil
+	adLocked = false
 	s.peerMu.Unlock()
 	log.Trace().Str("site", "withdrawServedCMSession").Str("phase", "lock_released").Str("address", string(dialAddress)).Msg("peer_mu_writer")
 
@@ -1879,6 +2096,16 @@ func (s *Service) deregisterServedCMSessionRouting(session *peerSession, err err
 // route withdrawal to this node. Its ActiveSessionLost, if any, is stale and
 // suppressed by the generation guard.
 func (s *Service) onCMSessionTeardown(info SessionInfo) {
+	var adTicket *k3AdvertisedTicket
+	var adLocked bool
+	if s.k3Advertised != nil {
+		defer func() {
+			if adLocked {
+				s.guardK3AdvertisedPeerLocked(adTicket)
+				s.peerMu.Unlock()
+			}
+		}()
+	}
 	// Session is registered under DialAddress (the actual TCP address used,
 	// which may be a fallback port). Use DialAddress for cleanup, falling
 	// back to the canonical Address when DialAddress is empty (pre-activation
@@ -1898,12 +2125,19 @@ func (s *Service) onCMSessionTeardown(info SessionInfo) {
 	// s.deliveryMu.  Canonical s.peerMu OUTER → s.deliveryMu INNER.
 	log.Trace().Str("site", "onCMSessionTeardown").Str("phase", "lock_wait").Str("address", string(addr)).Msg("peer_mu_writer")
 	s.peerMu.Lock()
+	adLocked = true
+	adTicket = s.beginK3AdvertisedPeerLocked()
 	log.Trace().Str("site", "onCMSessionTeardown").Str("phase", "lock_held").Str("address", string(addr)).Msg("peer_mu_writer")
 	log.Trace().Str("site", "onCMSessionTeardown").Str("phase", "lock_wait").Str("address", string(addr)).Msg("delivery_mu_writer")
 	s.deliveryMu.Lock()
 	log.Trace().Str("site", "onCMSessionTeardown").Str("phase", "lock_held").Str("address", string(addr)).Msg("delivery_mu_writer")
 	ownedCleanup := info.Session != nil && s.sessions[addr] == info.Session
 	if ownedCleanup {
+		var k3 k3RegisteredTicket
+		if s.k3Registered != nil {
+			k3 = s.k3BeginSessionLocked(addr)
+		}
+		s.k3AdvertisedSessionChangingLocked(addr, nil)
 		publication := s.beginRegistryPublication()
 		delete(s.sessions, addr)
 		delete(s.upstream, addr)
@@ -1911,9 +2145,15 @@ func (s *Service) onCMSessionTeardown(info SessionInfo) {
 		if publication != nil {
 			publication.Complete()
 		}
+		if s.k3Registered != nil {
+			s.k3FinishSessionLocked(k3)
+		}
 	}
 	s.deliveryMu.Unlock()
 	log.Trace().Str("site", "onCMSessionTeardown").Str("phase", "lock_released").Str("address", string(addr)).Msg("delivery_mu_writer")
+	s.finishK3AdvertisedPeerLocked(adTicket)
+	adTicket = nil
+	adLocked = false
 	s.peerMu.Unlock()
 	log.Trace().Str("site", "onCMSessionTeardown").Str("phase", "lock_released").Str("address", string(addr)).Msg("peer_mu_writer")
 
@@ -1968,11 +2208,21 @@ func (s *Service) onCMStaleSession(session *peerSession) {
 	}
 	log.Trace().Str("site", "onCMStaleSession").Str("phase", "lock_wait").Str("address", string(session.address)).Msg("peer_mu_writer")
 	s.peerMu.Lock()
+	adLocked := true
+	if s.k3Advertised != nil {
+		defer func() {
+			if adLocked {
+				s.guardK3AdvertisedPeerLocked(s.k3AdvertisedActive)
+				s.peerMu.Unlock()
+			}
+		}()
+	}
 	log.Trace().Str("site", "onCMStaleSession").Str("phase", "lock_held").Str("address", string(session.address)).Msg("peer_mu_writer")
 	// Clean up the dialOrigin entry the stale dial registered — unless a
 	// newer session for the same dial address is registered, whose entry it
 	// now is. The same rule as every other unpublished-session exit.
 	s.forgetUnpublishedDialOriginLocked(session)
+	adLocked = false
 	s.peerMu.Unlock()
 	log.Trace().Str("site", "onCMStaleSession").Str("phase", "lock_released").Str("address", string(session.address)).Msg("peer_mu_writer")
 }
@@ -2037,8 +2287,20 @@ func (s *Service) onCMDialFailed(address domain.PeerAddress, err error, incompat
 // LastDisconnectedAt, BannedUntil) are always refreshed because
 // they reflect "right now" and must not stale-pin a prior classification.
 func (s *Service) applySelfIdentityCooldown(address domain.PeerAddress, selfErr *selfIdentityError) {
+	var adTicket *k3AdvertisedTicket
+	var adLocked bool
+	if s.k3Advertised != nil {
+		defer func() {
+			if adLocked {
+				s.guardK3AdvertisedPeerLocked(adTicket)
+				s.peerMu.Unlock()
+			}
+		}()
+	}
 	log.Trace().Str("site", "applySelfIdentityCooldown").Str("phase", "lock_wait").Str("address", string(address)).Msg("peer_mu_writer")
 	s.peerMu.Lock()
+	adLocked = true
+	adTicket = s.beginK3AdvertisedPeerLocked()
 	log.Trace().Str("site", "applySelfIdentityCooldown").Str("phase", "lock_held").Str("address", string(address)).Msg("peer_mu_writer")
 	address = s.resolveHealthAddress(address)
 	health := s.ensurePeerHealthLocked(address)
@@ -2071,6 +2333,9 @@ func (s *Service) applySelfIdentityCooldown(address domain.PeerAddress, selfErr 
 	s.deliveryMu.RLock()
 	s.emitPeerHealthDeltaLocked(health)
 	s.deliveryMu.RUnlock()
+	s.finishK3AdvertisedPeerLocked(adTicket)
+	adTicket = nil
+	adLocked = false
 	s.peerMu.Unlock()
 	log.Trace().Str("site", "applySelfIdentityCooldown").Str("phase", "lock_released").Str("address", string(address)).Msg("peer_mu_writer")
 

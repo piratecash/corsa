@@ -2,6 +2,7 @@ package node
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -544,6 +545,8 @@ func ninN1SourceErrors(sources map[string][]byte) []string {
 	expected["proofToken"]["find_node_owned_answer.go:dispatchOwnedFindNodeAnswer"] = 1
 	expected["proofToken"]["find_node_owned_answer.go:queueOwnedFindNodeAnswer"] = 1
 
+	// These are the two original opaque work types in the closed trace-slot DTO.
+	expected["findnode"]["find_node_owned_answer.go:<package>"] = 2
 	expected["findnode"]["find_node_resources.go:<package>"] = 2
 	expected["findnode"]["find_node_owned_round_loop.go:<package>"] = 1
 	// Local target original custody, before Service/F1 escape; forwarding retained.
@@ -594,6 +597,29 @@ func ninN1SourceErrors(sources map[string][]byte) []string {
 		made[name] = map[string]int{}
 	}
 	var failures []string
+	// Only these two complete reviewed sources qualify scalar/keyed data roles.
+	// A pin mismatch gives NO exemption; original authority accounting still runs.
+	dataPins := map[string]string{
+		"pending_queue_observation.go": "e9d7a7640c4a0ea1dc222549d7c711070ccd0729f6bc532a19018d2d9a5d0d7d",
+		"k5_interval_reduce.go":        "ad748259610420428002189610d55f03c469917370430511a024ece84106eca0",
+	}
+	dataQualified := map[string]bool{}
+	for path, want := range dataPins {
+		if raw, ok := sources[path]; ok && fmt.Sprintf("%x", sha256.Sum256(raw)) == want {
+			dataQualified[path] = true
+		} else {
+			failures = append(failures, "N1 pinned data source changed: "+path)
+		}
+	}
+	wantDataRoles := map[string]int{
+		"pending_queue_observation.go:PendingQueueObservation:End-key": 1,
+		"k5_interval_reduce.go:k5Union:end":                            8,
+		"k5_interval_reduce.go:k5Intersect:end":                        5,
+		"k5_interval_reduce.go:k5Contained:end":                        3,
+		"k5_interval_reduce.go:reduceK5UTCday:end":                     5,
+		"k5_interval_reduce.go:reduceK5UTCday:attempt":                 2,
+	}
+	dataRoles, scalarFields, traceFields := map[string]int{}, map[string]int{}, map[string]int{}
 	directOnly := map[string]bool{"runWithFiles": true, "selectInboundSend": true, "selectInboundClose": true, "bindInboundLeafLocked": true, "inboundTerminalForWire": true, "transportTerminalLocked": true, "selectInboundPinAfterLocked": true, "endInboundLeavesLocked": true, "staleInboundTerminalsLocked": true, "condemnInboundSelected": true, "stageInboundPin": true, "publishInboundLifetime": true, "acceptedTransportArrivalContext": true, "transportArrivalOwner": true, "newServiceWithDatagramConstructor": true, "newInboundPinCandidateService": true, "newUnknownInboundPinCandidateService": true, "attachInboundPinCandidate": true, "installUnknownInboundPinJournal": true, "newFindNodeCandidateService": true, "newFindNodeInboundCandidateService": true, "captureFindNodeSeed": true, "publishFindNodeLocked": true, "publishAcceptedProofTransport": true, "prepareFindNodeCMAcceptedLocked": true, "publishFindNodeCM": true, "findNodeMembers": true, "bindProofTransportLocked": true, "bindProofTransport": true, "endProofTransportIO": true, "endProofTransport": true, "ownerLocked": true, "captureSessionTransportOwner": true, "sessionTransportArrivalContext": true, "matchesTransportLocked": true, "PrepareSession": true, "Bind": true, "End": true, "NewSession": true}
 	for path, raw := range sources {
 		f, err := parser.ParseFile(token.NewFileSet(), path, raw, 0)
@@ -609,6 +635,8 @@ func ninN1SourceErrors(sources map[string][]byte) []string {
 			}
 			callees := map[ast.Node]bool{}
 			selectorParents := map[*ast.Ident][]*ast.SelectorExpr{}
+			dataIdentifiers := map[*ast.Ident]bool{}
+			dataSelectors := map[*ast.SelectorExpr]bool{}
 			ast.Inspect(decl, func(n ast.Node) bool {
 				if c, ok := n.(*ast.CallExpr); ok {
 					callees[c.Fun] = true
@@ -617,12 +645,55 @@ func ninN1SourceErrors(sources map[string][]byte) []string {
 					// Keep the original traversal order and parent multiplicity.
 					selectorParents[parent.Sel] = append(selectorParents[parent.Sel], parent)
 				}
+				// Scalar fields have exact pinned source/type/site roles, not a
+				// name- or file-wide allowance. Called selectors never qualify.
+				if sel, ok := n.(*ast.SelectorExpr); ok && dataQualified[path] && !callees[sel] {
+					role := site + ":" + sel.Sel.Name
+					if _, expected := wantDataRoles[role]; expected {
+						dataRoles[role]++
+						dataIdentifiers[sel.Sel], dataSelectors[sel] = true, true
+					}
+				}
+				if literal, ok := n.(*ast.CompositeLit); ok && dataQualified[path] && site == "pending_queue_observation.go:PendingQueueObservation" {
+					if typ, ok := literal.Type.(*ast.SelectorExpr); ok {
+						if pkg, ok := typ.X.(*ast.Ident); ok && pkg.Name == "domain" && typ.Sel.Name == "PendingQueueObservationSnapshot" {
+							for _, element := range literal.Elts {
+								if field, ok := element.(*ast.KeyValueExpr); ok {
+									if key, ok := field.Key.(*ast.Ident); ok && key.Name == "End" {
+										dataRoles[site+":End-key"]++
+										dataIdentifiers[key] = true
+									}
+								}
+							}
+						}
+					}
+				}
+				if typ, ok := n.(*ast.TypeSpec); ok && !typ.Assign.IsValid() {
+					if structure, ok := typ.Type.(*ast.StructType); ok {
+						for _, field := range structure.Fields.List {
+							for _, name := range field.Names {
+								if dataQualified[path] && site == "k5_interval_reduce.go:<package>" {
+									if primitive, ok := field.Type.(*ast.Ident); ok && ((typ.Name.Name == "k5UTCInterval" && name.Name == "end" && primitive.Name == "int64") || (typ.Name.Name == "k5ActualLoad" && name.Name == "attempt" && primitive.Name == "string")) {
+										scalarFields[typ.Name.Name+"."+name.Name+":"+primitive.Name]++
+									}
+								}
+								if path == "find_node_owned_answer.go" && site == "find_node_owned_answer.go:<package>" && typ.Name.Name == "ownedFindNodeEndpointTestSlot" {
+									if selected, ok := field.Type.(*ast.SelectorExpr); ok {
+										if pkg, ok := selected.X.(*ast.Ident); ok && pkg.Name == "findnode" && ((name.Name == "relayTraceWork" && selected.Sel.Name == "OwnedAnswerWork") || (name.Name == "targetTraceWork" && selected.Sel.Name == "OwnedLocalSignWork")) {
+											traceFields[name.Name+":"+selected.Sel.Name]++
+										}
+									}
+								}
+							}
+						}
+					}
+				}
 				return true
 			})
 			ast.Inspect(decl, func(n ast.Node) bool {
 				switch n := n.(type) {
 				case *ast.Ident:
-					if n == declaration {
+					if n == declaration || dataIdentifiers[n] {
 						return true
 					}
 					if refs, ok := actual[n.Name]; ok {
@@ -642,6 +713,9 @@ func ninN1SourceErrors(sources map[string][]byte) []string {
 						}
 					}
 				case *ast.SelectorExpr:
+					if dataSelectors[n] {
+						return true
+					}
 					if refs, tracked := methods[n.Sel.Name]; tracked {
 						refs[site]++
 						if !callees[n] {
@@ -672,6 +746,15 @@ func ninN1SourceErrors(sources map[string][]byte) []string {
 				return true
 			})
 		}
+	}
+	if len(dataPins) != 2 || !reflect.DeepEqual(dataRoles, wantDataRoles) {
+		failures = append(failures, fmt.Sprintf("N1 exact scalar/keyed data roles got%v want%v", dataRoles, wantDataRoles))
+	}
+	if !reflect.DeepEqual(scalarFields, map[string]int{"k5UTCInterval.end:int64": 1, "k5ActualLoad.attempt:string": 1}) {
+		failures = append(failures, "N1 pinned scalar field types changed")
+	}
+	if !reflect.DeepEqual(traceFields, map[string]int{"relayTraceWork:OwnedAnswerWork": 1, "targetTraceWork:OwnedLocalSignWork": 1}) {
+		failures = append(failures, "N1 exact opaque trace-slot field types changed")
 	}
 	for name, want := range expected {
 		if !reflect.DeepEqual(actual[name], want) {
@@ -764,6 +847,35 @@ func TestInboundN1ClosedOriginalOwnerAuthorityInventory(t *testing.T) {
 	mutated["identity_pin_inbound_lifecycle.go"] = append(append([]byte(nil), sources["identity_pin_inbound_lifecycle.go"]...), []byte("\nfunc extraSameFile(s *secureSessionStore){_ = s.stageInboundPin}\n")...)
 	if len(ninN1SourceErrors(mutated)) == 0 {
 		t.Fatal("whole approved source file became an allowance")
+	}
+
+	// True authority method-values cannot hide behind the same scalar/key names.
+	// Same-named pinned-source mutations must fail both the pin and the real
+	// method-value check. OTHERFILE cases receive no data-role exemption.
+	for _, tc := range []struct {
+		path string
+		pin  bool
+	}{
+		{"k5_interval_reduce.go", true},
+		{"extra_owner_values.go", false},
+	} {
+		mutated := map[string][]byte{}
+		for path, raw := range sources {
+			mutated[path] = raw
+		}
+		raw, exists := sources[tc.path]
+		if !exists {
+			raw = []byte("package node\n")
+		}
+		extra := "\nfunc extraTrueOwnerValues(o *proofTransportOwner, p *inboundPinProducer, b *findNodeConnectionBinding){_ = o.end; _ = p.attempt; _ = b.session.End}\n"
+		mutated[tc.path] = append(append([]byte(nil), raw...), []byte(extra)...)
+		failures := strings.Join(ninN1SourceErrors(mutated), "\n")
+		if !strings.Contains(failures, "terminal method value escape "+tc.path+":extraTrueOwnerValues") ||
+			!strings.Contains(failures, "selection method value escape "+tc.path+":extraTrueOwnerValues") ||
+			!strings.Contains(failures, "method value escape "+tc.path+":extraTrueOwnerValues:End") ||
+			(tc.pin && !strings.Contains(failures, "N1 pinned data source changed: "+tc.path)) {
+			t.Fatal("scalar/key role obscured true owner method-value", tc.path, failures)
+		}
 	}
 }
 
@@ -914,7 +1026,7 @@ func ninN1SelectionShapeErrors(path string, raw []byte) []string {
 	}
 	expected := map[string]string{
 		"inboundSendSelection":  `type inboundSendSelection struct { core *netcore.NetCore; owner *proofTransportOwner }`,
-		"inboundCloseSelection": `type inboundCloseSelection struct { core *netcore.NetCore }`,
+		"inboundCloseSelection": `type inboundCloseSelection struct { core *netcore.NetCore; terminal *k10TerminalCapsule }`,
 		"selectInboundSend": `func (b *networkBridge) selectInboundSend(id domain.ConnID) inboundSendSelection {
  b.svc.peerMu.RLock()
  selected := inboundSendSelection{core:b.svc.coreForIDLocked(id), owner:b.svc.transportTerminalLocked(id)}
@@ -934,6 +1046,7 @@ func ninN1SelectionShapeErrors(path string, raw []byte) []string {
 		"selectInboundClose": `func (b *networkBridge) selectInboundClose(id domain.ConnID) inboundCloseSelection {
  b.svc.peerMu.RLock()
  selected:=inboundCloseSelection{core:b.svc.coreForIDLocked(id)}
+ selected.terminal=b.svc.k10ForIDLocked(id)
  owner:=b.svc.transportTerminalLocked(id)
  owner.end()
  b.svc.peerMu.RUnlock()
@@ -941,6 +1054,7 @@ func ninN1SelectionShapeErrors(path string, raw []byte) []string {
  }`,
 		"closeCapturedInbound": `func(selected inboundCloseSelection)closeCapturedInbound()error{
  if selected.core==nil{return netcore.ErrUnknownConn}
+ selected.terminal.request(k10GenericClose)
  selected.core.Close()
  return nil
  }`,

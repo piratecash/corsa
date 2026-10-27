@@ -348,6 +348,8 @@ type secureSessionStore struct {
 	// Order: pinMutationGate → writeMu → mu. Never held over a handshake.
 	pinMutationGate sync.RWMutex
 	mu              sync.Mutex
+	// Optional raw-memory source; installed only after original startup checks.
+	pinMembership *pinMembershipSource
 	// Identity history has one owner: these entries. The proof/protection
 	// counters and preview key are runtime-only and owned by mu.
 	evidenceRevision   identityPinEvidenceRevision
@@ -482,6 +484,8 @@ func secureSessionStorePath(cfg config.Node) string {
 
 // secureSessionStoreOptions is what a store is opened from.
 type secureSessionStoreOptions struct {
+	// Constructor-only raw pin-membership request, never an admission policy.
+	pinMembership   *pinMembershipRequest
 	bridgePublisher findnodebridge.Publisher // immutable before marker/load/refusal
 	// path is the store file; "" keeps the store in memory only.
 	path string
@@ -506,6 +510,12 @@ type secureSessionStoreOptions struct {
 // pinned and nothing is written — so even a caller that ignored the refusal
 // would neither let v1 through nor overwrite the evidence.
 func openSecureSessionStore(opts secureSessionStoreOptions) *secureSessionStore {
+	// Freeze the optional request before load/audit/clock callbacks can mutate it.
+	var membershipRequest *pinMembershipRequest
+	if opts.pinMembership != nil {
+		request := *opts.pinMembership
+		membershipRequest = &request
+	}
 	store := newSecureSessionStoreWithPublisher(opts.clock, opts.logger, opts.bridgePublisher)
 	if opts.ninElapsed != nil {
 		store.ninElapsed = opts.ninElapsed
@@ -520,6 +530,9 @@ func openSecureSessionStore(opts secureSessionStoreOptions) *secureSessionStore 
 		if marker := readPinStoreMarker(opts.markerPath); marker.state == markerIntact || marker.state == markerDamaged {
 			store.refuse(refuseStoreNotConfigured(opts.markerPath, marker.store))
 		}
+		if membershipRequest != nil {
+			store.initializePinMembership(*membershipRequest)
+		}
 		return store
 	}
 	store.writeFile = store.writeToDisk
@@ -531,6 +544,9 @@ func openSecureSessionStore(opts secureSessionStoreOptions) *secureSessionStore 
 		store.refuse(refusal)
 	}
 	store.inspectIdentityPinGuard()
+	if membershipRequest != nil {
+		store.initializePinMembership(*membershipRequest)
+	}
 	return store
 }
 

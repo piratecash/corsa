@@ -541,6 +541,10 @@ func (s *Service) beginRegistryPublication() *findnodebridge.Publication {
 // triple is created for an inbound connection. The caller must hold s.peerMu
 // write lock and must ensure the connection is not already registered.
 func (s *Service) registerInboundConnLocked(conn net.Conn, core *netcore.NetCore, metered *netcore.MeteredConn, budget *connbudget.Reservation) {
+	adTicket := s.beginK3AdvertisedPeerLocked()
+	if adTicket != nil {
+		defer s.guardK3AdvertisedPeerLocked(adTicket)
+	}
 	entry := &connEntry{core: core, budget: budget, receive: routing.NewAnnounceReceiveState()}
 	if metered != nil {
 		entry.metered = metered
@@ -550,12 +554,23 @@ func (s *Service) registerInboundConnLocked(conn net.Conn, core *netcore.NetCore
 		s.bindProofTransportLocked(entry, id, wire)
 	}
 	s.k10RegisterLocked(conn, entry)
+	var k3 k3RegisteredTicket
+	if s.k3Registered != nil {
+		k3 = s.k3BeginRegistryLocked(id)
+	}
+	if s.k3Advertised != nil {
+		s.k3AdvertisedRegistryAddedLocked(id, k3AdvertisedDirection(core))
+	}
 	publication := s.beginRegistryPublication()
 	s.conns[id] = entry
 	s.connIDByNetConn[conn] = id
 	if publication != nil {
 		publication.Complete()
 	}
+	if s.k3Registered != nil {
+		s.k3FinishRegistryLocked(k3)
+	}
+	s.finishK3AdvertisedPeerLocked(adTicket)
 }
 
 // attachOutboundCoreLocked registers an outbound NetCore in the connection registry.
@@ -564,18 +579,33 @@ func (s *Service) registerInboundConnLocked(conn net.Conn, core *netcore.NetCore
 // The caller must hold s.peerMu write lock and must ensure the connection is
 // not already registered.
 func (s *Service) attachOutboundCoreLocked(conn net.Conn, core *netcore.NetCore) {
+	adTicket := s.beginK3AdvertisedPeerLocked()
+	if adTicket != nil {
+		defer s.guardK3AdvertisedPeerLocked(adTicket)
+	}
 	id := core.ConnID()
 	entry := &connEntry{core: core, metered: netcore.MeteredOf(conn), receive: routing.NewAnnounceReceiveState()}
 	if wire, ok := conn.(*peekedConn); ok {
 		s.bindProofTransportLocked(entry, id, wire)
 	}
 	s.k10RegisterLocked(conn, entry)
+	var k3 k3RegisteredTicket
+	if s.k3Registered != nil {
+		k3 = s.k3BeginRegistryLocked(id)
+	}
+	if s.k3Advertised != nil {
+		s.k3AdvertisedRegistryAddedLocked(id, k3AdvertisedDirection(core))
+	}
 	publication := s.beginRegistryPublication()
 	s.conns[id] = entry
 	s.connIDByNetConn[conn] = id
 	if publication != nil {
 		publication.Complete()
 	}
+	if s.k3Registered != nil {
+		s.k3FinishRegistryLocked(k3)
+	}
+	s.finishK3AdvertisedPeerLocked(adTicket)
 }
 
 // receiveForIDLocked returns only the receive owner of the registered ConnID.
@@ -594,8 +624,13 @@ func (s *Service) receiveForIDLocked(id domain.ConnID) *routing.AnnounceReceiveS
 // teardown path racing with the first), the call is a no-op — both deletes
 // are idempotent. The caller must hold s.peerMu.
 func (s *Service) unregisterConnLocked(conn net.Conn) {
+	adTicket := s.beginK3AdvertisedPeerLocked()
+	if adTicket != nil {
+		defer s.guardK3AdvertisedPeerLocked(adTicket)
+	}
 	id, ok := s.connIDByNetConn[conn]
 	if !ok {
+		s.finishK3AdvertisedPeerLocked(adTicket)
 		return
 	}
 	// The connection stops existing here, so its unit of the shared ceiling
@@ -609,12 +644,21 @@ func (s *Service) unregisterConnLocked(conn net.Conn) {
 		entry.budget.Release()
 		entry.terminal.remove(entry)
 	}
+	var k3 k3RegisteredTicket
+	if s.k3Registered != nil {
+		k3 = s.k3BeginRegistryLocked(id)
+	}
+	s.k3AdvertisedRegistryRemovedLocked(id)
 	publication := s.beginRegistryPublication()
 	delete(s.conns, id)
 	delete(s.connIDByNetConn, conn)
 	if publication != nil {
 		publication.Complete()
 	}
+	if s.k3Registered != nil {
+		s.k3FinishRegistryLocked(k3)
+	}
+	s.finishK3AdvertisedPeerLocked(adTicket)
 }
 
 // bindProofTransportLocked is the original registry attach. Tuple checks live

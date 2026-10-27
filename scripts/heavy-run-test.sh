@@ -318,6 +318,21 @@ case_stopped_daemon_lock_reads_stale() {
   : > $state/ps_down
   run_heavy fake probe true; expect_code 76 $? "probe beside a dead holder on a stopped daemon"
   rm -rf $lock
+  # Deterministic no-argument group lookup; retain the original owner-publication race above.
+  local code
+  if ps -p 2147483647 -o pid= >/dev/null 2>&1; then
+    fail "reserved nonexistent-PID fixture is present";return
+  fi
+  mkdir -m 0700 $lock
+  { print -r -- "name=missing-pgid-fixture";print -r -- "pid=2147483647";print -r -- "pid_lstart=confirmed-absent-fixture";print -r -- "token=owned-missing-pgid"; } > $lock/owner
+  : > $state/ps_down
+  cp $lock/owner $case_dir/missing-pgid-owner.before
+  run_heavy fake probe touch $case_dir/missing-pgid-child
+  code=$?
+  expect_code 76 $code "probe with explicitly absent pgid on stopped daemon"
+  [[ ! -e $case_dir/missing-pgid-child ]] || fail "missing-pgid probe started a child"
+  [[ -d $lock ]] || fail "stale fixture lock was removed"
+  rm -rf $lock
 }
 
 # A remote endpoint, or a context that cannot be read: refused, the job does

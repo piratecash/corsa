@@ -223,6 +223,10 @@ func addressVictimBefore(a, b peerEntry) bool {
 // forgetPeerAddressLocked requires peerMu (write). Security-store pins,
 // endpoint bindings, and downgrade marks have their own lifetime and survive.
 func (s *Service) forgetPeerAddressLocked(address domain.PeerAddress) {
+	adTicket := s.beginK3AdvertisedPeerLocked()
+	if adTicket != nil {
+		defer s.guardK3AdvertisedPeerLocked(adTicket)
+	}
 	for i, peer := range s.peers {
 		if peer.Address == address {
 			s.peers = append(s.peers[:i], s.peers[i+1:]...)
@@ -237,6 +241,7 @@ func (s *Service) forgetPeerAddressLocked(address domain.PeerAddress) {
 	delete(s.peerBuilds, address)
 	delete(s.metaOrphanFirstSeen, address)
 	delete(s.dialOrigin, address)
+	s.finishK3AdvertisedPeerLocked(adTicket)
 }
 
 type addressEviction struct {

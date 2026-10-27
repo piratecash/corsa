@@ -135,6 +135,19 @@ func localCapabilities(enableV3 bool, datagrams datagramAdvertise) []domain.Capa
 	return caps
 }
 
+// localHandshakeCapabilities is the one typed local set used by the original
+// hello/welcome projection and both directions of capability negotiation.
+// The existing test-only per-Service selection is immutable before handshakes;
+// ordinary and existing Ready constructors leave it off. No proof or auth
+// authority is created by membership in this local set.
+func (s *Service) localHandshakeCapabilities() []domain.Capability {
+	caps := localCapabilities(s.cfg.EnableMeshRoutingV3, s.localDatagramAdvertise())
+	if s.ownedFindNodeAdvertiseTest {
+		caps = append(caps, domain.CapOverlayFindNodeV1)
+	}
+	return caps
+}
+
 // localCapabilityStrings returns the wire-format string list for the hello/
 // welcome frame. Used at the protocol boundary where Frame.Capabilities
 // is []string. The enableV3 flag and the datagram advertise are threaded

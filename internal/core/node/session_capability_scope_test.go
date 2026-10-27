@@ -120,7 +120,7 @@ func TestSessionCapabilityGateRacesHandshakeWrite(t *testing.T) {
 		// the test is worthless if it invents an ordering openPeerSession
 		// does not have.
 		svc.peerMu.Lock()
-		applyWelcomeMetadata(session, welcome, false, datagramAdvertise{Endpoint: true})
+		applyWelcomeMetadata(session, welcome, localCapabilities(false, datagramAdvertise{Endpoint: true}))
 		svc.peerMu.Unlock()
 	}()
 	go func() {

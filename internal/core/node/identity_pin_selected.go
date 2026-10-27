@@ -99,9 +99,22 @@ func (s *secureSessionStore) selectedConfirmationNeeded() bool {
 
 // putPinEntryLocked requires the store mu and updates its derived counters atomically.
 func (s *secureSessionStore) putPinEntryLocked(id domain.PeerIdentity, entry identityPinEntry) {
+	ticket := s.beginPinMembershipLocked(id, true)
+	if ticket != nil {
+		defer ticket.finish(s)
+	}
 	publication := s.beginPinPublication()
 	if publication != nil {
-		defer publication.Complete()
+		if ticket == nil {
+			defer publication.Complete()
+		} else {
+			defer func() {
+				publication.Complete()
+				ticket.publicationReturned = true
+			}()
+		}
+	} else if ticket != nil {
+		ticket.publicationReturned = true
 	}
 	old := s.identities[id]
 	if old.inboundMetadataConfirmed() {
@@ -130,13 +143,29 @@ func (s *secureSessionStore) putPinEntryLocked(id domain.PeerIdentity, entry ide
 	}
 	s.replaceRelationTalliesLocked(old, entry)
 	s.identities[id] = entry
+	if ticket != nil {
+		ticket.leafReturned = true
+	}
 }
 
 // deletePinEntryLocked requires the store mu.
 func (s *secureSessionStore) deletePinEntryLocked(id domain.PeerIdentity) {
+	ticket := s.beginPinMembershipLocked(id, false)
+	if ticket != nil {
+		defer ticket.finish(s)
+	}
 	publication := s.beginPinPublication()
 	if publication != nil {
-		defer publication.Complete()
+		if ticket == nil {
+			defer publication.Complete()
+		} else {
+			defer func() {
+				publication.Complete()
+				ticket.publicationReturned = true
+			}()
+		}
+	} else if ticket != nil {
+		ticket.publicationReturned = true
 	}
 	entry := s.identities[id]
 	if entry.inboundMetadataConfirmed() {
@@ -153,6 +182,9 @@ func (s *secureSessionStore) deletePinEntryLocked(id domain.PeerIdentity) {
 	}
 	s.replaceRelationTalliesLocked(entry, identityPinEntry{})
 	delete(s.identities, id)
+	if ticket != nil {
+		ticket.leafReturned = true
+	}
 }
 func (e identityPinEntry) selectedConfirmed() bool {
 	return e.protectionRevision != 0 && e.metadata != nil && e.classMetadata().Selected.State == domain.IdentityPinAllocationEligible && e.metadata.confirmedRevision == e.protectionRevision

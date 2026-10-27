@@ -1,6 +1,8 @@
-# C1/C2a: production daemon memory screens
+# C1/C2a/C2b32: production daemon memory screens
 
 [Русская версия](d1-corsad-memory-screen.ru.md)
+
+Latest bounded result: [C2b32 on the current candidate](#c2b32-current-candidate-32-tlsv2-peers-and-16-identity-churn--2026-10-26). Earlier sections retain their original subjects and history.
 
 2026-10-25. **This limited screen completed without an observed OOM or budget overrun. Full D1 compliance with512MB remains UNKNOWN.** These are our own measurements, not external sizing figures. The resource checkpoints and remaining cases are in [D1 to DHT](../design/d1-dht-resource-checkpoints.md).
 
@@ -67,3 +69,51 @@ Attempts 1 and 2 stopped before container creation because the launch omitted th
 Retained proof: `/private/tmp/corsa-D1-C2a-eight-peer-ROOT-package-v1/ATTEMPT-3-TERMINAL.json`, SHA-256 `63a977a7fa18acf8a1ad89fe9d12be5d718a540a47e9c7d096ecc5882c85db25`; run `runs/corsa-c2a-90e20c6d45317c03a57ae579932d028a/host.json`, SHA-256 `07b19dfbfe21daf0f3d8624a423a1cd1703b4951d300b4bc99e1e3594596ae58`, under that package. Original samples and both preflight failures are retained locally; availability outside this workspace is not assumed.
 
 This is only the fixed binary and bounded C2a TLS/get_peers/churn scenario. It does not establish overload admission, FindNode/F1, full 512-peer coverage, long-term retention, current post-K12 candidate memory, SQLite/DesktopClient cost, Tor/Windows, G2 or release readiness. The later `e651bb6c…` static CLI build and the staged K12 integration are different scopes. Full C2 and the remaining D1 resource checkpoints remain open.
+
+
+## C2b32: current candidate, 32 TLSv2 peers and 16-identity churn — 2026-10-26
+
+The first C2b32 attempt completed its separately owner-admitted case: **32 → 16 → 32 → 0**, with 48 distinct identities. Proven channels used ordinals1–32, original survivors17–32, recovered channels17–48, then none. Each nonempty phase verified genuine TLSv2/session-v2 identity/channel ownership and successful `get_peers`; sixteen new identities were disjoint from the original32. Four5s waits also included serialized exchanges. The driver charged **1344 application frames / 41216 bytes**, within the unchanged2048-frame/8MiB limits; this is not TLS-wire accounting. Cached live census was diagnostic only.
+
+The final0 is a **source-bound fresh authenticated Node RPC witness**, not an inference from driver exit or an empty peer list. After closing/joining all owned channels, the pinned compiled driver required fresh `getNodeStatus`/`fetchRouteSummary` to return the same server incarnation and enforced instantaneous loopback `active==0`, before emitting `zero-drained`. The final RPC response body/atomic field/read timestamp was not retained as a separate RAW response; independent review joined the executed source and artifact to the ordered protocol record. Subsequent child drain/reaping and daemon drain are separate lifecycle facts.
+
+| Observed scope | Bytes | Qualification |
+|---|---:|---|
+| Service cgroup peak |36,233,216|Includes Python keeper and service descendants; no subtraction. |
+| Maximum sampled daemon VmHWM |25,358,336|Observed process HWM; complete lifetime VmHWM remains UNKNOWN. |
+| wait4 command HWM |26,140,672|May include descendants/pre-exec; separate from daemon-only HWM. |
+| Driver cgroup peak |24,952,832|Keeper+child group through final read after Go drain; later keeper-exit costs unmeasured. |
+| Observer cgroup peak |41,172,992|Through its last peak read before final record; full post-exit lifetime UNKNOWN. |
+| Preparer/shared-tmpfs charge |UNKNOWN|Not subtracted;1MiB storage ceiling is not measured RAM. |
+
+The service peak was36.233216 decimalMB, below512000000bytes **for this case**. These separate scope peaks are not a simultaneous physical-memory sum. Continuous process-tree RSS and full daemon lifetime HWM remain UNKNOWN. No per-additional-peer RAM delta or saving is inferred from the older8-peer/`9ba93241…` runs: code, CGO build variant and workload changed. K9/K10/K12 opt-ins were OFF, so this is not their active collection cost.
+
+Production CLI SHA256 `ae61fc926e7f5c2353a21075041300fb722f2c8346389344a6e2e145931632c7`,21627040bytes, was the ordinary `./cmd/corsa-node`, Go1.27.3/Linuxarm64v8.0/CGO0 with no tags or benchmark wrapper. Its source is base `e50f97511d88d7ffd7a08daa3490bee7d63f0f6a` **plus19 staged paths**, snapshot `1fcca8012a39015fcc377472d2e56cdb82cbedef0562f07ee6acf8f6895f9f29` (2119files/70186204bytes), not pure committed HEAD. Driver SHA256 `90d1c2d68524a5507aa09d4e443cb70cf3c52fb6fe936a1d9280917bad7f7aa7`,6750368bytes, used that current source plus four private component posts and the actual CLI literal; manifest `2806e1feef432c56b4db0824ea5cfe6b9e6694178c4df7d37a890b24599cd734` (2119files/70197026bytes). Both ELFs have static self-only closure/no interpreter or needed DSO. They were cross-built on macOS, then executed natively in the same arm64 Linux Docker image910cfcaf…; these are different facts. The original CLI metadata-only qualifier FAIL was retained; a separate static readback qualified the existing ELF without rebuilding it.
+
+Limits remained service1CPU/512000000bytes/64PIDs, observer0.25CPU/128MiB/32PIDs, driver1CPU/256MiB/32PIDs, all no swap;120s work including preparation plus30s cleanup, max3 measured roles. The owned1MiB native credential tmpfs,501:20/0600/read-only consumers, prep-before-observer/driver handoff, offline loopback namespace and held cgroup/FD checks were retained. The complete105-record stream has22 service samples,22 service process records,20 driver samples,20 driver process records and four protocol milestones. Initial absolute events and subsequent deltas showed no OOM/overrun; no gaps were accepted. Final held reads and host flush preceded keeper release; all four owned containers exited0/noOOM and were removed, then the own volume was removed. Fresh exact-owner queries were empty and the heavy lock was released.
+
+Local proof: `/private/tmp/corsa-D1-C2b32-current-ROOT-package-v1/runs/corsa-c2b32-f81167849ca5419213464d803dc85831/host.json`, SHA256 `e2ce81ab4e0dfa096673bb1ac1480f139f7997d0248b2c82f89eb9afe95a3b68`; complete NDJSON SHA256 `68d63989d4bc432c1560801d55c250317db30a6e4cc85835d4c98a2b614e618c`. Independent TESTER and reviewer accepted this bounded scope, including the source-bound zero-witness limitation. Files are workspace-local; availability elsewhere is not assumed.
+
+This closes only this32-channel TLS/get_peers/churn screen. Full C2/512-peer workload, F1/FindNode, overload, persistent/long-duration state, co-tenants, active observations, T5/Member4, G2 and D1 release remain open. It does not establish the final DHT footprint or universal512MB suitability; Windows/Tor remain unverified/deferred. `piratecashd` was not run or sized.
+
+
+## S6 EMPTY64 instrumentation preparation — 2026-10-27
+
+The private instrumented CLI was built for Linux arm64/CGO0: SHA-256 `9bea7a6ed0c50bc293f105bfbf495295770e2daf8b59fd0d187d0a0873b62d3c`, 31,355,161 bytes. Its explicit observation profile leaves project defaults unchanged. Static build evidence and the six-group integration result below do not transfer earlier memory measurements to this binary.
+
+The complete OFF→ON controller passed six pure integration test groups in one closed30 Python command (normal exit 0, child reaped). Tests exercised the actual scheduling/metric helpers with a simulated clock and RPCs, temporary counter/store files, synthetic mount/process metadata, and keeper→receiver RAW/EOF handling. They covered the full 50-second schedule and 51 calls per method, omitted metrics/boundaries, daemon membership, late returns, adverse outcomes and cleanup failures suppressing ON. This was not 50 seconds of real daemon work or a kernel-counter/permission test.
+
+Review corrected Linux device-number decoding on the macOS host, final result normalization after failed volume cleanup, and the attempt-budget origin. The proposed physical case uses the same instrumented binary in both modes, fresh disposable stores, serial 64 captures only in ON and matching RPC instrumentation. The complete source remains inert/private; runtime binding, resource admission and the physical OFF/ON measurement are still pending. No new memory, CPU or disk-cost result is claimed. Full D1/512 MB, K5 qualification, G2 and release remain open.
+
+Workspace-local evidence: Source `7d1018c4…`; CODE `0e31c369…`; `/private/tmp/corsa-D1-C2-S6-empty64-fullcase-QA-ROOT-v1/result.json`, SHA-256 `e85a373010de57691209844da9b3a5be057b503eaa22fb08caf00241e5e6b9b3`. No Docker container, daemon or VM was executed in this pure check.
+
+
+## S6 live EMPTY64: the admitted attempt stopped in OFF — 2026-10-27
+
+The single newly authorized OFF→ON pair ended with outer exit 2 (`83f7fd` / session `27510` → `5a6a04`). OFF launched the daemon, but the observer refused with `time-clock-reader-domain`; no complete authenticated-RPC 50-second window or resource measurement was obtained. Host status is `LOSTRESULT`, measurement `partial`, adverse outcome `FAIL`, and runtime custody `INCOMPLETE/UNKNOWN`. The reported refusal is an observed outcome, not a qualified root cause. ON was skipped. In OFF the observation selector was absent: 0 Capture started/completed/interrupted and 0 marker bytes. ON has no Capture observations; this is not a successful zero-cost comparison.
+
+The input was the private instrumented Linux arm64/CGO0 `./cmd/corsa-node`, **31,430,248 bytes**, SHA-256 `64c0b82bd51842326cb279c2a7d400a8097284e4f952ec5557f6c8eff031df90`, source domain `98ce7427d3c15ddba5e19065cb0876af0b8cc0906e314dfa32cbdd14fc0468ed` (base `e50f97511d88d7ffd7a08daa3490bee7d63f0f6a` with private instrumentation). It is distinct from the earlier `9bea7a6e…` preparation and subsequent Main changes. Static build/source correspondence does not qualify this failed runtime measurement. Service peak, observer cost and the requested RAM/CPU/disk-cost comparison remain **UNKNOWN**, including suitability for the 512,000,000-byte target.
+
+Cleanup removed the three owned containers and both owned volumes and reaped local children; fresh exact-owner container/volume queries were empty and the heavy lock was absent. Host retained `known_service_forced_kill=true`, so cleanup is not proof of normal CLI exit or successful drain. The disposable store was deleted, not archived: its contents are unavailable for later K5 readback, and no archive/retention result is claimed. The one-pair authorization was consumed; no repeat is authorized. Full S6/K5, D1/512 MB, G2 and release remain open. `piratecashd` was not run or sized.
+
+Workspace-local evidence: `/private/tmp/corsa-D1-K5-live-empty64-owner-package-ROOT-v1/ATTEMPT-1-ROOT-TERMINAL.json`, SHA-256 `59a379a13683b809c69a99a7fac3ad4d558df4170d73b469f86f6c4accb8ffdf`; `ATTEMPT-1-OUTPUT-MANIFEST.json` in the same package, SHA-256 `9bd1818ef942bac8bc5d4adf035a12d6fecb1a5793ffb1907fa0523eb1ca447f`. The manifest binds retained Host, keeper/observer RAW, empty marker RAW, samples and exact staged input copies. These are retained failure evidence, not resource PASS.

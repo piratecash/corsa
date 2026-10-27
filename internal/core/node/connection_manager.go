@@ -148,6 +148,7 @@ type DialResult struct {
 
 // ConnectionManagerConfig holds dependencies injected at construction time.
 type ConnectionManagerConfig struct {
+	advertised *k3AdvertisedSource // constructor-only same Service source
 	// MaxSlotsFn returns the current slot limit. Called on every fill().
 	MaxSlotsFn func() int
 
@@ -862,6 +863,14 @@ func (cm *ConnectionManager) handleHintEvent(ctx context.Context, event HintEven
 // both reach into the embedder; under cm.mu, dedup and admit
 // (admitManualPeerLocked); after it, publish and dial.
 func (cm *ConnectionManager) handleManualPeer(ctx context.Context, ev ManualPeerRequested) {
+	var adLocked bool
+	if cm.config.advertised != nil {
+		defer func() {
+			if adLocked {
+				cm.mu.Unlock()
+			}
+		}()
+	}
 	if cm.refuseManualPeerOutsideLivePin(ev.Address) {
 		return
 	}
@@ -869,11 +878,14 @@ func (cm *ConnectionManager) handleManualPeer(ctx context.Context, ev ManualPeer
 	scores := cm.slotScoresForEviction()
 
 	cm.mu.Lock()
+	adLocked = true
 	if cm.manualPeerDuplicateLocked(ev.Address) {
+		adLocked = false
 		cm.mu.Unlock()
 		return
 	}
 	admission := cm.admitManualPeerLocked(ev, maxSlots, scores)
+	adLocked = false
 	cm.mu.Unlock()
 
 	cm.publishManualPeerAdmission(ctx, admission)
@@ -955,6 +967,10 @@ type manualPeerAdmission struct {
 //
 // Caller holds cm.mu.Lock; maxSlots and scores were read before it.
 func (cm *ConnectionManager) admitManualPeerLocked(ev ManualPeerRequested, maxSlots int, scores map[*slot]int) manualPeerAdmission {
+	adTicket := cm.beginK3AdvertisedLocked()
+	if adTicket != nil {
+		defer adTicket.guard()
+	}
 	var evictions slotEvictions
 	reservation, budgetErr := cm.reserveOutbound()
 
@@ -972,7 +988,7 @@ func (cm *ConnectionManager) admitManualPeerLocked(ev ManualPeerRequested, maxSl
 				Err(budgetErr).
 				Str("address", string(ev.Address)).
 				Msg("cm: manual peer refused by connection budget; nothing evicted")
-			return manualPeerAdmission{}
+			return cm.finishK3AdvertisedAdmission(adTicket, manualPeerAdmission{})
 		case victim == nil:
 			// Nothing to evict: the invariant wins over operator intent,
 			// and the reservation we may hold must not be leaked.
@@ -980,7 +996,7 @@ func (cm *ConnectionManager) admitManualPeerLocked(ev ManualPeerRequested, maxSl
 			log.Warn().
 				Str("address", string(ev.Address)).
 				Msg("cm: manual peer refused — slot table full with no evictable slot")
-			return manualPeerAdmission{}
+			return cm.finishK3AdvertisedAdmission(adTicket, manualPeerAdmission{})
 		default:
 			log.Info().
 				Str("evicted", string(victim.Address)).
@@ -1000,7 +1016,7 @@ func (cm *ConnectionManager) admitManualPeerLocked(ev ManualPeerRequested, maxSl
 			Err(budgetErr).
 			Str("address", string(ev.Address)).
 			Msg("cm: manual peer refused by connection budget")
-		return manualPeerAdmission{evictions: evictions}
+		return cm.finishK3AdvertisedAdmission(adTicket, manualPeerAdmission{evictions: evictions})
 	}
 
 	dialAddrs := ev.DialAddresses
@@ -1015,7 +1031,7 @@ func (cm *ConnectionManager) admitManualPeerLocked(ev ManualPeerRequested, maxSl
 		reservation:   reservation,
 	}
 	cm.slots = append(cm.slots, admitted)
-	return manualPeerAdmission{admitted: admitted, evictions: evictions}
+	return cm.finishK3AdvertisedAdmission(adTicket, manualPeerAdmission{admitted: admitted, evictions: evictions})
 }
 
 // publishManualPeerAdmission publishes what admitManualPeerLocked did and
@@ -1084,6 +1100,16 @@ func (cm *ConnectionManager) findLowestScoringSlotLocked(scores map[*slot]int) *
 }
 
 func (cm *ConnectionManager) handleActiveSessionLost(ctx context.Context, ev ActiveSessionLost) {
+	var adTicket *k3AdvertisedTicket
+	var adLocked bool
+	if cm.config.advertised != nil {
+		defer func() {
+			if adLocked {
+				adTicket.guard()
+				cm.mu.Unlock()
+			}
+		}()
+	}
 	// Pre-compute the setup-failure cooldown status BEFORE taking
 	// cm.mu — IsSetupFailureBannedFn is wired to Service.IsSetupFailureBanned
 	// in production, which takes peerMu.RLock. Calling it under cm.mu
@@ -1099,13 +1125,21 @@ func (cm *ConnectionManager) handleActiveSessionLost(ctx context.Context, ev Act
 	}
 
 	cm.mu.Lock()
+	adLocked = true
+	adTicket = cm.beginK3AdvertisedLocked()
 
 	s := cm.findSlotLocked(ev.Address)
 	if s == nil {
+		cm.finishK3AdvertisedLocked(adTicket)
+		adTicket = nil
+		adLocked = false
 		cm.mu.Unlock()
 		return
 	}
 	if s.Generation != ev.SlotGeneration {
+		cm.finishK3AdvertisedLocked(adTicket)
+		adTicket = nil
+		adLocked = false
 		cm.mu.Unlock()
 		return
 	}
@@ -1151,6 +1185,9 @@ func (cm *ConnectionManager) handleActiveSessionLost(ctx context.Context, ev Act
 
 			replaceTeardown := cm.replaceSlotLocked(s, slotDeactivationOutcomeReported)
 			addr := s.Address
+			cm.finishK3AdvertisedLocked(adTicket)
+			adTicket = nil
+			adLocked = false
 			cm.mu.Unlock()
 
 			// Slot removed — emit empty state so subscribers clear the peer.
@@ -1171,6 +1208,11 @@ func (cm *ConnectionManager) handleActiveSessionLost(ctx context.Context, ev Act
 		s.Generation = gen
 		dialAddrs := s.DialAddresses
 		retryCount := s.RetryCount
+
+		cm.finishK3AdvertisedLocked(adTicket)
+
+		adTicket = nil
+		adLocked = false
 
 		cm.mu.Unlock()
 
@@ -1200,6 +1242,11 @@ func (cm *ConnectionManager) handleActiveSessionLost(ctx context.Context, ev Act
 	addr := s.Address
 	dialAddrs := s.DialAddresses
 
+	cm.finishK3AdvertisedLocked(adTicket)
+
+	adTicket = nil
+	adLocked = false
+
 	cm.mu.Unlock()
 
 	cm.emitSlotStateChanged(addr, domain.SlotStateReconnecting)
@@ -1217,18 +1264,36 @@ func (cm *ConnectionManager) handleActiveSessionLost(ctx context.Context, ev Act
 }
 
 func (cm *ConnectionManager) handleDialFailed(ctx context.Context, ev DialFailed) {
+	var adTicket *k3AdvertisedTicket
+	var adLocked bool
+	if cm.config.advertised != nil {
+		defer func() {
+			if adLocked {
+				adTicket.guard()
+				cm.mu.Unlock()
+			}
+		}()
+	}
 	cm.mu.Lock()
+	adLocked = true
+	adTicket = cm.beginK3AdvertisedLocked()
 
 	s := cm.findSlotLocked(ev.Address)
 	if s == nil {
 		// The attempt outlived its slot: release the capacity parked for
 		// it. No socket was opened — this is the failure path.
 		cm.releaseOrphanLocked(ev.SlotGeneration)
+		cm.finishK3AdvertisedLocked(adTicket)
+		adTicket = nil
+		adLocked = false
 		cm.mu.Unlock()
 		return
 	}
 	if s.Generation != ev.SlotGeneration {
 		cm.releaseOrphanLocked(ev.SlotGeneration)
+		cm.finishK3AdvertisedLocked(adTicket)
+		adTicket = nil
+		adLocked = false
 		cm.mu.Unlock()
 		return
 	}
@@ -1249,6 +1314,9 @@ func (cm *ConnectionManager) handleDialFailed(ctx context.Context, ev DialFailed
 		finished := cm.takeReservationLocked(s)
 		teardown := cm.replaceSlotLocked(s, slotDeactivationOutcomeReported)
 		replacedAddr := s.Address
+		cm.finishK3AdvertisedLocked(adTicket)
+		adTicket = nil
+		adLocked = false
 		cm.mu.Unlock()
 
 		finished.Release()
@@ -1273,6 +1341,11 @@ func (cm *ConnectionManager) handleDialFailed(ctx context.Context, ev DialFailed
 		dialAddrs := s.DialAddresses
 		retryCount := s.RetryCount
 
+		cm.finishK3AdvertisedLocked(adTicket)
+
+		adTicket = nil
+		adLocked = false
+
 		cm.mu.Unlock()
 
 		cm.emitSlotStateChanged(addr, domain.SlotStateRetryWait)
@@ -1293,7 +1366,19 @@ func (cm *ConnectionManager) handleDialFailed(ctx context.Context, ev DialFailed
 }
 
 func (cm *ConnectionManager) handleDialSucceeded(_ context.Context, ev DialSucceeded) {
+	var adTicket *k3AdvertisedTicket
+	var adLocked bool
+	if cm.config.advertised != nil {
+		defer func() {
+			if adLocked {
+				adTicket.guard()
+				cm.mu.Unlock()
+			}
+		}()
+	}
 	cm.mu.Lock()
+	adLocked = true
+	adTicket = cm.beginK3AdvertisedLocked()
 
 	s := cm.findSlotLocked(ev.Address)
 	if s == nil || s.Generation != ev.SlotGeneration {
@@ -1305,6 +1390,9 @@ func (cm *ConnectionManager) handleDialSucceeded(_ context.Context, ev DialSucce
 		// socket is still open, which is the overshoot the ceiling exists
 		// to prevent.
 		stale := cm.takeOrphanLocked(ev.SlotGeneration)
+		cm.finishK3AdvertisedLocked(adTicket)
+		adTicket = nil
+		adLocked = false
 		cm.mu.Unlock()
 		defer stale.Release()
 		// Stale: slot already replaced or transitioned.
@@ -1323,6 +1411,9 @@ func (cm *ConnectionManager) handleDialSucceeded(_ context.Context, ev DialSucce
 	}
 
 	info := cm.beginInitSlotLocked(s, ev)
+	cm.finishK3AdvertisedLocked(adTicket)
+	adTicket = nil
+	adLocked = false
 	cm.mu.Unlock()
 
 	// Published after the unlock, like every other slot state: a synchronous
@@ -1342,20 +1433,41 @@ func (cm *ConnectionManager) handleDialSucceeded(_ context.Context, ev DialSucce
 // advertisement of peers that are not yet usable. Slots() still reports it,
 // labelled Initializing, for diagnostics.
 func (cm *ConnectionManager) handleSessionInitReady(_ context.Context, ev SessionInitReady) {
+	var adTicket *k3AdvertisedTicket
+	var adLocked bool
+	if cm.config.advertised != nil {
+		defer func() {
+			if adLocked {
+				adTicket.guard()
+				cm.mu.Unlock()
+			}
+		}()
+	}
 	cm.mu.Lock()
+	adLocked = true
+	adTicket = cm.beginK3AdvertisedLocked()
 
 	s := cm.findSlotLocked(ev.Address)
 	if s == nil || s.Generation != ev.SlotGeneration {
+		cm.finishK3AdvertisedLocked(adTicket)
+		adTicket = nil
+		adLocked = false
 		cm.mu.Unlock()
 		return
 	}
 	if s.State != domain.SlotStateInitializing {
 		// Already promoted, deactivated, or replaced — stale event.
+		cm.finishK3AdvertisedLocked(adTicket)
+		adTicket = nil
+		adLocked = false
 		cm.mu.Unlock()
 		return
 	}
 
 	cm.promoteSlotLocked(s)
+	cm.finishK3AdvertisedLocked(adTicket)
+	adTicket = nil
+	adLocked = false
 	cm.mu.Unlock()
 
 	// After the unlock: a synchronous subscriber may read the table.
@@ -1373,6 +1485,16 @@ func (cm *ConnectionManager) handleSessionInitReady(_ context.Context, ev Sessio
 // evicts excess slots (non-active preferred) to bring the count back
 // within bounds before attempting to add new ones.
 func (cm *ConnectionManager) fill(ctx context.Context) {
+	var adTicket *k3AdvertisedTicket
+	var adLocked bool
+	if cm.config.advertised != nil {
+		defer func() {
+			if adLocked {
+				adTicket.guard()
+				cm.mu.Unlock()
+			}
+		}()
+	}
 	if cm.config.Provider == nil {
 		return
 	}
@@ -1411,6 +1533,8 @@ func (cm *ConnectionManager) fill(ctx context.Context) {
 	}
 
 	cm.mu.Lock()
+	adLocked = true
+	adTicket = cm.beginK3AdvertisedLocked()
 
 	// Re-check: slot count may have changed between RUnlock and Lock
 	// only if another writer ran in between. Every slot mutation runs on
@@ -1418,6 +1542,9 @@ func (cm *ConnectionManager) fill(ctx context.Context) {
 	// defensive re-check costs nothing.
 	freeSlots = maxSlots - len(cm.slots)
 	if freeSlots <= 0 {
+		cm.finishK3AdvertisedLocked(adTicket)
+		adTicket = nil
+		adLocked = false
 		cm.mu.Unlock()
 		return
 	}
@@ -1465,6 +1592,11 @@ func (cm *ConnectionManager) fill(ctx context.Context) {
 		})
 	}
 
+	cm.finishK3AdvertisedLocked(adTicket)
+
+	adTicket = nil
+	adLocked = false
+
 	cm.mu.Unlock()
 
 	// Emit slot state changes outside the lock.
@@ -1490,9 +1622,24 @@ func (cm *ConnectionManager) fill(ctx context.Context) {
 // already gone and the count is still above the limit.
 // Callbacks (OnSessionTeardown) are invoked outside the lock.
 func (cm *ConnectionManager) shrinkToLimit(maxSlots int) {
+	var adTicket *k3AdvertisedTicket
+	var adLocked bool
+	if cm.config.advertised != nil {
+		defer func() {
+			if adLocked {
+				adTicket.guard()
+				cm.mu.Unlock()
+			}
+		}()
+	}
 	cm.mu.Lock()
+	adLocked = true
+	adTicket = cm.beginK3AdvertisedLocked()
 	excess := len(cm.slots) - maxSlots
 	if excess <= 0 {
+		cm.finishK3AdvertisedLocked(adTicket)
+		adTicket = nil
+		adLocked = false
 		cm.mu.Unlock()
 		return
 	}
@@ -1525,6 +1672,9 @@ func (cm *ConnectionManager) shrinkToLimit(maxSlots int) {
 	}
 
 	evictions := cm.evictSlotsLocked(victims)
+	cm.finishK3AdvertisedLocked(adTicket)
+	adTicket = nil
+	adLocked = false
 	cm.mu.Unlock()
 
 	cm.publishEvictions(evictions)
@@ -1703,7 +1853,19 @@ func (cm *ConnectionManager) enforceLivePinRule() {
 // address); a keep that matches no slot evicts everything — the pinned dial is
 // enqueued separately (ManualPeerRequested), or by the next fill.
 func (cm *ConnectionManager) retainOnlyAddress(keep domain.PeerAddress) {
+	var adTicket *k3AdvertisedTicket
+	var adLocked bool
+	if cm.config.advertised != nil {
+		defer func() {
+			if adLocked {
+				adTicket.guard()
+				cm.mu.Unlock()
+			}
+		}()
+	}
 	cm.mu.Lock()
+	adLocked = true
+	adTicket = cm.beginK3AdvertisedLocked()
 	var victims []*slot
 	for _, s := range cm.slots {
 		if s.Address != keep {
@@ -1711,6 +1873,9 @@ func (cm *ConnectionManager) retainOnlyAddress(keep domain.PeerAddress) {
 		}
 	}
 	if len(victims) == 0 {
+		cm.finishK3AdvertisedLocked(adTicket)
+		adTicket = nil
+		adLocked = false
 		cm.mu.Unlock()
 		return
 	}
@@ -1722,6 +1887,9 @@ func (cm *ConnectionManager) retainOnlyAddress(keep domain.PeerAddress) {
 		Msg("cm: retaining only pinned peer, evicting other outbound slots")
 
 	evictions := cm.evictSlotsLocked(victims)
+	cm.finishK3AdvertisedLocked(adTicket)
+	adTicket = nil
+	adLocked = false
 	cm.mu.Unlock()
 
 	cm.publishEvictions(evictions)
@@ -2033,6 +2201,16 @@ func backoffDuration(attempt int) time.Duration {
 // ---------------------------------------------------------------------------
 
 func (cm *ConnectionManager) shutdown() {
+	var adTicket *k3AdvertisedTicket
+	var adLocked bool
+	if cm.config.advertised != nil {
+		defer func() {
+			if adLocked {
+				adTicket.guard()
+				cm.mu.Unlock()
+			}
+		}()
+	}
 	// 0. Close the emit gate so EmitSlot rejects new events immediately.
 	//    Workers that already passed the guard may still enqueue into the
 	//    buffered channel — drainChannels() below handles those.
@@ -2040,6 +2218,8 @@ func (cm *ConnectionManager) shutdown() {
 	cm.accepting.Store(0)
 
 	cm.mu.Lock()
+	adLocked = true
+	adTicket = cm.beginK3AdvertisedLocked()
 
 	log.Info().Int("slots", len(cm.slots)).Msg("cm: shutting down")
 
@@ -2057,6 +2237,11 @@ func (cm *ConnectionManager) shutdown() {
 		cm.orphanReservationLocked(s)
 	}
 	cm.slots = nil
+
+	cm.finishK3AdvertisedLocked(adTicket)
+
+	adTicket = nil
+	adLocked = false
 
 	cm.mu.Unlock()
 

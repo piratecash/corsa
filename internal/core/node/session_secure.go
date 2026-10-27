@@ -87,7 +87,9 @@ type secureSessions struct {
 // secureSessionsOptions is what a node's v2 state is built from besides its
 // identity.
 type secureSessionsOptions struct {
-	bridgePublisher findnodebridge.Publisher // immutable before store constructor/load
+	pinMembership    *pinMembershipRequest         // copied before startup callbacks; no observer policy
+	bridgePublisher  findnodebridge.Publisher      // immutable before store constructor/load
+	guardObservation *guardObservationConstruction // immutable before the actual store clock/load
 	// ninElapsed is immutable before the store loads/anchors a journal.
 	ninElapsed func() (time.Duration, error)
 	// storePath is the downgrade-protection store's file.
@@ -146,10 +148,11 @@ func buildSecureSessions(id *identity.Identity, opts secureSessionsOptions, buil
 	}
 	store := openSecureSessionStore(secureSessionStoreOptions{
 		bridgePublisher: opts.bridgePublisher,
+		pinMembership:   opts.pinMembership,
 		ninElapsed:      opts.ninElapsed,
 		path:            opts.storePath,
 		markerPath:      opts.markerPath,
-		clock:           trustedclock.New(trustedclock.Sources{Wall: opts.clock, SinceBoot: trustedclock.SinceBoot}),
+		clock:           opts.guardObservation.newClock(trustedclock.Sources{Wall: opts.clock, SinceBoot: trustedclock.SinceBoot}),
 		logger:          log.Logger,
 		audit:           secretfile.AuditLocation,
 	})

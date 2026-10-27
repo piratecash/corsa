@@ -1,6 +1,8 @@
-# C1/C2a: замеры памяти настоящего демона
+# C1/C2a/C2b32: замеры памяти настоящего демона
 
 [English version](d1-corsad-memory-screen.md)
+
+Последний ограниченный результат — C2b32 текущего кандидата в конце страницы. Предыдущие разделы сохраняют исходные предметы и историю.
 
 2026-10-25. **Ограниченный замер завершён без наблюдённого OOM и превышения бюджета. Пригодность полной нагрузки D1 в512МБ остаётся UNKNOWN.** Это наши собственные измерения, не sizing из внешней документации. Остальные случаи описаны в [контрольных точках D1→DHT](../design/d1-dht-resource-checkpoints.ru.md).
 
@@ -67,3 +69,51 @@ Attempt 1 и 2 остановились до создания контейнер
 Локальные доказательства: `/private/tmp/corsa-D1-C2a-eight-peer-ROOT-package-v1/ATTEMPT-3-TERMINAL.json`, SHA-256 `63a977a7fa18acf8a1ad89fe9d12be5d718a540a47e9c7d096ecc5882c85db25`; `runs/corsa-c2a-90e20c6d45317c03a57ae579932d028a/host.json`, SHA-256 `07b19dfbfe21daf0f3d8624a423a1cd1703b4951d300b4bc99e1e3594596ae58`, внутри того же пакета. RAW samples и оба предстартовых отказа сохранены; доступность вне workspace не предполагается.
 
 Результат относится только к зафиксированному бинарнику и ограниченному TLS/get_peers/churn-сценарию C2a. Он не подтверждает overload admission, FindNode/F1, full512, длительное удержание памяти, память текущего post-K12 кандидата, SQLite/DesktopClient, Tor/Windows, G2 или готовность выпуска. Более поздняя статическая сборка CLI `e651bb6c…` и staged K12 — другие области. Полный C2 и остальные ресурсные checkpoints D1 остаются открытыми.
+
+
+## C2b32: текущий кандидат, 32 TLSv2 peers и churn16 identity — 2026-10-26
+
+Первая попытка C2b32 завершила отдельно допущенный владельцем случай: **32 → 16 → 32 → 0**,48 различных identity. Доказанные каналы имели ordinal1–32, исходные survivors17–32, восстановленные каналы17–48, затем пустой набор. Каждая непустая фаза проверила настоящие TLSv2/session-v2 identity/каналы и успешный `get_peers`;16 новых identity не пересекались с исходными32. Четыре ожидания по5с включали дополнительное время последовательных обменов. Driver учёл **1344 application frames / 41216байт**, не меняя пределы2048frames/8MiB; это не TLS-wire bytes. Cached live census оставался только диагностикой.
+
+Финальный0 — **source-bound свидетельство свежего аутентифицированного Node RPC**, а не вывод из выхода driver или пустого списка peers. После close/join всех собственных каналов pinned compiled driver потребовал свежие `getNodeStatus`/`fetchRouteSummary`: тот же server incarnation и enforced instantaneous loopback `active==0`, до публикации `zero-drained`. Тело финального RPC-ответа/atomic field/read timestamp не сохранено отдельным RAW-ответом; независимое review связало исполненный source/artifact с упорядоченным protocol record. Последующие drain/reap driver и drain демона — отдельные факты lifecycle.
+
+| Наблюдённая область | Байты | Ограничение |
+|---|---:|---|
+| Пик cgroup сервиса |36 233 216|Включает Python keeper и потомков сервиса; ничего не вычтено. |
+| Максимум sampled VmHWM демона |25 358 336|Наблюдённый HWM процесса; полный lifetime VmHWM UNKNOWN. |
+| HWM команды из wait4 |26 140 672|Может включать descendants/pre-exec; отдельная область от daemon-only HWM. |
+| Пик cgroup driver |24 952 832|Группа keeper+child до финального чтения после Go drain; дальнейший exit keeper не измерен. |
+| Пик cgroup observer |41 172 992|До последнего peak-read перед final record; полный post-exit lifetime UNKNOWN. |
+| Расход preparer/shared tmpfs |UNKNOWN|Ничего не вычтено;1MiB — предел хранения, не измеренная RAM. |
+
+Пик сервиса36,233216 десятичныхMB ниже512000000байт **в этом случае**. Пики разных областей не являются одновременной суммой физической памяти. Continuous process-tree RSS и полный lifetime HWM демона UNKNOWN. Из старых8-peer/`9ba93241…` запусков нельзя выводить RAM на дополнительный peer или экономию: изменились код, CGO build variant и нагрузка. Opt-in K9/K10/K12 были OFF; стоимость их активного сбора этим не измерена.
+
+Production CLI SHA256 `ae61fc926e7f5c2353a21075041300fb722f2c8346389344a6e2e145931632c7`,21627040байт — обычный `./cmd/corsa-node`,Go1.27.3/Linuxarm64v8.0/CGO0 без tags/benchmark wrapper. Source: база `e50f97511d88d7ffd7a08daa3490bee7d63f0f6a` **плюс19 staged paths**, snapshot `1fcca8012a39015fcc377472d2e56cdb82cbedef0562f07ee6acf8f6895f9f29` (2119файлов/70186204байт), не чистый committed HEAD. Driver SHA256 `90d1c2d68524a5507aa09d4e443cb70cf3c52fb6fe936a1d9280917bad7f7aa7`,6750368байт: тот же current source плюс4 приватных component post и actual CLI literal, manifest `2806e1feef432c56b4db0824ea5cfe6b9e6694178c4df7d37a890b24599cd734` (2119файлов/70197026байт). Оба ELF имеют static self-only closure без interpreter/needed DSO. Cross-build на macOS и последующее native исполнение в том же arm64 Linux Docker image910cfcaf… — разные факты. Исходный metadata-only qualifier FAIL CLI сохранён; отдельный static readback квалифицировал существующий ELF без пересборки.
+
+Пределы прежние: сервис1CPU/512000000байт/64PID, observer0,25CPU/128MiB/32PID, driver1CPU/256MiB/32PID, все no swap;120с работы с подготовкой плюс30с очистки, максимум3 измеряемые роли. Сохранены собственный native tmpfs credentials≤1MiB,501:20/0600/read-only consumers, prep-remove до observer/driver, offline loopback namespace и held cgroup/FD guards. Полный поток105records содержит22service samples,22service process records,20driver samples,20driver process records и4protocol milestones. Initial absolute events и дальнейшие deltas не показали OOM/overrun; gaps не приняты. Final held reads и host flush предшествовали release keeper; все4 собственных контейнера завершились0/noOOM и удалены, затем удалён свой volume. Свежие exact-owner queries пусты, heavy lock освобождён.
+
+Локальный proof: `/private/tmp/corsa-D1-C2b32-current-ROOT-package-v1/runs/corsa-c2b32-f81167849ca5419213464d803dc85831/host.json`, SHA256 `e2ce81ab4e0dfa096673bb1ac1480f139f7997d0248b2c82f89eb9afe95a3b68`; SHA256 полного NDJSON `68d63989d4bc432c1560801d55c250317db30a6e4cc85835d4c98a2b614e618c`. Независимые TESTER/reviewer приняли ограниченную область и ограничение source-bound zero witness. Файлы локальны workspace; доступность снаружи не предполагается.
+
+Закрыт только этот32-channel TLS/get_peers/churn screen. Full C2/512-peer workload,F1/FindNode,overload,persistent/long-duration state,co-tenants,активные наблюдения,T5/Member4,G2 и выпуск D1 остаются открытыми. Финальная стоимость DHT и универсальная пригодность512MB этим не доказаны; Windows/Tor UNVERIFIED/deferred. `piratecashd` не запускался и не использовался для sizing.
+
+
+## Подготовка инструмента S6 EMPTY64 — 2026-10-27
+
+Частный инструментированный CLI собран для Linux arm64/CGO0: SHA-256 `9bea7a6ed0c50bc293f105bfbf495295770e2daf8b59fd0d187d0a0873b62d3c`, 31 355 161 байт. Явный профиль наблюдения не меняет defaults проекта. Статическая сборка и шесть интеграционных групп ниже не переносят прежние замеры памяти на этот бинарник.
+
+Полный контроллер OFF→ON прошёл шесть pure-интеграционных тестовых групп одной Python-командой closed30 (штатный exit 0, дочерний процесс собран). Проверялись реальные helpers расписания/метрик с искусственными часами и RPC, временные counter/store-файлы, синтетические данные монтирования/процессов и RAW/EOF keeper→receiver. Покрыты полное расписание 50 секунд и 51 вызов каждого метода, пропуски метрик/границ, присутствие демона, поздний возврат, неблагоприятные исходы и ошибки очистки, запрещающие ON. Это не 50 секунд работы настоящего демона и не проверка kernel counters/прав доступа.
+
+Ревью исправило декодирование Linux device number на macOS Host, финальную нормализацию результата после ошибки удаления тома и начало бюджета попытки. Предложенный физический сценарий использует один инструментированный бинарник в обоих режимах, новые утилизируемые stores, последовательные 64 Capture только в ON и одинаковые RPC/измерители. Полный Source остаётся неактивным и частным; runtime binding, ресурсный допуск и физический OFF/ON-замер ещё предстоят. Новых результатов памяти, CPU или дисковых затрат нет. Полная D1/512 MB, квалификация K5, G2 и выпуск открыты.
+
+Локальные свидетельства: Source `7d1018c4…`; CODE `0e31c369…`; `/private/tmp/corsa-D1-C2-S6-empty64-fullcase-QA-ROOT-v1/result.json`, SHA-256 `e85a373010de57691209844da9b3a5be057b503eaa22fb08caf00241e5e6b9b3`. В этой pure-проверке контейнеры Docker, демон и VM не запускались.
+
+
+## S6 live EMPTY64: допущенная попытка остановлена в OFF — 2026-10-27
+
+Единственная заново разрешённая пара OFF→ON завершилась с outer exit 2 (`83f7fd` / session `27510` → `5a6a04`). В OFF демон был запущен, но observer отказал с `time-clock-reader-domain`; полное 50-секундное окно аутентифицированных RPC и ресурсный замер не получены. Host сохранил статус `LOSTRESULT`, measurement `partial`, adverse outcome `FAIL`, runtime custody `INCOMPLETE/UNKNOWN`. Строка отказа — наблюдённый исход, а не квалифицированная первопричина. ON пропущен. В OFF selector наблюдения отсутствовал: 0 начатых/завершённых/прерванных Capture и 0 marker bytes. Для ON наблюдений Capture нет; это не успешное сравнение с нулевой стоимостью.
+
+Входом был частный инструментированный Linux arm64/CGO0 `./cmd/corsa-node`, **31 430 248 байт**, SHA-256 `64c0b82bd51842326cb279c2a7d400a8097284e4f952ec5557f6c8eff031df90`, source domain `98ce7427d3c15ddba5e19065cb0876af0b8cc0906e314dfa32cbdd14fc0468ed` (база `e50f97511d88d7ffd7a08daa3490bee7d63f0f6a` с private instrumentation). Это другой объект, чем прежняя подготовка `9bea7a6e…` и последующие изменения Main. Статическая связь build/source не квалифицирует неудавшийся runtime-замер. Пик сервиса, стоимость observer и требуемое сравнение RAM/CPU/дисковых затрат остаются **UNKNOWN**, включая пригодность для цели 512 000 000 байт.
+
+Очистка удалила три собственных контейнера и оба собственных volume, локальные дочерние процессы собраны; свежие exact-owner запросы контейнеров/volume пусты, heavy lock отсутствовал. Host сохранил `known_service_forced_kill=true`, поэтому очистка не доказывает штатный CLI exit или успешный drain. Утилизируемый store удалён, не архивирован: его содержимое недоступно для последующего K5 readback; результата архивирования/удержания нет. Разрешение одной пары израсходовано; повтор не разрешён. Полные S6/K5, D1/512 MB, G2 и выпуск остаются открытыми. `piratecashd` не запускался и не использовался для sizing.
+
+Локальные свидетельства: `/private/tmp/corsa-D1-K5-live-empty64-owner-package-ROOT-v1/ATTEMPT-1-ROOT-TERMINAL.json`, SHA-256 `59a379a13683b809c69a99a7fac3ad4d558df4170d73b469f86f6c4accb8ffdf`; `ATTEMPT-1-OUTPUT-MANIFEST.json` в том же пакете, SHA-256 `9bd1818ef942bac8bc5d4adf035a12d6fecb1a5793ffb1907fa0523eb1ca447f`. Manifest связывает сохранённые Host, keeper/observer RAW, пустой marker RAW, samples и точные копии входов. Это сохранённые свидетельства отказа, не resource PASS.

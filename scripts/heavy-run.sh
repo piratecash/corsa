@@ -115,7 +115,7 @@ print_owner() {
 # holder started from one locale must not look dead to a checker in another.
 process_lstart() { LC_ALL=C ps -p $1 -o lstart= 2>/dev/null }
 
-group_has_members() { [[ $1 == <-> ]] && ps -A -o pgid= | grep -qx " *$1" }
+group_has_members() { [[ ${1:-} == <-> ]] && ps -A -o pgid= | grep -qx " *$1" }
 
 # A group id is reused once the group is empty, and any new pipeline leader
 # takes it: the recorded group counts only while its leader, if still present,

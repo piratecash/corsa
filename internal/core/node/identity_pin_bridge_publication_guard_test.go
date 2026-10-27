@@ -129,10 +129,20 @@ func pinPublicationSourceErrors(sources map[string][]byte) []string {
 	if !initialPinLiteral {
 		failures = append(failures, "Publisher must attach only in initial store literal")
 	}
-	prefix := "{ publication := s.beginPinPublication() if publication != nil { defer publication.Complete() } "
 	for _, name := range []string{"putPinEntryLocked", "deletePinEntryLocked"} {
 		body := bodies["identity_pin_selected.go:"+name]
-		if !strings.HasPrefix(body, prefix) || strings.Contains(body, ".Lock(") || strings.Contains(body, ".RLock(") || strings.Count(body, ".Complete()") != 1 {
+		added, mutation := "true", "s.identities[id]=entry"
+		if name == "deletePinEntryLocked" {
+			added, mutation = "false", "delete(s.identities,id)"
+		}
+		// Exact two-branch grammar: Before precedes W, finish is deferred
+		// first, returned-Complete is marked after Complete, and the normal
+		// leaf sentinel follows the actual final membership write. Compacting
+		// whitespace adds no wildcard/statement allowance to this prefix.
+		prefix := "{ticket:=s.beginPinMembershipLocked(id," + added + ")ifticket!=nil{deferticket.finish(s)}publication:=s.beginPinPublication()ifpublication!=nil{ifticket==nil{deferpublication.Complete()}else{deferfunc(){publication.Complete()ticket.publicationReturned=true}()}}elseifticket!=nil{ticket.publicationReturned=true}"
+		compactBody := strings.Join(strings.Fields(body), "")
+		suffix := mutation + "ifticket!=nil{ticket.leafReturned=true}}"
+		if !strings.HasPrefix(compactBody, prefix) || !strings.HasSuffix(compactBody, suffix) || strings.Contains(body, ".Lock(") || strings.Contains(body, ".RLock(") || strings.Count(body, ".Complete()") != 2 || strings.Count(body, "ticket.finish(s)") != 1 || strings.Count(compactBody, "ticket.publicationReturned=true") != 2 || strings.Count(compactBody, "ticket.leafReturned=true") != 1 {
 			failures = append(failures, "pin map final memory guard: "+name)
 		}
 	}
@@ -154,12 +164,18 @@ func TestPinBridgeGuardRejectsLateAttachmentAndMissingLeaves(t *testing.T) {
 		t.Fatal("baseline pin publication contract", failures)
 	}
 	cases := []struct{ name, path, before, after string }{
-		{"put", "identity_pin_selected.go", "func (s *secureSessionStore) putPinEntryLocked(id domain.PeerIdentity, entry identityPinEntry) {\n\tpublication := s.beginPinPublication()\n\tif publication != nil {\n\t\tdefer publication.Complete()\n\t}", "func (s *secureSessionStore) putPinEntryLocked(id domain.PeerIdentity, entry identityPinEntry) {"},
+		{"put", "identity_pin_selected.go", "func (s *secureSessionStore) putPinEntryLocked(id domain.PeerIdentity, entry identityPinEntry) {\n\tticket := s.beginPinMembershipLocked(id, true)\n\tif ticket != nil {\n\t\tdefer ticket.finish(s)\n\t}\n\tpublication := s.beginPinPublication()\n\tif publication != nil {\n\t\tif ticket == nil {\n\t\t\tdefer publication.Complete()\n\t\t} else {\n\t\t\tdefer func() {\n\t\t\t\tpublication.Complete()\n\t\t\t\tticket.publicationReturned = true\n\t\t\t}()\n\t\t}\n\t} else if ticket != nil {\n\t\tticket.publicationReturned = true\n\t}\n", "func (s *secureSessionStore) putPinEntryLocked(id domain.PeerIdentity, entry identityPinEntry) {\n\tticket := s.beginPinMembershipLocked(id, true)\n\tif ticket != nil {\n\t\tdefer ticket.finish(s)\n\t}\n\tif ticket != nil {\n\t\tticket.publicationReturned = true\n\t}\n"},
 		{"veto", "secure_session_store.go", "return s.pinPublisher.BeginPublication()", "return nil"},
 		{"late_setter", "secure_session_store.go", "\n// startFromDisk audits", "\nfunc (s *secureSessionStore) latePublisher(p findnodebridge.Publisher) { s.pinPublisher=p }\n// startFromDisk audits"},
 		{"fatal_scope", "identity_pin_transaction.go", "\t\tif publication != nil {\n\t\t\tpublication.Complete()\n\t\t}\n\t\ts.mu.Unlock()", "\t\ts.mu.Unlock()\n\t\tif publication != nil {\n\t\t\tpublication.Complete()\n\t\t}"},
 		{"pre_literal_statement", "secure_session_store.go", "func newSecureSessionStoreWithPublisher(clock *trustedclock.Clock, logger zerolog.Logger, publisher findnodebridge.Publisher) *secureSessionStore {\n\treturn &secureSessionStore{", "func newSecureSessionStoreWithPublisher(clock *trustedclock.Clock, logger zerolog.Logger, publisher findnodebridge.Publisher) *secureSessionStore {\n\t_ = 0\n\treturn &secureSessionStore{"},
 	}
+	cases = append(cases, []struct{ name, path, before, after string }{
+		{"membership-Before-inside-W", "identity_pin_selected.go", "func (s *secureSessionStore) putPinEntryLocked(id domain.PeerIdentity, entry identityPinEntry) {\n\tticket := s.beginPinMembershipLocked(id, true)\n\tif ticket != nil {\n\t\tdefer ticket.finish(s)\n\t}\n\tpublication := s.beginPinPublication()\n\tif publication != nil {\n\t\tif ticket == nil {\n\t\t\tdefer publication.Complete()\n\t\t} else {\n\t\t\tdefer func() {\n\t\t\t\tpublication.Complete()\n\t\t\t\tticket.publicationReturned = true\n\t\t\t}()\n\t\t}\n\t} else if ticket != nil {\n\t\tticket.publicationReturned = true\n\t}\n", "func (s *secureSessionStore) putPinEntryLocked(id domain.PeerIdentity, entry identityPinEntry) {\n\tvar ticket *pinMembershipTicket\n\tpublication := s.beginPinPublication()\n\tif publication != nil {\n\t\tif ticket == nil {\n\t\t\tdefer publication.Complete()\n\t\t} else {\n\t\t\tdefer func() {\n\t\t\t\tpublication.Complete()\n\t\t\t\tticket.publicationReturned = true\n\t\t\t}()\n\t\t}\n\t} else if ticket != nil {\n\t\tticket.publicationReturned = true\n\t}\n\tticket = s.beginPinMembershipLocked(id, true)\n\tif ticket != nil {\n\t\tdefer ticket.finish(s)\n\t}\n"},
+		{"membership-After-before-W-Complete", "identity_pin_selected.go", "func (s *secureSessionStore) putPinEntryLocked(id domain.PeerIdentity, entry identityPinEntry) {\n\tticket := s.beginPinMembershipLocked(id, true)\n\tif ticket != nil {\n\t\tdefer ticket.finish(s)\n\t}\n\tpublication := s.beginPinPublication()\n\tif publication != nil {\n\t\tif ticket == nil {\n\t\t\tdefer publication.Complete()\n\t\t} else {\n\t\t\tdefer func() {\n\t\t\t\tpublication.Complete()\n\t\t\t\tticket.publicationReturned = true\n\t\t\t}()\n\t\t}\n\t} else if ticket != nil {\n\t\tticket.publicationReturned = true\n\t}\n", "func (s *secureSessionStore) putPinEntryLocked(id domain.PeerIdentity, entry identityPinEntry) {\n\tticket := s.beginPinMembershipLocked(id, true)\n\tpublication := s.beginPinPublication()\n\tif publication != nil {\n\t\tif ticket == nil {\n\t\t\tdefer publication.Complete()\n\t\t} else {\n\t\t\tdefer func() {\n\t\t\t\tpublication.Complete()\n\t\t\t\tticket.publicationReturned = true\n\t\t\t}()\n\t\t}\n\t} else if ticket != nil {\n\t\tticket.publicationReturned = true\n\t}\n\tif ticket != nil {\n\t\tdefer ticket.finish(s)\n\t}\n"},
+		{"membership-Complete-returned-too-early", "identity_pin_selected.go", "func (s *secureSessionStore) putPinEntryLocked(id domain.PeerIdentity, entry identityPinEntry) {\n\tticket := s.beginPinMembershipLocked(id, true)\n\tif ticket != nil {\n\t\tdefer ticket.finish(s)\n\t}\n\tpublication := s.beginPinPublication()\n\tif publication != nil {\n\t\tif ticket == nil {\n\t\t\tdefer publication.Complete()\n\t\t} else {\n\t\t\tdefer func() {\n\t\t\t\tpublication.Complete()\n\t\t\t\tticket.publicationReturned = true\n\t\t\t}()\n\t\t}\n\t} else if ticket != nil {\n\t\tticket.publicationReturned = true\n\t}\n", "func (s *secureSessionStore) putPinEntryLocked(id domain.PeerIdentity, entry identityPinEntry) {\n\tticket := s.beginPinMembershipLocked(id, true)\n\tif ticket != nil {\n\t\tdefer ticket.finish(s)\n\t}\n\tpublication := s.beginPinPublication()\n\tif publication != nil {\n\t\tif ticket == nil {\n\t\t\tdefer publication.Complete()\n\t\t} else {\n\t\t\tdefer func() {\n\t\t\t\tticket.publicationReturned = true\n\t\t\t\tpublication.Complete()\n\t\t\t}()\n\t\t}\n\t} else if ticket != nil {\n\t\tticket.publicationReturned = true\n\t}\n"},
+		{"membership-leaf-returned-before-write", "identity_pin_selected.go", "\ts.identities[id] = entry\n\tif ticket != nil {\n\t\tticket.leafReturned = true\n\t}", "\tif ticket != nil {\n\t\tticket.leafReturned = true\n\t}\n\ts.identities[id] = entry"},
+	}...)
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			altered := make(map[string][]byte)

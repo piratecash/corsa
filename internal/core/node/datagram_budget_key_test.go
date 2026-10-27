@@ -143,7 +143,7 @@ func welcomedOutboundSession(
 		t.Fatal("the node under test does not advertise mesh_datagram_v1, so no session can negotiate it")
 	}
 	svc.peerMu.Lock()
-	applyWelcomeMetadata(session, welcome, svc.cfg.EnableMeshRoutingV3, advertise)
+	applyWelcomeMetadata(session, welcome, localCapabilities(svc.cfg.EnableMeshRoutingV3, advertise))
 	svc.sessions[address] = session
 	svc.health[address] = &peerHealth{Connected: true}
 	svc.peerMu.Unlock()

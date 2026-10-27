@@ -51,6 +51,7 @@ type handshakeFullObservation struct {
 	start, maximum                     time.Duration
 	nextRead, reads, sequence, pending uint64
 	sealed                             handshakeFullCut
+	segment                            *handshakeSegmentState // explicit private V2, frozen before publication
 }
 type handshakeFullRead struct {
 	owner            *handshakeFullObservation
@@ -62,6 +63,7 @@ type handshakeFullCompletion struct {
 	owner                   *handshakeFullObservation
 	index                   int
 	sequence                uint64
+	generation              uint64 // zero on unchanged V1 path
 	lower                   time.Duration
 	valid, registered, done bool
 }
@@ -212,13 +214,29 @@ func (h *inboundHandshakes) fullMutationLocked(at time.Duration, valid bool) han
 		o.fail("transition-capacity-gap")
 		return p
 	}
+	index, generation := o.used, uint64(0)
+	if o.segment != nil {
+		index = o.segment.slot(o.used, len(o.rows))
+		if o.segment.generations[index] == k5MaxUint {
+			o.fail("segment-slot-generation-overflow")
+			return p
+		}
+		o.segment.generations[index]++
+		generation = o.segment.generations[index]
+	}
 	o.sequence++
 	o.pending++
-	index := o.used
 	o.used++
 	lower := at - o.start
 	o.rows[index] = handshakeFullTransition{sequence: o.sequence, full: full, count: h.inFlight, lower: lower}
-	return handshakeFullCompletion{owner: o, index: index, sequence: o.sequence, lower: lower, valid: true, registered: true}
+	if o.segment != nil {
+		if full {
+			o.segment.liveCarry = handshakeSegmentCarry{full: true, entry: o.rows[index]}
+		} else {
+			o.segment.liveCarry = handshakeSegmentCarry{}
+		}
+	}
+	return handshakeFullCompletion{owner: o, index: index, sequence: o.sequence, generation: generation, lower: lower, valid: true, registered: true}
 }
 func (h *inboundHandshakes) finishFullTransition(p *handshakeFullCompletion) {
 	if !p.registered {
@@ -234,13 +252,13 @@ func (h *inboundHandshakes) finishFullTransition(p *handshakeFullCompletion) {
 }
 func (h *inboundHandshakes) completeFullRowLocked(p *handshakeFullCompletion, at time.Duration, valid bool) {
 	o := h.fullObservation
-	if p.owner != o || p.done || !p.registered || p.index < 0 || p.index >= o.used {
+	if p.owner != o || p.done || !p.registered || p.index < 0 || p.index >= len(o.rows) || (o.segment == nil && p.index >= o.used) {
 		o.fail("invalid-completion-owner")
 		return
 	}
 	p.done = true
 	row := &o.rows[p.index]
-	if row.sequence != p.sequence || row.done {
+	if row.sequence != p.sequence || row.done || (o.segment != nil && o.segment.generations[p.index] != p.generation) {
 		o.fail("completion-sequence-mismatch")
 		return
 	}
@@ -256,6 +274,9 @@ func (h *inboundHandshakes) completeFullRowLocked(p *handshakeFullCompletion, at
 	row.done, row.valid = true, valid
 	if valid {
 		row.upper = at - o.start
+	}
+	if o.segment != nil && o.segment.liveCarry.full && o.segment.liveCarry.entry.sequence == row.sequence {
+		o.segment.liveCarry.entry = *row
 	}
 }
 func (h *inboundHandshakes) enterObserved(source handshakeSource) (func(), error) {
@@ -308,6 +329,13 @@ func (h *inboundHandshakes) fullSnapshot() handshakeFullSnapshot {
 	h.mu.Lock()
 	o := h.fullObservation
 	h.checkFullOwnerLocked()
+	if o.segment != nil {
+		// A V2 window is never a V1 whole-epoch prefix, even before its first
+		// retirement or after invalid construction. No available legacy cut.
+		result := handshakeFullSnapshot{status: "UNKNOWN", reason: "segmented-source-requires-v2", key: o.key, bounds: o.bounds, coverageStart: o.start, pastOnly: true}
+		h.mu.Unlock()
+		return result
+	}
 	status, reason := "", o.invalid
 	if o.invalid != "" || !o.initialized {
 		status = "UNKNOWN"
