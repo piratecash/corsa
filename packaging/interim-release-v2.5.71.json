@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "version": "2.5.71",
+  "source_sha": "0183edc712c01ad9cd8a2d1ceecd983fa794922b1a4fd3b322001eeea425787c",
+  "decision": {
+    "date": "2026-10-30",
+    "authority": "Project owner requested deployment of 2.5.71 before completing S6. The owner reviews and commits this content-bound interim policy and explicitly selects its commit for the release tag. This records interim publication only, not an independent cryptographic verdict or S6 completion; see docs/release.md."
+  },
+  "outstanding_conditions": [
+    "crypto_review",
+    "first_contact_latency",
+    "load_run_on_candidate",
+    "unsafe_pin_store_refusal",
+    "loopback_inbound_class",
+    "owner_session_choices",
+    "network_observation_plan",
+    "final_candidate_checks",
+    "release_notes"
+  ],
+  "deferred_conditions": [
+    "tor_phase_measurement"
+  ]
+}

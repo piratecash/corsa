@@ -66,8 +66,8 @@ func candidateBuildProblems(text string) []string {
 	push, hasPush := doc.On["push"]
 	_, manual := doc.On["workflow_dispatch"]
 	var trigger map[string][]string
-	if err := push.Decode(&trigger); err != nil || !hasPush || !manual || len(doc.On) != 2 || len(trigger) != 1 || !slices.Equal(trigger["branches"], []string{"dev"}) {
-		problems = append(problems, "candidate validation triggers must be manual and dev pushes only")
+	if err := push.Decode(&trigger); err != nil || !hasPush || !manual || len(doc.On) != 2 || len(trigger) != 1 || !slices.Equal(trigger["branches"], []string{"dev", "master"}) {
+		problems = append(problems, "candidate validation triggers must be manual and dev/master pushes only")
 	}
 	build, exists := doc.Jobs["build"]
 	if !exists || len(doc.Jobs) != 1 || build.Timeout <= 0 || build.Timeout > 30 {
@@ -101,7 +101,8 @@ func TestCandidateBuildChecksEveryReleasePlatformWithoutPublishing(t *testing.T)
 }
 
 func TestReleaseCIKeepsTheApprovedTestScopeAndCGOChecks(t *testing.T) {
-	w, err := parseWorkflow(readWorkflowText(t, "ci.yml"))
+	text := readWorkflowText(t, "ci.yml")
+	w, err := parseWorkflow(text)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -123,13 +124,28 @@ func TestReleaseCIKeepsTheApprovedTestScopeAndCGOChecks(t *testing.T) {
 	if selected != 1 || cgo != 1 || controls != 1 {
 		t.Fatal("CI must run the approved package selection, tagged CGO suite and preflight refusal controls")
 	}
+	var events struct {
+		On map[string]yaml.Node `yaml:"on"`
+	}
+	if err := yaml.Unmarshal([]byte(text), &events); err != nil {
+		t.Fatal(err)
+	}
+	push := events.On["push"]
+	var trigger map[string][]string
+	_, pr := events.On["pull_request"]
+	_, manual := events.On["workflow_dispatch"]
+	if err := push.Decode(&trigger); err != nil || len(events.On) != 3 || !pr || !manual || len(trigger) != 1 || !slices.Equal(trigger["branches"], []string{"dev", "master"}) {
+		t.Fatal("CI must check both development and release-preparation branches, PRs and manual runs")
+	}
 }
 
 func TestCandidateBuildRefusesPublishingAndCoverageRegressions(t *testing.T) {
 	original := readWorkflowText(t, candidateWorkflowFile)
 	for _, mutation := range []struct{ name, old, replacement string }{
 		{"write-token", "contents: read", "contents: write"},
-		{"tag-trigger", "branches: [dev]", "tags: ['v*']"},
+		{"tag-trigger", "branches: [dev, master]", "tags: ['v*']"},
+		{"missing-master", "branches: [dev, master]", "branches: [dev]"},
+		{"missing-dev", "branches: [dev, master]", "branches: [master]"},
 		{"duplicate-platform", "platform: windows-arm64", "platform: windows-amd64"},
 		{"wrong-build", "make build-desktop-windows-arm64", "make build-desktop-windows-amd64"},
 		{"missing-daemon", "make build-node-linux-amd64", "echo skipped"},

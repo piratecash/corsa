@@ -1,5 +1,17 @@
 # What's New in v2.5.71
 
+This is an interim release before completion of S6, under the version-specific
+publication policy described in [Releases](../release.md#interim-2571-publication--2026-10-30).
+Independent cryptographic review and final candidate latency, load, resource and
+observation acceptance remain incomplete. TLSv2/protocol 31 and storage schema 8
+are active; this release does not claim completed S6, D1/G2 or a full-load 512 MB
+memory guarantee. Native Windows/DACL and Tor measurements remain UNVERIFIED.
+
+Это промежуточный выпуск до завершения S6. Независимая криптоэкспертиза,
+итоговая приёмка задержек, нагрузки, ресурсов и наблюдения ещё не завершены.
+TLSv2/protocol 31 и storage schema 8 активны; завершение S6, D1/G2 и пригодность
+для полной нагрузки в 512 МБ не заявляются. Windows/DACL и Tor — UNVERIFIED.
+
 ## Peer Connections Use Secure Session v2
 
 Nodes running protocol version 31 can now establish secure session v2 connections over TLS 1.3. The peer's identity proof is tied to the exact encrypted connection, and Corsa remembers verified identities and endpoints across restarts so that a proven v2 peer cannot silently return to the legacy session later.

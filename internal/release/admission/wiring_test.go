@@ -429,6 +429,131 @@ func releaseBodyProblems(file string, w workflow) []string {
 	return problems
 }
 
+// releaseCheckProblems keeps the interim CI admission distinct from passing
+// the actual release checks. Artifacts cannot publish around a failed test job.
+func releaseCheckProblems(file, text string, w workflow) []string {
+	var problems []string
+	requireNeeds := func(name string, required ...string) {
+		job, exists := w.Jobs[name]
+		if !exists {
+			problems = append(problems, fmt.Sprintf("%s: required job %q is missing", file, name))
+			return
+		}
+		needs, err := needsOf(job)
+		if err != nil {
+			problems = append(problems, fmt.Sprintf("%s: job %q: %v", file, name, err))
+		}
+		for _, dependency := range required {
+			if !slices.Contains(needs, dependency) {
+				problems = append(problems, fmt.Sprintf("%s: job %q must directly need %q", file, name, dependency))
+			}
+		}
+	}
+	requireNeeds("lint", admissionJobName)
+	requireNeeds("tests", admissionJobName)
+	requireNeeds("build-linux", admissionJobName, "lint", "tests")
+	requireNeeds("build-platforms", admissionJobName, "lint", "tests")
+	requireNeeds("release", admissionJobName, "lint", "tests", "build-linux", "build-platforms")
+	for name, job := range w.Jobs {
+		if name != "release" {
+			if writes, err := mayWrite(w, job); err != nil || writes {
+				problems = append(problems, fmt.Sprintf("%s: only the release job may have write permissions (job %q)", file, name))
+			}
+		}
+		if job.ContinueOnError.Kind != 0 {
+			problems = append(problems, fmt.Sprintf("%s: job %q must not set continue-on-error", file, name))
+		}
+		if name != admissionJobName {
+			if publishing, err := publishes(w, job); err != nil || publishing {
+				requireNeeds(name, admissionJobName, "lint", "tests")
+			}
+		}
+	}
+
+	var doc yaml.Node
+	if err := yaml.Unmarshal([]byte(text), &doc); err != nil || len(doc.Content) == 0 {
+		return append(problems, file+": cannot inspect release checks")
+	}
+	root, _ := mappingOf(doc.Content[0])
+	jobs, _ := mappingOf(root["jobs"])
+	for _, name := range []string{"lint", "tests"} {
+		job, ok := mappingOf(jobs[name])
+		if !ok {
+			continue // The missing job is already reported above.
+		}
+		where := fmt.Sprintf("%s: job %q", file, name)
+		problems = append(problems, unexpectedKeys(where, job, []string{"name", "runs-on", "needs", "steps", "permissions", "timeout-minutes"})...)
+		if runner := job["runs-on"]; runner == nil || runner.Kind != yaml.ScalarNode || runner.Value != "ubuntu-latest" {
+			problems = append(problems, where+": release checks must run on ubuntu-latest")
+		}
+	}
+	// Exact commands retain their exit status, default working directory and
+	// real shell. No step condition, env, alternate shell or error masking.
+	requireCommand := func(name, command string) {
+		job, _ := mappingOf(jobs[name])
+		steps := job["steps"]
+		count := 0
+		if steps != nil && steps.Kind == yaml.SequenceNode {
+			for _, node := range steps.Content {
+				step, ok := mappingOf(node)
+				if !ok || step["run"] == nil || strings.TrimSpace(step["run"].Value) != command {
+					continue
+				}
+				count++
+				where := fmt.Sprintf("%s: job %q command %q", file, name, command)
+				problems = append(problems, unexpectedKeys(where, step, []string{"name", "run", "shell"})...)
+				if shell := step["shell"]; shell != nil && (shell.Kind != yaml.ScalarNode || shell.Value != "bash") {
+					problems = append(problems, where+": shell must be the default or bash")
+				}
+			}
+		}
+		if count != 1 {
+			problems = append(problems, fmt.Sprintf("%s: job %q must run %q exactly once", file, name, command))
+		}
+	}
+	requireCommand("lint", "make lint")
+	requireCommand("tests", "python scripts/test-test-release.py\npython scripts/test-report-candidate-artifacts.py")
+	requireCommand("tests", "make test-release")
+	requireCommand("tests", "make test-cgo")
+	requireCommand("build-linux", "make build-node-linux-amd64\nmake build-desktop-linux-amd64")
+	requireCommand("build-platforms", "${{ matrix.build_cmds }}")
+
+	var matrixDoc struct {
+		Jobs map[string]struct {
+			Strategy struct {
+				Matrix struct {
+					Include []struct {
+						Name     string `yaml:"name"`
+						Runner   string `yaml:"runs_on"`
+						Commands string `yaml:"build_cmds"`
+					} `yaml:"include"`
+				} `yaml:"matrix"`
+			} `yaml:"strategy"`
+		} `yaml:"jobs"`
+	}
+	if err := yaml.Unmarshal([]byte(text), &matrixDoc); err != nil {
+		return append(problems, err.Error())
+	}
+	want := map[string][3]string{
+		"macos-arm64":   {"macos-latest", "build-node-macos-arm64", "build-desktop-macos-arm64"},
+		"macos-amd64":   {"macos-15-intel", "build-node-macos-amd64", "build-desktop-macos-amd64"},
+		"windows-amd64": {"windows-latest", "build-node-windows-amd64", "build-desktop-windows-amd64"},
+		"windows-arm64": {"windows-latest", "build-node-windows-arm64", "build-desktop-windows-arm64"},
+	}
+	seen := map[string]bool{}
+	for _, row := range matrixDoc.Jobs["build-platforms"].Strategy.Matrix.Include {
+		expected, exists := want[row.Name]
+		if !exists || seen[row.Name] || row.Runner != expected[0] || strings.TrimSpace(row.Commands) != fmt.Sprintf("make %s\nmake %s", expected[1], expected[2]) {
+			problems = append(problems, file+": platform matrix must retain all four daemon/Desktop builds")
+		}
+		seen[row.Name] = true
+	}
+	if len(seen) != len(want) {
+		problems = append(problems, file+": incomplete platform matrix")
+	}
+	return problems
+}
+
 func workflowProblems(file, text string, everyJobGated bool) []string {
 	w, err := parseWorkflow(text)
 	if err != nil {
@@ -445,6 +570,7 @@ func workflowProblems(file, text string, everyJobGated bool) []string {
 	}
 	if everyJobGated {
 		problems = append(problems, releaseBodyProblems(file, w)...)
+		problems = append(problems, releaseCheckProblems(file, text, w)...)
 	}
 	for name, job := range w.Jobs {
 		if name == admissionJobName {
@@ -544,8 +670,8 @@ func TestWiringChecksCatchBypasses(t *testing.T) {
 		},
 		{
 			name:        "release job drops the direct need",
-			old:         "    needs:\n      - admission\n      - build-linux\n",
-			replacement: "    needs:\n      - build-linux\n",
+			old:         "    needs:\n      - admission\n      - lint\n      - tests\n      - build-linux\n",
+			replacement: "    needs:\n      - lint\n      - tests\n      - build-linux\n",
 		},
 		{
 			name:        "default token everywhere",
@@ -644,6 +770,84 @@ func TestWiringChecksCatchBypasses(t *testing.T) {
 			mutated := strings.Replace(original, tc.old, tc.replacement, 1)
 			if problems := workflowProblems(releaseWorkflowFile, mutated, true); len(problems) == 0 {
 				t.Fatal("the wiring checks accept the mutated workflow")
+			}
+		})
+	}
+}
+
+// These mutations target actual release jobs and commands, not a second
+// miniature workflow that could drift away from the publishing path.
+func TestReleaseChecksAndPlatformCoverageCannotBeBypassed(t *testing.T) {
+	original := readWorkflowText(t, releaseWorkflowFile)
+	jobBlock := func(name string) string {
+		marker := "\n  " + name + ":\n"
+		start := strings.Index(original, marker)
+		if start < 0 {
+			t.Fatalf("missing release job %q", name)
+		}
+		end := len(original)
+		for _, next := range []string{"admission", "lint", "tests", "build-linux", "build-platforms", "release"} {
+			at := strings.Index(original, "\n  "+next+":\n")
+			if at > start && at < end {
+				end = at
+			}
+		}
+		return original[start:end]
+	}
+	cases := []struct{ name, old, replacement string }{
+		{"missing tests job", jobBlock("tests"), "\n"},
+		{"default tests skipped", "run: make test-release", "run: echo skipped"},
+		{"cgo failure swallowed", "run: make test-cgo", "run: make test-cgo || true"},
+		{"lint failure swallowed", "run: make lint", "run: make lint || true"},
+		{"default test step disabled", "run: make test-release", "run: make test-release\n        if: false"},
+		{"cgo step allows failure", "run: make test-cgo", "run: make test-cgo\n        continue-on-error: true"},
+		{"test step dry run environment", "run: make test-release", "run: make test-release\n        env:\n          MAKEFLAGS: -n"},
+		{"test step false shell", "run: make test-release", "run: make test-release\n        shell: \"true {0}\""},
+		{"tests job dry run environment", "    name: Release tests\n", "    name: Release tests\n    env:\n      MAKEFLAGS: -n\n"},
+		{"tests job write token", "    name: Release tests\n", "    name: Release tests\n    permissions:\n      contents: write\n"},
+		{"preflight controls skipped", "python scripts/test-test-release.py\n          python scripts/test-report-candidate-artifacts.py", "echo skipped"},
+		{"linux daemon skipped", "make build-node-linux-amd64", "echo skipped"},
+		{"matrix invocation skipped", "run: ${{ matrix.build_cmds }}", "run: echo skipped"},
+		{"platform duplicated", "name: windows-arm64", "name: windows-amd64"},
+		{"wrong Desktop architecture", "make build-desktop-windows-arm64", "make build-desktop-windows-amd64"},
+	}
+	for _, job := range []string{"build-linux", "build-platforms", "release"} {
+		old := jobBlock(job)
+		for _, dependency := range []string{"lint", "tests"} {
+			line := "      - " + dependency + "\n"
+			if strings.Count(old, line) != 1 {
+				t.Fatalf("job %q does not have one direct %q dependency", job, dependency)
+			}
+			cases = append(cases, struct{ name, old, replacement string }{
+				job + " drops " + dependency, old, strings.Replace(old, line, "", 1),
+			})
+		}
+	}
+	for _, dependency := range []string{"build-linux", "build-platforms"} {
+		old := jobBlock("release")
+		line := "      - " + dependency + "\n"
+		cases = append(cases, struct{ name, old, replacement string }{
+			"release drops " + dependency, old, strings.Replace(old, line, "", 1),
+		})
+	}
+	old := jobBlock("tests")
+	cases = append(cases, struct{ name, old, replacement string }{
+		"tests drops admission", old, strings.Replace(old, "    needs: admission\n", "", 1),
+	})
+	cases = append(cases, struct{ name, old, replacement string }{
+		"tests job failure ignored", old, strings.Replace(old, "    name: Release tests\n", "    name: Release tests\n    continue-on-error: true\n", 1),
+	})
+	if problems := workflowProblems(releaseWorkflowFile, original, true); len(problems) != 0 {
+		t.Fatalf("unmodified release checks have problems: %v", problems)
+	}
+	for _, mutation := range cases {
+		t.Run(mutation.name, func(t *testing.T) {
+			if mutation.old == mutation.replacement || strings.Count(original, mutation.old) != 1 {
+				t.Fatal("update the mutation to target one actual release path")
+			}
+			changed := strings.Replace(original, mutation.old, mutation.replacement, 1)
+			if len(workflowProblems(releaseWorkflowFile, changed, true)) == 0 {
+				t.Fatal("release checks accepted the masked or missing prerequisite")
 			}
 		})
 	}

@@ -1,5 +1,47 @@
 # Releases
 
+## Interim 2.5.71 publication — 2026-10-30
+
+The owner requested deployment of **2.5.71 before completing S6**. This one
+publication uses the separate, content-bound policy in
+`packaging/interim-release-v2.5.71.json`. It does not complete the ordinary
+17-condition S6 manifest or grant D1/G2 activation. The historical S6 requirements
+below remain the normal policy for subsequent releases and tagless Android builds.
+
+This exception applies only to explicit `RELEASE_TAG=v2.5.71`, release 2.5.71,
+protocol 31, minimum 28 and secure-session activation 31. Its approval lists the
+actual outstanding and deferred conditions; any change to that list refuses.
+Independent cryptographic review, final latency/load measurements, unsafe-store
+final-candidate checks, measured loopback budgets, owner session choices,
+observation plan, final-candidate checks and release-note acceptance remain
+uncompleted S6 obligations. Native Windows/DACL and Tor remain UNVERIFIED.
+TLSv2, pins, downgrade protections and storage schema 8 remain active.
+
+The approval binds the canonical SHA-256 of every tracked path, executable mode
+and raw file body, excluding only the approval file itself to avoid recursive
+hashing. The approval must itself be committed, regular and unchanged. Worktree
+bytes and modes, the index, untracked inputs, HEAD, the peeled tag and GitHub event
+must agree. Only the existing `.gocache/` and `.gomodcache/` caches are excluded
+from the untracked-input check. A changed source or workflow needs a new digest
+and owner review. The tool reports the actual full commit and **S6 admitted: false**.
+
+After admission, publication still requires actual `make test-release`,
+`make test-cgo`, lint and all five daemon + Desktop platform builds. Only
+`internal/overlaysim` is deferred from the product test selector, never PASS.
+Android is separate. These are CI requirements, not claims that those jobs have
+already passed on the new commit.
+
+The owner reviews and commits the versioned approval with this disclosed scope,
+then explicitly selects that commit for the tag. Re-running an older failed tag
+cannot load newer source. Agents do not move tags or publish the release.
+
+**Промежуточный выпуск 2.5.71:** это отдельный допуск до завершения S6.
+Незавершённые условия не получают PASS; криптоэкспертиза и итоговая ресурсная
+приёмка остаются открытыми. Действующие TLSv2/pins и ограничения отката schema 8
+сохраняются. Владелец подтверждает конкретное содержимое своим коммитом и выбором
+тега после просмотра этого ограничения. Будущие версии возвращаются к обычному
+допуску S6.
+
 > **Current S6 release scope — 2026-10-29.** The
 > [urgent full-product scope](operations/urgent-full-product-release-scope.md)
 > covers current DEV, daemon and clients. The owner deferred session

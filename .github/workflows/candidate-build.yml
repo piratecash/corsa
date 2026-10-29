@@ -3,7 +3,7 @@ name: Candidate build validation
 on:
   workflow_dispatch:
   push:
-    branches: [dev]
+    branches: [dev, master]
 
 # Build evidence only. No upload-artifact, release, tag or registry publication.
 # release.yml remains the only publisher and retains its admission gate.
