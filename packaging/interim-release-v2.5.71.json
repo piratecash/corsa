@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "version": "2.5.71",
-  "source_sha": "0183edc712c01ad9cd8a2d1ceecd983fa794922b1a4fd3b322001eeea425787c",
+  "source_sha": "57b5b44714c5c52f8ff150bd253e79ca127ac770d384c1fd4dc84792d4a29880",
   "decision": {
     "date": "2026-10-30",
     "authority": "Project owner requested deployment of 2.5.71 before completing S6. The owner reviews and commits this content-bound interim policy and explicitly selects its commit for the release tag. This records interim publication only, not an independent cryptographic verdict or S6 completion; see docs/release.md."

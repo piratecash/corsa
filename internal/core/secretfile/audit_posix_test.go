@@ -57,7 +57,9 @@ func TestAuditReportsAWorldWritableDirectoryHoldingTheFile(t *testing.T) {
 	if unsafe.Mode.Perm() != 0o777 {
 		t.Fatalf("reported mode = %s, want the directory's own", unsafe.Mode)
 	}
-	assertNoPath(t, err, chain[1])
+	// The helper derives its unique test-name token from the temp root's
+	// parent; using data's parent would match "001" inside CI's uid 1001.
+	assertNoPath(t, err, chain[0])
 }
 
 // Not only the directory holding the file: every ancestor up to the root.

@@ -177,7 +177,7 @@ func checkContainment(command ChildCommand) error {
 		if !ok || stat.Uid != 0 || info.Mode()&os.ModeSymlink != 0 {
 			return ErrUnauthorized
 		}
-		if info.Mode().Perm()&0o022 != 0 && !(info.IsDir() && info.Mode()&os.ModeSticky != 0) {
+		if info.Mode().Perm()&0o022 != 0 && (!info.IsDir() || info.Mode()&os.ModeSticky == 0) {
 			return ErrUnauthorized
 		}
 		if current == command.Path && !info.Mode().IsRegular() {

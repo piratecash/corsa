@@ -56,7 +56,7 @@ def inspect_binary(path, product, system, arch, source_sha):
     if system != "windows" and not path.stat().st_mode & stat.S_IXUSR:
         raise ValueError(f"candidate executable has no owner execute permission: {path}")
     check_header(path, system, arch)
-    raw = subprocess.check_output(["go", "version", "-m", str(path)], text=True, timeout=30)
+    raw = subprocess.check_output(["go", "version", "-m", str(path)], text=True, encoding="utf-8", timeout=30)
     fields = {}
     package = None
     for line in raw.splitlines():
@@ -77,13 +77,13 @@ def inspect_binary(path, product, system, arch, source_sha):
 def report(platform, source_sha):
     if not re.fullmatch(r"[0-9a-f]{40}", source_sha):
         raise ValueError("a full source commit is required")
-    actual = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+    actual = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True, encoding="utf-8").strip()
     if actual != source_sha:
         raise ValueError("checkout does not match the requested commit")
     subprocess.run(["git", "diff", "--quiet", "HEAD", "--"], check=True)
     if Path(".env").exists():
         raise ValueError("candidate checkout must not contain a private .env")
-    config = Path("internal/core/config/config.go").read_text()
+    config = Path("internal/core/config/config.go").read_text(encoding="utf-8")
     parts = []
     for component in ("Major", "Minor", "Build"):
         matches = re.findall(rf"^\s*ClientVersion{component}\s*=\s*(\d+)\s*$", config, re.MULTILINE)

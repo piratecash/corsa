@@ -25,6 +25,7 @@ type summaryMemberTest struct {
 	mu        sync.Mutex
 	trace     []string
 	summaries uint64
+	workDone  <-chan struct{}
 }
 
 func (f *summaryMemberTest) record(point string) {
@@ -102,6 +103,7 @@ func summaryMemberFixture(t *testing.T, failure string) *summaryMemberTest {
 	})
 	owner.rpc = source.client
 	stop, done := make(chan struct{}), make(chan struct{})
+	fixture.workDone = done
 	go func() {
 		defer close(done)
 		for index := 0; ; index++ {
@@ -154,6 +156,12 @@ func summaryMemberFixture(t *testing.T, failure string) *summaryMemberTest {
 			}
 			if err = work.write(packet, time.Now().Add(2*time.Second)); err != nil {
 				t.Error(err)
+				return
+			}
+			if code == linuxResultUnavailable {
+				// This scripted reply makes the original work owner poison and
+				// close its endpoint. There is no fifth sample request: waiting
+				// for it races the expected EOF against test cleanup.
 				return
 			}
 		}
@@ -504,6 +512,18 @@ func TestLinuxMemberRetainsBothReadBracketScalars(t *testing.T) {
 		nextCtx, nextCancel := context.WithTimeout(t.Context(), 2*time.Second)
 		defer nextCancel()
 		next, err := fixture.member.Sample(nextCtx)
+		select {
+		case <-fixture.workDone:
+		case <-nextCtx.Done():
+			t.Fatal("scripted unavailable reply owner did not join", nextCtx.Err())
+		}
+		owner := fixture.member.fixture
+		owner.mu.Lock()
+		stopping, poisoned := owner.stopping, owner.correlation.poisoned
+		owner.mu.Unlock()
+		if !stopping || !poisoned {
+			t.Fatal("unavailable reply did not stop and poison the original owner")
+		}
 		failure, ok := err.(*linuxSampleFailure)
 		trace, calls := fixture.snapshot()
 		want := []string{"before", "fetchRouteSummary", "getResourceBreakdown", "getDatagramRuntimeState", "listBanned", "getRuntimeMetrics", "after"}

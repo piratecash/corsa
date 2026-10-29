@@ -2,6 +2,7 @@
 """Controller tests with synthetic headers and stub metadata, not real build evidence."""
 import contextlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -242,6 +243,69 @@ class CandidateReports(unittest.TestCase):
                     with patch.object(REPORT.subprocess, "check_output", side_effect=output), patch.object(REPORT.subprocess, "run", side_effect=run):
                         with self.assertRaises(ValueError):
                             REPORT.report(platform, SHA)
+
+    def test_windows_non_ascii_source_uses_explicit_utf8(self):
+        original_text_encoding = io.text_encoding
+
+        def windows_text_encoding(encoding, stacklevel=2):
+            return "cp1252" if encoding is None else original_text_encoding(encoding, stacklevel)
+
+        for platform in ("windows-amd64", "windows-arm64"):
+            with self.subTest(platform=platform), directory():
+                system, arch = candidate_fixture(platform)
+                config = Path("internal/core/config/config.go")
+                config_bytes = "// я: UTF-8 source, never the Windows locale\n".encode("utf-8") + config.read_bytes()
+                self.assertIn(b"\x8f", config_bytes)
+                config.write_bytes(config_bytes)
+                base_output, run = subprocess_stubs(system, arch)
+
+                def output(command, **kwargs):
+                    value = base_output(command, **kwargs)
+                    if command[:3] == ["go", "version", "-m"]:
+                        # Real UTF-8 decoding of synthetic Go metadata. No
+                        # subprocess is launched; an omitted encoding models
+                        # the same CP1252 Windows boundary as Path.read_text.
+                        value += "\tbuild\t-ldflags=я\n"
+                    return value.encode("utf-8").decode(kwargs.get("encoding") or "cp1252",
+                                                       errors=kwargs.get("errors") or "strict")
+
+                with patch.object(io, "text_encoding", side_effect=windows_text_encoding), patch.object(REPORT.subprocess, "check_output", side_effect=output) as calls, patch.object(REPORT.subprocess, "run", side_effect=run):
+                    data = REPORT.report(platform, SHA)
+                self.assertEqual(data["source_version"], "2.5.71")
+                self.assertEqual(len(calls.call_args_list), 3)
+                self.assertEqual(calls.call_args_list[0].args[0], ["git", "rev-parse", "HEAD"])
+                for call in calls.call_args_list:
+                    self.assertIn(call.kwargs.get("encoding"), ("utf-8", "utf8"))
+                    self.assertEqual(call.kwargs.get("errors") or "strict", "strict")
+                for binary in data["binaries"]:
+                    self.assertIn("-ldflags=я", binary["go_build_info"])
+                self.assertTrue(Path(data["archive"]["path"]).is_file())
+
+    def test_windows_invalid_utf8_is_refused(self):
+        original_text_encoding = io.text_encoding
+
+        def windows_text_encoding(encoding, stacklevel=2):
+            return "cp1252" if encoding is None else original_text_encoding(encoding, stacklevel)
+
+        for platform in ("windows-amd64", "windows-arm64"):
+            for boundary in ("config", "go-metadata"):
+                with self.subTest(platform=platform, boundary=boundary), directory():
+                    system, arch = candidate_fixture(platform)
+                    config = Path("internal/core/config/config.go")
+                    config.write_bytes((b"// \xff invalid UTF-8\n" if boundary == "config" else b"// valid UTF-8\n") + config.read_bytes())
+                    base_output, run = subprocess_stubs(system, arch)
+
+                    def output(command, **kwargs):
+                        raw = base_output(command, **kwargs).encode("utf-8")
+                        if boundary == "go-metadata" and command[:3] == ["go", "version", "-m"]:
+                            raw += b"\tbuild\t-ldflags=\xff\n"
+                        return raw.decode(kwargs.get("encoding") or "cp1252",
+                                          errors=kwargs.get("errors") or "strict")
+
+                    with patch.object(io, "text_encoding", side_effect=windows_text_encoding), patch.object(REPORT.subprocess, "check_output", side_effect=output), patch.object(REPORT.subprocess, "run", side_effect=run):
+                        with self.assertRaises(UnicodeDecodeError):
+                            REPORT.report(platform, SHA)
+                    self.assertFalse(Path("dist/candidate").exists())
 
 
 if __name__ == "__main__":
