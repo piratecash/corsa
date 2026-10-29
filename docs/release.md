@@ -26,8 +26,19 @@ from the untracked-input check. A changed source or workflow needs a new digest
 and owner review. The tool reports the actual full commit and **S6 admitted: false**.
 
 After admission, publication still requires actual `make test-release`,
-`make test-cgo`, lint and all five daemon + Desktop platform builds. Only
-`internal/overlaysim` is deferred from the product test selector, never PASS.
+`make test-cgo`, lint and all five daemon + Desktop platform builds.
+`internal/overlaysim` remains deferred from the product test selector, never PASS.
+On 2026-10-30 the owner additionally deferred exactly two inactive D1 diagnostics
+for source version **2.5.71 only**:
+`TestOwnedReadyTargetTimingFourGenuineSources` and
+`TestOwnedReadyNormalTimedFactoryLoadsOriginalAndSignsWithoutGate`.
+The first failed before its target read gate with a lawful `bridge domain: busy`
+refusal; the second has no separately established passing result in that run.
+Both remain required for D1 repair and acceptance. `test-release` reports them
+as DEFERRED, runs every other Node test, and passes no skip option to other
+packages. Other source versions and ordinary `make test` / `make test-all` retain
+both tests. TLS, pins, clients, storage, CGO, lint and all platform builds remain
+required; this is not a general test bypass or a green full repository suite.
 Android is separate. These are CI requirements, not claims that those jobs have
 already passed on the new commit.
 

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# The owner's urgent-release scope defers exactly overlaysim to D1.
-# Ordinary make test/test-all continue to include it. Never call this full-suite PASS.
+# The owner's urgent-release scope defers overlaysim to D1, plus two exact
+# inactive D1 timing diagnostics in 2.5.71 only. Ordinary make test/test-all
+# include them. A deferral is never full-suite PASS.
 set -euo pipefail
 
 readonly module=github.com/piratecash/corsa
@@ -42,4 +43,53 @@ if [[ "$deferred_count" -ne 1 || "${#packages[@]}" -eq 0 ]]; then
     exit 1
 fi
 printf 'DEFERRED to D1 (not PASS): %s\n' "$deferred" >&2
+
+# Bind the temporary exception to source constants, never an environment flag
+# or a mutable tag. Missing/duplicate/malformed version declarations refuse.
+readonly config=internal/core/config/config.go
+if [[ ! -f "$config" || -L "$config" ]]; then
+    echo 'release tests: regular source version configuration is required' >&2
+    exit 1
+fi
+version_parts=()
+for component in Major Minor Build; do
+    count=0
+    value=''
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        if [[ "$line" =~ ^[[:space:]]*ClientVersion${component}[[:space:]]*=[[:space:]]*([0-9]+)[[:space:]]*$ ]]; then
+            count=$((count + 1))
+            value=${BASH_REMATCH[1]}
+        fi
+    done < "$config"
+    if [[ "$count" -ne 1 ]]; then
+        echo 'release tests: missing, ambiguous or malformed source version' >&2
+        exit 1
+    fi
+    version_parts+=("$value")
+done
+version="${version_parts[0]}.${version_parts[1]}.${version_parts[2]}"
+if [[ "$version" == 2.5.71 ]]; then
+    readonly node_package="$module/internal/core/node"
+    readonly diagnostics='^(TestOwnedReadyTargetTimingFourGenuineSources|TestOwnedReadyNormalTimedFactoryLoadsOriginalAndSignsWithoutGate)$'
+    remaining=()
+    node_count=0
+    for package in "${packages[@]}"; do
+        if [[ "$package" == "$node_package" ]]; then
+            node_count=$((node_count + 1))
+        else
+            remaining+=("$package")
+        fi
+    done
+    if [[ "$node_count" -ne 1 ]]; then
+        echo 'release tests: interim 2.5.71 requires the exact Node package' >&2
+        exit 1
+    fi
+    printf 'DEFERRED to D1 for 2.5.71 (not PASS): %s\n' \
+        TestOwnedReadyTargetTimingFourGenuineSources \
+        TestOwnedReadyNormalTimedFactoryLoadsOriginalAndSignsWithoutGate >&2
+    if [[ "${#remaining[@]}" -ne 0 ]]; then
+        "$go_command" test -count=1 -timeout=15m "${remaining[@]}" || exit "$?"
+    fi
+    exec "$go_command" test -count=1 -timeout=15m -skip "$diagnostics" "$node_package"
+fi
 exec "$go_command" test -count=1 -timeout=15m "${packages[@]}"

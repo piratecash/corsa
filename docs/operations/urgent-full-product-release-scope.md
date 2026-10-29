@@ -1,5 +1,8 @@
 # Current DEV: full-product release scope and remaining blockers
 
+> **Superseding decision, 2026-10-30:** interim 2.5.71 additionally defers the two exact inactive D1 timing diagnostics named in [Releases](../release.md#interim-2571-publication--2026-10-30). They remain in the full suite; every other product test remains required. DEFERRED is not PASS.
+
+
 The owner selected **current DEV plus necessary regression fixes** for the
 usual GitHub release matrix: **daemon and Desktop on Linux amd64, macOS arm64
 and amd64, and Windows amd64 and arm64**. Android APK/AAB are a separate later
