@@ -2134,8 +2134,12 @@ func (r *DMRouter) onNewMessage(event protocol.LocalChangeEvent) {
 	}
 
 	// Already in the cache means a reload brought it in, and that reload met
-	// the reader with it (loadConversation).
+	// the reader with it (loadConversation). It did not announce the first
+	// live event: keep that event's sound even when there is no row to append.
 	if r.cache.HasMessage(event.MessageID) {
+		if announce {
+			r.notify(UIEventBeep)
+		}
 		return
 	}
 

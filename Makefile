@@ -152,7 +152,7 @@ mocks:
 
 .PHONY: lint
 lint:
-	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) $(GO) run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0 run ./... --timeout=7m --color always
+	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) $(GO) run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0 run ./... --timeout=7m --color always --allow-serial-runners
 
 .PHONY: fmt gofmt-changed
 fmt:
