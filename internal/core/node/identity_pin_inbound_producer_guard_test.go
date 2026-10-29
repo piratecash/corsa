@@ -17,6 +17,12 @@ import (
 // Closed AST node/site multisets, including declarations/signatures/GenDecls.
 // Expected sites are literal reviewed inputs, never learned from current code.
 func ninN1SourceErrors(sources map[string][]byte) []string {
+	if !qualifiedD1MembershipSource(sources["find_node_membership_checkpoint.go"]) {
+		return []string{"membership exact tag/body changed"}
+	}
+	if !qualifiedD1DiagnosticSource(sources["find_node_resource_diagnostic.go"]) {
+		return []string{"diagnostic exact tag/body changed"}
+	}
 	expected := map[string]map[string]int{
 		"runWithFiles": {
 			"identity_pin_inbound_lifecycle.go:run": 1,
@@ -586,6 +592,18 @@ func ninN1SourceErrors(sources map[string][]byte) []string {
 	expected["findnode"]["identity_pin_own_dm_runtime.go:<package>"] = 2
 	expected["findnode"]["find_node_ready_target_timing.go:newFindNodeReadyTimedLoadedInboundCandidateService"] = 2
 	expected["findnode"]["find_node_ready_target_timing.go:prepareFindNodeReadyTimedTestConstruction"] = 3
+	expected["findNodeAdapter"]["find_node_resource_diagnostic.go:<package>"] = 1
+	expected["findnode"]["find_node_resource_diagnostic.go:<package>"] = 1
+	expected["proofTransportServiceToken"]["find_node_resource_diagnostic.go:<package>"] = 1
+	expected["findNode"]["find_node_resource_diagnostic.go:NewD1FindNodeResourceDiagnostic"] = 1
+	expected["findnode"]["find_node_resource_diagnostic.go:NewD1FindNodeResourceDiagnostic"] = 7
+	expected["proofToken"]["find_node_resource_diagnostic.go:NewD1FindNodeResourceDiagnostic"] = 1
+	expected["findNode"]["find_node_resource_diagnostic.go:boundTo"] = 1
+	expected["proofToken"]["find_node_resource_diagnostic.go:boundTo"] = 1
+	expected["findnode"]["find_node_membership_checkpoint.go:<package>"] = 1
+	expected["proofTransportLifetime"]["find_node_membership_checkpoint.go:<package>"] = 1
+	expected["findNode"]["find_node_membership_checkpoint.go:CheckpointForService"] = 3
+	expected["findnode"]["find_node_membership_checkpoint.go:CheckpointForService"] = 8
 	actual := map[string]map[string]int{}
 	made := map[string]map[string]int{}
 	ends := map[string]int{}

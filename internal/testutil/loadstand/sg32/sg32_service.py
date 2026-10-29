@@ -349,6 +349,40 @@ def read_line(stream, maximum=4096):
     return raw
 
 
+def bounded_control_line(stream, deadline, maximum=4096):
+    """One unbuffered closed-protocol line under the original phase deadline."""
+    need(type(maximum) is int and 0 < maximum <= 8192, "control-line-limit")
+    fd, raw = stream.fileno(), bytearray()
+    with selectors.DefaultSelector() as selector:
+        previous = os.get_blocking(fd)
+        os.set_blocking(fd, False)
+        try:
+            selector.register(fd, selectors.EVENT_READ)
+            while True:
+                need(time.monotonic() < deadline, "handoff-control-deadline")
+                if not selector.select(min(.05, max(0, deadline - time.monotonic()))):
+                    continue
+                need(time.monotonic() < deadline, "handoff-control-deadline")
+                try:
+                    part = os.read(fd, min(4096, maximum + 1 - len(raw)))
+                except BlockingIOError:
+                    continue
+                need(bool(part), "handoff-control-eof")
+                raw.extend(part)
+                need(len(raw) <= maximum, "handoff-control-line-limit")
+                if b"\n" in raw:
+                    need(raw.endswith(b"\n") and raw.count(b"\n") == 1, "handoff-control-extra")
+                    return bytes(raw)
+        finally:
+            active = sys.exc_info()[1]
+            try:
+                os.set_blocking(fd, previous)
+            except OSError:
+                if active is None:
+                    raise
+                active.cleanup_failed = True
+
+
 def control(raw, nonce):
     value = strict_json(raw)
     need(type(value) is dict and value.get("nonce") == nonce and type(value.get("kind")) is str,
@@ -578,23 +612,60 @@ def node_running(child, birth, phase):
         raise Adverse("node-early-exit", fact)
 
 
+KEEPER_STARTUP_OPERATIONS = {"clock-before", "read-secret", "cgroup-open", "process-witness-open",
+                             "initial-cgroup-snapshot", "selector-open", "sampler-spawn", "read-secret-after-handoff"}
+
+
+KEEPER_STARTUP_PATHS = {name: "cgroup-metric:" + name for name in Cgroup.NAMES}
+KEEPER_STARTUP_PATHS.update({"/run/c1/auth.json": "auth", "/proc/self/cgroup": "self-cgroup",
+                             "/proc/self/mountinfo": "self-mountinfo", "/proc/1": "keeper-proc",
+                             "/proc/1/stat": "keeper-stat", "/proc/1/status": "keeper-status",
+                             "/proc/1/cgroup": "keeper-cgroup", "/proc/1/exe": "keeper-exe",
+                             "exe": "keeper-exe", "ns/time": "keeper-time",
+                             "ns/time_for_children": "keeper-time-for-children",
+                             "/proc/1/ns/time": "keeper-time",
+                             "/proc/1/ns/time_for_children": "keeper-time-for-children"})
+
+
+def keeper_startup_call(operation, function, *args, **kwargs):
+    """Label the existing composite call, without exposing arguments or adding reads."""
+    need(operation in KEEPER_STARTUP_OPERATIONS, "keeper-startup-diagnostic-label")
+    try:
+        return function(*args, **kwargs)
+    except OSError as error:
+        value, filename = error.errno, error.filename
+        facts = {"scope": "KEEPER_STARTUP_OPERATION", "operation": operation,
+                 "errno": value if type(value) is int and 0 <= value <= 4095 else None,
+                 "path_label": KEEPER_STARTUP_PATHS.get(filename) if type(filename) is str else None}
+        try:
+            error.keeper_diagnostic = facts
+        except Exception:
+            pass
+        raise
+
+
 def keeper(nonce, cli_sha):
     need(os.getpid() == 1 and os.getuid() == 501 and os.getgid() == 20, "keeper-credentials")
-    clock = qualified_clock("keeper", "sg32-keeper-before", nonce)
+    start, normal = time.monotonic(), False
+    clock = keeper_startup_call("clock-before", qualified_clock, "keeper", "sg32-keeper-before", nonce)
     domain = clock["contexts"]["thread_self"]["time"]
-    secret, owned, messages = read_secret(), [], []
+    secret, owned, messages = keeper_startup_call("read-secret", read_secret), [], []
+    emit({"kind": "SECRET_ATTACHED", "nonce": nonce})
+    continuation = control(bounded_control_line(sys.stdin.buffer, start + 20), nonce)
+    need(continuation == {"kind": "CONTINUE", "nonce": nonce}, "keeper-handoff-control")
+    retained = keeper_startup_call("read-secret-after-handoff", read_secret)
+    need(time.monotonic() < start + 20 and retained == secret, "keeper-handoff-secret-changed-or-late")
     host_buffer, host_messages, checked = bytearray(), [], []
     bootstrap = "import sys;sys.path.insert(0,'/inputs');import sg32_service;raise SystemExit(sg32_service.main())"
-    start, normal = time.monotonic(), False
     node_child, birth, stop_requested = None, None, False
     with contextlib.ExitStack() as stack:
-        group = stack.enter_context(Cgroup())
-        own = stack.enter_context(ProcWitness(1, group.raw, domain))
-        initial = group.snapshot(initial=True)
+        group = stack.enter_context(keeper_startup_call("cgroup-open", Cgroup))
+        own = stack.enter_context(keeper_startup_call("process-witness-open", ProcWitness, 1, group.raw, domain))
+        initial = keeper_startup_call("initial-cgroup-snapshot", group.snapshot, initial=True)
         need(initial["members"] == [1], "keeper-initial-membership")
-        selector = stack.enter_context(selectors.DefaultSelector())
+        selector = stack.enter_context(keeper_startup_call("selector-open", selectors.DefaultSelector))
         try:
-            sampler_child = OwnedChild(["/usr/bin/python3", "-I", "-S", "-B", "-c", bootstrap,
+            sampler_child = keeper_startup_call("sampler-spawn", OwnedChild, ["/usr/bin/python3", "-I", "-S", "-B", "-c", bootstrap,
                                         "sampler", nonce, cli_sha, "1"], owned,
                                        {"PATH": "/usr/bin:/bin", "LC_ALL": "C"}, True)
             def register(child, label):
@@ -818,7 +889,7 @@ def preparer_call(operation, path, function, *args):
 def preparer(nonce):
     need(os.getuid() == 0 and os.getgid() == 0, "preparer-credentials")
     start = time.monotonic()
-    config = manifest(strict_json(preparer_call("stdin-read", None, read_line, sys.stdin.buffer, 8192)), nonce)
+    config = manifest(strict_json(preparer_call("stdin-read", None, bounded_control_line, sys.stdin.buffer, start + 20, 8192)), nonce)
     need(all(stat.S_ISDIR(preparer_call("lstat", path, os.lstat, path).st_mode) for path in ("/inputs", "/run/c1", "/work")),
          "volume-root-not-directory")
     need(set(preparer_call("listdir", "/inputs", os.listdir, "/inputs")) == set(INPUTS) | {"manifest.json"} and
@@ -874,6 +945,9 @@ def preparer(nonce):
     preparer_call("emit", None, emit, {"kind": "PREPARED", "nonce": nonce, "files": config["files"],
           "credential": {"mode": 384, "uid": 501, "gid": 20, "nlink": 1},
           "state_children": ["data", "home", "tmp"]})
+    release = control(preparer_call("stdin-read", None, bounded_control_line, sys.stdin.buffer, start + 20), nonce)
+    need(time.monotonic() < start + 20 and release == {"kind": "RELEASE", "nonce": nonce},
+         "preparer-release-control-or-deadline")
     return 0
 
 
@@ -903,7 +977,7 @@ def main(argv=None):
                                                (observed["returncode"] != 0 or observed["early"]))
         emit({"kind": "ERROR", "nonce": nonce, "status": "FAIL" if failed else "UNKNOWN",
               "reason": str(error) if isinstance(error, (Fault, clockprobe.Fault)) else type(error).__name__,
-              "facts": error.facts if isinstance(error, Adverse) else getattr(error, "preparer_diagnostic", None),
+              "facts": error.facts if isinstance(error, Adverse) else getattr(error, "preparer_diagnostic", getattr(error, "keeper_diagnostic", None)),
               "cleanup_failed": getattr(error, "cleanup_failed", False),
               "observed_node_exit": observed, "child_exits": getattr(error, "child_exits", [])})
         return 2

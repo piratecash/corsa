@@ -10,6 +10,9 @@ import (
 )
 
 func c5SourceErrors(sources map[string][]byte) []string {
+	if !qualifiedD1DiagnosticSource(sources["find_node_resource_diagnostic.go"]) {
+		return []string{"diagnostic exact tag/body changed"}
+	}
 	expected := map[string]map[string]int{
 		"findNodePriorityProfile":        {"find_node_connection.go:<package>": 1, "find_node_connection.go:valid": 1, "find_node_connection.go:findNodePriorityMembers": 1, "find_node_connection.go:findNodePrioritySnapshot": 1, "find_node_connection.go:collectOwnedFindNodeRawFacts": 1, "find_node_bridge_capture.go:<package>": 2},
 		"findNodePriorityContact":        {"find_node_connection.go:<package>": 1, "find_node_connection.go:captureFindNodePriorityClasses": 2, "find_node_connection.go:findNodePriorityClassLocked": 1, "find_node_connection.go:collectOwnedFindNodeRawFacts": 1, "find_node_connection.go:collectOwnedFindNodeRawClasses": 2},
@@ -22,6 +25,7 @@ func c5SourceErrors(sources map[string][]byte) []string {
 		"NewPrioritySnapshot":            {"find_node_connection.go:findNodePrioritySnapshot": 1},
 	}
 	expected["findNodePriorityProfile"]["identity_pin_own_dm_runtime.go:NewInactiveOwnDMRuntimeCandidate"] = 1
+	expected["findNodePriorityProfile"]["find_node_resource_diagnostic.go:NewD1FindNodeResourceDiagnostic"] = 1
 	actual := map[string]map[string]int{}
 	for name := range expected {
 		actual[name] = map[string]int{}

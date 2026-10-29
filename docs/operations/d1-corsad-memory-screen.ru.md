@@ -1,8 +1,8 @@
-# C1/C2a/C2b32: замеры памяти настоящего демона
+# C1/C2a/C2b32/SG32: замеры памяти настоящего демона
 
 [English version](d1-corsad-memory-screen.md)
 
-Последний ограниченный результат — C2b32 текущего кандидата в конце страницы. Предыдущие разделы сохраняют исходные предметы и историю.
+Последний ограниченный результат — [SG32-v6: daemon, keeper и sampler вместе](#результат-service-группы-sg32-v6--2026-10-28): **41 328 640 байт** за полный фиксированный32-сессионный случай. Пригодность полной D1/512МБ остаётся UNKNOWN; прежние разделы сохраняют исходные предметы и историю.
 
 2026-10-25. **Ограниченный замер завершён без наблюдённого OOM и превышения бюджета. Пригодность полной нагрузки D1 в512МБ остаётся UNKNOWN.** Это наши собственные измерения, не sizing из внешней документации. Остальные случаи описаны в [контрольных точках D1→DHT](../design/d1-dht-resource-checkpoints.ru.md).
 
@@ -119,6 +119,28 @@ Production CLI SHA256 `ae61fc926e7f5c2353a21075041300fb722f2c8346389344a6e2e1459
 Локальные свидетельства: `/private/tmp/corsa-D1-K5-live-empty64-owner-package-ROOT-v1/ATTEMPT-1-ROOT-TERMINAL.json`, SHA-256 `59a379a13683b809c69a99a7fac3ad4d558df4170d73b469f86f6c4accb8ffdf`; `ATTEMPT-1-OUTPUT-MANIFEST.json` в том же пакете, SHA-256 `9bd1818ef942bac8bc5d4adf035a12d6fecb1a5793ffb1907fa0523eb1ca447f`. Manifest связывает сохранённые Host, keeper/observer RAW, пустой marker RAW, samples и точные копии входов. Это сохранённые свидетельства отказа, не resource PASS.
 
 
-## Доступность исторических свидетельств — 2026-10-28
+## Доступность исторических свидетельств на этапе восстановления — 2026-10-28
 
-Указанные выше private-пути `/private/tmp/corsa-D1-*` сейчас недоступны, включая прежний runtime-пакет `64c0` и RAW. Закоммиченные исходы/хеши остаются исторической записью; текущая доступность этих файлов не заявляется. Статически восстановлены фрагмент `CurrentBootContext` и относящиеся к нему caller edit-строки; ни один из шести полных runtime-файлов не квалифицирован до финального хеша, прежний ELF не восстановлен. Новый [проект clock-domain диагностики](d1-clock-domain-diagnostic.ru.md) прошёл CODE и локальную pure QA; Docker/kernel проба не запускалась и не получила разрешения владельца. Он не устанавливает причину прежнего отказа или пригодность по памяти. Все отчёты выше сохранены без изменения.
+Указанные выше private-пути `/private/tmp/corsa-D1-*` сейчас недоступны, включая прежний runtime-пакет `64c0` и RAW. Закоммиченные исходы/хеши остаются исторической записью; текущая доступность этих файлов не заявляется. Статически восстановлены фрагмент `CurrentBootContext` и относящиеся к нему caller edit-строки; ни один из шести полных runtime-файлов не квалифицирован до финального хеша, прежний ELF не восстановлен. На этом этапе восстановления [проект clock-domain диагностики](d1-clock-domain-diagnostic.ru.md) имел CODE и локальную pure QA, но ещё ждал допуска и Docker/kernel пробы. Последующая текущая диагностика выполнена и обнаружила разные time namespace отдельных контейнеров; SG32 использует colocated parent/child clock proofs. Он не устанавливает причину прежнего отказа или пригодность по памяти. Все отчёты выше сохранены без изменения.
+
+## Результат service-группы SG32-v6 — 2026-10-28
+
+**SCOPED_SUCCESS:** настоящий daemon, keeper и sampler вместе дали kernel-charged cgroup peak **41 328 640 байт =41,32864MB =39,4140625MiB** при согласованном service-лимите512000000байт/1CPU/64tasks/no-swap, без вычитаний. Это наш фактический Docker Linuxarm64 замер. Фиксированная работа завершена:32→16→32→0 TLSv2-сессий,48 различных identity и224 source-bound завершённых ping/get_peers/ping последовательности (672 основные request/reply пары,1344 основных application frames/41216байт, не TLS wire). Active FindNode/F1, полные512peers, overload, длительная история state, стоимость включённыхS6-наблюдателей, Desktop/SQLite и native macOS этим не измерены.
+
+| Наблюдение | Значение / область |
+|---|---|
+| Final service memory.current |13 963 264байт после reap daemon и sampler; это не daemon-only RSS |
+| Окно kernel peak |Создание свежей service-cgroup → bounded final keeper peak-read, включая ожидающий prefix передачи и стоимость helpers |
+| Peak read bracket |53711252221516..53711252227683нс в квалифицированном guest BOOTTIME domain; не host/UTC |
+| Sampling |41 периодический SAMPLE плюс SAMPLER_READY/SAMPLER_FINAL =43;45 cgroup facts с initial/final keeper |
+| Покрытие |Максимальный pre-reap sample-end gap511126917нс; последняя owned-reap граница57810584нс, оба ниже2с |
+| Final events/members |OOM/oom_kill/oom_group_kill0 во всех сохранённых facts; после node/sampler normal0/reap остался keeper[1] |
+| Logical state |Четыре phase walk7113/7268/9904/9904байт; максимум12entries, не physical I/O или приёмка роста |
+
+Владелец разрешил одну живую передачу: PREPARED оставался нетерминальным; keeper прочитал501:20/0600 секрет через RO mount и выдал SECRET_ATTACHED, затем preparer завершился0/reaped/удалён со свежей absence-проверкой. Только после этого точный Host отправляет CONTINUE; точный keeper повторяет исходные secret-checks/equality до sampler/node, driver стартует позже. RAW/порядок команд и исполненный Source подтверждают этот control-flow. Значения/хеши секретов и отдельный inner-read/mount-inode trace не выгружались. Передача проверена в данном запуске; единственная физическая причина v5 задним числом не устанавливается.
+
+Все59 обычных command records завершились0 отдельно от трёх interactive CLI normal0 (preparer20/service24/driver33). Node/sampler также normal0/reaped, driver/контейнеры завершились нормально; final seal сохранил стабильные cgroup/processbirth/executable/clock proofs и наблюдённые loopback-only network snapshots. Удалены только три точных собственных контейнера и три тома; последние восемь own-label/ID/name absence queries пусты/exit0, canonical lock отсутствовал. Это scoped cleanup, не физическое освобождение всех backend allocations. Во время выполнения сохранены все2195 tracked bodies/full metadata и indexbd6e.
+
+Артефакты: CLI `9c5764b19c5be6b635d5a1dde774c0fc4f5bcc64ac960c8d31c7f6121b4eebc4`, driver `c836814111c5fc6fad55f0e4c7888060d252919a9278d57efb270594b42fafea`; Go1.27.3/Linuxarm64v8/CGO0, frozen Go-срез8afa, без пересборки. SHA service helper/Host/Common и точные source manifests — в [профиле/происхождении](d1-service-group-memory-profile-proposal.ru.md). ROOT838a8f/session6395→8c64e5/exit0, noncebd3ecb3f03e6cea4b7e3497b27df15e3; actual receipt SHA427feb830c9e8bce14091213765363b392f3b3b416ae343cd9019e149e44c439, result SHA`a52d2ec96705a058e2c671c945e91092ce19475f93becaad59fa17bc43eb2d66`. TESTERabd1d980/REVIEWER9f72b776 независимо приняли whole DATA. RAW хранится в ignored durable `docs/_internal/d1-artifacts/2026-10-28/sg32-runtime-package-v6/`; прежние отказы отдельно.
+
+Границы:224 последовательности и свежий authenticated final0 witness связаны с точным stock-driver control-flow; полного terminal per-peer RAW и отдельно сохранённого final atomic-RPC response body нет, cached_live не oracle. Peak/current — раздельные ordered non-atomic reads; поздний current может превысить прежний peak без противоречия. Покрытие считается по read_bracket_ns и owned REAP; SAMPLER_FINAL.requested_at_ns — scheduled due, не фактический instant запроса. Keeper-only exit-tail, physical shared-page attribution, isolated daemon/role charges, optional RSS/HWM/PSS и пики preparer/driver остаются UNKNOWN. Лимиты отдельных ролей не являются замерами пиков. Не выводить per-peer cost или marginal delta из прежних бинарников/схем collector. Разовый допуск израсходован; повтор, полнаяD1/512МБ-приёмка, G2, активация, коммит и выпуск результатом не разрешаются.

@@ -12,6 +12,9 @@ import (
 // Exact conditional SOURCE contract; no Ready, full capture or typed/unsafe
 // alias closure is inferred from this finite syntax inventory.
 func ownedTerminalSourceErrors(sources map[string][]byte) []string {
+	if !qualifiedD1DiagnosticSource(sources["find_node_resource_diagnostic.go"]) {
+		return []string{"diagnostic exact tag/body changed"}
+	}
 	compact := func(s string) string { return strings.Join(strings.Fields(s), "") }
 	var failures []string
 	need := func(path, fragment, label string) {
@@ -125,6 +128,7 @@ func ownedTerminalSourceErrors(sources map[string][]byte) []string {
 		"serviceConstruction:service.go:newServiceWithConstruction":                                             1,
 		"serviceConstruction:s6_terminal_construction.go:newServiceWithObservations":                            1,
 	}
+	wantTypeRefs["findNodeBridgeTerminal:find_node_resource_diagnostic.go:<package>"] = 1
 	if !reflect.DeepEqual(typeRefs, wantTypeRefs) {
 		failures = append(failures, "terminal/construction exact type references changed")
 	}

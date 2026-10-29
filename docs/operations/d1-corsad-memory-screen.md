@@ -1,8 +1,8 @@
-# C1/C2a/C2b32: production daemon memory screens
+# C1/C2a/C2b32/SG32: production daemon memory screens
 
 [Русская версия](d1-corsad-memory-screen.ru.md)
 
-Latest bounded result: [C2b32 on the current candidate](#c2b32-current-candidate-32-tlsv2-peers-and-16-identity-churn--2026-10-26). Earlier sections retain their original subjects and history.
+Latest bounded result: [SG32-v6: daemon, keeper and sampler charged together](#sg32-v6-service-group-result--2026-10-28): **41,328,640 bytes** for the complete fixed32-session case. Full D1/512MB suitability remains UNKNOWN; earlier sections retain their exact subjects and history.
 
 2026-10-25. **This limited screen completed without an observed OOM or budget overrun. Full D1 compliance with512MB remains UNKNOWN.** These are our own measurements, not external sizing figures. The resource checkpoints and remaining cases are in [D1 to DHT](../design/d1-dht-resource-checkpoints.md).
 
@@ -121,4 +121,26 @@ Workspace-local evidence: `/private/tmp/corsa-D1-K5-live-empty64-owner-package-R
 
 ## Historical evidence availability — 2026-10-28
 
-The private `/private/tmp/corsa-D1-*` paths cited above are now unavailable, including the old `64c0` runtime package and RAW. The committed outcomes/hashes remain historical records; live access to those files is not claimed. Static recovery preserved the `CurrentBootContext` fragment and relevant caller edit strings, with zero of six complete runtime files qualified to their final hashes; the old ELF was not restored. The new [clock-domain diagnostic proposal](d1-clock-domain-diagnostic.md) has accepted CODE and local pure QA; its Docker/kernel run and owner admission remain outstanding. It does not establish the old refusal's cause or memory fitness. Existing reports above are preserved unchanged.
+The private `/private/tmp/corsa-D1-*` paths cited above are now unavailable, including the old `64c0` runtime package and RAW. The committed outcomes/hashes remain historical records; live access to those files is not claimed. Static recovery preserved the `CurrentBootContext` fragment and relevant caller edit strings, with zero of six complete runtime files qualified to their final hashes; the old ELF was not restored. At that recovery checkpoint the new [clock-domain diagnostic](d1-clock-domain-diagnostic.md) had CODE/local pure QA but awaited owner admission and Docker execution. The later current diagnostic completed and found distinct time namespaces across separate containers; SG32 instead uses colocated parent/child clock proofs. It does not establish the old refusal's cause or memory fitness. Existing reports above are preserved unchanged.
+
+## SG32-v6 service-group result — 2026-10-28
+
+**SCOPED_SUCCESS:** the real daemon, keeper and sampler together had a kernel-charged cgroup peak of **41,328,640 bytes =41.32864MB =39.4140625MiB**, under the declared512000000-byte/1CPU/64task/no-swap service limit, with no subtraction. This is our actual Linuxarm64 Docker measurement. The fixed workload completed32→16→32→0 TLSv2 sessions,48 distinct identities and224 source-bound completed ping/get_peers/ping sequences (672 primary request/reply pairs,1344 main application frames/41216bytes, not TLS wire volume). No active FindNode/F1, full512-peer population, overload, long state history, enabledS6-observer cost, Desktop/SQLite or native macOS measurement is established.
+
+| Observation | Value / scope |
+|---|---|
+| Final service memory.current |13,963,264bytes, read after daemon and sampler reap; not a daemon-only RSS figure |
+| Kernel peak window |Fresh service cgroup creation through bounded final keeper peak-read, including its handoff waiting prefix and helper costs |
+| Peak read bracket |53711252221516..53711252227683ns in the qualified guest BOOTTIME domain; not host/UTC |
+| Sampling |41 periodic SAMPLE records plus SAMPLER_READY/SAMPLER_FINAL =43;45 total cgroup facts with keeper initial/final |
+| Coverage |Maximum pre-reap sample-end gap511126917ns; last owned-reap edge57810584ns, both below2s |
+| Final events and members |OOM/oom_kill/oom_group_kill0 throughout retained facts; keeper-only member[1] after node/sampler normal0/reap |
+| Logical state |Four phase walks7113/7268/9904/9904bytes; maxima12entries, not physical disk I/O or growth acceptance |
+
+The owner approved exactly one live handoff: PREPARED remained nonterminal; keeper read the501:20/0600 secret through its RO mount and emitted SECRET_ATTACHED, then preparer exited0/reaped/was removed with fresh absence. Only afterwards did the exact Host send CONTINUE; the exact keeper repeats its original secret checks/equality before sampler/node, and driver starts later. Retained RAW/command ordering plus exact executed Source attest this control flow. Secret values/hashes and separate inner-read/mount-inode traces were not exported. This validates the declared handoff in this run, not the sole physical cause of v5 retrospectively.
+
+All59 normal command records exited0, separately from three interactive CLI exits0 (preparer20/service24/driver33). Node and sampler also exited0/reaped, driver/container completion was normal, and final service seal retained stable cgroup/process births/executable/clock proofs and observed loopback-only network snapshots. Only the three exact owned containers and three volumes were removed; final eight own-label/ID/name absence queries were empty/exit0 and the canonical lock was absent. This is scoped cleanup, not proof of physical release of all backend allocations. All2195 tracked bodies/full metadata and indexbd6e were preserved during execution.
+
+Artifact lineage: CLI `9c5764b19c5be6b635d5a1dde774c0fc4f5bcc64ac960c8d31c7f6121b4eebc4`, driver `c836814111c5fc6fad55f0e4c7888060d252919a9278d57efb270594b42fafea`; Go1.27.3/Linuxarm64v8/CGO0 frozen Go source8afa, no rebuild. The service helper/Host/Common hashes and exact build-source manifests are in the [profile/provenance](d1-service-group-memory-profile-proposal.md). Root838a8f/session6395→8c64e5/exit0, noncebd3ecb3f03e6cea4b7e3497b27df15e3; actual receipt SHA427feb830c9e8bce14091213765363b392f3b3b416ae343cd9019e149e44c439, result SHA`a52d2ec96705a058e2c671c945e91092ce19475f93becaad59fa17bc43eb2d66`. Testerabd1d980/reviewer9f72b776 independently accepted whole DATA. RAW remains under ignored durable `docs/_internal/d1-artifacts/2026-10-28/sg32-runtime-package-v6/`; earlier failures remain separate.
+
+Bounds remain explicit:224 sequences and the fresh authenticated final0 witness are tied to exact stock-driver control flow; there is no full terminal per-peer RAW or separately retained final atomic-RPC response body, and cached_live is not the oracle. Peak/current are non-atomic ordered reads; a later current may exceed an earlier peak without contradiction. Coverage uses read_bracket_ns and owned REAP; SAMPLER_FINAL.requested_at_ns is a scheduled due value, not an actual request instant. Keeper-only exit-tail, physical shared-page attribution, isolated daemon/role charges, optional RSS/HWM/PSS and preparer/driver peaks remain UNKNOWN. Separate role limits are not measured peaks. Do not derive per-peer cost or a marginal delta from earlier binaries/collector arrangements. The one grant is consumed; no repeat, fullD1/512MB acceptance, G2, activation, commit or release is approved by this result.

@@ -66,6 +66,7 @@ func ownedReadySourceErrors(sources map[string][]byte) []string {
 	pins["internal/core/node/s6_connection_total_file_construction.go"] = "35e39f6a1a9560ccdb37184b127763521c7e932ff4ec813fd28ce06d7022ad6f"
 	pins["internal/core/node/k5_handshake_past.go"] = "36ffbc5fce20f06ba9fcaacce2c93b49aaa94840732a278def000617b1267aba"
 	pins["internal/core/connbudget/total_past.go"] = "22a97c21abe2bf31c7d29236266f6415acb9d689a3e53259ba99967d9a466a09"
+	pins["internal/core/node/find_node_resource_diagnostic.go"] = "63112a5bba4b8e2832680b47ae904bdf50f64806f5c707628c3a6604f9dfe549"
 	closed := map[string]bool{"ownedFindNodeSigningTestGate": true, "signingGate": true, "newFindNodeReadyTimedLoadedInboundCandidateService": true, "prepareFindNodeReadyTimedTestConstruction": true, "newFindNodeReadyLoadedContactReconciliationCandidateService": true, "captureContactReconciliationResolver": true, "captureContactReconciliationProducer": true, "contactReconciliation": true, "originalContactResolver": true, "originalContactAdmission": true, "originalContactProducer": true, "originalContactService": true, "originalContactWake": true, "findNodeReadyConstruction": true, "findNodeReadyOptions": true, "buildWithOptions": true, "installLoadedInbound": true, "newFindNodeReadyLoadedInboundCandidateService": true, "ownDMRuntimeConstruction": true, "prepareFindNodeReadyConstruction": true, "newFindNodeReadyCandidateService": true, "NewExecutingBootstrapIntake": true, "newDormantIntakeAt": true}
 	tracked := map[string]bool{"newFindNodeReadyLoadedContactReconciliationCandidateService": true, "captureContactReconciliationResolver": true, "captureContactReconciliationProducer": true, "newFindNodeReadyTimedLoadedInboundCandidateService": true, "prepareFindNodeReadyTimedTestConstruction": true, "buildWithOptions": true, "installLoadedInbound": true, "newFindNodeReadyLoadedInboundCandidateService": true, "prepareFindNodeReadyConstruction": true, "newFindNodeReadyCandidateService": true, "NewExecutingBootstrapIntake": true, "newDormantIntakeAt": true}
 	// The original gate factory now delegates through one pinned typed wrapper.
@@ -176,6 +177,7 @@ func ownedReadySourceErrors(sources map[string][]byte) []string {
 		}
 	}
 	wantCalls := map[string]int{
+		"prepareFindNodeReadyConstruction:internal/core/node/find_node_resource_diagnostic.go:NewD1FindNodeResourceDiagnostic":                            1,
 		"prepareFindNodeReadyConstruction:internal/core/node/find_node_ready_construction.go:newFindNodeReadyLoadedContactReconciliationCandidateService": 1,
 		"buildWithOptions:internal/core/node/find_node_ready_construction.go:newFindNodeReadyLoadedContactReconciliationCandidateService":                 1,
 		"captureContactReconciliationResolver:internal/core/node/service.go:newServiceWithConstruction":                                                   1,

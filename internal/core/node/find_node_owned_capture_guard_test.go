@@ -24,6 +24,9 @@ func ownedRawF1BodyPins() map[string]string {
 }
 
 func ownedRawF1SourceErrors(sources map[string][]byte) []string {
+	if !qualifiedD1MembershipSource(sources["find_node_membership_checkpoint.go"]) {
+		return []string{"membership exact tag/body changed"}
+	}
 	expected := map[string]map[string]int{
 		"ownedFindNodeRawFacts":               {"find_node_connection.go:<package>": 1, "find_node_connection.go:collectOwnedFindNodeRawFacts": 9, "find_node_bridge_capture.go:<package>": 1},
 		"ownedFindNodeRawWordsPerMember":      {"find_node_connection.go:<package>": 1, "find_node_connection.go:collectOwnedFindNodeRawFacts": 1, "find_node_bridge_construction.go:prepareFindNodeOwnedCaptureConstruction": 1, "find_node_bridge_construction.go:claim": 1},
@@ -32,6 +35,7 @@ func ownedRawF1SourceErrors(sources map[string][]byte) []string {
 		"collectOwnedFindNodeRawClasses":      {"find_node_connection.go:collectOwnedFindNodeRawFacts": 1},
 		"findNodePriorityClassLocked":         {"find_node_connection.go:captureFindNodePriorityClasses": 1, "find_node_connection.go:collectOwnedFindNodeRawClasses": 1},
 	}
+	expected["collectOwnedFindNodeRawMemberLocked"]["find_node_membership_checkpoint.go:CheckpointForService"] = 1
 	functions := map[string]bool{"collectOwnedFindNodeRawFacts": true, "collectOwnedFindNodeRawMemberLocked": true, "collectOwnedFindNodeRawClasses": true, "findNodePriorityClassLocked": true}
 	actual := map[string]map[string]int{}
 	for name := range expected {

@@ -362,9 +362,14 @@ def process_values(row, known, domain, allow_missing=False):
         need(known[pid] == identity, "process-incarnation-changed")
 
 
+def verify_secret_attachment(record, nonce):
+    need(type(record) is dict and record == {"kind": "SECRET_ATTACHED", "nonce": nonce},
+         "secret-attachment-receipt")
+
+
 def verify_service(records, nonce, cli_sha):
     need(type(records) is list and 1 <= len(records) <= 4096, "service-record-count")
-    allowed = {"SAMPLER_READY", "SAMPLE", "NODE_BOUND", "READY", "STOPPING_ACK", "SAMPLER_FINAL",
+    allowed = {"SECRET_ATTACHED", "SAMPLER_READY", "SAMPLE", "NODE_BOUND", "READY", "STOPPING_ACK", "SAMPLER_FINAL",
                "SAMPLER_SEALED", "STATE_CHECK", "LOG", "FINAL", "ERROR"}
     selected = {}
     samples, states = [], []
@@ -386,10 +391,12 @@ def verify_service(records, nonce, cli_sha):
             selected[kind] = row
     need(set(selected) == allowed - {"SAMPLE", "STATE_CHECK", "LOG", "ERROR"}, "missing-service-control")
     positions = {row["kind"]: index for index, row in enumerate(records) if row["kind"] in selected}
-    order = ["SAMPLER_READY", "NODE_BOUND", "READY", "STOPPING_ACK", "SAMPLER_FINAL", "SAMPLER_SEALED", "FINAL"]
+    order = ["SECRET_ATTACHED", "SAMPLER_READY", "NODE_BOUND", "READY", "STOPPING_ACK", "SAMPLER_FINAL", "SAMPLER_SEALED", "FINAL"]
     need([positions[k] for k in order] == sorted(positions[k] for k in order), "service-control-order")
     need(all(positions["READY"] < index < positions["STOPPING_ACK"] for index, row in enumerate(records)
              if row["kind"] == "STATE_CHECK"), "state-check-order")
+    verify_secret_attachment(selected["SECRET_ATTACHED"], nonce)
+    need(positions["SECRET_ATTACHED"] == 0, "secret-attachment-not-first")
     initial, final = selected["SAMPLER_READY"], selected["FINAL"]
     need(initial["ordinal"] == 0 and type(initial["ordinal"]) is int and bool(samples), "sampler-start-or-empty")
     ready = selected["READY"]

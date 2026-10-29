@@ -422,6 +422,9 @@ func bareV2PilotSourceErrors(sources map[string][]byte) []string {
 	const field = "ownedFindNodeAdvertiseTest"
 	const factory = "newOwnedBareV2PilotRelay"
 	var failures []string
+	if !qualifiedD1DiagnosticSource(sources["find_node_resource_diagnostic.go"]) {
+		failures = append(failures, "pilot diagnostic tagged Source changed")
+	}
 	declared, read, written, called, factories := 0, 0, 0, 0, 0
 	for path, raw := range sources {
 		file, err := parser.ParseFile(token.NewFileSet(), path, raw, 0)
@@ -475,7 +478,7 @@ func bareV2PilotSourceErrors(sources map[string][]byte) []string {
 							if len(n.Rhs) == 1 {
 								value, _ = n.Rhs[0].(*ast.Ident)
 							}
-							if (site != "find_node_bare_v2_pilot_test.go:"+factory && site != "find_node_automatic_endpoint_trace_test.go:newOwnedAutomaticTraceService" && site != "find_node_capability_selection_test.go:TestOwnedFindNodeHandshakeCapabilitySelection") || len(n.Lhs) != 1 || len(n.Rhs) != 1 || value == nil || value.Name != "true" {
+							if (site != "find_node_bare_v2_pilot_test.go:"+factory && site != "find_node_automatic_endpoint_trace_test.go:newOwnedAutomaticTraceService" && site != "find_node_capability_selection_test.go:TestOwnedFindNodeHandshakeCapabilitySelection" && site != "find_node_resource_diagnostic.go:NewD1FindNodeResourceDiagnostic") || len(n.Lhs) != 1 || len(n.Rhs) != 1 || value == nil || value.Name != "true" {
 								failures = append(failures, "pilot unclosed setter")
 							}
 						}
@@ -516,7 +519,7 @@ func bareV2PilotSourceErrors(sources map[string][]byte) []string {
 			})
 		}
 	}
-	if declared != 1 || read != 1 || written != 3 || called != 2 || factories != 1 {
+	if declared != 1 || read != 1 || written != 4 || called != 2 || factories != 1 {
 		failures = append(failures, "pilot exact declaration/read/write/call inventory")
 	}
 	return failures

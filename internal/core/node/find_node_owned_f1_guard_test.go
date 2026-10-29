@@ -13,6 +13,9 @@ import (
 // Closed S1 syntax roles only. Registry write closure, Ready, admission and
 // runtime causal sensitivity remain independent obligations.
 func ownedF1SourceErrors(sources map[string][]byte) []string {
+	if !qualifiedD1DiagnosticSource(sources["find_node_resource_diagnostic.go"]) {
+		return []string{"diagnostic exact tag/body changed"}
+	}
 	compact := func(s string) string { return strings.Join(strings.Fields(s), "") }
 	var failures []string
 	bodies := map[string]string{}
@@ -60,7 +63,7 @@ func ownedF1SourceErrors(sources map[string][]byte) []string {
 	if !reflect.DeepEqual(refs, map[string]int{"find_node_connection.go:<package>": 2, "find_node_bridge_construction.go:newFindNodeOwnedF1CandidateService": 1, "find_node_bridge_construction.go:prepareFindNodeOwnedCaptureConstruction": 1}) {
 		failures = append(failures, "owned F1 exact adapter roles changed")
 	}
-	if !reflect.DeepEqual(owned, map[string]int{"find_node_ready_construction.go:prepareFindNodeReadyConstruction": 2, "find_node_ready_construction.go:bindings": 5, "find_node_owned_local_target.go:prepareFindNodeOwnedLocalTargetConstruction": 1, "find_node_connection.go:publishFindNodeLocked": 1, "find_node_connection.go:findNodePrioritySnapshot": 1, "find_node_connection.go:collectOwnedFindNodeRawFacts": 2, "find_node_bridge_construction.go:claim": 3, "find_node_bridge_capture.go:captureOwnedFindNodeObservation": 2, "find_node_connection.go:captureFindNodeSeed": 3, "find_node_owned_round_loop.go:prepareFindNodeOwnedRoundConstruction": 1}) {
+	if !reflect.DeepEqual(owned, map[string]int{"find_node_resource_diagnostic.go:boundTo": 5, "find_node_ready_construction.go:prepareFindNodeReadyConstruction": 2, "find_node_ready_construction.go:bindings": 5, "find_node_owned_local_target.go:prepareFindNodeOwnedLocalTargetConstruction": 1, "find_node_connection.go:publishFindNodeLocked": 1, "find_node_connection.go:findNodePrioritySnapshot": 1, "find_node_connection.go:collectOwnedFindNodeRawFacts": 2, "find_node_bridge_construction.go:claim": 3, "find_node_bridge_capture.go:captureOwnedFindNodeObservation": 2, "find_node_connection.go:captureFindNodeSeed": 3, "find_node_owned_round_loop.go:prepareFindNodeOwnedRoundConstruction": 1}) {
 		failures = append(failures, "owned F1 field alias/role escape")
 	}
 	if !reflect.DeepEqual(literals, map[string]int{"find_node_bridge_construction.go:newFindNodeOwnedF1CandidateService": 1, "find_node_bridge_construction.go:prepareFindNodeOwnedCaptureConstruction": 1}) {

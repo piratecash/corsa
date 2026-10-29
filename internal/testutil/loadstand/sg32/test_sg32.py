@@ -156,7 +156,7 @@ def complete_service_records(service):
              "sampler_final": raw[-2], "sampler_sealed": raw[-1], "keeper_process": process_record(1),
              "state": {"bytes": 3, "entries": 4, "bracket_ns": [last + 50, last + 60]},
              "checked_phases": list(service.PHASES), "keeper_exit_tail": "UNKNOWN"}
-    return raw[:3] + [ready] + checks + raw[3:] + [final]
+    return [{"kind": "SECRET_ATTACHED", "nonce": NONCE}] + raw[:3] + [ready] + checks + raw[3:] + [final]
 
 
 class RealFD:
@@ -437,6 +437,12 @@ class PreparerFiles(RealFD):
         self.stack.enter_context(mock.patch.object(self.s, "os", fake_os))
         raw = json.dumps(self.config).encode() + b"\n"
         self.stack.enter_context(mock.patch.object(self.s, "sys", types.SimpleNamespace(stdin=types.SimpleNamespace(buffer=io.BytesIO(raw)))))
+        controls = iter((raw, self.s.encode({"kind": "RELEASE", "nonce": NONCE}, 4096)))
+        self.control_reads = []
+        def next_control(stream, deadline, maximum=4096):
+            self.control_reads.append((deadline, maximum))
+            return next(controls)
+        self.stack.enter_context(mock.patch.object(self.s, "bounded_control_line", side_effect=next_control))
         self.stack.enter_context(mock.patch.object(self.s, "time", types.SimpleNamespace(monotonic=lambda: 100.)))
         self.stack.enter_context(mock.patch.object(self.s.secrets, "token_hex", lambda size: "c" * (2 * size)))
         self.stack.enter_context(mock.patch.object(self.s, "emit", lambda value: self.records.append(copy.deepcopy(value))))
@@ -623,6 +629,7 @@ class SG32PureTests(unittest.TestCase):
         with PreparerFiles(s) as fixture:
             self.assertEqual(s.preparer(NONCE), 0)
             self.assertEqual([r["kind"] for r in fixture.records], ["PREPARED"])
+            self.assertEqual(fixture.control_reads, [(120., 8192), (120., 4096)])
             secret = fixture.paths["auth"] / "auth.json"
             value = json.loads(secret.read_bytes())
             self.assertEqual(value["password"], "c" * 64)

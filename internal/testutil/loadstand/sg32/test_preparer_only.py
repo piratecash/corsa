@@ -10,6 +10,7 @@ import sys
 import tempfile
 import types
 import unittest
+import zlib
 from unittest import mock
 
 HERE = Path(__file__).resolve().parent
@@ -147,6 +148,17 @@ class Transport:
         for args in self.starts: test.assertEqual(args, ['start', '-a', '-i', ID])
 
 
+def historical_service_fixture():
+    """Closed historical Source DATA; never import or execute the decompressed bytes."""
+    raw = (HERE / 'fixtures/preparer_service_4575.py.gz').read_bytes()
+    assert len(raw) == 12134 and sha(raw) == 'f0521c0e10cd82dfbd240dfba0964ebae3520b36fb99d5739f8eefe8ec2f8465'
+    decoder = zlib.decompressobj(31)
+    restored = decoder.decompress(raw, 47526)
+    assert decoder.eof and not decoder.unused_data and not decoder.unconsumed_tail
+    assert len(restored) == 47525 and sha(restored) == P.DIAGNOSTIC_SHA
+    return restored
+
+
 class BootstrapFiles(OwnFiles):
     def __init__(self):
         super().__init__(); self.src = self.root / 'source'; self.src.mkdir(mode=0o700)
@@ -157,7 +169,7 @@ class BootstrapFiles(OwnFiles):
                     'allow_recovery_hold': True, 'inputs_ready': True, 'runtime_service': False, 'runtime_driver': False, 'files': {}}
         for name in C.INPUT_NAMES:
             path = self.src/name
-            if name == 'sg32_service.py': self.write(path, (HERE/name).read_bytes())
+            if name == 'sg32_service.py': self.write(path, historical_service_fixture())
             elif not path.exists(): self.write(path, b'ordinary opaque fixture\n')
             raw = path.read_bytes(); self.cfg['files'][name] = {'path': str(path), 'sha256': sha(raw), 'bytes': len(raw)}
         q = {'status': 'QUALIFIED_CURRENT_CLI_AND_REBOUND_DRIVER', 'source_commit': '8afa7f5b365a56d55f116c8a0dfb0ac581c79000',
@@ -205,11 +217,16 @@ class PreparerOnlyPureTests(unittest.TestCase):
                         read.assert_called_once_with(f.path,expected_profile=P.PROFILE)
 
     def test_02_bootstrap_qualified_marker_and_owner_bytes_modules_refuse(self):
-        for case in ('ownerfalse','controller-sha','stale-module','exact-marker'):
+        for case in ('ownerfalse','controller-sha','stale-module','exact-marker','current-source'):
             with self.subTest(bootstrap=case):
                 f=self.own(BootstrapFiles)
                 if case=='ownerfalse': f.cfg['owner_approved']=False
                 if case=='controller-sha': f.cfg['preparer_only_sha256']='0'*64
+                if case=='current-source':
+                    raw=(HERE/'sg32_service.py').read_bytes()
+                    self.assertNotEqual(sha(raw),P.DIAGNOSTIC_SHA)
+                    path=f.src/'sg32_service.py';f.write(path,raw)
+                    f.cfg['files']['sg32_service.py']={'path':str(path),'sha256':sha(raw),'bytes':len(raw)}
                 f.save()
                 with f.bound(), mock.patch.dict(sys.modules), contextlib.redirect_stdout(io.StringIO()):
                     for name in ('sg32_common','sg32_host','preparer_only'):sys.modules.pop(name,None)
@@ -218,10 +235,15 @@ class PreparerOnlyPureTests(unittest.TestCase):
                         with self.assertRaisesRegex(B.Fault,'subject-already-loaded'): B._load_validated(b'MARKER=1',b'MARKER=2',b'MARKER=3')
                         self.assertIs(sys.modules['preparer_only'],foreign)
                     elif case=='exact-marker':
+                        self.assertEqual(f.cfg['files']['sg32_service.py']['sha256'],P.DIAGNOSTIC_SHA)
+                        with mock.patch.object(Path,'read_bytes',return_value=b'corrupted historical fixture'):
+                            with self.assertRaises(AssertionError): historical_service_fixture()
                         with mock.patch.object(B.time,'monotonic',side_effect=[91.,92.]):self.assertEqual(B.main([str(f.path)]),73)
                         self.assertTrue(all(name not in sys.modules for name in ('sg32_common','sg32_host','preparer_only')))
                     else:
                         with mock.patch.object(B,'_load_validated',side_effect=AssertionError('loaded unapproved bytes')) as load_subject:
+                            if case=='current-source':
+                                with self.assertRaisesRegex(B.Fault,'^diagnostic-source$'): B.preflight(f.path)
                             self.assertEqual(B.main([str(f.path)]),2)
                         load_subject.assert_not_called()
 

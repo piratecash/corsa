@@ -2,6 +2,8 @@ package findnodebridge
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"fmt"
 	"go/ast"
 	"go/format"
 	"go/parser"
@@ -435,8 +437,9 @@ func TestDomainHasNoExistingProductionImporter(t *testing.T) {
 	root := filepath.Clean(filepath.Join("..", "..", ".."))
 	wanted := "github.com/piratecash/corsa/internal/core/findnodebridge"
 	approvedImporters := map[string]bool{
-		"internal/core/node/find_node_ready_construction.go": true,
-		"internal/core/findnode/owned_bridge_bootstrap.go":   true, "internal/core/findnode/owned_bridge_forward_answer.go": true, "internal/core/findnode/owned_bridge_round_dispatch.go": true,
+		"internal/core/node/find_node_resource_diagnostic.go": true,
+		"internal/core/node/find_node_ready_construction.go":  true,
+		"internal/core/findnode/owned_bridge_bootstrap.go":    true, "internal/core/findnode/owned_bridge_forward_answer.go": true, "internal/core/findnode/owned_bridge_round_dispatch.go": true,
 		"internal/core/findnode/owned_bridge_receive.go":          true,
 		"internal/core/node/find_node_owned_receive.go":           true,
 		"internal/core/findnode/owned_bridge_commit.go":           true,
@@ -486,6 +489,15 @@ func TestDomainHasNoExistingProductionImporter(t *testing.T) {
 				}
 				rel = filepath.ToSlash(rel)
 				importers[rel]++
+				if rel == "internal/core/node/find_node_resource_diagnostic.go" {
+					body, err := os.ReadFile(path)
+					if err != nil {
+						return err
+					}
+					if !bytes.HasPrefix(body, []byte("//go:build d1_resource_probe\n\npackage node\n")) || fmt.Sprintf("%x", sha256.Sum256(body)) != "63112a5bba4b8e2832680b47ae904bdf50f64806f5c707628c3a6604f9dfe549" {
+						t.Error("diagnostic importer exact tag/body changed")
+					}
+				}
 				if !approvedImporters[rel] || imp.Name != nil {
 					t.Errorf("dormant leaf has unapproved production importer: %s", path)
 				}

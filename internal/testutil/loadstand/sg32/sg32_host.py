@@ -11,7 +11,7 @@ import subprocess
 import sys
 import time
 
-from sg32_common import Fault, need, strict_json, encode, read_owned, digest, static_elf, hex_value, INPUT_NAMES, IMAGE, verify_driver, verify_service
+from sg32_common import Fault, need, strict_json, encode, read_owned, digest, static_elf, hex_value, INPUT_NAMES, IMAGE, verify_driver, verify_service, verify_secret_attachment
 
 DOCKER = "/Users/hades/.docker/bin/docker"
 ENDPOINT = "unix:///Users/hades/.docker/run/docker.sock"
@@ -300,6 +300,61 @@ def activate_driver(driver, activation, work):
     driver.send(payload); driver.finish_input()
 
 
+def handoff_packet(child, kind, nonce):
+    need(all(type(row) is dict for row in child.records()), "handoff-record-shape")
+    return find_record(child, kind, nonce)
+
+
+def handoff_secret(engine, prep, prep_id, nonce, manifest, names, ids, cli_sha, work, prep_deadline):
+    """Transfer an ACTIVE tmpfs mount before releasing its original owner."""
+    engine.pump_until(lambda: handoff_packet(prep, "PREPARED", nonce) is not None or prep.done(), prep_deadline)
+    receipts = prep.records(True)
+    need(prep.p.poll() is None and not prep.err and len(receipts) == 1 and
+         receipts[0].get("kind") == "PREPARED" and receipts[0].get("nonce") == nonce and
+         receipts[0].get("files") == manifest["files"], "live-preparer-receipt")
+    prep_state = engine.inspect(prep_id, prep_deadline)["State"]
+    need(prep_state["Running"] is True and prep_state["OOMKilled"] is False, "preparer-not-live")
+    service_deadline = min(work, time.monotonic() + 20)
+    limit = min(prep_deadline, service_deadline)
+    service_id = engine.command(create_argv("service", nonce, names, cli_sha=cli_sha), limit,
+                                mutation=True).decode().strip()
+    need(hex_value(service_id, 64), "created-service-id")
+    ids.append(service_id)
+    verify_created(engine.inspect(service_id, limit), "service", nonce, names)
+    need(prep.p.poll() is None and time.monotonic() < limit, "preparer-lost-before-service-start")
+    service = Child(engine, ["start", "-a", "-i", service_id], "service", True)
+    engine.pump_until(lambda: handoff_packet(service, "SECRET_ATTACHED", nonce) is not None or
+                      service.done() or prep.done(), limit)
+    attached = handoff_packet(service, "SECRET_ATTACHED", nonce)
+    verify_secret_attachment(attached, nonce)
+    need(service.records(True) == [attached], "handoff-service-prefix")
+    need(service.p.poll() is None and prep.p.poll() is None and not service.err,
+         "handoff-holder-lost")
+    for ident in (prep_id, service_id):
+        state = engine.inspect(ident, limit)["State"]
+        need(state["Running"] is True and state["OOMKilled"] is False, "handoff-holder-not-running")
+    release = encode({"kind": "RELEASE", "nonce": nonce}, 4096)
+    need(time.monotonic() < limit, "handoff-release-deadline")
+    prep.send(release); prep.finish_input()
+    engine.pump_until(lambda: prep.done() or service.done(), limit)
+    need(prep.done() and prep.p.returncode == 0 and not prep.err and service.p.poll() is None and
+         prep.records(True) == receipts and prep.p.wait(timeout=.001) == 0, "preparer-handoff-exit")
+    state = engine.inspect(prep_id, limit)["State"]
+    need(state["Running"] is False and type(state["ExitCode"]) is int and state["ExitCode"] == 0 and
+         state["OOMKilled"] is False, "preparer-handoff-terminal")
+    engine.command(["rm", prep_id], limit, mutation=True)
+    need(not engine.command(["ps", "-a", "--no-trunc", "--filter", "id=" + prep_id,
+         "--format", "{{.ID}}"], limit).strip(), "preparer-not-removed")
+    state = engine.inspect(service_id, limit)["State"]
+    need(state["Running"] is True and state["OOMKilled"] is False and service.p.poll() is None,
+         "handoff-holder-lost-before-continue")
+    need(service.records(True) == [attached], "handoff-service-prefix-before-continue")
+    continuation = encode({"kind": "CONTINUE", "nonce": nonce}, 4096)
+    need(time.monotonic() < limit, "handoff-continue-deadline")
+    service.send(continuation)
+    return service_id, service, service_deadline
+
+
 def find_record(child, kind, nonce):
     records = [r for r in child.records() if type(r) is dict and r.get("kind") == kind and r.get("nonce") == nonce]
     need(len(records) <= 1, "duplicate-control-receipt")
@@ -437,22 +492,11 @@ def run(admission_path, started_at=None):
         engine.command(["cp", str(engine.root / "inputs-manifest.json"), prep_id + ":/inputs/manifest.json"], work, mutation=True)
         prep_deadline = min(work, time.monotonic() + 20)
         prep = Child(engine, ["start", "-a", "-i", prep_id], "control", True)
-        prep.send(encode(manifest, 4096)); prep.finish_input()
-        engine.pump_until(prep.done, prep_deadline)
-        receipts = prep.records(True)
-        need(prep.p.returncode == 0 and not prep.err and len(receipts) == 1 and
-             receipts[0].get("kind") == "PREPARED" and receipts[0].get("nonce") == nonce and
-             receipts[0].get("files") == manifest["files"], "preparer-receipt")
-        prep_state = engine.inspect(prep_id, work)["State"]
-        need(prep_state["Running"] is False and type(prep_state["ExitCode"]) is int and
-             prep_state["ExitCode"] == 0 and prep_state["OOMKilled"] is False, "preparer-exit")
-        engine.command(["rm", prep_id], work, mutation=True)
-        need(not engine.command(["ps", "-a", "--no-trunc", "--filter", "id=" + prep_id,
-             "--format", "{{.ID}}"], work).strip(), "preparer-not-removed")
-        service_id = create("service")
-        service = Child(engine, ["start", "-a", "-i", service_id], "service", True)
+        prep.send(encode(manifest, 4096))
+        service_id, service, service_deadline = handoff_secret(engine, prep, prep_id, nonce, manifest,
+            names, ids, cfg["files"]["corsad"]["sha256"], work, prep_deadline)
         engine.pump_until(lambda: find_record(service, "READY", nonce) is not None or service.done(),
-                          min(work, time.monotonic() + 20))
+                          service_deadline)
         ready = find_record(service, "READY", nonce)
         need(ready is not None and service.p.poll() is None and hex_value(ready.get("identity"), 40) and
              type(ready.get("started_at")) is str and ready["started_at"].endswith("Z"), "service-ready")

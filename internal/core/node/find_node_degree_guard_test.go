@@ -12,6 +12,12 @@ import (
 // Closed constructor/escape/lifecycle scope. These syntax checks complement
 // genuine Accept/Dial/CM/terminal tests; they do not manufacture runtime proof.
 func degreeSourceErrors(sources map[string][]byte) []string {
+	if !qualifiedD1MembershipSource(sources["find_node_membership_checkpoint.go"]) {
+		return []string{"membership exact tag/body changed"}
+	}
+	if !qualifiedD1DiagnosticSource(sources["find_node_resource_diagnostic.go"]) {
+		return []string{"diagnostic exact tag/body changed"}
+	}
 	expected := map[string]map[string]int{
 		"degreeProfile":                    {"find_node_degree.go:<package>": 2, "find_node_degree.go:newDegreeCandidateService": 1, "find_node_degree.go:newDegreeFixtureCandidateService": 1, "find_node_degree.go:newDegreeService": 1},
 		"degreeClock":                      {"find_node_degree.go:<package>": 2, "find_node_degree.go:elapsed": 1, "find_node_degree.go:newDegreeService": 2},
@@ -65,6 +71,10 @@ func degreeSourceErrors(sources map[string][]byte) []string {
 	expected["degreeHistoryRow"]["find_node_degree_bridge.go:ownedDegreeProjectionFrontier"] = 1
 	// Exact private Ready constructor sites; all existing closures stay strict.
 	expected["degreeOwner"]["find_node_ready_construction.go:<package>"] = 1
+	expected["degreeProfile"]["find_node_resource_diagnostic.go:NewD1FindNodeResourceDiagnostic"] = 1
+	expected["degreeOwner"]["find_node_resource_diagnostic.go:<package>"] = 1
+	expected["degreeWitness"]["find_node_membership_checkpoint.go:<package>"] = 1
+	expected["degreeWitness"]["find_node_membership_checkpoint.go:CheckpointForService"] = 1
 	actual := map[string]map[string]int{}
 	for name := range expected {
 		actual[name] = map[string]int{}
@@ -279,6 +289,14 @@ func TestDegreeWitnessOriginGuardRejectsOmissionNilAndLateRewrite(t *testing.T) 
 // This is not whole-program unsafe/reflection or dynamic alias analysis.
 func degreeOriginReferenceErrors(sources map[string][]byte) []string {
 	expected := map[string]int{
+		"find_node_membership_checkpoint.go:CheckpointForService|selector/read|ifw==nil||w.origin!=row.life||w.owner!=o||w.closed||w.untracked||w.slot!=index||w.generation==0||w.generation!=row.generation||row.life.token!=r.token||!validDegreeStatisticKey(w.key)||w.key.outgoing||w.key.identity==domain.PeerIdentityFromWire(r.address){": 1,
+		"k5_handshake_past.go:<package>|field|target,originhandshakeSegmentDescriptor": 1,
+		"k5_handshake_past.go:identity|reference/assignment-lhs|origin:=handshakeSegmentDescriptor{key:r.target.key,bounds:r.target.bounds,coverageStart:r.target.coverageStart,fromAt:r.target.coverageStart,throughAt:r.target.coverageStart}": 1,
+		"k5_handshake_past.go:identity|reference/read|ifd.err!=nil||d.cursor!=len(d.raw)||q!=origin||session!=r.expected.Checkpoint.Session||capacity!=r.expected.Capacity||chunk!=r.expected.ChunkCapacity{":                                    1,
+		"k5_handshake_past.go:identity|selector/assignment-lhs|r.origin=origin":                                       1,
+		"k5_handshake_past.go:identity|reference/read|r.origin=origin":                                                1,
+		"k5_handshake_past.go:originCursor|selector/read|returnhandshakePastCursor{at:int64(r.origin.coverageStart)}": 1,
+		"k5_handshake_past.go:decodeFinal|selector/read|iferr!=nil||!ok||session!=r.expected.Checkpoint.Session||q.key!=r.origin.key||q.bounds!=r.origin.bounds||q.coverageStart!=r.origin.coverageStart||q.checkpointID!=id||q.rowCount<0||q.rowCount>r.expected.Capacity||layout!=r.expected.ChunkCapacity||chunks!=want||chunks>uint64(r.limits.StoreRecords){": 3,
 		"address_identities.go:<package>|field|origindomain.PeerIdentityOrigin":                                                                                            1,
 		"address_identities.go:claimedAddressIdentity|key|returnaddressIdentity{identity:id,origin:domain.PeerIdentityClaimed}":                                            1,
 		"address_identities.go:record|selector/read|ifpresent&&current.origin==domain.PeerIdentityProvenV2&&next.origin!=domain.PeerIdentityProvenV2{":                     2,
