@@ -2,6 +2,9 @@ name: Checks
 
 on:
   pull_request:
+  push:
+    branches: [dev]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -110,6 +113,11 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Setup Python for preflight controls
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
       - name: Install Linux desktop build deps
         run: |
           sudo apt-get update
@@ -131,8 +139,13 @@ jobs:
             libxrender-dev \
             libxxf86vm-dev
 
-      - name: Run tests
-        run: make test
+      - name: Check release test scope and artifact report refusals
+        run: |
+          python scripts/test-test-release.py
+          python scripts/test-report-candidate-artifacts.py
+
+      - name: Run applicable release tests (overlaysim deferred to D1)
+        run: make test-release
 
       - name: Run storage tests against the cgo SQLite driver
         run: make test-cgo

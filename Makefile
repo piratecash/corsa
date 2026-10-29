@@ -174,6 +174,12 @@ vuln:
 test:
 	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) $(GO) test -timeout=15m ./...
 
+# Owner-approved urgent-release scope; overlaysim is DEFERRED, never PASS.
+# Keep test/test-v/test-all intact for the full repository suite.
+.PHONY: test-release
+test-release:
+	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) GO="$(GO)" bash scripts/test-release.sh
+
 # The storage tests against the cgo SQLite driver. That driver ships on Android
 # only, and no CI runner runs Android, so without this target its DSN handling,
 # WAL behaviour and transaction semantics were never exercised — a divergence

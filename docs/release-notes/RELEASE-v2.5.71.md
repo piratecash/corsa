@@ -6,6 +6,8 @@ Nodes running protocol version 31 can now establish secure session v2 connection
 
 TLS-first connections are enabled by default. Supported older peers can still use the legacy session after a strictly validated legacy handshake, but a failed TLS attempt alone is never treated as permission to downgrade. The minimum supported protocol version is now 28, and signing keys receive stricter validation when they enter the node.
 
+To switch TLS-first off temporarily for peers that have never proved v2, set `CORSA_V2_TLS_FIRST=0` for the node. The SDK uses its `NodeConfig.V2TLSFirst` field rather than reading that environment variable. This does not disable the v2 listener, remove saved pins or permit legacy for a known pinned identity or bound endpoint. Where legacy is still allowed, an on-path attacker can hold peers that have never proved v2 in legacy at first contact; this release does not claim that attack closed for the whole network.
+
 The saved v2 protection is part of the node's identity state. If its pin store or marker is missing, unreadable or kept in an unsafe location, Corsa refuses to start and explains the problem instead of discarding that protection or silently falling back.
 
 ## Messages Are Read When They Are Seen
@@ -48,6 +50,8 @@ Keep a coherent backup of the identity file, `secure-sessions-<port>.json`, its 
 
 After storage schema 8 is committed, an older binary whose migration catalog ends at schema 7 cannot open that database. An in-place binary rollback is therefore unsupported. Create a verified, SQLite-consistent backup after an orderly shutdown; copying only a live `.db` file without its WAL is not a safe backup.
 
+Any rollback build must support secure session v2 and the database schema it is asked to open, including schema 8 after that migration. A build ending at schema 7 requires an explicitly verified, SQLite-consistent pre-upgrade backup and recovery procedure; never delete pins or lower the session protection to make an older binary start. Native Windows runtime/DACL checks and real Tor measurements remain DEFERRED / UNVERIFIED, not passed; this does not remove the applicable Windows build obligations or proxy and authentication protections.
+
 The Docker image runs as UID 10001 and keeps its persistent data in `/home/corsa/.corsacore`. Mount the volume at that location and make it private to the container user rather than using a world-writable directory.
 
 ---
@@ -59,6 +63,8 @@ The Docker image runs as UID 10001 and keeps its persistent data in `/home/corsa
 Ноды с protocol version 31 теперь могут устанавливать secure session v2 поверх TLS 1.3. Доказательство identity привязано к конкретному зашифрованному соединению, а проверенные identities и endpoints сохраняются между перезапусками. После успешной v2-проверки peer не может незаметно вернуться к legacy-сессии.
 
 TLS-first включён по умолчанию. Поддерживаемые старые peers всё ещё могут использовать legacy-сессию после строго проверенного legacy handshake, но одного сбоя TLS недостаточно для downgrade. Минимальная поддерживаемая версия протокола повышена до 28, а signing keys проходят более строгую проверку при поступлении в ноду.
+
+Чтобы временно отключить TLS-first для peers, которые ещё не доказали v2, задайте ноде `CORSA_V2_TLS_FIRST=0`. SDK использует поле `NodeConfig.V2TLSFirst`, а не эту переменную окружения. Это не отключает v2 listener, не удаляет сохранённые pins и не разрешает legacy для известной pinned identity или привязанного endpoint. Там, где legacy ещё разрешён, on-path атакующий может удерживать peers, ещё не доказавших v2, в legacy при первом контакте; релиз не объявляет эту атаку закрытой для всей сети.
 
 Сохранённая v2-защита является частью состояния identity ноды. Если pin store или его marker отсутствует, не читается или хранится в небезопасном месте, Corsa объясняет проблему и отказывается стартовать вместо удаления защиты или незаметного fallback.
 
@@ -101,5 +107,7 @@ Traffic totals сохраняют накопленные значения пос
 Сохраните согласованную резервную копию identity, файла `secure-sessions-<port>.json`, его marker и state database. При переносе ноды или смене каталога данных перемещайте identity и pin state вместе. Удаление trust state ради обхода отказа запуска удаляет защиту, накопленную предыдущими secure sessions.
 
 После применения storage schema 8 старый binary, чей каталог миграций заканчивается на schema 7, не сможет открыть эту базу. Поэтому in-place rollback binary не поддерживается. Сделайте проверенную SQLite-consistent копию после корректного shutdown; копирование только работающего `.db` без WAL не является безопасным backup.
+
+Binary для отката должен поддерживать secure session v2 и схему открываемой базы, включая schema 8 после этой миграции. Для binary с каталогом до schema 7 требуется явно проверенная SQLite-consistent резервная копия до обновления и процедура восстановления; нельзя удалять pins или ослаблять session-защиту ради запуска старого binary. Настоящие Windows runtime/DACL проверки и Tor-замеры остаются DEFERRED / UNVERIFIED, не пройденными; это не отменяет применимые Windows builds, защиту proxy и аутентификацию.
 
 Docker image работает от UID 10001 и хранит постоянные данные в `/home/corsa/.corsacore`. Монтируйте volume в этот каталог и ограничьте доступ пользователем контейнера вместо использования world-writable директории.

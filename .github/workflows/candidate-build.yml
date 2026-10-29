@@ -1,0 +1,90 @@
+name: Candidate build validation
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [dev]
+
+# Build evidence only. No upload-artifact, release, tag or registry publication.
+# release.yml remains the only publisher and retains its admission gate.
+permissions:
+  contents: read
+
+concurrency:
+  group: candidate-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Candidate (${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-amd64
+            runner: ubuntu-latest
+            commands: |
+              make build-node-linux-amd64
+              make build-desktop-linux-amd64
+          - platform: darwin-arm64
+            runner: macos-latest
+            commands: |
+              make build-node-macos-arm64
+              make build-desktop-macos-arm64
+          - platform: darwin-amd64
+            runner: macos-15-intel
+            commands: |
+              make build-node-macos-amd64
+              make build-desktop-macos-amd64
+          - platform: windows-amd64
+            runner: windows-latest
+            commands: |
+              make build-node-windows-amd64
+              make build-desktop-windows-amd64
+          - platform: windows-arm64
+            runner: windows-latest
+            commands: |
+              make build-node-windows-arm64
+              make build-desktop-windows-arm64
+    steps:
+      - name: Checkout exact triggering commit
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Setup Python for static artifact checks
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Linux desktop build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libasound2-dev libegl1-mesa-dev libgles2-mesa-dev libvulkan-dev \
+            libwayland-dev libx11-dev libx11-xcb-dev libxcursor-dev libxext-dev \
+            libxfixes-dev libxi-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libxrandr-dev libxrender-dev libxxf86vm-dev
+
+      - name: Build daemon and Desktop
+        shell: bash
+        env:
+          GOTOOLCHAIN: local
+          GOTELEMETRY: "off"
+        run: ${{ matrix.commands }}
+
+      - name: Inspect and package candidates (log evidence only)
+        shell: bash
+        env:
+          GOTOOLCHAIN: local
+          GOTELEMETRY: "off"
+        run: python scripts/report-candidate-artifacts.py --platform "${{ matrix.platform }}" --source-sha "$GITHUB_SHA"

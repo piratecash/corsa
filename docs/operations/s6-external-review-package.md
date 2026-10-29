@@ -1,10 +1,10 @@
 # S6 external review and native Windows evidence / Внешняя проверка S6 и свидетельства Windows
 
-## Current verification scope / Текущая область проверки — 2026-10-23
+## Current verification scope / Текущая область проверки — 2026-10-29
 
-The [later owner decision](../operations/d1-release-decision-proposal.md#measurement-scope-2026-10-23) defers real Windows/DACL and Tor measurements while work proceeds on macOS/Linux. Earlier unconditional Windows/Tor release prerequisites below are superseded only in that scope; the historical results are retained. Windows and Tor remain UNVERIFIED/UNKNOWN, never PASS. Schema 2 retains all 17 conditions: 7 done, 2 partial, 7 not_done and 1 deferred (`tor_phase_measurement`). The unsafe-store composite remains partial; clearnet/real-old-release first-contact timing and timeout derivation remain required. Proxy/no-direct-fallback, authentication, independent crypto review, other tests, G2 and separate release decisions remain required. The gate is closed. Any Tor observation role remains deferred; macOS/Linux data establishes no Tor threshold or guarantee.
+The [accepted current scope](urgent-full-product-release-scope.md) is daemon and Desktop on Linux amd64, macOS arm64/amd64 and Windows amd64/arm64; Android APK/AAB follow separately. Only `internal/overlaysim` is DEFERRED to D1, not PASS; generic `make test-all` is not green. K2/R1b/R2/N-in remain OFF in ordinary constructors, configuration and RPC. D1/G2/FindNode/F1 activation is outside this release; internal source opt-in APIs do not activate shipped products. All other applicable product tests, proxy/no-direct-fallback and authentication protections, independent crypto review and the 17 admission conditions remain required. The [recorded Windows/DACL and real Tor deferral](d1-release-decision-proposal.md#measurement-scope-2026-10-23) remains UNVERIFIED, not PASS; applicable Windows builds and macOS/Linux checks remain required. Tor timing is not inferred from clearnet measurements. The gate is CLOSED: schema 2 has 7 done, 2 partial, 7 not_done and 1 deferred (`tor_phase_measurement`); no release decision or expert verdict is recorded.
 
-[Последнее решение владельца](../operations/d1-release-decision-proposal.md#measurement-scope-2026-10-23) переносит реальные Windows/DACL и Tor замеры; работа идёт на macOS/Linux. Прежние безусловные требования Windows/Tor ниже заменены только в этой области, исторические результаты сохранены. Фактический статус — UNVERIFIED/UNKNOWN, не PASS. Schema 2 сохраняет 17 условий: 7 done, 2 partial, 7 not_done и 1 deferred (`tor_phase_measurement`). Условие небезопасного хранилища остаётся partial; clearnet/настоящие старые выпуски, замеры первого контакта и вывод timeout остаются обязательными. Proxy/no-direct-fallback, аутентификация, независимая криптоэкспертиза, остальные проверки, G2 и отдельные решения о выпуске сохраняются. Gate закрыт. Tor-роль наблюдения отложена; данные macOS/Linux не доказывают пороги или гарантии Tor.
+[Принятая текущая область](urgent-full-product-release-scope.ru.md) — демон и Desktop на Linux amd64, macOS arm64/amd64 и Windows amd64/arm64; Android APK/AAB выпускаются отдельно позже. Только `internal/overlaysim` отложен до D1 как DEFERRED, не PASS; общий `make test-all` не зелёный. K2/R1b/R2/N-in выключены в обычных constructors, config и RPC. Активация D1/G2/FindNode/F1 вне этого релиза; внутренние source opt-in API не включают их в выпускаемых продуктах. Остальные применимые продуктовые тесты, proxy/no-direct-fallback, аутентификация, независимая криптоэкспертиза и все 17 условий допуска сохраняются. [Записанная отсрочка Windows/DACL и реального Tor](d1-release-decision-proposal.md#measurement-scope-2026-10-23) остаётся UNVERIFIED, не PASS; применимые Windows builds и macOS/Linux проверки обязательны. Tor timing нельзя выводить из clearnet-замеров. Gate ЗАКРЫТ: schema 2 содержит 7 done, 2 partial, 7 not_done и 1 deferred (`tor_phase_measurement`); решения о выпуске и заключения эксперта нет.
 
 ## English
 
@@ -15,17 +15,22 @@ This is a preparation package for `crypto_review` and the Windows part of
 It records review scope and proposed execution inputs. No expert verdict, native Windows run,
 resource authorisation, production deployment or release approval is supplied here.
 
-The preparation snapshot is **MAIN2047**, based on owner-committed HEAD
-`c17a4961689c9e8c33bd5681ea7c7ec577bb53cf`, with additional accepted changes.
-Its 2,047-file manifest SHA-256 is
-`4dee2cbd54685ac0076afa325e0c65bf0326ffd465f28f71cb7ce069910efb80`.
-HEAD and this working-tree snapshot are different identities. Neither is designated the final
-release candidate. The manifest currently has **17 conditions: 7 done, 2 partial, 8 not_done**;
-`release_decision` is `null`, `crypto_review` is `not_done` and
+The current preliminary source input is committed Corsa **v2.5.71**, protocol 31/minimum 28,
+commit **`bf449d1c2505ca40ed78c3483ab125708cdc7793`**, Git tree
+`420a4ddae43b8baeab1d9f5dc47abc0f71e565f4`, using Go 1.27.3. Give the expert this exact
+commit rather than a mutable DEV branch. This is not an assertion that a final candidate or
+binary has been admitted. Changes made after it, including this package refresh, belong to a
+later candidate and must be named in the final review or an attributable affected-path addendum.
+The manifest has **17 conditions: 7 done, 2 partial, 7 not_done and 1 deferred**;
+`release_decision` is `null`, `crypto_review` is `not_done` with no evidence and
 `unsafe_pin_store_refusal` is `partial`.
 
-An accepted review report must name the full 40-character candidate commit and the actual source
-and binary inputs reviewed. A preliminary review of this snapshot can find defects, but cannot be
+The old MAIN2047 snapshot based on `c17a4961689c9e8c33bd5681ea7c7ec577bb53cf`
+(manifest SHA-256 `4dee2cbd54685ac0076afa325e0c65bf0326ffd465f28f71cb7ce069910efb80`)
+is historical preparation, not the current source input.
+
+An accepted review report must name the full 40-character candidate commit, the actual source
+and any binary inputs reviewed (explicitly none if the review is source-only). A preliminary review of this snapshot can find defects, but cannot be
 relabelled as final-candidate acceptance. The [release gate](../release.md) requires all conditions
 and a separate version-specific owner decision. After the checked candidate commit, only the
 manifest, that version's release notes and the manifest-pinning test may change without renewed
@@ -43,6 +48,9 @@ implementation anchors from the repository root:
 | Exact signed bytes and strict frame | `proof.go`: `proofPayload`, `verifyProof`, `parseProofFrame`; `proof_test.go`: `TestProofPayloadAndSignaturesMatchTheVectors`, `TestProofRefusesTheNegativeVectors`, `TestProofFrameIsParsedStrictly` |
 | Handshake state and identity publication | `handshake.go`: `runHandshake`, `sendIntroAndProof`, `receiveProvenPeer`, `checkIntro`; `session.go` and `proven_identity_test.go`; `node/session_secure.go`: inbound `sessionv2.Accept`, outbound `sessionv2.Dial`, `acceptProvenInboundOwned`, `provenTransport` |
 | Active relay and reflection | `handshake_test.go`: `TestARelayedListenerProofDoesNotVerifyOnAnotherConnection`, `TestARelayedDialerProofIsRefusedWhereV1AcceptedIt`; `proof_test.go` negative exporter/role/key/network/v1-signature cases |
+| Signing keys, records and liveness claims | `internal/core/identity/publickey.go`, `identity.go`; `internal/core/protocol/identity_record.go`, `identity_discovery.go`, `liveness_token.go`; `internal/core/node/identity_discovery.go`, `presence_service.go`: canonical/small-order acceptance, record/key binding, sealed target proof and bounded epoch checks |
+| Downgrade, persistence and client trust | `internal/core/node/session_dial_choice.go`, `session_probe.go`, `secure_session_store.go`, `pin_store_marker.go`, `endpoint_binding_operator.go`, `endpoint_canonical.go`; `internal/core/secretfile/*.go`; ordinary `sdk/runtime.go`, `internal/app/desktop/runtime.go`, `internal/app/node/app.go` roots |
+| Message and receipt claims | `internal/core/directmsg/message.go`, `file_command_crypto.go`; `internal/core/service/dm_crypto.go`, `dm_router.go`; `internal/core/node/message_identity.go`, `service.go`; `internal/core/protocol/message.go`: distinguish party-tuple/hop authentication from end-to-end content or delivery proof |
 
 The implementation uses TLS 1.3 only, ALPN `corsa/2`, disabled session tickets and no client session
 cache. The dialler deliberately does not authenticate the TLS certificate: identity is established
@@ -74,8 +82,16 @@ Existing test sources are review inputs, not an expert verdict. This package est
 timing, measured loopback budget, Windows filesystem behaviour, C3 deployment admission or
 network-wide closure of the legacy relayed-proof attack. Those retain their own conditions.
 
+The review includes ordinary SDK/Desktop trust and storage consumers, not just the daemon handshake.
+In particular, the dm-v1 outer message ID and `DeliveryReceipt` are not signed content receipts;
+assess malicious authenticated-relay/replay assumptions and the actual status/retry claims without
+silently declaring tuple-scoped state to be end-to-end delivery proof. Do not infer a need to
+activate the deferred session/D1 mechanisms or redesign the wire protocol without an explicit finding.
+
 The expert's deliverable is a signed or otherwise attributable report naming the candidate commit,
-scope, method, assumptions, findings by severity, reproducible examples and explicit limitations.
+reviewer and date, scope, method, assumptions, findings by severity, source locations, safe reproducible
+examples, unreviewed areas and explicit limitations. Identify the actual source and any binary/dependency
+inputs reviewed; explicitly list binary/dependency inputs not reviewed. Avoid live user identities, stores or messages.
 Every critical finding must be fixed and independently re-reviewed on the resulting candidate.
 Record unresolved findings and their disposition; do not turn missing coverage into a passing result.
 
@@ -142,14 +158,21 @@ to `done`. Final notes and candidate rechecks remain required by the manifest.
 `unsafe_pin_store_refusal` в [манифесте выпуска](../../packaging/release-admission.json).
 Здесь нет заключения эксперта, настоящего Windows-прогона, разрешения ресурса, deployment или выпуска.
 
-База подготовки — **MAIN2047** поверх закоммиченного владельцем HEAD
-`c17a4961689c9e8c33bd5681ea7c7ec577bb53cf`; SHA-256 манифеста 2 047 файлов —
-`4dee2cbd54685ac0076afa325e0c65bf0326ffd465f28f71cb7ce069910efb80`.
-HEAD и рабочий срез различаются; ни один здесь не назначен финальным кандидатом. В манифесте
-**17 условий: 7 done, 2 partial, 8 not_done**; `release_decision=null`,
-`crypto_review=not_done`, `unsafe_pin_store_refusal=partial`.
+Текущий предварительный исходный срез — закоммиченный Corsa **v2.5.71**, protocol 31/minimum 28,
+commit **`bf449d1c2505ca40ed78c3483ab125708cdc7793`**, Git tree
+`420a4ddae43b8baeab1d9f5dc47abc0f71e565f4`, Go 1.27.3. Эксперту передаётся точный commit,
+а не изменяемая ветка DEV. Это не подтверждает допуск финального кандидата или binary.
+Изменения после него, включая обновление этого пакета, относятся к следующему кандидату;
+окончательный отчёт или атрибутируемое дополнение по затронутым путям должны назвать его.
+В манифесте **17 условий: 7 done, 2 partial, 7 not_done и 1 deferred**;
+`release_decision=null`, `crypto_review=not_done` без evidence, `unsafe_pin_store_refusal=partial`.
 
-Принимаемый отчёт называет полный 40-символьный commit кандидата, фактические исходники и бинарники.
+Прежний MAIN2047 поверх `c17a4961689c9e8c33bd5681ea7c7ec577bb53cf`
+(SHA-256 манифеста `4dee2cbd54685ac0076afa325e0c65bf0326ffd465f28f71cb7ce069910efb80`)
+сохранён как история подготовки, а не текущий исходный срез.
+
+Принимаемый отчёт называет полный 40-символьный commit кандидата, фактические исходники и
+проверенные binary inputs (явно указать отсутствие binary review при source-only экспертизе).
 Предварительную проверку этого среза нельзя переименовать в final-candidate acceptance.
 [Гейт выпуска](../release.md) требует всех условий и отдельного решения владельца о конкретной
 версии. После проверенного candidate commit без повторения затронутых проверок разрешены только
@@ -160,8 +183,13 @@ HEAD и рабочий срез различаются; ни один здесь
 
 Исходный scope — [контракт с опубликованными векторами](../protocol/session_v2.md) и четыре строки
 таблицы English выше: TLS/certificate policy; точные байты proof и parser; handshake/publication
-в `sessionv2` и `node/session_secure.go`; relay/reflection controls. Дополнительные реальные
-зависимости эксперт включает в отчёт явно.
+в `sessionv2` и `node/session_secure.go`; relay/reflection controls. Таблица также охватывает canonical/small-order ключи,
+records/liveness, downgrade/persistence и обычные SDK/Desktop trust/storage consumers.
+`dm-v1` outer message ID и `DeliveryReceipt` не являются подписанными content receipts;
+эксперт оценивает malicious authenticated-relay/replay предпосылки и реальные status/retry гарантии,
+не приравнивая tuple/hop-проверку к end-to-end доказательству доставки. Это не разрешает активацию
+отложенных механизмов или перепроектирование wire protocol без конкретного finding.
+Дополнительные реальные зависимости эксперт включает в отчёт явно.
 
 TLS ограничен 1.3, ALPN — `corsa/2`, tickets и client cache выключены. Сертификат намеренно не
 аутентифицирует identity: Ed25519 proof связывает её с exporter именно этой TLS-сессии. Эксперт
@@ -178,8 +206,10 @@ Sybil-стойкости или анонимности. Компрометаци
 
 Исходники тестов не являются заключением эксперта. Tor timing, измеренные loopback budgets,
 Windows filesystem behaviour, C3 deployment и закрытие legacy-атаки для всей сети этим пакетом не
-доказываются. Нужен атрибутируемый отчёт с commit, scope/method/assumptions, severity, воспроизводимыми
-примерами и границами. Все critical исправляются и повторно независимо проверяются на новом
+доказываются. Нужен атрибутируемый отчёт с точным commit40, reviewer/date, scope/method/assumptions, severity,
+source locations, безопасными воспроизводимыми примерами, непроверенными областями и границами.
+Назвать фактически проверенный source и binary/dependency inputs, явно перечислить непроверенные binary/dependencies;
+не использовать реальные identities, хранилища или сообщения пользователей. Все critical исправляются и повторно независимо проверяются на новом
 кандидате; открытые finding и их решения остаются видимыми.
 
 ### Настоящий Windows-прогон
@@ -256,7 +286,13 @@ loopback listener. Исходные ограниченные логи сохра
 startup-проверки, release notes, final-candidate проверки и решение о выпуске S6 остаются;
 `unsafe_pin_store_refusal` сохраняет partial, release decision — null.
 
-## Owner decision of 2026-10-23 / Решение владельца от 2026-10-23
+## Historical owner decision of 2026-10-23 / Историческое решение владельца от 2026-10-23
+
+This earlier record is retained for provenance. Its unconditional Windows blocker and pre-deferral
+status counts below are superseded by the current verification scope at the top; Windows remains
+UNVERIFIED/deferred, not PASS. / Ранняя запись сохранена для истории. Её безусловный Windows-blocker
+и статистика до отсрочки ниже заменены текущей областью в начале документа; Windows остаётся
+UNVERIFIED/deferred, не PASS.
 
 ### English
 
