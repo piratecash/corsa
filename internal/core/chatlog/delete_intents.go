@@ -206,6 +206,20 @@ func (s *Store) DeleteWithIntent(ctx context.Context, intent DeleteIntent) (bool
 	return removed, nil
 }
 
+// deleteIntentNextAttemptKey is the exact UTC/nanosecond ordering shared with
+// migration 0008's expression indexes. RFC3339Nano itself does not sort as time:
+// ".1Z" sorts after ".11Z". The migration validates the active legacy domain;
+// every repository writer already emits UTC. Keep this expression identical
+// to both index definitions; do not replace it with a floating-point date.
+const deleteIntentNextAttemptKey = `substr(next_attempt_at, 1, 19) || '.' || substr(replace(substr(next_attempt_at, 21), 'Z', '') || '000000000', 1, 9)`
+
+const deleteIntentComparisonLayout = "2006-01-02T15:04:05.000000000Z"
+
+const reviveDeleteIntentsSQL = `
+	UPDATE message_delete_intents
+	SET next_attempt_at = ?, held = 0
+	WHERE peer = ? AND owed = 1 AND held = ? AND (` + deleteIntentNextAttemptKey + `) > ?`
+
 // ReviveDeleteIntentsForPeer pulls the peer's PARKED intents forward to
 // `now`, so the next sweep dispatches them.
 //
@@ -226,10 +240,8 @@ func (s *Store) ReviveDeleteIntentsForPeer(ctx context.Context, peer domain.Peer
 		return 0, nil
 	}
 	stamp := now.UTC().Format(time.RFC3339Nano)
-	res, err := s.db.ExecContext(ctx, `
-		UPDATE message_delete_intents
-		SET next_attempt_at = ?, held = 0
-		WHERE peer = ? AND owed = 1 AND held = ? AND next_attempt_at > ?`, stamp, peer.String(), int(HoldPeerAbsent), stamp)
+	res, err := s.db.ExecContext(ctx, reviveDeleteIntentsSQL,
+		stamp, peer.String(), int(HoldPeerAbsent), now.UTC().Format(deleteIntentComparisonLayout))
 	if err != nil {
 		return 0, fmt.Errorf("chatlog: revive delete intents for %s: %w", peer, err)
 	}
@@ -358,6 +370,17 @@ const coveredByAStandingWipe = `
 		  AND w.owed = 1
 		  AND w.request_id = i.request_id)`
 
+// SQLite expression indexes supply this exact time ordering. rowid is the
+// index's existing implicit tie key; it does not make equal-time requests
+// different kinds of work or promise a persistent delivery order.
+const dueDeleteIntentsSQL = `
+	SELECT ` + deleteIntentColumns + `
+	FROM message_delete_intents AS i
+	WHERE i.owed = 1 AND (` + deleteIntentNextAttemptKey + `) <= ?
+	  AND NOT (` + coveredByAStandingWipe + `)
+	ORDER BY (` + deleteIntentNextAttemptKey + `) ASC, i.rowid ASC
+	LIMIT ?`
+
 // DueDeleteIntents returns the intents whose next attempt is due, oldest
 // first, capped at limit. A non-positive limit returns nothing rather than
 // the whole table: an unbounded sweep is a way to stall the scheduler
@@ -367,14 +390,8 @@ func (s *Store) DueDeleteIntents(ctx context.Context, now time.Time, limit int) 
 		return nil, nil
 	}
 
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT `+deleteIntentColumns+`
-		FROM message_delete_intents AS i
-		WHERE i.owed = 1 AND i.next_attempt_at <= ?
-		  AND NOT (`+coveredByAStandingWipe+`)
-		ORDER BY i.next_attempt_at ASC
-		LIMIT ?`,
-		now.UTC().Format(time.RFC3339Nano), limit)
+	rows, err := s.db.QueryContext(ctx, dueDeleteIntentsSQL,
+		now.UTC().Format(deleteIntentComparisonLayout), limit)
 	if err != nil {
 		return nil, fmt.Errorf("chatlog: select due delete intents: %w", err)
 	}

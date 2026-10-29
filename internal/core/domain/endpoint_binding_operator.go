@@ -146,6 +146,7 @@ type EndpointBindingDemotionPlan struct {
 
 // EndpointBindingDemotionResult is a demotion that was written.
 type EndpointBindingDemotionResult struct {
+	Outcome     EndpointBindingActionOutcome
 	OperationID EndpointBindingOperationID
 	Items       []EndpointBindingDemotionItem
 	Consequence string
@@ -153,12 +154,17 @@ type EndpointBindingDemotionResult struct {
 
 // EndpointBindingRemoval is an ordinary binding the operator removed.
 type EndpointBindingRemoval struct {
+	Outcome     EndpointBindingActionOutcome
 	OperationID EndpointBindingOperationID
 	Endpoint    PeerAddress
 	KeyForm     EndpointBindingKeyForm
 }
 
 var (
+	// ErrEndpointBindingMutationUnavailable keeps every public mutation path
+	// unavailable while write outcomes and all competing mutations are being
+	// qualified. Listing and dry-run planning remain separate read-only paths.
+	ErrEndpointBindingMutationUnavailable = errors.New("endpoint_binding_mutation_unavailable: endpoint removal and demotion are unavailable pending verified outcome and mutation isolation")
 	// ErrEndpointBindingNotFound: no live binding is held under the address.
 	ErrEndpointBindingNotFound = errors.New("endpoint_binding_not_found")
 	// ErrEndpointBindingProtected: the addressed removal is for ordinary

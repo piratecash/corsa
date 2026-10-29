@@ -196,39 +196,43 @@ func TestCompactExpiredClearsVacatedTail(t *testing.T) {
 	}
 }
 
-// The Usage gauge exposes the invariant so a running node can be
-// checked without a heap profile.
-func TestUsageReportsRouteHealthOrphans(t *testing.T) {
+// Common resource polling must report the cheap total, not walk every health
+// pair to audit an invariant. Absence of the expensive series is not zero.
+func TestUsageOmitsExpensiveOrphanAudit(t *testing.T) {
 	t.Parallel()
 	now := time.Unix(1_700_000_000, 0)
 	tbl := NewTable(WithLocalOrigin(domaintest.ID("me")), WithClock(fixedClock(now)))
 	target := domaintest.ID("target-X")
-	uplinkA := domaintest.ID("uplink-A")
-
-	mustUpdate(t, tbl, transitEntry(target, uplinkA, 2, 1, now.Add(time.Hour)))
-	// Plant an orphan directly: the gauge must count it, whatever path
-	// would have produced it.
+	uplink := domaintest.ID("uplink-A")
+	mustUpdate(t, tbl, transitEntry(target, uplink, 2, 1, now.Add(time.Hour)))
 	tbl.mu.Lock()
 	tbl.health.ensureLocked(target, domaintest.ID("uplink-ghost"), now)
 	tbl.mu.Unlock()
-
-	var orphans, health uint64
-	var orphanKind domain.ResourceGaugeKind
+	var health uint64
 	for _, gauge := range tbl.Usage().Gauges() {
-		switch gauge.Name() {
-		case "route_health":
+		if gauge.Name() == "route_health_orphans" {
+			t.Fatal("common resource polling exposed the expensive orphan audit")
+		}
+		if gauge.Name() == "route_health" {
 			health = gauge.Count()
-		case "route_health_orphans":
-			orphans = gauge.Count()
-			orphanKind = gauge.Kind()
 		}
 	}
-	if health != 2 || orphans != 1 {
-		t.Fatalf("route_health=%d route_health_orphans=%d, want 2 and 1", health, orphans)
+	if health != 2 {
+		t.Fatalf("route_health=%d, want the complete container count 2", health)
 	}
-	// Orphans are a subset of route_health: charging them again would
-	// put the floor above the truth.
-	if orphanKind != domain.ResourceGaugeSaturation {
-		t.Fatalf("route_health_orphans kind = %v, want saturation", orphanKind)
+	if count := orphanHealthCount(tbl); count != 1 {
+		t.Fatalf("test-only invariant audit=%d, want 1 (not a fabricated zero)", count)
 	}
+}
+
+// This full invariant audit is test-only. It must not be called while normal
+// resource polling holds the production table read lock.
+func (s *healthStore) orphanCountLocked(hasClaim func(identity, uplink domain.PeerIdentity) bool) int {
+	orphans := 0
+	for key := range s.states {
+		if !hasClaim(key.Identity, key.Uplink) {
+			orphans++
+		}
+	}
+	return orphans
 }

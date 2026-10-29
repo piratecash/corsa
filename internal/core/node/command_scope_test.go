@@ -5,8 +5,6 @@ import (
 	"go/parser"
 	"go/token"
 	"net"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -159,11 +157,7 @@ var requiredP2PWireCommands = map[string]bool{
 func extractSwitchCasesFromFunc(t *testing.T, funcName string) map[string]bool {
 	t.Helper()
 
-	_, thisFile, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
-	}
-	serviceFile := filepath.Join(filepath.Dir(thisFile), "service.go")
+	serviceFile := "service.go"
 
 	fset := token.NewFileSet()
 	node, err := parser.ParseFile(fset, serviceFile, nil, 0)

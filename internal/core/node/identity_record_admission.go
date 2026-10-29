@@ -42,16 +42,17 @@ type contactRecordAdmissionSource uint8
 const (
 	contactRecordPushSource contactRecordAdmissionSource = iota
 	contactRecordReconciliationSource
+	contactRecordSessionSource // closed combined candidate only; not invocation evidence
 )
 
 func (source contactRecordAdmissionSource) valid() bool {
-	return source == contactRecordPushSource || source == contactRecordReconciliationSource
+	return source == contactRecordPushSource || source == contactRecordReconciliationSource || source == contactRecordSessionSource
 }
 func (a *relationRecordAdmission) admitsContactPush() bool {
-	return a.admitsK() && a.kSource == contactRecordPushSource
+	return a.admitsK() && (a.kSource == contactRecordPushSource || a.kSource == contactRecordSessionSource)
 }
 func (a *relationRecordAdmission) admitsContactReconciliation() bool {
-	return a.admitsK() && a.kSource == contactRecordReconciliationSource
+	return a.admitsK() && (a.kSource == contactRecordReconciliationSource || a.kSource == contactRecordSessionSource)
 }
 
 // Private construction dependency, not stage authority. Every production
@@ -159,6 +160,26 @@ func newIdentityResolverWithRecordAdmission(svc *Service, intents *identityInten
 		now := time.Now()
 		return relationObservedTime{wall: now, elapsed: now.Sub(epoch)}
 	}, wake: make(chan struct{}, 1), openFiles: svc.localContactPinStore().openIdentityPinFiles}
+	return r
+}
+
+// Final resolver captured by push registration before Build. The original
+// secure store is constructed later; this closed opener captures only the same
+// Service and is first usable by the original Run-started R worker. No backend
+// assignment/setter, second owner or receiver bound to an unfinished nil store.
+func newIdentityResolverWithSessionRecordAdmission(svc *Service, intents *identityIntentStore, network domain.NetworkID) *identityResolver {
+	r := newIdentityResolver(svc, intents, network)
+	epoch := time.Now()
+	r.recordAdmission = &relationRecordAdmission{classes: recordAdmissionChargedR | recordAdmissionImmediateK, kSource: contactRecordSessionSource, service: svc, resolver: r, network: network, clock: func() relationObservedTime {
+		now := time.Now()
+		return relationObservedTime{wall: now, elapsed: now.Sub(epoch)}
+	}, wake: make(chan struct{}, 1), openFiles: func() (identityPinDurableFiles, error) {
+		store := svc.localContactPinStore()
+		if store == nil {
+			return nil, domain.ErrIdentityPinStoreUnavailable
+		}
+		return store.openIdentityPinFiles()
+	}}
 	return r
 }
 

@@ -8,8 +8,6 @@ import (
 	"go/parser"
 	"go/token"
 	"net"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -519,12 +517,8 @@ func TestInboundCommandReaderIsTheStrictBudget(t *testing.T) {
 func TestInboundReadLoopHandsOverTheWireLine(t *testing.T) {
 	t.Parallel()
 
-	_, thisFile, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
-	}
 	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, filepath.Join(filepath.Dir(thisFile), "service.go"), nil, 0)
+	file, err := parser.ParseFile(fset, "service.go", nil, 0)
 	if err != nil {
 		t.Fatalf("parse service.go: %v", err)
 	}

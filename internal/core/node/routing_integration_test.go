@@ -503,7 +503,7 @@ func TestConfirmRouteViaHopAck(t *testing.T) {
 	}
 
 	// Confirm with the actual NextHop identity that carried the message.
-	svc.confirmRouteViaHopAck(idTargetX, domain.PeerAddress(idPeerB.String()))
+	svc.confirmRouteViaHopAck(idTargetX, idPeerB)
 
 	routes := svc.routingTable.Lookup(idTargetX)
 	if len(routes) == 0 {
@@ -536,7 +536,7 @@ func TestConfirmRouteViaHopAck_PreservesExtra(t *testing.T) {
 		t.Fatal("UpdateRoute should succeed")
 	}
 
-	svc.confirmRouteViaHopAck(idTargetX, domain.PeerAddress(idPeerB.String()))
+	svc.confirmRouteViaHopAck(idTargetX, idPeerB)
 
 	routes := svc.routingTable.Lookup(idTargetX)
 	if len(routes) == 0 {
@@ -574,7 +574,7 @@ func TestConfirmRouteViaHopAck_WrongNextHopNotConfirmed(t *testing.T) {
 
 	// hop_ack came for a message forwarded to peer-C (different route).
 	// Should NOT promote the peer-B route.
-	svc.confirmRouteViaHopAck(idTargetX, domain.PeerAddress(idPeerC.String()))
+	svc.confirmRouteViaHopAck(idTargetX, idPeerC)
 
 	routes := svc.routingTable.Lookup(idTargetX)
 	if len(routes) == 0 {
@@ -602,7 +602,7 @@ func TestConfirmRouteViaHopAck_AlreadyHopAck(t *testing.T) {
 		t.Fatal("UpdateRoute should succeed")
 	}
 
-	svc.confirmRouteViaHopAck(idTargetX, domain.PeerAddress(idPeerB.String()))
+	svc.confirmRouteViaHopAck(idTargetX, idPeerB)
 
 	routes := svc.routingTable.Lookup(idTargetX)
 	if routes[0].Source != routing.RouteSourceHopAck {
@@ -616,7 +616,7 @@ func TestConfirmRouteViaHopAck_DirectNotDemoted(t *testing.T) {
 	// Direct route should not be touched by hop_ack confirmation.
 	svc.onPeerSessionEstablished(idTargetX, []domain.Capability{domain.CapMeshRelayV1})
 
-	svc.confirmRouteViaHopAck(idTargetX, domain.PeerAddress(idTargetX.String()))
+	svc.confirmRouteViaHopAck(idTargetX, idTargetX)
 
 	routes := svc.routingTable.Lookup(idTargetX)
 	if len(routes) == 0 {
@@ -627,7 +627,7 @@ func TestConfirmRouteViaHopAck_DirectNotDemoted(t *testing.T) {
 	}
 }
 
-func TestConfirmRouteViaHopAck_ResolvesTransportAddress(t *testing.T) {
+func TestConfirmRouteViaHopAck_UsesCapturedIdentityDespiteAddressReplacement(t *testing.T) {
 	svc := newTestServiceWithRouting(t, idNodeA)
 
 	// Simulate an outbound session: transport address "tcp://1.2.3.4:9000"
@@ -651,20 +651,22 @@ func TestConfirmRouteViaHopAck_ResolvesTransportAddress(t *testing.T) {
 		t.Fatal("UpdateRoute should succeed")
 	}
 
-	// hop_ack arrives from transport address — should resolve to peer-B
-	// and confirm the route.
-	svc.confirmRouteViaHopAck(idTargetX, domain.PeerAddress("tcp://1.2.3.4:9000"))
+	// The frame arrived on B. The address now holds C, so re-resolving it
+	// would credit an unrelated connection instead of the captured sender.
+	captured := sessionRoutingSender(svc.sessions["tcp://1.2.3.4:9000"]).identity
+	svc.sessions["tcp://1.2.3.4:9000"] = &peerSession{peerIdentity: idPeerC}
+	svc.confirmRouteViaHopAck(idTargetX, captured)
 
 	routes := svc.routingTable.Lookup(idTargetX)
 	if len(routes) == 0 {
 		t.Fatal("expected route to exist")
 	}
 	if routes[0].Source != routing.RouteSourceHopAck {
-		t.Fatalf("expected source=hop_ack after transport-address confirmation, got %s", routes[0].Source)
+		t.Fatalf("expected source=hop_ack after captured-identity confirmation, got %s", routes[0].Source)
 	}
 }
 
-func TestConfirmRouteViaHopAck_EmptyForwardedToSkips(t *testing.T) {
+func TestConfirmRouteViaHopAck_ZeroCapturedIdentitySkips(t *testing.T) {
 	svc := newTestServiceWithRouting(t, idNodeA)
 
 	// Add a route.
@@ -681,12 +683,12 @@ func TestConfirmRouteViaHopAck_EmptyForwardedToSkips(t *testing.T) {
 		t.Fatal("UpdateRoute should succeed")
 	}
 
-	// Empty forwardedTo (stored locally, not forwarded) — should not confirm.
-	svc.confirmRouteViaHopAck(idTargetX, domain.PeerAddress(""))
+	// No captured sender identity cannot confirm a route.
+	svc.confirmRouteViaHopAck(idTargetX, domain.PeerIdentity{})
 
 	routes := svc.routingTable.Lookup(idTargetX)
 	if routes[0].Source != routing.RouteSourceAnnouncement {
-		t.Fatal("empty forwardedTo should not confirm any route")
+		t.Fatal("zero captured identity should not confirm any route")
 	}
 }
 
@@ -960,7 +962,7 @@ func TestHopAckScoping_DifferentIdentityNotPromoted(t *testing.T) {
 	}
 
 	// hop_ack for target-X only.
-	svc.confirmRouteViaHopAck(idTargetX, domain.PeerAddress(idPeerB.String()))
+	svc.confirmRouteViaHopAck(idTargetX, idPeerB)
 
 	// target-X should be promoted.
 	routesX := svc.routingTable.Lookup(idTargetX)
@@ -1012,7 +1014,7 @@ func TestHopAckScoping_SameIdentityDifferentNextHopNotPromoted(t *testing.T) {
 	}
 
 	// hop_ack from peer-D should only promote the peer-D route.
-	svc.confirmRouteViaHopAck(idTargetX, domain.PeerAddress(idPeerD.String()))
+	svc.confirmRouteViaHopAck(idTargetX, idPeerD)
 
 	routes := svc.routingTable.Lookup(idTargetX)
 	if len(routes) < 2 {

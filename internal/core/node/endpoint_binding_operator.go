@@ -2,9 +2,9 @@ package node
 
 import (
 	"context"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -29,9 +29,10 @@ import (
 //
 // A change is written before it is made: the store as it would be after the
 // change is written as one version of the file, and only once that write
-// landed is the change made in memory. A failed write leaves both the disk and
-// memory as they were — after a demotion that could not be written, no binding
-// is lowered. Every change is journalled per endpoint under an operation id of
+// is confirmed is the change made in memory. An indeterminate write may leave
+// changed visible bytes; current memory stays stronger and restoration has its
+// own result. A confirmed commit with a later cleanup error is distinct. Every
+// action is identified per endpoint under an operation id of
 // its own, which no connection has, so the lines of one action are found
 // together. The journal pairs endpoints with identities and stays in the local
 // log; the answers name endpoints only.
@@ -293,21 +294,16 @@ func (e bindingEdit) writeInto(file secureSessionFile) {
 	file.Endpoints[e.key.address] = e.key.record(next)
 }
 
-// commitOperatorEdits checks an operator action against the store and writes
-// it before making it: check runs under mu and returns the edits; the store as
-// it would be after them is written as one version of the file; only then are
-// they made in memory. A failed write returns its error and changes nothing.
-// writeMu is held from the check to the change in memory, so no other write
-// can put the old state back on disk in between.
-//
-// A binding that moved on between the check and the change in memory — a
-// session changed its owner or raised it while the file was written
-// (stillApplies) — fails the whole action: none of it is made in memory, and
-// the file is written again from memory in the same operation, still under
-// writeMu, so the disk never stays without a protection memory holds. The
-// caller gets domain.ErrEndpointBindingSelectionChanged and repeats. Takes
-// writeMu, then mu; no domain mutex is held by the caller.
+// commitOperatorEdits is the closed private engine. Public mutation entrypoints
+// remain unavailable independently of this engine's implementation. Exclusive
+// pinMutationGate spans exact selection -> write disposition -> publication or
+// one protective rewrite; no filesystem I/O is performed under store.mu.
 func (s *secureSessionStore) commitOperatorEdits(check func(now time.Time) ([]bindingEdit, error)) ([]bindingEdit, error) {
+	// This private engine does not enable the public entrypoints below.
+	// Freeze every supported selected-binding mutator before check/write/
+	// publication: proof already holds R; expiry takes R before pruning.
+	s.pinMutationGate.Lock()
+	defer s.pinMutationGate.Unlock()
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	s.mu.Lock()
@@ -334,22 +330,42 @@ func (s *secureSessionStore) commitOperatorEdits(check func(now time.Time) ([]bi
 	}
 	s.mu.Unlock()
 
-	if err := s.writeSnapshot(file); err != nil {
-		return nil, err
+	writeErr := s.writeSnapshot(file)
+	var failure *pinSnapshotWriteError
+	if writeErr != nil {
+		if !errors.As(writeErr, &failure) || failure == nil {
+			failure = snapshotWriteFailure(domain.EndpointBindingActionIndeterminate, writeErr)
+		}
+		if failure.outcome != domain.EndpointBindingActionAppliedCleanupError {
+			if failure.outcome == domain.EndpointBindingActionIndeterminate {
+				// Even an unconfirmed publication must not hide a defensive
+				// stale-selection refusal behind ordinary operator intent.
+				s.mu.Lock()
+				stillValid := s.editsStillApplyLocked(edits)
+				s.mu.Unlock()
+				if !stillValid {
+					failure.causeCode = domain.EndpointBindingCauseSelectionChanged
+					failure.cause = errors.Join(domain.ErrEndpointBindingSelectionChanged, failure.cause)
+				}
+				failure = s.restoreEndpointActionHoldingWriteMu(failure)
+			}
+			return edits, failure
+		}
 	}
 	s.mu.Lock()
 	if !s.editsStillApplyLocked(edits) {
-		// The file now holds the action, memory does not: the written
-		// version is no longer the store's, whatever it covered.
-		s.changes++
+		// Defensive refusal: owner consent never authorizes a stale selected
+		// state. Supported mutation roots are excluded by the gate above.
 		s.mu.Unlock()
-		return nil, s.rewriteFromMemoryHoldingWriteMu()
+		stale := snapshotWriteFailure(domain.EndpointBindingActionIndeterminate, errors.Join(domain.ErrEndpointBindingSelectionChanged, writeErr))
+		stale.causeCode = domain.EndpointBindingCauseSelectionChanged
+		return edits, s.restoreEndpointActionHoldingWriteMu(stale)
 	}
 	s.applyEditsLocked(edits)
 	s.markWrittenLocked(covers)
 	s.recordNinSnapshotWrittenLocked(quota, false)
 	s.mu.Unlock()
-	return edits, nil
+	return edits, writeErr
 }
 
 // editsStillApplyLocked reports whether every binding of edits is still the
@@ -378,25 +394,37 @@ func (s *secureSessionStore) applyEditsLocked(edits []bindingEdit) {
 	}
 }
 
-// rewriteFromMemoryHoldingWriteMu writes the store as memory holds it after an
-// operator action was written but could not be made, and reports the action as
-// changed. Should the rewrite fail too, the store stays marked unwritten and
-// the periodic flush retries it; the write error is reported. Caller holds
-// writeMu and not mu.
-func (s *secureSessionStore) rewriteFromMemoryHoldingWriteMu() error {
+// restoreEndpointActionHoldingWriteMu performs one protective rewrite under
+// the SAME exclusive gate/writeMu. A failed rewrite is never rollback proof;
+// successful namespace restoration remains distinct from the earlier edit.
+func (s *secureSessionStore) restoreEndpointActionHoldingWriteMu(failure *pinSnapshotWriteError) *pinSnapshotWriteError {
 	s.mu.Lock()
+	s.changes++
 	file := s.snapshotLocked()
 	covers := s.changes
 	quota := file.InboundQuota.stamp()
 	s.mu.Unlock()
-	if err := s.writeSnapshot(file); err != nil {
-		return fmt.Errorf("%w; restoring the store file: %w", domain.ErrEndpointBindingSelectionChanged, err)
+	restoreErr := s.writeSnapshot(file)
+	confirmed := restoreErr == nil
+	var restoreFailure *pinSnapshotWriteError
+	if errors.As(restoreErr, &restoreFailure) && restoreFailure != nil && restoreFailure.outcome == domain.EndpointBindingActionAppliedCleanupError {
+		confirmed = true
 	}
-	s.mu.Lock()
-	s.markWrittenLocked(covers)
-	s.recordNinSnapshotWrittenLocked(quota, false)
-	s.mu.Unlock()
-	return fmt.Errorf("%w: a binding changed while the action was written; nothing was changed, repeat it", domain.ErrEndpointBindingSelectionChanged)
+	failure.restoration = domain.EndpointBindingRestorationUnconfirmed
+	failure.restorationCause = domain.EndpointBindingCauseWriteFailed
+	if confirmed {
+		s.mu.Lock()
+		s.markWrittenLocked(covers)
+		s.recordNinSnapshotWrittenLocked(quota, false)
+		s.mu.Unlock()
+		failure.restoration = domain.EndpointBindingRestorationConfirmed
+		failure.restorationCause = domain.EndpointBindingCauseNone
+		if restoreErr != nil {
+			failure.restorationCause = domain.EndpointBindingCauseCleanupFailed
+		}
+	}
+	failure.cause = errors.Join(failure.cause, restoreErr)
+	return failure
 }
 
 // --- the addressed removal ---
@@ -418,6 +446,7 @@ func (s *secureSessionStore) removeGeneralBinding(address domain.PeerAddress, op
 		return []bindingEdit{{key: key, checked: binding, change: removeOrdinary{owner: binding.identity}}}, nil
 	})
 	if err != nil {
+		err = endpointActionError(op, edits, err)
 		s.logOperatorRefusal("remove", op, err)
 		return domain.EndpointBindingRemoval{}, err
 	}
@@ -429,7 +458,7 @@ func (s *secureSessionStore) removeGeneralBinding(address domain.PeerAddress, op
 		Time("last_v2", removed.checked.lastV2).
 		Str("operation_id", string(op)).
 		Msg("endpoint_binding_removed_by_operator")
-	return domain.EndpointBindingRemoval{OperationID: op, Endpoint: removed.key.address, KeyForm: removed.key.form()}, nil
+	return domain.EndpointBindingRemoval{Outcome: domain.EndpointBindingActionCommitted, OperationID: op, Endpoint: removed.key.address, KeyForm: removed.key.form()}, nil
 }
 
 // --- the demotion ---
@@ -472,11 +501,12 @@ func (s *secureSessionStore) demote(addresses []domain.PeerAddress, token domain
 		return edits, nil
 	})
 	if err != nil {
+		err = endpointActionError(op, edits, err)
 		s.logOperatorRefusal("demote", op, err)
 		return domain.EndpointBindingDemotionResult{}, err
 	}
 	s.logDemotions(op, edits)
-	return domain.EndpointBindingDemotionResult{OperationID: op, Items: items, Consequence: domain.EndpointBindingDemotionConsequence}, nil
+	return domain.EndpointBindingDemotionResult{Outcome: domain.EndpointBindingActionCommitted, OperationID: op, Items: items, Consequence: domain.EndpointBindingDemotionConsequence}, nil
 }
 
 // demotionEditsLocked checks a selection — named, at most
@@ -571,25 +601,28 @@ func (s *secureSessionStore) logDemotions(op domain.EndpointBindingOperationID, 
 	}
 }
 
-// logOperatorRefusal journals an operator action that changed nothing: a
-// refusal of what it named, or a write that failed.
+// logOperatorRefusal distinguishes operation outcomes from a refusal that
+// happened before an eligible action existed. It never calls every write error
+// "nothing changed", and keeps the low-level cause out of the public message.
 func (s *secureSessionStore) logOperatorRefusal(action string, op domain.EndpointBindingOperationID, err error) {
-	s.logger.Warn().Err(err).
-		Str("action", action).
-		Str("operation_id", string(op)).
-		Msg("endpoint_binding_operator_action_refused")
+	var outcome *domain.EndpointBindingActionError
+	if errors.As(err, &outcome) && outcome != nil {
+		// Eligible engine actions retain at most 256 exact selected keys.
+		endpoints := make([]string, len(outcome.Endpoints))
+		for i, endpoint := range outcome.Endpoints {
+			endpoints[i] = string(endpoint)
+		}
+		s.logger.Warn().Str("action", action).Str("operation_id", string(op)).
+			Strs("endpoints", endpoints).
+			Str("outcome", string(outcome.Outcome)).Str("restoration", string(outcome.Restoration)).
+			Str("cause_code", string(outcome.CauseCode)).Str("restoration_cause_code", string(outcome.RestorationCauseCode)).
+			Msg("endpoint_binding_operator_action_outcome")
+		return
+	}
+	s.logger.Warn().Err(err).Str("action", action).Str("operation_id", string(op)).Msg("endpoint_binding_operator_action_refused")
 }
 
 // --- the node's entry points ---
-
-// newEndpointBindingOperationID mints the id of one operator action.
-func newEndpointBindingOperationID() (domain.EndpointBindingOperationID, error) {
-	raw := make([]byte, 16)
-	if _, err := rand.Read(raw); err != nil {
-		return "", fmt.Errorf("endpoint binding operation id: %w", err)
-	}
-	return domain.EndpointBindingOperationID(hex.EncodeToString(raw)), nil
-}
 
 // operatorBindingStore is the store the operator's actions act on; a node
 // without v2 state has none.
@@ -613,22 +646,14 @@ func (s *Service) ListEndpointBindings(ctx context.Context, query domain.Endpoin
 	return store.listBindings(query)
 }
 
-// RemoveEndpointBinding removes the ordinary binding endpoint names, written to
-// disk first and journalled under a fresh operation id; a protected binding is
-// refused. Disk I/O: the caller holds no domain mutex.
+// RemoveEndpointBinding remains unavailable until the confirmed endpoint
+// outcome contract and all competing mutations have been qualified. This guard
+// lives at the actual domain entrypoint, so neither RPC nor UI can bypass it.
 func (s *Service) RemoveEndpointBinding(ctx context.Context, endpoint domain.PeerAddress) (domain.EndpointBindingRemoval, error) {
 	if err := ctx.Err(); err != nil {
 		return domain.EndpointBindingRemoval{}, err
 	}
-	store, err := s.operatorBindingStore()
-	if err != nil {
-		return domain.EndpointBindingRemoval{}, err
-	}
-	op, err := newEndpointBindingOperationID()
-	if err != nil {
-		return domain.EndpointBindingRemoval{}, err
-	}
-	return store.removeGeneralBinding(endpoint, op)
+	return domain.EndpointBindingRemoval{}, domain.ErrEndpointBindingMutationUnavailable
 }
 
 // PlanEndpointBindingDemotion is the dry run of a demotion of the selected
@@ -644,21 +669,11 @@ func (s *Service) PlanEndpointBindingDemotion(ctx context.Context, endpoints []d
 	return store.planDemotion(endpoints)
 }
 
-// DemoteEndpointBindings moves the selected protected bindings to the ordinary
-// tier if token confirms this selection as the dry run showed it — all in one
-// version of the file, or none — journalled under a fresh operation id. Disk
-// I/O: the caller holds no domain mutex.
+// DemoteEndpointBindings has the same unconditional domain refusal as removal.
+// A dry-run token is not activation authority; no runtime flag enables it.
 func (s *Service) DemoteEndpointBindings(ctx context.Context, endpoints []domain.PeerAddress, token domain.EndpointBindingSelectionToken) (domain.EndpointBindingDemotionResult, error) {
 	if err := ctx.Err(); err != nil {
 		return domain.EndpointBindingDemotionResult{}, err
 	}
-	store, err := s.operatorBindingStore()
-	if err != nil {
-		return domain.EndpointBindingDemotionResult{}, err
-	}
-	op, err := newEndpointBindingOperationID()
-	if err != nil {
-		return domain.EndpointBindingDemotionResult{}, err
-	}
-	return store.demote(endpoints, token, op)
+	return domain.EndpointBindingDemotionResult{}, domain.ErrEndpointBindingMutationUnavailable
 }

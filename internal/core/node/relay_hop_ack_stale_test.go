@@ -10,9 +10,9 @@ import (
 // relay_hop_ack_stale_test.go covers the Phase 3 review fix: a late
 // relay_hop_ack from a downstream that has been SUPERSEDED by a failover
 // must not flip HopAckObserved on the state now tracking the current
-// downstream. The stale-sender guard therefore runs BEFORE
-// markHopAckObserved, not only before route confirmation. Otherwise the
-// current attempt's budget timer is silenced and never fails over.
+// downstream. Current-attempt identity validation and timer consumption
+// share one store critical section. Otherwise a stale snapshot could silence
+// the replacement attempt's budget before route confirmation.
 
 // TestHandleRelayHopAck_StaleTableRoutedSenderDoesNotSuppressTimer — the
 // table-routed reroute case (relayNextHopRoutingTable, ForwardedTo rotated to B).
@@ -23,20 +23,27 @@ func TestHandleRelayHopAck_StaleTableRoutedSenderDoesNotSuppressTimer(t *testing
 	svc := newTestServiceWithRoutingAndHealth(t, idNodeB)
 	svc.relayStates = newRelayStateStore()
 
-	// Sessions so resolvePeerIdentity maps addresses → identities.
+	// Sessions supply captured send-time and incoming identities.
 	svc.sessions[domain.PeerAddress("addr-A")] = &peerSession{peerIdentity: idPeerA, address: "addr-A"}
 	svc.sessions[domain.PeerAddress("addr-B")] = &peerSession{peerIdentity: idPeerC, address: "addr-B"}
 
-	// Currently forwarded to B (table-routed); A is the
-	// superseded prior next-hop. Budget armed, not yet observed.
+	// Start through A, then replace it with B using the real upsert path.
+	// The current attempt has a fresh budget and captured B identity.
 	svc.relayStates.store(&relayForwardState{
 		MessageID:            "m-stale-table",
-		ForwardedTo:          domain.PeerAddress("addr-B"),
+		ForwardedTo:          domain.PeerAddress("addr-A"),
 		Recipient:            idTargetX,
 		NextHopSelection:     relayNextHopRoutingTable,
-		AbandonedForwardedTo: []domain.PeerAddress{"addr-A"},
+		ForwardedVia:         sessionRoutingSender(svc.sessions["addr-A"]),
 		HopAckRemainingTicks: 5,
 		HopAckObserved:       false,
+	})
+
+	svc.relayStates.store(&relayForwardState{
+		MessageID: "m-stale-table", ForwardedTo: "addr-B",
+		ForwardedVia: sessionRoutingSender(svc.sessions["addr-B"]),
+		Recipient:    idTargetX, NextHopSelection: relayNextHopRoutingTable,
+		HopAckRemainingTicks: 5, FrameLine: "current-wire",
 	})
 
 	// Late ack from the superseded downstream A.
@@ -57,8 +64,8 @@ func TestHandleRelayHopAck_StaleTableRoutedSenderDoesNotSuppressTimer(t *testing
 }
 
 // TestHandleRelayHopAck_StaleGossipFallbackSenderDoesNotSuppressTimer —
-// the table→gossip fallback case (selection overwritten, prior next-hop in
-// AbandonedForwardedTo). A late ack from the abandoned next-hop A must be
+// the table→gossip fallback case (selection overwritten, prior actual identity
+// captured in abandoned history). A late ack from abandoned next-hop A must be
 // ignored for suppression; an ack from the current gossip target marks
 // observed.
 func TestHandleRelayHopAck_StaleGossipFallbackSenderDoesNotSuppressTimer(t *testing.T) {
@@ -68,16 +75,23 @@ func TestHandleRelayHopAck_StaleGossipFallbackSenderDoesNotSuppressTimer(t *test
 	svc.sessions[domain.PeerAddress("addr-A")] = &peerSession{peerIdentity: idPeerA, address: "addr-A"}
 	svc.sessions[domain.PeerAddress("addr-G")] = &peerSession{peerIdentity: idPeerC, address: "addr-G"}
 
-	// The gossip resend overwrote the selection and pushed A onto AbandonedForwardedTo;
-	// the message is now out via gossip target G.
+	// Store the actual old sender A, then perform the real upsert to G.
+	// The transition captures A independently of any later address lookup.
 	svc.relayStates.store(&relayForwardState{
 		MessageID:            "m-stale-gossip",
-		ForwardedTo:          domain.PeerAddress("addr-G"),
+		ForwardedTo:          domain.PeerAddress("addr-A"),
 		Recipient:            idTargetX,
 		NextHopSelection:     relayNextHopGossipFanOut,
-		AbandonedForwardedTo: []domain.PeerAddress{"addr-A"},
+		ForwardedVia:         sessionRoutingSender(svc.sessions["addr-A"]),
 		HopAckRemainingTicks: 5,
 		HopAckObserved:       false,
+	})
+
+	svc.relayStates.store(&relayForwardState{
+		MessageID: "m-stale-gossip", ForwardedTo: "addr-G",
+		ForwardedVia: sessionRoutingSender(svc.sessions["addr-G"]),
+		Recipient:    idTargetX, NextHopSelection: relayNextHopGossipFanOut,
+		HopAckRemainingTicks: 5, FrameLine: "current-wire",
 	})
 
 	// Late ack from the abandoned next-hop A.
@@ -124,6 +138,7 @@ func TestHandleRelayHopAck_TableRoutedAttemptIgnoresAckFromAnyOtherIdentity(t *t
 
 	svc.relayStates.store(&relayForwardState{
 		MessageID:            "m-table-other",
+		ForwardedVia:         sessionRoutingSender(svc.sessions["addr-B"]),
 		ForwardedTo:          domain.PeerAddress("addr-B"),
 		Recipient:            idTargetX,
 		NextHopSelection:     relayNextHopRoutingTable,
@@ -140,9 +155,8 @@ func TestHandleRelayHopAck_TableRoutedAttemptIgnoresAckFromAnyOtherIdentity(t *t
 
 // TestHandleRelayHopAck_UntabledAttemptRejectsOnlyAbandonedHops pins the
 // other side of the guard: an attempt whose next hop was not pinned by a
-// routing-table decision (gossip fan-out, direct session, failover) can
-// only prove an ack stale through the abandoned-next-hop list, so an ack
-// from an identity that was never abandoned is treated as current.
+// routing-table decision (gossip fan-out, direct session, failover) accepts a
+// never-abandoned other identity only while captured history is complete.
 func TestHandleRelayHopAck_UntabledAttemptRejectsOnlyAbandonedHops(t *testing.T) {
 	svc := newTestServiceWithRoutingAndHealth(t, idNodeB)
 	svc.relayStates = newRelayStateStore()
@@ -152,6 +166,7 @@ func TestHandleRelayHopAck_UntabledAttemptRejectsOnlyAbandonedHops(t *testing.T)
 
 	svc.relayStates.store(&relayForwardState{
 		MessageID:            "m-gossip-other",
+		ForwardedVia:         sessionRoutingSender(svc.sessions["addr-G"]),
 		ForwardedTo:          domain.PeerAddress("addr-G"),
 		Recipient:            idTargetX,
 		NextHopSelection:     relayNextHopGossipFanOut,

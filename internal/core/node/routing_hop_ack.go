@@ -19,18 +19,14 @@ import (
 	"github.com/piratecash/corsa/internal/core/routing"
 )
 
-// confirmRouteViaHopAck promotes the route through the peer that sent us
-// the relay_hop_ack to source=hop_ack. The ackSenderAddress parameter is
-// the transport address of the peer that produced the ack — this is the
-// provably correct next-hop, even under gossip fan-out where multiple
-// peers received the relay_message but only one actually delivered it.
+// confirmRouteViaHopAck promotes the route through the actual identity
+// captured from the connection that delivered the ack. The caller has already
+// consumed the current attempt under relayStateStore.mu and retains any legacy
+// routing-input lease through this last routing mutation. No current transport
+// address lookup may substitute a replacement connection's identity.
 //
-// The confirmed claim is the (recipient, ack sender) slot — the routing
-// table keys claims per (Identity, Uplink) and keeps no Origin, so
-// nothing else is needed to find it.
-//
-// If ackSenderAddress is empty, no route can be confirmed (message
-// was stored locally without forwarding).
+// A zero captured identity confirms nothing. Same-identity sessions remain
+// interchangeable because the wire acknowledgement carries only a message ID.
 //
 // Cap-eviction edge case. When MaxNextHopsPerOrigin is active and the
 // (Identity, Uplink) claim was evicted from the routing table
@@ -43,17 +39,9 @@ import (
 // paths (split-horizon, withdrawal authority) rely on. Subsequent
 // announcement traffic for the same (Identity, Uplink) re-populates
 // the bucket through the normal admission rules.
-func (s *Service) confirmRouteViaHopAck(recipientIdentity domain.PeerIdentity, ackSenderAddress domain.PeerAddress) {
-	if ackSenderAddress == "" {
+func (s *Service) confirmRouteViaHopAck(recipientIdentity, ackIdentity domain.PeerIdentity) {
+	if ackIdentity.IsZero() {
 		return
-	}
-
-	// ackSenderAddress is a transport address. Resolve to peer identity
-	// so we can match against routing table entries (keyed by identity).
-	nextHopIdentity := s.resolvePeerIdentity(ackSenderAddress)
-	if nextHopIdentity.IsZero() {
-		// Session may have closed. Try using ackSenderAddress as identity directly.
-		nextHopIdentity = domain.PeerIdentityFromWire(string(ackSenderAddress))
 	}
 
 	// PR 11.12 P2#1 — atomic confirmation. Table.ConfirmHopAck
@@ -78,19 +66,18 @@ func (s *Service) confirmRouteViaHopAck(recipientIdentity domain.PeerIdentity, a
 	// (RouteAccepted) vs. the claim already being at HopAck or
 	// better (RouteUnchanged) vs. an internal refusal that left
 	// health refreshed but did not promote (RouteRejected).
-	status, applied := s.routingTable.ConfirmHopAck(recipientIdentity, nextHopIdentity, 0)
+	status, applied := s.routingTable.ConfirmHopAck(recipientIdentity, ackIdentity, 0)
 	if !applied {
 		log.Debug().
 			Str("identity", recipientIdentity.String()).
-			Str("next_hop", nextHopIdentity.String()).
-			Str("ack_sender", string(ackSenderAddress)).
+			Str("next_hop", ackIdentity.String()).
 			Msg("route_hop_ack_no_matching_route")
 		return
 	}
 	if status == routing.RouteAccepted {
 		log.Debug().
 			Str("identity", recipientIdentity.String()).
-			Str("next_hop", nextHopIdentity.String()).
+			Str("next_hop", ackIdentity.String()).
 			Msg("route_confirmed_via_hop_ack")
 	}
 }

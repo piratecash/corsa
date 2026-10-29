@@ -8,7 +8,7 @@ All three commands are **`TransportLoopbackOnly`** ([rpc.md](../rpc.md), "Transp
 
 There is **no bulk removal** — neither of all bindings nor of all bindings of an identity. Every endpoint is named.
 
-Errors are mapped by type, never by text: a refusal of what was named → `400`; a node without a readable store → `503` (`endpoint_binding_store_unavailable`); a failed write → `500` (nothing was changed).
+Errors are mapped by type, never by text: a refusal of what was named → `400`; an unavailable store or mutation → `503`. **Endpoint mutation activation is not authorised** under the [2026-10-29 owner decision](../design/endpoint-binding-write-outcomes-decision.md); removal and confirmed demotion must refuse at their domain entrypoints until the required checks and separate activation decision. Read-only list/preview are distinct. The approved write contract distinguishes not-applied, indeterminate, applied-with-cleanup-error and committed; a generic write error no longer promises unchanged disk. Structured outcome/client handling remains under implementation and verification.
 
 | Refusal | Meaning |
 |---|---|
@@ -135,7 +135,7 @@ Confirmation: the same shape with `"confirmed": true`, the term counted from the
 | `expires_at` | the term: 30 days after the demotion, extended by every later v2 session |
 | `identity_pin_remains` | the last identity proven on the endpoint is pinned: a v1 session naming **that** identity stays refused on any address. It does not keep another identity off the endpoint |
 
-All selected bindings are demoted in **one version** of the store file, written before anything changes in memory: if the write fails, no binding is demoted. If a session changes one of the bindings (its owner, or its tier) while the file is being written, none of the demotion is made, the file is written again from memory in the same call, and the answer is `endpoint_binding_selection_changed` — run the dry run again. A removal behaves the same way. Each endpoint is journalled as `endpoint_binding_demoted_by_operator` with `previous_protected_by`, `pool`, the new `expires_at` and the action's `operation_id`, which does not depend on any connection.
+The target write uses one complete store snapshot. Its result follows the [four approved outcomes](../design/endpoint-binding-write-outcomes-decision.md): a post-publication error can leave a changed valid file, and failed restoration does not establish rollback. A stale selection never authorises applying an edit; exhaustive competing-mutator coverage is required before enabling mutations. Audit and typed clients must distinguish the four outcomes—not-applied, indeterminate, applied-with-cleanup-error and committed—and a separate restoration result, with operation ID and exact endpoints; do not log every error as an unchanged action. The command examples below describe the interface, not permission to activate it.
 
 #### CLI / console
 
@@ -205,7 +205,7 @@ The internal C3 transaction and restoration-only `Service.RecoverIdentityPinProt
 
 **Массового снятия нет** — ни всех привязок, ни всех привязок одной identity. Каждый адрес называется явно.
 
-Ошибки сопоставляются по типу, а не по тексту: отказ по названному → `400`; узел без читаемого хранилища → `503` (`endpoint_binding_store_unavailable`); сбой записи → `500` (ничего не изменено).
+Ошибки сопоставляются по типу, а не по тексту: отказ по названному → `400`; недоступное хранилище или изменение → `503`. **Активация изменения endpoint-привязок не разрешена** [решением владельца от 2026-10-29](../design/endpoint-binding-write-outcomes-decision.ru.md): снятие и подтверждённое понижение должны отказывать в доменных точках входа до необходимых проверок и отдельного решения о включении. Чтение списка/preview выделены отдельно. Утверждённый контракт различает «не применено», «результат неопределён», «применено, ошибка очистки» и подтверждённый commit; общая ошибка записи больше не обещает неизменённый диск. Структурированные исходы и их обработка клиентами ещё реализуются и проверяются.
 
 | Отказ | Значение |
 |---|---|
@@ -285,7 +285,7 @@ The internal C3 transaction and restoration-only `Service.RecoverIdentityPinProt
 | `expires_at` | срок: 30 суток после понижения, продлевается каждой следующей сессией v2 |
 | `identity_pin_remains` | последняя доказанная на адресе identity закреплена: сессия v1, называющая **эту** identity, по-прежнему отклоняется на любом адресе. Другую identity на адресе это не останавливает |
 
-Все выбранные привязки понижаются **одной версией** файла хранилища, записанной раньше любых изменений в памяти: если запись не удалась, не понижена ни одна. Если во время записи файла сессия изменила одну из привязок (владельца или ярус), понижение не делается целиком, файл в том же вызове перезаписывается из памяти, и ответ — `endpoint_binding_selection_changed`: повторите пробный прогон. Снятие ведёт себя так же. Каждый адрес пишется в журнал как `endpoint_binding_demoted_by_operator` с `previous_protected_by`, `pool`, новым `expires_at` и `operation_id` действия, который не зависит ни от какого соединения.
+Целевая запись использует один полный снимок хранилища. Результат следует [четырём утверждённым исходам](../design/endpoint-binding-write-outcomes-decision.ru.md): ошибка после публикации может оставить изменённый валидный файл, а неудачное восстановление не доказывает rollback. Устаревший выбор не разрешает изменение; до включения требуется полный охват конкурирующих мутаций. Аудит и typed-клиенты различают четыре исхода — «не применено», «неопределённо», «применено, ошибка очистки» и commit — и отдельный результат восстановления, с operation ID и точными endpoints; нельзя писать о каждом отказе как о неизменённом действии. Примеры команд ниже описывают интерфейс, а не разрешение включить его.
 
 #### CLI / консоль
 

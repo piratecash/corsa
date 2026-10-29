@@ -42,6 +42,9 @@ func TestInboundN0LazyAndSaturatedStorageCostIsBounded(t *testing.T) {
 
 func TestInboundN1FixedOwnershipCostAndTerminalAliasRelease(t *testing.T) {
 	f := n1AcceptedFixture(t)
+	if f.service.terminalObservation != nil {
+		t.Fatal("ordinary N1 fixture enabled the optional terminal observer")
+	}
 	if !f.service.publishInboundLifetime(f.owner) {
 		t.Fatal("publish failed")
 	}
@@ -62,8 +65,12 @@ func TestInboundN1FixedOwnershipCostAndTerminalAliasRelease(t *testing.T) {
 	sendSelectionBytes := unsafe.Sizeof(inboundSendSelection{})
 	closeSelectionBytes := unsafe.Sizeof(inboundCloseSelection{})
 	pointerBytes := unsafe.Sizeof(uintptr(0))
-	if sendSelectionBytes != 2*pointerBytes || closeSelectionBytes != pointerBytes {
-		t.Fatal("captured selection retained more than actual core/original owner", sendSelectionBytes, closeSelectionBytes)
+	// Both selections have exactly two pointer fields. The closed source guard
+	// also checks their actual types: core/original owner for Send, and
+	// core/optional original K10 terminal capsule for Close. Ordinary N1 has
+	// no terminal source and allocates no capsule.
+	if sendSelectionBytes != 2*pointerBytes || closeSelectionBytes != 2*pointerBytes {
+		t.Fatal("captured selection changed its exact two-pointer shape", sendSelectionBytes, closeSelectionBytes)
 	}
 	// These are broad structural regression bounds, NOT heap/RSS acceptance.
 	// No witness slice/map or per-session worker/timer belongs in these owners.
@@ -71,7 +78,7 @@ func TestInboundN1FixedOwnershipCostAndTerminalAliasRelease(t *testing.T) {
 		t.Fatal("fixed original-owner shape grew", leafBytes, wireBytes, handleBytes, producerBytes)
 	}
 	t.Logf("N1 shallow sizes: original leaf %dB, candidate W %dB, handle %dB, producer %dB; R grows by one pointer; private context allocator/closure/interface/GC costs additional. B live handlers, J existing delayed jobs, existing concurrent send/Close callers and one selection may retain leaves; J<=B is NOT proved. Existing N0 arena/snapshots/full-main/write buffers additional; no D1 resource admission", leafBytes, wireBytes, handleBytes, producerBytes)
-	t.Logf("Send selection %dB, close selection %dB; values retain no Service/ConnID/callback. Borrowed strict port is fixture-owned until synchronous common scheduler joins; actual runtime wrappers pass nil and retain no backend field", sendSelectionBytes, closeSelectionBytes)
+	t.Logf("Send selection %dB, close selection %dB; no direct Service/ConnID/callback fields. An observed Close may retain its original K10 capsule and original entry/common graph, not a replacement lookup; these shallow sizes do not measure that graph. End cleared the proof/session/entry/producer authority above. Borrowed strict port is fixture-owned until synchronous common scheduler joins; actual runtime wrappers pass nil and retain no backend field", sendSelectionBytes, closeSelectionBytes)
 	runtime.KeepAlive(capturedJob)
 	runtime.KeepAlive(capturedArrival)
 }

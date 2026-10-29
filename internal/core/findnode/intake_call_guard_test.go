@@ -1,6 +1,8 @@
 package findnode
 
 import (
+	"crypto/sha256"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -13,9 +15,47 @@ import (
 	"testing"
 )
 
+// Only these two exact tagged diagnostic bodies may extend the importer set.
+// A tag alone, another path, or a changed body does not admit a production root.
+func candidateDiagnosticImporter(rel string, raw []byte) bool {
+	var want string
+	switch rel {
+	case "internal/core/node/find_node_resource_diagnostic.go":
+		want = "63112a5bba4b8e2832680b47ae904bdf50f64806f5c707628c3a6604f9dfe549"
+	case "internal/core/node/find_node_membership_checkpoint.go":
+		want = "39209defff20031f7f093ec2bd86c2c956e105b3699fa70a8963b522290186d8"
+	default:
+		return false
+	}
+	return strings.HasPrefix(string(raw), "//go:build d1_resource_probe\n\npackage node\n") && fmt.Sprintf("%x", sha256.Sum256(raw)) == want
+}
+
 // This is a reviewed call/field inventory, not universal dataflow verification.
 func TestCandidateInactiveCallGraphAndInventories(t *testing.T) {
 	root := filepath.Join("..", "..", "..")
+	// Exercise the same predicate used below, including default activation and
+	// an OTHERFILE copy. These do not exempt any additional importer or caller.
+	for _, rel := range []string{"internal/core/node/find_node_resource_diagnostic.go", "internal/core/node/find_node_membership_checkpoint.go"} {
+		raw, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(rel)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !candidateDiagnosticImporter(rel, raw) {
+			t.Fatal("reviewed diagnostic importer changed", rel)
+		}
+		for _, changed := range [][]byte{
+			[]byte(strings.Replace(string(raw), "//go:build d1_resource_probe\n\n", "", 1)),
+			[]byte(strings.Replace(string(raw), "d1_resource_probe", "other_probe", 1)),
+			append(append([]byte(nil), raw...), '\n'),
+		} {
+			if candidateDiagnosticImporter(rel, changed) {
+				t.Fatal("diagnostic importer tag/body control escaped", rel)
+			}
+		}
+		if candidateDiagnosticImporter("internal/core/node/other_diagnostic.go", raw) {
+			t.Fatal("diagnostic importer OTHERFILE escaped", rel)
+		}
+	}
 	allowed := map[string]bool{"intake_owner.go": true, "intake_capacity_epoch.go": true, "intake_source_limits.go": true, "intake_pending_fixed.go": true, "intake_groups.go": true, "intake_membership.go": true, "budget.go": true, "pending.go": true, "session.go": true}
 	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -36,7 +76,17 @@ func TestCandidateInactiveCallGraphAndInventories(t *testing.T) {
 		}
 		for _, spec := range file.Imports {
 			if strings.Trim(spec.Path.Value, "\"") == "github.com/piratecash/corsa/internal/core/findnode" && path != filepath.Join(root, "internal", "core", "node", "find_node_resources.go") && path != filepath.Join(root, "internal", "core", "netcore", "owned_resources.go") && path != filepath.Join(root, "internal", "core", "node", "find_node_connection.go") && path != filepath.Join(root, "internal", "core", "node", "find_node_bridge_capture.go") && path != filepath.Join(root, "internal", "core", "node", "find_node_bridge_construction.go") && path != filepath.Join(root, "internal", "core", "node", "find_node_owned_receive.go") && path != filepath.Join(root, "internal", "core", "node", "peer_management.go") && path != filepath.Join(root, "internal", "core", "node", "proof_transport_lifetime.go") && path != filepath.Join(root, "internal", "core", "node", "find_node_owned_round_loop.go") && path != filepath.Join(root, "internal", "core", "node", "find_node_owned_write.go") && path != filepath.Join(root, "internal", "core", "netcore", "owned_findnode_write.go") && path != filepath.Join(root, "internal", "core", "node", "find_node_owned_answer.go") && path != filepath.Join(root, "internal", "core", "netcore", "owned_findnode_answer_write.go") && path != filepath.Join(root, "internal", "core", "node", "find_node_owned_local_target.go") && path != filepath.Join(root, "internal", "core", "node", "identity_pin_own_dm_runtime.go") && path != filepath.Join(root, "internal", "core", "node", "find_node_ready_construction.go") && path != filepath.Join(root, "internal", "core", "node", "find_node_ready_target_timing.go") {
-				t.Errorf("production import: %s", path)
+				rel, err := filepath.Rel(root, path)
+				if err != nil {
+					return err
+				}
+				raw, err := os.ReadFile(path)
+				if err != nil {
+					return err
+				}
+				if spec.Name != nil || !candidateDiagnosticImporter(filepath.ToSlash(rel), raw) {
+					t.Errorf("production import: %s", path)
+				}
 			}
 		}
 		if filepath.Dir(path) != filepath.Join(root, "internal", "core", "findnode") {

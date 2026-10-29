@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/secretfile"
 )
 
 // endpoint_binding_operator_test.go pins the operator's actions on endpoint
@@ -316,10 +317,16 @@ func TestAFailedWriteOfADemotionLowersNoBinding(t *testing.T) {
 		t.Fatalf("dry run: %v", err)
 	}
 	diskFull := errors.New("disk full")
-	store.writeFile = func([]byte) error { return diskFull }
+	writes := 0
+	store.writeFile = func([]byte) error { writes++; return diskFull }
 
 	if _, err := store.demote(selection, plan.Token, operatorTestOp); !errors.Is(err, diskFull) {
 		t.Fatalf("demotion on a failing disk = %v, want the write error", err)
+	} else {
+		var action *domain.EndpointBindingActionError
+		if !errors.As(err, &action) || action.Outcome != domain.EndpointBindingActionIndeterminate || action.Restoration != domain.EndpointBindingRestorationUnconfirmed || action.OperationID != operatorTestOp || !reflect.DeepEqual(action.Endpoints, selection) || writes != 2 {
+			t.Fatalf("an untyped writer error was called previsible or a failed protective rewrite acknowledged: %+v writes=%d", action, writes)
+		}
 	}
 	if after := protectedRecords(store); !reflect.DeepEqual(before, after) {
 		t.Fatalf("a failed write lowered bindings in memory: %v → %v", before, after)
@@ -550,29 +557,65 @@ func assertNamesNoIdentity(t *testing.T, name string, answer any, ids ...domain.
 	}
 }
 
-// The node's entry points: each takes the caller's context, a cancelled one
-// does nothing, a removal gets a fresh operation id, and a node without a
-// readable store refuses every action instead of answering from nothing.
-func TestTheServiceRunsTheOperatorActionsOnItsStore(t *testing.T) {
+// Public mutations remain unavailable until the owner-approved outcome and
+// competing-writer mechanism is qualified. A preview token is not activation.
+// The private store-engine tests above do not assert public availability.
+func TestServiceEndpointMutationsStayUnavailableWhileReadsWork(t *testing.T) {
 	t.Parallel()
-	store := loadSecureSessionStore("", newStoreClock().trusted())
+	paths := newPinStorePaths(t)
+	store, _ := openPinStore(t, paths, newStoreClock())
+	requireStarts(t, store)
 	endpoint := domain.PeerAddress("192.0.2.110:64646")
+	protected := domain.PeerAddress("192.0.2.111:64646")
 	bindOrdinary(t, store, endpoint, domain.PeerIdentity{0xb1})
+	protectEndpoint(t, store, protected, domain.PeerIdentity{0xb2}, domain.ProtectedBindingPoolContact)
 	svc := &Service{secureSessions: &secureSessions{store: store}}
 	ctx := context.Background()
+	store.mu.Lock()
+	before := store.snapshotLocked()
+	changes, written := store.changes, store.written
+	store.mu.Unlock()
+	onDisk, err := os.ReadFile(paths.store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writes := 0
+	store.writeFile = func([]byte) error { writes++; return errors.New("unavailable mutation reached store writer") }
+	store.writeMarker = func([]byte) error { writes++; return errors.New("unavailable mutation reached marker writer") }
 
 	cancelled, cancel := context.WithCancel(ctx)
 	cancel()
 	if _, err := svc.RemoveEndpointBinding(cancelled, endpoint); !errors.Is(err, context.Canceled) || !store.endpointRequiresV2(endpoint) {
 		t.Fatalf("a cancelled removal = %v; the binding must stay", err)
 	}
+	if _, err := svc.DemoteEndpointBindings(cancelled, []domain.PeerAddress{protected}, "unused"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("a cancelled demotion = %v", err)
+	}
 	page, err := svc.ListEndpointBindings(ctx, domain.EndpointBindingQuery{Limit: 10})
-	if err != nil || page.Total != 1 {
+	if err != nil || page.Total != 2 {
 		t.Fatalf("list = %+v, %v", page, err)
 	}
+	plan, err := svc.PlanEndpointBindingDemotion(ctx, []domain.PeerAddress{protected})
+	if err != nil || len(plan.Items) != 1 || plan.Token == "" {
+		t.Fatalf("read-only preview = %+v, %v", plan, err)
+	}
 	removal, err := svc.RemoveEndpointBinding(ctx, endpoint)
-	if err != nil || removal.OperationID == "" || store.endpointRequiresV2(endpoint) {
-		t.Fatalf("removal = %+v, %v", removal, err)
+	if !errors.Is(err, domain.ErrEndpointBindingMutationUnavailable) || !reflect.DeepEqual(removal, domain.EndpointBindingRemoval{}) {
+		t.Fatalf("default removal = %+v, %v", removal, err)
+	}
+	demotion, err := svc.DemoteEndpointBindings(ctx, []domain.PeerAddress{protected}, plan.Token)
+	if !errors.Is(err, domain.ErrEndpointBindingMutationUnavailable) || !reflect.DeepEqual(demotion, domain.EndpointBindingDemotionResult{}) {
+		t.Fatalf("preview token activated default demotion = %+v, %v", demotion, err)
+	}
+	store.mu.Lock()
+	after := store.snapshotLocked()
+	unchanged := changes == store.changes && written == store.written
+	store.mu.Unlock()
+	if writes != 0 || !unchanged || !reflect.DeepEqual(before, after) || !store.endpointRequiresV2(endpoint) {
+		t.Fatal("unavailable public mutation changed protection, counters or reached filesystem writers")
+	}
+	if raw, err := os.ReadFile(paths.store); err != nil || string(raw) != string(onDisk) {
+		t.Fatal("unavailable public mutation changed visible store")
 	}
 
 	unreadablePath := filepath.Join(t.TempDir(), "secure-sessions-64646.json")
@@ -587,13 +630,13 @@ func TestTheServiceRunsTheOperatorActionsOnItsStore(t *testing.T) {
 		if _, err := node.ListEndpointBindings(ctx, domain.EndpointBindingQuery{Limit: 10}); !errors.Is(err, domain.ErrEndpointBindingStoreUnavailable) {
 			t.Fatalf("%s: list = %v", name, err)
 		}
-		if _, err := node.RemoveEndpointBinding(ctx, endpoint); !errors.Is(err, domain.ErrEndpointBindingStoreUnavailable) {
+		if _, err := node.RemoveEndpointBinding(ctx, endpoint); !errors.Is(err, domain.ErrEndpointBindingMutationUnavailable) {
 			t.Fatalf("%s: remove = %v", name, err)
 		}
 		if _, err := node.PlanEndpointBindingDemotion(ctx, []domain.PeerAddress{endpoint}); !errors.Is(err, domain.ErrEndpointBindingStoreUnavailable) {
 			t.Fatalf("%s: dry run = %v", name, err)
 		}
-		if _, err := node.DemoteEndpointBindings(ctx, []domain.PeerAddress{endpoint}, "token"); !errors.Is(err, domain.ErrEndpointBindingStoreUnavailable) {
+		if _, err := node.DemoteEndpointBindings(ctx, []domain.PeerAddress{endpoint}, "token"); !errors.Is(err, domain.ErrEndpointBindingMutationUnavailable) {
 			t.Fatalf("%s: confirm = %v", name, err)
 		}
 	}
@@ -639,14 +682,17 @@ func TestAnOwnerChangeBetweenTheDryRunAndTheConfirmationRefusesIt(t *testing.T) 
 	}
 }
 
-// movedOnDuringWrite changes the binding of endpoint in memory the moment the
-// operator's write reaches the disk — as a concurrent session would, whose own
-// save waits for writeMu — and lets every write through.
-func movedOnDuringWrite(t *testing.T, store *secureSessionStore, endpoint domain.PeerAddress, move func(*endpointBinding)) *int {
+// movedOnDuringWrite injects a defensive stale-selection state directly under
+// mu. It deliberately bypasses pinMutationGate, unlike every supported proof
+// or expiry producer. The separate concurrent producer test covers that gate.
+func movedOnDuringWrite(t *testing.T, store *secureSessionStore, endpoint domain.PeerAddress, move func(*endpointBinding), uncertain bool) *int {
 	t.Helper()
 	writes := 0
 	store.writeFile = func(raw []byte) error {
 		writes++
+		if err := store.writeToDisk(raw); err != nil {
+			return err
+		}
 		if writes == 1 {
 			key := mustCanonical(t, endpoint)
 			store.mu.Lock()
@@ -655,8 +701,11 @@ func movedOnDuringWrite(t *testing.T, store *secureSessionStore, endpoint domain
 			store.insertBindingLocked(key, binding)
 			store.changes++
 			store.mu.Unlock()
+			if uncertain {
+				return &pinFileWriteError{commit: secretfile.DurableIndeterminate, cause: errors.New("test postvisible stale write uncertain")}
+			}
 		}
-		return store.writeToDisk(raw)
+		return nil
 	}
 	return &writes
 }
@@ -700,37 +749,44 @@ func TestABindingThatMovedOnDuringTheWriteRewritesTheFileFromMemory(t *testing.T
 			},
 		},
 	} {
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-			clock := newStoreClock()
-			path := filepath.Join(t.TempDir(), "secure-sessions-64646.json")
-			store := loadSecureSessionStore(path, clock.trusted())
-			endpoint := domain.PeerAddress("192.0.2.131:64646")
-			tc.setUp(t, store, endpoint)
-			writes := movedOnDuringWrite(t, store, endpoint, tc.move)
+		for _, uncertain := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/uncertain-%v", name, uncertain), func(t *testing.T) {
+				t.Parallel()
+				clock := newStoreClock()
+				path := filepath.Join(t.TempDir(), "secure-sessions-64646.json")
+				store := loadSecureSessionStore(path, clock.trusted())
+				endpoint := domain.PeerAddress("192.0.2.131:64646")
+				tc.setUp(t, store, endpoint)
+				writes := movedOnDuringWrite(t, store, endpoint, tc.move, uncertain)
 
-			if err := tc.act(t, store, endpoint); !errors.Is(err, domain.ErrEndpointBindingSelectionChanged) {
-				t.Fatalf("action on a binding that moved on = %v, want ErrEndpointBindingSelectionChanged", err)
-			}
-			if *writes != 2 {
-				t.Fatalf("the store was written %d times, want the action and the rewrite from memory", *writes)
-			}
-			inMemory, bound := bindingOf(store, endpoint)
-			if !bound || inMemory.protection == nil {
-				t.Fatalf("memory lost the protection: bound %v, %+v", bound, inMemory)
-			}
-			onDisk, bound := bindingOf(loadSecureSessionStore(path, clock.trusted()), endpoint)
-			if !bound || onDisk.identity != inMemory.identity || onDisk.protection == nil || *onDisk.protection != *inMemory.protection {
-				t.Fatalf("the disk does not hold memory's binding: %+v, memory %+v", onDisk, inMemory)
-			}
-			store.mu.Lock()
-			pending := store.changes != store.written
-			store.mu.Unlock()
-			if pending {
-				t.Fatal("the rewrite from memory left the store marked unwritten")
-			}
-			assertTallies(t, store)
-		})
+				if err := tc.act(t, store, endpoint); !errors.Is(err, domain.ErrEndpointBindingSelectionChanged) {
+					t.Fatalf("action on a binding that moved on = %v, want ErrEndpointBindingSelectionChanged", err)
+				} else {
+					var action *domain.EndpointBindingActionError
+					if !errors.As(err, &action) || action.Outcome != domain.EndpointBindingActionIndeterminate || action.Restoration != domain.EndpointBindingRestorationConfirmed || action.CauseCode != domain.EndpointBindingCauseSelectionChanged || action.OperationID != operatorTestOp || !reflect.DeepEqual(action.Endpoints, []domain.PeerAddress{endpoint}) {
+						t.Fatalf("postvisible stale state lost its indeterminate receipt: %+v", action)
+					}
+				}
+				if *writes != 2 {
+					t.Fatalf("the store was written %d times, want the action and the rewrite from memory", *writes)
+				}
+				inMemory, bound := bindingOf(store, endpoint)
+				if !bound || inMemory.protection == nil {
+					t.Fatalf("memory lost the protection: bound %v, %+v", bound, inMemory)
+				}
+				onDisk, bound := bindingOf(loadSecureSessionStore(path, clock.trusted()), endpoint)
+				if !bound || onDisk.identity != inMemory.identity || onDisk.protection == nil || *onDisk.protection != *inMemory.protection {
+					t.Fatalf("the disk does not hold memory's binding: %+v, memory %+v", onDisk, inMemory)
+				}
+				store.mu.Lock()
+				pending := store.changes != store.written
+				store.mu.Unlock()
+				if pending {
+					t.Fatal("the rewrite from memory left the store marked unwritten")
+				}
+				assertTallies(t, store)
+			})
+		}
 	}
 }
 

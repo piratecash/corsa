@@ -259,6 +259,21 @@ func (s *Server) execute(c fiber.Ctx, req CommandRequest) CommandResponse {
 	return s.table.Execute(req)
 }
 
+// commandErrorResponse preserves endpoint-action disposition across every
+// CommandTable HTTP entrypoint. Only the reviewed typed error adds details;
+// unrelated errors keep the original response. Build its message from the
+// safe DTO so an outer storage wrapper cannot disclose a filesystem path.
+func commandErrorResponse(c fiber.Ctx, response CommandResponse) error {
+	if details := endpointBindingActionDetails(response.Error); details != nil {
+		message := (&EndpointBindingRPCError{Details: *details}).Error()
+		return c.Status(response.ErrorKind.HTTPStatus()).JSON(fiber.Map{
+			"error":           message,
+			"endpoint_action": details,
+		})
+	}
+	return ErrorResponse(c, response.ErrorKind.HTTPStatus(), response.Error.Error())
+}
+
 // handleExec is the universal command dispatcher.
 // POST /rpc/v1/exec {"command": "ping", "args": {...}}
 func (s *Server) handleExec(c fiber.Ctx) error {
@@ -278,7 +293,7 @@ func (s *Server) handleExec(c fiber.Ctx) error {
 	// input transparently — no need to lowercase here.
 	resp := s.execute(c, CommandRequest{Name: req.Command, Args: req.Args, Ctx: c.RequestCtx()})
 	if resp.Error != nil {
-		return ErrorResponse(c, resp.ErrorKind.HTTPStatus(), resp.Error.Error())
+		return commandErrorResponse(c, resp)
 	}
 
 	c.Set("Content-Type", "application/json")
@@ -330,7 +345,7 @@ func (s *Server) handleFrame(c fiber.Ctx) error {
 	}
 
 	if resp.Error != nil {
-		return ErrorResponse(c, resp.ErrorKind.HTTPStatus(), resp.Error.Error())
+		return commandErrorResponse(c, resp)
 	}
 
 	c.Set("Content-Type", "application/json")
@@ -418,7 +433,7 @@ func (s *Server) legacyHandler(command string) fiber.Handler {
 	return func(c fiber.Ctx) error {
 		resp := s.execute(c, CommandRequest{Name: command, Ctx: c.RequestCtx()})
 		if resp.Error != nil {
-			return ErrorResponse(c, resp.ErrorKind.HTTPStatus(), resp.Error.Error())
+			return commandErrorResponse(c, resp)
 		}
 		c.Set("Content-Type", "application/json")
 		return c.Status(fiber.StatusOK).Send(resp.Data)
@@ -438,7 +453,7 @@ func (s *Server) legacyArgHandler(command string) fiber.Handler {
 		}
 		resp := s.execute(c, CommandRequest{Name: command, Args: args, Ctx: c.RequestCtx()})
 		if resp.Error != nil {
-			return ErrorResponse(c, resp.ErrorKind.HTTPStatus(), resp.Error.Error())
+			return commandErrorResponse(c, resp)
 		}
 		c.Set("Content-Type", "application/json")
 		return c.Status(fiber.StatusOK).Send(resp.Data)

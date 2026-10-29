@@ -802,6 +802,11 @@ func (s *Service) refuseLegacyWelcome(address domain.PeerAddress, claimed domain
 	return err
 }
 
+// errPinProtectionLocalFailure classifies a local store refusal or I/O failure
+// after the outbound peer has proved its identity. The dial still fails closed;
+// this outcome preserves its original cause without blaming the endpoint.
+var errPinProtectionLocalFailure = errors.New("secure session: proved peer protection could not be stored locally")
+
 // unchargedDialOutcomes are the dial outcomes that say nothing against the
 // address. This node refused a v1 answer from a peer that requires v2, held
 // the fall back to v1 after such a refusal, or held the dial itself on the
@@ -837,6 +842,7 @@ var unchargedDialOutcomes = []error{
 	errV2FailedBeforeProof,
 	errDialAbortedLocally,
 	errPinStoreFull,
+	errPinProtectionLocalFailure,
 	domain.ErrIdentityPinRevisionExhausted,
 	errPinRoomAwaited,
 	errV2DialLocalFailure,
@@ -938,12 +944,16 @@ func (s *Service) provenTransport(ctx context.Context, transport *dialledTranspo
 	return transport, nil
 }
 
-// notePinNotStored passes on why the protection of a proven outbound session
-// was not stored. A full pin store is this node's own limit: the next dial to
-// the address waits until the store has room, pinRoomWaitMax at most.
+// notePinNotStored passes on why this node could not retain the protection
+// of an already proven outbound peer. Local store failures are uncharged and
+// retain their original cause; they do not admit the session or allow fallback.
+// A full pin store keeps its existing separate wait for room.
 func (s *Service) notePinNotStored(address domain.PeerAddress, err error) error {
+	if err == nil {
+		return nil
+	}
 	if !errors.Is(err, errPinStoreFull) {
-		return err
+		return fmt.Errorf("%w: %w", errPinProtectionLocalFailure, err)
 	}
 	wait := s.secureSessions.marks.notePinStoreFull(address)
 	log.Debug().Str("peer", string(address)).Dur("pin_room_wait_max", wait).Msg("secure_session_dial_waits_for_pin_room")

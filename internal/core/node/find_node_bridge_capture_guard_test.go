@@ -25,7 +25,7 @@ func ownedNodeObservationPins() map[string]string {
 		"find_node_bridge_construction.go:newFindNodeOwnedCaptureCandidateService": "01052f314728fba976f31147a9c46c6ffdb56b95e4176b4a8f9144f713222363",
 		"find_node_bridge_construction.go:prepareFindNodeOwnedCaptureConstruction": "2343b9c62954608a8368ff91477c7121a190ecbb82fc50277ca7684d38b4be44",
 		"find_node_bridge_construction.go:claim":                                   "9ccee7db98eb74261f9f0a63ef6f88e5ffd764996347698eaa83538247538547",
-		"service.go:newServiceWithConstruction":                                    "60aa31cde72a95361386c4181eabc6305bdc22c0828955e8d402d8412a1fc8d0",
+		"service.go:newServiceWithConstruction":                                    "21501b1ff8e9d4de7471b3451d093e0c5a2c58b656cef53b6ba84fa1bc609d26",
 		"find_node_bridge_capture.go:captureOwnedFindNodeObservation":              "f5ff7ca923852bb269e9424b7ba23233b1a5fcdcce3b345b1f2e90051638c4f4",
 		"find_node_degree_bridge.go:captureBridgeDegreeProjection":                 "e71ba3a62ab7cf918bab392544da7c77adb51c1491e62e340cea51fa6456c9cb",
 		"find_node_degree_bridge.go:ownedDegreeProjectionFrontier":                 "79bea910912ac92bf3a85785614dbd6e25e17163fa6c697d656772c9c1070a9f",
@@ -200,6 +200,7 @@ func TestOwnedNodeObservationClosedSource(t *testing.T) {
 // In-memory SOURCE controls only, not physical FUNCTIONAL qualification.
 func TestOwnedNodeObservationSourceControls(t *testing.T) {
 	for _, tc := range []struct{ name, file, before, after string }{
+		{"broaden-session-class", "service.go", "sessionRecords := classes == recordAdmissionChargedR|recordAdmissionImmediateK && admission.kSource == contactRecordSessionSource", "sessionRecords := true"},
 		{"skip-pair", "find_node_bridge_construction.go", "b.capture.intake, b.capture.sink = intake, sink", "_ = intake; _ = sink"},
 		{"drop-tail-conversion", "find_node_bridge_capture.go", "range observation.facts.allOriginal {", "range observation.facts.allOriginal[:len(observation.facts.allOriginal)-1] {"},
 		{"late-pair", "", "", ""},

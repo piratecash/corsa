@@ -596,7 +596,7 @@ func (s *secureSessionStore) startFromDisk(opts secureSessionStoreOptions) *PinS
 	}
 	s.storeAbs = storeAbs
 	marker := readPinStoreMarker(opts.markerPath)
-	file, loadErr := s.load()
+	file, raw, loadErr := s.load()
 	switch decidePinStoreStartup(marker, file, storeAbs) {
 	case startupFirst:
 		// The marker comes with the first write of the store, never before
@@ -606,9 +606,15 @@ func (s *secureSessionStore) startFromDisk(opts secureSessionStoreOptions) *PinS
 		return nil
 	case startupKept:
 		s.markerWritten = true
+		if err := s.confirmLoadedPinStore(raw); err != nil {
+			return refuseStoreUnconfirmed(opts.path, err)
+		}
+		if err := s.writeMarkerOnce(); err != nil {
+			return refuseMarkerUnwritable(opts.markerPath, err)
+		}
 		return nil
 	case startupMarkKept:
-		return s.markKeptStore(marker)
+		return s.markKeptStore(marker, raw)
 	case startupLost:
 		return refuseStoreMissing(opts.path, opts.markerPath, marker.store)
 	default:
@@ -667,9 +673,12 @@ func auditPinStoreLocations(opts secureSessionStoreOptions) *PinStoreRefusalErro
 // that still holds a store is a refusal too: the store was copied, and
 // which copy is current is the operator's call. Called while the store is
 // built, before it is shared.
-func (s *secureSessionStore) markKeptStore(marker pinStoreMarker) *PinStoreRefusalError {
+func (s *secureSessionStore) markKeptStore(marker pinStoreMarker, mainRaw []byte) *PinStoreRefusalError {
 	if marker.state == markerIntact && anotherStoreRemains(*marker.store, s.storeAbs) {
 		return refuseTwoStores(s.storeAbs, *marker.store, s.markerPath)
+	}
+	if err := s.confirmLoadedPinStore(mainRaw); err != nil {
+		return refuseStoreUnconfirmed(s.storeAbs, err)
 	}
 	raw, err := encodePinStoreMarker(s.storeAbs)
 	if err == nil {
@@ -921,13 +930,13 @@ func derivedFromOf(record endpointBindingRecord) (*domain.CanonicalEndpoint, err
 
 // load reads the store file into the empty store and says what it found: no
 // file, a file loaded, or one that cannot be read (with why).
-func (s *secureSessionStore) load() (pinStoreFileState, error) {
+func (s *secureSessionStore) load() (pinStoreFileState, []byte, error) {
 	dir, err := secretfile.Open(s.dir)
 	if errors.Is(err, fs.ErrNotExist) {
-		return storeFileAbsent, nil
+		return storeFileAbsent, nil, nil
 	}
 	if err != nil {
-		return storeFileUnreadable, err
+		return storeFileUnreadable, nil, err
 	}
 	defer func() { _ = dir.Close() }()
 	// A crash between a temp and its rename leaves the temp behind, up to
@@ -936,20 +945,20 @@ func (s *secureSessionStore) load() (pinStoreFileState, error) {
 	sweepStaleSecretTemps(dir)
 	raw, err := dir.ReadFile(s.name)
 	if errors.Is(err, fs.ErrNotExist) {
-		return storeFileAbsent, nil
+		return storeFileAbsent, nil, nil
 	}
 	if err != nil {
-		return storeFileUnreadable, fmt.Errorf("read: %w", secretfile.StripPath(err))
+		return storeFileUnreadable, nil, fmt.Errorf("read: %w", secretfile.StripPath(err))
 	}
 	file, err := decodeSecureSessionFile(raw)
 	if err != nil {
-		return storeFileUnreadable, err
+		return storeFileUnreadable, nil, err
 	}
 	if err := s.loadFile(file); err != nil {
-		return storeFileUnreadable, err
+		return storeFileUnreadable, nil, err
 	}
 	s.pinMainLoaded = true
-	return storeFileLoaded, nil
+	return storeFileLoaded, raw, nil
 }
 
 // loadFile puts what a decoded file holds into the empty store. Nothing else
@@ -1729,6 +1738,13 @@ func (s *secureSessionStore) flushPending(moment renewalFlushMoment) error {
 	// lookup — is journalled on the way out, once mu is released: the
 	// lookups that find it run under mu.
 	defer s.reportClockJump()
+	var expired []expiredEndpointBinding
+	defer func() { s.logExpired(expired) }()
+	// This gate must precede the expiry mutation itself, not just persist.
+	// updatePinProof already owns its read side; shared leaf helpers do not
+	// acquire it again. Order remains gate -> writeMu -> brief mu.
+	s.pinMutationGate.RLock()
+	defer s.pinMutationGate.RUnlock()
 	s.mu.Lock()
 	if s.unreadable {
 		// Fail-closed: every endpoint is treated as bound, and nothing may be
@@ -1738,7 +1754,7 @@ func (s *secureSessionStore) flushPending(moment renewalFlushMoment) error {
 	}
 	at := s.now()
 	s.sampleNinQuotaLocked()
-	expired := s.sweepExpiredWhenDueLocked(moment, at)
+	expired = s.sweepExpiredWhenDueLocked(moment, at)
 	normalPending := s.changes != s.written || s.renewalsUnwritten || len(expired) > 0
 	journalPending := s.ninProgressPendingLocked()
 	if moment == flushRenewalsWhenDue &&
@@ -1749,7 +1765,6 @@ func (s *secureSessionStore) flushPending(moment renewalFlushMoment) error {
 		// require v2.
 		s.renewalsUnwritten = s.renewalsUnwritten || len(expired) > 0
 		s.mu.Unlock()
-		s.logExpired(expired)
 		return nil
 	}
 	if s.renewalsUnwritten || len(expired) > 0 {
@@ -1764,7 +1779,6 @@ func (s *secureSessionStore) flushPending(moment renewalFlushMoment) error {
 		s.lastFlush = &renewalFlush{at: at}
 	}
 	s.mu.Unlock()
-	s.logExpired(expired)
 	if !pending {
 		return nil
 	}
@@ -2314,16 +2328,33 @@ func (s *secureSessionStore) writeSnapshot(file secureSessionFile) error {
 	if err == nil {
 		raw, err = json.Marshal(file)
 	}
-	if err == nil {
-		err = s.writeFile(raw)
-	}
 	if err != nil {
+		failure := snapshotWriteFailure(domain.EndpointBindingActionNotApplied, err)
+		failure.causeCode = domain.EndpointBindingCauseValidationRefused
+		return failure
+	}
+	if err := s.writeFile(raw); err != nil {
 		s.logger.Error().Err(err).Str("store", s.name).Msg(writeFailureMessage(err))
-		return fmt.Errorf("secure session store: %w", err)
+		outcome := domain.EndpointBindingActionIndeterminate
+		switch pinFileCommit(err) {
+		case secretfile.DurableNotCommitted:
+			outcome = domain.EndpointBindingActionNotApplied
+		case secretfile.DurableCommitted:
+			// A cleanup error is a confirmed whole snapshot only when the
+			// required marker was already confirmed before this write.
+			if s.markerWritten {
+				outcome = domain.EndpointBindingActionAppliedCleanupError
+			}
+		}
+		return snapshotWriteFailure(outcome, fmt.Errorf("secure session store: %w", err))
 	}
 	if err := s.writeMarkerOnce(); err != nil {
 		s.logger.Error().Err(err).Str("store", s.name).Msg("pin_store_marker_write_failed")
-		return fmt.Errorf("secure session store marker: %w", err)
+		outcome := domain.EndpointBindingActionIndeterminate
+		if pinFileCommit(err) == secretfile.DurableCommitted {
+			outcome = domain.EndpointBindingActionAppliedCleanupError
+		}
+		return snapshotWriteFailure(outcome, fmt.Errorf("secure session store marker: %w", err))
 	}
 	return nil
 }
@@ -2339,6 +2370,11 @@ func (s *secureSessionStore) writeMarkerOnce() error {
 		return err
 	}
 	if err := s.writeMarker(raw); err != nil {
+		// Namespace confirmation and handle cleanup are distinct. The
+		// ordinary caller still receives an error and never ACKs it.
+		if pinFileCommit(err) == secretfile.DurableCommitted {
+			s.markerWritten = true
+		}
 		return err
 	}
 	s.markerWritten = true
@@ -2369,12 +2405,7 @@ func (s *secureSessionStore) writeToDisk(raw []byte) error {
 	if s.dir == "" {
 		return nil
 	}
-	dir, err := secretfile.Open(s.dir)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = dir.Close() }()
-	return dir.Write(s.name, raw)
+	return writeOrdinaryPinFile(filepath.Join(s.dir, s.name), raw)
 }
 
 // renewalFlushMoment says whether a flush of the secure-session store's

@@ -378,6 +378,9 @@ func TestDegreeStatisticActualPartialFailureRetryKeepsOriginalAt(t *testing.T) {
 
 // Exact SOURCE closure, not a typed semantic graph or a600s runtime experiment.
 func degreeStatisticSourceErrors(sources map[string][]byte) []string {
+	if !qualifiedD1MembershipSource(sources["find_node_membership_checkpoint.go"]) {
+		return []string{"membership exact tag/body changed"}
+	}
 	var failures []string
 	compact := func(s string) string { return strings.Join(strings.Fields(s), "") }
 	producer := compact(string(sources["peer_state_degree_statistic.go"]))
@@ -490,7 +493,7 @@ func degreeStatisticReferenceInventory() map[string]map[string]int {
 		"sampleDegreeStatisticClockLocked":   {"peer_state_degree_statistic.go:captureOverlayDWinForFlush": 1, "peer_state_degree_statistic.go:newDegreeStatisticCandidateService": 1},
 		"degreeStatisticCoverageReady":       {"peer_state_degree_statistic.go:captureOverlayDWinForFlush": 1, "peer_state_owned_degree_statistic.go:captureOwnedOverlayDWinForFlush": 1},
 		"captureOverlayDWinForFlush":         {"peer_management.go:flushPeerState": 1},
-		"validDegreeStatisticKey":            {"peer_state_degree_statistic.go:projectDegreeStatisticLocked": 2, "find_node_degree_terminal_bridge.go:endBridgeLocked": 1, "peer_state_owned_degree_statistic.go:projectOwnedDegreeBasisLocked": 2},
+		"validDegreeStatisticKey":            {"peer_state_degree_statistic.go:projectDegreeStatisticLocked": 2, "find_node_degree_terminal_bridge.go:endBridgeLocked": 1, "peer_state_owned_degree_statistic.go:projectOwnedDegreeBasisLocked": 2, "find_node_membership_checkpoint.go:CheckpointForService": 1},
 		"insertDegreeStatisticKey":           {"peer_state_degree_statistic.go:projectDegreeStatisticLocked": 1, "peer_state_owned_degree_statistic.go:projectOwnedDegreeBasisLocked": 1},
 		"projectDegreeStatisticLocked":       {"peer_state_degree_statistic.go:captureOverlayDWinForFlush": 1},
 		"selectOverlayDegreeStatistic":       {"peer_management.go:flushPeerState": 1},
@@ -533,11 +536,11 @@ func degreeStatisticConstructionPins() map[string]string {
 		"internal/core/findnodebridge/domain.go":                    "65baaa7284945055fb4a2967035baaa3f1567a2b9e4e5310029b877350d22a24",
 		"internal/core/node/peer_state_owned_degree_statistic.go":   "d6fdf8fc431fcaa5b7645a353459ca385687174e9b0e6977c310776a13bc78ca",
 		"internal/core/node/trust.go":                               "8ff0a1b8ec71aa0138bd047c94c0a601ca669fa255c19bf64691e6e7fc001da7",
-		"internal/core/node/secure_session_store.go":                "d5d123041e678cbc4a68097f0c4c9d54357f1a1ae7b64273f9cae27aa566e49d",
+		"internal/core/node/secure_session_store.go":                "6ed48c914feff5e8a7519dd12216083f931c9d3d7f93365048eb663aac7c1fd5",
 		"internal/core/node/identity_pin_membership_observation.go": "e1cae528985c681d19858b4f76aa0b246cb604da285298443b9ad09c84ef3f7c",
 		"internal/core/node/find_node_degree_terminal_bridge.go":    "e6c1022489eb1de4969683cecba0c40590fe5a3ffef14e272e5464b722677ef8",
 		"internal/core/node/find_node_bridge_construction.go":       "09d857b53409deb6a9d2be2a2ba6a04c14d212ea0e1d7dec7415646a24e3878e",
-		"internal/core/node/service.go":                             "4b51bea99468339ff35e5ce9192a093d629a8c73f707d554961d0ae1aedfd01e",
+		"internal/core/node/service.go":                             "140e304fe12ffdaa532521f80059803ec30bcd54355afb253235504f6760320e",
 		"internal/core/node/advertised_connection_observation.go":   "e6f1465349fba266cedda26b2e04ec6d635f852a570b2419ef397e402d82c3b0",
 		"internal/core/node/find_node_degree.go":                    "5fd8c8fd9700cb63fd238bd9fb3255c7e434081258e4448d3febb89f4e0e35ea",
 		"internal/core/node/datagram_runtime_state.go":              "62817ed3c561f3eedbaa8baca6ded4c3696b8595a5c3a5345e35faada9ebcf64",
@@ -547,7 +550,7 @@ func degreeStatisticConstructionPins() map[string]string {
 		"internal/core/node/dm_control_send.go":                     "753ba1612511586cb4d66a3dd4ab60d799596e3fbd615286e1747c72ce194144",
 		"internal/core/node/datagram_resolver.go":                   "ffa15909b4e84a29783f2ef30a29a46feaf97d32101010a3efc652dc6b5d87b0",
 		"internal/core/node/peer_provider.go":                       "9268c592b85b2ad3796f1bc491b9757103ae9a9d5d5104926268e0b15cb74454",
-		"internal/core/node/connection_manager.go":                  "55a0127c8c2e2bf0c4d502ebe07a42ddbaf89e903580f9bb6a3df56ee2074566",
+		"internal/core/node/connection_manager.go":                  "dcfe1d31155c5322cb82815e7fe4493529780678a935061db6737457aa07b13b",
 		"internal/core/node/dial_pacer.go":                          "3125f36eeb159fbc7c576e86b893ebe6ea5e2cb65a5d41bcfbbb43bb156290f3",
 		"internal/core/node/table_router.go":                        "69b0f71a7a6d9aa616c8b78f79c2d3f472ed2898f8a24a3b3161f4ce05877fe7",
 		"internal/core/node/identity_resolver.go":                   "399cfcd845e46676972d36de1687693bce145f2e3c6adfc4ac7e07ce4d562d8d",
@@ -557,7 +560,7 @@ func degreeStatisticConstructionPins() map[string]string {
 		"internal/core/node/routing_probe_loop.go":                  "0f2d686591241ea8a0dbae14df106a88178636f02f6edbb02419bc611f676fa0",
 		"internal/core/node/first_hop_guards.go":                    "2a5e84542d445dcbec23cd4656413cac866c4c6d431041e76ca54546bfa5d46b",
 		"internal/core/node/traffic_capture_bridge.go":              "8131bc4c65d451f3327b85cbf14dca6fb57b6094b188760b6b31de9e1c6ed4c0",
-		"internal/core/node/session_secure.go":                      "5d3f017f40d7a2132ec2329dff1862de2cad087f43f68dd33b91a9f5c5f3ef65",
+		"internal/core/node/session_secure.go":                      "5e5043f5d17da11b650641282aec15395484b2935ec6bc8eede93b127ca07dcd",
 		"internal/core/node/proof_transport_lifetime.go":            "5b12ec684cb095751c62c9b90e64593da266ed3a5e0ea50fc6801624c1939119",
 		"internal/core/node/datagram_integration.go":                "ed3c23313b35f766e1a96fdce579aa0627167bbd14bb8e965ca010143b94cc08",
 		"internal/core/capture/manager.go":                          "b8678d19e181c3e41f2877e589029a2bdd7048c8890e77f0db7012112599732c",
@@ -570,6 +573,7 @@ func degreeStatisticConstructionPins() map[string]string {
 
 func TestDegreeStatisticGuardRejectsEarlyOverwriteAndClockEscape(t *testing.T) {
 	for _, c := range []struct{ name, path, before, after string }{
+		{"membership-tag", "find_node_membership_checkpoint.go", "//go:build d1_resource_probe\n\n", ""},
 		{"early", "peer_state_degree_statistic.go", "q-start >= degreeRecent", "q-start >= 0"},
 		{"restamp", "peer_state_degree_statistic.go", "return prior", "prior.at = now; return prior"},
 		{"late_clock", "peer_state_degree_statistic.go", "q := sample.Sub(o.clock.origin)", "q := time.Now().Sub(o.clock.origin)"},
@@ -585,5 +589,11 @@ func TestDegreeStatisticGuardRejectsEarlyOverwriteAndClockEscape(t *testing.T) {
 				t.Fatal("statistic source guard accepted policy or clock escape")
 			}
 		})
+	}
+
+	sources := ninN1Sources(t)
+	sources["degree_membership_predicate_escape.go"] = []byte("package node\nfunc predicateEscape(k degreeKey){_ = validDegreeStatisticKey(k)}\n")
+	if len(degreeStatisticSourceErrors(sources)) == 0 {
+		t.Fatal("membership predicate extra caller accepted")
 	}
 }

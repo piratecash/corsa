@@ -107,6 +107,11 @@ func (c *Client) ExecuteCommand(input string) (string, error) {
 	}
 
 	if statusCode >= 400 {
+		if actionErr, parseErr := decodeEndpointBindingActionError(raw); parseErr != nil {
+			return "", parseErr
+		} else if actionErr != nil {
+			return "", actionErr
+		}
 		var errResp map[string]interface{}
 		if jsonErr := json.Unmarshal(raw, &errResp); jsonErr == nil {
 			if errMsg, ok := errResp["error"].(string); ok {
@@ -137,6 +142,14 @@ func (c *Client) exec(command string, args map[string]interface{}) (map[string]i
 		return nil, err
 	}
 
+	if statusCode >= 400 {
+		if actionErr, parseErr := decodeEndpointBindingActionError(raw); parseErr != nil {
+			return nil, parseErr
+		} else if actionErr != nil {
+			return nil, actionErr
+		}
+	}
+
 	var result map[string]interface{}
 	if err := json.Unmarshal(raw, &result); err != nil {
 		return nil, fmt.Errorf("parse response: %w", err)
@@ -164,6 +177,11 @@ func (c *Client) execInto(command string, args map[string]interface{}, out inter
 		return err
 	}
 	if statusCode >= 400 {
+		if actionErr, parseErr := decodeEndpointBindingActionError(raw); parseErr != nil {
+			return parseErr
+		} else if actionErr != nil {
+			return actionErr
+		}
 		var errResp map[string]interface{}
 		if jsonErr := json.Unmarshal(raw, &errResp); jsonErr == nil {
 			if errMsg, ok := errResp["error"].(string); ok {

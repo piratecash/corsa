@@ -1990,6 +1990,13 @@ func newRelationRecordCandidateService(cfg config.Node, id *identity.Identity, e
 	return newServiceWithRecordAdmissionClasses(cfg, id, eventBus, nil, productionDatagramConstructor{}, recordAdmissionConstruction{classes: recordAdmissionChargedR})
 }
 
+// Unused fixed session-only candidate. No public/default/config/RPC path calls
+// this constructor; all three original K-push/K-reconciliation/R authorities
+// remain necessary. It supplies neither Ready nor FindNode/F1/N-in/R2 wiring.
+func newSessionRecordCandidateService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Service {
+	return newServiceWithRecordAdmissionClasses(cfg, id, eventBus, nil, productionDatagramConstructor{}, recordAdmissionConstruction{classes: recordAdmissionChargedR | recordAdmissionImmediateK, kSource: contactRecordSessionSource})
+}
+
 func newServiceWithRecordAdmissionClasses(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus, networkOverride netcore.Network, constructor datagramConstructor, admission recordAdmissionConstruction, inboundClocks ...inboundPinClock) *Service {
 	return newServiceWithConstruction(cfg, id, eventBus, networkOverride, constructor, serviceConstruction{record: admission}, inboundClocks...)
 }
@@ -2005,13 +2012,14 @@ func newServiceWithConstruction(cfg config.Node, id *identity.Identity, eventBus
 		bridge.claim()
 	}
 	classes := admission.classes
-	if !admission.kSource.valid() || classes != recordAdmissionImmediateK && admission.kSource != contactRecordPushSource {
+	sessionRecords := classes == recordAdmissionChargedR|recordAdmissionImmediateK && admission.kSource == contactRecordSessionSource
+	if !admission.kSource.valid() || admission.kSource == contactRecordSessionSource && !sessionRecords || classes != recordAdmissionImmediateK && !sessionRecords && admission.kSource != contactRecordPushSource {
 		panic("unsupported Service K provenance")
 	}
 	if admission.borrowedKFiles != nil && classes != recordAdmissionImmediateK {
 		panic("borrowed K dependency without K class")
 	}
-	if !classes.valid() || classes != recordAdmissionNone && classes != recordAdmissionImmediateK && classes != recordAdmissionChargedR {
+	if !classes.valid() || classes != recordAdmissionNone && classes != recordAdmissionImmediateK && classes != recordAdmissionChargedR && !sessionRecords {
 		panic("unsupported Service record admission classes")
 	}
 
@@ -2736,13 +2744,17 @@ func newServiceWithConstruction(cfg config.Node, id *identity.Identity, eventBus
 	// K registration captures the final complete resolver before Build can escape
 	// its handler. Ordinary construction retains its original later intent load.
 	var selfRecordNetwork domain.NetworkID
-	if classes == recordAdmissionImmediateK {
+	if classes == recordAdmissionImmediateK || sessionRecords {
 		parsedNetwork, parseErr := domain.ParseNetworkID(networkName)
 		if parseErr != nil {
 			panic(fmt.Errorf("parse network id %q: %w", networkName, parseErr))
 		}
 		selfRecordNetwork = parsedNetwork
-		svc.identityResolver = newIdentityResolverWithContactRecordAdmission(svc, loadIdentityIntentStore(cfg.IdentityIntentsPath), selfRecordNetwork, admission.borrowedKFiles, admission.kSource)
+		if sessionRecords {
+			svc.identityResolver = newIdentityResolverWithSessionRecordAdmission(svc, loadIdentityIntentStore(cfg.IdentityIntentsPath), selfRecordNetwork)
+		} else {
+			svc.identityResolver = newIdentityResolverWithContactRecordAdmission(svc, loadIdentityIntentStore(cfg.IdentityIntentsPath), selfRecordNetwork, admission.borrowedKFiles, admission.kSource)
+		}
 		if construction.ready != nil {
 			construction.ready.captureContactReconciliationResolver(svc)
 		}
@@ -2792,7 +2804,7 @@ func newServiceWithConstruction(cfg config.Node, id *identity.Identity, eventBus
 	// bumped seq here.
 	// A failure is the same class as a trust-store load failure — the node
 	// must not run half-identified — hence the same panic.
-	if classes != recordAdmissionImmediateK {
+	if classes != recordAdmissionImmediateK && !sessionRecords {
 		var parseErr error
 		selfRecordNetwork, parseErr = domain.ParseNetworkID(networkName)
 		if parseErr != nil {
@@ -2818,6 +2830,7 @@ func newServiceWithConstruction(cfg config.Node, id *identity.Identity, eventBus
 	svc.selfRecord = selfRecord
 	svc.selfRecordBody = selfRecordBody
 
+	// The combined session-only candidate retains its original early resolver.
 	// Identity lookup engine: constructed after the self-record so the
 	// datagram handlers registered above observe a fully identified node.
 	switch classes {

@@ -43,11 +43,11 @@ func recordAdmissionClosedSource(name string, src []byte) error {
 			}
 			switch n := n.(type) {
 			case *ast.Ident:
-				if n.Name == "newIdentityResolverWithRecordAdmission" && (name != "service.go" || functionOwner != "newServiceWithConstruction") {
+				if (n.Name == "newIdentityResolverWithRecordAdmission" || n.Name == "newIdentityResolverWithSessionRecordAdmission") && (name != "service.go" || functionOwner != "newServiceWithConstruction") {
 					refused = fmt.Errorf("live opt-in reference in %s", functionOwner)
 				}
 			case *ast.CompositeLit:
-				if typ, ok := n.Type.(*ast.Ident); ok && typ.Name == "relationRecordAdmission" && (name != "identity_record_admission.go" || (functionOwner != "newIdentityResolverWithRecordAdmission" && functionOwner != "newIdentityResolverWithContactRecordAdmission")) {
+				if typ, ok := n.Type.(*ast.Ident); ok && typ.Name == "relationRecordAdmission" && (name != "identity_record_admission.go" || (functionOwner != "newIdentityResolverWithRecordAdmission" && functionOwner != "newIdentityResolverWithContactRecordAdmission" && functionOwner != "newIdentityResolverWithSessionRecordAdmission")) {
 					refused = fmt.Errorf("alternate owner constructor")
 				}
 			case *ast.TypeSpec:
@@ -62,7 +62,7 @@ func recordAdmissionClosedSource(name string, src []byte) error {
 				if key.Name == "recordAdmission" {
 					refused = fmt.Errorf("unreviewed carrier constructor")
 				}
-				if key.Name == "openFiles" && (name != "identity_record_admission.go" || functionOwner != "newIdentityResolverWithRecordAdmission") {
+				if key.Name == "openFiles" && (name != "identity_record_admission.go" || (functionOwner != "newIdentityResolverWithRecordAdmission" && functionOwner != "newIdentityResolverWithSessionRecordAdmission")) {
 					refused = fmt.Errorf("unreviewed backend constructor")
 				}
 			case *ast.AssignStmt:
@@ -75,7 +75,7 @@ func recordAdmissionClosedSource(name string, src []byte) error {
 					if !ok || sel.Sel.Name != "recordAdmission" {
 						continue
 					}
-					permitted := (name == "identity_record_admission.go" && (functionOwner == "newIdentityResolverWithRecordAdmission" || functionOwner == "newIdentityResolverWithContactRecordAdmission")) || (name == "identity_resolver.go" && (functionOwner == "sendOwnedAttempt" || functionOwner == "HandleAnswer"))
+					permitted := (name == "identity_record_admission.go" && (functionOwner == "newIdentityResolverWithRecordAdmission" || functionOwner == "newIdentityResolverWithContactRecordAdmission" || functionOwner == "newIdentityResolverWithSessionRecordAdmission")) || (name == "identity_resolver.go" && (functionOwner == "sendOwnedAttempt" || functionOwner == "HandleAnswer"))
 					if !permitted {
 						refused = fmt.Errorf("unreviewed carrier assignment in %s", functionOwner)
 					}
@@ -124,6 +124,7 @@ func TestRecordAdmissionClosedProductionConstructionAndReferences(t *testing.T) 
 	}
 	for _, src := range []string{
 		`package node;func live(){ _ = newIdentityResolverWithRecordAdmission }`,
+		`package node;func live(){ _ = newIdentityResolverWithSessionRecordAdmission }`,
 		`package node;func live(){ r.recordAdmission = source }`,
 		`package node;func live(){ _ = &relationRecordAdmission{} }`,
 		`package node;func live(){ _ = r.stageRelationAdmission }`,
@@ -278,9 +279,11 @@ func contactPushSourceErrors(sources map[string][]byte) []string {
 		"newContactRecordPushCandidateService":           {},
 		"newContactRecordReconciliationCandidateService": {},
 		"newRelationRecordCandidateService":              {},
+		"newSessionRecordCandidateService":               {},
+		"newIdentityResolverWithSessionRecordAdmission":  {"service.go:newServiceWithConstruction": 1},
 		"newIdentityResolverWithRecordAdmission":         {"service.go:newServiceWithConstruction": 1},
 		"hasContactRecordPushTransportCapability":        {"session_secure.go:acceptSecureInbound": 1, "session_secure.go:dialV2": 1, "session_secure.go:provenTransport": 1},
-		"newServiceWithRecordAdmissionClasses":           {"service.go:newServiceWithDatagramConstructor": 1, "service.go:newContactRecordPushCandidateService": 1, "service.go:newRelationRecordCandidateService": 1, "service.go:newContactRecordReconciliationCandidateService": 1, "identity_record_admission_own_dm.go:NewInactiveOwnDMAdmissionCandidate": 1},
+		"newServiceWithRecordAdmissionClasses":           {"service.go:newServiceWithDatagramConstructor": 1, "service.go:newContactRecordPushCandidateService": 1, "service.go:newRelationRecordCandidateService": 1, "service.go:newContactRecordReconciliationCandidateService": 1, "service.go:newSessionRecordCandidateService": 1, "identity_record_admission_own_dm.go:NewInactiveOwnDMAdmissionCandidate": 1},
 		"newIdentityResolverWithContactRecordAdmission":  {"service.go:newServiceWithConstruction": 1},
 		"prepareContactRecordPush":                       {"identity_discovery.go:Handle": 1},
 		"reserveContactRecordPush":                       {"identity_record_admission.go:prepareContactRecordPush": 1},
@@ -310,8 +313,17 @@ func contactPushSourceErrors(sources map[string][]byte) []string {
 		"contactRecordReconciliationAuthority": {"identity_pin_contact_reconciliation.go:reserveContactRecordReconciliation": 1},
 		"preparedContactRecordStage":           {"identity_pin_contact_record.go:prepareContactRecordStageLocked": 1},
 		"contactRecordCandidate":               {"identity_pin_contact_record.go:observeContactRecord": 1, "identity_pin_contact_reconciliation.go:captureReconciliation": 1},
-		"recordAdmissionConstruction":          {"find_node_ready_construction.go:buildWithOptions": 3, "service.go:newServiceWithDatagramConstructor": 1, "service.go:newContactRecordPushCandidateService": 1, "service.go:newRelationRecordCandidateService": 1, "service.go:newContactRecordReconciliationCandidateService": 1, "identity_record_admission_own_dm.go:NewInactiveOwnDMAdmissionCandidate": 1},
-		"relationRecordAdmission":              {"identity_record_admission.go:newIdentityResolverWithRecordAdmission": 1, "identity_record_admission.go:newIdentityResolverWithContactRecordAdmission": 1},
+		"recordAdmissionConstruction":          {"find_node_ready_construction.go:buildWithOptions": 3, "service.go:newServiceWithDatagramConstructor": 1, "service.go:newContactRecordPushCandidateService": 1, "service.go:newRelationRecordCandidateService": 1, "service.go:newContactRecordReconciliationCandidateService": 1, "service.go:newSessionRecordCandidateService": 1, "identity_record_admission_own_dm.go:NewInactiveOwnDMAdmissionCandidate": 1},
+		"relationRecordAdmission":              {"identity_record_admission.go:newIdentityResolverWithRecordAdmission": 1, "identity_record_admission.go:newIdentityResolverWithContactRecordAdmission": 1, "identity_record_admission.go:newIdentityResolverWithSessionRecordAdmission": 1},
+	}
+	combinedClasses := func(expression ast.Expr) bool {
+		binary, ok := expression.(*ast.BinaryExpr)
+		if !ok || binary.Op != token.OR {
+			return false
+		}
+		left, l := binary.X.(*ast.Ident)
+		right, r := binary.Y.(*ast.Ident)
+		return l && r && left.Name == "recordAdmissionChargedR" && right.Name == "recordAdmissionImmediateK"
 	}
 	actual, made := map[string]map[string]int{}, map[string]map[string]int{}
 	for key := range expected {
@@ -396,6 +408,20 @@ func contactPushSourceErrors(sources map[string][]byte) []string {
 							if owner == "newServiceWithDatagramConstructor" && len(n.Elts) != 0 {
 								failures = append(failures, "ordinary constructor selected admission")
 							}
+							if owner == "newSessionRecordCandidateService" {
+								fields := map[string]ast.Expr{}
+								for _, elt := range n.Elts {
+									if kv, ok := elt.(*ast.KeyValueExpr); ok {
+										if key, ok := kv.Key.(*ast.Ident); ok {
+											fields[key.Name] = kv.Value
+										}
+									}
+								}
+								source, ok := fields["kSource"].(*ast.Ident)
+								if len(n.Elts) != 2 || len(fields) != 2 || !combinedClasses(fields["classes"]) || !ok || source.Name != "contactRecordSessionSource" {
+									failures = append(failures, "session record constructor option changed")
+								}
+							}
 							if owner == "newContactRecordReconciliationCandidateService" {
 								fields := map[string]string{}
 								for _, elt := range n.Elts {
@@ -442,7 +468,11 @@ func contactPushSourceErrors(sources map[string][]byte) []string {
 							for _, elt := range n.Elts {
 								if kv, ok := elt.(*ast.KeyValueExpr); ok {
 									if key, ok := kv.Key.(*ast.Ident); ok && key.Name == "classes" {
-										if value, ok := kv.Value.(*ast.Ident); ok && value.Name == want {
+										if owner == "newIdentityResolverWithSessionRecordAdmission" {
+											if combinedClasses(kv.Value) {
+												count++
+											}
+										} else if value, ok := kv.Value.(*ast.Ident); ok && value.Name == want {
 											count++
 										}
 									}
@@ -462,13 +492,13 @@ func contactPushSourceErrors(sources map[string][]byte) []string {
 									continue
 								}
 								value, ok := kv.Value.(*ast.Ident)
-								if owner == "newIdentityResolverWithContactRecordAdmission" && ok && value.Name == "source" {
+								if (owner == "newIdentityResolverWithContactRecordAdmission" && ok && value.Name == "source") || (owner == "newIdentityResolverWithSessionRecordAdmission" && ok && value.Name == "contactRecordSessionSource") {
 									sourceCount++
 								} else {
 									failures = append(failures, "immutable K source changed "+site)
 								}
 							}
-							if owner == "newIdentityResolverWithContactRecordAdmission" && sourceCount != 1 {
+							if (owner == "newIdentityResolverWithContactRecordAdmission" || owner == "newIdentityResolverWithSessionRecordAdmission") && sourceCount != 1 {
 								failures = append(failures, "immutable K source missing "+site)
 							}
 
@@ -540,6 +570,8 @@ func TestContactPushClosedAuthorityAndFinalLeafPlacement(t *testing.T) {
 		`package node;func escape(){ _ = s.prepareContactRecordPush }`,
 		`package node;var escaped = newContactRecordPushCandidateService`,
 		`package node;var escaped = newRelationRecordCandidateService`,
+		`package node;var escaped = newSessionRecordCandidateService`,
+		`package node;var escaped = newIdentityResolverWithSessionRecordAdmission`,
 		`package node;var escaped = newIdentityResolverWithRecordAdmission`,
 		`package node;type Alias = contactRecordStageAuthority`,
 		`package node;func escape(){ _ = &preparedContactRecordStage{} }`,
@@ -888,5 +920,169 @@ func TestContactReconciliationClosedSourceOrderAndCausalShapes(t *testing.T) {
 				t.Fatal("reconciliation causal shape escaped", test.name)
 			}
 		})
+	}
+}
+
+// The finite assignment/constructor inventory is a syntactic Source boundary,
+// not a universal pointer-alias/dataflow proof. It covers actual protected
+// field writes, including the existing two diagnostic store-view assignments.
+func sessionRecordSourceErrors(sources map[string][]byte) []string {
+	failures := contactPushSourceErrors(sources)
+	writes := map[string]int{}
+	constructors := map[string]int{}
+	var actualBackend string
+	for name, raw := range sources {
+		file, err := parser.ParseFile(token.NewFileSet(), name, raw, 0)
+		if err != nil {
+			return append(failures, err.Error())
+		}
+		for _, declaration := range file.Decls {
+			fn, ok := declaration.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				continue
+			}
+			site := name + ":" + fn.Name.Name
+			if name == "identity_record_admission.go" && fn.Name.Name == "newIdentityResolverWithSessionRecordAdmission" {
+				var printed bytes.Buffer
+				if err := format.Node(&printed, token.NewFileSet(), fn); err != nil {
+					return append(failures, err.Error())
+				}
+				actualBackend = printed.String()
+			}
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				if assignment, ok := n.(*ast.AssignStmt); ok {
+					for i, lhs := range assignment.Lhs {
+						selector, ok := lhs.(*ast.SelectorExpr)
+						if !ok || (selector.Sel.Name != "identityResolver" && selector.Sel.Name != "secureSessions" && selector.Sel.Name != "store") {
+							continue
+						}
+						key := site + ":" + selector.Sel.Name
+						if selector.Sel.Name != "store" {
+							callee := "<non-call>"
+							if len(assignment.Lhs) == len(assignment.Rhs) {
+								if call, ok := assignment.Rhs[i].(*ast.CallExpr); ok {
+									if id, ok := call.Fun.(*ast.Ident); ok {
+										callee = id.Name
+									}
+								}
+							}
+							key += ":" + callee
+						}
+						writes[key]++
+					}
+				}
+				if literal, ok := n.(*ast.CompositeLit); ok {
+					if typ, ok := literal.Type.(*ast.Ident); ok && (typ.Name == "secureSessions" || typ.Name == "identityResolver") {
+						constructors[site+":"+typ.Name]++
+					}
+				}
+				if field, ok := n.(*ast.KeyValueExpr); ok {
+					if key, ok := field.Key.(*ast.Ident); ok && (key.Name == "identityResolver" || key.Name == "secureSessions") {
+						failures = append(failures, "alternate Service receiver binding "+site)
+					}
+				}
+				return true
+			})
+		}
+	}
+	expectedWrites := map[string]int{
+		"service.go:newServiceWithConstruction:identityResolver:newIdentityResolver":                           1,
+		"service.go:newServiceWithConstruction:identityResolver:newIdentityResolverWithRecordAdmission":        1,
+		"service.go:newServiceWithConstruction:identityResolver:newIdentityResolverWithContactRecordAdmission": 1,
+		"service.go:newServiceWithConstruction:identityResolver:newIdentityResolverWithSessionRecordAdmission": 1,
+		"service.go:newServiceWithConstruction:secureSessions:newSecureSessions":                               1,
+		"service.go:newServiceWithConstruction:store":                                                          1,
+		"s6_terminal_construction.go:newServiceWithObservations:store":                                         1,
+	}
+	expectedConstructors := map[string]int{
+		"session_secure.go:buildSecureSessions:secureSessions":      1,
+		"session_secure.go:legacyOnlySessions:secureSessions":       1,
+		"identity_resolver.go:newIdentityResolver:identityResolver": 1,
+	}
+	if !reflect.DeepEqual(writes, expectedWrites) {
+		failures = append(failures, "original receiver write frontier changed")
+	}
+	if !reflect.DeepEqual(constructors, expectedConstructors) {
+		failures = append(failures, "original receiver construction frontier changed")
+	}
+	// Exact closed delayed backend: sameService, nil refusal, no setter,
+	// replacement store, arbitrary dependency, alternate resolver or I/O at New.
+	const backend = `func newIdentityResolverWithSessionRecordAdmission(svc *Service, intents *identityIntentStore, network domain.NetworkID) *identityResolver {
+	r := newIdentityResolver(svc, intents, network)
+	epoch := time.Now()
+	r.recordAdmission = &relationRecordAdmission{classes: recordAdmissionChargedR | recordAdmissionImmediateK, kSource: contactRecordSessionSource, service: svc, resolver: r, network: network, clock: func() relationObservedTime {
+		now := time.Now()
+		return relationObservedTime{wall: now, elapsed: now.Sub(epoch)}
+	}, wake: make(chan struct{}, 1), openFiles: func() (identityPinDurableFiles, error) {
+		store := svc.localContactPinStore()
+		if store == nil {
+			return nil, domain.ErrIdentityPinStoreUnavailable
+		}
+		return store.openIdentityPinFiles()
+	}}
+	return r
+}`
+	parsed, err := parser.ParseFile(token.NewFileSet(), "contract.go", "package node\n"+backend, 0)
+	if err != nil {
+		return append(failures, err.Error())
+	}
+	var expected bytes.Buffer
+	if err := format.Node(&expected, token.NewFileSet(), parsed.Decls[0]); err != nil {
+		return append(failures, err.Error())
+	}
+	if actualBackend != expected.String() {
+		failures = append(failures, "closed combined backend changed")
+	}
+	return failures
+}
+
+func TestSessionRecordSourceClosedFactoryAndOriginalReceivers(t *testing.T) {
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sources := map[string][]byte{}
+	for _, entry := range entries {
+		name := entry.Name()
+		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		sources[name], err = os.ReadFile(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if failures := sessionRecordSourceErrors(sources); len(failures) != 0 {
+		t.Fatal(failures)
+	}
+	for _, mutation := range []struct{ name, file, old, new string }{
+		{"factory-class", "service.go", "classes: recordAdmissionChargedR | recordAdmissionImmediateK, kSource: contactRecordSessionSource", "classes: recordAdmissionImmediateK, kSource: contactRecordSessionSource"},
+		{"ordinary-class", "service.go", "recordAdmissionConstruction{}", "recordAdmissionConstruction{classes: recordAdmissionChargedR | recordAdmissionImmediateK, kSource: contactRecordSessionSource}"},
+		{"backend", "identity_record_admission.go", "return store.openIdentityPinFiles()", "return replacement()"},
+		{"backend-nil", "identity_record_admission.go", "if store == nil {", "if false {"},
+	} {
+		t.Run(mutation.name, func(t *testing.T) {
+			original := sources[mutation.file]
+			if !bytes.Contains(original, []byte(mutation.old)) {
+				t.Fatal("mutation preimage missing")
+			}
+			sources[mutation.file] = bytes.Replace(original, []byte(mutation.old), []byte(mutation.new), 1)
+			defer func() { sources[mutation.file] = original }()
+			if len(sessionRecordSourceErrors(sources)) == 0 {
+				t.Fatal("closed source accepted mutation")
+			}
+		})
+	}
+	for _, extra := range []string{
+		`package node;func escape(){s.identityResolver=replacement()}`,
+		`package node;func escape(){s.secureSessions=replacement()}`,
+		`package node;func escape(){sessions.store=replacement}`,
+		`package node;func escape(){_=newSessionRecordCandidateService}`,
+	} {
+		sources["escape.go"] = []byte(extra)
+		if len(sessionRecordSourceErrors(sources)) == 0 {
+			t.Fatal("receiver/caller frontier escaped")
+		}
+		delete(sources, "escape.go")
 	}
 }

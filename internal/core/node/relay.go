@@ -52,6 +52,10 @@ const (
 	// fallback already covers the tail. See Phase 3 §4.9 decision
 	// #7 for the rationale.
 	MaxFailoverRetries = 1
+
+	// maxAbandonedHopAckIdentities bounds acknowledgement history, not hops.
+	// If it fills, only a known current identity may acknowledge the message.
+	maxAbandonedHopAckIdentities = 8
 )
 
 // relayNextHopSelection names the path that picked the downstream of the
@@ -127,12 +131,18 @@ type relayForwardState struct {
 	// charges this and never re-resolves the address, which may by then be
 	// held by another connection. Zero when no connection held the address
 	// (the frame was queued locally): such an attempt is charged to nobody.
-	ForwardedVia         routingSender
-	AbandonedForwardedTo []domain.PeerAddress  // old ForwardedTo values from reroutes (stale ack rejection)
-	Recipient            domain.PeerIdentity   // final recipient identity (for hop_ack route confirmation)
-	NextHopSelection     relayNextHopSelection // which path picked ForwardedTo; decides how the stale-ack guard judges an ack (isStaleHopAckSender)
-	HopCount             int                   // incremented on each hop
-	RemainingTTL         int                   // seconds until cleanup (decremented by ticker)
+	ForwardedVia routingSender
+	// Captured identities, never identities resolved from old addresses. The
+	// fixed history bounds memory; incomplete history disables only the
+	// broader unpinned acknowledgement policy, not the known current sender.
+	abandonedAckIdentities [maxAbandonedHopAckIdentities]domain.PeerIdentity
+	abandonedAckCount      uint8
+	abandonedAckIncomplete bool
+	AbandonedForwardedTo   []domain.PeerAddress  // old transport addresses for failover exclusion
+	Recipient              domain.PeerIdentity   // final recipient identity (for hop_ack route confirmation)
+	NextHopSelection       relayNextHopSelection // which path picked ForwardedTo; decides how consumeHopAck judges an ack
+	HopCount               int                   // incremented on each hop
+	RemainingTTL           int                   // seconds until cleanup (decremented by ticker)
 
 	// Phase 3 PR 12.2 — hop-ack budget tracking for the reputation
 	// primitive (routing.Table.MarkHopFailure).
@@ -406,15 +416,16 @@ func (rs *relayStateStore) store(state *relayForwardState) bool {
 		// and the stale-ack guard must judge an ack by the path of the
 		// attempt that is actually outstanding.
 		//
-		// AbandonedForwardedTo accumulates all old ForwardedTo addresses
-		// from previous reroutes. This lets the stale ack guard reject
-		// late acks from any abandoned next-hop, not just the most recent
-		// one (e.g. table via A → table via B → gossip via C: both A and
-		// B are stale and must be rejected).
-		if existing.ForwardedTo != state.ForwardedTo && existing.ForwardedTo != "" {
-			existing.AbandonedForwardedTo = append(existing.AbandonedForwardedTo, existing.ForwardedTo)
-			// Real reroute: the previous next-hop is now in
-			// AbandonedForwardedTo, so the new forward gets a fresh
+		// Abandoned transport addresses remain for failover path exclusion.
+		// ACK authority uses separately captured, bounded identity history;
+		// resolving one of these addresses later would name its new holder.
+		if existing.ForwardedTo != "" && (existing.ForwardedTo != state.ForwardedTo || existing.ForwardedVia.identity != state.ForwardedVia.identity) {
+			existing.rememberAbandonedHopAckIdentityLocked()
+			if existing.ForwardedTo != state.ForwardedTo {
+				existing.AbandonedForwardedTo = append(existing.AbandonedForwardedTo, existing.ForwardedTo)
+			}
+			// Real reroute: the previous actual identity is abandoned,
+			// even at the same address, so the new forward gets a fresh
 			// hop-ack budget. The caller is responsible for staging
 			// HopAckRemainingTicks=defaultHopAckBudgetSeconds and
 			// HopAckObserved=false on the inbound state struct; we
@@ -482,19 +493,6 @@ func (rs *relayStateStore) lookupReceiptForwardTo(messageID string) domain.PeerA
 		return ""
 	}
 	return state.ReceiptForwardTo
-}
-
-// lookupRecipient returns the final recipient identity for a relayed message,
-// or "" if the message ID is unknown. Used by hop_ack processing to confirm
-// the routing table entry for the recipient.
-func (rs *relayStateStore) lookupRecipient(messageID string) domain.PeerIdentity {
-	rs.mu.Lock()
-	defer rs.mu.Unlock()
-	state, ok := rs.states[messageID]
-	if !ok {
-		return domain.PeerIdentity{}
-	}
-	return state.Recipient
 }
 
 // lookupForwardAttempt returns the address and next-hop selection of the
@@ -582,10 +580,9 @@ func (rs *relayStateStore) tickHopAckBudgets() []relayForwardState {
 // returns true when a state was actually present. No-op when the
 // message is unknown (already evicted by TTL, or never recorded).
 //
-// Production caller: handleRelayHopAck, BEFORE confirmRouteViaHopAck,
-// so a tick that lands between handleRelayHopAck entry and our
-// confirmRouteViaHopAck → Table.ConfirmHopAck path cannot fire the
-// MarkHopFailure callback on the same hop-ack timeline.
+// Low-level bookkeeping retained for the existing timer tests. Production
+// acknowledgement handling uses consumeHopAck, which validates actual
+// current-attempt provenance in the same store section as the field flip.
 //
 // Lock contract: takes rs.mu in W mode for the field flip. Disjoint
 // from routing.Table.mu so the caller can safely take that mutex
@@ -597,6 +594,13 @@ func (rs *relayStateStore) markHopAckObserved(messageID string) bool {
 	if !ok {
 		return false
 	}
+	markHopAckObservedLocked(state)
+	return true
+}
+
+// Caller owns relayStateStore.mu. Classification belongs to consumeHopAck;
+// this leaf also preserves the existing low-level bookkeeping tests.
+func markHopAckObservedLocked(state *relayForwardState) {
 	// Release the stashed wire bytes only when this call is the one
 	// CANCELLING a live timer. Then the ack proves the next hop holds
 	// the frame and the failover resend — FrameLine's only reader —
@@ -616,7 +620,58 @@ func (rs *relayStateStore) markHopAckObserved(messageID string) bool {
 		state.FrameLine = ""
 	}
 	state.HopAckObserved = true
-	return true
+}
+
+// rememberAbandonedHopAckIdentityLocked records the actual previous sender.
+// Caller owns relayStateStore.mu. Unknown/overflow history cannot justify an
+// acknowledgement by another unpinned peer; it never grows an identity slice.
+func (state *relayForwardState) rememberAbandonedHopAckIdentityLocked() {
+	id := state.ForwardedVia.identity
+	if id.IsZero() {
+		state.abandonedAckIncomplete = true
+		return
+	}
+	for i := uint8(0); i < state.abandonedAckCount; i++ {
+		if state.abandonedAckIdentities[i] == id {
+			return
+		}
+	}
+	if int(state.abandonedAckCount) == len(state.abandonedAckIdentities) {
+		state.abandonedAckIncomplete = true
+		return
+	}
+	state.abandonedAckIdentities[state.abandonedAckCount] = id
+	state.abandonedAckCount++
+}
+
+// consumeHopAck validates and consumes the CURRENT attempt in one rs.mu
+// section. No registry resolution, Service lock or routing mutation occurs
+// under it. A reroute either precedes this check, or rearms its timer after
+// this consume; an old snapshot can never consume the replacement attempt.
+//
+// The wire carries only a message ID: a current identity may acknowledge on
+// another session, and a same-identity retry has no distinct wire proof.
+// Broader gossip/direct/failover acceptance stays unpinned, except that a
+// captured abandoned identity (or incomplete history) cannot justify it.
+func (rs *relayStateStore) consumeHopAck(messageID string, ackIdentity domain.PeerIdentity) (domain.PeerIdentity, bool) {
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	state, ok := rs.states[messageID]
+	if !ok || state.ForwardedTo == "" || ackIdentity.IsZero() {
+		return domain.PeerIdentity{}, false
+	}
+	if state.ForwardedVia.identity != ackIdentity {
+		if state.NextHopSelection.pinsAckIdentity() || state.abandonedAckIncomplete {
+			return domain.PeerIdentity{}, false
+		}
+		for i := uint8(0); i < state.abandonedAckCount; i++ {
+			if state.abandonedAckIdentities[i] == ackIdentity {
+				return domain.PeerIdentity{}, false
+			}
+		}
+	}
+	markHopAckObservedLocked(state)
+	return state.Recipient, true
 }
 
 // frameLineBytes sums the wire payload bytes stashed for failover
@@ -672,8 +727,11 @@ func (rs *relayStateStore) recordFailoverRetry(messageID string, newAddress doma
 	if !ok {
 		return false
 	}
-	if state.ForwardedTo != "" && state.ForwardedTo != newAddress {
-		state.AbandonedForwardedTo = append(state.AbandonedForwardedTo, state.ForwardedTo)
+	if state.ForwardedTo != "" && (state.ForwardedTo != newAddress || state.ForwardedVia.identity != via.identity) {
+		state.rememberAbandonedHopAckIdentityLocked()
+		if state.ForwardedTo != newAddress {
+			state.AbandonedForwardedTo = append(state.AbandonedForwardedTo, state.ForwardedTo)
+		}
 	}
 	if frameLine != "" {
 		state.FrameLine = frameLine
@@ -1182,30 +1240,15 @@ func (s *Service) sendRelayHopAck(peerAddress domain.PeerAddress, messageID, sta
 // attempt) and — when the ack confirms delivery/forwarding — promotes
 // the route through the responding peer via confirmRouteViaHopAck.
 //
-// Stale-ack ordering (Phase 3 review fix): the stale-sender guard runs
-// BEFORE markHopAckObserved, not just before route confirmation. After a
-// timeout-driven failover A → B, store() rotated ForwardedTo to B and
-// pushed A onto AbandonedForwardedTo. A late ack from the superseded
-// downstream A must NOT suppress B's budget timer — otherwise B's
-// attempt never times out and never fails over. Marking observed only
-// for an ack that matches the CURRENT attempt keeps the timer tied to
-// the path we are actually waiting on. An unknown message ID
-// (TTL eviction beat the ack) or a stored-locally message (no
-// downstream) has no live timer, so both are early no-ops here.
+// The actual incoming identity and current send-time provenance are checked
+// together with timer consumption under relayStateStore.mu. Rerouting cannot
+// occur between a stale check and the field flip. A timeout that already fired
+// retains its resend payload; a valid late ack may still refresh the actual
+// sender's route. The routing-table write happens afterwards, without nesting
+// the store and routing mutexes, and under the legacy admission lease.
 //
-// For an ack that IS current, markHopAckObserved still runs BEFORE
-// confirmRouteViaHopAck so a tick landing between the two cannot fire
-// onRelayHopAckTimeout for a message we just observed. The state
-// mutation is strictly inside relayStateStore.mu, disjoint from
-// routing.Table.mu — no nested-lock concerns when confirmRouteViaHopAck
-// reaches Table.ConfirmHopAck afterward.
-//
-// A current late ack arriving AFTER the timeout fired (HopAckObserved
-// already true) is still processed: confirmRouteViaHopAck reaches
-// Table.ConfirmHopAck → applyHopAckSuccess, which clears CooldownUntil
-// and resets ConsecutiveFailures (PR 12.1 contract). That is the
-// documented recovery path — positive evidence overrides the black-hole
-// signal.
+// This is message-ID acknowledgement, not cryptographic per-retry freshness:
+// another session of the same identity may acknowledge the current message.
 func (s *Service) handleRelayHopAck(senderAddress domain.PeerAddress, sender routingSender, frame protocol.Frame) {
 	log.Debug().
 		Str("id", frame.ID).
@@ -1213,13 +1256,6 @@ func (s *Service) handleRelayHopAck(senderAddress domain.PeerAddress, sender rou
 		Str("status", frame.Status).
 		Msg("relay_hop_ack_received")
 
-	forwardedTo, selection := s.relayStates.lookupForwardAttempt(frame.ID)
-	if forwardedTo == "" {
-		// Unknown message ID (TTL eviction beat the ack) OR a message we
-		// stored locally without forwarding. Either way there is no
-		// downstream budget timer to suppress and no next-hop to confirm.
-		return
-	}
 	// sender is the connection the ack ARRIVED on, handed over by the
 	// dispatcher. A connection that names no identity cannot vouch for any
 	// attempt; resolving the address instead would credit whoever holds it
@@ -1238,75 +1274,16 @@ func (s *Service) handleRelayHopAck(senderAddress domain.PeerAddress, sender rou
 	}
 	defer release()
 
-	// Stale-ack guard — applied to the SUPPRESSION decision, not only to
-	// route confirmation. A stale ack must not reset the current
-	// attempt's timer.
-	//
-	// Table-routed attempt (relayNextHopRoutingTable): the table named
-	// one next hop, and after a reroute store() moves ForwardedTo to the
-	// new one. An ack from any identity other than ForwardedTo's is stale.
-	// Comparison is identity-based (not transport address) because a peer
-	// may have several sessions (inbound + outbound) and the ack can
-	// arrive on any.
-	//
-	// Any other attempt (direct session, gossip fan-out, failover): store()
-	// and recordFailoverRetry overwrite the selection, so a table-routed
-	// message retried another way no longer takes the branch above.
-	// AbandonedForwardedTo accumulates every superseded next-hop across
-	// reroutes; reject acks from any of them (covers chains like
-	// A → B → gossip(C)).
-	if s.isStaleHopAckSender(frame.ID, ackIdentity, forwardedTo, selection) {
+	// Validation and timer consumption share one store section and use only
+	// send-time provenance plus this connection's captured identity. A later
+	// address holder is neither evidence for this ack nor its route subject.
+	recipient, accepted := s.relayStates.consumeHopAck(frame.ID, ackIdentity)
+	if !accepted {
 		return
 	}
-
-	// Ack relates to the current downstream attempt. Suppress its budget
-	// timer before confirming the route.
-	s.relayStates.markHopAckObserved(frame.ID)
-
-	if frame.Status == "delivered" || frame.Status == "forwarded" {
-		recipient := s.relayStates.lookupRecipient(frame.ID)
-		if recipient.IsZero() {
-			return
-		}
-		s.confirmRouteViaHopAck(recipient, senderAddress)
+	if (frame.Status == "delivered" || frame.Status == "forwarded") && !recipient.IsZero() {
+		s.confirmRouteViaHopAck(recipient, ackIdentity)
 	}
-}
-
-// isStaleHopAckSender reports whether an incoming relay_hop_ack came from
-// a downstream that has been superseded for this message, so the ack must
-// neither suppress the current attempt's budget timer nor promote a
-// route. See handleRelayHopAck for the table-routed vs table→gossip
-// fallback rationale. ackIdentity may be "" when the sender cannot be
-// resolved — in that case we cannot prove staleness and treat the ack as
-// current (the existing behaviour; resolution races are rare and a
-// false-current only costs one extra timer suppression).
-func (s *Service) isStaleHopAckSender(messageID string, ackIdentity domain.PeerIdentity, forwardedTo domain.PeerAddress, selection relayNextHopSelection) bool {
-	if ackIdentity.IsZero() {
-		return false
-	}
-	if selection.pinsAckIdentity() {
-		fwdIdentity := s.resolvePeerIdentity(forwardedTo)
-		if !fwdIdentity.IsZero() && fwdIdentity != ackIdentity {
-			log.Debug().
-				Str("id", messageID).
-				Str("ack_identity", ackIdentity.String()).
-				Str("forwarded_identity", fwdIdentity.String()).
-				Msg("relay_hop_ack_stale_sender_ignored")
-			return true
-		}
-		return false
-	}
-	for _, abandoned := range s.relayStates.lookupAbandonedForwardedTo(messageID) {
-		if s.resolvePeerIdentity(abandoned) == ackIdentity {
-			log.Debug().
-				Str("id", messageID).
-				Str("ack_identity", ackIdentity.String()).
-				Str("abandoned_forwarded_identity", ackIdentity.String()).
-				Msg("relay_hop_ack_stale_prev_route_ignored")
-			return true
-		}
-	}
-	return false
 }
 
 // tryForwardToDirectPeer iterates all outbound sessions whose peerIdentity

@@ -429,7 +429,7 @@ func TestReview_v4_P2_2_ConfirmRouteViaHopAck_RevivesDeadRoute(t *testing.T) {
 	// would not see it past this point.
 	svc.routingTable.ForceHealthForTest(idTargetX, idPeerB, routing.HealthDead)
 
-	svc.confirmRouteViaHopAck(idTargetX, domain.PeerAddress(idPeerB.String()))
+	svc.confirmRouteViaHopAck(idTargetX, idPeerB)
 
 	snap := svc.routingTable.HealthSnapshot()
 	if len(snap) != 1 {
@@ -512,7 +512,7 @@ func TestReview_v4_P2_2_ConfirmRouteViaHopAck_NoOrphanHealthOnUnmatchedAck(t *te
 	// claim in storage. The pre-fix code would have called
 	// MarkHopAck(idTargetX, idPeerC, 0) before realising the loop
 	// has no match, leaving an orphan Good entry for that pair.
-	svc.confirmRouteViaHopAck(idTargetX, domain.PeerAddress(idPeerC.String()))
+	svc.confirmRouteViaHopAck(idTargetX, idPeerC)
 
 	after := svc.routingTable.HealthSnapshot()
 	if len(after) != 1 {
@@ -590,7 +590,7 @@ func TestReview_v4_P2_2_ConfirmRouteViaHopAck_SkipsWithdrawnRoute(t *testing.T) 
 	}
 	baselineHealth := baseline[0].Health
 
-	svc.confirmRouteViaHopAck(idTargetX, domain.PeerAddress(idPeerB.String()))
+	svc.confirmRouteViaHopAck(idTargetX, idPeerB)
 
 	after := svc.routingTable.HealthSnapshot()
 	if len(after) != 1 {

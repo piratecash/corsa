@@ -937,6 +937,9 @@ func (cm *ConnectionManager) manualPeerDuplicateLocked(address domain.PeerAddres
 type manualPeerAdmission struct {
 	admitted  *slot
 	evictions slotEvictions
+	// Only a same-direction replacement may reuse the evicted unit. Until
+	// its old Close returns and the exact transfer succeeds, no worker runs.
+	reservationTeardown *sessionTeardown
 }
 
 // admitManualPeerLocked decides whether the manual peer gets a slot, and
@@ -972,6 +975,7 @@ func (cm *ConnectionManager) admitManualPeerLocked(ev ManualPeerRequested, maxSl
 		defer adTicket.guard()
 	}
 	var evictions slotEvictions
+	var reservationTeardown *sessionTeardown
 	reservation, budgetErr := cm.reserveOutbound()
 
 	// Evict when the slot table is what stands in the way — either the budget
@@ -1002,11 +1006,25 @@ func (cm *ConnectionManager) admitManualPeerLocked(ev ManualPeerRequested, maxSl
 				Str("evicted", string(victim.Address)).
 				Str("manual", string(ev.Address)).
 				Msg("cm: evicting slot to make room for manual peer")
-			// Removal settles the victim's own unit: a live session
-			// releases it here, an in-flight dial keeps it parked.
+			// A detached live session keeps its unit until Close returns.
+			// When its same outbound unit can pay for this replacement, keep
+			// it continuously accounted: no release/re-reserve gap permits an
+			// independent inbound or auxiliary dial to steal the capacity.
 			evictions = cm.evictSlotsLocked([]*slot{victim})
 			if budgetErr != nil {
-				reservation, budgetErr = cm.reserveOutbound()
+				for _, teardown := range evictions.teardowns {
+					if teardown != nil && teardown.reservation != nil && teardown.reservation.Direction() == connbudget.DirectionOutbound {
+						reservationTeardown = teardown
+						break
+					}
+				}
+				if reservationTeardown != nil {
+					budgetErr = nil
+				} else {
+					// No live session remains (and an in-flight victim was
+					// rejected by evictionWouldHelp): ordinary retry is safe.
+					reservation, budgetErr = cm.reserveOutbound()
+				}
 			}
 		}
 	}
@@ -1031,7 +1049,13 @@ func (cm *ConnectionManager) admitManualPeerLocked(ev ManualPeerRequested, maxSl
 		reservation:   reservation,
 	}
 	cm.slots = append(cm.slots, admitted)
-	return cm.finishK3AdvertisedAdmission(adTicket, manualPeerAdmission{admitted: admitted, evictions: evictions})
+	if reservationTeardown != nil {
+		// This visible Dialing slot is pending bookkeeping, not a running
+		// dial: the sole event loop closes first and binds the unit below.
+		reservationTeardown.replacement = admitted
+		reservationTeardown.replacementGeneration = admitted.Generation
+	}
+	return cm.finishK3AdvertisedAdmission(adTicket, manualPeerAdmission{admitted: admitted, evictions: evictions, reservationTeardown: reservationTeardown})
 }
 
 // publishManualPeerAdmission publishes what admitManualPeerLocked did and
@@ -1042,6 +1066,11 @@ func (cm *ConnectionManager) publishManualPeerAdmission(ctx context.Context, adm
 	cm.publishEvictions(admission.evictions)
 	admitted := admission.admitted
 	if admitted == nil {
+		return
+	}
+	if admission.reservationTeardown != nil && !admission.reservationTeardown.reservationTransferred {
+		// No budget ownership means no worker, even if a stale/changed
+		// replacement prevented the expected transfer after the close.
 		return
 	}
 	cm.emitSlotStateChanged(admitted.Address, domain.SlotStateDialing)
@@ -1183,6 +1212,11 @@ func (cm *ConnectionManager) handleActiveSessionLost(ctx context.Context, ev Act
 				Bool("setup_banned", setupBanned).
 				Msg("cm: replacing slot after repeated setup failures")
 
+			// The first deactivation above already detached this session.
+			// Its reservation must follow that close, not the now-empty slot.
+			if teardown != nil {
+				teardown.reservation = cm.takeReservationLocked(s)
+			}
 			replaceTeardown := cm.replaceSlotLocked(s, slotDeactivationOutcomeReported)
 			addr := s.Address
 			cm.finishK3AdvertisedLocked(adTicket)
@@ -1313,6 +1347,12 @@ func (cm *ConnectionManager) handleDialFailed(ctx context.Context, ev DialFailed
 		// is gone.
 		finished := cm.takeReservationLocked(s)
 		teardown := cm.replaceSlotLocked(s, slotDeactivationOutcomeReported)
+		if teardown != nil {
+			// Normally a failed dial has no Session. Keep any actual detached
+			// transport accounted until its close even on this terminal path.
+			teardown.reservation = finished
+			finished = nil
+		}
 		replacedAddr := s.Address
 		cm.finishK3AdvertisedLocked(adTicket)
 		adTicket = nil
@@ -1697,7 +1737,7 @@ func (cm *ConnectionManager) evictSlotsLocked(victims []*slot) slotEvictions {
 	evictions := slotEvictions{removed: make([]domain.PeerAddress, 0, len(victims))}
 	for _, v := range victims {
 		evictions.removed = append(evictions.removed, v.Address)
-		evictions.teardowns = append(evictions.teardowns, cm.deactivateSlotLocked(v, slotDeactivationLocalEviction))
+		evictions.teardowns = append(evictions.teardowns, cm.deactivateSlotForRemovalLocked(v, slotDeactivationLocalEviction))
 		cm.removeSlotLocked(v)
 	}
 	return evictions
@@ -1994,6 +2034,14 @@ func (r slotDeactivationReason) sessionCloser() peerSessionCloser {
 type sessionTeardown struct {
 	info   SessionInfo
 	closer peerSessionCloser
+	// Sole ownership after slot removal, until closeAs has returned. A
+	// reconnecting slot is retained and keeps its existing unit instead.
+	reservation *connbudget.Reservation
+	// A manual replacement may receive the same still-accounted outbound
+	// unit, only after Close. These fields belong to the sole event loop.
+	replacement            *slot
+	replacementGeneration  uint64
+	reservationTransferred bool
 }
 
 // deactivateSlotLocked detaches the session of an active or initializing slot.
@@ -2050,6 +2098,22 @@ func (cm *ConnectionManager) tearDownSession(teardown *sessionTeardown) {
 	// The close error is the transport's own; the slot is given up either
 	// way and nothing here could act on it.
 	_ = teardown.info.Session.closeAs(teardown.closer)
+	// No defer: a panic before Close returns must not invent free capacity.
+	reservation := teardown.reservation
+	teardown.reservation = nil
+	if reservation != nil && teardown.replacement != nil {
+		cm.mu.Lock()
+		replacement := teardown.replacement
+		if cm.findSlotLocked(replacement.Address) == replacement &&
+			replacement.Generation == teardown.replacementGeneration &&
+			replacement.State == domain.SlotStateDialing && replacement.reservation == nil {
+			replacement.reservation = reservation
+			teardown.reservationTransferred = true
+			reservation = nil
+		}
+		cm.mu.Unlock()
+	}
+	reservation.Release()
 	if cm.config.OnSessionTeardown != nil {
 		cm.config.OnSessionTeardown(teardown.info)
 	}
@@ -2066,8 +2130,19 @@ func (cm *ConnectionManager) tearDownSessions(teardowns []*sessionTeardown) {
 // Caller must hold cm.mu.Lock. Returns the detached session, if the slot had
 // one, for tearDownSession once cm.mu is released.
 func (cm *ConnectionManager) replaceSlotLocked(s *slot, reason slotDeactivationReason) *sessionTeardown {
-	teardown := cm.deactivateSlotLocked(s, reason)
+	teardown := cm.deactivateSlotForRemovalLocked(s, reason)
 	cm.removeSlotLocked(s)
+	return teardown
+}
+
+// deactivateSlotForRemovalLocked transfers the removed live session's unit
+// to its close owner. removeSlotLocked must not release it first. The caller
+// still owns cm.mu here; all Close/I/O/callbacks remain after the unlock.
+func (cm *ConnectionManager) deactivateSlotForRemovalLocked(s *slot, reason slotDeactivationReason) *sessionTeardown {
+	teardown := cm.deactivateSlotLocked(s, reason)
+	if teardown != nil {
+		teardown.reservation = cm.takeReservationLocked(s)
+	}
 	return teardown
 }
 
@@ -2227,7 +2302,7 @@ func (cm *ConnectionManager) shutdown() {
 	//    cleanup). Shutdown is a local decision: the peers did nothing.
 	teardowns := make([]*sessionTeardown, 0, len(cm.slots))
 	for _, s := range cm.slots {
-		teardowns = append(teardowns, cm.deactivateSlotLocked(s, slotDeactivationLocalEviction))
+		teardowns = append(teardowns, cm.deactivateSlotForRemovalLocked(s, slotDeactivationLocalEviction))
 	}
 
 	// 2. Clear slots, settling each slot's budget unit on the way out. The
@@ -2312,7 +2387,8 @@ func (cm *ConnectionManager) removeSlotLocked(target *slot) {
 		if s == target {
 			// Settle the budget BEFORE the slot stops existing: a dial
 			// still in flight keeps the capacity accounted (parked by
-			// generation), anything else releases it now.
+			// generation). A live removed session's close owner has already
+			// taken its unit; only an otherwise idle unit releases here.
 			cm.orphanReservationLocked(s)
 			cm.slots = append(cm.slots[:i], cm.slots[i+1:]...)
 			return

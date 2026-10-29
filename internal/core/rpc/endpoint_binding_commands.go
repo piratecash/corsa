@@ -212,8 +212,14 @@ var endpointBindingRefusals = []error{
 // unavailable, anything else — a failed write — is internal.
 func endpointBindingFailure(action string, err error) CommandResponse {
 	wrapped := fmt.Errorf("%s: %w", action, err)
-	if errors.Is(err, domain.ErrEndpointBindingStoreUnavailable) {
+	if errors.Is(err, domain.ErrEndpointBindingStoreUnavailable) || errors.Is(err, domain.ErrEndpointBindingMutationUnavailable) {
 		return unavailableError(wrapped)
+	}
+	// A typed post-write/cleanup disposition is not a prevalidation refusal,
+	// even when its local cause retains SelectionChanged for errors.Is.
+	var actionFailure *domain.EndpointBindingActionError
+	if errors.As(err, &actionFailure) && actionFailure != nil {
+		return internalError(wrapped)
 	}
 	for _, refusal := range endpointBindingRefusals {
 		if errors.Is(err, refusal) {
@@ -409,13 +415,15 @@ func (c *Client) ListEndpointBindings(req EndpointBindingListRequest) (EndpointB
 		args["limit"] = req.Limit
 	}
 	var page EndpointBindingPageDTO
-	return page, c.execInto("listEndpointBindings", args, &page)
+	err := c.execInto("listEndpointBindings", args, &page)
+	return page, err
 }
 
 // RemoveEndpointBinding runs removeEndpointBinding for one endpoint.
 func (c *Client) RemoveEndpointBinding(endpoint string) (EndpointBindingRemovalDTO, error) {
 	var removal EndpointBindingRemovalDTO
-	return removal, c.execInto("removeEndpointBinding", map[string]interface{}{"endpoint": endpoint}, &removal)
+	err := c.execInto("removeEndpointBinding", map[string]interface{}{"endpoint": endpoint}, &removal)
+	return removal, err
 }
 
 // DemoteEndpointBindings runs demoteEndpointBindings: the dry run when
@@ -426,5 +434,6 @@ func (c *Client) DemoteEndpointBindings(endpoints []string, confirm string) (End
 		args["confirm"] = confirm
 	}
 	var demotion EndpointBindingDemotionDTO
-	return demotion, c.execInto("demoteEndpointBindings", args, &demotion)
+	err := c.execInto("demoteEndpointBindings", args, &demotion)
+	return demotion, err
 }

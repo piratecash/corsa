@@ -55,3 +55,20 @@ registry	internal/core/node/resource_breakdown.go | func (s *Service) sessionsUs
 registry	internal/core/node/rollout_metrics.go | func (s *Service) collectNeighbourComposition() domain.NeighbourComposition | for id, entry := range s.conns {
 registry	internal/core/node/session_kind_metrics.go | func (s *Service) refreshLiveSessionKinds() | for id, entry := range s.conns {
 uint64	internal/core/node/peer_management.go | func isActiveConnectionState(connected bool, connID uint64, state string, slotState domain.SlotState) bool | func isActiveConnectionState(connected bool, connID uint64, state string, slotState domain.SlotState) bool {
+
+# Individually reviewed S6/K3/K10 and exact-tag D1 source sites; not whole-file exceptions.
+registry	internal/core/node/advertised_connection_observation.go | func (s *Service) bindK3AdvertisedConstruction() | valid := len(s.conns) == 0 && len(s.sessions) == 0 && len(s.dialOrigin) == 0 && s.connManager != nil && s.connManager.config.advertised == o && len(s.connManager.slots) == 0
+registry	internal/core/node/advertised_connection_observation.go | func (s *Service) collectK3AdvertisedPeersLocked(o *k3AdvertisedSource) (map[k3AdvertisedPeerKey]k3AdvertisedPeerFact, bool) | for id, entry := range s.conns {
+registry	internal/core/node/advertised_connection_observation.go | func (s *Service) collectK3AdvertisedPeersLocked(o *k3AdvertisedSource) (map[k3AdvertisedPeerKey]k3AdvertisedPeerFact, bool) | if len(s.conns) > o.connectionCapacity || len(s.sessions) > o.connectionCapacity {
+registry	internal/core/node/advertised_connection_observation.go | func (s *Service) k3AdvertisedRegistryRemovedLocked(id domain.ConnID) | if entry := s.conns[id]; entry != nil && entry.core != nil && entry.core.Dir() == netcore.Outbound && s.k3AdvertisedOtherSessionLocked(id, entry.core, "", false) {
+registry	internal/core/node/advertised_connection_observation.go | func (s *Service) k3AdvertisedSessionChangingLocked(address domain.PeerAddress, next *peerSession) | entry := s.conns[next.connID]
+registry	internal/core/node/advertised_connection_observation.go | func (s *Service) k3AdvertisedSessionChangingLocked(address domain.PeerAddress, next *peerSession) | entry := s.conns[old.connID]
+registry	internal/core/node/s6_terminal_construction.go | func (c *terminalObservationConstruction) install(s *Service) | if len(s.conns) != 0 || len(s.connIDByNetConn) != 0 {
+conn	internal/core/node/conn_registry.go | func (s *Service) k10ForRegistered(conn net.Conn) *k10TerminalCapsule
+conn	internal/core/node/conn_registry.go | func (s *Service) k10RegisterLocked(conn net.Conn, entry *connEntry)
+entry	internal/core/node/advertised_connection_observation.go | func (s *Service) collectK3AdvertisedPeersLocked(o *k3AdvertisedSource) (map[k3AdvertisedPeerKey]k3AdvertisedPeerFact, bool) | address := entry.core.Address()
+entry	internal/core/node/advertised_connection_observation.go | func (s *Service) collectK3AdvertisedPeersLocked(o *k3AdvertisedSource) (map[k3AdvertisedPeerKey]k3AdvertisedPeerFact, bool) | if entry == nil || entry.core == nil || entry.core.ConnID() != id {
+entry	internal/core/node/advertised_connection_observation.go | func (s *Service) k3AdvertisedRegistryRemovedLocked(id domain.ConnID) | if entry := s.conns[id]; entry != nil && entry.core != nil && entry.core.Dir() == netcore.Outbound && s.k3AdvertisedOtherSessionLocked(id, entry.core, "", false) {
+entry	internal/core/node/find_node_membership_checkpoint.go | func (r *D1FindNodeResourceReadout) CheckpointForService(expected *Service) D1FindNodeCheckpoint | if l.outbound || l.role != sessionv2.RoleListener || l.token != r.token || l.bridgeTerminal != r.terminal || l.id != id || id == 0 || l.entry != entry || entry.common != l || entry.core == nil || entry.core.ConnID() != id {
+entry	internal/core/node/service.go | func (s *Service) clearConnAuth(id domain.ConnID) | entry.core.ClearAuth()
+entry	internal/core/node/service.go | func (s *Service) setConnAuthStateByID(id domain.ConnID, state *connauth.State) | entry.core.SetAuth(state)

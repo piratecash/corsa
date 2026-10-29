@@ -111,7 +111,8 @@ func retryEndpointDialHandler(dd EndpointDialDelayProvider) CommandHandler {
 // be reached over loopback with credentials.
 func (c *Client) ListEndpointDialDelays() ([]EndpointDialDelayDTO, error) {
 	var delays []EndpointDialDelayDTO
-	return delays, c.execInto("listEndpointDialDelays", map[string]interface{}{}, &delays)
+	err := c.execInto("listEndpointDialDelays", map[string]interface{}{}, &delays)
+	return delays, err
 }
 
 // RetryEndpointDial runs retryEndpointDial for one endpoint.

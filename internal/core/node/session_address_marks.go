@@ -391,7 +391,12 @@ func (m *sessionAddressMarks) noteListenerRefused(address domain.PeerAddress) ti
 		if m.stepV2RetryLocked(address, mark, now) {
 			mark.v2Retry.until = mark.v2Retry.until.Add(m.jitter(mark.v2Retry.until.Sub(now) / 2))
 		}
-		wait = mark.v2Retry.until.Sub(now)
+		// A concurrent successful dial may have cleared the retry after this
+		// dial group took its step. Preserve that reset instead of inventing
+		// another step or dereferencing an absent retry.
+		if mark.v2Retry != nil {
+			wait = mark.v2Retry.until.Sub(now)
+		}
 	})
 	return wait
 }
@@ -404,7 +409,12 @@ func (m *sessionAddressMarks) noteV2Unanswered(address domain.PeerAddress) time.
 	var wait time.Duration
 	m.update(address, func(mark *sessionAddressMark, now time.Time) {
 		m.stepV2RetryLocked(address, mark, now)
-		wait = mark.v2Retry.until.Sub(now)
+		// A concurrent successful dial may have cleared the retry after this
+		// dial group took its step. Preserve that reset instead of inventing
+		// another step or dereferencing an absent retry.
+		if mark.v2Retry != nil {
+			wait = mark.v2Retry.until.Sub(now)
+		}
 	})
 	return wait
 }

@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/mock"
 
@@ -210,37 +212,79 @@ func TestCodeChangedAfterTheCandidateIsRefused(t *testing.T) {
 	}
 }
 
-// TestGitHistoryReadsTheRepository exercises the real history source with
-// read-only git: the commit under test is known, a made-up one is an error
-// rather than "nothing changed".
+// gitHistoryFixture creates a real, clean repository owned by this test.
+// Both commits have the same tree but no parents: equal files are not proof
+// that a candidate belongs to HEAD's history. No CORSA checkout is consulted.
+func gitHistoryFixture(t *testing.T) (context.Context, gitTree, admission.CommitHash, admission.CommitHash) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	t.Cleanup(cancel)
+	root := t.TempDir()
+	run := func(args ...string) string {
+		t.Helper()
+		cmd := exec.CommandContext(ctx, "git", append([]string{
+			"-c", "core.hooksPath=" + filepath.Join(root, ".git", "disabled-hooks"),
+			"-c", "commit.gpgSign=false", "-c", "gc.auto=0", "-c", "maintenance.auto=false",
+		}, args...)...)
+		cmd.WaitDelay = time.Second
+		cmd.Dir = root
+		cmd.Env = append(gitIsolatedEnv(),
+			"GIT_AUTHOR_NAME=Fixture", "GIT_AUTHOR_EMAIL=fixture@example.invalid",
+			"GIT_COMMITTER_NAME=Fixture", "GIT_COMMITTER_EMAIL=fixture@example.invalid",
+			"GIT_AUTHOR_DATE=2000-01-01T00:00:00Z", "GIT_COMMITTER_DATE=2000-01-01T00:00:00Z")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("own Git fixture %v: %v: %s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	run("init", "--quiet", "--template=", "--initial-branch=fixture-main", "--object-format=sha1")
+	if err := os.WriteFile(filepath.Join(root, "fixture.txt"), []byte("same fixture tree\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run("add", "--force", "--", "fixture.txt")
+	tree := run("write-tree")
+	head := run("commit-tree", tree, "-m", "fixture A")
+	other := run("commit-tree", tree, "-m", "fixture B")
+	if head == other || len(head) != 40 || len(other) != 40 {
+		t.Fatalf("fixture roots are not distinct SHA-1 commits: %q / %q", head, other)
+	}
+	run("update-ref", "refs/heads/fixture-main", head)
+	run("update-ref", "refs/heads/fixture-other", other)
+	if run("rev-parse", "HEAD") != head || run("rev-list", "--parents", "-n", "1", head) != head ||
+		run("rev-list", "--parents", "-n", "1", other) != other ||
+		run("rev-parse", head+"^{tree}") != tree || run("rev-parse", other+"^{tree}") != tree ||
+		run("rev-list", "--all", "--not", "HEAD", "--max-count=1") != other ||
+		run("status", "--porcelain", "--untracked-files=all") != "" {
+		t.Fatal("own Git fixture does not have clean HEAD and unrelated same-tree root")
+	}
+	return ctx, gitTree{root: root}, admission.CommitHash(head), admission.CommitHash(other)
+}
+
+// TestGitHistoryReadsTheRepository exercises the real history source against
+// a known current commit and a nonexistent commit, without clone-dependent skips.
 func TestGitHistoryReadsTheRepository(t *testing.T) {
-	head, err := exec.Command("git", "rev-parse", "HEAD").Output()
-	if err != nil {
-		t.Skipf("no git history to read here: %v", err)
+	ctx, history, head, _ := gitHistoryFixture(t)
+	changed, err := history.FilesChangedSince(ctx, head)
+	if err != nil || len(changed) != 0 {
+		t.Fatalf("FilesChangedSince(HEAD) = %v, %v; want clean fixture", changed, err)
 	}
-	history := gitTree{root: repoRoot}
-	if _, err := history.FilesChangedSince(context.Background(), admission.CommitHash(strings.TrimSpace(string(head)))); err != nil {
-		t.Fatalf("FilesChangedSince(HEAD) error = %v", err)
-	}
-	if _, err := history.FilesChangedSince(context.Background(), "0000000000000000000000000000000000000000"); err == nil {
+	if _, err := history.FilesChangedSince(ctx, "0000000000000000000000000000000000000000"); err == nil {
 		t.Fatal("FilesChangedSince(unknown commit) returned no error; an unknown candidate would read as unchanged")
+	}
+	if err := ctx.Err(); err != nil {
+		t.Fatalf("history fixture deadline, not evidence of commit refusal: %v", err)
 	}
 }
 
-// TestGitTreeRefusesACandidateOffTheHistory: the candidate must stay
-// reachable from the released commit; a commit elsewhere is not "the same
-// code with a manifest edit".
+// TestGitTreeRefusesACandidateOffTheHistory rejects an existing root with
+// identical files: it must be reachable from HEAD, not merely have equal bytes.
 func TestGitTreeRefusesACandidateOffTheHistory(t *testing.T) {
-	out, err := exec.Command("git", "rev-list", "--all", "--not", "HEAD", "--max-count=1").Output()
-	if err != nil {
-		t.Skipf("no git history to read here: %v", err)
-	}
-	other := strings.TrimSpace(string(out))
-	if other == "" {
-		t.Skip("every commit in this clone is an ancestor of HEAD; no off-history commit to test with")
-	}
-	if _, err := (gitTree{root: repoRoot}).FilesChangedSince(context.Background(), admission.CommitHash(other)); err == nil {
-		t.Fatalf("FilesChangedSince(%s, not an ancestor of HEAD) returned no error", other)
+	ctx, history, _, other := gitHistoryFixture(t)
+	_, err := history.FilesChangedSince(ctx, other)
+	var exit *exec.ExitError
+	if err == nil || !errors.As(err, &exit) || exit.ExitCode() != 1 || ctx.Err() != nil {
+		t.Fatalf("FilesChangedSince(%s, not an ancestor of HEAD) = %v; want real ancestry rejection, context=%v", other, err, ctx.Err())
 	}
 }
 

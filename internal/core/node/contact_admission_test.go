@@ -5,7 +5,6 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -542,11 +541,7 @@ func sameContactOrder(left, right []protocol.ContactFrame) bool {
 func TestNetworkFetchContactsServesTheTrimmedReply(t *testing.T) {
 	t.Parallel()
 
-	_, thisFile, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
-	}
-	parsed, err := parser.ParseFile(token.NewFileSet(), filepath.Join(filepath.Dir(thisFile), "service.go"), nil, 0)
+	parsed, err := parser.ParseFile(token.NewFileSet(), "service.go", nil, 0)
 	if err != nil {
 		t.Fatalf("parse service.go: %v", err)
 	}
@@ -740,12 +735,8 @@ func contactTestAddress(i int) string {
 func callsInsideFunctionBody(t *testing.T, file, function string) []string {
 	t.Helper()
 
-	_, thisFile, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
-	}
 	fset := token.NewFileSet()
-	parsed, err := parser.ParseFile(fset, filepath.Join(filepath.Dir(thisFile), file), nil, 0)
+	parsed, err := parser.ParseFile(fset, file, nil, 0)
 	if err != nil {
 		t.Fatalf("parse %s: %v", file, err)
 	}

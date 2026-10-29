@@ -107,28 +107,58 @@ func TestIdentityPinRemovalPreservesDirtyEndpointChangesAndConcurrentFlush(t *te
 	}
 	var releaseOnce sync.Once
 	release := func() { releaseOnce.Do(func() { close(releaseFlush) }) }
-	defer release()
 	flushDone := make(chan error, 1)
+	flushStarted, flushJoined := false, false
+	defer func() {
+		release()
+		if flushStarted && !flushJoined {
+			select {
+			case err := <-flushDone:
+				if err != nil {
+					t.Error("concurrent flush cleanup", err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Error("concurrent flush cleanup did not join")
+			}
+		}
+	}()
 	files := NewMockidentityPinDurableFiles(t)
 	files.EXPECT().Preflight(mock.Anything).RunAndReturn(real.Preflight).Once()
 	files.EXPECT().ReadGuard(mock.Anything).RunAndReturn(real.ReadGuard).Once()
 	files.EXPECT().WriteGuard(mock.Anything, mock.Anything).RunAndReturn(real.WriteGuard).Once()
 	files.EXPECT().RemoveGuard(mock.Anything).RunAndReturn(real.RemoveGuard).Once()
 	files.EXPECT().WriteMain(mock.Anything, mock.Anything).RunAndReturn(func(ctx context.Context, raw []byte) (secretfile.DurableCommit, error) {
-		// An endpoint mutation during I/O is outside this snapshot. Like expiry,
-		// it happens under mu and waits for the periodic writer after publication.
+		// Deliberately inject an out-of-snapshot dirty mutation under mu.
+		// Ordinary expiry now owns the read gate and cannot mutate during
+		// removal I/O. This retains defensive dirty-counter coverage rather
+		// than modelling an allowed concurrent expiry path.
 		key := storedKeyOf(victim)
 		store.mu.Lock()
 		store.deleteBindingLocked(key)
 		store.changes++
 		store.renewalsUnwritten = true
 		store.mu.Unlock()
-		go func() { flushDone <- store.flushRenewalsNow() }()
-		waitForConditionMsg(t, 5*time.Second, "flush did not publish dirty counters before waiting on writeMu", func() bool {
-			store.mu.Lock()
-			defer store.mu.Unlock()
-			return store.lastFlush != nil
-		})
+		flushGID := make(chan uint64, 1)
+		flushStarted = true
+		go func() {
+			flushGID <- relationGateCurrentGID()
+			flushDone <- store.flushRenewalsNow()
+		}()
+		select {
+		case gid := <-flushGID:
+			// The R1 gate precedes expiry/counters as well as the writer.
+			// Observe this exact worker blocked in the original flush, not
+			// an absence-of-progress timer or a scheduler guess.
+			n1WaitMutexFrame(t, gid, "(*secureSessionStore).flushPending(")
+		case <-time.After(5 * time.Second):
+			t.Fatal("concurrent flush owner did not start")
+		}
+		store.mu.Lock()
+		lastFlush := store.lastFlush
+		store.mu.Unlock()
+		if lastFlush != nil {
+			t.Fatal("flush published counters while removal held the exclusive gate")
+		}
 		return real.WriteMain(ctx, raw)
 	}).Once()
 	if _, err := store.removeIdentityPin(context.Background(), binding, token, fence, files); err != nil {
@@ -158,7 +188,9 @@ func TestIdentityPinRemovalPreservesDirtyEndpointChangesAndConcurrentFlush(t *te
 	}
 	// Let the existing flush finish, then restore its write hook before teardown.
 	release()
-	if err := <-flushDone; err != nil {
+	err := <-flushDone
+	flushJoined = true
+	if err != nil {
 		t.Fatal(err)
 	}
 }

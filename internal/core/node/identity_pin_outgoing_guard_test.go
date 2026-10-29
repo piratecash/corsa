@@ -2,6 +2,7 @@ package node
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"fmt"
 	"go/ast"
 	"go/format"
@@ -60,6 +61,14 @@ func r2aGuardErrors(sources map[string][]byte, expected map[string]map[r2aRefere
 	fields := map[string]map[r2aReferenceSite]int{"outgoingProvenance": {}, "ack": {}, "sealed": {}, "prepared": {}}
 	var failures []string
 	writes := map[r2aReferenceSite]map[string]int{}
+	// These unrelated fields have the same spelling, but hold only K5 cuts.
+	// Admit exact reviewed diagnostic bodies/sites, never an R2a capability.
+	diagnosticSealedPins := map[r2aReferenceSite]string{
+		{"handshake_node_full_observation.go", "newObservedInboundHandshakes"}: "0546074fbad694b3f78ff77632d1de8b55aef84339fe3ea2d710f2f80921370d",
+		{"handshake_node_full_observation.go", "fullSnapshot"}:                 "f947c463b0102abd1c90cfb25f9e7349e989ddeeb2736798cb57f933c7284a85",
+		{"k5_handshake_segment.go", "newSegmentedInboundHandshakes"}:           "e8bd5713d26f6ca8f08c8e6a3fb094a2ffad5e1ec0e36d0ab35120b175c365c3",
+	}
+	actualDiagnosticSealedPins := map[r2aReferenceSite]string{}
 	for name := range expected {
 		actual[name] = map[r2aReferenceSite]int{}
 	}
@@ -75,6 +84,12 @@ func r2aGuardErrors(sources map[string][]byte, expected map[string]map[r2aRefere
 			if fn, ok := decl.(*ast.FuncDecl); ok {
 				site.function = fn.Name.Name
 				body = fn.Body
+				if _, watched := diagnosticSealedPins[site]; watched && fn.Body != nil {
+					if _, duplicate := actualDiagnosticSealedPins[site]; duplicate {
+						failures = append(failures, "duplicate diagnostic sealed body")
+					}
+					actualDiagnosticSealedPins[site] = fmt.Sprintf("%x", sha256.Sum256(source[int(fn.Body.Pos())-1:int(fn.Body.End())-1]))
+				}
 			}
 			if body == nil {
 				continue
@@ -144,10 +159,13 @@ func r2aGuardErrors(sources map[string][]byte, expected map[string]map[r2aRefere
 		}
 	}
 	if len(expected) == len(r2aClosedReferences) {
+		if !reflect.DeepEqual(actualDiagnosticSealedPins, diagnosticSealedPins) {
+			failures = append(failures, "diagnostic sealed body changed")
+		}
 		wantFields := map[string]map[r2aReferenceSite]int{
 			"outgoingProvenance": {{"identity_pin_outgoing_provenance.go", "registerR2aOrigin"}: 1, {"identity_pin_outgoing_provenance.go", "r2aCurrentLocked"}: 1, {"identity_pin_outgoing_provenance.go", "existingR2aOrigin"}: 2},
 			"ack":                {{"identity_pin_outgoing_provenance.go", "settleR2aOwnHopLocked"}: 1, {"relay.go", "sendTableRoutedRelayMessageWithR2a"}: 1},
-			"sealed":             {{"identity_record_admission_own_dm.go", "bindOwnDMResidence"}: 4, {"identity_pin_outgoing_provenance.go", "submitR2aOwnDM"}: 5, {"identity_pin_outgoing_provenance.go", "openR2aFixtureHop"}: 1, {"identity_pin_outgoing_provenance.go", "snapshotR2aDirectedSession"}: 1, {"peer_sessions.go", "finishPeerSessionForCM"}: 3, {"identity_pin_own_dm_port.go", "submitWithResidence"}: 3},
+			"sealed":             {{"identity_record_admission_own_dm.go", "bindOwnDMResidence"}: 4, {"identity_pin_outgoing_provenance.go", "submitR2aOwnDM"}: 5, {"identity_pin_outgoing_provenance.go", "openR2aFixtureHop"}: 1, {"identity_pin_outgoing_provenance.go", "snapshotR2aDirectedSession"}: 1, {"peer_sessions.go", "finishPeerSessionForCM"}: 3, {"identity_pin_own_dm_port.go", "submitWithResidence"}: 3, {"handshake_node_full_observation.go", "newObservedInboundHandshakes"}: 1, {"handshake_node_full_observation.go", "fullSnapshot"}: 3, {"k5_handshake_segment.go", "newSegmentedInboundHandshakes"}: 1},
 			"prepared":           {{"identity_pin_outgoing_provenance.go", "registerR2aOrigin"}: 3, {"identity_pin_outgoing_provenance.go", "r2aCurrentLocked"}: 4, {"identity_pin_outgoing_provenance.go", "claimR2aFirstDirectedItemLocked"}: 8, {"identity_pin_outgoing_provenance.go", "settleR2aOwnHop"}: 1, {"identity_pin_outgoing_provenance.go", "settleR2aOwnHopLocked"}: 5, {"identity_record_admission.go", "expireRelationSlotsLocked"}: 1, {"identity_record_admission_own_dm.go", "ownDMObservation"}: 1, {"identity_record_admission_own_dm.go", "registerOwnDMRecordAdmission"}: 3, {"identity_record_admission_own_dm.go", "ownDMClaimCurrentLocked"}: 2, {"identity_record_admission_own_dm.go", "stageOwnDMRelationRecordLocked"}: 3},
 		}
 
@@ -208,5 +226,32 @@ func TestR2aReferenceGuardRejectsFunctionValueAndSameCountReplacement(t *testing
 		if len(r2aGuardErrors(map[string][]byte{"sample.go": []byte(source)}, expected)) == 0 {
 			t.Fatal("source guard accepted caller substitution/escape")
 		}
+	}
+
+	baseline := ninN1Sources(t)
+	if failures := r2aGuardErrors(baseline, r2aClosedReferences); len(failures) != 0 {
+		t.Fatal("diagnostic baseline", failures)
+	}
+	for _, name := range []string{"changed-diagnostic-cut", "extra-sealed-reader"} {
+		t.Run(name, func(t *testing.T) {
+			sources := map[string][]byte{}
+			for file, raw := range baseline {
+				sources[file] = raw
+			}
+			if name == "changed-diagnostic-cut" {
+				const file = "handshake_node_full_observation.go"
+				const before = "o.sealed = handshakeFullCut{available: true, at: at}"
+				raw := string(sources[file])
+				if strings.Count(raw, before) != 1 {
+					t.Fatal("exact diagnostic cut anchor")
+				}
+				sources[file] = []byte(strings.Replace(raw, before, "o.sealed = handshakeFullCut{}", 1))
+			} else {
+				sources["diagnostic_sealed_escape.go"] = []byte("package node\nfunc diagnosticEscape(o *handshakeFullObservation){_ = o.sealed}\n")
+			}
+			if len(r2aGuardErrors(sources, r2aClosedReferences)) == 0 {
+				t.Fatal("diagnostic sealed escape accepted")
+			}
+		})
 	}
 }

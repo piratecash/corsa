@@ -91,7 +91,7 @@ func TestConstructionPointClosedSource(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if declarations != 1 || !reflect.DeepEqual(refs, map[string]int{"internal/core/findnode/owned_bridge_bootstrap.go:NewExecutingBootstrapIntake": 2, "internal/core/findnode/owned_bridge_local_target.go:NewLocalTarget": 1, "internal/core/findnode/owned_bridge_local_target.go:WaitDelay": 1, "internal/core/findnode/owned_bridge_local_target.go:Complete": 1}) {
+	if declarations != 1 || !reflect.DeepEqual(refs, map[string]int{"internal/core/findnode/owned_bridge_bootstrap.go:NewExecutingBootstrapIntake": 2, "internal/core/findnode/owned_bridge_local_target.go:newLocalTarget": 1, "internal/core/findnode/owned_bridge_local_target.go:WaitDelay": 1, "internal/core/findnode/owned_bridge_local_target.go:Complete": 1}) {
 		t.Fatal("construction point exact caller inventory", declarations, refs)
 	}
 }

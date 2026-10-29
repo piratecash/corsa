@@ -52,7 +52,8 @@ func (e *PinStoreRefusalError) Unwrap() error { return e.cause }
 // unsafeLocation is the audit's verdict behind a location refusal, if any.
 func (e *PinStoreRefusalError) unsafeLocation() (*secretfile.UnsafeLocationError, bool) {
 	var unsafe *secretfile.UnsafeLocationError
-	return unsafe, errors.As(e.cause, &unsafe)
+	found := errors.As(e.cause, &unsafe)
+	return unsafe, found
 }
 
 // pinStoreFileRole names which of the two files a refusal is about.
@@ -157,6 +158,18 @@ func refuseStoreUnreadable(store, marker string, cause error) *PinStoreRefusalEr
 		fix: fmt.Sprintf("restore the file from a backup, or run the newer build that wrote it. Only if it is lost for good, %s: the node then starts with no pins, and every peer may be taken back to v1 once more",
 			giveUp),
 		cause: cause,
+	}
+}
+
+// refuseStoreUnconfirmed preserves a valid visible store whose persistence
+// barrier failed. An I/O repair is required, never a pin reset or legacy retry.
+func refuseStoreUnconfirmed(store string, cause error) *PinStoreRefusalError {
+	return &PinStoreRefusalError{
+		Reason:  domain.PinStoreRefusalLocationUnverifiable,
+		File:    store,
+		problem: fmt.Sprintf("the loaded pin store is visible but its persistence cannot be confirmed (%v)", cause),
+		fix:     "keep the pin store and marker, repair the filesystem or mount so file and directory synchronization succeeds, then restart; do not delete protection to bypass this refusal",
+		cause:   cause,
 	}
 }
 

@@ -26,7 +26,7 @@ func registryPublicationBodyPins() map[string]string {
 		"conn_registry.go:unregisterConnLocked":                   "f59796f1bcdbf93cd9792866515aa24e381f95a00b394dcbdbcf0aad525e3e8c",
 		"connection_manager.go:deactivateSlotLocked":              "26fb7214b4663240a888110d59bcc1261bf63b35be44130fbc6d8298d5257658",
 		"connection_manager.go:handleDialSucceeded":               "0b7f0d2942f6ca4be107a1898bc5b501d6266d643e61f1e9c2112c75b6fe0fbf",
-		"connection_manager.go:tearDownSession":                   "ec0ccbf2a529b10dc4243592460479c2c01e37728ca4218fc94eee281d54fd94",
+		"connection_manager.go:tearDownSession":                   "610654b3b56e7214b2cb5bee40ea6d7c55fce5a2fbc58649e63dac1eab42d6f6",
 		"find_node_connection.go:prepareFindNodeCMAcceptedLocked": "967a726272bc0ad15f3fc5204b377c636cb5d2039704b080b70962586677ddf0",
 		"find_node_connection.go:publishFindNodeCM":               "fb26ab47369e1d4e2b8600821acb6c5422a1c2f2ff0dbe9226dbdc2cbed8ebb1",
 		"find_node_connection.go:publishFindNodeLocked":           "7320628cd8080ffb5cb220eeaf6ee7e8e207209ac77d2d68177e138d551f251b",
@@ -205,6 +205,7 @@ func TestRegistryPublicationSourceRejectsEscapes(t *testing.T) {
 		t.Fatal("registry baseline SOURCE", failures)
 	}
 	for _, c := range []struct{ name, path, fn, before, after string }{
+		{"budget-before-close", "connection_manager.go", "tearDownSession", "_ = teardown.info.Session.closeAs(teardown.closer)", "teardown.reservation.Release(); _ = teardown.info.Session.closeAs(teardown.closer)"},
 		{"outer-W-before-End", "conn_registry.go", "unregisterConnLocked", "entry.common.end()", "outer := s.beginRegistryPublication(); entry.common.end(); if outer != nil { outer.Complete() }"},
 		{"lock-after-W", "conn_registry.go", "registerInboundConnLocked", "s.conns[id] = entry", "s.deliveryMu.Lock(); s.conns[id] = entry; s.deliveryMu.Unlock()"},
 		{"Complete-before-last-write", "conn_registry.go", "registerInboundConnLocked", "s.connIDByNetConn[conn] = id", "if publication != nil { publication.Complete() }; s.connIDByNetConn[conn] = id"},

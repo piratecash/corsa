@@ -205,6 +205,31 @@ func TestEndpointBindingAnswersRoundTripThroughTheClient(t *testing.T) {
 	}
 }
 
+// Table dispatch is also the UI console path. This checks the actual Service
+// guard plus typed error/status mapping, without an HTTP listener/client.
+func TestEndpointBindingMutationsUnavailableMapsTo503WithoutHTTP(t *testing.T) {
+	t.Parallel()
+	table := rpc.NewCommandTable()
+	rpc.RegisterEndpointBindingCommands(table, &node.Service{})
+	for _, tc := range []struct {
+		name string
+		args map[string]interface{}
+	}{
+		{name: "removeEndpointBinding", args: map[string]interface{}{"endpoint": "192.0.2.110:64646"}},
+		{name: "demoteEndpointBindings", args: map[string]interface{}{"endpoints": "192.0.2.111:64646", "confirm": "a-preview-token"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			response := table.Execute(rpc.CommandRequest{Name: tc.name, Args: tc.args})
+			if !errors.Is(response.Error, domain.ErrEndpointBindingMutationUnavailable) || response.ErrorKind != rpc.ErrUnavailable || response.ErrorKind.HTTPStatus() != http.StatusServiceUnavailable {
+				t.Fatalf("mutation guard did not retain typed unavailable/503: %+v", response)
+			}
+			if len(response.Data) != 0 {
+				t.Fatal("unavailable mutation fabricated a successful operation payload")
+			}
+		})
+	}
+}
+
 // The handlers only parse and validate: a malformed argument never reaches
 // the node, the node's refusals map to their kinds by errors.Is, and there is
 // no way to name more than one binding in a removal.

@@ -30,6 +30,8 @@ import (
 	"context"
 	_ "embed"
 	"fmt"
+	"strings"
+	"time"
 
 	"github.com/piratecash/corsa/internal/core/storage"
 )
@@ -54,6 +56,47 @@ var messageReactionsSQL string
 
 //go:embed 0007_conversation_delete.sql
 var conversationDeleteSQL string
+
+//go:embed 0008_delete_intent_time_order.sql
+var deleteIntentTimeOrderSQL string
+
+// deleteIntentTimeOrderHolds qualifies only active requests for the indexed
+// UTC/nanosecond key. Supported old/new writers use UTC RFC3339Nano; a database
+// edited to contain another spelling must not be silently indexed as that time.
+// This one-time read is inside 0008's transaction. It changes no row bytes.
+func deleteIntentTimeOrderHolds(ctx context.Context, tx storage.SchemaReader) error {
+	rows, err := tx.QueryContext(ctx, `SELECT next_attempt_at FROM message_delete_intents WHERE owed = 1`)
+	if err != nil {
+		return fmt.Errorf("read active delete intent times: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		var raw string
+		if err := rows.Scan(&raw); err != nil {
+			return fmt.Errorf("read active delete intent time: %w", err)
+		}
+		at, err := time.Parse(time.RFC3339Nano, raw)
+		if err != nil || len(raw) < 20 || len(raw) > 30 || !strings.HasSuffix(raw, "Z") {
+			return fmt.Errorf("active delete intent time is not UTC RFC3339 with at most nine fractional digits")
+		}
+		// Fixed-width and trailing-zero UTC spellings are equally exact. The
+		// index pads these digits; only the comparison spelling is normalized.
+		normalized := raw
+		if len(raw) > 20 && raw[19] == '.' {
+			normalized = strings.TrimSuffix(strings.TrimRight(raw[:len(raw)-1], "0"), ".") + "Z"
+		}
+		if normalized != at.UTC().Format(time.RFC3339Nano) {
+			return fmt.Errorf("active delete intent time is not canonical UTC RFC3339")
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate active delete intent times: %w", err)
+	}
+	return rows.Close()
+}
 
 // conversationDeleteHolds is the post-condition of 0007.
 //
@@ -144,6 +187,12 @@ func Catalog() []storage.Migration {
 			Name:      "conversation_delete",
 			SQL:       conversationDeleteSQL,
 			Invariant: conversationDeleteHolds,
+		},
+		{
+			Version:   8,
+			Name:      "delete_intent_time_order",
+			SQL:       deleteIntentTimeOrderSQL,
+			Invariant: deleteIntentTimeOrderHolds,
 		},
 	}
 }

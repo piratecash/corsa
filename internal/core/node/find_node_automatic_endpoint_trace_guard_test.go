@@ -14,7 +14,7 @@ import (
 // Finite exact Source closure for two test-only retained cells. No callback,
 // unbounded collector, mutable clock or new operational capability is allowed.
 func automaticEndpointTraceSourceErrors(sources map[string][]byte) []string {
-	pins := map[string]string{"service.go": "4b51bea99468339ff35e5ce9192a093d629a8c73f707d554961d0ae1aedfd01e", "find_node_owned_answer.go": "db16c461c252487076df0515d067202c0d8dbbfd84ea0a3f35fc7b795b2c202e", "find_node_owned_local_target.go": "3f72673fd435bb363ff434ef5fb728d61fc151e06f85b72a9e1a303599983915", "find_node_automatic_endpoint_trace_test.go": "85bd2c0c28681872c43a1b2d56d0f06f9f62c9a40f4c3035c98cf21869b15dc9"}
+	pins := map[string]string{"service.go": "140e304fe12ffdaa532521f80059803ec30bcd54355afb253235504f6760320e", "find_node_owned_answer.go": "db16c461c252487076df0515d067202c0d8dbbfd84ea0a3f35fc7b795b2c202e", "find_node_owned_local_target.go": "3f72673fd435bb363ff434ef5fb728d61fc151e06f85b72a9e1a303599983915", "find_node_automatic_endpoint_trace_test.go": "85bd2c0c28681872c43a1b2d56d0f06f9f62c9a40f4c3035c98cf21869b15dc9"}
 	var failures []string
 	for path, want := range pins {
 		if fmt.Sprintf("%x", sha256.Sum256(sources[path])) != want {

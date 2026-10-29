@@ -131,6 +131,16 @@ var identityStateInventory = map[string]identityStateEntry{
 	"Service.senderKeySyncHopInFlight": {identityUnprovenClaim,
 		"previous hop by session identity or by peerIDs, v1 included; released when the pass ends"},
 
+	// Inactive K3 advertisement observations preserve raw claims, not proof.
+	"Service.k3AdvertisedClaims": {identityUnprovenClaim, "raw original inbound Hello/outbound Welcome identity, v1 included; proof mirroring only marks conflict and never upgrades the claim; removed with its original registered/session owner"},
+	"k3AdvertisedSource.peer":    {identityUnprovenClaim, "bounded value projection of those raw claims and Core metadata, v1 included; replaced on original owner mutations and cleared on a source fault, never proof authority"},
+	"Service.k3AdvertisedGenerations": {identityNotApplicable,
+		"direction/ConnID to original observation generation, with no remote identity in key or value"},
+
+	// The registered K3 population admits only the original v2 proof binding.
+	"k3RegisteredSource.owners": {identityFromV2Proof, "only k3RegisteredInbound Auth.ProvenIdentity or k3RegisteredOutbound session.provenIdentity, with matching original Core/ConnID/session; removed on owner replacement/removal and cleared on source fault"},
+	"k3RegisteredSource.refs":   {identityFromV2Proof, "refcounts updated solely from those validated registered bindings; decremented/deleted with their original owner and cleared on source fault"},
+
 	// Service: identities bound by a signature or a fingerprint.
 	"Service.pubKeys":          {identitySelfAuthenticated, "every writer checks the key's fingerprint or a signed record"},
 	"Service.boxKeys":          {identitySelfAuthenticated, "every writer checks identity.VerifyBoxKeyBinding"},

@@ -4,8 +4,6 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -227,12 +225,8 @@ func TestNoDatagramDeliveryBelowTheUniversalParser(t *testing.T) {
 func callsInsideCaseClause(t *testing.T, file, function, label string) []string {
 	t.Helper()
 
-	_, thisFile, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
-	}
 	fset := token.NewFileSet()
-	parsed, err := parser.ParseFile(fset, filepath.Join(filepath.Dir(thisFile), file), nil, 0)
+	parsed, err := parser.ParseFile(fset, file, nil, 0)
 	if err != nil {
 		t.Fatalf("parse %s: %v", file, err)
 	}

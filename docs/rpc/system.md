@@ -250,11 +250,8 @@ Field notes:
   are over containers with a bound of their own (live sessions and
   connections, topic backlogs under their byte budget, relay states
   under their cap, the key maps under the known-identity cap) and read
-  one field per entry. The one exception is `route_plane/
-  route_health_orphans`, which probes storage once per health entry
-  under the table's read lock: it answers an invariant a `len` cannot
-  (see below), costs low milliseconds at tens of thousands of entries,
-  and this command is one an operator runs, not one a client samples.
+  one field per entry. The route-plane snapshot does not run a full orphan-
+  health invariant audit under the routing-table lock.
 - `subsystems[].gauges[].entry_bytes` — what one entry of that container
   costs: its key plus its value, and **nothing they point at**.
 - `subsystems[].gauges[].kind` — `memory` or `saturation`. A **saturation**
@@ -284,14 +281,6 @@ Several gauges are not memory figures at all and are documented here
 because they are easy to misread as ones. All are `kind: "saturation"` and
 all contribute zero bytes:
 
-- `route_plane/route_health_orphans` — health entries whose
-  `(destination, uplink)` pair has no claim in storage. The invariant is
-  `health keys ⊆ storage keys`, maintained at the claim-removal
-  chokepoints; the only correct value is `0`, and a non-zero value names
-  a cleanup path that forgot to evict. This was the 28 510-against-3 585
-  shape of the five-day relay: cap replacement displaced a claim without
-  its health entry, and the reconcile that would have caught it ran only
-  when TTL removed something.
 - `sessions/session_send_queued`, `sessions/session_inbox_queued`,
   `sessions/conn_writer_queued` — occupancy of the per-session and
   per-connection queues whose slots `*_slots` beside them already price.
@@ -331,7 +320,11 @@ all contribute zero bytes:
 Gauges added with the September 2026 relay-memory work, so a reader of an
 older dump knows what a missing series means:
 
-- `route_plane/route_health_orphans` — above.
+- `route_plane/route_health_orphans` is intentionally **absent** from the
+  common snapshot: auditing every health pair would add a table-size walk
+  under the routing lock. Absence is not a measured zero. Cleanup invariants
+  remain covered by the test-only audit; `route_health` still reports the
+  complete live container count.
 - `delivery/transit_envelopes` now counts **only** transit envelopes —
   messages neither from nor to this node, the ones the transit byte
   budget governs — where it used to sum every topic backlog and so
@@ -625,12 +618,8 @@ challenge-и.
   обходы, которые всё же есть, идут по контейнерам с собственной границей
   (живые сессии и соединения, backlog'и топиков под их байтовым бюджетом,
   relay-состояния под их капом, key-карты под капом known identities) и
-  читают по одному полю на запись. Единственное исключение —
-  `route_plane/route_health_orphans`: он опрашивает хранилище по разу на
-  health-запись под read-lock'ом таблицы, потому что отвечает на
-  инвариант, который `len` выразить не может (см. ниже), стоит единицы
-  миллисекунд на десятках тысяч записей, и эту команду оператор запускает
-  сам, а не клиент по таймеру.
+  читают по одному полю на запись. Снимок route-plane не выполняет полный
+  аудит orphan-health под блокировкой routing-таблицы.
 - `subsystems[].gauges[].entry_bytes` — во что обходится одна запись:
   ключ плюс значение и **ничего из того, на что они ссылаются**.
 - `subsystems[].gauges[].kind` — `memory` или `saturation`. Gauge вида
@@ -658,14 +647,6 @@ challenge-и.
 Несколько gauge вообще не про память и вынесены сюда, потому что их легко
 принять за память. Все — `kind: "saturation"`, все дают ноль байт:
 
-- `route_plane/route_health_orphans` — health-записи, у чьей пары
-  `(destination, uplink)` нет claim'а в хранилище. Инвариант —
-  `health keys ⊆ storage keys`, он держится в точках удаления claim'ов;
-  единственное правильное значение — `0`, а ненулевое называет путь
-  очистки, забывший evict. Это и была форма 28 510 против 3 585 на relay
-  с uptime 5 суток: cap-замена вытесняла claim без его health-записи, а
-  reconcile, который бы это поймал, запускался только когда TTL что-то
-  удалял.
 - `sessions/session_send_queued`, `sessions/session_inbox_queued`,
   `sessions/conn_writer_queued` — заполненность per-session и
   per-connection очередей, чьи слоты уже оценены соседними `*_slots`.
@@ -705,7 +686,11 @@ challenge-и.
 Gauge, добавленные в работе по памяти relay в сентябре 2026, — чтобы
 читатель старого дампа понимал, что означает отсутствующая серия:
 
-- `route_plane/route_health_orphans` — выше.
+- `route_plane/route_health_orphans` намеренно **отсутствует** в обычном
+  снимке: аудит каждой health-пары добавлял бы обход по размеру таблицы
+  под routing-lock. Отсутствие не означает измеренный ноль. Инварианты
+  очистки остаются в test-only аудите; `route_health` по-прежнему сообщает
+  полный размер живого контейнера.
 - `delivery/transit_envelopes` теперь считает **только** транзитные
   конверты — сообщения не от этого узла и не ему, те, которыми управляет
   транзитный байтовый бюджет, — тогда как раньше суммировал все backlog'и

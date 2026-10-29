@@ -118,6 +118,42 @@ readiness and retained zero-pattern gates. Focused D1 controls also remove,
 duplicate and replace its declaration/import records and add a different
 unreviewed importer; the reviewed degree addition does not allow those changes.
 
+### Individually reviewed S6/K3/K10 and tagged D1 sites (2026-10-29)
+
+The following additions are explicit reviewed access debt, not a recalculation
+from HEAD or a whole-file exception. All previous records, matcher semantics,
+zero-pattern gates, import restrictions and multiplicity remain unchanged.
+Current totals are **26 declaration matches, 11 registry sites, 10 entry.core
+sites, 20 net import occurrences and one uint64 helper**. The 23/18 legacy and
+24/20 earlier D1 subtotals above describe their original scopes.
+
+| Added exact sites | Original owner and reason |
+|---|---|
+| K3 advertised construction: one registry site | Pre-publication empty Service/CM construction check; no running worker or socket I/O. |
+| K3 advertised collection: two registry and two entry sites | Original peerMu transaction, capacity/nil/original ConnID validation and metadata Address; bounded source/history, no exported live core or raw I/O. |
+| K3 registry removal: one registry and one entry site | Same physical line in two categories; while peerMu owns removal, retain the same outbound core's other original session before dropping diagnostic generation/claim. |
+| K3 session change: two registry sites | Original peerMu mutation checks old/next session against the exact original core; no new registry or admission decision. |
+| Terminal observation construction: one registry site | peerMu write-lock validates both original maps empty before installing the requested source; not an assumed zero baseline. |
+| K10 k10RegisterLocked and k10ForRegistered: two net.Conn declarations | Already inside conn_registry.go; original register/lookup map a raw connection to one owner capsule, default nil source no-op. No new socket read/write/close. |
+| Tagged CheckpointForService: one entry site | Exact d1_resource_probe body validates original lifetime/entry/core ConnID under peerMu and lifetime mutex; disabled in ordinary builds, no admission, clock or retirement authority. |
+| clearConnAuth and setConnAuthStateByID: two entry sites | These are **metadata writes**, not metrics reads: only the explicit K3 registered observer branch holds peerMu write-lock across the ORIGINAL auth write and observer publication. Ordinary nil-observer branches and policy remain unchanged. |
+
+K3 sources and terminal observations require explicit typed construction requests;
+these records do not enable them or change service defaults. A record only pins
+its exact lexical site; it is not an automated proof of lock ordering, physical
+resource bounds or all code in the containing function. Go/source tests remain
+independent. A move to registry-owner helpers could be a separate cleanup, but
+aliasing or moving code merely to hide a matcher occurrence is not this repair.
+
+The noncompiled fixture generator now emits the **maximum per-category
+multiplicity** for identical source in an enclosing function. Summing would
+emit the shared K3 removal line twice; global deduplication would lose a genuine
+duplicate within one category. The real checker still independently compares
+both exact multisets. Focused controls require the one physical overlap, reject
+its duplication in both categories, and reject missing/duplicate/substituted
+K10 declarations, changed terminal/F1/auth predicates and additional access in
+an already reviewed diagnostic file. Nothing here executes a Go fixture.
+
 ## Русский
 
 Boundary guard фиксирует существующий технический долг коммита `251b2a2`. Это не
@@ -233,3 +269,32 @@ lookup/mutation helpers и старые walker signatures. Прежние direct
 zero-pattern gates. Отдельные D1 controls удаляют, дублируют и заменяют
 его declaration/import записи и добавляют другой непроверенный importer;
 проверенное дополнение degree эти изменения не разрешает.
+
+### Точечные дополнения S6/K3/K10 и tagged D1 (2026-10-29)
+
+Это индивидуально рассмотренный долг точных sites, не вычисление baseline из
+HEAD и не исключение файлов. Все прежние записи, алгоритм checker, нулевые
+запреты, imports и кратность сохранены. Текущие итоги: **26 деклараций, 11
+registry sites, 10 entry.core sites, 20 вхождений net и один uint64 helper**;
+числа 23/18 и прежние 24/20 выше относятся к своим историческим scopes.
+
+| Новые точные sites | Владелец и обоснование |
+|---|---|
+| K3 construction: 1 registry | Проверка пустых исходных Service/CM до публикации и запуска; без socket I/O. |
+| K3 collect: 2 registry + 2 entry | Исходная транзакция под peerMu: capacity/nil/ConnID и Address metadata; ограниченный source/history, без экспорта live core или raw I/O. |
+| K3 remove: 1 registry + 1 entry | Одна физическая строка двух категорий: под peerMu перед удалением сохраняется поколение/claim того же outbound core, если у него есть другая исходная session. |
+| K3 session change: 2 registry | Под исходным peerMu old/next session связываются с точным original core, без новой registry/admission policy. |
+| Terminal construction: 1 registry | peerMu write-lock проверяет пустоту обеих исходных maps до установки явно запрошенного source; нулевая baseline не предполагается. |
+| K10 register/lookup: 2 net.Conn декларации | Уже внутри conn_registry.go, связывают исходный register/lookup с owner capsule; nil source по умолчанию ничего не включает, socket I/O не добавлен. |
+| Tagged CheckpointForService: 1 entry | Точный d1_resource_probe body связывает original lifetime/entry/core ConnID под peerMu и lifetime mutex; обычная сборка его не включает; admission/clock/retirement authority не появляется. |
+| clearConnAuth/setConnAuthStateByID: 2 entry | Это **записи metadata**, не metrics reads: только явно включённый K3 registered observer удерживает peerMu W на исходной auth-записи и её публикации. Nil-ветки и policy неизменны. |
+
+Записи не активируют K3/terminal observations и не являются автоматическим
+доказательством locks, RAM или всего тела функции. Реальный checker сохраняет
+обе независимые точные категории. Toy generator для общей строки берёт максимум
+кратностей по категориям, а не сумму и не глобальный set. Новые controls требуют
+одного физического overlap и отказа при его дублировании в обеих категориях,
+при missing/duplicate/substitute K10 и изменениях terminal/F1/auth sites или
+новом доступе в уже рассмотренном файле. Это некомпилируемые fixtures; Go не
+запускается. Отдельный архитектурный cleanup возможен позднее; перенос или alias
+ради обхода regex этим исправлением не выполняется.

@@ -102,14 +102,17 @@ type IdentityPinProvider interface {
 // on endpoint bindings"): the list, the addressed removal of an ordinary
 // binding and the two-step demotion of selected protected bindings. Every
 // command over it is TransportLoopbackOnly. A node that does not implement it
-// gets the commands registered as unavailable.
+// gets the commands registered as unavailable. The stock Service currently
+// refuses removal and demotion unconditionally; listing and planning stay read-only.
 type EndpointBindingProvider interface {
 	// ListEndpointBindings is one page of the live bindings the query keeps,
 	// in key order.
 	ListEndpointBindings(ctx context.Context, query domain.EndpointBindingQuery) (domain.EndpointBindingPage, error)
 
-	// RemoveEndpointBinding removes the ordinary binding endpoint names; a
-	// protected one is refused with domain.ErrEndpointBindingProtected.
+	// RemoveEndpointBinding describes the addressed removal contract. An
+	// implementation may refuse it with ErrEndpointBindingMutationUnavailable.
+	// Error does not by itself prove that the persisted snapshot is unchanged;
+	// an EndpointBindingActionError carries the explicit write disposition.
 	RemoveEndpointBinding(ctx context.Context, endpoint domain.PeerAddress) (domain.EndpointBindingRemoval, error)
 
 	// PlanEndpointBindingDemotion is the dry run of a demotion of the
@@ -117,9 +120,10 @@ type EndpointBindingProvider interface {
 	// the token that confirms exactly this selection. It changes nothing.
 	PlanEndpointBindingDemotion(ctx context.Context, endpoints []domain.PeerAddress) (domain.EndpointBindingDemotionPlan, error)
 
-	// DemoteEndpointBindings moves the selected protected bindings to the
-	// ordinary tier when token is the dry run's token of this selection as
-	// it is now — all in one version of the store file, or none.
+	// DemoteEndpointBindings describes a confirmed, still-current selection
+	// in one snapshot. An implementation may refuse it as unavailable. A failed
+	// call may report an indeterminate or committed-with-cleanup-error outcome;
+	// callers must preserve the explicit disposition and never retry blindly.
 	DemoteEndpointBindings(ctx context.Context, endpoints []domain.PeerAddress, token domain.EndpointBindingSelectionToken) (domain.EndpointBindingDemotionResult, error)
 }
 

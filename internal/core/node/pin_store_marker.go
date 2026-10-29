@@ -201,7 +201,7 @@ func writePinStoreMarker(path string, raw []byte, audit func(string) error) erro
 	if err := audit(path); err != nil {
 		return fmt.Errorf("the marker's location: %w", err)
 	}
-	return secretfile.WriteFile(path, raw)
+	return writeOrdinaryPinFile(path, raw)
 }
 
 // ensurePrivateDirectory creates the marker's directory when it does not

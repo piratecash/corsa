@@ -1,5 +1,35 @@
 # Releases
 
+> **Current S6 release scope — 2026-10-29.** The
+> [urgent full-product scope](operations/urgent-full-product-release-scope.md)
+> covers current DEV, daemon and clients. The owner deferred session
+> K2/R1b/R2/N-in activation to the next release and accepted protocol-only
+> compatibility with selected PirateCash 071855, satisfied by source 31≥31.
+> The selected matrix is daemon+Desktop on Linux amd64, macOS arm64/amd64
+> and Windows amd64/arm64; Android APK/AAB follow separately. Only overlaysim
+> is DEFERRED to D1, not PASS; generic make test-all is not green. All other
+> applicable emitted-product/routing/TLS/pin tests and builds remain required.
+> D1/G2 activation is outside this S6 release; older G2 requirements below
+> concern that separate activation boundary. Applicable conditions in the
+> 17-condition gate, independent crypto review, the full suite and final
+> release admission remain fail-closed until accepted evidence and owner
+> decision; recorded Windows/Tor deferrals stay UNVERIFIED.
+>
+> **Текущая область S6 — 2026-10-29.**
+> [Срочный полный релиз](operations/urgent-full-product-release-scope.ru.md)
+> включает текущий DEV, демон и клиенты. Владелец перенёс активацию session
+> K2/R1b/R2/N-in на следующий релиз; для выбранного PirateCash 071855 принят
+> только протокольный критерий, выполненный проверкой исходников 31≥31.
+> Матрица — демон+Desktop на Linux amd64, macOS arm64/amd64 и Windows
+> amd64/arm64; Android APK/AAB позже отдельно. Только overlaysim DEFERRED
+> до D1, не PASS; общий make test-all не зелёный. Все остальные применимые
+> тесты выпускаемых продуктов, routing/TLS/pins и сборки сохраняются.
+> Активация D1/G2 вне этого S6-релиза; прежние требования G2 ниже относятся
+> к отдельной границе активации. Применимые условия gate из 17 пунктов,
+> независимая crypto review, полный набор тестов и итоговый допуск остаются
+> закрытыми до принятия свидетельств и решения владельца; записанные
+> отсрочки Windows/Tor остаются UNVERIFIED.
+
 ## Current verification scope / Текущая область проверки — 2026-10-23
 
 The [later owner decision](operations/d1-release-decision-proposal.md#measurement-scope-2026-10-23) defers real Windows/DACL and Tor measurements while work proceeds on macOS/Linux. Earlier unconditional Windows/Tor release prerequisites below are superseded only in that scope; the historical results are retained. Windows and Tor remain UNVERIFIED/UNKNOWN, never PASS. Schema 2 retains all 17 conditions: 7 done, 2 partial, 7 not_done and 1 deferred (`tor_phase_measurement`). The unsafe-store composite remains partial; clearnet/real-old-release first-contact timing and timeout derivation remain required. Proxy/no-direct-fallback, authentication, independent crypto review, other tests, G2 and separate release decisions remain required. The gate is closed. Any Tor observation role remains deferred; macOS/Linux data establishes no Tor threshold or guarantee.

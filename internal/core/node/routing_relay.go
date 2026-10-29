@@ -70,9 +70,9 @@ type tableForwardResult struct {
 // onRelayHopAckTimeout is the Phase 3 PR 12.2 callback fired by the
 // relay state store's TTL ticker when a forwarded relay_message's
 // hop-ack budget (defaultHopAckBudgetSeconds) elapses without a
-// matching relay_hop_ack arrival. It resolves the abandoned
-// next-hop's transport address to its peer identity and records the
-// failure on the per-(Identity, Uplink) reputation primitive via
+// matching relay_hop_ack arrival. It uses the attempt's captured
+// actual sender identity and records the failure on the
+// per-(Identity, Uplink) reputation primitive via
 // routing.Table.MarkHopFailure (PR 12.1 reputation surface).
 //
 // The state argument is a value copy snapshotted by
@@ -93,14 +93,10 @@ type tableForwardResult struct {
 // defensively no-op rather than fire a phantom MarkHopFailure on a
 // resolved identity that would be empty anyway.
 //
-// Identity resolution mirrors confirmRouteViaHopAck: ask the peer
-// registry first, fall back to treating the address as an identity
-// only when the session has already torn down. An empty resolved
-// identity means we have no way to attribute the failure to a routing
-// pair, so the callback is a no-op for that case as well — the
-// reputation primitive would refuse it via the
-// Table.MarkHopFailure(identity="", ...) guard anyway, but bailing
-// out here keeps the structured log honest.
+// Unknown captured identity means no failure attribution. A current
+// holder of the old transport address may guide failover exclusion only;
+// it is never substituted as the failed attempt's identity. Positive ACK
+// confirmation likewise uses the identity captured from the actual sender.
 //
 // Lock contract: this method takes routing.Table.mu via
 // MarkHopFailure (briefly, W mode). The store-side caller already

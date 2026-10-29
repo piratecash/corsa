@@ -90,13 +90,14 @@ func (s *Service) peerNow() time.Time {
 type addressDialAttemptKey struct{}
 type addressDialAttempt struct{ performed bool }
 
-// localAddressDialOutcomes are decisions that never reached the endpoint.
-// Refusals by the remote listener remain chargeable for aging, independently
-// of the separate score policy in unchargedDialOutcomes.
+// localAddressDialOutcomes do not establish an endpoint failure. They include
+// local protection-store failures after a peer proved its identity. Refusals
+// by the remote listener remain chargeable for aging, independently of the
+// separate score policy in unchargedDialOutcomes.
 var localAddressDialOutcomes = []error{
 	context.Canceled,
 	errLegacyRefusedBackoff, errV2RetryHeld, errLegacyProbeLocalFailure,
-	errDialAbortedLocally, errPinStoreFull, errPinRoomAwaited, domain.ErrIdentityPinRevisionExhausted,
+	errDialAbortedLocally, errPinStoreFull, errPinProtectionLocalFailure, errPinRoomAwaited, domain.ErrIdentityPinRevisionExhausted,
 	errV2DialLocalFailure, errOldVersionAwaited,
 	errOverlayWithoutProxy, errProxyUnavailable, errInvalidOverlayAddress, errAddressRecheckHeld,
 }

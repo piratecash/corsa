@@ -11,6 +11,8 @@ import (
 
 func TestUserDownloadsDirReadsTheXDGConfig(t *testing.T) {
 	home := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("XDG_DOWNLOAD_DIR", "")
 	config := filepath.Join(home, ".config")
 	if err := os.MkdirAll(config, 0o700); err != nil {
 		t.Fatalf("mkdir: %v", err)

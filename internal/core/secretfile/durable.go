@@ -2,6 +2,7 @@ package secretfile
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
 )
 
@@ -77,6 +78,9 @@ func (d *Dir) writeDurableTemp(raw []byte) (string, error) {
 		return "", err
 	}
 	file, name, err := d.createTemp()
+	if errors.Is(err, fs.ErrPermission) {
+		return "", fmt.Errorf("%w (%s): %w", ErrDirectoryNotWritable, describeDirectory(d), err)
+	}
 	if err != nil {
 		return "", err
 	}

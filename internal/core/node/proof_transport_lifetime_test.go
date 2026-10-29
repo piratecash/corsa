@@ -180,7 +180,7 @@ func TestProofTransportPublicationElapsedAfterCommonWait(t *testing.T) {
 	// Exact original publisher/common-mutex callsite in this frozen source.
 	// Mutex waits are NOT durable synctest blocking; use an actual GID/stack
 	// barrier and the existing immutable real-clock origin, without fake time.
-	n1WaitMutexFrame(t, publisherGID, "conn_registry.go:720")
+	n1WaitMutexFrame(t, publisherGID, "conn_registry.go:767")
 	releaseBoundary := findnode.Instant(time.Since(f.accepted.findNode.origin))
 	l.mu.Unlock()
 	held = false
