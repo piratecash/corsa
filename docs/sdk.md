@@ -154,6 +154,13 @@ creates a new identity file if one does not exist yet.
 
 If neither `PrivateKey` nor a valid `IdentityPath` is provided, `sdk.New()` returns an error.
 
+HTTP RPC is disabled by default. Setting `RPC.Enabled=true` also requires both
+`RPC.Username` and `RPC.Password`; otherwise construction fails with
+`errors.Is(err, sdk.ErrRPCAuthenticationRequired)`. No unauthenticated HTTP server
+is created. Keeping `RPC.Enabled=false` preserves in-process commands without an
+HTTP listener. This requirement applies to SDK composition, without changing
+the internal RPC server's separate test configuration.
+
 `sdk.New()` also fails, before its RPC server or node exist, when the node must not start over its
 v2 pin store: the store, its marker (`<IdentityPath>.pin-store-marker.json`, kept next to the
 identity path even when the key is given inline) or a directory above them can be changed by
@@ -277,6 +284,13 @@ cfg.Node.IdentityPath = "/path/to/identity.json"
 создаёт новый файл identity, если его ещё нет.
 
 Если ни `PrivateKey`, ни валидный `IdentityPath` не указаны, `sdk.New()` возвращает ошибку.
+
+HTTP RPC по умолчанию выключен. Для `RPC.Enabled=true` также нужны оба поля
+`RPC.Username` и `RPC.Password`; иначе конструирование завершается ошибкой,
+проверяемой через `errors.Is(err, sdk.ErrRPCAuthenticationRequired)`.
+Неаутентифицированный HTTP-сервер не создаётся. При `RPC.Enabled=false` команды
+внутри процесса доступны без HTTP listener. Это требование композиции SDK;
+отдельная тестовая конфигурация внутреннего RPC-сервера не меняется.
 
 `sdk.New()` также завершается ошибкой — до создания RPC-сервера и узла, — если узлу нельзя стартовать
 из-за хранилища pin v2: хранилище, его маркер (`<IdentityPath>.pin-store-marker.json`, лежит рядом с

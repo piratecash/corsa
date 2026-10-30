@@ -28,6 +28,9 @@ import (
 // ErrInvalidIdentityIntentsPath rejects an explicitly empty durability override.
 var ErrInvalidIdentityIntentsPath = errors.New("SDK identity intents path must be nonblank when specified")
 
+// ErrRPCAuthenticationRequired rejects an enabled HTTP server without both credentials.
+var ErrRPCAuthenticationRequired = errors.New("SDK HTTP RPC requires both username and password")
+
 // CommandInfo describes a console/RPC command exposed by the SDK runtime.
 type CommandInfo struct {
 	Name        string `json:"name"`
@@ -368,6 +371,10 @@ func newWithContext(ctx context.Context, cfg Config, profile *corsanode.OwnDMRun
 
 	var rpcServer *rpc.Server
 	if normalizeConfig(cfg).RPC.Enabled {
+		if !internalCfg.RPC.AuthEnabled() {
+			abandon()
+			return nil, fmt.Errorf("create rpc server: %w", ErrRPCAuthenticationRequired)
+		}
 		rpcServer, err = rpc.NewServer(internalCfg.RPC, cmdTable, nodeService)
 		if err != nil {
 			abandon()

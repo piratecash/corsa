@@ -176,7 +176,7 @@ func TestNewReleasesStateDatabaseWhenALaterStepFails(t *testing.T) {
 	cfg.Node.IdentityPath = filepath.Join(dir, "identity.json")
 	cfg.Node.TrustStorePath = filepath.Join(dir, "trust.json")
 	cfg.Node.PeersStatePath = filepath.Join(dir, "peers.json")
-	// Half-configured auth: rpc.NewServer rejects it, which is the step
+	// Half-configured auth is rejected at the RPC construction step,
 	// after the database is already open.
 	cfg.RPC.Enabled = true
 	cfg.RPC.Username = "operator"
@@ -787,6 +787,8 @@ func TestAFailedStartReportsItsErrorToEveryWaiter(t *testing.T) {
 	// An address no listener can bind: rpc.NewServer accepts it and
 	// StartAsync is what fails — after the router is already running.
 	cfg.RPC.Enabled = true
+	cfg.RPC.Username = "operator"
+	cfg.RPC.Password = "fixture-rpc-password"
 	cfg.RPC.Host = "256.256.256.256"
 	cfg.RPC.Port = "1"
 
@@ -835,6 +837,8 @@ func TestConcurrentStartsShareTheSameOutcome(t *testing.T) {
 
 	cfg := testRuntimeConfig(t)
 	cfg.RPC.Enabled = true
+	cfg.RPC.Username = "operator"
+	cfg.RPC.Password = "fixture-rpc-password"
 	cfg.RPC.Host = "256.256.256.256"
 	cfg.RPC.Port = "1"
 

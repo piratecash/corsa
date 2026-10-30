@@ -10,6 +10,11 @@ The desktop UI calls `CommandTable` directly (no HTTP round-trip). External clie
 
 The HTTP RPC server listens on `127.0.0.1:46464` by default. The server is only started when authentication credentials are configured via `CORSA_RPC_USERNAME` and `CORSA_RPC_PASSWORD` environment variables. Without credentials, the RPC server is not created — this prevents port conflicts when running multiple instances and avoids exposing an unauthenticated control plane. When credentials are set, all requests require HTTP Basic authentication.
 
+For an embedded SDK runtime, HTTP RPC is explicitly requested with `RPC.Enabled=true`
+and requires both `RPC.Username` and `RPC.Password`. `sdk.New` returns
+`sdk.ErrRPCAuthenticationRequired` when either credential is absent. With HTTP RPC
+disabled, in-process commands remain available without creating an HTTP listener.
+
 ### Transport policy
 
 Because one `CommandTable` serves both an in-process caller and a socket, each command declares in its `CommandInfo` where it may be called FROM. The declaration is a `rpc.TransportPolicy`:
@@ -507,6 +512,11 @@ RPC слой обеспечивает диспетчеризацию коман�
 Desktop UI вызывает `CommandTable` напрямую (без HTTP round-trip). Внешние клиенты (`corsa-cli`, сторонние инструменты) обращаются к командам через тонкую HTTP-обёртку на Fiber v3, которая делегирует в тот же `CommandTable`. Это гарантирует идентичное поведение для всех вызывающих.
 
 HTTP RPC сервер по умолчанию слушает `127.0.0.1:46464`. Сервер запускается только при наличии учётных данных аутентификации через переменные окружения `CORSA_RPC_USERNAME` и `CORSA_RPC_PASSWORD`. Без учётных данных RPC сервер не создаётся — это предотвращает конфликты портов при запуске нескольких экземпляров и исключает открытый неаутентифицированный control plane. Когда учётные данные заданы, все запросы требуют HTTP Basic аутентификации.
+
+Во встроенном SDK HTTP RPC включается явно через `RPC.Enabled=true` и требует
+обоих полей `RPC.Username` и `RPC.Password`. Если хотя бы одно отсутствует,
+`sdk.New` возвращает `sdk.ErrRPCAuthenticationRequired`. При выключенном HTTP RPC
+команды внутри процесса доступны без создания HTTP listener.
 
 ### Транспортная политика
 

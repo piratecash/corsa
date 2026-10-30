@@ -148,6 +148,8 @@ func TestFinalTransportIncompleteCloseStaysUnavailableUntilActualRetryJoins(t *t
 func TestFinalTransportFailedBeforeNodeStartIsUnavailable(t *testing.T) {
 	cfg := testRuntimeConfig(t)
 	cfg.RPC.Enabled = true
+	cfg.RPC.Username = "operator"
+	cfg.RPC.Password = "fixture-rpc-password"
 	cfg.RPC.Host = "256.256.256.256"
 	cfg.RPC.Port = "1"
 	r, err := New(cfg)

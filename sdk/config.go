@@ -168,7 +168,8 @@ func (c NodeConfig) Format(f fmt.State, verb rune) {
 
 // RPCConfig configures the optional HTTP RPC server. Password is a secret and
 // is kept out of marshalling and formatting the same way NodeConfig.PrivateKey
-// is.
+// is. Enabled requires both Username and Password; New rejects a missing pair.
+// With Enabled false no HTTP server is created; in-process commands remain available.
 type RPCConfig struct {
 	Enabled  bool
 	Host     string
