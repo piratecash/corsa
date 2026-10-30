@@ -4,8 +4,9 @@ package secretfile
 
 import (
 	"fmt"
-	"strings"
+	"runtime"
 	"testing"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
@@ -18,12 +19,12 @@ import (
 // API, in code that only compiles on this platform. Compiling it proves the
 // types line up and nothing else.
 //
-// There are no Windows-only TESTS here, on purpose. The behavioural tests in
-// secretfile_test.go run on both platforms; this file supplies the one thing
-// whose answer differs, so those tests assert the protection without a
-// platform branch. Mixing the two used to force a whole test to skip on
-// Windows, throwing away the behavioural half along with the part that did not
-// apply. The symlink-dependent tests ask this machine whether it can create a
+// The behavioural tests in secretfile_test.go run on both platforms; this
+// file supplies the one thing whose answer differs, so those tests assert
+// the protection without a platform branch. The descriptor table below
+// checks this Windows-only oracle against SID aliases and unsafe ACL shapes.
+// A platform branch in each behavioural test used to force a whole test to
+// skip on Windows, throwing away the behavioural half as well. The symlink-dependent tests ask this machine whether it can create a
 // link rather than assuming the OS cannot, so an elevated shell or Developer
 // Mode exercises them for real.
 //
@@ -55,30 +56,106 @@ func assertOwnerOnly(t *testing.T, what, path string) {
 	if err != nil {
 		t.Fatalf("%s: read security info: %v", what, err)
 	}
+	sid, err := windows.StringToSid(currentUserSID(t))
+	if err != nil {
+		t.Fatalf("%s: parse current user SID: %v", what, err)
+	}
+	if err := ownerOnlyDescriptorError(descriptor, sid); err != nil {
+		t.Fatalf("%s: %v: %s", what, err, descriptor.String())
+	}
+}
+
+// ownerOnlyDescriptorError checks binary trustees, not their SDDL spelling:
+// Windows may print a numeric account SID using an alias such as LA.
+// This is intentionally stricter than the general location audit: it checks
+// the exact single full-access grant that this package creates.
+func ownerOnlyDescriptorError(descriptor *windows.SECURITY_DESCRIPTOR, owner *windows.SID) error {
+	if descriptor == nil || owner == nil || !owner.IsValid() {
+		return fmt.Errorf("missing descriptor or valid owner SID")
+	}
+	// The ACE and its variable-length SID point into the descriptor.
+	defer runtime.KeepAlive(descriptor)
 	control, _, err := descriptor.Control()
 	if err != nil {
-		t.Fatalf("%s: read control flags: %v", what, err)
+		return fmt.Errorf("read control flags: %w", err)
 	}
 	if control&windows.SE_DACL_PROTECTED == 0 {
-		t.Fatalf("%s: DACL is not protected, so the parent's inheritable ACEs still apply: %s",
-			what, descriptor.String())
+		return fmt.Errorf("DACL is not protected")
 	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil {
+		return fmt.Errorf("read DACL: %w", err)
+	}
+	if dacl == nil {
+		return fmt.Errorf("DACL is NULL and grants unrestricted access")
+	}
+	if dacl.AceCount != 1 {
+		return fmt.Errorf("DACL has %d ACEs, want exactly one", dacl.AceCount)
+	}
+	var ace *windows.ACCESS_ALLOWED_ACE
+	if err := windows.GetAce(dacl, 0, &ace); err != nil {
+		return fmt.Errorf("read ACE: %w", err)
+	}
+	if ace == nil || ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE {
+		return fmt.Errorf("DACL does not contain one ordinary allow ACE")
+	}
+	if ace.Header.AceFlags&windows.INHERIT_ONLY_ACE != 0 {
+		return fmt.Errorf("owner grant is inherit-only and does not apply to the object")
+	}
+	if ace.Mask != windows.ACCESS_MASK(fileAllAccess) {
+		return fmt.Errorf("owner grant mask = %#x, want FILE_ALL_ACCESS", ace.Mask)
+	}
+	const sidHeaderBytes = 8
+	sidOffset := unsafe.Offsetof(ace.SidStart)
+	if uintptr(ace.Header.AceSize) < sidOffset+sidHeaderBytes {
+		return fmt.Errorf("owner grant has a truncated SID")
+	}
+	trustee := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
+	if sidBytes := sidHeaderBytes + 4*uintptr(trustee.SubAuthorityCount()); sidBytes > uintptr(ace.Header.AceSize)-sidOffset {
+		return fmt.Errorf("owner grant has a truncated SID")
+	}
+	if !trustee.IsValid() || !trustee.Equals(owner) {
+		return fmt.Errorf("DACL does not grant the expected owner SID")
+	}
+	return nil
+}
 
-	sddl := descriptor.String()
-	dacl := sddl
-	if index := strings.Index(sddl, "D:"); index >= 0 {
-		dacl = sddl[index:]
+func TestOwnerOnlyDescriptorOracleUsesBinarySIDs(t *testing.T) {
+	// Local System has a fixed numeric SID and the SDDL alias SY. This
+	// exercises alias equivalence independently of which account runs CI;
+	// assertOwnerOnly above still checks the real process token's SID.
+	owner, err := windows.StringToSid("S-1-5-18")
+	if err != nil {
+		t.Fatalf("parse expected SID: %v", err)
 	}
-	sid := currentUserSID(t)
-	if !strings.Contains(dacl, sid) {
-		t.Fatalf("%s: DACL does not grant the current user (%s): %s", what, sid, dacl)
-	}
-	// Exactly one ACE. Any second entry is somebody else with access.
-	if aces := strings.Count(dacl, "(A;"); aces != 1 {
-		t.Fatalf("%s: DACL grants %d ACEs, want exactly one (the current user): %s", what, aces, dacl)
-	}
-	if denied := strings.Count(dacl, "(D;"); denied != 0 {
-		t.Fatalf("%s: DACL carries deny ACEs, which is not the shape this package builds: %s", what, dacl)
+	for _, tc := range []struct {
+		name          string
+		sddl          string
+		wantOwnerOnly bool
+	}{
+		{"numeric SID", "D:P(A;;FA;;;S-1-5-18)", true},
+		{"SID alias", "D:P(A;;FA;;;SY)", true},
+		{"wrong SID", "D:P(A;;FA;;;WD)", false},
+		{"extra allow ACE", "D:P(A;;FA;;;SY)(A;;FR;;;WD)", false},
+		{"duplicate owner ACE", "D:P(A;;FA;;;SY)(A;;FA;;;SY)", false},
+		{"deny ACE", "D:P(D;;FA;;;SY)", false},
+		{"allow plus deny ACE", "D:P(D;;FW;;;WD)(A;;FA;;;SY)", false},
+		{"insufficient mask", "D:P(A;;FR;;;SY)", false},
+		{"NULL DACL", "D:PNO_ACCESS_CONTROL", false},
+		{"empty DACL", "D:P", false},
+		{"unprotected DACL", "D:(A;;FA;;;SY)", false},
+		{"inherit-only grant", "D:P(A;OICIIO;FA;;;SY)", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			descriptor, err := windows.SecurityDescriptorFromString(tc.sddl)
+			if err != nil {
+				t.Fatalf("build fixture descriptor: %v", err)
+			}
+			err = ownerOnlyDescriptorError(descriptor, owner)
+			if got := err == nil; got != tc.wantOwnerOnly {
+				t.Fatalf("owner-only = %t, want %t (error: %v)", got, tc.wantOwnerOnly, err)
+			}
+		})
 	}
 }
 
