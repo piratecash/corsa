@@ -55,7 +55,11 @@ func (s *Service) FreezeOutgoingDeliveriesTo(recipient domain.PeerIdentity, scop
 	if recipient.IsZero() {
 		return FrozenDeliveries{}, fmt.Errorf("freeze outgoing deliveries: %w: recipient is required", protocol.ErrInvalidCancelDelivery)
 	}
-	frozen := s.freezeDeliveries(scope)
+	refs := make([]messageIdentity, 0, len(scope))
+	for _, id := range scope {
+		refs = append(refs, s.ownMessageIdentity(id, recipient.String()))
+	}
+	frozen := s.freezeMessageIdentities(refs)
 	// A freeze is only ever taken for a deletion, so this line says the same
 	// thing the deletion paths must not say: that this user is erasing a
 	// conversation with this peer, right now. Behind the same gate as the rest
@@ -71,52 +75,105 @@ func (s *Service) FreezeOutgoingDeliveriesTo(recipient domain.PeerIdentity, scop
 // freezeDeliveries is the recipient-less core: a single-message delete
 // needs the same guarantee for one id, and derives its peer from the row
 // rather than being given one.
-func (s *Service) freezeDeliveries(scope []protocol.MessageID) FrozenDeliveries {
-	var frozen FrozenDeliveries
-	if len(scope) == 0 {
-		return frozen
+func (s *Service) freezeDeliveries(scope []protocol.MessageID) (FrozenDeliveries, error) {
+	refs, err := s.resolveOwnMessageIDs(scope)
+	if err != nil {
+		return FrozenDeliveries{}, err
 	}
+	return s.freezeMessageIdentities(refs), nil
+}
 
-	neverEmitted := make(map[protocol.MessageID]struct{}, len(scope))
+func (s *Service) freezeMessageIdentities(refs []messageIdentity) FrozenDeliveries {
+	never := make(map[protocol.MessageID]struct{}, len(refs))
 	s.deliveryMu.Lock()
+	defer s.deliveryMu.Unlock()
 	if s.frozenDeliveries == nil {
-		s.frozenDeliveries = make(map[protocol.MessageID]struct{}, len(scope))
+		s.frozenDeliveries = make(map[messageIdentity]struct{}, len(refs))
 	}
-	for _, id := range scope {
-		s.frozenDeliveries[id] = struct{}{}
-		// An id with no entry left says nothing: it may have been
-		// delivered, or dropped after its retries ran out. Only a live
-		// entry that has never emitted is proof, and the caller ORs this
-		// with the durable mark on the row, which covers the rest.
-		if entry, awaiting := s.awaitingDelivered[id]; awaiting && !entry.Emitted {
-			neverEmitted[id] = struct{}{}
+	for _, ref := range refs {
+		s.frozenDeliveries[ref] = struct{}{}
+		if entry, exists := s.awaitingDelivered[ref]; exists && !entry.Emitted {
+			never[ref.MessageID] = struct{}{}
 		}
 	}
-	frozen.Frozen = len(scope)
-	s.deliveryMu.Unlock()
+	return FrozenDeliveries{Frozen: len(refs), NeverEmitted: never}
+}
 
-	frozen.NeverEmitted = neverEmitted
-	return frozen
+// resolveOwnMessageIDs is a compatibility resolver, not a wildcard. It never
+// freezes/thaws a second recipient merely because the wire id was reused.
+func (s *Service) resolveOwnMessageIDs(ids []protocol.MessageID) ([]messageIdentity, error) {
+	s.deliveryMu.RLock()
+	defer s.deliveryMu.RUnlock()
+	s.gossipMu.RLock()
+	defer s.gossipMu.RUnlock()
+	refs := make([]messageIdentity, 0, len(ids))
+	for _, id := range ids {
+		candidates := make(map[messageIdentity]struct{})
+		add := func(ref messageIdentity) {
+			if ref.MessageID == id && s.identity != nil && ref.Sender == s.identity.Address {
+				candidates[ref] = struct{}{}
+			}
+		}
+		for ref := range s.awaitingDelivered {
+			add(ref)
+		}
+		for ref := range s.frozenDeliveries {
+			add(ref)
+		}
+		for ref := range s.markedNeverEmitted {
+			add(ref)
+		}
+		for _, envelope := range s.topics["dm"] {
+			add(messageIdentityOf(envelope))
+		}
+		if len(candidates) > 1 {
+			return nil, domain.ErrAmbiguousMessage
+		}
+		if len(candidates) == 0 {
+			return nil, fmt.Errorf("message identity unavailable: %w", protocol.ErrInvalidCancelDelivery)
+		}
+		for ref := range candidates {
+			refs = append(refs, ref)
+		}
+	}
+	return refs, nil
 }
 
 // ThawOutgoingDeliveries ends a freeze that its caller did not commit —
 // the wipe's transaction failed, so the messages are still the user's and
 // must go out as before.
-func (s *Service) ThawOutgoingDeliveries(ids []protocol.MessageID) {
-	if len(ids) == 0 {
-		return
+func (s *Service) ThawOutgoingDeliveries(ids []protocol.MessageID) error {
+	refs, err := s.resolveOwnMessageIDs(ids)
+	if err != nil {
+		return err
 	}
-	s.deliveryMu.Lock()
+	s.thawMessageIdentities(refs)
+	return nil
+}
+
+func (s *Service) ThawOutgoingDeliveriesTo(recipient domain.PeerIdentity, ids []protocol.MessageID) error {
+	if recipient.IsZero() {
+		return protocol.ErrInvalidCancelDelivery
+	}
+	refs := make([]messageIdentity, 0, len(ids))
 	for _, id := range ids {
-		delete(s.frozenDeliveries, id)
+		refs = append(refs, s.ownMessageIdentity(id, recipient.String()))
 	}
-	s.deliveryMu.Unlock()
-	logid.DeletionLog().Info().Int("thawed", len(ids)).Msg("delivery_freeze_released")
+	s.thawMessageIdentities(refs)
+	return nil
+}
+
+func (s *Service) thawMessageIdentities(refs []messageIdentity) {
+	s.deliveryMu.Lock()
+	defer s.deliveryMu.Unlock()
+	for _, ref := range refs {
+		delete(s.frozenDeliveries, ref)
+	}
 }
 
 // clearFreezeLocked forgets a freeze because the delivery it held back is
 // now withdrawn for good. Caller MUST hold s.deliveryMu.Lock.
-func (s *Service) clearFreezeLocked(ids map[protocol.MessageID]struct{}) {
+func (s *Service) clearFreezeLocked(ids map[messageIdentity]struct{}) {
 	for id := range ids {
 		delete(s.frozenDeliveries, id)
 	}
@@ -124,7 +181,7 @@ func (s *Service) clearFreezeLocked(ids map[protocol.MessageID]struct{}) {
 
 // deliveryFrozenLocked reports whether the id is held back by a freeze.
 // Caller MUST hold s.deliveryMu (read or write).
-func (s *Service) deliveryFrozenLocked(id protocol.MessageID) bool {
+func (s *Service) deliveryFrozenLocked(id messageIdentity) bool {
 	_, frozen := s.frozenDeliveries[id]
 	return frozen
 }
@@ -169,7 +226,15 @@ func (s *Service) thawConversationDeliveryFrame(frame protocol.Frame) protocol.F
 	for _, id := range frame.IDs {
 		ids = append(ids, protocol.MessageID(id))
 	}
-	s.ThawOutgoingDeliveries(ids)
+	var err error
+	if strings.TrimSpace(frame.Recipient) == "" {
+		err = s.ThawOutgoingDeliveries(ids)
+	} else {
+		err = s.ThawOutgoingDeliveriesTo(domain.PeerIdentityFromWire(strings.TrimSpace(frame.Recipient)), ids)
+	}
+	if err != nil {
+		return protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidCancelDelivery, Error: err.Error()}
+	}
 	return protocol.Frame{
 		Type:      "delivery_thawed",
 		Topic:     "dm",
@@ -190,7 +255,16 @@ func (s *Service) freezeMessageDeliveryFrame(frame protocol.Frame) protocol.Fram
 			Error: "freeze message delivery: message id is required",
 		}
 	}
-	frozen := s.freezeDeliveries([]protocol.MessageID{id})
+	var frozen FrozenDeliveries
+	var err error
+	if peer := domain.PeerIdentityFromWire(strings.TrimSpace(frame.Recipient)); !peer.IsZero() {
+		frozen, err = s.FreezeOutgoingDeliveriesTo(peer, []protocol.MessageID{id})
+	} else {
+		frozen, err = s.freezeDeliveries([]protocol.MessageID{id})
+	}
+	if err != nil {
+		return protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidCancelDelivery, Error: err.Error()}
+	}
 	_, never := frozen.NeverEmitted[id]
 	status := CancelStatusUnknown
 	if never {

@@ -194,7 +194,7 @@ func TestINV6_ReceiptUsesTransportAddress(t *testing.T) {
 		t.Fatalf("expected delivered, got %q", status)
 	}
 
-	forwardTo := svc.relayStates.lookupReceiptForwardTo("inv6-test")
+	forwardTo := svc.relayStates.lookupReceiptForwardTo(envelopeRef(frameEnvelope(frame)))
 	if forwardTo != domain.PeerAddress(transportAddr) {
 		t.Fatalf("INV-6 violated: ReceiptForwardTo = %q, want transport address %q", forwardTo, transportAddr)
 	}
@@ -207,7 +207,7 @@ func TestINV11_OriginReceiptForwardToEmpty(t *testing.T) {
 	svc := newTestService(t, config.NodeTypeFull)
 
 	svc.relayStates.store(&relayForwardState{
-		MessageID:        "inv7-test",
+		Message:          domain.MessageRef{Topic: "dm", ID: "inv7-test", Sender: svc.Address(), Recipient: "some-recipient"},
 		PreviousHop:      "",
 		ReceiptForwardTo: "",
 		ForwardedTo:      "10.0.0.1:64646",
@@ -215,14 +215,15 @@ func TestINV11_OriginReceiptForwardToEmpty(t *testing.T) {
 		RemainingTTL:     relayStateTTLSeconds,
 	})
 
-	forwardTo := svc.relayStates.lookupReceiptForwardTo("inv7-test")
+	forwardTo := svc.relayStates.lookupReceiptForwardTo(domain.MessageRef{Topic: "dm", ID: "inv7-test", Sender: svc.Address(), Recipient: "some-recipient"})
 	if forwardTo != domain.PeerAddress("") {
 		t.Fatalf("INV-11 violated: origin ReceiptForwardTo = %q, want empty", forwardTo)
 	}
 
 	receipt := protocol.DeliveryReceipt{
 		MessageID: "inv7-test",
-		Recipient: "some-recipient",
+		Sender:    "some-recipient",
+		Recipient: svc.Address(),
 		Status:    protocol.ReceiptStatusDelivered,
 	}
 	if svc.handleRelayReceipt(receipt) {

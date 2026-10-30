@@ -44,22 +44,22 @@ const maxRelayDeliveredMessages = 8192
 // recordRelayDeliveredTo notes that peer `who` confirmed (via ack_delete)
 // it already holds message `id`. Subsequent gossip fan-outs of `id` skip
 // that peer. No-op for an empty id or zero identity.
-func (s *Service) recordRelayDeliveredTo(id protocol.MessageID, who domain.PeerIdentity) {
-	if id == "" || who.IsZero() {
+func (s *Service) recordRelayDeliveredTo(message messageIdentity, who domain.PeerIdentity) {
+	if message.MessageID == "" || who.IsZero() {
 		return
 	}
 	s.relayDeliveredMu.Lock()
 	defer s.relayDeliveredMu.Unlock()
 	if s.relayDeliveredTo == nil {
-		s.relayDeliveredTo = make(map[protocol.MessageID]map[domain.PeerIdentity]struct{})
+		s.relayDeliveredTo = make(map[messageIdentity]map[domain.PeerIdentity]struct{})
 	}
-	peers := s.relayDeliveredTo[id]
+	peers := s.relayDeliveredTo[message]
 	if peers == nil {
 		if len(s.relayDeliveredTo) >= maxRelayDeliveredMessages {
 			return
 		}
 		peers = make(map[domain.PeerIdentity]struct{})
-		s.relayDeliveredTo[id] = peers
+		s.relayDeliveredTo[message] = peers
 	}
 	peers[who] = struct{}{}
 }
@@ -70,10 +70,10 @@ func (s *Service) recordRelayDeliveredTo(id protocol.MessageID, who domain.PeerI
 // filterGossipTargetsForEnvelope (so the leaf lock never nests under
 // peerMu). A concurrent record after the snapshot is benign: the
 // freshly-acked peer is simply not excluded until the next fan-out.
-func (s *Service) relayDeliveredSnapshot(id protocol.MessageID) map[domain.PeerIdentity]struct{} {
+func (s *Service) relayDeliveredSnapshot(message messageIdentity) map[domain.PeerIdentity]struct{} {
 	s.relayDeliveredMu.Lock()
 	defer s.relayDeliveredMu.Unlock()
-	src := s.relayDeliveredTo[id]
+	src := s.relayDeliveredTo[message]
 	if len(src) == 0 {
 		return nil
 	}
@@ -108,10 +108,16 @@ func (s *Service) relayDeliveredSnapshot(id protocol.MessageID) map[domain.PeerI
 func (s *Service) recordRelayDeliveredWhileRelayed(id protocol.MessageID, who domain.PeerIdentity) bool {
 	s.deliveryMu.RLock()
 	defer s.deliveryMu.RUnlock()
-	if _, relayed := s.relayRetry[relayMessageKey(id)]; !relayed {
+	s.gossipMu.RLock()
+	message, unique := s.backlogMessageUnderIDLocked(id)
+	s.gossipMu.RUnlock()
+	if !unique {
 		return false
 	}
-	s.recordRelayDeliveredTo(id, who)
+	if _, relayed := s.relayRetry[relayMessageIdentityKey(message)]; !relayed {
+		return false
+	}
+	s.recordRelayDeliveredTo(message, who)
 	return true
 }
 
@@ -122,13 +128,29 @@ func (s *Service) recordRelayDeliveredWhileRelayed(id protocol.MessageID, who do
 // their commit has released every domain mutex, the orphan reap calls it
 // inside its deliveryMu (write) hold. The caller must never hold it while
 // acquiring a domain mutex — it takes none.
-func (s *Service) forgetRelayDelivered(ids []protocol.MessageID) {
-	if len(ids) == 0 {
+func (s *Service) forgetRelayDelivered(refs []messageIdentity) {
+	if len(refs) == 0 {
 		return
+	}
+	// Hold the live snapshot until the leaf mutation: a new admission of the
+	// same tuple cannot acquire gossipMu between qualification and deletion.
+	s.gossipMu.RLock()
+	defer s.gossipMu.RUnlock()
+	live := make(map[messageIdentity]bool, len(refs))
+	for _, ref := range refs {
+		live[ref] = false
+	}
+	for _, envelope := range s.topics["dm"] {
+		ref := messageIdentityOf(envelope)
+		if _, wanted := live[ref]; wanted {
+			live[ref] = true
+		}
 	}
 	s.relayDeliveredMu.Lock()
 	defer s.relayDeliveredMu.Unlock()
-	for _, id := range ids {
-		delete(s.relayDeliveredTo, id)
+	for ref, present := range live {
+		if !present {
+			delete(s.relayDeliveredTo, ref)
+		}
 	}
 }

@@ -2,6 +2,7 @@ package chatlog
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -196,9 +197,9 @@ func TestDropDeleteIntentIsIdempotent(t *testing.T) {
 }
 
 // TestNoteDeleteIntentKeepsTheOriginalPeer pins the one rewrite the upsert
-// must never do. A message id belongs to exactly one conversation, so a
-// second intent naming a different peer is a caller bug — and honouring it
-// would re-point a pending deletion at somebody who was never part of it.
+// must never do. A second conversation may use the same wire ID, but its
+// intent must not re-point the original conversation's pending deletion.
+// The legacy ID-only lookup must refuse the resulting ambiguity.
 func TestNoteDeleteIntentKeepsTheOriginalPeer(t *testing.T) {
 	t.Parallel()
 
@@ -219,12 +220,19 @@ func TestNoteDeleteIntentKeepsTheOriginalPeer(t *testing.T) {
 		t.Fatalf("NoteDeleteIntent (stranger): %v", err)
 	}
 
-	intent, found, err := store.DeleteIntentByID(ctx, intentMsgID)
+	intent, found, err := store.DeleteIntentForPeer(ctx, original, intentMsgID)
 	if err != nil || !found {
-		t.Fatalf("DeleteIntentByID: found=%v err=%v", found, err)
+		t.Fatalf("DeleteIntentForPeer: found=%v err=%v", found, err)
 	}
 	if intent.Peer != original {
 		t.Errorf("peer = %s, want the original %s", intent.Peer, original)
+	}
+	other, found, err := store.DeleteIntentForPeer(ctx, stranger, intentMsgID)
+	if err != nil || !found || other.Peer != stranger {
+		t.Fatalf("stranger intent = %+v found=%v err=%v", other, found, err)
+	}
+	if _, _, err := store.DeleteIntentByID(ctx, intentMsgID); !errors.Is(err, domain.ErrAmbiguousMessage) {
+		t.Fatalf("ID-only lookup must refuse both intents: %v", err)
 	}
 }
 

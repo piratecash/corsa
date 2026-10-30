@@ -168,7 +168,7 @@ func (r *DMRouter) applyInboundConversationDelete(peer domain.PeerIdentity, requ
 	// the request with the requester, which is the only durable retry either
 	// side has.
 	if len(scope.IDs) > 0 {
-		if _, err := r.client.FreezeConversationDelivery(ctx, peer, scope.IDs); err != nil {
+		if _, err := r.client.FreezeConversationDelivery(ctx, peer, scope.OwnIDs(r.client.Address())); err != nil {
 			log.Warn().Err(err).
 				Msg("dm_router: applyInboundConversationDelete: could not stop our deliveries; refusing to erase what we might still send")
 			return domain.ConversationDeleteStatusError
@@ -177,7 +177,7 @@ func (r *DMRouter) applyInboundConversationDelete(peer domain.PeerIdentity, requ
 
 	// Refused before the transaction opens: a copy of one of these messages
 	// arriving while it runs must be turned away, not stored behind the wipe.
-	r.wipeTombstones.Note(scope.IDs, r.now())
+	r.wipeTombstones.NoteRefs(scope.Refs, r.now())
 	wiped, err := store.DeleteConversationForPeerRequest(ctx, peer, scope)
 	if err == nil {
 		r.client.ForgetConversationState(peer)
@@ -191,10 +191,10 @@ func (r *DMRouter) applyInboundConversationDelete(peer domain.PeerIdentity, requ
 		// exist: leaving those refusals would swallow a legitimate re-delivery
 		// of any of them. The freeze goes the same way — those messages are
 		// still ours to send.
-		r.wipeTombstones.Forget(scope.IDs)
+		r.wipeTombstones.ForgetRefs(scope.Refs)
 		if len(scope.IDs) > 0 {
 			thawCtx, cancelThaw := context.WithTimeout(r.detachedCtx(ctx), conversationCompensationBudget)
-			thawErr := r.client.ThawConversationDelivery(thawCtx, peer, scope.IDs)
+			thawErr := r.client.ThawConversationDelivery(thawCtx, peer, scope.OwnIDs(r.client.Address()))
 			cancelThaw()
 			if thawErr != nil {
 				log.Error().Err(thawErr).
@@ -216,19 +216,19 @@ func (r *DMRouter) applyInboundConversationDelete(peer domain.PeerIdentity, requ
 	// and the repeat — bounded by the same moment, so it takes nothing new —
 	// runs the withdrawal again.
 	if len(scope.IDs) > 0 {
-		_ = r.withdrawDeletedDeliveries(ctx, peer, scope.IDs)
+		_ = r.withdrawDeletedDeliveries(ctx, peer, wiped.OwnIDs(r.client.Address()))
 	}
 
 	r.withFileOps(peer, len(wiped.Removed) > 0, func() {
 		if r.fileBridge == nil {
 			return
 		}
-		for _, id := range wiped.Removed {
-			r.fileBridge.OnMessageDeleted(id)
+		for _, ref := range wiped.RemovedRefs {
+			r.fileBridge.OnMessageDeletedRef(ref)
 		}
 	})
 
-	r.evictWipedConversationFromUI(peer, wiped.Removed)
+	r.evictWipedConversationFromUI(peer, wiped.Removed, wiped.RemovedRefs)
 	r.publishReactionsChanged(peer)
 	// The peer asked us to destroy this conversation — the deletion the
 	// protocol exists to deliver — so it gets the same on-disk treatment as

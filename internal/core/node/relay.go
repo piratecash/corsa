@@ -121,7 +121,7 @@ func (s relayNextHopSelection) String() string {
 // node. Each node knows only its own previous_hop and forwarded_to —
 // no single message reveals the full path.
 type relayForwardState struct {
-	MessageID        string
+	Message          domain.MessageRef
 	PreviousHop      domain.PeerAddress // who sent this relay to me (transport address)
 	ReceiptForwardTo domain.PeerAddress // = PreviousHop (where to send receipt back)
 	ForwardedTo      domain.PeerAddress // who I forwarded to (for loop detection)
@@ -220,8 +220,9 @@ type relayForwardState struct {
 // the relay message is silently dropped (same as dedupe).
 type relayStateStore struct {
 	mu       sync.Mutex
-	states   map[string]*relayForwardState // keyed by message ID
-	perPeer  map[domain.PeerAddress]int    // PreviousHop → count of active states
+	states   map[domain.MessageRef]*relayForwardState            // exact topic/ID/endpoints
+	byID     map[string]map[domain.MessageRef]*relayForwardState // bounded legacy ACK candidates
+	perPeer  map[domain.PeerAddress]int                          // PreviousHop → count of active states
 	stopCh   chan struct{}
 	rejected int64 // counter for monitoring: entries rejected due to capacity
 
@@ -242,7 +243,8 @@ type relayStateStore struct {
 
 func newRelayStateStore() *relayStateStore {
 	return &relayStateStore{
-		states:  make(map[string]*relayForwardState),
+		states:  make(map[domain.MessageRef]*relayForwardState),
+		byID:    make(map[string]map[domain.MessageRef]*relayForwardState),
 		perPeer: make(map[domain.PeerAddress]int),
 		stopCh:  make(chan struct{}),
 	}
@@ -298,21 +300,43 @@ func (rs *relayStateStore) decrementTTLs() {
 					delete(rs.perPeer, state.PreviousHop)
 				}
 			}
-			delete(rs.states, id)
+			rs.removeStateLocked(id)
 		}
 	}
 }
 
+// setStateLocked and removeStateLocked maintain the legacy wire-ID candidate
+// index with the exact primary map. Both contain at most maxRelayStates refs;
+// no wildcard operation may update or retire every message under a wire ID.
+// Caller owns rs.mu.
+func (rs *relayStateStore) setStateLocked(state *relayForwardState) {
+	rs.states[state.Message] = state
+	refs := rs.byID[state.Message.ID]
+	if refs == nil {
+		refs = make(map[domain.MessageRef]*relayForwardState)
+		rs.byID[state.Message.ID] = refs
+	}
+	refs[state.Message] = state
+}
+func (rs *relayStateStore) removeStateLocked(ref domain.MessageRef) {
+	delete(rs.states, ref)
+	refs := rs.byID[ref.ID]
+	delete(refs, ref)
+	if len(refs) == 0 {
+		delete(rs.byID, ref.ID)
+	}
+}
+
 // hasSeen returns true if a relayForwardState already exists for this message
-// ID — the message has already been relayed through this node.
-func (rs *relayStateStore) hasSeen(messageID string) bool {
+// reference — the message has already been relayed through this node.
+func (rs *relayStateStore) hasSeen(ref domain.MessageRef) bool {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
-	_, ok := rs.states[messageID]
+	_, ok := rs.states[ref]
 	return ok
 }
 
-// tryReserve atomically checks whether messageID has been seen and, if not,
+// tryReserve atomically checks whether the exact reference has been seen and, if not,
 // inserts a placeholder entry. Returns true when the caller wins the
 // reservation (first claim). This replaces the racy hasSeen+store pattern
 // by combining both into a single critical section.
@@ -325,10 +349,10 @@ func (rs *relayStateStore) hasSeen(messageID string) bool {
 // limit (maxRelayStates) or per-peer limit (maxRelayStatesPerPeer) is
 // reached. The caller treats this identically to a duplicate — the relay
 // message is silently dropped.
-func (rs *relayStateStore) tryReserve(messageID string, previousHop domain.PeerAddress) bool {
+func (rs *relayStateStore) tryReserve(ref domain.MessageRef, previousHop domain.PeerAddress) bool {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
-	if _, ok := rs.states[messageID]; ok {
+	if _, ok := rs.states[ref]; ok {
 		return false
 	}
 	// Enforce global capacity.
@@ -341,32 +365,32 @@ func (rs *relayStateStore) tryReserve(messageID string, previousHop domain.PeerA
 		rs.rejected++
 		return false
 	}
-	rs.states[messageID] = &relayForwardState{
-		MessageID:        messageID,
+	rs.setStateLocked(&relayForwardState{
+		Message:          ref,
 		PreviousHop:      previousHop,
 		NextHopSelection: relayNextHopNotForwarded,
 		RemainingTTL:     relayStateTTLSeconds,
-	}
+	})
 	if previousHop != "" {
 		rs.perPeer[previousHop]++
 	}
 	return true
 }
 
-// release removes a previously reserved messageID. Used on error paths
+// release removes a previously reserved reference. Used on error paths
 // (max hops, client node, store rejection) so the slot does not block
 // a legitimate retry from a different hop.
-func (rs *relayStateStore) release(messageID string) {
+func (rs *relayStateStore) release(ref domain.MessageRef) {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
-	if state, ok := rs.states[messageID]; ok {
+	if state, ok := rs.states[ref]; ok {
 		if state.PreviousHop != "" {
 			rs.perPeer[state.PreviousHop]--
 			if rs.perPeer[state.PreviousHop] <= 0 {
 				delete(rs.perPeer, state.PreviousHop)
 			}
 		}
-		delete(rs.states, messageID)
+		rs.removeStateLocked(ref)
 	}
 }
 
@@ -381,7 +405,7 @@ func warnMissingNextHopSelection(state *relayForwardState) {
 	switch state.NextHopSelection {
 	case relayNextHopUnspecified, relayNextHopNotForwarded:
 		log.Warn().
-			Str("id", state.MessageID).
+			Str("id", state.Message.ID).
 			Str("forwarded_to", string(state.ForwardedTo)).
 			Str("next_hop_selection", state.NextHopSelection.String()).
 			Msg("relay_state_next_hop_selection_missing")
@@ -394,7 +418,7 @@ func (rs *relayStateStore) updateState(state *relayForwardState) {
 	warnMissingNextHopSelection(state)
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
-	rs.states[state.MessageID] = state
+	rs.setStateLocked(state)
 }
 
 // store saves forwarding state for a relayed message. Returns false if the
@@ -403,7 +427,7 @@ func (rs *relayStateStore) store(state *relayForwardState) bool {
 	warnMissingNextHopSelection(state)
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
-	if existing, ok := rs.states[state.MessageID]; ok {
+	if existing, ok := rs.states[state.Message]; ok {
 		// Idempotent upsert: refresh forwarding fields and TTL so that
 		// pending queue retries after route churn use the current best
 		// path instead of being rejected.
@@ -462,7 +486,7 @@ func (rs *relayStateStore) store(state *relayForwardState) bool {
 		rs.rejected++
 		return false
 	}
-	rs.states[state.MessageID] = state
+	rs.setStateLocked(state)
 	if state.PreviousHop != "" {
 		rs.perPeer[state.PreviousHop]++
 	}
@@ -473,10 +497,10 @@ func (rs *relayStateStore) store(state *relayForwardState) bool {
 // or "" if unknown. Used by hop_ack processing to verify that the ack
 // sender matches the current forwarding destination — a mismatch
 // indicates a stale ack from a previous route and should be ignored.
-func (rs *relayStateStore) lookupForwardedTo(messageID string) domain.PeerAddress {
+func (rs *relayStateStore) lookupForwardedTo(ref domain.MessageRef) domain.PeerAddress {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
-	state, ok := rs.states[messageID]
+	state, ok := rs.states[ref]
 	if !ok {
 		return ""
 	}
@@ -485,10 +509,10 @@ func (rs *relayStateStore) lookupForwardedTo(messageID string) domain.PeerAddres
 
 // lookupReceiptForwardTo returns the address to forward a receipt back to
 // for the given message ID, or "" if unknown.
-func (rs *relayStateStore) lookupReceiptForwardTo(messageID string) domain.PeerAddress {
+func (rs *relayStateStore) lookupReceiptForwardTo(ref domain.MessageRef) domain.PeerAddress {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
-	state, ok := rs.states[messageID]
+	state, ok := rs.states[ref]
 	if !ok {
 		return ""
 	}
@@ -500,10 +524,10 @@ func (rs *relayStateStore) lookupReceiptForwardTo(messageID string) domain.PeerA
 // one lock so a concurrent failover cannot pair one attempt's address with
 // another attempt's selection. An unknown message ID yields "" and
 // relayNextHopNotForwarded: nothing this node knows of went downstream.
-func (rs *relayStateStore) lookupForwardAttempt(messageID string) (domain.PeerAddress, relayNextHopSelection) {
+func (rs *relayStateStore) lookupForwardAttempt(ref domain.MessageRef) (domain.PeerAddress, relayNextHopSelection) {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
-	state, ok := rs.states[messageID]
+	state, ok := rs.states[ref]
 	if !ok {
 		return "", relayNextHopNotForwarded
 	}
@@ -512,10 +536,10 @@ func (rs *relayStateStore) lookupForwardAttempt(messageID string) (domain.PeerAd
 
 // lookupAbandonedForwardedTo returns all ForwardedTo addresses from previous
 // reroutes, or nil if the message was never rerouted.
-func (rs *relayStateStore) lookupAbandonedForwardedTo(messageID string) []domain.PeerAddress {
+func (rs *relayStateStore) lookupAbandonedForwardedTo(ref domain.MessageRef) []domain.PeerAddress {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
-	state, ok := rs.states[messageID]
+	state, ok := rs.states[ref]
 	if !ok {
 		return nil
 	}
@@ -587,10 +611,10 @@ func (rs *relayStateStore) tickHopAckBudgets() []relayForwardState {
 // Lock contract: takes rs.mu in W mode for the field flip. Disjoint
 // from routing.Table.mu so the caller can safely take that mutex
 // afterward without nesting concerns.
-func (rs *relayStateStore) markHopAckObserved(messageID string) bool {
+func (rs *relayStateStore) markHopAckObserved(ref domain.MessageRef) bool {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
-	state, ok := rs.states[messageID]
+	state, ok := rs.states[ref]
 	if !ok {
 		return false
 	}
@@ -656,22 +680,44 @@ func (state *relayForwardState) rememberAbandonedHopAckIdentityLocked() {
 func (rs *relayStateStore) consumeHopAck(messageID string, ackIdentity domain.PeerIdentity) (domain.PeerIdentity, bool) {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
-	state, ok := rs.states[messageID]
-	if !ok || state.ForwardedTo == "" || ackIdentity.IsZero() {
+	if ackIdentity.IsZero() {
 		return domain.PeerIdentity{}, false
+	}
+	var selected *relayForwardState
+	for _, state := range rs.byID[messageID] {
+		if !relayHopAckMatches(state, ackIdentity) {
+			continue
+		}
+		if selected != nil {
+			return domain.PeerIdentity{}, false
+		}
+		selected = state
+	}
+	if selected == nil {
+		return domain.PeerIdentity{}, false
+	}
+	markHopAckObservedLocked(selected)
+	return selected.Recipient, true
+}
+
+// The old protocol carries no message parties in a hop ACK. Preserve the
+// existing captured-hop policy, but two eligible references are ambiguous:
+// neither budget nor payload may be consumed on that ID-only input.
+func relayHopAckMatches(state *relayForwardState, ackIdentity domain.PeerIdentity) bool {
+	if state == nil || state.ForwardedTo == "" || ackIdentity.IsZero() {
+		return false
 	}
 	if state.ForwardedVia.identity != ackIdentity {
 		if state.NextHopSelection.pinsAckIdentity() || state.abandonedAckIncomplete {
-			return domain.PeerIdentity{}, false
+			return false
 		}
 		for i := uint8(0); i < state.abandonedAckCount; i++ {
 			if state.abandonedAckIdentities[i] == ackIdentity {
-				return domain.PeerIdentity{}, false
+				return false
 			}
 		}
 	}
-	markHopAckObservedLocked(state)
-	return state.Recipient, true
+	return true
 }
 
 // frameLineBytes sums the wire payload bytes stashed for failover
@@ -720,10 +766,10 @@ func (rs *relayStateStore) frameLineBytes() int {
 // routing_relay.go is the only production caller — see
 // onRelayHopAckTimeout's doc-comment for the lock-ordering contract
 // against routing.Table.mu (rs.mu released BEFORE Table reads).
-func (rs *relayStateStore) recordFailoverRetry(messageID string, newAddress domain.PeerAddress, via routingSender, frameLine string) bool {
+func (rs *relayStateStore) recordFailoverRetry(ref domain.MessageRef, newAddress domain.PeerAddress, via routingSender, frameLine string) bool {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
-	state, ok := rs.states[messageID]
+	state, ok := rs.states[ref]
 	if !ok {
 		return false
 	}
@@ -752,10 +798,10 @@ func (rs *relayStateStore) recordFailoverRetry(messageID string, newAddress doma
 // ttlHopAckBudgets is already stale when the callback fires — a
 // concurrent recordFailoverRetry could have advanced the counter in
 // between). Returns (0, false) for unknown message IDs.
-func (rs *relayStateStore) retryAttemptCountFor(messageID string) (int, bool) {
+func (rs *relayStateStore) retryAttemptCountFor(ref domain.MessageRef) (int, bool) {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
-	state, ok := rs.states[messageID]
+	state, ok := rs.states[ref]
 	if !ok {
 		return 0, false
 	}
@@ -809,12 +855,14 @@ func (s *Service) handleRelayMessage(senderAddress domain.PeerAddress, syncSessi
 		return ""
 	}
 
+	message := envelopeRef(frameEnvelope(frame))
+
 	// Am I the final recipient?
 	if recipient == s.identity.Address {
 		// Dedupe at final hop: if relay state already exists, this is a
 		// duplicate relay_message. Drop silently — the valid reverse-path
 		// state from the first delivery must not be overwritten or released.
-		if !s.relayStates.tryReserve(messageID, senderAddress) {
+		if !s.relayStates.tryReserve(message, senderAddress) {
 			log.Info().
 				Str("id", messageID).
 				Str("from", originSender).
@@ -826,7 +874,7 @@ func (s *Service) handleRelayMessage(senderAddress domain.PeerAddress, syncSessi
 		// delivery so the receipt reverse path is available when
 		// storeIncomingMessage fires emitDeliveryReceipt in a goroutine.
 		s.relayStates.updateState(&relayForwardState{
-			MessageID:        messageID,
+			Message:          message,
 			PreviousHop:      senderAddress,
 			ReceiptForwardTo: senderAddress,
 			ForwardedTo:      "",
@@ -836,7 +884,7 @@ func (s *Service) handleRelayMessage(senderAddress domain.PeerAddress, syncSessi
 			RemainingTTL:     relayStateTTLSeconds,
 		})
 		if !s.deliverRelayedMessage(senderAddress, syncSession, frame) {
-			s.relayStates.release(messageID)
+			s.relayStates.release(message)
 			log.Warn().
 				Str("id", messageID).
 				Str("from", originSender).
@@ -854,7 +902,7 @@ func (s *Service) handleRelayMessage(senderAddress domain.PeerAddress, syncSessi
 	// Dedupe: atomically reserve this message_id. If another goroutine
 	// already claimed it, drop silently. tryReserve inserts a placeholder
 	// entry so no concurrent handler can pass this point for the same ID.
-	if !s.relayStates.tryReserve(messageID, senderAddress) {
+	if !s.relayStates.tryReserve(message, senderAddress) {
 		log.Debug().
 			Str("id", messageID).
 			Str("from", originSender).
@@ -864,7 +912,7 @@ func (s *Service) handleRelayMessage(senderAddress domain.PeerAddress, syncSessi
 
 	// Max hops exceeded? Release the reservation.
 	if hopCount >= maxHops {
-		s.relayStates.release(messageID)
+		s.relayStates.release(message)
 		log.Debug().
 			Str("id", messageID).
 			Int("hop_count", hopCount).
@@ -877,7 +925,7 @@ func (s *Service) handleRelayMessage(senderAddress domain.PeerAddress, syncSessi
 	// Client nodes may be senders or final recipients, but never
 	// intermediate relay hops.
 	if !s.CanForward() {
-		s.relayStates.release(messageID)
+		s.relayStates.release(message)
 		log.Debug().
 			Str("id", messageID).
 			Msg("relay_drop_client_node")
@@ -894,7 +942,7 @@ func (s *Service) handleRelayMessage(senderAddress domain.PeerAddress, syncSessi
 	// path bypasses that guard because it forwards before storeIncomingMessage.
 	// No hop-ack (same as the max-hops drop).
 	if s.identity != nil && originSender == s.identity.Address {
-		s.relayStates.release(messageID)
+		s.relayStates.release(message)
 		log.Debug().
 			Str("node", s.identity.Address).
 			Str("id", messageID).
@@ -911,7 +959,7 @@ func (s *Service) handleRelayMessage(senderAddress domain.PeerAddress, syncSessi
 	// transit frame with no created_at, or one dated beyond clock skew into
 	// the future. No hop-ack (same as the max-hops drop).
 	if s.relayFrameAged(frame, originSender, recipient) {
-		s.relayStates.release(messageID)
+		s.relayStates.release(message)
 		log.Debug().
 			Str("node", s.identity.Address).
 			Str("id", messageID).
@@ -993,7 +1041,7 @@ func (s *Service) handleRelayMessage(senderAddress domain.PeerAddress, syncSessi
 		// upstream lets the sender's retry budget treat this attempt
 		// as a miss and try again.
 		if frame.Topic == protocol.TopicControlDM {
-			s.relayStates.release(messageID)
+			s.relayStates.release(message)
 			log.Info().
 				Str("id", messageID).
 				Str("recipient", recipient).
@@ -1009,7 +1057,7 @@ func (s *Service) handleRelayMessage(senderAddress domain.PeerAddress, syncSessi
 		// status tells the previous hop that relay forwarding did not
 		// happen, but the message is not stuck — gossip handles it.
 		if !s.deliverRelayedMessage(senderAddress, syncSession, frame) {
-			s.relayStates.release(messageID)
+			s.relayStates.release(message)
 			log.Warn().
 				Str("id", messageID).
 				Str("recipient", recipient).
@@ -1019,7 +1067,7 @@ func (s *Service) handleRelayMessage(senderAddress domain.PeerAddress, syncSessi
 		// Update the reservation placeholder with full state so the
 		// receipt reverse path works correctly.
 		s.relayStates.updateState(&relayForwardState{
-			MessageID:        messageID,
+			Message:          message,
 			PreviousHop:      senderAddress,
 			ReceiptForwardTo: senderAddress,
 			ForwardedTo:      "", // stored locally, not forwarded
@@ -1065,7 +1113,7 @@ func (s *Service) handleRelayMessage(senderAddress domain.PeerAddress, syncSessi
 			Msg("relay_forward_frame_marshal_failed_retry_disabled")
 	}
 	s.relayStates.updateState(&relayForwardState{
-		MessageID:            messageID,
+		Message:              message,
 		PreviousHop:          senderAddress,
 		ReceiptForwardTo:     senderAddress,
 		ForwardedTo:          forwardedTo,
@@ -1374,9 +1422,9 @@ func (s *Service) relayViaGossip(frame protocol.Frame, excludeAddress domain.Pee
 // to the original sender.
 func (s *Service) relayHopForReceipt(receipt protocol.DeliveryReceipt) domain.PeerAddress {
 	if receipt.Status == protocol.ReceiptStatusSeenAck {
-		return s.relayStates.lookupForwardedTo(string(receipt.MessageID))
+		return s.relayStates.lookupForwardedTo(deliveryMessageRef(madeByMessageAuthor(receipt)))
 	}
-	return s.relayStates.lookupReceiptForwardTo(string(receipt.MessageID))
+	return s.relayStates.lookupReceiptForwardTo(deliveryMessageRef(madeByMessageRecipient(receipt)))
 }
 
 func (s *Service) handleRelayReceipt(receipt protocol.DeliveryReceipt) bool {
@@ -1644,7 +1692,7 @@ func (s *Service) sendRelayMessage(address domain.PeerAddress, msg protocol.Enve
 			Msg("relay_origin_frame_marshal_failed_retry_disabled")
 	}
 	s.relayStates.store(&relayForwardState{
-		MessageID:            string(msg.ID),
+		Message:              envelopeRef(msg),
 		PreviousHop:          "",
 		ReceiptForwardTo:     "",
 		ForwardedTo:          address,
@@ -1748,7 +1796,7 @@ func (s *Service) sendTableRoutedRelayMessageWithR2a(address domain.PeerAddress,
 			Msg("relay_origin_frame_marshal_failed_retry_disabled")
 	}
 	stored := s.relayStates.store(&relayForwardState{
-		MessageID:            string(msg.ID),
+		Message:              envelopeRef(msg),
 		PreviousHop:          "",
 		ReceiptForwardTo:     "",
 		ForwardedTo:          address,
@@ -1818,7 +1866,7 @@ func (s *Service) retryRelayDeliveries() {
 
 	now := time.Now().UTC()
 	for _, msg := range s.retryableRelayMessages(now) {
-		attempts, tracked := s.noteRelayAttempt(relayMessageKey(msg.ID), now)
+		attempts, tracked := s.noteRelayAttempt(relayMessageIdentityKey(messageIdentityOf(msg)), now)
 		if !tracked {
 			// Removed between the snapshot and now — the message is no
 			// longer ours to retry.
@@ -1906,7 +1954,7 @@ func (s *Service) retryableRelayMessages(now time.Time) []protocol.Envelope {
 	s.gossipMu.RUnlock()
 	out := make([]protocol.Envelope, 0)
 	for _, msg := range items {
-		key := relayMessageKey(msg.ID)
+		key := relayMessageIdentityKey(messageIdentityOf(msg))
 		// The same predicate the admission commit arms by, so an envelope
 		// the commit would not arm can never be retried from here, whatever
 		// put an entry under its id. See envelopeEntersRelayRetry.
@@ -2078,7 +2126,7 @@ func (s *Service) armRelayMessageRetryLocked(envelope protocol.Envelope) {
 			Msg("relay retry not armed for transit message: relayRetry is full")
 		return
 	}
-	s.relayRetry[relayMessageKey(envelope.ID)] = relayAttempt{FirstSeen: envelope.StoredAt}
+	s.relayRetry[relayMessageIdentityKey(messageIdentityOf(envelope))] = relayAttempt{FirstSeen: envelope.StoredAt}
 }
 
 // receiptEntersRelayRetry reports whether a BACKLOGGED receipt is one this
@@ -2149,12 +2197,12 @@ func (s *Service) armRelayReceiptRetryLocked(receipt protocol.DeliveryReceipt, n
 // drop all take it, and the walk would then resume re-sending a message its
 // recipient has already confirmed.
 func (s *Service) dropConfirmedRelayMessageRetryLocked(message messageIdentity) {
-	key := relayMessageKey(message.MessageID)
+	key := relayMessageIdentityKey(message)
 	if _, armed := s.relayRetry[key]; !armed {
 		return
 	}
 	s.gossipMu.RLock()
-	owner, backlogged := s.backlogMessageUnderIDLocked(message.MessageID)
+	backlogged := s.backlogHasMessageIdentityLocked(message)
 	s.gossipMu.RUnlock()
 	if !backlogged {
 		// An entry with no envelope behind it breaks the invariant the
@@ -2174,36 +2222,43 @@ func (s *Service) dropConfirmedRelayMessageRetryLocked(message messageIdentity) 
 			Str("confirmed_sender", message.Sender).Str("confirmed_recipient", message.Recipient).
 			Msg("relay_retry_entry_without_backlogged_envelope")
 		delete(s.relayRetry, key)
-		s.forgetRelayDelivered([]protocol.MessageID{message.MessageID})
+		s.forgetRelayDelivered([]messageIdentity{message})
 		return
 	}
-	if owner == message {
-		delete(s.relayRetry, key)
-		return
-	}
-	// An armed entry whose envelope is some other message: an id collision
-	// or a forged receipt. Logged so a relay that keeps running after a
-	// receipt can be traced to the mismatch that kept it.
-	log.Debug().Str("message_id", string(message.MessageID)).
-		Str("confirmed_sender", message.Sender).Str("confirmed_recipient", message.Recipient).
-		Str("envelope_sender", owner.Sender).Str("envelope_recipient", owner.Recipient).
-		Msg("relay_retry_kept_receipt_confirms_another_message")
+	delete(s.relayRetry, key)
 }
 
 // backlogMessageUnderIDLocked returns the identity of the dm backlog's
-// envelope under id; the admission's exact-id dedup keeps at most one.
+// sole envelope under a legacy ID. Colliding full references refuse rather
+// than letting an ID-only acknowledgement select the first author.
 // Caller MUST hold s.gossipMu (RLock or Lock; reads s.topics).
 func (s *Service) backlogMessageUnderIDLocked(id protocol.MessageID) (messageIdentity, bool) {
+	var found messageIdentity
+	count := 0
 	for _, envelope := range s.topics["dm"] {
 		if envelope.ID == id {
-			return messageIdentityOf(envelope), true
+			found = messageIdentityOf(envelope)
+			count++
 		}
 	}
-	return messageIdentity{}, false
+	return found, count == 1
+}
+
+func (s *Service) backlogHasMessageIdentityLocked(message messageIdentity) bool {
+	for _, envelope := range s.topics["dm"] {
+		if messageIdentityOf(envelope) == message {
+			return true
+		}
+	}
+	return false
+}
+
+func relayMessageIdentityKey(message messageIdentity) string {
+	return relayMessageKey(message.MessageID) + domain.MessageRef{Sender: message.Sender, Recipient: message.Recipient}.Key()
 }
 
 func relayMessageKey(id protocol.MessageID) string {
-	return "msg|" + string(id)
+	return fmt.Sprintf("msg|%d:%s|", len(id), id)
 }
 
 // relayFrameAged reports whether an incoming relay_message must not be
@@ -2261,11 +2316,24 @@ func (s *Service) deleteBacklogMessageForRecipient(recipient string, messageID p
 	log.Trace().Str("site", "deleteBacklogMessageForRecipient").Str("phase", "lock_held").Str("recipient", recipient).Str("msg_id", string(messageID)).Msg("delivery_mu_writer")
 	s.gossipMu.Lock()
 	messages := s.topics["dm"]
+	matches := 0
+	for _, message := range messages {
+		if message.ID == messageID && message.Recipient == recipient {
+			matches++
+		}
+	}
+	if matches > 1 {
+		s.gossipMu.Unlock()
+		s.deliveryMu.Unlock()
+		return -1
+	}
 	before := len(messages)
+	var removedRefs []messageIdentity
 	filtered := messages[:0]
 	for _, msg := range messages {
 		if msg.ID == messageID && msg.Recipient == recipient {
-			delete(s.relayRetry, relayMessageKey(msg.ID))
+			delete(s.relayRetry, relayMessageIdentityKey(messageIdentityOf(msg)))
+			removedRefs = append(removedRefs, messageIdentityOf(msg))
 			continue
 		}
 		filtered = append(filtered, msg)
@@ -2292,7 +2360,7 @@ func (s *Service) deleteBacklogMessageForRecipient(recipient string, messageID p
 	// The envelope left s.topics — drop its ack_delete suppression set too
 	// (relay_delivered.go). Leaf lock, taken after both domain mutexes are
 	// released.
-	s.forgetRelayDelivered([]protocol.MessageID{messageID})
+	s.forgetRelayDelivered(removedRefs)
 	return removed
 }
 
@@ -2370,7 +2438,7 @@ func (s *Service) noteOutboundQueuedLocked(frame protocol.Frame, errText string)
 	if frame.Type != "send_message" || frame.ID == "" {
 		return
 	}
-	state := s.outbound[frame.ID]
+	state := s.outbound[s.ownMessageIdentity(protocol.MessageID(frame.ID), frame.Recipient)]
 	if state.MessageID == "" {
 		state.MessageID = frame.ID
 		state.Recipient = frame.Recipient
@@ -2378,7 +2446,7 @@ func (s *Service) noteOutboundQueuedLocked(frame protocol.Frame, errText string)
 	}
 	state.Status = "queued"
 	state.Error = errText
-	s.outbound[frame.ID] = state
+	s.outbound[s.ownMessageIdentity(protocol.MessageID(frame.ID), frame.Recipient)] = state
 }
 
 func (s *Service) markOutboundRetrying(frame protocol.Frame, queuedAt time.Time, retries int, errText string) {
@@ -2401,7 +2469,7 @@ func (s *Service) markOutboundRetryingLocked(frame protocol.Frame, queuedAt time
 	if frame.Type != "send_message" || frame.ID == "" {
 		return
 	}
-	state := s.outbound[frame.ID]
+	state := s.outbound[s.ownMessageIdentity(protocol.MessageID(frame.ID), frame.Recipient)]
 	if state.MessageID == "" {
 		state.MessageID = frame.ID
 		state.Recipient = frame.Recipient
@@ -2413,7 +2481,7 @@ func (s *Service) markOutboundRetryingLocked(frame protocol.Frame, queuedAt time
 	state.Retries = retries
 	state.LastAttemptAt = time.Now().UTC()
 	state.Error = errText
-	s.outbound[frame.ID] = state
+	s.outbound[s.ownMessageIdentity(protocol.MessageID(frame.ID), frame.Recipient)] = state
 }
 
 func (s *Service) markOutboundTerminal(frame protocol.Frame, status, errText string) {
@@ -2436,7 +2504,7 @@ func (s *Service) markOutboundTerminalLocked(frame protocol.Frame, status, errTe
 	if frame.Type != "send_message" || frame.ID == "" {
 		return
 	}
-	state := s.outbound[frame.ID]
+	state := s.outbound[s.ownMessageIdentity(protocol.MessageID(frame.ID), frame.Recipient)]
 	if state.MessageID == "" {
 		state.MessageID = frame.ID
 		state.Recipient = frame.Recipient
@@ -2448,7 +2516,7 @@ func (s *Service) markOutboundTerminalLocked(frame protocol.Frame, status, errTe
 		state.Retries++
 	}
 	state.Error = errText
-	s.outbound[frame.ID] = state
+	s.outbound[s.ownMessageIdentity(protocol.MessageID(frame.ID), frame.Recipient)] = state
 }
 
 // sweepTerminalOutbound reclaims s.outbound entries stuck in a terminal
@@ -2501,39 +2569,39 @@ func (s *Service) sweepTerminalOutbound(now time.Time) {
 // status is what fetch_pending_messages shows, and CancelOutgoingDeliveriesTo
 // learns the id from it.
 func (s *Service) clearConfirmedOutboundLocked(message messageIdentity) {
-	entry, tracked := s.outbound[string(message.MessageID)]
+	entry, tracked := s.outbound[message]
 	if !tracked || s.ownMessageIdentity(message.MessageID, entry.Recipient) != message {
 		return
 	}
-	delete(s.outbound, string(message.MessageID))
+	delete(s.outbound, message)
 }
 
-func (s *Service) clearOutboundQueued(messageID string) {
-	if strings.TrimSpace(messageID) == "" {
+func (s *Service) clearOutboundQueued(message messageIdentity) {
+	if strings.TrimSpace(string(message.MessageID)) == "" {
 		return
 	}
-	log.Trace().Str("site", "clearOutboundQueued").Str("phase", "lock_wait").Str("msg_id", messageID).Msg("delivery_mu_writer")
+	log.Trace().Str("site", "clearOutboundQueued").Str("phase", "lock_wait").Str("msg_id", string(message.MessageID)).Msg("delivery_mu_writer")
 	s.deliveryMu.Lock()
-	log.Trace().Str("site", "clearOutboundQueued").Str("phase", "lock_held").Str("msg_id", messageID).Msg("delivery_mu_writer")
-	if _, ok := s.outbound[messageID]; !ok {
+	log.Trace().Str("site", "clearOutboundQueued").Str("phase", "lock_held").Str("msg_id", string(message.MessageID)).Msg("delivery_mu_writer")
+	if _, ok := s.outbound[message]; !ok {
 		s.deliveryMu.Unlock()
-		log.Trace().Str("site", "clearOutboundQueued").Str("phase", "lock_released_noop").Str("msg_id", messageID).Msg("delivery_mu_writer")
+		log.Trace().Str("site", "clearOutboundQueued").Str("phase", "lock_released_noop").Str("msg_id", string(message.MessageID)).Msg("delivery_mu_writer")
 		return
 	}
-	delete(s.outbound, messageID)
+	delete(s.outbound, message)
 	s.deliveryMu.Unlock()
-	log.Trace().Str("site", "clearOutboundQueued").Str("phase", "lock_released").Str("msg_id", messageID).Msg("delivery_mu_writer")
+	log.Trace().Str("site", "clearOutboundQueued").Str("phase", "lock_released").Str("msg_id", string(message.MessageID)).Msg("delivery_mu_writer")
 }
 
 // clearOutboundQueuedLocked removes outbound delivery state for a message in
 // memory. Caller MUST hold s.deliveryMu.Lock. drainPendingForIdentities
 // collects these as deferred actions and applies them with the pending-queue
 // return as one atomic in-memory update.
-func (s *Service) clearOutboundQueuedLocked(messageID string) {
-	if strings.TrimSpace(messageID) == "" {
+func (s *Service) clearOutboundQueuedLocked(message messageIdentity) {
+	if strings.TrimSpace(string(message.MessageID)) == "" {
 		return
 	}
-	delete(s.outbound, messageID)
+	delete(s.outbound, message)
 }
 
 func (s *Service) clearRelayRetryForOutbound(frame protocol.Frame) {

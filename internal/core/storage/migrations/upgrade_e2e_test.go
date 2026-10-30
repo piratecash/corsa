@@ -128,7 +128,9 @@ func upgradeWriteRestartRead(t *testing.T, generation legacyGeneration) {
 // it starts by running its own CREATE ... IF NOT EXISTS DDL. The rollback
 // contract is that this is a no-op, the extra tables are simply ignored, and
 // every row is still there — which is why the default file name did not move
-// and why every migration so far is additive.
+// and why migrations through version8 are additive. This historical proof
+// stops at8: the version9 tuple primary key requires a pre-upgrade backup for
+// an ancient reader that does not enforce the migration ledger.
 func TestRollbackToThePreviousBinaryStillReadsTheFile(t *testing.T) {
 	for _, generation := range legacyGenerations() {
 		t.Run(generation.name, func(t *testing.T) {
@@ -140,7 +142,7 @@ func TestRollbackToThePreviousBinaryStillReadsTheFile(t *testing.T) {
 			upgraded, err := storage.Open(context.Background(), storage.Config{
 				ExplicitPath: path,
 				Owner:        owner(t),
-				Catalog:      migrations.Catalog(),
+				Catalog:      migrations.Catalog()[:8], // historical additive schema; version9 is forward-only
 			})
 			if err != nil {
 				t.Fatalf("upgrade open: %v", err)

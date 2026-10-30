@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/config"
+	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
@@ -38,7 +39,7 @@ func TestRefusedStatusWriteCommitsNothing(t *testing.T) {
 	recipient := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	const target = protocol.MessageID("refused-status-write")
 	now := time.Now().UTC()
-	svc.sentDMIDs.Add(string(target))
+	svc.sentDMIDs.Add(deliveryMessageRef(svc.ownMessageIdentity(target, recipient)).Key())
 	svc.deliveryMu.Lock()
 	svc.registerAwaitingDeliveredLocked(protocol.Envelope{
 		ID: target, Topic: "dm", Sender: svc.Address(), Recipient: recipient, CreatedAt: now,
@@ -60,7 +61,7 @@ func TestRefusedStatusWriteCommitsNothing(t *testing.T) {
 		t.Error("the dedup key was committed over a refused write; the peer's next copy would be swallowed")
 	}
 	svc.deliveryMu.RLock()
-	_, stillRetrying := svc.awaitingDelivered[target]
+	_, stillRetrying := svc.awaitingDelivered[svc.ownMessageIdentity(target, recipient)]
 	backlog := len(svc.receipts[svc.Address()])
 	svc.deliveryMu.RUnlock()
 	if !stillRetrying {
@@ -85,7 +86,7 @@ func TestRefusedStatusWriteCommitsNothing(t *testing.T) {
 		t.Error("a handled receipt left no dedup key, so the peer's next copy is processed again")
 	}
 	svc.deliveryMu.RLock()
-	_, retryingAfter := svc.awaitingDelivered[target]
+	_, retryingAfter := svc.awaitingDelivered[svc.ownMessageIdentity(target, recipient)]
 	svc.deliveryMu.RUnlock()
 	if retryingAfter {
 		t.Error("a recorded receipt left the sender re-sending a message the peer holds")
@@ -515,7 +516,7 @@ func TestCommitIsTheSerialisationPoint(t *testing.T) {
 
 		recipient := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 		const target = protocol.MessageID("concurrent-copies")
-		svc.sentDMIDs.Add(string(target))
+		svc.sentDMIDs.Add(deliveryMessageRef(svc.ownMessageIdentity(target, recipient)).Key())
 		receipt := protocol.DeliveryReceipt{
 			MessageID:   target,
 			Sender:      recipient,
@@ -595,8 +596,8 @@ func TestCommitIsTheSerialisationPoint(t *testing.T) {
 		// Delivery state this receipt would settle, seeded so the drop
 		// can be checked against it.
 		svc.deliveryMu.Lock()
-		svc.outbound[string(receipt.MessageID)] = outboundDelivery{}
-		svc.relayRetry[relayMessageKey(receipt.MessageID)] = relayAttempt{}
+		svc.outbound[madeByMessageRecipient(receipt)] = outboundDelivery{}
+		svc.relayRetry[relayMessageIdentityKey(madeByMessageRecipient(receipt))] = relayAttempt{}
 		svc.deliveryMu.Unlock()
 
 		entered, release := store.park()
@@ -625,8 +626,8 @@ func TestCommitIsTheSerialisationPoint(t *testing.T) {
 		svc.deliveryMu.RLock()
 		orphaned := len(svc.receipts[listener])
 		_, tracked := svc.relayRetry[relayReceiptKey(receipt)]
-		_, outboundKept := svc.outbound[string(receipt.MessageID)]
-		_, messageRetryKept := svc.relayRetry[relayMessageKey(receipt.MessageID)]
+		_, outboundKept := svc.outbound[madeByMessageRecipient(receipt)]
+		_, messageRetryKept := svc.relayRetry[relayMessageIdentityKey(madeByMessageRecipient(receipt))]
 		svc.deliveryMu.RUnlock()
 		if !outboundKept || !messageRetryKept {
 			// The drop promises to touch nothing. Settling delivery state
@@ -670,7 +671,7 @@ func TestSeenAfterRestartIsAcceptedForADeliveredMessage(t *testing.T) {
 	outbox := newEmissionOutbox()
 	// Nothing to reseed for retry — the message is already delivered — but
 	// the chatlog still holds it as ours.
-	outbox.alsoSent = []protocol.MessageID{delivered}
+	outbox.alsoSent = []domain.MessageRef{{Topic: "dm", ID: string(delivered), Sender: svc.Address(), Recipient: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}
 	svc.RegisterDeliveryOutbox(outbox)
 	svc.WaitBackground()
 
@@ -709,7 +710,7 @@ func TestReceiptFromAnyoneElseDoesNotEndTheDelivery(t *testing.T) {
 	recipient := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	stranger := "cccccccccccccccccccccccccccccccccccccccc"
 	now := time.Now().UTC()
-	svc.sentDMIDs.Add(string(target))
+	svc.sentDMIDs.Add(deliveryMessageRef(svc.ownMessageIdentity(target, recipient)).Key())
 	svc.deliveryMu.Lock()
 	svc.registerAwaitingDeliveredLocked(protocol.Envelope{
 		ID: target, Topic: "dm", Sender: svc.Address(), Recipient: recipient, CreatedAt: now,
@@ -723,7 +724,7 @@ func TestReceiptFromAnyoneElseDoesNotEndTheDelivery(t *testing.T) {
 	svc.WaitBackground()
 
 	svc.deliveryMu.RLock()
-	_, stillOwed := svc.awaitingDelivered[target]
+	_, stillOwed := svc.awaitingDelivered[svc.ownMessageIdentity(target, recipient)]
 	svc.deliveryMu.RUnlock()
 	if !stillOwed {
 		t.Fatal("a stranger's receipt ended the delivery; the message it was addressed to may never arrive")
@@ -737,7 +738,7 @@ func TestReceiptFromAnyoneElseDoesNotEndTheDelivery(t *testing.T) {
 	svc.WaitBackground()
 
 	svc.deliveryMu.RLock()
-	_, owedAfter := svc.awaitingDelivered[target]
+	_, owedAfter := svc.awaitingDelivered[svc.ownMessageIdentity(target, recipient)]
 	svc.deliveryMu.RUnlock()
 	if owedAfter {
 		t.Error("the recipient's own receipt did not end the delivery")

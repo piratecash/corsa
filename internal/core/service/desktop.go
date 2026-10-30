@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/chatlog"
@@ -92,9 +93,10 @@ type DesktopClient struct {
 	// to say what the node knew when it stopped sending, and to observe
 	// that an aborted wipe puts the deliveries back.
 	freezeConversationDeliveryFn func(context.Context, domain.PeerIdentity, []domain.MessageID) (ConversationFreeze, error)
-	// freezeMessageDeliveryFn is the single-message half: the delete
-	// classifies under it, so a test that wants to say "this one never
-	// went out" has to say it here.
+	// The selected-reference delete path classifies under this scoped
+	// single-message seam, never an unscoped ID-only override.
+	freezeMessageDeliveryToFn func(context.Context, domain.PeerIdentity, domain.MessageID) (bool, error)
+	// The legacy single-message API retains its own test seam.
 	freezeMessageDeliveryFn    func(context.Context, domain.MessageID) (bool, error)
 	thawConversationDeliveryFn func(context.Context, domain.PeerIdentity, []domain.MessageID) error
 	dm                         *DMCrypto
@@ -1105,4 +1107,77 @@ func (c *DesktopClient) RemoveSenderMapping(fileID domain.FileID) bool {
 		return false
 	}
 	return c.localNode.RemoveSenderMapping(fileID)
+}
+
+func (c *DesktopClient) LookupEntryRef(ctx context.Context, ref domain.MessageRef) (bool, error) {
+	return c.chatlog.LookupEntryRef(ctx, ref)
+}
+
+func (c *DesktopClient) FreezeMessageDeliveryTo(ctx context.Context, peer domain.PeerIdentity, messageID domain.MessageID) (bool, error) {
+	if c.freezeMessageDeliveryToFn != nil {
+		return c.freezeMessageDeliveryToFn(ctx, peer, messageID)
+	}
+	if c.dm == nil {
+		return false, fmt.Errorf("direct messages unavailable")
+	}
+	return c.dm.FreezeMessageDeliveryTo(ctx, peer, messageID)
+}
+
+// Ref file-transfer methods preserve the selected message identity through
+// the embedded node. Role and local ownership are validated by that node.
+func (c *DesktopClient) RegisterIncomingFileTransferRef(ref domain.MessageRef, fileHash, fileName, contentType string, fileSize uint64, sender domain.PeerIdentity) error {
+	if c.localNode == nil {
+		return errNoLocalNode
+	}
+	return c.localNode.RegisterIncomingFileTransferRef(ref, fileHash, fileName, contentType, fileSize, sender)
+}
+func (c *DesktopClient) CancelFileDownloadRef(ref domain.MessageRef) error {
+	if c.localNode == nil {
+		return errNoLocalNode
+	}
+	return c.localNode.CancelFileDownloadRef(ref)
+}
+func (c *DesktopClient) StartFileDownloadRef(ref domain.MessageRef) error {
+	if c.localNode == nil {
+		return errNoLocalNode
+	}
+	return c.localNode.StartFileDownloadRef(ref)
+}
+func (c *DesktopClient) RestartFileDownloadRef(ref domain.MessageRef) error {
+	if c.localNode == nil {
+		return errNoLocalNode
+	}
+	return c.localNode.RestartFileDownloadRef(ref)
+}
+func (c *DesktopClient) RetryFileChunkRef(ref domain.MessageRef) error {
+	if c.localNode == nil {
+		return errNoLocalNode
+	}
+	return c.localNode.RetryFileChunkRef(ref)
+}
+func (c *DesktopClient) FileTransferProgressRef(ref domain.MessageRef, isSender bool) (uint64, uint64, string, bool) {
+	if c.localNode == nil {
+		return 0, 0, "", false
+	}
+	return c.localNode.FileTransferProgressRef(ref, isSender)
+}
+func (c *DesktopClient) FileTransferFilePathRef(ref domain.MessageRef, isSender bool) string {
+	if c.localNode == nil {
+		return ""
+	}
+	return c.localNode.FileTransferFilePathRef(ref, isSender)
+}
+func (c *DesktopClient) DeleteLocalFileCopyRef(ref domain.MessageRef) error {
+	if c.localNode == nil {
+		return errNoLocalNode
+	}
+	return c.localNode.DeleteLocalFileCopyRef(ref)
+}
+func (c *DesktopClient) CleanupTransferByMessageRef(ref domain.MessageRef) {
+	if c.localNode != nil {
+		c.localNode.CleanupTransferByMessageRef(ref)
+	}
+}
+func (c *DesktopClient) RemoveSenderMappingRef(ref domain.MessageRef) bool {
+	return c.localNode != nil && c.localNode.RemoveSenderMappingRef(ref)
 }

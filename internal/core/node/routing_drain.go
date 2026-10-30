@@ -484,7 +484,7 @@ returnFrames:
 		case "retrying":
 			s.markOutboundRetryingLocked(d.frame, d.queuedAt, d.retries, d.errText)
 		case "clear":
-			s.clearOutboundQueuedLocked(d.frame.ID)
+			s.clearOutboundQueuedLocked(s.ownMessageIdentity(protocol.MessageID(d.frame.ID), d.frame.Recipient))
 		}
 	}
 	// Enforce the per-peer ring bound on every queue we merged returns into —

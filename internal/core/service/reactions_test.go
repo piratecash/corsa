@@ -37,11 +37,21 @@ func (f *fakeReactionStore) ApplyReactionFact(_ context.Context, fact domain.Rea
 	return true, nil
 }
 
-func (f *fakeReactionStore) ReactionFacts(context.Context, domain.MessageID) ([]domain.ReactionFact, error) {
-	return f.facts, nil
+func (f *fakeReactionStore) ReactionFactsInConversation(_ context.Context, peer domain.PeerIdentity, id domain.MessageID) ([]domain.ReactionFact, error) {
+	var facts []domain.ReactionFact
+	for _, fact := range f.facts {
+		if fact.Scope == domain.ReactionScopeForPeer(peer) && fact.Key.MessageID == id {
+			facts = append(facts, fact)
+		}
+	}
+	return facts, nil
 }
 
 func (f *fakeReactionStore) ReactionsForScope(context.Context, domain.ReactionScope, domain.PeerIdentity) (map[domain.MessageID][]domain.Reaction, error) {
+	return nil, nil
+}
+
+func (f *fakeReactionStore) ReactionsForScopeRefs(context.Context, domain.ReactionScope, domain.PeerIdentity) (map[domain.MessageRef][]domain.Reaction, error) {
 	return nil, nil
 }
 
@@ -135,6 +145,7 @@ func TestToggleReactionIgnoresOtherActors(t *testing.T) {
 	self := reactionIdentity("11")
 	peer := reactionIdentity("22")
 	store := &fakeReactionStore{facts: []domain.ReactionFact{{
+		Scope: domain.ReactionScopeForPeer(peer),
 		Key:   domain.ReactionKey{MessageID: "m1", Actor: peer, Emoji: "👍"},
 		Op:    domain.ReactionSet,
 		Clock: 40,

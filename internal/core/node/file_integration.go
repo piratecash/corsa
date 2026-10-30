@@ -68,6 +68,11 @@ func (s *Service) initFileTransfer() {
 		},
 	})
 
+	if err := manager.Err(); err != nil {
+		log.Error().Err(err).Msg("file_transfer: refusing mapping startup; persistent state preserved")
+		return
+	}
+
 	router := filerouter.NewRouter(filerouter.RouterConfig{
 		NonceCache: newDefaultNonceCache(),
 		LocalID:    domain.PeerIdentityFromWire(s.identity.Address),
@@ -906,3 +911,117 @@ func (e *fileTransferError) Error() string {
 // lookup inlined into the IsAuthorizedForLocalDelivery callback in
 // initFileTransfer. See docs/protocol/file_transfer.md for the
 // authenticity-vs-authorization split.)
+
+// fileTransferRefRole validates local ownership and the caller's role filter.
+func (s *Service) fileTransferRefRole(ref domain.MessageRef, isSender bool) bool {
+	if s.identity == nil || ref.Topic != "dm" || ref.ID == "" || ref.Sender == "" || ref.Recipient == "" {
+		return false
+	}
+	if isSender {
+		return ref.Sender == s.identity.Address
+	}
+	return ref.Recipient == s.identity.Address
+}
+
+func (s *Service) FileTransferProgressRef(ref domain.MessageRef, isSender bool) (uint64, uint64, string, bool) {
+	if !s.fileTransferRefRole(ref, isSender) {
+		return 0, 0, "", false
+	}
+	manager, err := s.getFileTransferManager()
+	if err != nil {
+		return 0, 0, "", false
+	}
+	if isSender {
+		return manager.SenderProgressRef(ref)
+	}
+	return manager.ReceiverProgressRef(ref)
+}
+func (s *Service) FileTransferFilePathRef(ref domain.MessageRef, isSender bool) string {
+	if !s.fileTransferRefRole(ref, isSender) {
+		return ""
+	}
+	manager, err := s.getFileTransferManager()
+	if err != nil {
+		return ""
+	}
+	if isSender {
+		return manager.SenderFilePathRef(ref)
+	}
+	return manager.ReceiverFilePathRef(ref)
+}
+func (s *Service) DeleteLocalFileCopyRef(ref domain.MessageRef) error {
+	if !s.fileTransferRefRole(ref, false) && !s.fileTransferRefRole(ref, true) {
+		return fmt.Errorf("invalid local file message reference")
+	}
+	manager, err := s.getFileTransferManager()
+	if err != nil {
+		return err
+	}
+	return manager.DeleteLocalCopyRef(ref)
+}
+func (s *Service) RegisterIncomingFileTransferRef(ref domain.MessageRef, hash, name, contentType string, size uint64, sender domain.PeerIdentity) error {
+	if !s.fileTransferRefRole(ref, false) || ref.Sender != sender.String() {
+		return fmt.Errorf("invalid incoming file message reference")
+	}
+	manager, err := s.getFileTransferManager()
+	if err != nil {
+		return err
+	}
+	return manager.RegisterFileReceiveRef(ref, hash, name, contentType, size, sender)
+}
+func (s *Service) CancelFileDownloadRef(ref domain.MessageRef) error {
+	if !s.fileTransferRefRole(ref, false) {
+		return fmt.Errorf("invalid receiver file message reference")
+	}
+	manager, err := s.getFileTransferManager()
+	if err != nil {
+		return err
+	}
+	return manager.CancelDownloadRef(ref)
+}
+func (s *Service) StartFileDownloadRef(ref domain.MessageRef) error {
+	if !s.fileTransferRefRole(ref, false) {
+		return fmt.Errorf("invalid receiver file message reference")
+	}
+	manager, err := s.getFileTransferManager()
+	if err != nil {
+		return err
+	}
+	return manager.StartDownloadRef(ref)
+}
+func (s *Service) RestartFileDownloadRef(ref domain.MessageRef) error {
+	if !s.fileTransferRefRole(ref, false) {
+		return fmt.Errorf("invalid receiver file message reference")
+	}
+	manager, err := s.getFileTransferManager()
+	if err != nil {
+		return err
+	}
+	return manager.RestartDownloadRef(ref)
+}
+func (s *Service) RetryFileChunkRef(ref domain.MessageRef) error {
+	if !s.fileTransferRefRole(ref, false) {
+		return fmt.Errorf("invalid receiver file message reference")
+	}
+	manager, err := s.getFileTransferManager()
+	if err != nil {
+		return err
+	}
+	return manager.ForceRetryChunkRef(ref)
+}
+func (s *Service) CleanupTransferByMessageRef(ref domain.MessageRef) {
+	if !s.fileTransferRefRole(ref, false) && !s.fileTransferRefRole(ref, true) {
+		return
+	}
+	manager, err := s.getFileTransferManager()
+	if err == nil {
+		manager.CleanupTransferByMessageRef(ref)
+	}
+}
+func (s *Service) RemoveSenderMappingRef(ref domain.MessageRef) bool {
+	if !s.fileTransferRefRole(ref, true) {
+		return false
+	}
+	manager, err := s.getFileTransferManager()
+	return err == nil && manager.RemoveSenderMappingRef(ref)
+}

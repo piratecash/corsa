@@ -85,7 +85,7 @@ func TestFirstLiveEventStillBeepsAfterConversationReload(t *testing.T) {
 				load()
 			}
 			c.r.mu.RLock()
-			gate := c.r.seenMessageIDs[incomingID]
+			gate := c.r.seenMessageIDs[localMessageRef(event).Key()]
 			replaying, startupComplete := c.r.replayingStartup, c.r.startupComplete
 			c.r.mu.RUnlock()
 			if gate.announced || gate.handled || replaying || !startupComplete {

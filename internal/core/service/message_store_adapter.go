@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"sync/atomic"
 	"time"
 
@@ -125,11 +126,11 @@ func (a *MessageStoreAdapter) opContext() context.Context {
 // Bare "dm", not IsDMTopic: control DMs are never persisted (the node
 // skips the store for them entirely), so they own no row a refusal could
 // name.
-func (a *MessageStoreAdapter) refusesDeletedID(envelope protocol.Envelope) (refused, known bool) {
-	if envelope.Topic != "dm" {
-		return false, true
+func (a *MessageStoreAdapter) refusesDeletedID(envelope protocol.Envelope) (refused, known, exact bool) {
+	if a == nil || a.refusals == nil || envelope.Topic != "dm" {
+		return false, true, false
 	}
-	return a.refusals.Refuses(domain.MessageID(envelope.ID), time.Now().UTC())
+	return a.refusals.RefusesRef(domain.MessageRef{Topic: envelope.Topic, ID: string(envelope.ID), Sender: envelope.Sender, Recipient: envelope.Recipient}, time.Now().UTC())
 }
 
 // admitWrite takes a lease on writing this envelope's conversation, held
@@ -208,22 +209,16 @@ func (a *MessageStoreAdapter) StoreMessage(envelope protocol.Envelope, isOutgoin
 	}
 	defer releaseWrite()
 
-	refused, known := a.refusesDeletedID(envelope)
+	refused, known, exact := a.refusesDeletedID(envelope)
 	switch {
 	case refused:
-		// Already deleted here, and recently enough that copies of it can
-		// still be in flight. Reported as a duplicate rather than a
-		// failure: it IS one — we had this message and destroyed it — and
-		// the node's duplicate path re-sends the delivery receipt, which
-		// stops the sender retrying a message we are never going to keep.
-		// Gated for the same reason, and it is the sharper of the two: it says
-		// that THIS id was deleted here, which is exactly the fact the database
-		// no longer keeps.
-		deletionLog().Debug().
-			Str("id", logID(string(envelope.ID))).
-			Str("topic", envelope.Topic).
-			Msg("chatlog store refused a re-delivery of a deleted message")
-		return node.StoreDuplicate
+		// Legacy refusals are ID-only. Preserve anti-resurrection while the
+		// finite refusal is active, but do not invent an exact identity or
+		// authorize a delivered receipt for an unrelated colliding author.
+		if exact {
+			return node.StoreDuplicate
+		}
+		return node.StoreDeferred
 	case !known:
 		// The refusals could not be read, so whether this message was
 		// deleted here is unknown — and storing it on a guess is how a
@@ -276,6 +271,12 @@ func (a *MessageStoreAdapter) StoreMessage(envelope protocol.Envelope, isOutgoin
 	inserted, err := a.chatlog.AppendReportNew(a.opContext(), envelope.Topic, domain.PeerIdentityFromWire(a.id.Address), entry)
 	if err != nil {
 		log.Error().Str("topic", envelope.Topic).Str("id", string(envelope.ID)).Err(err).Msg("chatlog append failed")
+		if errors.Is(err, chatlog.ErrInvalidEntry) {
+			// A rejected new row is neither a durable duplicate nor a
+			// transient outage eligible for the runtime fallback. Do not
+			// confirm delivery of an entry the store refuses to represent.
+			return node.StoreDeferred
+		}
 		return node.StoreFailed
 	}
 	// Released on a duplicate too, and that is not belt-and-braces. The message
@@ -356,7 +357,7 @@ func conversationPeer(self string, envelope protocol.Envelope) domain.PeerIdenti
 // and the receipt recipient is the message sender (being notified). The
 // chatlog peer is the other party relative to the local identity.
 func (a *MessageStoreAdapter) UpdateDeliveryStatus(receipt protocol.DeliveryReceipt) bool {
-	if a == nil || a.chatlog == nil {
+	if a == nil || a.chatlog == nil || a.id == nil || a.chatlog.Store() == nil {
 		return false
 	}
 	var chatlogPeer domain.PeerIdentity
@@ -373,7 +374,7 @@ func (a *MessageStoreAdapter) UpdateDeliveryStatus(receipt protocol.DeliveryRece
 	// from another thread, or a peer confirming someone else's message —
 	// and reporting it as recorded would let the caller stop the retry for
 	// a message its real recipient has said nothing about.
-	updated, err := a.chatlog.UpdateStatus(a.opContext(), "dm", chatlogPeer, domain.MessageID(receipt.MessageID), receipt.Status)
+	updated, err := a.chatlog.Store().UpdateStatusRef(a.opContext(), domain.MessageRef{Topic: "dm", ID: string(receipt.MessageID), Sender: receipt.Recipient, Recipient: receipt.Sender}, receipt.Status)
 	if err != nil {
 		log.Error().Str("message_id", string(receipt.MessageID)).Str("status", receipt.Status).Err(err).Msg("chatlog update status failed")
 		return false
@@ -395,14 +396,11 @@ func (a *MessageStoreAdapter) UpdateDeliveryStatus(receipt protocol.DeliveryRece
 // knowsOutgoingMessage reports whether the chatlog holds the message this
 // receipt names in the conversation it claims to be about.
 func (a *MessageStoreAdapter) knowsOutgoingMessage(receipt protocol.DeliveryReceipt) bool {
-	if a == nil || a.chatlog == nil {
+	if a == nil || a.chatlog == nil || a.chatlog.Store() == nil || a.id == nil || (receipt.Recipient != a.id.Address && receipt.Sender != a.id.Address) {
 		return false
 	}
-	peer := receipt.Sender
-	if receipt.Sender == a.id.Address {
-		peer = receipt.Recipient
-	}
-	return a.chatlog.HasEntryInConversation(a.opContext(), peer, string(receipt.MessageID))
+	_, found, err := a.chatlog.Store().EntryByRef(a.opContext(), domain.MessageRef{Topic: "dm", ID: string(receipt.MessageID), Sender: receipt.Recipient, Recipient: receipt.Sender})
+	return err == nil && found
 }
 
 // SentMessageIDs implements node.DeliveryOutbox: the newest ids of DMs
@@ -562,4 +560,38 @@ func (a *MessageStoreAdapter) MarkSeenConfirmed(id protocol.MessageID) error {
 		return nil
 	}
 	return a.chatlog.MarkSeenConfirmed(a.opContext(), string(id))
+}
+
+// Exact journal methods preserve the original message's two endpoints.
+func (a *MessageStoreAdapter) MarkDeliveryFailedRef(ref domain.MessageRef) error {
+	if a == nil || a.chatlog == nil || a.chatlog.Store() == nil {
+		return nil
+	}
+	return a.chatlog.Store().MarkDeliveryFailedRef(a.opContext(), ref)
+}
+func (a *MessageStoreAdapter) MarkSeenConfirmedRef(ref domain.MessageRef) error {
+	if a == nil || a.chatlog == nil || a.chatlog.Store() == nil {
+		return nil
+	}
+	return a.chatlog.Store().MarkSeenConfirmedRef(a.opContext(), ref)
+}
+
+func (a *MessageStoreAdapter) MarkOnWireRefs(refs []domain.MessageRef) error {
+	if a == nil || a.chatlog == nil || a.chatlog.Store() == nil {
+		return nil
+	}
+	return a.chatlog.Store().MarkOnWireRefs(a.opContext(), refs)
+}
+func (a *MessageStoreAdapter) ClearNeverEmittedRefs(refs []domain.MessageRef) error {
+	if a == nil || a.chatlog == nil || a.chatlog.Store() == nil {
+		return nil
+	}
+	return a.chatlog.Store().ClearNeverEmittedRefs(a.opContext(), refs)
+}
+
+func (a *MessageStoreAdapter) SentMessageRefs(limit int) ([]domain.MessageRef, error) {
+	if a == nil || a.chatlog == nil || a.chatlog.Store() == nil || a.id == nil {
+		return nil, nil
+	}
+	return a.chatlog.Store().SentMessageRefs(a.opContext(), domain.PeerIdentityFromWire(a.id.Address), limit)
 }

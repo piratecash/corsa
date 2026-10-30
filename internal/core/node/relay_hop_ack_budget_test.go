@@ -26,7 +26,7 @@ func TestHopAckBudget_TickerFiresOnExactlyOneTickAfterCountdown(t *testing.T) {
 	rs := newRelayStateStore()
 
 	rs.store(&relayForwardState{
-		MessageID:            "msg-1",
+		Message:              relayStateFixtureRef("msg-1"),
 		ForwardedTo:          domain.PeerAddress("peer-b"),
 		Recipient:            domaintest.ID("id-recipient"),
 		RemainingTTL:         60,
@@ -44,8 +44,8 @@ func TestHopAckBudget_TickerFiresOnExactlyOneTickAfterCountdown(t *testing.T) {
 	if len(fired) != 1 {
 		t.Fatalf("tick 3: fired = %v, want 1 entry", fired)
 	}
-	if fired[0].MessageID != "msg-1" {
-		t.Fatalf("fired[0].MessageID = %q, want msg-1", fired[0].MessageID)
+	if fired[0].Message.ID != "msg-1" {
+		t.Fatalf("fired[0].Message.ID = %q, want msg-1", fired[0].Message.ID)
 	}
 
 	// Subsequent ticks must be no-op (HopAckObserved=true now).
@@ -65,7 +65,7 @@ func TestHopAckBudget_MarkObservedCancelsTimer(t *testing.T) {
 	rs := newRelayStateStore()
 
 	rs.store(&relayForwardState{
-		MessageID:            "msg-cancel",
+		Message:              relayStateFixtureRef("msg-cancel"),
 		ForwardedTo:          domain.PeerAddress("peer-b"),
 		Recipient:            domaintest.ID("id-recipient"),
 		RemainingTTL:         60,
@@ -77,7 +77,7 @@ func TestHopAckBudget_MarkObservedCancelsTimer(t *testing.T) {
 		t.Fatalf("tick 1: fired = %v, want nil", fired)
 	}
 	// Ack arrives — cancels.
-	if !rs.markHopAckObserved("msg-cancel") {
+	if !rs.markHopAckObserved(relayStateFixtureRef("msg-cancel")) {
 		t.Fatal("markHopAckObserved returned false for live state")
 	}
 	// Subsequent ticks must NOT fire.
@@ -99,7 +99,7 @@ func TestHopAckBudget_NotTrackingWhenRemainingTicksZero(t *testing.T) {
 	// Simulates the final-recipient branch of handleRelayMessage:
 	// ForwardedTo is empty, HopAckRemainingTicks is the default 0.
 	rs.store(&relayForwardState{
-		MessageID:    "msg-final",
+		Message:      relayStateFixtureRef("msg-final"),
 		ForwardedTo:  domain.PeerAddress(""),
 		Recipient:    domaintest.ID("id-recipient"),
 		RemainingTTL: 60,
@@ -121,14 +121,14 @@ func TestHopAckBudget_TracksMultipleStatesIndependently(t *testing.T) {
 	rs := newRelayStateStore()
 
 	rs.store(&relayForwardState{
-		MessageID:            "msg-short",
+		Message:              relayStateFixtureRef("msg-short"),
 		ForwardedTo:          domain.PeerAddress("peer-a"),
 		Recipient:            domaintest.ID("id-x"),
 		RemainingTTL:         60,
 		HopAckRemainingTicks: 2,
 	})
 	rs.store(&relayForwardState{
-		MessageID:            "msg-long",
+		Message:              relayStateFixtureRef("msg-long"),
 		ForwardedTo:          domain.PeerAddress("peer-b"),
 		Recipient:            domaintest.ID("id-y"),
 		RemainingTTL:         60,
@@ -141,7 +141,7 @@ func TestHopAckBudget_TracksMultipleStatesIndependently(t *testing.T) {
 	}
 	// Tick 2: msg-short fires.
 	fired := rs.tickHopAckBudgets()
-	if len(fired) != 1 || fired[0].MessageID != "msg-short" {
+	if len(fired) != 1 || fired[0].Message.ID != "msg-short" {
 		t.Fatalf("tick 2: fired = %v, want [msg-short]", fired)
 	}
 	// Tick 3: nothing (msg-long still has 1 tick left).
@@ -150,7 +150,7 @@ func TestHopAckBudget_TracksMultipleStatesIndependently(t *testing.T) {
 	}
 	// Tick 4: msg-long fires.
 	fired = rs.tickHopAckBudgets()
-	if len(fired) != 1 || fired[0].MessageID != "msg-long" {
+	if len(fired) != 1 || fired[0].Message.ID != "msg-long" {
 		t.Fatalf("tick 4: fired = %v, want [msg-long]", fired)
 	}
 }
@@ -168,7 +168,7 @@ func TestHopAckBudget_StoreUpsertRerouteResetsBudget(t *testing.T) {
 	rs := newRelayStateStore()
 
 	rs.store(&relayForwardState{
-		MessageID:            "msg-reroute",
+		Message:              relayStateFixtureRef("msg-reroute"),
 		ForwardedTo:          domain.PeerAddress("peer-a"),
 		Recipient:            domaintest.ID("id-target"),
 		RemainingTTL:         60,
@@ -182,7 +182,7 @@ func TestHopAckBudget_StoreUpsertRerouteResetsBudget(t *testing.T) {
 
 	// Sanity: verify the fire really happened (Observed flipped).
 	rs.mu.Lock()
-	if !rs.states["msg-reroute"].HopAckObserved {
+	if !rs.states[relayStateFixtureRef("msg-reroute")].HopAckObserved {
 		t.Fatal("precondition: expected HopAckObserved=true after budget elapse")
 	}
 	rs.mu.Unlock()
@@ -190,7 +190,7 @@ func TestHopAckBudget_StoreUpsertRerouteResetsBudget(t *testing.T) {
 	// Re-route through a different peer with a fresh budget +
 	// Observed=false.
 	rs.store(&relayForwardState{
-		MessageID:            "msg-reroute",
+		Message:              relayStateFixtureRef("msg-reroute"),
 		ForwardedTo:          domain.PeerAddress("peer-b"),
 		Recipient:            domaintest.ID("id-target"),
 		RemainingTTL:         60,
@@ -200,7 +200,7 @@ func TestHopAckBudget_StoreUpsertRerouteResetsBudget(t *testing.T) {
 
 	// Verify the reset propagated through store()'s upsert branch.
 	rs.mu.Lock()
-	st := rs.states["msg-reroute"]
+	st := rs.states[relayStateFixtureRef("msg-reroute")]
 	rs.mu.Unlock()
 	if st.HopAckObserved {
 		t.Fatal("HopAckObserved still true after reroute store(); want false")
@@ -235,7 +235,7 @@ func TestHopAckBudget_StoreUpsertSameForwardedToDoesNotResetBudget(t *testing.T)
 	rs := newRelayStateStore()
 
 	rs.store(&relayForwardState{
-		MessageID:            "msg-retry",
+		Message:              relayStateFixtureRef("msg-retry"),
 		ForwardedTo:          domain.PeerAddress("peer-a"),
 		Recipient:            domaintest.ID("id-target"),
 		RemainingTTL:         60,
@@ -247,7 +247,7 @@ func TestHopAckBudget_StoreUpsertSameForwardedToDoesNotResetBudget(t *testing.T)
 
 	// Same ForwardedTo upsert — should NOT reset.
 	rs.store(&relayForwardState{
-		MessageID:            "msg-retry",
+		Message:              relayStateFixtureRef("msg-retry"),
 		ForwardedTo:          domain.PeerAddress("peer-a"),
 		Recipient:            domaintest.ID("id-target"),
 		RemainingTTL:         60,
@@ -256,7 +256,7 @@ func TestHopAckBudget_StoreUpsertSameForwardedToDoesNotResetBudget(t *testing.T)
 	})
 
 	rs.mu.Lock()
-	st := rs.states["msg-retry"]
+	st := rs.states[relayStateFixtureRef("msg-retry")]
 	rs.mu.Unlock()
 	if st.HopAckRemainingTicks != 1 {
 		t.Fatalf("HopAckRemainingTicks = %d after same-peer upsert, want 1 (preserved)", st.HopAckRemainingTicks)
@@ -274,7 +274,7 @@ func TestHopAckBudget_StoreUpsertSameForwardedToDoesNotResetBudget(t *testing.T)
 // return false without creating any phantom state.
 func TestHopAckBudget_MarkObservedNoopOnUnknownMessage(t *testing.T) {
 	rs := newRelayStateStore()
-	if rs.markHopAckObserved("never-existed") {
+	if rs.markHopAckObserved(relayStateFixtureRef("never-existed")) {
 		t.Fatal("markHopAckObserved returned true for unknown message ID")
 	}
 	if rs.count() != 0 {
@@ -291,7 +291,7 @@ func TestHopAckBudget_TTLEvictionInvalidatesPendingBudget(t *testing.T) {
 	rs := newRelayStateStore()
 
 	rs.store(&relayForwardState{
-		MessageID:            "msg-short-ttl",
+		Message:              relayStateFixtureRef("msg-short-ttl"),
 		ForwardedTo:          domain.PeerAddress("peer-a"),
 		Recipient:            domaintest.ID("id-target"),
 		RemainingTTL:         2, // expires in 2 ticks
@@ -325,7 +325,7 @@ func TestHopAckBudget_OriginPathStampsBudget(t *testing.T) {
 	rs := newRelayStateStore()
 
 	rs.store(&relayForwardState{
-		MessageID:            "msg-origin",
+		Message:              relayStateFixtureRef("msg-origin"),
 		ForwardedTo:          domain.PeerAddress("peer-a"),
 		Recipient:            domaintest.ID("id-target"),
 		RemainingTTL:         180,
@@ -333,7 +333,7 @@ func TestHopAckBudget_OriginPathStampsBudget(t *testing.T) {
 	})
 
 	rs.mu.Lock()
-	st := rs.states["msg-origin"]
+	st := rs.states[relayStateFixtureRef("msg-origin")]
 	rs.mu.Unlock()
 	if st.HopAckRemainingTicks != defaultHopAckBudgetSeconds {
 		t.Fatalf("HopAckRemainingTicks = %d, want %d", st.HopAckRemainingTicks, defaultHopAckBudgetSeconds)
@@ -363,7 +363,7 @@ func TestFailoverRetry_RecordTransitionsAllFieldsAtomically(t *testing.T) {
 	rs := newRelayStateStore()
 
 	rs.store(&relayForwardState{
-		MessageID:            "msg-fail",
+		Message:              relayStateFixtureRef("msg-fail"),
 		ForwardedTo:          domain.PeerAddress("peer-a"),
 		Recipient:            domaintest.ID("id-target"),
 		NextHopSelection:     relayNextHopRoutingTable,
@@ -373,12 +373,12 @@ func TestFailoverRetry_RecordTransitionsAllFieldsAtomically(t *testing.T) {
 		FrameLine:            "{\"type\":\"relay_message\"}\n",
 	})
 
-	if !rs.recordFailoverRetry("msg-fail", domain.PeerAddress("peer-b"), routingSender{}, "") {
+	if !rs.recordFailoverRetry(relayStateFixtureRef("msg-fail"), domain.PeerAddress("peer-b"), routingSender{}, "") {
 		t.Fatal("recordFailoverRetry returned false for live state")
 	}
 
 	rs.mu.Lock()
-	st := rs.states["msg-fail"]
+	st := rs.states[relayStateFixtureRef("msg-fail")]
 	rs.mu.Unlock()
 	if st.ForwardedTo != "peer-b" {
 		t.Fatalf("ForwardedTo = %q, want peer-b", st.ForwardedTo)
@@ -410,7 +410,7 @@ func TestFailoverRetry_RecordTransitionsAllFieldsAtomically(t *testing.T) {
 // log and move on.
 func TestFailoverRetry_RecordNoopOnUnknownMessage(t *testing.T) {
 	rs := newRelayStateStore()
-	if rs.recordFailoverRetry("never-existed", "peer-b", routingSender{}, "") {
+	if rs.recordFailoverRetry(relayStateFixtureRef("never-existed"), "peer-b", routingSender{}, "") {
 		t.Fatal("recordFailoverRetry returned true on unknown message ID")
 	}
 	if rs.count() != 0 {
@@ -427,7 +427,7 @@ func TestFailoverRetry_RecordNoopOnUnknownMessage(t *testing.T) {
 func TestFailoverRetry_RecordSamePeerDoesNotAppendAbandoned(t *testing.T) {
 	rs := newRelayStateStore()
 	rs.store(&relayForwardState{
-		MessageID:            "msg-same",
+		Message:              relayStateFixtureRef("msg-same"),
 		ForwardedTo:          domain.PeerAddress("peer-a"),
 		Recipient:            domaintest.ID("id-target"),
 		RemainingTTL:         60,
@@ -435,12 +435,12 @@ func TestFailoverRetry_RecordSamePeerDoesNotAppendAbandoned(t *testing.T) {
 		HopAckObserved:       true,
 	})
 
-	if !rs.recordFailoverRetry("msg-same", domain.PeerAddress("peer-a"), routingSender{}, "") {
+	if !rs.recordFailoverRetry(relayStateFixtureRef("msg-same"), domain.PeerAddress("peer-a"), routingSender{}, "") {
 		t.Fatal("recordFailoverRetry returned false for same-peer retry")
 	}
 
 	rs.mu.Lock()
-	st := rs.states["msg-same"]
+	st := rs.states[relayStateFixtureRef("msg-same")]
 	rs.mu.Unlock()
 	if len(st.AbandonedForwardedTo) != 0 {
 		t.Fatalf("AbandonedForwardedTo = %v, want empty (same-peer retry must not append)", st.AbandonedForwardedTo)
@@ -459,12 +459,12 @@ func TestFailoverRetry_RecordSamePeerDoesNotAppendAbandoned(t *testing.T) {
 func TestRetryAttemptCountFor_ReturnsCurrentValue(t *testing.T) {
 	rs := newRelayStateStore()
 
-	if count, present := rs.retryAttemptCountFor("never-existed"); present || count != 0 {
+	if count, present := rs.retryAttemptCountFor(relayStateFixtureRef("never-existed")); present || count != 0 {
 		t.Fatalf("unknown ID: got (%d, %v), want (0, false)", count, present)
 	}
 
 	rs.store(&relayForwardState{
-		MessageID:            "msg-counted",
+		Message:              relayStateFixtureRef("msg-counted"),
 		ForwardedTo:          domain.PeerAddress("peer-a"),
 		Recipient:            domaintest.ID("id-target"),
 		RemainingTTL:         60,
@@ -472,7 +472,7 @@ func TestRetryAttemptCountFor_ReturnsCurrentValue(t *testing.T) {
 		RetryAttempt:         3,
 	})
 
-	count, present := rs.retryAttemptCountFor("msg-counted")
+	count, present := rs.retryAttemptCountFor(relayStateFixtureRef("msg-counted"))
 	if !present {
 		t.Fatal("retryAttemptCountFor returned present=false for live state")
 	}
@@ -491,22 +491,22 @@ func TestFailoverRetry_AccumulatesAbandonedAcrossMultipleRetries(t *testing.T) {
 	rs := newRelayStateStore()
 
 	rs.store(&relayForwardState{
-		MessageID:            "msg-chain",
+		Message:              relayStateFixtureRef("msg-chain"),
 		ForwardedTo:          domain.PeerAddress("peer-a"),
 		Recipient:            domaintest.ID("id-target"),
 		RemainingTTL:         60,
 		HopAckRemainingTicks: defaultHopAckBudgetSeconds,
 	})
 
-	if !rs.recordFailoverRetry("msg-chain", "peer-b", routingSender{}, "") {
+	if !rs.recordFailoverRetry(relayStateFixtureRef("msg-chain"), "peer-b", routingSender{}, "") {
 		t.Fatal("first retry returned false")
 	}
-	if !rs.recordFailoverRetry("msg-chain", "peer-c", routingSender{}, "") {
+	if !rs.recordFailoverRetry(relayStateFixtureRef("msg-chain"), "peer-c", routingSender{}, "") {
 		t.Fatal("second retry returned false")
 	}
 
 	rs.mu.Lock()
-	st := rs.states["msg-chain"]
+	st := rs.states[relayStateFixtureRef("msg-chain")]
 	rs.mu.Unlock()
 	if st.ForwardedTo != "peer-c" {
 		t.Fatalf("ForwardedTo = %q, want peer-c", st.ForwardedTo)

@@ -554,7 +554,7 @@ func TestRecoveryPassRetriesStalledResends(t *testing.T) {
 	const root = "stalled-root"
 
 	router.recovery.mu.Lock()
-	router.recovery.pendingResends[root] = recoveryResend{originalID: testUUID(0x50), peer: peer.String()}
+	router.recovery.pendingResends[router.recovery.resendRef(peer.String(), root)] = recoveryResend{originalID: testUUID(0x50), peer: peer.String()}
 	router.recovery.proofs[recoveryProofKey{peer: peer.String(), scope: root}] = recoveryProofRequest{resolutionID: "r-1", granted: true}
 	router.recovery.mu.Unlock()
 
@@ -564,7 +564,7 @@ func TestRecoveryPassRetriesStalledResends(t *testing.T) {
 	router.recovery.pass(context.Background())
 
 	router.recovery.mu.Lock()
-	_, stillQueued := router.recovery.pendingResends[root]
+	_, stillQueued := router.recovery.pendingResends[router.recovery.resendRef(peer.String(), root)]
 	router.recovery.mu.Unlock()
 	if stillQueued {
 		t.Fatal("the scheduler pass did not re-drive the stalled re-send")
@@ -653,15 +653,15 @@ func TestResendTerminalRetriedNotDropped(t *testing.T) {
 		t.Fatalf("append original: %v", err)
 	}
 	router.recovery.mu.Lock()
-	router.recovery.pendingResends[root] = recoveryResend{
+	router.recovery.pendingResends[router.recovery.resendRef(peer.String(), root)] = recoveryResend{
 		originalID: originalID, peer: peer.String(), sentReplacementID: replacementID,
 	}
 	router.recovery.mu.Unlock()
 
-	router.recovery.tryResend(root)
+	router.recovery.tryResend(router.recovery.resendRef(peer.String(), root))
 	router.recovery.mu.Lock()
-	_, stillActive := router.recovery.pendingResends[root]
-	_, indebted := router.recovery.terminalDebts[root]
+	_, stillActive := router.recovery.pendingResends[router.recovery.resendRef(peer.String(), root)]
+	_, indebted := router.recovery.terminalDebts[router.recovery.resendRef(peer.String(), root)]
 	router.recovery.mu.Unlock()
 	if stillActive {
 		t.Fatal("a terminal debt kept its active-pool slot")
@@ -683,7 +683,7 @@ func TestResendTerminalRetriedNotDropped(t *testing.T) {
 	}
 	router.recovery.pass(context.Background())
 	router.recovery.mu.Lock()
-	_, indebted = router.recovery.terminalDebts[root]
+	_, indebted = router.recovery.terminalDebts[router.recovery.resendRef(peer.String(), root)]
 	router.recovery.mu.Unlock()
 	if indebted {
 		t.Fatal("the retried terminal did not settle the debt")
@@ -752,7 +752,7 @@ func TestCrashedTerminalDebtRestoredNotResent(t *testing.T) {
 	})
 	router.recovery.pass(context.Background())
 	router.recovery.mu.Lock()
-	_, indebted := router.recovery.terminalDebts[ghostOriginal]
+	_, indebted := router.recovery.terminalDebts[router.recovery.resendRef(peer.String(), ghostOriginal)]
 	router.recovery.mu.Unlock()
 	if indebted {
 		t.Fatal("a debt with a vanished original wedged instead of settling")
@@ -806,7 +806,7 @@ func TestAwaitingTurnBlocksEventRetry(t *testing.T) {
 	root := testUUID(0xE0)
 
 	router.recovery.mu.Lock()
-	router.recovery.pendingResends[root] = recoveryResend{
+	router.recovery.pendingResends[router.recovery.resendRef(peer.String(), root)] = recoveryResend{
 		originalID: root, peer: peer.String(), replacementID: testUUID(0xE1), awaitingTurn: true,
 	}
 	router.recovery.proofs[recoveryProofKey{peer: peer.String(), scope: root}] = recoveryProofRequest{resolutionID: "r-turn", granted: true}
@@ -837,15 +837,15 @@ func TestResendClaimDefersRelease(t *testing.T) {
 		ReplacementID: testUUID(0xC1), CreatedAt: time.Now().UTC(),
 	})
 	router.recovery.mu.Lock()
-	router.recovery.pendingResends[root] = recoveryResend{
+	router.recovery.pendingResends[router.recovery.resendRef(peer.String(), root)] = recoveryResend{
 		originalID: root, peer: peer.String(), replacementID: testUUID(0xC1), busy: true,
 	}
 	router.recovery.mu.Unlock()
 
 	// The release arrives mid-claim: everything must survive.
-	router.recovery.releaseResend(client.chatLog, root)
+	router.recovery.releaseResend(client.chatLog, router.recovery.resendRef(peer.String(), root))
 	router.recovery.mu.Lock()
-	entry, stillQueued := router.recovery.pendingResends[root]
+	entry, stillQueued := router.recovery.pendingResends[router.recovery.resendRef(peer.String(), root)]
 	router.recovery.mu.Unlock()
 	if !stillQueued || !entry.pendingRelease {
 		t.Fatalf("a mid-claim release stripped the entry: queued=%v %+v", stillQueued, entry)
@@ -855,9 +855,9 @@ func TestResendClaimDefersRelease(t *testing.T) {
 	}
 
 	// The claim drops: the deferred release executes in full.
-	router.recovery.unclaimResend(client.chatLog, root)
+	router.recovery.unclaimResend(client.chatLog, router.recovery.resendRef(peer.String(), root))
 	router.recovery.mu.Lock()
-	_, stillQueued = router.recovery.pendingResends[root]
+	_, stillQueued = router.recovery.pendingResends[router.recovery.resendRef(peer.String(), root)]
 	router.recovery.mu.Unlock()
 	if stillQueued {
 		t.Fatal("the deferred release did not execute at unclaim")
@@ -884,16 +884,16 @@ func TestResendStaleTaskRetiresOnIDMismatch(t *testing.T) {
 	// The STALE in-memory task still carries the previous incarnation's id
 	// and a granted proof, so it reaches the durable re-check.
 	router.recovery.mu.Lock()
-	router.recovery.pendingResends[root] = recoveryResend{
+	router.recovery.pendingResends[router.recovery.resendRef(peer.String(), root)] = recoveryResend{
 		originalID: root, peer: peer.String(), replacementID: testUUID(0xC4),
 	}
 	router.recovery.proofs[recoveryProofKey{peer: peer.String(), scope: root}] = recoveryProofRequest{resolutionID: "r-aba", granted: true}
 	router.recovery.mu.Unlock()
 
-	router.recovery.tryResend(root)
+	router.recovery.tryResend(router.recovery.resendRef(peer.String(), root))
 
 	router.recovery.mu.Lock()
-	_, stillQueued := router.recovery.pendingResends[root]
+	_, stillQueued := router.recovery.pendingResends[router.recovery.resendRef(peer.String(), root)]
 	router.recovery.mu.Unlock()
 	if stillQueued {
 		t.Fatal("the stale task survived the id mismatch")
@@ -970,7 +970,7 @@ func TestReconcileResendIntentsFinishesCrashedTerminal(t *testing.T) {
 		t.Fatal("a never-sent intent invented a terminal")
 	}
 	router.recovery.mu.Lock()
-	restored, active := router.recovery.pendingResends[ghostOriginal]
+	restored, active := router.recovery.pendingResends[router.recovery.resendRef(peer.String(), ghostOriginal)]
 	router.recovery.mu.Unlock()
 	if !active || restored.replacementID != testUUID(0x73) {
 		t.Fatalf("the crashed sender task was not restored with its stored id: active=%v %+v", active, restored)
@@ -997,6 +997,57 @@ func TestReconcileResendIntentsFinishesCrashedTerminal(t *testing.T) {
 	}
 }
 
+func TestReconcileResendExpiryKeepsAnotherPeersCollidingRoot(t *testing.T) {
+	t.Parallel()
+	router, client, id := newRecoveryRouter(t)
+	self := domain.PeerIdentityFromWire(id.Address)
+	expiredPeer := domaintest.ID("expired-colliding-root-peer")
+	activePeer := domaintest.ID("active-colliding-root-peer")
+	root := testUUID(0xD4)
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	router.recovery.clock = func() time.Time { return now }
+	ctx := context.Background()
+	for i, peer := range []domain.PeerIdentity{expiredPeer, activePeer} {
+		if inserted, err := client.chatLog.AppendReportNew(ctx, "dm", self, chatlog.Entry{ID: root, Sender: id.Address, Recipient: peer.String(), Body: "original-" + peer.String(), CreatedAt: now.Format(time.RFC3339Nano)}); err != nil || !inserted {
+			t.Fatalf("colliding original %s inserted=%v err=%v", peer, inserted, err)
+		}
+		created := now.Add(-time.Minute)
+		if i == 0 {
+			created = now.Add(-8 * 24 * time.Hour)
+		}
+		replacement := testUUID(byte(0xD5 + i))
+		admitTestResendIntent(t, client.chatLog, chatlog.ResendIntent{Root: root, OriginalID: root, Peer: peer.String(), ReplacementID: replacement, CreatedAt: created})
+		router.recovery.pendingResends[router.recovery.resendRef(peer.String(), root)] = recoveryResend{originalID: root, peer: peer.String(), replacementID: replacement}
+		router.recovery.proofs[recoveryProofKey{peer: peer.String(), scope: root}] = recoveryProofRequest{}
+	}
+	router.recovery.reconcileResendIntents(ctx, client.chatLog)
+	if _, found, err := client.chatLog.ResendIntentByPeer(ctx, expiredPeer.String(), root); err != nil || found {
+		t.Fatalf("expired intent remains: found=%v err=%v", found, err)
+	}
+	active, found, err := client.chatLog.ResendIntentByPeer(ctx, activePeer.String(), root)
+	if err != nil || !found || active.ReplacementID != testUUID(0xD6) || !active.CreatedAt.Equal(now.Add(-time.Minute)) {
+		t.Fatalf("another peer's same-root intent changed: %+v found=%v err=%v", active, found, err)
+	}
+	expiredRef, activeRef := router.recovery.resendRef(expiredPeer.String(), root), router.recovery.resendRef(activePeer.String(), root)
+	if _, retained := router.recovery.pendingResends[expiredRef]; retained {
+		t.Fatal("expired peer's active resend was not retired")
+	}
+	if retained, ok := router.recovery.pendingResends[activeRef]; !ok || retained.replacementID != testUUID(0xD6) {
+		t.Fatal("expiry retired another peer's active resend", retained)
+	}
+	if _, retained := router.recovery.proofs[recoveryProofKey{peer: expiredPeer.String(), scope: root}]; retained {
+		t.Fatal("expired peer's proof scope was not retired")
+	}
+	if _, retained := router.recovery.proofs[recoveryProofKey{peer: activePeer.String(), scope: root}]; !retained {
+		t.Fatal("expiry retired another peer's proof scope")
+	}
+	for _, ref := range []domain.MessageRef{expiredRef, activeRef} {
+		if row, found, err := client.chatLog.EntryByRef(ctx, ref); err != nil || !found || row.Body != "original-"+ref.Recipient {
+			t.Fatalf("expiry mutated original chat row %v: %+v found=%v err=%v", ref, row, found, err)
+		}
+	}
+}
+
 // TestActiveResendAgesOut: the seven-day deadline reaches a resend whose
 // root sits in the ACTIVE queue too — an unreachable peer must not hold an
 // active slot, a backlog slot and a proof loop forever.
@@ -1011,7 +1062,7 @@ func TestActiveResendAgesOut(t *testing.T) {
 		ReplacementID: testUUID(0xB1), CreatedAt: time.Now().UTC().Add(-8 * 24 * time.Hour),
 	})
 	router.recovery.mu.Lock()
-	router.recovery.pendingResends[root] = recoveryResend{
+	router.recovery.pendingResends[router.recovery.resendRef(peer.String(), root)] = recoveryResend{
 		originalID: root, peer: peer.String(), replacementID: testUUID(0xB1),
 	}
 	router.recovery.mu.Unlock()
@@ -1019,7 +1070,7 @@ func TestActiveResendAgesOut(t *testing.T) {
 	router.recovery.pass(context.Background())
 
 	router.recovery.mu.Lock()
-	_, stillActive := router.recovery.pendingResends[root]
+	_, stillActive := router.recovery.pendingResends[router.recovery.resendRef(peer.String(), root)]
 	router.recovery.mu.Unlock()
 	if stillActive {
 		t.Fatal("an expired resend kept its active slot")
@@ -1215,12 +1266,12 @@ func TestResendQuotasBoundSenderLeg(t *testing.T) {
 		t.Fatal("test setup: no stored intent for the first root")
 	}
 	router.recovery.mu.Lock()
-	router.recovery.pendingResends = map[string]recoveryResend{}
+	router.recovery.pendingResends = map[domain.MessageRef]recoveryResend{}
 	router.recovery.mu.Unlock()
 	notice(t, repeatRoot)
 	router.recovery.pass(context.Background())
 	router.recovery.mu.Lock()
-	restored, active := router.recovery.pendingResends[repeatRoot]
+	restored, active := router.recovery.pendingResends[router.recovery.resendRef(flood.String(), repeatRoot)]
 	router.recovery.mu.Unlock()
 	if !active || restored.replacementID != storedID {
 		t.Fatalf("repeated notice diverged from the stored id: active=%v got=%q want=%q", active, restored.replacementID, storedID)

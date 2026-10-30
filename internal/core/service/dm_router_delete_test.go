@@ -1381,7 +1381,7 @@ func TestSendMessageDeleteRecallsAMessageThatNeverLeftTheNode(t *testing.T) {
 
 	r, c, myAddr, counter := newTestDMRouterForDelete(t)
 	r.peerReachableFn = func(domain.PeerIdentity) bool { return true }
-	r.client.freezeMessageDeliveryFn = func(context.Context, domain.MessageID) (bool, error) {
+	r.client.freezeMessageDeliveryToFn = func(context.Context, domain.PeerIdentity, domain.MessageID) (bool, error) {
 		return true, nil
 	}
 
@@ -1523,7 +1523,7 @@ func TestSendMessageDeletePublishesOnlyWhenTheDeletionIsFinished(t *testing.T) {
 	}
 
 	// A recall owes nobody anything, so it is final on return.
-	r.client.freezeMessageDeliveryFn = func(context.Context, domain.MessageID) (bool, error) {
+	r.client.freezeMessageDeliveryToFn = func(context.Context, domain.PeerIdentity, domain.MessageID) (bool, error) {
 		return true, nil
 	}
 	const recalled = "b1000000-2222-4444-8888-cccccccccccc"
@@ -1826,7 +1826,7 @@ func TestDeleteReadsTheRowsProofWhenTheNodeHasForgotten(t *testing.T) {
 	}
 
 	// The node has no entry left, so its answer proves nothing.
-	r.client.freezeMessageDeliveryFn = func(context.Context, domain.MessageID) (bool, error) {
+	r.client.freezeMessageDeliveryToFn = func(context.Context, domain.PeerIdentity, domain.MessageID) (bool, error) {
 		return false, nil
 	}
 
@@ -1878,7 +1878,7 @@ func TestFailedWithdrawalKeepsTheMessageFrozenAndOwed(t *testing.T) {
 
 	// The freeze holds, so the row's proof is trustworthy; the withdrawal
 	// that would tidy up after it does not.
-	r.client.freezeMessageDeliveryFn = func(context.Context, domain.MessageID) (bool, error) {
+	r.client.freezeMessageDeliveryToFn = func(context.Context, domain.PeerIdentity, domain.MessageID) (bool, error) {
 		return false, nil
 	}
 	r.client.cancelConversationDeliveryFn = func(context.Context, domain.PeerIdentity) (ConversationCancellation, error) {
@@ -1934,7 +1934,7 @@ func TestFreezeIsReleasedOnEveryEarlyExit(t *testing.T) {
 		thawed = append(thawed, ids...)
 		return nil
 	}
-	r.client.freezeMessageDeliveryFn = func(context.Context, domain.MessageID) (bool, error) {
+	r.client.freezeMessageDeliveryToFn = func(context.Context, domain.PeerIdentity, domain.MessageID) (bool, error) {
 		return false, nil
 	}
 
@@ -1955,13 +1955,30 @@ func TestFreezeIsReleasedOnEveryEarlyExit(t *testing.T) {
 		t.Fatalf("thawed = %v, want the refused id: a freeze with no TTL was left standing", thawed)
 	}
 
-	// A row that cannot be read at all takes the same exit.
+	// The database blinks AFTER the scoped freeze, so this still exercises
+	// compensation for a hold that was actually acquired, not preflight failure.
 	thawed = nil
 	const unreadable = "50000000-2222-4444-8888-cccccccccccc"
 	owner := domain.PeerIdentityFromWire(myAddr.String())
-	r.client.chatlog = NewChatlogGateway(newClosedChatlogStore(t, owner), owner)
+	database := newTestStateDB(t, owner)
+	r.client.chatlog = NewChatlogGateway(testChatlogStore(database.Executor(), owner), owner)
+	insertChatlogEntry(t, r.client.chatlog, peer, chatlog.Entry{ID: unreadable, Sender: myAddr.String(), Recipient: peer.String(), Body: "ciphertext", CreatedAt: time.Now().UTC().Format(time.RFC3339Nano)})
+	freezeReached := false
+	r.client.freezeMessageDeliveryToFn = func(_ context.Context, actualPeer domain.PeerIdentity, id domain.MessageID) (bool, error) {
+		if actualPeer != peer || string(id) != unreadable {
+			t.Fatalf("scoped freeze=%s/%s", actualPeer, id)
+		}
+		freezeReached = true
+		if err := database.Close(); err != nil {
+			t.Fatal(err)
+		}
+		return false, nil
+	}
 	if _, err := r.SendMessageDelete(ctx, peer, domain.MessageID(unreadable)); err == nil {
 		t.Fatal("a delete over a dead database must fail")
+	}
+	if !freezeReached {
+		t.Fatal("the database failed before a scoped freeze was acquired")
 	}
 	if len(thawed) != 1 || string(thawed[0]) != unreadable {
 		t.Fatalf("thawed = %v, want the unreadable id", thawed)
@@ -1990,7 +2007,7 @@ func TestFreezeIsReleasedEvenWhenTheCallerCancelled(t *testing.T) {
 		thawErr = ctx.Err()
 		return thawErr
 	}
-	r.client.freezeMessageDeliveryFn = func(context.Context, domain.MessageID) (bool, error) {
+	r.client.freezeMessageDeliveryToFn = func(context.Context, domain.PeerIdentity, domain.MessageID) (bool, error) {
 		return false, nil
 	}
 
@@ -2005,10 +2022,22 @@ func TestFreezeIsReleasedEvenWhenTheCallerCancelled(t *testing.T) {
 	})
 
 	cancelled, cancel := context.WithCancel(context.Background())
-	cancel()
+	defer cancel()
+	freezeReached := false
+	r.client.freezeMessageDeliveryToFn = func(_ context.Context, actualPeer domain.PeerIdentity, id domain.MessageID) (bool, error) {
+		if actualPeer != peer || string(id) != target {
+			t.Fatalf("scoped freeze=%s/%s", actualPeer, id)
+		}
+		freezeReached = true
+		cancel()
+		return false, nil
+	}
 
 	if _, err := r.SendMessageDelete(cancelled, peer, domain.MessageID(target)); err == nil {
 		t.Fatal("an immutable message must be refused")
+	}
+	if !freezeReached {
+		t.Fatal("the caller cancelled before acquiring the scoped freeze")
 	}
 	if !thawCalled {
 		t.Fatal("the freeze was never released")

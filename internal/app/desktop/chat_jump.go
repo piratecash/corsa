@@ -1,6 +1,7 @@
 package desktop
 
 import (
+	"github.com/piratecash/corsa/internal/core/domain"
 	"time"
 
 	"gioui.org/layout"
@@ -52,7 +53,7 @@ import (
 // "as close as the conversation allows" without this file testing for it.
 type chatJump struct {
 	// msgID is the message the user asked for; "" when nothing is pending.
-	msgID string
+	msgID domain.MessageRef
 	// index is where the target sits, refreshed every frame, and it exists for
 	// one reason: measure is called for every child and has to recognise this
 	// one. It is NOT how a later frame FINDS the target — that re-reads the
@@ -105,7 +106,7 @@ type drawnChild struct {
 // message) scrolled the conversation to the end and the jump was simply lost:
 // measured at 602px past the target, which is to say off the screen it had
 // just been put on.
-func (j *chatJump) pending() bool { return j.msgID != "" }
+func (j *chatJump) pending() bool { return j.msgID.ID != "" }
 
 // measure records what the list gave one child, and is called for every child
 // of the frame. Two different things are kept: the target's own height, which
@@ -242,7 +243,7 @@ func (j *chatJump) spanOf(from, to int) (int, bool) {
 // release draws a frame — but when the two are delivered together, which a
 // synthetic tap, a stylus or a dropped frame all do, the click was recorded
 // and then sat there until the user happened to move the mouse.
-func (w *Window) beginChatJump(gtx layout.Context, msgID string) {
+func (w *Window) beginChatJump(gtx layout.Context, msgID domain.MessageRef) {
 	w.chatJump = chatJump{msgID: msgID}
 	w.msgHighlight.start(msgID, gtx.Now)
 	gtx.Execute(op.InvalidateCmd{})
@@ -293,7 +294,7 @@ func (w *Window) applyChatJump(gtx layout.Context) {
 	// The cache is rebuilt earlier in this same frame, so an id it does not
 	// hold is a message that is gone — nothing to jump to, and nothing to
 	// retry.
-	target, ok := w.findCachedMsg(w.chatJump.msgID)
+	target, ok := w.findCachedMsgRef(w.chatJump.msgID)
 	if !ok {
 		w.chatJump = chatJump{}
 		return
@@ -458,7 +459,7 @@ const (
 // before the reader has looked.
 type msgHighlight struct {
 	// msgID is the lit message; "" when nothing is lit.
-	msgID string
+	msgID domain.MessageRef
 	// since is when it was lit, on the frame clock (gtx.Now) rather than
 	// time.Now: the frames are what draws the fade, and Gio hands each one
 	// the time it was scheduled for.
@@ -467,14 +468,14 @@ type msgHighlight struct {
 	level float32
 }
 
-func (h *msgHighlight) start(msgID string, now time.Time) {
+func (h *msgHighlight) start(msgID domain.MessageRef, now time.Time) {
 	*h = msgHighlight{msgID: msgID, since: now}
 }
 
 // level tells a bubble how lit it is. Every bubble asks; only one is ever
 // answered with more than zero.
-func (h *msgHighlight) levelFor(msgID string) float32 {
-	if msgID == "" || msgID != h.msgID {
+func (h *msgHighlight) levelFor(msgID domain.MessageRef) float32 {
+	if msgID.ID == "" || msgID != h.msgID {
 		return 0
 	}
 	return h.level
@@ -483,7 +484,7 @@ func (h *msgHighlight) levelFor(msgID string) float32 {
 // tick recomputes this frame's level and reports whether the highlight is
 // still running — that is, whether another frame is owed.
 func (h *msgHighlight) tick(now time.Time) bool {
-	if h.msgID == "" {
+	if h.msgID.ID == "" {
 		return false
 	}
 	elapsed := now.Sub(h.since)

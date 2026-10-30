@@ -69,7 +69,7 @@ func TestCancelOutgoingDeliveryClearsEveryDeliveryHook(t *testing.T) {
 	svc.pending[domain.PeerAddress("127.0.0.1:64646")] = []pendingFrame{{Frame: frame, QueuedAt: time.Now().UTC()}}
 	svc.pendingKeys[pendingFrameKey(domain.PeerAddress("127.0.0.1:64646"), frame)] = struct{}{}
 	svc.noteOutboundQueuedLocked(frame, "")
-	_, registered := svc.awaitingDelivered[target]
+	_, registered := svc.awaitingDelivered[svc.ownMessageIdentity(target, recipientID.Address)]
 	svc.deliveryMu.Unlock()
 	if !registered {
 		t.Fatal("precondition: own outgoing DM must be registered in awaitingDelivered")
@@ -97,11 +97,11 @@ func TestCancelOutgoingDeliveryClearsEveryDeliveryHook(t *testing.T) {
 		t.Error("envelope still in the backlog after cancellation")
 	}
 	svc.deliveryMu.RLock()
-	_, stillAwaiting := svc.awaitingDelivered[target]
-	_, stillOutbound := svc.outbound[string(target)]
+	_, stillAwaiting := svc.awaitingDelivered[svc.ownMessageIdentity(target, recipientID.Address)]
+	_, stillOutbound := svc.outbound[svc.ownMessageIdentity(target, recipientID.Address)]
 	// Not a hook the cancellation clears: an own message is never armed
 	// for relay retry at all, before or after the withdrawal.
-	_, ownArmed := svc.relayRetry[relayMessageKey(target)]
+	_, ownArmed := svc.relayRetry[relayMessageIdentityKey(svc.ownMessageIdentity(target, recipientID.Address))]
 	pendingLeft := svc.countPendingFramesLocked(svc.ownMessageIdentity(target, recipientID.Address))
 	svc.deliveryMu.RUnlock()
 
@@ -274,7 +274,7 @@ func TestCancelOutgoingDeliveryReportsNeverEmitted(t *testing.T) {
 	storeOwnOutgoingDM(t, svc, recipientID, target)
 
 	svc.deliveryMu.RLock()
-	entry, registered := svc.awaitingDelivered[target]
+	entry, registered := svc.awaitingDelivered[svc.ownMessageIdentity(target, recipientID.Address)]
 	emitted := registered && entry.Emitted
 	svc.deliveryMu.RUnlock()
 	if !registered {
@@ -336,7 +336,7 @@ func TestBacklogReplayClearsTheNeverEmittedClaim(t *testing.T) {
 	storeOwnOutgoingDM(t, svc, recipientID, target)
 
 	svc.deliveryMu.RLock()
-	entry, registered := svc.awaitingDelivered[target]
+	entry, registered := svc.awaitingDelivered[svc.ownMessageIdentity(target, recipientID.Address)]
 	heldBefore := registered && !entry.Emitted
 	svc.deliveryMu.RUnlock()
 	if !heldBefore {

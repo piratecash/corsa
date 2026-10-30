@@ -2,6 +2,16 @@
 
 ## English
 
+### Current message identity
+
+Migration 0009 changes local identity to `(topic, id, sender, recipient)`.
+An ID alone is not a global message key. Exact APIs carry all four fields;
+legacy ID-only operations refuse an ambiguous local selection. See
+[the S6 local message identity repair](operations/s6-local-message-identity.md)
+for journal binding, duplicate handling and upgrade/rollback boundaries.
+The schema and `INSERT OR IGNORE` examples below describe earlier migrations;
+the current migration catalog and the identity rules here take precedence.
+
 ### Overview
 
 The `chatlog` package provides SQLite-backed storage for chat messages.
@@ -1113,10 +1123,12 @@ FetchSinglePreview(ctx, peerAddress)
 
 ### Deduplication
 
-Messages are deduplicated by primary key (`id`). The `INSERT OR IGNORE`
-statement ensures that re-appending a message with the same ID is silently
-ignored. Additionally, the in-memory `seen` map in the node service handles
-deduplication before the chatlog append, so duplicate writes don't normally occur.
+Messages are deduplicated by the full primary key
+`(topic, id, sender, recipient)`. `AppendReportNew` uses an explicit conflict
+target for that key; invalid enum values return `ErrInvalidEntry`, rather than
+being mistaken for an already stored message. Legacy `Append` retains its
+separate compatibility behavior. In-memory message state also uses the full
+reference, so another author or recipient may reuse a wire ID independently.
 
 ### Conversation listing
 
@@ -1151,6 +1163,16 @@ The desktop client minimizes memory usage by following these principles:
 ---
 
 ## Русский
+
+### Текущая идентичность сообщения
+
+Миграция 0009 меняет локальную идентичность на `(topic, id, sender, recipient)`.
+Один ID не является глобальным ключом сообщения. Точные API передают все четыре
+поля; старые операции только с ID отказывают при неоднозначном локальном выборе.
+Привязка журналов, обработка дубликатов и границы обновления/отката описаны в
+[исправлении локальной идентичности S6](operations/s6-local-message-identity.md).
+Примеры схемы и `INSERT OR IGNORE` ниже описывают прежние миграции; текущий
+каталог миграций и приведённые здесь правила идентичности имеют приоритет.
 
 ### Обзор
 
@@ -2222,10 +2244,12 @@ storeDeliveryReceipt()
 
 ### Дедупликация
 
-Сообщения дедуплицируются по первичному ключу (`id`). Оператор `INSERT OR IGNORE`
-гарантирует, что повторная вставка сообщения с тем же ID будет тихо проигнорирована.
-Кроме того, in-memory карта `seen` в сервисе ноды обрабатывает дедупликацию до
-записи в chatlog, поэтому дублирующие записи обычно не возникают.
+Сообщения дедуплицируются по полному первичному ключу
+`(topic, id, sender, recipient)`. `AppendReportNew` задаёт явную цель конфликта
+для этого ключа; недопустимые enum возвращают `ErrInvalidEntry`, а не считаются
+уже сохранённым сообщением. Старый `Append` сохраняет отдельное поведение
+совместимости. Состояние сообщений в памяти тоже использует полную ссылку,
+поэтому другой автор или получатель может независимо использовать тот же wire ID.
 
 ### Список диалогов
 

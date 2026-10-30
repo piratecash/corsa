@@ -2,6 +2,7 @@ package desktop
 
 import (
 	"bytes"
+	"github.com/piratecash/corsa/internal/core/domain"
 	"image"
 	"image/color"
 	"image/png"
@@ -171,13 +172,13 @@ func TestPeerChangeGivesBackTheConversationsPictures(t *testing.T) {
 		snap:         service.RouterSnapshot{ActivePeer: domaintest.ID("peer-b")},
 		lastChatPeer: domaintest.ID("peer-a"),
 	}
-	w.thumbClickBtns = map[string]*widget.Clickable{"msg-1": new(widget.Clickable)}
-	w.fileDownloadBtns = map[string]*widget.Clickable{"msg-1": new(widget.Clickable)}
-	w.fileCancelDownloadBtns = map[string]*widget.Clickable{"msg-1": new(widget.Clickable)}
-	w.fileRestartBtns = map[string]*widget.Clickable{"msg-1": new(widget.Clickable)}
-	w.fileRevealBtns = map[string]*widget.Clickable{"msg-1": new(widget.Clickable)}
-	w.fileOpenBtns = map[string]*widget.Clickable{"msg-1": new(widget.Clickable)}
-	w.fileRowDeleteBtns = map[string]*widget.Clickable{"msg-1": new(widget.Clickable)}
+	w.thumbClickBtns = map[domain.MessageRef]*widget.Clickable{fixtureMessageRef("msg-1"): new(widget.Clickable)}
+	w.fileDownloadBtns = map[domain.MessageRef]*widget.Clickable{fixtureMessageRef("msg-1"): new(widget.Clickable)}
+	w.fileCancelDownloadBtns = map[domain.MessageRef]*widget.Clickable{fixtureMessageRef("msg-1"): new(widget.Clickable)}
+	w.fileRestartBtns = map[domain.MessageRef]*widget.Clickable{fixtureMessageRef("msg-1"): new(widget.Clickable)}
+	w.fileRevealBtns = map[domain.MessageRef]*widget.Clickable{fixtureMessageRef("msg-1"): new(widget.Clickable)}
+	w.fileOpenBtns = map[domain.MessageRef]*widget.Clickable{fixtureMessageRef("msg-1"): new(widget.Clickable)}
+	w.fileRowDeleteBtns = map[domain.MessageRef]*widget.Clickable{fixtureMessageRef("msg-1"): new(widget.Clickable)}
 	decodedBounds(t, &w.thumbCache, imageSource{Path: path, ContentID: "hash-a"})
 
 	w.resetConversationStateOnPeerChange()

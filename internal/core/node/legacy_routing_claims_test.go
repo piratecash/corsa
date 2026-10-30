@@ -170,7 +170,7 @@ func TestUnprovenClaimHopSignalsAreNotChargedToAV2Identity(t *testing.T) {
 	tw := newRoutingTwins(t)
 	for i := 0; i < routing.BlackHoleThreshold+1; i++ {
 		tw.svc.onRelayHopAckTimeout(relayForwardState{
-			MessageID:    "via-impostor",
+			Message:      relayStateFixtureRef("via-impostor"),
 			Recipient:    idTargetX,
 			ForwardedTo:  tw.impostor.address,
 			ForwardedVia: sessionRoutingSender(tw.impostor),
@@ -408,7 +408,7 @@ func TestAV2ProofForgetsWhatALegacyClaimWroteBeforeIt(t *testing.T) {
 	})
 	upsertRouteViaForTest(t, svc, idTargetY, x)
 	for i := 0; i < routing.BlackHoleThreshold; i++ {
-		svc.onRelayHopAckTimeout(relayForwardState{MessageID: "pre-proof", Recipient: idTargetY, ForwardedTo: impostor.address, ForwardedVia: sessionRoutingSender(impostor)})
+		svc.onRelayHopAckTimeout(relayForwardState{Message: domain.MessageRef{Topic: "dm", ID: "pre-proof", Sender: idNodeA.String(), Recipient: idTargetY.String()}, Recipient: idTargetY, ForwardedTo: impostor.address, ForwardedVia: sessionRoutingSender(impostor)})
 	}
 	if len(svc.routingTable.Lookup(idTargetY)) != 0 {
 		t.Fatal("precondition: the impostor's hop failures cooled the route via X down")

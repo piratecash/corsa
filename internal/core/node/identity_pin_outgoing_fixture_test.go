@@ -499,11 +499,15 @@ func TestR2aPositiveWriteTerminalAndFreezeLifecycle(t *testing.T) {
 			}
 			switch terminal {
 			case "freeze_thaw":
-				s.freezeDeliveries([]protocol.MessageID{e.ID})
+				if _, err := s.FreezeOutgoingDeliveriesTo(domain.PeerIdentityFromWire(e.Recipient), []protocol.MessageID{e.ID}); err != nil {
+					t.Fatal(err)
+				}
 				if _, _, err := s.settleR2aOwnHop(t.Context(), result); !errors.Is(err, errR2aOrigin) {
 					t.Fatal("freeze ignored", err)
 				}
-				s.ThawOutgoingDeliveries([]protocol.MessageID{e.ID})
+				if err := s.ThawOutgoingDeliveriesTo(domain.PeerIdentityFromWire(e.Recipient), []protocol.MessageID{e.ID}); err != nil {
+					t.Fatal(err)
+				}
 			case "withdraw":
 				if _, err := s.CancelOutgoingDelivery(e.ID, domain.PeerIdentityFromWire(e.Recipient)); err != nil {
 					t.Fatal(err)

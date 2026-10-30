@@ -1,6 +1,7 @@
 package node
 
 import (
+	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
@@ -84,5 +85,23 @@ func (s *Service) ownMessageIdentity(id protocol.MessageID, recipient string) me
 // dedup key (pendingFrameKey) is built from the same identity, so none of
 // them can disagree about which frames belong to the message.
 func frameCarriesMessage(frame protocol.Frame, message messageIdentity) bool {
-	return messageIdentityOf(frameEnvelope(frame)) == message
+	envelope := frameEnvelope(frame)
+	return envelope.Topic == "dm" && messageIdentityOf(envelope) == message
+}
+
+// admissionRef retains the topic namespace as well as both verified endpoints.
+func admissionRef(msg incomingMessage) domain.MessageRef {
+	return domain.MessageRef{Topic: msg.Topic, ID: string(msg.ID), Sender: msg.Sender, Recipient: msg.Recipient}
+}
+
+func envelopeRef(envelope protocol.Envelope) domain.MessageRef {
+	return domain.MessageRef{Topic: envelope.Topic, ID: string(envelope.ID), Sender: envelope.Sender, Recipient: envelope.Recipient}
+}
+
+func (s *Service) ownMessageSet(ids map[protocol.MessageID]struct{}, recipient string) map[messageIdentity]struct{} {
+	refs := make(map[messageIdentity]struct{}, len(ids))
+	for id := range ids {
+		refs[s.ownMessageIdentity(id, recipient)] = struct{}{}
+	}
+	return refs
 }

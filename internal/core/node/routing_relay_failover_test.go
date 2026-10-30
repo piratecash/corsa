@@ -33,6 +33,8 @@ func makeRelayFrameLine(t *testing.T, messageID string, recipient domain.PeerIde
 	t.Helper()
 	frame := protocol.Frame{
 		Type:      "relay_message",
+		Topic:     "dm",
+		Address:   idNodeA.String(),
 		ID:        messageID,
 		Recipient: recipient.String(),
 		HopCount:  1,
@@ -105,7 +107,7 @@ func TestFailoverRelay_FailoverOnHopAckTimeout(t *testing.T) {
 	// forwarded through A.
 	line := makeRelayFrameLine(t, "msg-failover", idTargetX)
 	svc.relayStates.store(&relayForwardState{
-		MessageID:            "msg-failover",
+		Message:              relayStateFixtureRef("msg-failover"),
 		ForwardedTo:          domain.PeerAddress("addr-A"),
 		Recipient:            idTargetX,
 		HopCount:             1,
@@ -119,7 +121,7 @@ func TestFailoverRelay_FailoverOnHopAckTimeout(t *testing.T) {
 	// callback; we mirror that here to stay faithful to the
 	// production call chain).
 	snap := relayForwardState{
-		MessageID:            "msg-failover",
+		Message:              relayStateFixtureRef("msg-failover"),
 		ForwardedTo:          domain.PeerAddress("addr-A"),
 		Recipient:            idTargetX,
 		HopCount:             1,
@@ -147,7 +149,7 @@ func TestFailoverRelay_FailoverOnHopAckTimeout(t *testing.T) {
 	// State should now point at B with RetryAttempt=1, fresh budget,
 	// observed=false, and A in AbandonedForwardedTo.
 	svc.relayStates.mu.Lock()
-	st := svc.relayStates.states["msg-failover"]
+	st := svc.relayStates.states[relayStateFixtureRef("msg-failover")]
 	svc.relayStates.mu.Unlock()
 	if st.ForwardedTo != "addr-C" {
 		t.Fatalf("ForwardedTo = %q, want addr-C", st.ForwardedTo)
@@ -214,7 +216,7 @@ func TestFailoverRelay_SkipsQuarantinedTransitNextHop(t *testing.T) {
 
 	line := makeRelayFrameLine(t, "msg-failover-q", idTargetX)
 	svc.relayStates.store(&relayForwardState{
-		MessageID:            "msg-failover-q",
+		Message:              relayStateFixtureRef("msg-failover-q"),
 		ForwardedTo:          domain.PeerAddress("addr-A"),
 		Recipient:            idTargetX,
 		HopCount:             1,
@@ -224,7 +226,7 @@ func TestFailoverRelay_SkipsQuarantinedTransitNextHop(t *testing.T) {
 	})
 
 	snap := relayForwardState{
-		MessageID:            "msg-failover-q",
+		Message:              relayStateFixtureRef("msg-failover-q"),
 		ForwardedTo:          domain.PeerAddress("addr-A"),
 		Recipient:            idTargetX,
 		HopCount:             1,
@@ -252,7 +254,7 @@ func TestFailoverRelay_SkipsQuarantinedTransitNextHop(t *testing.T) {
 
 	// State must point at C.
 	svc.relayStates.mu.Lock()
-	st := svc.relayStates.states["msg-failover-q"]
+	st := svc.relayStates.states[relayStateFixtureRef("msg-failover-q")]
 	svc.relayStates.mu.Unlock()
 	if st.ForwardedTo != "addr-C" {
 		t.Fatalf("ForwardedTo = %q, want addr-C (D should have been skipped by quarantine gate)", st.ForwardedTo)
@@ -284,7 +286,7 @@ func TestFailoverRelay_RespectsMaxRetries(t *testing.T) {
 
 	line := makeRelayFrameLine(t, "msg-maxed", idTargetX)
 	svc.relayStates.store(&relayForwardState{
-		MessageID:            "msg-maxed",
+		Message:              relayStateFixtureRef("msg-maxed"),
 		ForwardedTo:          domain.PeerAddress("addr-C"),
 		AbandonedForwardedTo: []domain.PeerAddress{"addr-A"},
 		Recipient:            idTargetX,
@@ -297,7 +299,7 @@ func TestFailoverRelay_RespectsMaxRetries(t *testing.T) {
 	})
 
 	snap := relayForwardState{
-		MessageID:            "msg-maxed",
+		Message:              relayStateFixtureRef("msg-maxed"),
 		ForwardedTo:          domain.PeerAddress("addr-C"),
 		AbandonedForwardedTo: []domain.PeerAddress{"addr-A"},
 		Recipient:            idTargetX,
@@ -327,7 +329,7 @@ func TestFailoverRelay_RespectsMaxRetries(t *testing.T) {
 	_ = sendChD // gossip fallback may legitimately enqueue here post-P1.2
 
 	svc.relayStates.mu.Lock()
-	st := svc.relayStates.states["msg-maxed"]
+	st := svc.relayStates.states[relayStateFixtureRef("msg-maxed")]
 	svc.relayStates.mu.Unlock()
 	if st.RetryAttempt != MaxFailoverRetries {
 		t.Fatalf("RetryAttempt = %d, want %d (failover retry must not run at the cap)", st.RetryAttempt, MaxFailoverRetries)
@@ -355,7 +357,7 @@ func TestFailoverRelay_NoAlternativeUplink_SkipsRetry(t *testing.T) {
 
 	line := makeRelayFrameLine(t, "msg-solo", idTargetX)
 	svc.relayStates.store(&relayForwardState{
-		MessageID:            "msg-solo",
+		Message:              relayStateFixtureRef("msg-solo"),
 		ForwardedTo:          domain.PeerAddress("addr-A"),
 		Recipient:            idTargetX,
 		RemainingTTL:         60,
@@ -365,7 +367,7 @@ func TestFailoverRelay_NoAlternativeUplink_SkipsRetry(t *testing.T) {
 	})
 
 	snap := relayForwardState{
-		MessageID:      "msg-solo",
+		Message:        relayStateFixtureRef("msg-solo"),
 		ForwardedTo:    domain.PeerAddress("addr-A"),
 		Recipient:      idTargetX,
 		HopAckObserved: true,
@@ -377,7 +379,7 @@ func TestFailoverRelay_NoAlternativeUplink_SkipsRetry(t *testing.T) {
 		t.Fatalf("retry resent through the failed uplink A; sendChA len = %d", len(sendChA))
 	}
 	svc.relayStates.mu.Lock()
-	st := svc.relayStates.states["msg-solo"]
+	st := svc.relayStates.states[relayStateFixtureRef("msg-solo")]
 	svc.relayStates.mu.Unlock()
 	if st.RetryAttempt != 0 {
 		t.Fatalf("RetryAttempt bumped to %d on no-alternative path", st.RetryAttempt)
@@ -411,7 +413,7 @@ func TestFailoverRelay_SkipsPreviousHop_SplitHorizon(t *testing.T) {
 
 	line := makeRelayFrameLine(t, "msg-splitH", idTargetX)
 	svc.relayStates.store(&relayForwardState{
-		MessageID:            "msg-splitH",
+		Message:              relayStateFixtureRef("msg-splitH"),
 		PreviousHop:          domain.PeerAddress("addr-C"), // C handed us the relay
 		ForwardedTo:          domain.PeerAddress("addr-A"),
 		Recipient:            idTargetX,
@@ -422,7 +424,7 @@ func TestFailoverRelay_SkipsPreviousHop_SplitHorizon(t *testing.T) {
 	})
 
 	snap := relayForwardState{
-		MessageID:      "msg-splitH",
+		Message:        relayStateFixtureRef("msg-splitH"),
 		PreviousHop:    domain.PeerAddress("addr-C"),
 		ForwardedTo:    domain.PeerAddress("addr-A"),
 		Recipient:      idTargetX,
@@ -469,7 +471,7 @@ func TestFailoverRelay_SkipsAbandonedUplinks(t *testing.T) {
 	// should be selectable.
 	line := makeRelayFrameLine(t, "msg-aban", idTargetX)
 	svc.relayStates.store(&relayForwardState{
-		MessageID:            "msg-aban",
+		Message:              relayStateFixtureRef("msg-aban"),
 		ForwardedTo:          domain.PeerAddress("addr-A"),
 		AbandonedForwardedTo: []domain.PeerAddress{"addr-C"},
 		Recipient:            idTargetX,
@@ -480,7 +482,7 @@ func TestFailoverRelay_SkipsAbandonedUplinks(t *testing.T) {
 	})
 
 	snap := relayForwardState{
-		MessageID:            "msg-aban",
+		Message:              relayStateFixtureRef("msg-aban"),
 		ForwardedTo:          domain.PeerAddress("addr-A"),
 		AbandonedForwardedTo: []domain.PeerAddress{"addr-C"},
 		Recipient:            idTargetX,
@@ -530,7 +532,7 @@ func TestFailoverRelay_EmptyFrameLine_SkipsRetry(t *testing.T) {
 	sendChC := installRelayCapableSession(t, svc, domain.PeerAddress("addr-C"), idPeerC)
 
 	svc.relayStates.store(&relayForwardState{
-		MessageID:            "msg-nopayload",
+		Message:              relayStateFixtureRef("msg-nopayload"),
 		ForwardedTo:          domain.PeerAddress("addr-A"),
 		Recipient:            idTargetX,
 		HopAckRemainingTicks: 0,
@@ -540,7 +542,7 @@ func TestFailoverRelay_EmptyFrameLine_SkipsRetry(t *testing.T) {
 	})
 
 	snap := relayForwardState{
-		MessageID:      "msg-nopayload",
+		Message:        relayStateFixtureRef("msg-nopayload"),
 		ForwardedTo:    domain.PeerAddress("addr-A"),
 		Recipient:      idTargetX,
 		HopAckObserved: true,
@@ -552,7 +554,7 @@ func TestFailoverRelay_EmptyFrameLine_SkipsRetry(t *testing.T) {
 		t.Fatal("retry fired with empty FrameLine; should have been skipped")
 	}
 	svc.relayStates.mu.Lock()
-	st := svc.relayStates.states["msg-nopayload"]
+	st := svc.relayStates.states[relayStateFixtureRef("msg-nopayload")]
 	svc.relayStates.mu.Unlock()
 	if st.RetryAttempt != 0 {
 		t.Fatalf("RetryAttempt = %d, want 0 (no-FrameLine path)", st.RetryAttempt)
@@ -587,7 +589,7 @@ func TestFailoverRelay_TTLEvictedBetweenFireAndRetry(t *testing.T) {
 	// State exists at snapshot time but is gone by the time the
 	// callback runs. We do NOT call svc.relayStates.store here.
 	snap := relayForwardState{
-		MessageID:      "msg-evicted",
+		Message:        relayStateFixtureRef("msg-evicted"),
 		ForwardedTo:    domain.PeerAddress("addr-A"),
 		Recipient:      idTargetX,
 		HopAckObserved: true,

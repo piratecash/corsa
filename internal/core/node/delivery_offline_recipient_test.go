@@ -53,7 +53,7 @@ func TestHeldDeliverySurvivesLongOfflineRecipient(t *testing.T) {
 	}
 
 	svc.deliveryMu.RLock()
-	entry, stillAwaiting := svc.awaitingDelivered["offline-hold-1"]
+	entry, stillAwaiting := svc.awaitingDelivered[svc.ownMessageIdentity("offline-hold-1", recipientID.Address)]
 	svc.deliveryMu.RUnlock()
 	if !stillAwaiting {
 		t.Fatal("a message that never reached the wire must stay in awaitingDelivered: " +
@@ -160,7 +160,7 @@ func TestInboundConnectDoesNotWakeDeliveriesBeforeAuthOK(t *testing.T) {
 
 	future := time.Now().UTC().Add(10 * time.Minute)
 	svc.deliveryMu.Lock()
-	svc.awaitingDelivered["pre-auth-hold"] = &deliveryRetryEntry{
+	svc.awaitingDelivered[svc.ownMessageIdentity("pre-auth-hold", recipientID.Address)] = &deliveryRetryEntry{
 		Envelope:      protocol.Envelope{ID: "pre-auth-hold", Topic: "dm", Sender: svc.Address(), Recipient: recipientID.Address},
 		Attempts:      5,
 		NextAttemptAt: future,
@@ -172,7 +172,7 @@ func TestInboundConnectDoesNotWakeDeliveriesBeforeAuthOK(t *testing.T) {
 	svc.trackInboundConnect(connID, "10.9.9.9:64646", domain.PeerIdentityFromWire(recipientID.Address))
 
 	svc.deliveryMu.RLock()
-	entry := svc.awaitingDelivered["pre-auth-hold"]
+	entry := svc.awaitingDelivered[svc.ownMessageIdentity("pre-auth-hold", recipientID.Address)]
 	attempts, next := entry.Attempts, entry.NextAttemptAt
 	svc.deliveryMu.RUnlock()
 	if attempts != 5 || !next.Equal(future) {
@@ -185,7 +185,7 @@ func TestInboundConnectDoesNotWakeDeliveriesBeforeAuthOK(t *testing.T) {
 		domain.PeerIdentityFromWire(recipientID.Address): {},
 	})
 	svc.deliveryMu.RLock()
-	woken := svc.awaitingDelivered["pre-auth-hold"].NextAttemptAt
+	woken := svc.awaitingDelivered[svc.ownMessageIdentity("pre-auth-hold", recipientID.Address)].NextAttemptAt
 	svc.deliveryMu.RUnlock()
 	if woken.Equal(future) {
 		t.Fatal("the kick did not wake the held delivery, so the assertion above proves nothing")
@@ -227,13 +227,13 @@ func TestDroppedAnnouncementIsRetried(t *testing.T) {
 	// is correctly one-shot — what is under test is the other branch.
 	for i := 0; i < 4096; i++ {
 		svc.deliveryMu.Lock()
-		svc.awaitingDelivered["dropped-announcement"].Announced = false
+		svc.awaitingDelivered[svc.ownMessageIdentity("dropped-announcement", "peer-a")].Announced = false
 		svc.deliveryMu.Unlock()
 
 		svc.publishMessagesEmitted([]protocol.Envelope{envelope})
 
 		svc.deliveryMu.RLock()
-		announced := svc.awaitingDelivered["dropped-announcement"].Announced
+		announced := svc.awaitingDelivered[svc.ownMessageIdentity("dropped-announcement", "peer-a")].Announced
 		svc.deliveryMu.RUnlock()
 		if !announced {
 			return // the drop gave the claim back, which is the contract
@@ -280,7 +280,7 @@ func TestOriginSendToADeadSubscriberIsNotSent(t *testing.T) {
 	svc.WaitBackground()
 
 	svc.deliveryMu.RLock()
-	entry, awaiting := svc.awaitingDelivered["ghost-subscriber-1"]
+	entry, awaiting := svc.awaitingDelivered[svc.ownMessageIdentity("ghost-subscriber-1", recipientID.Address)]
 	svc.deliveryMu.RUnlock()
 	if !awaiting {
 		t.Fatal("the message left the retry engine, so nothing will send it later")
@@ -353,7 +353,7 @@ func TestDeadSubscriberIsReportedQueuedToTheSender(t *testing.T) {
 
 	// The status stays queued on a later read too — the chatlog row is
 	// the authority once the echo is gone.
-	if got := svc.storedMessageStatus("ghost-status-1"); got != protocol.MessageStatusQueued {
+	if got := svc.storedMessageStatus(envelopeRef(frameEnvelope(frame))); got != protocol.MessageStatusQueued {
 		t.Errorf("storedMessageStatus = %q, want %q", got, protocol.MessageStatusQueued)
 	}
 }
@@ -385,11 +385,11 @@ func TestUnconfirmedHeadIsNotOvertaken(t *testing.T) {
 	}
 	// The head was attempted — Emitted is already true, as it is for every
 	// attempt — but no sink ever confirmed, and its next try is not due.
-	head := svc.awaitingDelivered["unconfirmed-head"]
+	head := svc.awaitingDelivered[svc.ownMessageIdentity("unconfirmed-head", recipientID.Address)]
 	head.LastEmittedAt = start.Add(-time.Hour)
 	head.Hold = holdUnconfirmed
 	head.NextAttemptAt = start.Add(2 * time.Minute)
-	svc.awaitingDelivered["younger-behind-it"].NextAttemptAt = start
+	svc.awaitingDelivered[svc.ownMessageIdentity("younger-behind-it", recipientID.Address)].NextAttemptAt = start
 	svc.deliveryMu.Unlock()
 
 	stream := newPushMessageStream(t, attachPushObserver(t, svc, recipientID.Address, netcore.ConnID(7422)))
@@ -398,8 +398,8 @@ func TestUnconfirmedHeadIsNotOvertaken(t *testing.T) {
 	// test is about: the subject here is the QUEUE ORDER, not the wake-up.
 	svc.retryDueDeliveries(start)
 	svc.deliveryMu.Lock()
-	svc.awaitingDelivered["unconfirmed-head"].NextAttemptAt = start.Add(2 * time.Minute)
-	svc.awaitingDelivered["younger-behind-it"].NextAttemptAt = start
+	svc.awaitingDelivered[svc.ownMessageIdentity("unconfirmed-head", recipientID.Address)].NextAttemptAt = start.Add(2 * time.Minute)
+	svc.awaitingDelivered[svc.ownMessageIdentity("younger-behind-it", recipientID.Address)].NextAttemptAt = start
 	svc.deliveryMu.Unlock()
 
 	svc.retryDueDeliveries(start.Add(time.Minute))
@@ -450,7 +450,7 @@ func TestUnconfirmedDeliveryIsWrittenDown(t *testing.T) {
 
 	// NOTHING was written by the refusal, and nothing had to be: the row
 	// carries no on-wire stamp, which is the bit the sender's badge reads.
-	if outbox.onWireStamped("unconfirmed-durable-1") {
+	if outbox.onWireStamped(deliveryMessageRef(svc.ownMessageIdentity("unconfirmed-durable-1", recipientID.Address))) {
 		t.Fatal("a dispatch no writer accepted was stamped as on the wire, so a restart reads it as sent")
 	}
 	rows, err := outbox.UndeliveredOutgoing()
@@ -499,7 +499,7 @@ func TestPendingRingFlushConfirmsDelivery(t *testing.T) {
 	svc.deliveryMu.Unlock()
 
 	svc.deliveryMu.RLock()
-	before := svc.awaitingDelivered["parked-then-flushed"].Hold
+	before := svc.awaitingDelivered[svc.ownMessageIdentity("parked-then-flushed", recipientID.Address)].Hold
 	svc.deliveryMu.RUnlock()
 	if before == holdNone {
 		t.Fatal("a parked frame must not start out confirmed, or this test proves nothing")
@@ -509,7 +509,7 @@ func TestPendingRingFlushConfirmsDelivery(t *testing.T) {
 	svc.WaitBackground()
 
 	svc.deliveryMu.RLock()
-	entry := svc.awaitingDelivered["parked-then-flushed"]
+	entry := svc.awaitingDelivered[svc.ownMessageIdentity("parked-then-flushed", recipientID.Address)]
 	svc.deliveryMu.RUnlock()
 	if entry.Hold != holdNone {
 		t.Error("a flushed frame did leave the node, but the delivery was never confirmed")
@@ -538,7 +538,7 @@ func TestRecipientGoingOfflineReopensTheDelivery(t *testing.T) {
 
 	now := time.Now().UTC()
 	svc.deliveryMu.Lock()
-	svc.awaitingDelivered["awaiting-receipt"] = &deliveryRetryEntry{
+	svc.awaitingDelivered[svc.ownMessageIdentity("awaiting-receipt", recipientID.Address)] = &deliveryRetryEntry{
 		Envelope: protocol.Envelope{
 			ID: "awaiting-receipt", Topic: "dm",
 			Sender: svc.Address(), Recipient: recipientID.Address,
@@ -553,7 +553,7 @@ func TestRecipientGoingOfflineReopensTheDelivery(t *testing.T) {
 	svc.noteRecipientWentOffline(recipient)
 
 	svc.deliveryMu.RLock()
-	reopened := svc.awaitingDelivered["awaiting-receipt"].Hold
+	reopened := svc.awaitingDelivered[svc.ownMessageIdentity("awaiting-receipt", recipientID.Address)].Hold
 	svc.deliveryMu.RUnlock()
 	if reopened != holdUnreachable {
 		t.Fatalf("hold = %d after the recipient left, want holdUnreachable so their return can wake it", reopened)
@@ -571,7 +571,7 @@ func TestRecipientGoingOfflineReopensTheDelivery(t *testing.T) {
 	svc.kickDeliveryRetriesForReachable(map[domain.PeerIdentity]struct{}{recipient: {}})
 
 	svc.deliveryMu.RLock()
-	entry := svc.awaitingDelivered["awaiting-receipt"]
+	entry := svc.awaitingDelivered[svc.ownMessageIdentity("awaiting-receipt", recipientID.Address)]
 	svc.deliveryMu.RUnlock()
 	if entry.Attempts != 0 {
 		t.Errorf("Attempts = %d, want 0: the recipient came back", entry.Attempts)
@@ -621,12 +621,12 @@ func TestRouteReconfirmationDoesNotOverrulePacing(t *testing.T) {
 	}
 	svc.deliveryMu.Lock()
 	// Dispatched on the current reachability; no sink has answered yet.
-	svc.awaitingDelivered["dispatched-awaiting-sink"] = &deliveryRetryEntry{
+	svc.awaitingDelivered[svc.ownMessageIdentity("dispatched-awaiting-sink", recipientID.Address)] = &deliveryRetryEntry{
 		Envelope: envelopeOf("dispatched-awaiting-sink"), Attempts: 3,
 		NextAttemptAt: parked, Hold: holdUnconfirmed,
 	}
 	// Never dispatched: the recipient was not there.
-	svc.awaitingDelivered["waiting-for-them"] = &deliveryRetryEntry{
+	svc.awaitingDelivered[svc.ownMessageIdentity("waiting-for-them", recipientID.Address)] = &deliveryRetryEntry{
 		Envelope: envelopeOf("waiting-for-them"), Attempts: 3,
 		NextAttemptAt: parked, Hold: holdUnreachable,
 	}
@@ -635,8 +635,8 @@ func TestRouteReconfirmationDoesNotOverrulePacing(t *testing.T) {
 	svc.kickDeliveryRetriesForReachable(map[domain.PeerIdentity]struct{}{recipient: {}})
 
 	svc.deliveryMu.RLock()
-	dispatched := *svc.awaitingDelivered["dispatched-awaiting-sink"]
-	held := *svc.awaitingDelivered["waiting-for-them"]
+	dispatched := *svc.awaitingDelivered[svc.ownMessageIdentity("dispatched-awaiting-sink", recipientID.Address)]
+	held := *svc.awaitingDelivered[svc.ownMessageIdentity("waiting-for-them", recipientID.Address)]
 	svc.deliveryMu.RUnlock()
 
 	if !dispatched.NextAttemptAt.Equal(parked) {
@@ -731,7 +731,7 @@ func TestConfirmationOutlivesTheDispatchThatOrderedIt(t *testing.T) {
 	svc.WaitBackground()
 
 	svc.deliveryMu.RLock()
-	entry := svc.awaitingDelivered["confirm-after-dispatch"]
+	entry := svc.awaitingDelivered[svc.ownMessageIdentity("confirm-after-dispatch", recipientID.Address)]
 	svc.deliveryMu.RUnlock()
 	if entry.Hold != holdNone {
 		t.Error("the accepting sink did not clear the hold")
@@ -862,8 +862,8 @@ func TestHeldRegistrationIsDueImmediately(t *testing.T) {
 	svc.registerAwaitingDeliveredLocked(protocol.Envelope{
 		ID: "emitted-waits", Topic: "dm", Sender: svc.Address(), Recipient: "peer-b", CreatedAt: now,
 	}, now, false)
-	held := svc.awaitingDelivered["held-due-now"]
-	emitted := svc.awaitingDelivered["emitted-waits"]
+	held := svc.awaitingDelivered[svc.ownMessageIdentity("held-due-now", "peer-a")]
+	emitted := svc.awaitingDelivered[svc.ownMessageIdentity("emitted-waits", "peer-b")]
 	svc.deliveryMu.Unlock()
 
 	if held.NextAttemptAt.After(now) {
@@ -909,7 +909,7 @@ func TestKickDuringATickKeepsTheEntryDue(t *testing.T) {
 	svc.retryDueDeliveries(tickStart)
 
 	svc.deliveryMu.RLock()
-	entry := svc.awaitingDelivered["raced-kick"]
+	entry := svc.awaitingDelivered[svc.ownMessageIdentity("raced-kick", recipientID.Address)]
 	svc.deliveryMu.RUnlock()
 	if entry.NextAttemptAt.After(tickStart) {
 		t.Fatalf("a hold decided across a kick must stay due, parked for %v instead", entry.NextAttemptAt.Sub(tickStart))
@@ -956,7 +956,7 @@ func TestFailedDispatchDoesNotAnnounceSent(t *testing.T) {
 	}
 
 	svc.deliveryMu.RLock()
-	entry := svc.awaitingDelivered["no-route-at-the-wire"]
+	entry := svc.awaitingDelivered[svc.ownMessageIdentity("no-route-at-the-wire", "peer-a")]
 	svc.deliveryMu.RUnlock()
 	if entry.Hold == holdNone {
 		t.Error("a message the wire refused must be held so a reachability kick can wake it")
@@ -1053,7 +1053,7 @@ func TestDeliveryOutlivesAnyAmountOfWaiting(t *testing.T) {
 	}
 
 	svc.deliveryMu.RLock()
-	entry, stillAwaiting := svc.awaitingDelivered["patient-1"]
+	entry, stillAwaiting := svc.awaitingDelivered[svc.ownMessageIdentity("patient-1", recipientID.Address)]
 	svc.deliveryMu.RUnlock()
 	if !stillAwaiting {
 		t.Fatal("the message was abandoned for nothing but the passage of time")
@@ -1095,7 +1095,7 @@ func TestReturningRecipientResetsTheBackoff(t *testing.T) {
 	svc.registerAwaitingDeliveredLocked(envelope, start, true)
 	// It went out several times before its recipient disappeared, so the
 	// schedule is deep into the exponential tail.
-	entry := svc.awaitingDelivered["backoff-reset-1"]
+	entry := svc.awaitingDelivered[svc.ownMessageIdentity("backoff-reset-1", recipientID.Address)]
 	entry.Attempts = 8
 	entry.LastEmittedAt = time.Now().UTC().Add(-time.Hour)
 	entry.Hold = holdUnreachable
@@ -1107,7 +1107,7 @@ func TestReturningRecipientResetsTheBackoff(t *testing.T) {
 	})
 
 	svc.deliveryMu.RLock()
-	attempts := svc.awaitingDelivered["backoff-reset-1"].Attempts
+	attempts := svc.awaitingDelivered[svc.ownMessageIdentity("backoff-reset-1", recipientID.Address)].Attempts
 	svc.deliveryMu.RUnlock()
 	if attempts != 0 {
 		t.Fatalf("Attempts = %d after the recipient returned, want 0 — the backoff is still on its slow end", attempts)
@@ -1124,7 +1124,7 @@ func TestReturningRecipientResetsTheBackoff(t *testing.T) {
 	// old backoff(1) was a minute, which is what "reset to the first
 	// step" was silently returning.
 	svc.deliveryMu.RLock()
-	next := svc.awaitingDelivered["backoff-reset-1"].NextAttemptAt
+	next := svc.awaitingDelivered[svc.ownMessageIdentity("backoff-reset-1", recipientID.Address)].NextAttemptAt
 	svc.deliveryMu.RUnlock()
 	if got, want := next.Sub(now), deliveryRetryBackoffAfter(1); got != want {
 		t.Fatalf("next attempt in %v, want %v", got, want)
@@ -1225,14 +1225,14 @@ func TestReseedClaimsNoQueueSlotItDidNotHave(t *testing.T) {
 			Payload: []byte("y"), CreatedAt: written,
 		}},
 	)
-	outbox.markNeverEmitted(unsent)
+	outbox.markNeverEmitted(deliveryMessageRef(svc.ownMessageIdentity(unsent, "peer-a")))
 	svc.RegisterDeliveryOutbox(outbox)
 
 	restartedAt := time.Now().UTC()
 	svc.deliveryMu.RLock()
 	defer svc.deliveryMu.RUnlock()
 
-	sentEntry, ok := svc.awaitingDelivered[sent]
+	sentEntry, ok := svc.awaitingDelivered[svc.ownMessageIdentity(sent, "peer-a")]
 	if !ok {
 		t.Fatal("the emitted row was not reseeded")
 	}
@@ -1244,7 +1244,7 @@ func TestReseedClaimsNoQueueSlotItDidNotHave(t *testing.T) {
 		t.Error("a reseeded message is holding its recipient's queue slot, so nothing goes out for a whole window after every restart")
 	}
 
-	unsentEntry, ok := svc.awaitingDelivered[unsent]
+	unsentEntry, ok := svc.awaitingDelivered[svc.ownMessageIdentity(unsent, "peer-a")]
 	if !ok {
 		t.Fatal("the marked row was not reseeded")
 	}
@@ -1254,7 +1254,7 @@ func TestReseedClaimsNoQueueSlotItDidNotHave(t *testing.T) {
 	// And the claim it still carries is known to this process, so a later
 	// emission can withdraw it instead of leaving the row saying "never
 	// emitted" while the peer holds the message.
-	if _, standing := svc.markedNeverEmitted[unsent]; !standing {
+	if _, standing := svc.markedNeverEmitted[svc.ownMessageIdentity(unsent, "peer-a")]; !standing {
 		t.Error("the reseed did not record the standing durable claim, so nothing will ever withdraw it")
 	}
 }
@@ -1309,14 +1309,14 @@ func TestClockMovedBackDoesNotStallTheQueue(t *testing.T) {
 	)
 	// The fake reports the on-wire bit from its own journal, not from the
 	// literal above — the same way the real adapter reads the row.
-	if err := outbox.MarkOnWire([]protocol.MessageID{head, behind}); err != nil {
+	if err := outbox.MarkOnWireRefs([]domain.MessageRef{deliveryMessageRef(svc.ownMessageIdentity(head, recipientID.Address)), deliveryMessageRef(svc.ownMessageIdentity(behind, recipientID.Address))}); err != nil {
 		t.Fatalf("MarkOnWire: %v", err)
 	}
 	svc.RegisterDeliveryOutbox(outbox)
 
 	now := time.Now().UTC()
 	svc.deliveryMu.RLock()
-	stamped := svc.awaitingDelivered[head]
+	stamped := svc.awaitingDelivered[svc.ownMessageIdentity(head, recipientID.Address)]
 	svc.deliveryMu.RUnlock()
 	if stamped == nil {
 		t.Fatal("the confirmed row was not reseeded")
@@ -1378,7 +1378,7 @@ func TestFrozenMessageDoesNotStallTheQueue(t *testing.T) {
 	stream.expect(t, "behind-the-freeze")
 
 	svc.deliveryMu.RLock()
-	frozen, stillAwaiting := svc.awaitingDelivered["frozen-head"]
+	frozen, stillAwaiting := svc.awaitingDelivered[svc.ownMessageIdentity("frozen-head", recipientID.Address)]
 	svc.deliveryMu.RUnlock()
 	if !stillAwaiting {
 		t.Fatal("the frozen message was dropped by the tick")
@@ -1416,8 +1416,8 @@ func TestUnsentMessageIsNotOvertaken(t *testing.T) {
 	// The older message is not due yet; the newer one is. Scheduling skew
 	// like this is ordinary — a held entry re-checks on the hold poll while
 	// a message written later starts on the first backoff step.
-	svc.awaitingDelivered["older-unsent"].NextAttemptAt = start.Add(2 * time.Minute)
-	svc.awaitingDelivered["newer-due-first"].NextAttemptAt = start
+	svc.awaitingDelivered[svc.ownMessageIdentity("older-unsent", recipientID.Address)].NextAttemptAt = start.Add(2 * time.Minute)
+	svc.awaitingDelivered[svc.ownMessageIdentity("newer-due-first", recipientID.Address)].NextAttemptAt = start
 	svc.deliveryMu.Unlock()
 
 	stream := newPushMessageStream(t, attachPushObserver(t, svc, recipientID.Address, netcore.ConnID(7415)))
@@ -1426,8 +1426,8 @@ func TestUnsentMessageIsNotOvertaken(t *testing.T) {
 	// test is about — its subject is the queue order, not the wake-up.
 	svc.retryDueDeliveries(start)
 	svc.deliveryMu.Lock()
-	svc.awaitingDelivered["older-unsent"].NextAttemptAt = start.Add(2 * time.Minute)
-	svc.awaitingDelivered["newer-due-first"].NextAttemptAt = start
+	svc.awaitingDelivered[svc.ownMessageIdentity("older-unsent", recipientID.Address)].NextAttemptAt = start.Add(2 * time.Minute)
+	svc.awaitingDelivered[svc.ownMessageIdentity("newer-due-first", recipientID.Address)].NextAttemptAt = start
 	svc.deliveryMu.Unlock()
 
 	svc.retryDueDeliveries(start.Add(time.Minute))
@@ -1583,7 +1583,7 @@ func TestLateReceiptPromotesTheMessageThatNeverWent(t *testing.T) {
 			Sender: svc.Address(), Recipient: recipientID.Address,
 			Payload: []byte("sealed"), CreatedAt: createdAt, StoredAt: createdAt,
 		}, start, true)
-		svc.sentDMIDs.Add(string(id))
+		svc.sentDMIDs.Add(deliveryMessageRef(svc.ownMessageIdentity(id, recipientID.Address)).Key())
 	}
 	svc.deliveryMu.Unlock()
 
@@ -1608,8 +1608,8 @@ func TestLateReceiptPromotesTheMessageThatNeverWent(t *testing.T) {
 
 	// The freed slot belongs to the message that has never been sent.
 	svc.deliveryMu.RLock()
-	second := svc.awaitingDelivered["queue-2"]
-	third := svc.awaitingDelivered["queue-3"]
+	second := svc.awaitingDelivered[svc.ownMessageIdentity("queue-2", recipientID.Address)]
+	third := svc.awaitingDelivered[svc.ownMessageIdentity("queue-3", recipientID.Address)]
 	secondDue, thirdDue := second.NextAttemptAt, third.NextAttemptAt
 	svc.deliveryMu.RUnlock()
 	if !secondDue.After(now) {
@@ -1686,13 +1686,13 @@ func TestKickDoesNotRearmAnEntryDispatchedWhileItLookedUpTheRoute(t *testing.T) 
 	svc.deliveryMu.Lock()
 	// Held on reachability when the kick looks — and dispatched by a tick
 	// while the kick is asking the router.
-	svc.awaitingDelivered[racing] = &deliveryRetryEntry{
+	svc.awaitingDelivered[svc.ownMessageIdentity(racing, recipientID.Address)] = &deliveryRetryEntry{
 		Envelope: envelopeOf(racing), Attempts: 3,
 		NextAttemptAt: parked, Hold: holdUnreachable,
 	}
 	// Held for the whole call: the kick must still do its job, or the
 	// assertion above proves nothing.
-	svc.awaitingDelivered[control] = &deliveryRetryEntry{
+	svc.awaitingDelivered[svc.ownMessageIdentity(control, recipientID.Address)] = &deliveryRetryEntry{
 		Envelope: envelopeOf(control), Attempts: 3,
 		NextAttemptAt: parked, Hold: holdUnreachable,
 	}
@@ -1701,7 +1701,7 @@ func TestKickDoesNotRearmAnEntryDispatchedWhileItLookedUpTheRoute(t *testing.T) 
 	// The tick gets there first, inside the window the kick opens.
 	svc.router = routeThenChange{inner: svc.router, hook: func() {
 		svc.deliveryMu.Lock()
-		if live, ok := svc.awaitingDelivered[racing]; ok {
+		if live, ok := svc.awaitingDelivered[svc.ownMessageIdentity(racing, recipientID.Address)]; ok {
 			live.Hold = holdUnconfirmed
 			live.NextAttemptAt = parked
 		}
@@ -1711,8 +1711,8 @@ func TestKickDoesNotRearmAnEntryDispatchedWhileItLookedUpTheRoute(t *testing.T) 
 	svc.kickDeliveryRetriesForReachable(map[domain.PeerIdentity]struct{}{recipient: {}})
 
 	svc.deliveryMu.RLock()
-	raced := *svc.awaitingDelivered[racing]
-	held := *svc.awaitingDelivered[control]
+	raced := *svc.awaitingDelivered[svc.ownMessageIdentity(racing, recipientID.Address)]
+	held := *svc.awaitingDelivered[svc.ownMessageIdentity(control, recipientID.Address)]
 	svc.deliveryMu.RUnlock()
 
 	if raced.Hold != holdUnconfirmed {
@@ -1764,7 +1764,7 @@ func TestStaleOfflineDoesNotFreezeAReconnectedRecipient(t *testing.T) {
 			now := time.Now().UTC()
 			const target = protocol.MessageID("stale-offline")
 			svc.deliveryMu.Lock()
-			svc.awaitingDelivered[target] = &deliveryRetryEntry{
+			svc.awaitingDelivered[svc.ownMessageIdentity(target, recipientID.Address)] = &deliveryRetryEntry{
 				Envelope: protocol.Envelope{
 					ID: target, Topic: "dm", Sender: svc.Address(),
 					Recipient: recipientID.Address, CreatedAt: now,
@@ -1785,8 +1785,8 @@ func TestStaleOfflineDoesNotFreezeAReconnectedRecipient(t *testing.T) {
 			settled := time.Now().UTC()
 
 			svc.deliveryMu.RLock()
-			hold := svc.awaitingDelivered[target].Hold
-			due := svc.awaitingDelivered[target].NextAttemptAt
+			hold := svc.awaitingDelivered[svc.ownMessageIdentity(target, recipientID.Address)].Hold
+			due := svc.awaitingDelivered[svc.ownMessageIdentity(target, recipientID.Address)].NextAttemptAt
 			svc.deliveryMu.RUnlock()
 			if hold != tc.wantHold {
 				t.Errorf("hold = %v, want %v: a departure that was already undone must not park a live delivery", hold, tc.wantHold)
@@ -1830,7 +1830,7 @@ func TestSeenAckRetryFollowsTheSchedule(t *testing.T) {
 	}
 	svc.deliveryMu.Lock()
 	svc.registerAwaitingSeenAckLocked(receipt, now)
-	first := svc.awaitingSeenAck[receipt.MessageID].NextAttemptAt
+	first := svc.awaitingSeenAck[madeByMessageRecipient(receipt)].NextAttemptAt
 	svc.deliveryMu.Unlock()
 
 	if got, want := first.Sub(now), deliveryRetrySchedule[0]; got != want {
@@ -1841,7 +1841,7 @@ func TestSeenAckRetryFollowsTheSchedule(t *testing.T) {
 	// first one again.
 	svc.planDueSeenAcks(first)
 	svc.deliveryMu.RLock()
-	second := svc.awaitingSeenAck[receipt.MessageID].NextAttemptAt
+	second := svc.awaitingSeenAck[madeByMessageRecipient(receipt)].NextAttemptAt
 	svc.deliveryMu.RUnlock()
 	if got, want := second.Sub(first), deliveryRetrySchedule[1]; got != want {
 		t.Errorf("second wait %v, want %v: the schedule must advance, not repeat", got, want)
@@ -1850,7 +1850,7 @@ func TestSeenAckRetryFollowsTheSchedule(t *testing.T) {
 	// And the budget counts RE-SENDS: one has happened, so with a
 	// configured maximum of one there is exactly none left.
 	svc.deliveryMu.RLock()
-	attempts := svc.awaitingSeenAck[receipt.MessageID].Attempts
+	attempts := svc.awaitingSeenAck[madeByMessageRecipient(receipt)].Attempts
 	svc.deliveryMu.RUnlock()
 	if attempts != 1 {
 		t.Errorf("Attempts = %d after one re-send, want 1 — registration must not charge for the original", attempts)
@@ -1879,7 +1879,7 @@ func TestSeenAckRetryBudgetCountsResends(t *testing.T) {
 	resends := 0
 	for range 10 {
 		svc.deliveryMu.RLock()
-		entry, live := svc.awaitingSeenAck[receipt.MessageID]
+		entry, live := svc.awaitingSeenAck[madeByMessageRecipient(receipt)]
 		var due time.Time
 		if live {
 			due = entry.NextAttemptAt

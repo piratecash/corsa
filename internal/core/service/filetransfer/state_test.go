@@ -42,8 +42,9 @@ func TestSenderStateAnnouncedToServingToCompleted(t *testing.T) {
 
 	var sentPayloads []domain.FileCommandPayload
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		store:        store,
 		sendCommand: func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error {
 			sentPayloads = append(sentPayloads, payload)
@@ -56,7 +57,8 @@ func TestSenderStateAnnouncedToServingToCompleted(t *testing.T) {
 	fileID := domain.FileID("lifecycle-file-id")
 
 	// Start in Announced.
-	m.senderMaps[fileID] = &senderFileMapping{
+	m.senderMaps[ftOutgoingRef(m, fileID, receiver)] = &senderFileMapping{
+		Ref:       ftOutgoingRef(m, fileID, receiver),
 		FileID:    fileID,
 		FileHash:  fileHash,
 		FileName:  "lifecycle.bin",
@@ -73,8 +75,8 @@ func TestSenderStateAnnouncedToServingToCompleted(t *testing.T) {
 		Size:   domain.DefaultChunkSize,
 	})
 
-	if m.senderMaps[fileID].State != senderServing {
-		t.Fatalf("after chunk_request: state = %s, want serving", m.senderMaps[fileID].State)
+	if m.senderMaps[ftOutgoingRef(m, fileID, receiver)].State != senderServing {
+		t.Fatalf("after chunk_request: state = %s, want serving", m.senderMaps[ftOutgoingRef(m, fileID, receiver)].State)
 	}
 	if len(sentPayloads) != 1 {
 		t.Fatalf("expected 1 chunk_response, got %d", len(sentPayloads))
@@ -98,10 +100,10 @@ func TestSenderStateAnnouncedToServingToCompleted(t *testing.T) {
 	sentPayloads = nil
 	m.HandleFileDownloaded(receiver, domain.FileDownloadedPayload{FileID: fileID, Epoch: served.Epoch})
 
-	if m.senderMaps[fileID].State != senderCompleted {
-		t.Fatalf("after file_downloaded: state = %s, want completed", m.senderMaps[fileID].State)
+	if m.senderMaps[ftOutgoingRef(m, fileID, receiver)].State != senderCompleted {
+		t.Fatalf("after file_downloaded: state = %s, want completed", m.senderMaps[ftOutgoingRef(m, fileID, receiver)].State)
 	}
-	if m.senderMaps[fileID].CompletedAt.IsZero() {
+	if m.senderMaps[ftOutgoingRef(m, fileID, receiver)].CompletedAt.IsZero() {
 		t.Error("CompletedAt should be set")
 	}
 	if len(sentPayloads) != 1 {
@@ -140,8 +142,9 @@ func TestSenderCompletedReservesChunkRequest(t *testing.T) {
 
 	var sentPayloads []domain.FileCommandPayload
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		store:        store,
 		sendCommand: func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error {
 			sentPayloads = append(sentPayloads, payload)
@@ -150,7 +153,8 @@ func TestSenderCompletedReservesChunkRequest(t *testing.T) {
 		stopCh: make(chan struct{}),
 	}
 
-	m.senderMaps[fileID] = &senderFileMapping{
+	m.senderMaps[ftOutgoingRef(m, fileID, receiver)] = &senderFileMapping{
+		Ref:         ftOutgoingRef(m, fileID, receiver),
 		FileID:      fileID,
 		FileHash:    fileHash,
 		FileName:    "photo.jpg",
@@ -168,8 +172,8 @@ func TestSenderCompletedReservesChunkRequest(t *testing.T) {
 		Size:   domain.DefaultChunkSize,
 	})
 
-	if m.senderMaps[fileID].State != senderServing {
-		t.Fatalf("after chunk_request on completed: state = %s, want serving", m.senderMaps[fileID].State)
+	if m.senderMaps[ftOutgoingRef(m, fileID, receiver)].State != senderServing {
+		t.Fatalf("after chunk_request on completed: state = %s, want serving", m.senderMaps[ftOutgoingRef(m, fileID, receiver)].State)
 	}
 	if len(sentPayloads) != 1 {
 		t.Fatalf("expected 1 chunk_response, got %d", len(sentPayloads))
@@ -204,8 +208,9 @@ func TestSenderTombstoneResurrectedAtServeTime(t *testing.T) {
 	// No ref in the store — the tombstone had released it.
 	var sentPayloads []domain.FileCommandPayload
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		store:        store,
 		sendCommand: func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error {
 			sentPayloads = append(sentPayloads, payload)
@@ -214,7 +219,8 @@ func TestSenderTombstoneResurrectedAtServeTime(t *testing.T) {
 		stopCh: make(chan struct{}),
 	}
 
-	m.senderMaps[fileID] = &senderFileMapping{
+	m.senderMaps[ftOutgoingRef(m, fileID, receiver)] = &senderFileMapping{
+		Ref:         ftOutgoingRef(m, fileID, receiver),
 		FileID:      fileID,
 		FileHash:    fileHash,
 		FileName:    "restored.jpg",
@@ -232,8 +238,8 @@ func TestSenderTombstoneResurrectedAtServeTime(t *testing.T) {
 		Size:   domain.DefaultChunkSize,
 	})
 
-	if m.senderMaps[fileID].State != senderServing {
-		t.Fatalf("after chunk_request on tombstone with blob: state = %s, want serving", m.senderMaps[fileID].State)
+	if m.senderMaps[ftOutgoingRef(m, fileID, receiver)].State != senderServing {
+		t.Fatalf("after chunk_request on tombstone with blob: state = %s, want serving", m.senderMaps[ftOutgoingRef(m, fileID, receiver)].State)
 	}
 	if len(sentPayloads) != 1 {
 		t.Fatalf("expected 1 chunk_response, got %d", len(sentPayloads))
@@ -266,8 +272,9 @@ func TestSenderTombstoneNoBlobStillRejected(t *testing.T) {
 
 	var sentPayloads []domain.FileCommandPayload
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		store:        store,
 		sendCommand: func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error {
 			sentPayloads = append(sentPayloads, payload)
@@ -276,7 +283,8 @@ func TestSenderTombstoneNoBlobStillRejected(t *testing.T) {
 		stopCh: make(chan struct{}),
 	}
 
-	m.senderMaps[fileID] = &senderFileMapping{
+	m.senderMaps[ftOutgoingRef(m, fileID, receiver)] = &senderFileMapping{
+		Ref:         ftOutgoingRef(m, fileID, receiver),
 		FileID:      fileID,
 		FileHash:    "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
 		FileName:    "gone.jpg",
@@ -294,8 +302,8 @@ func TestSenderTombstoneNoBlobStillRejected(t *testing.T) {
 		Size:   domain.DefaultChunkSize,
 	})
 
-	if m.senderMaps[fileID].State != senderTombstone {
-		t.Fatalf("tombstone without blob: state = %s, want tombstone", m.senderMaps[fileID].State)
+	if m.senderMaps[ftOutgoingRef(m, fileID, receiver)].State != senderTombstone {
+		t.Fatalf("tombstone without blob: state = %s, want tombstone", m.senderMaps[ftOutgoingRef(m, fileID, receiver)].State)
 	}
 	if len(sentPayloads) != 0 {
 		t.Fatalf("expected 0 responses for rejected tombstone, got %d", len(sentPayloads))
@@ -307,8 +315,9 @@ func TestSenderTombstoneNoBlobStillRejected(t *testing.T) {
 // (no double Release, no state change).
 func TestSenderIdempotentFileDownloaded(t *testing.T) {
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		sendCommand: func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error {
 			return nil
 		},
@@ -319,7 +328,8 @@ func TestSenderIdempotentFileDownloaded(t *testing.T) {
 	fileID := domain.FileID("idempotent-file")
 	completedAt := time.Now().Add(-time.Hour)
 
-	m.senderMaps[fileID] = &senderFileMapping{
+	m.senderMaps[ftOutgoingRef(m, fileID, receiver)] = &senderFileMapping{
+		Ref:          ftOutgoingRef(m, fileID, receiver),
 		FileID:       fileID,
 		FileHash:     "hash-x",
 		FileName:     "file.bin",
@@ -345,7 +355,7 @@ func TestSenderIdempotentFileDownloaded(t *testing.T) {
 	}
 
 	// CompletedAt should NOT be updated (idempotent).
-	if !m.senderMaps[fileID].CompletedAt.Equal(completedAt) {
+	if !m.senderMaps[ftOutgoingRef(m, fileID, receiver)].CompletedAt.Equal(completedAt) {
 		t.Error("CompletedAt should not change on duplicate file_downloaded")
 	}
 }
@@ -355,8 +365,9 @@ func TestSenderIdempotentFileDownloaded(t *testing.T) {
 func TestSenderTombstonedFileIDIgnoresChunkRequest(t *testing.T) {
 	var commandsSent int
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		sendCommand: func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error {
 			commandsSent++
 			return nil
@@ -367,7 +378,8 @@ func TestSenderTombstonedFileIDIgnoresChunkRequest(t *testing.T) {
 	receiver := domaintest.ID("receiver-identity-1234567890ab")
 	fileID := domain.FileID("tombstoned-file")
 
-	m.senderMaps[fileID] = &senderFileMapping{
+	m.senderMaps[ftOutgoingRef(m, fileID, receiver)] = &senderFileMapping{
+		Ref:         ftOutgoingRef(m, fileID, receiver),
 		FileID:      fileID,
 		FileHash:    "hash-tomb",
 		FileName:    "old.bin",
@@ -394,8 +406,9 @@ func TestSenderTombstonedFileIDIgnoresChunkRequest(t *testing.T) {
 func TestSenderFileDownloadedFromNonRecipientIgnored(t *testing.T) {
 	var acksSent int
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		sendCommand: func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error {
 			acksSent++
 			return nil
@@ -407,7 +420,8 @@ func TestSenderFileDownloadedFromNonRecipientIgnored(t *testing.T) {
 	attacker := domaintest.ID("attacker-identity-123456789012")
 	fileID := domain.FileID("auth-check-file")
 
-	m.senderMaps[fileID] = &senderFileMapping{
+	m.senderMaps[ftOutgoingRef(m, fileID, legitimateReceiver)] = &senderFileMapping{
+		Ref:       ftOutgoingRef(m, fileID, legitimateReceiver),
 		FileID:    fileID,
 		FileHash:  "hash-auth",
 		FileName:  "secret.bin",
@@ -423,8 +437,8 @@ func TestSenderFileDownloadedFromNonRecipientIgnored(t *testing.T) {
 	if acksSent != 0 {
 		t.Errorf("file_downloaded from non-recipient should not trigger ack, got %d", acksSent)
 	}
-	if m.senderMaps[fileID].State != senderServing {
-		t.Errorf("state should remain serving, got %s", m.senderMaps[fileID].State)
+	if m.senderMaps[ftOutgoingRef(m, fileID, legitimateReceiver)].State != senderServing {
+		t.Errorf("state should remain serving, got %s", m.senderMaps[ftOutgoingRef(m, fileID, legitimateReceiver)].State)
 	}
 }
 
@@ -443,8 +457,9 @@ func TestSenderFileDownloadedRejectedOutsideServingRun(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			var acksSent int
 			m := &Manager{
-				senderMaps:   make(map[domain.FileID]*senderFileMapping),
-				receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+				localID:      ftFixtureIdentity(),
+				senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+				receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 				sendCommand: func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error {
 					acksSent++
 					return nil
@@ -455,7 +470,8 @@ func TestSenderFileDownloadedRejectedOutsideServingRun(t *testing.T) {
 			receiver := domaintest.ID("receiver-state-guard-01234")
 			fileID := domain.FileID("state-guard-file")
 
-			m.senderMaps[fileID] = &senderFileMapping{
+			m.senderMaps[ftOutgoingRef(m, fileID, receiver)] = &senderFileMapping{
+				Ref:       ftOutgoingRef(m, fileID, receiver),
 				FileID:    fileID,
 				FileHash:  "hash-state-guard",
 				FileName:  "doc.bin",
@@ -470,8 +486,8 @@ func TestSenderFileDownloadedRejectedOutsideServingRun(t *testing.T) {
 			if acksSent != 0 {
 				t.Errorf("file_downloaded in state %s should not trigger ack, got %d", tc.state, acksSent)
 			}
-			if m.senderMaps[fileID].State != tc.state {
-				t.Errorf("state should remain %s, got %s", tc.state, m.senderMaps[fileID].State)
+			if m.senderMaps[ftOutgoingRef(m, fileID, receiver)].State != tc.state {
+				t.Errorf("state should remain %s, got %s", tc.state, m.senderMaps[ftOutgoingRef(m, fileID, receiver)].State)
 			}
 		})
 	}
@@ -485,15 +501,18 @@ func TestSenderFileDownloadedRejectedOutsideServingRun(t *testing.T) {
 // HandleFileDownloadedAck transitions from WaitingAck → Completed.
 func TestReceiverFileDownloadedAckTransitionsToCompleted(t *testing.T) {
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		stopCh:       make(chan struct{}),
 	}
 
 	sender := domaintest.ID("sender-identity-1234567890abcd")
 	fileID := domain.FileID("waiting-ack-file")
 
-	m.receiverMaps[fileID] = &receiverFileMapping{
+	m.receiverMaps[ftIncomingRef(m, fileID, sender)] = &receiverFileMapping{
+		Ref:          ftIncomingRef(m, fileID, sender),
+		PartialPath:  partialDownloadPath(m.downloadDir, fileID),
 		FileID:       fileID,
 		FileHash:     "hash-wait",
 		FileName:     "doc.pdf",
@@ -506,7 +525,7 @@ func TestReceiverFileDownloadedAckTransitionsToCompleted(t *testing.T) {
 
 	m.HandleFileDownloadedAck(sender, domain.FileDownloadedAckPayload{FileID: fileID, Epoch: 2})
 
-	mapping := m.receiverMaps[fileID]
+	mapping := m.receiverMaps[ftIncomingRef(m, fileID, sender)]
 	if mapping.State != receiverCompleted {
 		t.Errorf("state = %s, want completed", mapping.State)
 	}
@@ -519,8 +538,9 @@ func TestReceiverFileDownloadedAckTransitionsToCompleted(t *testing.T) {
 // HandleFileDownloadedAck is a no-op when the receiver is not in WaitingAck.
 func TestReceiverFileDownloadedAckIgnoredInOtherStates(t *testing.T) {
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		stopCh:       make(chan struct{}),
 	}
 
@@ -537,18 +557,20 @@ func TestReceiverFileDownloadedAckIgnoredInOtherStates(t *testing.T) {
 	}
 
 	for _, state := range states {
-		m.receiverMaps[fileID] = &receiverFileMapping{
-			FileID:    fileID,
-			FileHash:  "hash",
-			Sender:    sender,
-			State:     state,
-			CreatedAt: time.Now(),
+		m.receiverMaps[ftIncomingRef(m, fileID, sender)] = &receiverFileMapping{
+			Ref:         ftIncomingRef(m, fileID, sender),
+			PartialPath: partialDownloadPath(m.downloadDir, fileID),
+			FileID:      fileID,
+			FileHash:    "hash",
+			Sender:      sender,
+			State:       state,
+			CreatedAt:   time.Now(),
 		}
 
 		m.HandleFileDownloadedAck(sender, domain.FileDownloadedAckPayload{FileID: fileID})
 
-		if m.receiverMaps[fileID].State != state {
-			t.Errorf("state %s should not change on ack, got %s", state, m.receiverMaps[fileID].State)
+		if m.receiverMaps[ftIncomingRef(m, fileID, sender)].State != state {
+			t.Errorf("state %s should not change on ack, got %s", state, m.receiverMaps[ftIncomingRef(m, fileID, sender)].State)
 		}
 	}
 }
@@ -557,8 +579,9 @@ func TestReceiverFileDownloadedAckIgnoredInOtherStates(t *testing.T) {
 // from a peer that is not the mapping's Sender is silently ignored.
 func TestReceiverFileDownloadedAckFromWrongSenderIgnored(t *testing.T) {
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		stopCh:       make(chan struct{}),
 	}
 
@@ -566,16 +589,18 @@ func TestReceiverFileDownloadedAckFromWrongSenderIgnored(t *testing.T) {
 	fakeSender := domaintest.ID("fake-sender-identity-1234567890")
 	fileID := domain.FileID("wrong-sender-ack")
 
-	m.receiverMaps[fileID] = &receiverFileMapping{
-		FileID: fileID,
-		Sender: realSender,
-		State:  receiverWaitingAck,
+	m.receiverMaps[ftIncomingRef(m, fileID, realSender)] = &receiverFileMapping{
+		Ref:         ftIncomingRef(m, fileID, realSender),
+		PartialPath: partialDownloadPath(m.downloadDir, fileID),
+		FileID:      fileID,
+		Sender:      realSender,
+		State:       receiverWaitingAck,
 	}
 
 	m.HandleFileDownloadedAck(fakeSender, domain.FileDownloadedAckPayload{FileID: fileID})
 
-	if m.receiverMaps[fileID].State != receiverWaitingAck {
-		t.Errorf("ack from wrong sender should not change state, got %s", m.receiverMaps[fileID].State)
+	if m.receiverMaps[ftIncomingRef(m, fileID, realSender)].State != receiverWaitingAck {
+		t.Errorf("ack from wrong sender should not change state, got %s", m.receiverMaps[ftIncomingRef(m, fileID, realSender)].State)
 	}
 }
 
@@ -585,8 +610,9 @@ func TestReceiverFileDownloadedAckFromWrongSenderIgnored(t *testing.T) {
 func TestReceiverWaitingRouteResumesOnPeerReachable(t *testing.T) {
 	var chunkRequested bool
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		peerReachable: func(peer domain.PeerIdentity) bool {
 			return true // sender is back online
 		},
@@ -600,21 +626,23 @@ func TestReceiverWaitingRouteResumesOnPeerReachable(t *testing.T) {
 	sender := domaintest.ID("sender-who-went-offline-1234567")
 	fileID := domain.FileID("waiting-route-file")
 
-	m.receiverMaps[fileID] = &receiverFileMapping{
-		FileID:     fileID,
-		FileHash:   "hash-wr",
-		FileName:   "resume.bin",
-		FileSize:   100000,
-		Sender:     sender,
-		State:      receiverWaitingRoute,
-		CreatedAt:  time.Now(),
-		NextOffset: 50000, // partial download
-		ChunkSize:  domain.DefaultChunkSize,
+	m.receiverMaps[ftIncomingRef(m, fileID, sender)] = &receiverFileMapping{
+		Ref:         ftIncomingRef(m, fileID, sender),
+		PartialPath: partialDownloadPath(m.downloadDir, fileID),
+		FileID:      fileID,
+		FileHash:    "hash-wr",
+		FileName:    "resume.bin",
+		FileSize:    100000,
+		Sender:      sender,
+		State:       receiverWaitingRoute,
+		CreatedAt:   time.Now(),
+		NextOffset:  50000, // partial download
+		ChunkSize:   domain.DefaultChunkSize,
 	}
 
 	m.tickReceiverMappings()
 
-	mapping := m.receiverMaps[fileID]
+	mapping := m.receiverMaps[ftIncomingRef(m, fileID, sender)]
 	if mapping.State != receiverDownloading {
 		t.Errorf("state = %s, want downloading (resumed)", mapping.State)
 	}
@@ -627,8 +655,9 @@ func TestReceiverWaitingRouteResumesOnPeerReachable(t *testing.T) {
 // mappings remain paused when the sender is still unreachable.
 func TestReceiverWaitingRouteStaysWhenPeerOffline(t *testing.T) {
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		peerReachable: func(peer domain.PeerIdentity) bool {
 			return false // sender still offline
 		},
@@ -642,18 +671,20 @@ func TestReceiverWaitingRouteStaysWhenPeerOffline(t *testing.T) {
 	sender := domaintest.ID("offline-sender-identity-1234567")
 	fileID := domain.FileID("stays-waiting-file")
 
-	m.receiverMaps[fileID] = &receiverFileMapping{
-		FileID:     fileID,
-		Sender:     sender,
-		State:      receiverWaitingRoute,
-		NextOffset: 10000,
-		ChunkSize:  domain.DefaultChunkSize,
+	m.receiverMaps[ftIncomingRef(m, fileID, sender)] = &receiverFileMapping{
+		Ref:         ftIncomingRef(m, fileID, sender),
+		PartialPath: partialDownloadPath(m.downloadDir, fileID),
+		FileID:      fileID,
+		Sender:      sender,
+		State:       receiverWaitingRoute,
+		NextOffset:  10000,
+		ChunkSize:   domain.DefaultChunkSize,
 	}
 
 	m.tickReceiverMappings()
 
-	if m.receiverMaps[fileID].State != receiverWaitingRoute {
-		t.Errorf("state = %s, want waiting_route", m.receiverMaps[fileID].State)
+	if m.receiverMaps[ftIncomingRef(m, fileID, sender)].State != receiverWaitingRoute {
+		t.Errorf("state = %s, want waiting_route", m.receiverMaps[ftIncomingRef(m, fileID, sender)].State)
 	}
 }
 
@@ -662,8 +693,9 @@ func TestReceiverWaitingRouteStaysWhenPeerOffline(t *testing.T) {
 // Completed as a fallback.
 func TestReceiverWaitingAckTimeoutTransitionsToCompleted(t *testing.T) {
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		peerReachable: func(peer domain.PeerIdentity) bool {
 			return true
 		},
@@ -676,7 +708,9 @@ func TestReceiverWaitingAckTimeoutTransitionsToCompleted(t *testing.T) {
 	sender := domaintest.ID("sender-identity-1234567890abcd")
 	fileID := domain.FileID("ack-timeout-file")
 
-	m.receiverMaps[fileID] = &receiverFileMapping{
+	m.receiverMaps[ftIncomingRef(m, fileID, sender)] = &receiverFileMapping{
+		Ref:               ftIncomingRef(m, fileID, sender),
+		PartialPath:       partialDownloadPath(m.downloadDir, fileID),
 		FileID:            fileID,
 		Sender:            sender,
 		State:             receiverWaitingAck,
@@ -687,8 +721,8 @@ func TestReceiverWaitingAckTimeoutTransitionsToCompleted(t *testing.T) {
 
 	m.tickReceiverMappings()
 
-	if m.receiverMaps[fileID].State != receiverCompleted {
-		t.Errorf("state = %s, want completed (fallback after max retries)", m.receiverMaps[fileID].State)
+	if m.receiverMaps[ftIncomingRef(m, fileID, sender)].State != receiverCompleted {
+		t.Errorf("state = %s, want completed (fallback after max retries)", m.receiverMaps[ftIncomingRef(m, fileID, sender)].State)
 	}
 }
 
@@ -697,8 +731,9 @@ func TestReceiverWaitingAckTimeoutTransitionsToCompleted(t *testing.T) {
 func TestReceiverWaitingAckRetryFileDownloaded(t *testing.T) {
 	var downloadedSent int
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		peerReachable: func(peer domain.PeerIdentity) bool {
 			return true
 		},
@@ -716,7 +751,9 @@ func TestReceiverWaitingAckRetryFileDownloaded(t *testing.T) {
 	fileID := domain.FileID("retry-file-downloaded")
 
 	// Backoff expired — should trigger retry.
-	m.receiverMaps[fileID] = &receiverFileMapping{
+	m.receiverMaps[ftIncomingRef(m, fileID, sender)] = &receiverFileMapping{
+		Ref:               ftIncomingRef(m, fileID, sender),
+		PartialPath:       partialDownloadPath(m.downloadDir, fileID),
 		FileID:            fileID,
 		Sender:            sender,
 		State:             receiverWaitingAck,
@@ -731,7 +768,7 @@ func TestReceiverWaitingAckRetryFileDownloaded(t *testing.T) {
 		t.Errorf("expected 1 file_downloaded retry, got %d", downloadedSent)
 	}
 
-	mapping := m.receiverMaps[fileID]
+	mapping := m.receiverMaps[ftIncomingRef(m, fileID, sender)]
 	if mapping.DownloadedRetries != 3 {
 		t.Errorf("DownloadedRetries = %d, want 3", mapping.DownloadedRetries)
 	}
@@ -747,8 +784,9 @@ func TestReceiverWaitingAckRetryFileDownloaded(t *testing.T) {
 // chunk_response from a peer that is not the mapping's Sender is dropped.
 func TestReceiverChunkResponseFromWrongSenderIgnored(t *testing.T) {
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		sendCommand: func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error {
 			return nil
 		},
@@ -759,13 +797,15 @@ func TestReceiverChunkResponseFromWrongSenderIgnored(t *testing.T) {
 	fakeSender := domaintest.ID("fake-sender-identity-1234567890")
 	fileID := domain.FileID("wrong-sender-chunk")
 
-	m.receiverMaps[fileID] = &receiverFileMapping{
-		FileID:    fileID,
-		FileHash:  "hash",
-		FileSize:  10000,
-		Sender:    realSender,
-		State:     receiverDownloading,
-		ChunkSize: domain.DefaultChunkSize,
+	m.receiverMaps[ftIncomingRef(m, fileID, realSender)] = &receiverFileMapping{
+		Ref:         ftIncomingRef(m, fileID, realSender),
+		PartialPath: partialDownloadPath(m.downloadDir, fileID),
+		FileID:      fileID,
+		FileHash:    "hash",
+		FileSize:    10000,
+		Sender:      realSender,
+		State:       receiverDownloading,
+		ChunkSize:   domain.DefaultChunkSize,
 	}
 
 	m.HandleChunkResponse(fakeSender, domain.ChunkResponsePayload{
@@ -775,7 +815,7 @@ func TestReceiverChunkResponseFromWrongSenderIgnored(t *testing.T) {
 	})
 
 	// State should not change, bytes not advanced.
-	if m.receiverMaps[fileID].BytesReceived != 0 {
+	if m.receiverMaps[ftIncomingRef(m, fileID, realSender)].BytesReceived != 0 {
 		t.Error("chunk from wrong sender should not advance BytesReceived")
 	}
 }
@@ -797,8 +837,9 @@ func TestStartDownload_ResumeRollbackPreservesProgress(t *testing.T) {
 	}
 
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		downloadDir:  downloadDir,
 		sendCommand: func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error {
 			return fmt.Errorf("simulated transient send failure")
@@ -812,7 +853,9 @@ func TestStartDownload_ResumeRollbackPreservesProgress(t *testing.T) {
 	sender := domaintest.ID("sender-identity-1234567890abcd")
 	validHash := "a1a2a3a4a5a6a7a8b1b2b3b4b5b6b7b8c1c2c3c4c5c6c7c8d1d2d3d4d5d6d7d8"
 
-	m.receiverMaps[fileID] = &receiverFileMapping{
+	m.receiverMaps[ftIncomingRef(m, fileID, sender)] = &receiverFileMapping{
+		Ref:           ftIncomingRef(m, fileID, sender),
+		PartialPath:   partialDownloadPath(m.downloadDir, fileID),
 		FileID:        fileID,
 		FileHash:      validHash,
 		FileName:      "partial.bin",
@@ -830,7 +873,7 @@ func TestStartDownload_ResumeRollbackPreservesProgress(t *testing.T) {
 		t.Fatal("StartDownload should fail when sendCommand fails")
 	}
 
-	rm := m.receiverMaps[fileID]
+	rm := m.receiverMaps[ftIncomingRef(m, fileID, sender)]
 	if rm.State != receiverWaitingRoute {
 		t.Errorf("state after rollback = %s, want waiting_route", rm.State)
 	}
@@ -849,8 +892,9 @@ func TestStartDownload_FreshStartRollbackResetsToZero(t *testing.T) {
 	dir := t.TempDir()
 
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		downloadDir:  dir,
 		sendCommand: func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error {
 			return fmt.Errorf("simulated send failure")
@@ -865,15 +909,17 @@ func TestStartDownload_FreshStartRollbackResetsToZero(t *testing.T) {
 	fileID := domain.FileID("fresh-rollback")
 	validHash := "b1b2b3b4b5b6b7b8c1c2c3c4c5c6c7c8d1d2d3d4d5d6d7d8e1e2e3e4e5e6e7e8"
 
-	m.receiverMaps[fileID] = &receiverFileMapping{
-		FileID:    fileID,
-		FileHash:  validHash,
-		FileName:  "fresh.bin",
-		FileSize:  100000,
-		Sender:    sender,
-		State:     receiverAvailable,
-		ChunkSize: domain.DefaultChunkSize,
-		CreatedAt: time.Now(),
+	m.receiverMaps[ftIncomingRef(m, fileID, sender)] = &receiverFileMapping{
+		Ref:         ftIncomingRef(m, fileID, sender),
+		PartialPath: partialDownloadPath(m.downloadDir, fileID),
+		FileID:      fileID,
+		FileHash:    validHash,
+		FileName:    "fresh.bin",
+		FileSize:    100000,
+		Sender:      sender,
+		State:       receiverAvailable,
+		ChunkSize:   domain.DefaultChunkSize,
+		CreatedAt:   time.Now(),
 	}
 
 	err := m.StartDownload(fileID)
@@ -881,7 +927,7 @@ func TestStartDownload_FreshStartRollbackResetsToZero(t *testing.T) {
 		t.Fatal("StartDownload should fail when sendCommand fails")
 	}
 
-	rm := m.receiverMaps[fileID]
+	rm := m.receiverMaps[ftIncomingRef(m, fileID, sender)]
 	if rm.State != receiverAvailable {
 		t.Errorf("state after rollback = %s, want available", rm.State)
 	}
@@ -904,8 +950,9 @@ func TestStartDownload_ResumeFallsBackWhenPartialFileMissing(t *testing.T) {
 
 	var requestedOffset uint64
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		downloadDir:  dir,
 		sendCommand: func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error {
 			var req domain.ChunkRequestPayload
@@ -922,7 +969,9 @@ func TestStartDownload_ResumeFallsBackWhenPartialFileMissing(t *testing.T) {
 	fileID := domain.FileID("missing-partial")
 	validHash := "a1a2a3a4a5a6a7a8b1b2b3b4b5b6b7b8c1c2c3c4c5c6c7c8d1d2d3d4d5d6d7d8"
 
-	m.receiverMaps[fileID] = &receiverFileMapping{
+	m.receiverMaps[ftIncomingRef(m, fileID, sender)] = &receiverFileMapping{
+		Ref:           ftIncomingRef(m, fileID, sender),
+		PartialPath:   partialDownloadPath(m.downloadDir, fileID),
 		FileID:        fileID,
 		FileHash:      validHash,
 		FileName:      "test.bin",
@@ -943,7 +992,7 @@ func TestStartDownload_ResumeFallsBackWhenPartialFileMissing(t *testing.T) {
 		t.Errorf("requested offset = %d, want 0 (fresh start due to missing partial)", requestedOffset)
 	}
 
-	rm := m.receiverMaps[fileID]
+	rm := m.receiverMaps[ftIncomingRef(m, fileID, sender)]
 	if rm.NextOffset != 0 {
 		t.Errorf("NextOffset = %d, want 0", rm.NextOffset)
 	}
@@ -972,8 +1021,9 @@ func TestStartDownload_ResumeFallsBackWhenPartialFileTruncated(t *testing.T) {
 
 	var requestedOffset uint64
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		downloadDir:  dir,
 		sendCommand: func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error {
 			var req domain.ChunkRequestPayload
@@ -991,7 +1041,9 @@ func TestStartDownload_ResumeFallsBackWhenPartialFileTruncated(t *testing.T) {
 	fileID := domain.FileID("truncated-partial")
 	validHash := "b1b2b3b4b5b6b7b8c1c2c3c4c5c6c7c8d1d2d3d4d5d6d7d8e1e2e3e4e5e6e7e8"
 
-	m.receiverMaps[fileID] = &receiverFileMapping{
+	m.receiverMaps[ftIncomingRef(m, fileID, sender)] = &receiverFileMapping{
+		Ref:           ftIncomingRef(m, fileID, sender),
+		PartialPath:   partialDownloadPath(m.downloadDir, fileID),
 		FileID:        fileID,
 		FileHash:      validHash,
 		FileName:      "test.bin",
@@ -1012,7 +1064,7 @@ func TestStartDownload_ResumeFallsBackWhenPartialFileTruncated(t *testing.T) {
 		t.Errorf("requested offset = %d, want 0 (fresh start due to truncated partial)", requestedOffset)
 	}
 
-	rm := m.receiverMaps[fileID]
+	rm := m.receiverMaps[ftIncomingRef(m, fileID, sender)]
 	if rm.NextOffset != 0 {
 		t.Errorf("NextOffset = %d, want 0", rm.NextOffset)
 	}
@@ -1052,8 +1104,9 @@ func TestStartDownload_RestartFromZeroTruncatesStalePartial(t *testing.T) {
 	// But we're testing a fresh StartDownload from receiverAvailable which
 	// resets offset to 0 — the stale file MUST be cleaned up.
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		downloadDir:  dir,
 		sendCommand: func(_ domain.PeerIdentity, _ domain.FileCommandPayload) error {
 			return nil
@@ -1063,15 +1116,17 @@ func TestStartDownload_RestartFromZeroTruncatesStalePartial(t *testing.T) {
 	}
 
 	sender := domaintest.ID("sender-identity-1234567890abcd")
-	m.receiverMaps[fileID] = &receiverFileMapping{
-		FileID:    fileID,
-		FileHash:  validHash,
-		FileName:  "test.bin",
-		FileSize:  100000,
-		Sender:    sender,
-		State:     receiverAvailable,
-		ChunkSize: domain.DefaultChunkSize,
-		CreatedAt: time.Now(),
+	m.receiverMaps[ftIncomingRef(m, fileID, sender)] = &receiverFileMapping{
+		Ref:         ftIncomingRef(m, fileID, sender),
+		PartialPath: partialDownloadPath(m.downloadDir, fileID),
+		FileID:      fileID,
+		FileHash:    validHash,
+		FileName:    "test.bin",
+		FileSize:    100000,
+		Sender:      sender,
+		State:       receiverAvailable,
+		ChunkSize:   domain.DefaultChunkSize,
+		CreatedAt:   time.Now(),
 	}
 
 	if err := m.StartDownload(fileID); err != nil {
@@ -1104,8 +1159,9 @@ func TestStartDownload_ResumeSucceedsWhenPartialFileValid(t *testing.T) {
 
 	var requestedOffset uint64
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		downloadDir:  dir,
 		sendCommand: func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error {
 			var req domain.ChunkRequestPayload
@@ -1121,7 +1177,9 @@ func TestStartDownload_ResumeSucceedsWhenPartialFileValid(t *testing.T) {
 	sender := domaintest.ID("sender-identity-1234567890abcd")
 	validHash := "c1c2c3c4c5c6c7c8d1d2d3d4d5d6d7d8e1e2e3e4e5e6e7e8f1f2f3f4f5f6f7f8"
 
-	m.receiverMaps[fileID] = &receiverFileMapping{
+	m.receiverMaps[ftIncomingRef(m, fileID, sender)] = &receiverFileMapping{
+		Ref:           ftIncomingRef(m, fileID, sender),
+		PartialPath:   partialDownloadPath(m.downloadDir, fileID),
 		FileID:        fileID,
 		FileHash:      validHash,
 		FileName:      "test.bin",
@@ -1142,7 +1200,7 @@ func TestStartDownload_ResumeSucceedsWhenPartialFileValid(t *testing.T) {
 		t.Errorf("requested offset = %d, want 65536 (resume from persisted offset)", requestedOffset)
 	}
 
-	rm := m.receiverMaps[fileID]
+	rm := m.receiverMaps[ftIncomingRef(m, fileID, sender)]
 	if rm.NextOffset != 65536 {
 		t.Errorf("NextOffset = %d, want 65536 (preserved)", rm.NextOffset)
 	}
@@ -1175,8 +1233,9 @@ func TestStartDownload_OversizedPartialFileResetsOffset(t *testing.T) {
 
 	var requestedOffset uint64
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		downloadDir:  dir,
 		sendCommand: func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error {
 			var req domain.ChunkRequestPayload
@@ -1192,7 +1251,9 @@ func TestStartDownload_OversizedPartialFileResetsOffset(t *testing.T) {
 	sender := domaintest.ID("sender-identity-1234567890abcd")
 	validHash := "f1f2f3f4f5f6f7f8a1a2a3a4a5a6a7a8b1b2b3b4b5b6b7b8c1c2c3c4c5c6c7c8"
 
-	m.receiverMaps[fileID] = &receiverFileMapping{
+	m.receiverMaps[ftIncomingRef(m, fileID, sender)] = &receiverFileMapping{
+		Ref:           ftIncomingRef(m, fileID, sender),
+		PartialPath:   partialDownloadPath(m.downloadDir, fileID),
 		FileID:        fileID,
 		FileHash:      validHash,
 		FileName:      "test.bin",
@@ -1214,7 +1275,7 @@ func TestStartDownload_OversizedPartialFileResetsOffset(t *testing.T) {
 		t.Errorf("requested offset = %d, want 0 (oversized partial must reset)", requestedOffset)
 	}
 
-	rm := m.receiverMaps[fileID]
+	rm := m.receiverMaps[ftIncomingRef(m, fileID, sender)]
 	if rm.NextOffset != 0 {
 		t.Errorf("NextOffset = %d, want 0", rm.NextOffset)
 	}
@@ -1245,8 +1306,9 @@ func TestRetryPendingDownloads_RollsBackOnSendFailure(t *testing.T) {
 	}
 
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		downloadDir:  downloadDir,
 		sendCommand: func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error {
 			return fmt.Errorf("simulated network failure")
@@ -1259,7 +1321,9 @@ func TestRetryPendingDownloads_RollsBackOnSendFailure(t *testing.T) {
 
 	sender := domaintest.ID("sender-identity-1234567890abcd")
 
-	m.receiverMaps[fileID] = &receiverFileMapping{
+	m.receiverMaps[ftIncomingRef(m, fileID, sender)] = &receiverFileMapping{
+		Ref:           ftIncomingRef(m, fileID, sender),
+		PartialPath:   partialDownloadPath(m.downloadDir, fileID),
 		FileID:        fileID,
 		FileHash:      "e1e2e3e4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6e1e2",
 		FileName:      "test.bin",
@@ -1274,7 +1338,7 @@ func TestRetryPendingDownloads_RollsBackOnSendFailure(t *testing.T) {
 
 	m.tickReceiverMappings()
 
-	rm := m.receiverMaps[fileID]
+	rm := m.receiverMaps[ftIncomingRef(m, fileID, sender)]
 	if rm.State != receiverWaitingRoute {
 		t.Errorf("state = %s, want waiting_route (rolled back after send failure)", rm.State)
 	}
@@ -1303,8 +1367,9 @@ func TestRetryPendingDownloads_SuccessfulResumeStaysDownloading(t *testing.T) {
 
 	sendCalled := false
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		downloadDir:  downloadDir,
 		sendCommand: func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error {
 			sendCalled = true
@@ -1318,7 +1383,9 @@ func TestRetryPendingDownloads_SuccessfulResumeStaysDownloading(t *testing.T) {
 
 	sender := domaintest.ID("sender-identity-1234567890abcd")
 
-	m.receiverMaps[fileID] = &receiverFileMapping{
+	m.receiverMaps[ftIncomingRef(m, fileID, sender)] = &receiverFileMapping{
+		Ref:           ftIncomingRef(m, fileID, sender),
+		PartialPath:   partialDownloadPath(m.downloadDir, fileID),
 		FileID:        fileID,
 		FileHash:      "e1e2e3e4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6e1e2",
 		FileName:      "test.bin",
@@ -1333,7 +1400,7 @@ func TestRetryPendingDownloads_SuccessfulResumeStaysDownloading(t *testing.T) {
 
 	m.tickReceiverMappings()
 
-	rm := m.receiverMaps[fileID]
+	rm := m.receiverMaps[ftIncomingRef(m, fileID, sender)]
 	if rm.State != receiverDownloading {
 		t.Errorf("state = %s, want downloading (send succeeded)", rm.State)
 	}
@@ -1361,8 +1428,9 @@ func TestDeferredResumeSkippedAfterCancel(t *testing.T) {
 
 	chunkRequestSent := false
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		downloadDir:  downloadDir,
 		sendCommand: func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error {
 			chunkRequestSent = true
@@ -1373,7 +1441,9 @@ func TestDeferredResumeSkippedAfterCancel(t *testing.T) {
 	}
 
 	sender := domaintest.ID("sender-identity-1234567890abcd")
-	m.receiverMaps[fileID] = &receiverFileMapping{
+	m.receiverMaps[ftIncomingRef(m, fileID, sender)] = &receiverFileMapping{
+		Ref:           ftIncomingRef(m, fileID, sender),
+		PartialPath:   partialDownloadPath(m.downloadDir, fileID),
 		FileID:        fileID,
 		FileHash:      "a1a2a3a4a5a6a7a8b1b2b3b4b5b6b7b8c1c2c3c4c5c6c7c8d1d2d3d4d5d6d7d8",
 		FileName:      "test.bin",
@@ -1392,8 +1462,8 @@ func TestDeferredResumeSkippedAfterCancel(t *testing.T) {
 
 	// Phase 1: snapshot under lock (mimics what tick does).
 	m.mu.Lock()
-	rm := m.receiverMaps[fileID]
-	snap := m.prepareResumeLocked(fileID, rm)
+	rm := m.receiverMaps[ftIncomingRef(m, fileID, sender)]
+	snap := m.prepareResumeLocked(ftIncomingRef(m, fileID, sender), rm)
 	m.saveMappingsLocked()
 	m.mu.Unlock()
 
@@ -1405,7 +1475,7 @@ func TestDeferredResumeSkippedAfterCancel(t *testing.T) {
 	// Phase 3: deferred execution — should be skipped by receiverStateIs.
 	// The original mapping had generation 0; CancelDownload increments it,
 	// so both state and generation mismatch.
-	if m.receiverStateIs(fileID, receiverDownloading, 0) {
+	if m.receiverStateIs(ftIncomingRef(m, fileID, sender), receiverDownloading, 0) {
 		t.Fatal("receiverStateIs should return false after cancel")
 	}
 
@@ -1428,8 +1498,9 @@ func TestDeferredActionStateGuard_SkipsOnMismatch(t *testing.T) {
 
 	var actionExecuted bool
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		downloadDir:  downloadDir,
 		sendCommand: func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error {
 			actionExecuted = true
@@ -1439,24 +1510,27 @@ func TestDeferredActionStateGuard_SkipsOnMismatch(t *testing.T) {
 	}
 
 	sender := domaintest.ID("sender-guard-test")
-	m.receiverMaps[fileID] = &receiverFileMapping{
-		FileID:    fileID,
-		FileHash:  "aaaa",
-		FileName:  "test.bin",
-		FileSize:  10000,
-		Sender:    sender,
-		State:     receiverFailed, // actual state
-		ChunkSize: domain.DefaultChunkSize,
-		CreatedAt: time.Now(),
+	m.receiverMaps[ftIncomingRef(m, fileID, sender)] = &receiverFileMapping{
+		Ref:         ftIncomingRef(m, fileID, sender),
+		PartialPath: partialDownloadPath(m.downloadDir, fileID),
+		FileID:      fileID,
+		FileHash:    "aaaa",
+		FileName:    "test.bin",
+		FileSize:    10000,
+		Sender:      sender,
+		State:       receiverFailed, // actual state
+		ChunkSize:   domain.DefaultChunkSize,
+		CreatedAt:   time.Now(),
 	}
 
 	// Action was created when state was receiverDownloading, but since then
 	// the mapping moved to receiverFailed. The guard must skip it.
 	action := receiverTickAction{
+		partialPath:   partialDownloadPath(m.downloadDir, fileID),
 		kind:          actionRetryChunk,
 		requiredState: receiverDownloading, // does NOT match actual state
 		generation:    0,
-		fileID:        fileID,
+		fileID:        ftIncomingRef(m, fileID, sender),
 		sender:        sender,
 		offset:        0,
 		chunkSize:     domain.DefaultChunkSize,
@@ -1484,8 +1558,9 @@ func TestDeferredActionStateGuard_ExecutesOnMatch(t *testing.T) {
 
 	var ackSent bool
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		downloadDir:  downloadDir,
 		sendCommand: func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error {
 			ackSent = true
@@ -1495,7 +1570,9 @@ func TestDeferredActionStateGuard_ExecutesOnMatch(t *testing.T) {
 	}
 
 	sender := domaintest.ID("sender-guard-match")
-	m.receiverMaps[fileID] = &receiverFileMapping{
+	m.receiverMaps[ftIncomingRef(m, fileID, sender)] = &receiverFileMapping{
+		Ref:           ftIncomingRef(m, fileID, sender),
+		PartialPath:   partialDownloadPath(m.downloadDir, fileID),
 		FileID:        fileID,
 		FileHash:      "bbbb",
 		FileName:      "test.bin",
@@ -1508,10 +1585,11 @@ func TestDeferredActionStateGuard_ExecutesOnMatch(t *testing.T) {
 	}
 
 	action := receiverTickAction{
+		partialPath:   partialDownloadPath(m.downloadDir, fileID),
 		kind:          actionRetryFileDownloaded,
 		requiredState: receiverWaitingAck,
 		generation:    0,
-		fileID:        fileID,
+		fileID:        ftIncomingRef(m, fileID, sender),
 		sender:        sender,
 	}
 
@@ -1537,8 +1615,9 @@ func TestDeferredCleanupSkippedAfterReRegister(t *testing.T) {
 	fileID := domain.FileID("cleanup-reregister")
 
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		downloadDir:  downloadDir,
 		sendCommand: func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error {
 			return nil
@@ -1551,41 +1630,46 @@ func TestDeferredCleanupSkippedAfterReRegister(t *testing.T) {
 
 	// Phase 1: create a failed mapping (generation 0) and capture a
 	// deferred cleanup action from the tick snapshot.
-	m.receiverMaps[fileID] = &receiverFileMapping{
-		FileID:    fileID,
-		FileHash:  "aaaa",
-		FileName:  "test.bin",
-		FileSize:  100000,
-		Sender:    sender,
-		State:     receiverFailed,
-		ChunkSize: domain.DefaultChunkSize,
-		CreatedAt: time.Now(),
+	m.receiverMaps[ftIncomingRef(m, fileID, sender)] = &receiverFileMapping{
+		Ref:         ftIncomingRef(m, fileID, sender),
+		PartialPath: partialDownloadPath(m.downloadDir, fileID),
+		FileID:      fileID,
+		FileHash:    "aaaa",
+		FileName:    "test.bin",
+		FileSize:    100000,
+		Sender:      sender,
+		State:       receiverFailed,
+		ChunkSize:   domain.DefaultChunkSize,
+		CreatedAt:   time.Now(),
 		// Generation deliberately 0 (default).
 	}
 
 	staleAction := receiverTickAction{
+		partialPath:   partialDownloadPath(m.downloadDir, fileID),
 		kind:          actionCleanupFailed,
 		requiredState: receiverFailed,
 		generation:    0, // captured from the old mapping
-		fileID:        fileID,
+		fileID:        ftIncomingRef(m, fileID, sender),
 	}
 
 	// Phase 2: simulate CleanupPeerTransfers removing the failed mapping,
 	// then a new RegisterFileReceive + StartDownload creating a fresh
 	// .part file. We simulate this by deleting and re-inserting with a
 	// new generation.
-	delete(m.receiverMaps, fileID)
+	delete(m.receiverMaps, ftIncomingRef(m, fileID, sender))
 	m.nextGeneration++
-	m.receiverMaps[fileID] = &receiverFileMapping{
-		FileID:     fileID,
-		FileHash:   "bbbb",
-		FileName:   "test.bin",
-		FileSize:   200000,
-		Sender:     sender,
-		State:      receiverDownloading,
-		ChunkSize:  domain.DefaultChunkSize,
-		CreatedAt:  time.Now(),
-		Generation: m.nextGeneration,
+	m.receiverMaps[ftIncomingRef(m, fileID, sender)] = &receiverFileMapping{
+		Ref:         ftIncomingRef(m, fileID, sender),
+		PartialPath: partialDownloadPath(m.downloadDir, fileID),
+		FileID:      fileID,
+		FileHash:    "bbbb",
+		FileName:    "test.bin",
+		FileSize:    200000,
+		Sender:      sender,
+		State:       receiverDownloading,
+		ChunkSize:   domain.DefaultChunkSize,
+		CreatedAt:   time.Now(),
+		Generation:  m.nextGeneration,
 	}
 
 	// Create the fresh .part file that the new download is writing to.
@@ -1621,8 +1705,9 @@ func TestVerifyCleanupSkippedAfterCancelAndRestart(t *testing.T) {
 	sender := domaintest.ID("sender-verify-cancel")
 
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		downloadDir:  downloadDir,
 		sendCommand: func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error {
 			return nil
@@ -1635,26 +1720,28 @@ func TestVerifyCleanupSkippedAfterCancelAndRestart(t *testing.T) {
 	// and transitioning to receiverVerifying.
 	m.nextGeneration++
 	oldGeneration := m.nextGeneration
-	m.receiverMaps[fileID] = &receiverFileMapping{
-		FileID:     fileID,
-		FileHash:   "aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111",
-		FileName:   "test.bin",
-		FileSize:   100000,
-		Sender:     sender,
-		State:      receiverVerifying,
-		ChunkSize:  domain.DefaultChunkSize,
-		CreatedAt:  time.Now(),
-		Generation: oldGeneration,
+	m.receiverMaps[ftIncomingRef(m, fileID, sender)] = &receiverFileMapping{
+		Ref:         ftIncomingRef(m, fileID, sender),
+		PartialPath: partialDownloadPath(m.downloadDir, fileID),
+		FileID:      fileID,
+		FileHash:    "aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111",
+		FileName:    "test.bin",
+		FileSize:    100000,
+		Sender:      sender,
+		State:       receiverVerifying,
+		ChunkSize:   domain.DefaultChunkSize,
+		CreatedAt:   time.Now(),
+		Generation:  oldGeneration,
 	}
 
 	// Phase 2: user cancels and immediately starts a new download.
 	// CancelDownload resets state and bumps generation.
 	m.nextGeneration++
 	newGeneration := m.nextGeneration
-	m.receiverMaps[fileID].State = receiverDownloading
-	m.receiverMaps[fileID].Generation = newGeneration
-	m.receiverMaps[fileID].BytesReceived = 4096
-	m.receiverMaps[fileID].NextOffset = 4096
+	m.receiverMaps[ftIncomingRef(m, fileID, sender)].State = receiverDownloading
+	m.receiverMaps[ftIncomingRef(m, fileID, sender)].Generation = newGeneration
+	m.receiverMaps[ftIncomingRef(m, fileID, sender)].BytesReceived = 4096
+	m.receiverMaps[ftIncomingRef(m, fileID, sender)].NextOffset = 4096
 
 	// New .part file being written by the restarted download.
 	partialPath := partialDownloadPath(downloadDir, fileID)
@@ -1671,19 +1758,19 @@ func TestVerifyCleanupSkippedAfterCancelAndRestart(t *testing.T) {
 	// removePartialIfOwned checks receiverStateIs(fileID, receiverFailed, oldGeneration)
 	// which returns false because state is receiverDownloading and generation differs.
 
-	if m.receiverStateIs(fileID, receiverFailed, oldGeneration) {
+	if m.receiverStateIs(ftIncomingRef(m, fileID, sender), receiverFailed, oldGeneration) {
 		t.Fatal("receiverStateIs should return false: state is downloading with new generation")
 	}
 
 	// Also verify that even if the state were receiverFailed, the generation mismatch
 	// would still prevent cleanup.
-	m.receiverMaps[fileID].State = receiverFailed
-	if m.receiverStateIs(fileID, receiverFailed, oldGeneration) {
+	m.receiverMaps[ftIncomingRef(m, fileID, sender)].State = receiverFailed
+	if m.receiverStateIs(ftIncomingRef(m, fileID, sender), receiverFailed, oldGeneration) {
 		t.Fatal("receiverStateIs should return false: generation mismatch despite matching state")
 	}
 
 	// Restore to downloading for the final check.
-	m.receiverMaps[fileID].State = receiverDownloading
+	m.receiverMaps[ftIncomingRef(m, fileID, sender)].State = receiverDownloading
 
 	// Verify .part file survived — the stale verifier's cleanup was skipped.
 	if _, err := os.Stat(partialPath); os.IsNotExist(err) {
@@ -1701,8 +1788,9 @@ func TestMarkReceiverFailedRejectsStaleGeneration(t *testing.T) {
 	t.Parallel()
 
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		stopCh:       make(chan struct{}),
 	}
 
@@ -1724,7 +1812,9 @@ func TestMarkReceiverFailedRejectsStaleGeneration(t *testing.T) {
 		CreatedAt:  time.Now(),
 		Generation: currentGeneration,
 	}
-	m.receiverMaps[fileID] = rm
+	rm.Ref = ftIncomingRef(m, fileID, rm.Sender)
+	rm.PartialPath = partialDownloadPath(m.downloadDir, fileID)
+	m.receiverMaps[ftIncomingRef(m, fileID, domaintest.ID("sender-gen-race-1234567890abcd"))] = rm
 
 	// Stale verifier calls markReceiverFailed with old generation.
 	m.markReceiverFailed(rm, receiverVerifying, staleGeneration)
@@ -1762,8 +1852,9 @@ func TestRetryPendingDownloads_RollbackRestoresAllWaitingRouteOnSendFailure(t *t
 	}
 
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		downloadDir:  downloadDir,
 		sendCommand: func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error {
 			return fmt.Errorf("simulated network failure")
@@ -1780,7 +1871,9 @@ func TestRetryPendingDownloads_RollbackRestoresAllWaitingRouteOnSendFailure(t *t
 	// (no concurrency cap). The send fails for each, and the rollback
 	// path must restore both back to waitingRoute.
 	for _, fid := range []domain.FileID{"wr-file-a", "wr-file-b"} {
-		m.receiverMaps[fid] = &receiverFileMapping{
+		m.receiverMaps[ftIncomingRef(m, fid, sender)] = &receiverFileMapping{
+			Ref:           ftIncomingRef(m, fid, sender),
+			PartialPath:   partialDownloadPath(m.downloadDir, fid),
 			FileID:        fid,
 			FileHash:      "e1e2e3e4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6e1e2",
 			FileName:      "test.bin",
@@ -1797,7 +1890,7 @@ func TestRetryPendingDownloads_RollbackRestoresAllWaitingRouteOnSendFailure(t *t
 	m.tickReceiverMappings()
 
 	for _, fid := range []domain.FileID{"wr-file-a", "wr-file-b"} {
-		rm := m.receiverMaps[fid]
+		rm := m.receiverMaps[ftIncomingRef(m, fid, sender)]
 		if rm.State != receiverWaitingRoute {
 			t.Errorf("%s: state = %s, want waiting_route", fid, rm.State)
 		}
@@ -1829,8 +1922,9 @@ func TestRetryPendingDownloads_ResetsOffsetWhenPartialFileMissing(t *testing.T) 
 	downloadDir := createPartialDir(t)
 	var requestedOffset uint64
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		downloadDir:  downloadDir,
 		sendCommand: func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error {
 			var cr domain.ChunkRequestPayload
@@ -1848,7 +1942,9 @@ func TestRetryPendingDownloads_ResetsOffsetWhenPartialFileMissing(t *testing.T) 
 	sender := domaintest.ID("sender-identity-1234567890abcd")
 	fileID := domain.FileID("partial-missing")
 
-	m.receiverMaps[fileID] = &receiverFileMapping{
+	m.receiverMaps[ftIncomingRef(m, fileID, sender)] = &receiverFileMapping{
+		Ref:           ftIncomingRef(m, fileID, sender),
+		PartialPath:   partialDownloadPath(m.downloadDir, fileID),
 		FileID:        fileID,
 		FileHash:      "e1e2e3e4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6e1e2",
 		FileName:      "test.bin",
@@ -1864,7 +1960,7 @@ func TestRetryPendingDownloads_ResetsOffsetWhenPartialFileMissing(t *testing.T) 
 
 	m.tickReceiverMappings()
 
-	rm := m.receiverMaps[fileID]
+	rm := m.receiverMaps[ftIncomingRef(m, fileID, sender)]
 	if rm.State != receiverDownloading {
 		t.Fatalf("state = %s, want downloading", rm.State)
 	}
@@ -1895,8 +1991,9 @@ func TestRetryPendingDownloads_ResetsOffsetWhenPartialFileTruncated(t *testing.T
 	}
 
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		downloadDir:  downloadDir,
 		sendCommand: func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error {
 			return nil
@@ -1909,7 +2006,9 @@ func TestRetryPendingDownloads_ResetsOffsetWhenPartialFileTruncated(t *testing.T
 
 	sender := domaintest.ID("sender-identity-1234567890abcd")
 
-	m.receiverMaps[fileID] = &receiverFileMapping{
+	m.receiverMaps[ftIncomingRef(m, fileID, sender)] = &receiverFileMapping{
+		Ref:           ftIncomingRef(m, fileID, sender),
+		PartialPath:   partialDownloadPath(m.downloadDir, fileID),
 		FileID:        fileID,
 		FileHash:      "e1e2e3e4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6e1e2",
 		FileName:      "test.bin",
@@ -1924,7 +2023,7 @@ func TestRetryPendingDownloads_ResetsOffsetWhenPartialFileTruncated(t *testing.T
 
 	m.tickReceiverMappings()
 
-	rm := m.receiverMaps[fileID]
+	rm := m.receiverMaps[ftIncomingRef(m, fileID, sender)]
 	if rm.NextOffset != 0 {
 		t.Errorf("NextOffset = %d, want 0 (reset because partial file truncated)", rm.NextOffset)
 	}
@@ -1949,8 +2048,9 @@ func TestRetryPendingDownloads_PreservesOffsetWhenPartialFileValid(t *testing.T)
 
 	var requestedOffset uint64
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		downloadDir:  downloadDir,
 		sendCommand: func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error {
 			var cr domain.ChunkRequestPayload
@@ -1967,7 +2067,9 @@ func TestRetryPendingDownloads_PreservesOffsetWhenPartialFileValid(t *testing.T)
 
 	sender := domaintest.ID("sender-identity-1234567890abcd")
 
-	m.receiverMaps[fileID] = &receiverFileMapping{
+	m.receiverMaps[ftIncomingRef(m, fileID, sender)] = &receiverFileMapping{
+		Ref:           ftIncomingRef(m, fileID, sender),
+		PartialPath:   partialDownloadPath(m.downloadDir, fileID),
 		FileID:        fileID,
 		FileHash:      "e1e2e3e4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6e1e2",
 		FileName:      "test.bin",
@@ -1982,7 +2084,7 @@ func TestRetryPendingDownloads_PreservesOffsetWhenPartialFileValid(t *testing.T)
 
 	m.tickReceiverMappings()
 
-	rm := m.receiverMaps[fileID]
+	rm := m.receiverMaps[ftIncomingRef(m, fileID, sender)]
 	if rm.NextOffset != 32768 {
 		t.Errorf("NextOffset = %d, want 32768 (preserved, partial file valid)", rm.NextOffset)
 	}
@@ -2002,8 +2104,9 @@ func TestRetryPendingDownloads_ZeroOffsetSkipsPartialCheck(t *testing.T) {
 
 	// No downloadDir needed — check should be skipped entirely.
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		sendCommand: func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error {
 			return nil
 		},
@@ -2016,7 +2119,9 @@ func TestRetryPendingDownloads_ZeroOffsetSkipsPartialCheck(t *testing.T) {
 	sender := domaintest.ID("sender-identity-1234567890abcd")
 	fileID := domain.FileID("zero-offset-file")
 
-	m.receiverMaps[fileID] = &receiverFileMapping{
+	m.receiverMaps[ftIncomingRef(m, fileID, sender)] = &receiverFileMapping{
+		Ref:           ftIncomingRef(m, fileID, sender),
+		PartialPath:   partialDownloadPath(m.downloadDir, fileID),
 		FileID:        fileID,
 		FileHash:      "e1e2e3e4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6e1e2",
 		FileName:      "test.bin",
@@ -2031,7 +2136,7 @@ func TestRetryPendingDownloads_ZeroOffsetSkipsPartialCheck(t *testing.T) {
 
 	m.tickReceiverMappings()
 
-	rm := m.receiverMaps[fileID]
+	rm := m.receiverMaps[ftIncomingRef(m, fileID, sender)]
 	if rm.State != receiverDownloading {
 		t.Errorf("state = %s, want downloading", rm.State)
 	}
@@ -2049,14 +2154,17 @@ func TestRetryPendingDownloads_ZeroOffsetSkipsPartialCheck(t *testing.T) {
 func TestCancelDownloadRejectsWaitingAck(t *testing.T) {
 	dir := t.TempDir()
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		downloadDir:  dir,
 		stopCh:       make(chan struct{}),
 	}
 
 	fileID := domain.FileID("ack-pending-file")
-	m.receiverMaps[fileID] = &receiverFileMapping{
+	m.receiverMaps[ftIncomingRef(m, fileID, domaintest.ID("sender-identity-1234567890abcd"))] = &receiverFileMapping{
+		Ref:           ftIncomingRef(m, fileID, domaintest.ID("sender-identity-1234567890abcd")),
+		PartialPath:   partialDownloadPath(m.downloadDir, fileID),
 		FileID:        fileID,
 		FileHash:      "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
 		FileName:      "report.pdf",
@@ -2073,8 +2181,8 @@ func TestCancelDownloadRejectsWaitingAck(t *testing.T) {
 	}
 
 	// State must remain unchanged.
-	if m.receiverMaps[fileID].State != receiverWaitingAck {
-		t.Errorf("state = %s, want waiting_ack", m.receiverMaps[fileID].State)
+	if m.receiverMaps[ftIncomingRef(m, fileID, domaintest.ID("sender-identity-1234567890abcd"))].State != receiverWaitingAck {
+		t.Errorf("state = %s, want waiting_ack", m.receiverMaps[ftIncomingRef(m, fileID, domaintest.ID("sender-identity-1234567890abcd"))].State)
 	}
 }
 
@@ -2091,29 +2199,32 @@ func TestCancelDownloadAllowedStates(t *testing.T) {
 		t.Run(string(state), func(t *testing.T) {
 			dir := t.TempDir()
 			m := &Manager{
-				senderMaps:   make(map[domain.FileID]*senderFileMapping),
-				receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+				localID:      ftFixtureIdentity(),
+				senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+				receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 				downloadDir:  dir,
 				stopCh:       make(chan struct{}),
 			}
 
 			fileID := domain.FileID("cancel-" + string(state))
-			m.receiverMaps[fileID] = &receiverFileMapping{
-				FileID:    fileID,
-				FileHash:  "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
-				FileName:  "test.bin",
-				FileSize:  1024,
-				Sender:    domaintest.ID("sender-identity-1234567890abcd"),
-				State:     state,
-				CreatedAt: time.Now(),
+			m.receiverMaps[ftIncomingRef(m, fileID, domaintest.ID("sender-identity-1234567890abcd"))] = &receiverFileMapping{
+				Ref:         ftIncomingRef(m, fileID, domaintest.ID("sender-identity-1234567890abcd")),
+				PartialPath: partialDownloadPath(m.downloadDir, fileID),
+				FileID:      fileID,
+				FileHash:    "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+				FileName:    "test.bin",
+				FileSize:    1024,
+				Sender:      domaintest.ID("sender-identity-1234567890abcd"),
+				State:       state,
+				CreatedAt:   time.Now(),
 			}
 
 			if err := m.CancelDownload(fileID); err != nil {
 				t.Fatalf("CancelDownload should allow state %s: %v", state, err)
 			}
 
-			if m.receiverMaps[fileID].State != receiverAvailable {
-				t.Errorf("state = %s, want available", m.receiverMaps[fileID].State)
+			if m.receiverMaps[ftIncomingRef(m, fileID, domaintest.ID("sender-identity-1234567890abcd"))].State != receiverAvailable {
+				t.Errorf("state = %s, want available", m.receiverMaps[ftIncomingRef(m, fileID, domaintest.ID("sender-identity-1234567890abcd"))].State)
 			}
 		})
 	}
@@ -2135,7 +2246,9 @@ func TestRestartDownloadFromFailed(t *testing.T) {
 	// Set the manager's generation counter to match the mapping so the
 	// bump assertion is meaningful.
 	m.nextGeneration = 5
-	m.receiverMaps[fileID] = &receiverFileMapping{
+	m.receiverMaps[ftIncomingRef(m, fileID, sender)] = &receiverFileMapping{
+		Ref:           ftIncomingRef(m, fileID, sender),
+		PartialPath:   partialDownloadPath(m.downloadDir, fileID),
 		FileID:        fileID,
 		FileHash:      "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
 		FileName:      "restart.txt",
@@ -2154,7 +2267,7 @@ func TestRestartDownloadFromFailed(t *testing.T) {
 		t.Fatalf("RestartDownload failed: %v", err)
 	}
 
-	rm := m.receiverMaps[fileID]
+	rm := m.receiverMaps[ftIncomingRef(m, fileID, sender)]
 	if rm.State != receiverAvailable {
 		t.Errorf("state = %s, want %s", rm.State, receiverAvailable)
 	}
@@ -2191,20 +2304,22 @@ func TestRestartDownloadRejectsNonFailed(t *testing.T) {
 	for _, state := range nonFailedStates {
 		t.Run(string(state), func(t *testing.T) {
 			fileID := domain.FileID("restart-reject-" + string(state))
-			m.receiverMaps[fileID] = &receiverFileMapping{
-				FileID:    fileID,
-				Sender:    sender,
-				State:     state,
-				CreatedAt: time.Now(),
+			m.receiverMaps[ftIncomingRef(m, fileID, sender)] = &receiverFileMapping{
+				Ref:         ftIncomingRef(m, fileID, sender),
+				PartialPath: partialDownloadPath(m.downloadDir, fileID),
+				FileID:      fileID,
+				Sender:      sender,
+				State:       state,
+				CreatedAt:   time.Now(),
 			}
 
 			err := m.RestartDownload(fileID)
 			if err == nil {
 				t.Fatalf("RestartDownload should reject state %s", state)
 			}
-			if m.receiverMaps[fileID].State != state {
+			if m.receiverMaps[ftIncomingRef(m, fileID, sender)].State != state {
 				t.Errorf("state changed from %s to %s after rejected restart",
-					state, m.receiverMaps[fileID].State)
+					state, m.receiverMaps[ftIncomingRef(m, fileID, sender)].State)
 			}
 		})
 	}
@@ -2238,8 +2353,9 @@ func TestReclaimStalledServingSlots(t *testing.T) {
 	}
 
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		store:        store,
 		mappingsPath: filepath.Join(dir, "transfers.json"),
 		sendCommand: func(_ domain.PeerIdentity, _ domain.FileCommandPayload) error {
@@ -2252,7 +2368,8 @@ func TestReclaimStalledServingSlots(t *testing.T) {
 
 	// Stale entry: LastServedAt well past the timeout.
 	staleID := domain.FileID("stale-serving")
-	m.senderMaps[staleID] = &senderFileMapping{
+	m.senderMaps[ftOutgoingRef(m, staleID, recipient)] = &senderFileMapping{
+		Ref:          ftOutgoingRef(m, staleID, recipient),
 		FileID:       staleID,
 		FileHash:     "aabb",
 		FileName:     "stale.bin",
@@ -2265,7 +2382,8 @@ func TestReclaimStalledServingSlots(t *testing.T) {
 
 	// Fresh entry: LastServedAt within the timeout.
 	freshID := domain.FileID("fresh-serving")
-	m.senderMaps[freshID] = &senderFileMapping{
+	m.senderMaps[ftOutgoingRef(m, freshID, recipient)] = &senderFileMapping{
+		Ref:          ftOutgoingRef(m, freshID, recipient),
 		FileID:       freshID,
 		FileHash:     "ccdd",
 		FileName:     "fresh.bin",
@@ -2278,7 +2396,8 @@ func TestReclaimStalledServingSlots(t *testing.T) {
 
 	// Non-serving entry: should not be touched.
 	announcedID := domain.FileID("announced-entry")
-	m.senderMaps[announcedID] = &senderFileMapping{
+	m.senderMaps[ftOutgoingRef(m, announcedID, recipient)] = &senderFileMapping{
+		Ref:          ftOutgoingRef(m, announcedID, recipient),
 		FileID:       announcedID,
 		FileHash:     "eeff",
 		FileName:     "announced.bin",
@@ -2292,18 +2411,18 @@ func TestReclaimStalledServingSlots(t *testing.T) {
 	m.tickSenderMappings()
 
 	// Stale entry should revert to announced.
-	if m.senderMaps[staleID].State != senderAnnounced {
-		t.Errorf("stale entry: state = %s, want announced", m.senderMaps[staleID].State)
+	if m.senderMaps[ftOutgoingRef(m, staleID, recipient)].State != senderAnnounced {
+		t.Errorf("stale entry: state = %s, want announced", m.senderMaps[ftOutgoingRef(m, staleID, recipient)].State)
 	}
 
 	// Fresh entry should remain serving.
-	if m.senderMaps[freshID].State != senderServing {
-		t.Errorf("fresh entry: state = %s, want serving", m.senderMaps[freshID].State)
+	if m.senderMaps[ftOutgoingRef(m, freshID, recipient)].State != senderServing {
+		t.Errorf("fresh entry: state = %s, want serving", m.senderMaps[ftOutgoingRef(m, freshID, recipient)].State)
 	}
 
 	// Announced entry should stay announced.
-	if m.senderMaps[announcedID].State != senderAnnounced {
-		t.Errorf("announced entry: state = %s, want announced", m.senderMaps[announcedID].State)
+	if m.senderMaps[ftOutgoingRef(m, announcedID, recipient)].State != senderAnnounced {
+		t.Errorf("announced entry: state = %s, want announced", m.senderMaps[ftOutgoingRef(m, announcedID, recipient)].State)
 	}
 }
 
@@ -2324,8 +2443,9 @@ func TestReclaimStalledServingSlotsPersistence(t *testing.T) {
 
 	// Save a serving mapping with an old LastServedAt.
 	m1 := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		store:        store,
 		mappingsPath: mappingsPath,
 		stopCh:       make(chan struct{}),
@@ -2339,7 +2459,8 @@ func TestReclaimStalledServingSlotsPersistence(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	m1.senderMaps[fileID] = &senderFileMapping{
+	m1.senderMaps[ftOutgoingRef(m1, fileID, domaintest.ID("receiver-identity-1234567890ab"))] = &senderFileMapping{
+		Ref:          ftOutgoingRef(m1, fileID, domaintest.ID("receiver-identity-1234567890ab")),
 		FileID:       fileID,
 		FileHash:     validHash,
 		FileName:     "persist.bin",
@@ -2356,8 +2477,9 @@ func TestReclaimStalledServingSlotsPersistence(t *testing.T) {
 
 	// Reload into a new manager.
 	m2 := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		store:        store,
 		mappingsPath: mappingsPath,
 		downloadDir:  dir,
@@ -2365,7 +2487,7 @@ func TestReclaimStalledServingSlotsPersistence(t *testing.T) {
 	}
 	m2.loadMappings()
 
-	sm, ok := m2.senderMaps[fileID]
+	sm, ok := m2.senderMaps[ftOutgoingRef(m2, fileID, domaintest.ID("receiver-identity-1234567890ab"))]
 	if !ok {
 		t.Fatal("sender mapping not found after reload")
 	}
@@ -2392,8 +2514,9 @@ func TestReclaimStalledServingSlotsPersistence(t *testing.T) {
 func TestWaitingAckAdvancesRetryCounterWhenSenderOffline(t *testing.T) {
 	var downloadedSent int
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		peerReachable: func(peer domain.PeerIdentity) bool {
 			return false // sender always offline
 		},
@@ -2407,7 +2530,9 @@ func TestWaitingAckAdvancesRetryCounterWhenSenderOffline(t *testing.T) {
 	sender := domaintest.ID("sender-identity-1234567890abcd")
 	fileID := domain.FileID("offline-ack-retry")
 
-	m.receiverMaps[fileID] = &receiverFileMapping{
+	m.receiverMaps[ftIncomingRef(m, fileID, sender)] = &receiverFileMapping{
+		Ref:               ftIncomingRef(m, fileID, sender),
+		PartialPath:       partialDownloadPath(m.downloadDir, fileID),
 		FileID:            fileID,
 		Sender:            sender,
 		State:             receiverWaitingAck,
@@ -2419,7 +2544,7 @@ func TestWaitingAckAdvancesRetryCounterWhenSenderOffline(t *testing.T) {
 	m.tickReceiverMappings()
 
 	// Counter must have advanced even though sender is offline.
-	mapping := m.receiverMaps[fileID]
+	mapping := m.receiverMaps[ftIncomingRef(m, fileID, sender)]
 	if mapping.DownloadedRetries != 6 {
 		t.Errorf("DownloadedRetries = %d, want 6", mapping.DownloadedRetries)
 	}
@@ -2446,8 +2571,9 @@ func TestWaitingAckAdvancesRetryCounterWhenSenderOffline(t *testing.T) {
 // receiverCompleted even when the sender has been offline for every tick.
 func TestWaitingAckCompletesLocallyAfterMaxRetriesWithOfflineSender(t *testing.T) {
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		peerReachable: func(peer domain.PeerIdentity) bool {
 			return false
 		},
@@ -2461,7 +2587,9 @@ func TestWaitingAckCompletesLocallyAfterMaxRetriesWithOfflineSender(t *testing.T
 	fileID := domain.FileID("offline-ack-exhaust")
 
 	// Set retries to 20 — next tick should push it to 21 and trigger completion.
-	m.receiverMaps[fileID] = &receiverFileMapping{
+	m.receiverMaps[ftIncomingRef(m, fileID, sender)] = &receiverFileMapping{
+		Ref:               ftIncomingRef(m, fileID, sender),
+		PartialPath:       partialDownloadPath(m.downloadDir, fileID),
 		FileID:            fileID,
 		Sender:            sender,
 		State:             receiverWaitingAck,
@@ -2473,7 +2601,7 @@ func TestWaitingAckCompletesLocallyAfterMaxRetriesWithOfflineSender(t *testing.T
 
 	m.tickReceiverMappings()
 
-	mapping := m.receiverMaps[fileID]
+	mapping := m.receiverMaps[ftIncomingRef(m, fileID, sender)]
 	if mapping.State != receiverCompleted {
 		t.Fatalf("state = %s, want completed", mapping.State)
 	}
@@ -2514,8 +2642,9 @@ func TestSenderValidateChunkRequestBumpsServingEpochOnTransition(t *testing.T) {
 	store.mu.Unlock()
 
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		store:        store,
 		sendCommand:  func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error { return nil },
 		stopCh:       make(chan struct{}),
@@ -2524,7 +2653,8 @@ func TestSenderValidateChunkRequestBumpsServingEpochOnTransition(t *testing.T) {
 	receiver := domaintest.ID("receiver-identity-epoch-bump-1")
 	fileID := domain.FileID("epoch-bump-file")
 
-	m.senderMaps[fileID] = &senderFileMapping{
+	m.senderMaps[ftOutgoingRef(m, fileID, receiver)] = &senderFileMapping{
+		Ref:       ftOutgoingRef(m, fileID, receiver),
 		FileID:    fileID,
 		FileHash:  fileHash,
 		FileName:  "x.bin",
@@ -2536,20 +2666,20 @@ func TestSenderValidateChunkRequestBumpsServingEpochOnTransition(t *testing.T) {
 
 	// Announced → Serving: epoch 0 → 1.
 	m.HandleChunkRequest(receiver, domain.ChunkRequestPayload{FileID: fileID, Offset: 0, Size: domain.DefaultChunkSize})
-	if got := m.senderMaps[fileID].ServingEpoch; got != 1 {
+	if got := m.senderMaps[ftOutgoingRef(m, fileID, receiver)].ServingEpoch; got != 1 {
 		t.Fatalf("after first chunk_request: ServingEpoch = %d, want 1", got)
 	}
 
 	// Continuation (already serving): no bump.
 	m.HandleChunkRequest(receiver, domain.ChunkRequestPayload{FileID: fileID, Offset: 0, Size: domain.DefaultChunkSize})
-	if got := m.senderMaps[fileID].ServingEpoch; got != 1 {
+	if got := m.senderMaps[ftOutgoingRef(m, fileID, receiver)].ServingEpoch; got != 1 {
 		t.Fatalf("after continuation chunk_request: ServingEpoch = %d, want 1 (no bump)", got)
 	}
 
 	// Force completion then trigger a re-download: epoch 1 → 2.
-	m.senderMaps[fileID].State = senderCompleted
+	m.senderMaps[ftOutgoingRef(m, fileID, receiver)].State = senderCompleted
 	m.HandleChunkRequest(receiver, domain.ChunkRequestPayload{FileID: fileID, Offset: 0, Size: domain.DefaultChunkSize})
-	if got := m.senderMaps[fileID].ServingEpoch; got != 2 {
+	if got := m.senderMaps[ftOutgoingRef(m, fileID, receiver)].ServingEpoch; got != 2 {
 		t.Fatalf("after re-download chunk_request: ServingEpoch = %d, want 2", got)
 	}
 }
@@ -2576,8 +2706,9 @@ func TestSenderChunkResponseCarriesCurrentEpoch(t *testing.T) {
 
 	var sent []domain.ChunkResponsePayload
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		store:        store,
 		sendCommand: func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error {
 			if payload.Command != domain.FileActionChunkResp {
@@ -2598,7 +2729,8 @@ func TestSenderChunkResponseCarriesCurrentEpoch(t *testing.T) {
 
 	// Pre-set epoch to 7; the sender bumps on announced→serving so final
 	// observed wire epoch is 8.
-	m.senderMaps[fileID] = &senderFileMapping{
+	m.senderMaps[ftOutgoingRef(m, fileID, receiver)] = &senderFileMapping{
+		Ref:          ftOutgoingRef(m, fileID, receiver),
 		FileID:       fileID,
 		FileHash:     fileHash,
 		FileName:     "x.bin",
@@ -2626,8 +2758,9 @@ func TestSenderChunkResponseCarriesCurrentEpoch(t *testing.T) {
 func TestSenderHandleFileDownloadedRejectsStaleEpochReplay(t *testing.T) {
 	var acksSent int
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		sendCommand: func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error {
 			if payload.Command == domain.FileActionDownloadedAck {
 				acksSent++
@@ -2641,7 +2774,8 @@ func TestSenderHandleFileDownloadedRejectsStaleEpochReplay(t *testing.T) {
 	fileID := domain.FileID("stale-epoch-file")
 
 	// Active re-download: state=serving, ServingEpoch=5, origin=completed.
-	m.senderMaps[fileID] = &senderFileMapping{
+	m.senderMaps[ftOutgoingRef(m, fileID, receiver)] = &senderFileMapping{
+		Ref:           ftOutgoingRef(m, fileID, receiver),
 		FileID:        fileID,
 		FileHash:      "deadbeef",
 		FileName:      "doc.bin",
@@ -2657,7 +2791,7 @@ func TestSenderHandleFileDownloadedRejectsStaleEpochReplay(t *testing.T) {
 	// Stale file_downloaded from a prior run (epoch 4).
 	m.HandleFileDownloaded(receiver, domain.FileDownloadedPayload{FileID: fileID, Epoch: 4})
 
-	sm := m.senderMaps[fileID]
+	sm := m.senderMaps[ftOutgoingRef(m, fileID, receiver)]
 	if sm.State != senderServing {
 		t.Errorf("state = %s, want senderServing (stale replay must not flip)", sm.State)
 	}
@@ -2676,7 +2810,7 @@ func TestSenderHandleFileDownloadedRejectsStaleEpochReplay(t *testing.T) {
 
 	// Legitimate file_downloaded for the current epoch still completes.
 	m.HandleFileDownloaded(receiver, domain.FileDownloadedPayload{FileID: fileID, Epoch: 5})
-	sm = m.senderMaps[fileID]
+	sm = m.senderMaps[ftOutgoingRef(m, fileID, receiver)]
 	if sm.State != senderCompleted {
 		t.Errorf("after matching-epoch file_downloaded: state = %s, want senderCompleted", sm.State)
 	}
@@ -2778,8 +2912,9 @@ func TestSenderHandleFileDownloadedRejectsEpochOfAnotherRun(t *testing.T) {
 			captured := captureFileTransferLog(t)
 			var acksSent int
 			m := &Manager{
-				senderMaps:   make(map[domain.FileID]*senderFileMapping),
-				receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+				localID:      ftFixtureIdentity(),
+				senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+				receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 				sendCommand: func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error {
 					if payload.Command == domain.FileActionDownloadedAck {
 						acksSent++
@@ -2792,7 +2927,8 @@ func TestSenderHandleFileDownloadedRejectsEpochOfAnotherRun(t *testing.T) {
 			receiver := domaintest.ID("receiver-identity-epoch-run-01")
 			fileID := domain.FileID("epoch-of-another-run-file")
 			completedAt := time.Now().Add(-time.Hour)
-			m.senderMaps[fileID] = &senderFileMapping{
+			m.senderMaps[ftOutgoingRef(m, fileID, receiver)] = &senderFileMapping{
+				Ref:           ftOutgoingRef(m, fileID, receiver),
 				FileID:        fileID,
 				FileHash:      "cafebabe",
 				FileName:      "doc.bin",
@@ -2808,7 +2944,7 @@ func TestSenderHandleFileDownloadedRejectsEpochOfAnotherRun(t *testing.T) {
 
 			m.HandleFileDownloaded(receiver, domain.FileDownloadedPayload{FileID: fileID, Epoch: tc.wireEpoch})
 
-			sm := m.senderMaps[fileID]
+			sm := m.senderMaps[ftOutgoingRef(m, fileID, receiver)]
 			if sm.State != tc.state {
 				t.Errorf("state = %s, want %s (a frame of another run must not move the mapping)", sm.State, tc.state)
 			}
@@ -2857,8 +2993,9 @@ func TestSenderHandleFileDownloadedAcceptsEpochOfTheRun(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			var acks []domain.FileDownloadedAckPayload
 			m := &Manager{
-				senderMaps:   make(map[domain.FileID]*senderFileMapping),
-				receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+				localID:      ftFixtureIdentity(),
+				senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+				receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 				sendCommand: func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error {
 					var ack domain.FileDownloadedAckPayload
 					if err := json.Unmarshal(payload.Data, &ack); err != nil {
@@ -2872,7 +3009,8 @@ func TestSenderHandleFileDownloadedAcceptsEpochOfTheRun(t *testing.T) {
 
 			receiver := domaintest.ID("receiver-identity-epoch-run-02")
 			fileID := domain.FileID("epoch-of-the-run-file")
-			m.senderMaps[fileID] = &senderFileMapping{
+			m.senderMaps[ftOutgoingRef(m, fileID, receiver)] = &senderFileMapping{
+				Ref:           ftOutgoingRef(m, fileID, receiver),
 				FileID:        fileID,
 				FileHash:      "cafebabe",
 				FileName:      "doc.bin",
@@ -2887,7 +3025,7 @@ func TestSenderHandleFileDownloadedAcceptsEpochOfTheRun(t *testing.T) {
 
 			m.HandleFileDownloaded(receiver, domain.FileDownloadedPayload{FileID: fileID, Epoch: tc.servingEpoch})
 
-			if got := m.senderMaps[fileID].State; got != senderCompleted {
+			if got := m.senderMaps[ftOutgoingRef(m, fileID, receiver)].State; got != senderCompleted {
 				t.Errorf("state = %s, want %s", got, senderCompleted)
 			}
 			if len(acks) != 1 {
@@ -2917,15 +3055,18 @@ func TestReceiverHandleFileDownloadedAckRejectsEpochOfAnotherRun(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			captured := captureFileTransferLog(t)
 			m := &Manager{
-				senderMaps:   make(map[domain.FileID]*senderFileMapping),
-				receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+				localID:      ftFixtureIdentity(),
+				senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+				receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 				sendCommand:  func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error { return nil },
 				stopCh:       make(chan struct{}),
 			}
 
 			sender := domaintest.ID("sender-identity-ack-run-0001")
 			fileID := domain.FileID("ack-of-another-run-file")
-			m.receiverMaps[fileID] = &receiverFileMapping{
+			m.receiverMaps[ftIncomingRef(m, fileID, sender)] = &receiverFileMapping{
+				Ref:          ftIncomingRef(m, fileID, sender),
+				PartialPath:  partialDownloadPath(m.downloadDir, fileID),
 				FileID:       fileID,
 				FileHash:     "deadbeef",
 				FileName:     "doc.bin",
@@ -2938,7 +3079,7 @@ func TestReceiverHandleFileDownloadedAckRejectsEpochOfAnotherRun(t *testing.T) {
 
 			m.HandleFileDownloadedAck(sender, domain.FileDownloadedAckPayload{FileID: fileID, Epoch: tc.wireEpoch})
 
-			rm := m.receiverMaps[fileID]
+			rm := m.receiverMaps[ftIncomingRef(m, fileID, sender)]
 			if rm.State != receiverWaitingAck {
 				t.Errorf("state = %s, want %s", rm.State, receiverWaitingAck)
 			}
@@ -3029,11 +3170,13 @@ func TestEveryCompletionFrameCarriesTheServingRunEpoch(t *testing.T) {
 
 	wire := &epochWire{t: t, peers: make(map[domain.PeerIdentity]*Manager), loseNext: make(map[domain.FileAction]bool)}
 	sender := NewFileTransferManager(Config{
+		LocalID:      ftFixtureIdentityFor(senderID),
 		Store:        store,
 		MappingsPath: filepath.Join(root, "sender-transfers.json"),
 		SendCommand:  wire.sendCommandFrom(senderID),
 	})
 	receiver := NewFileTransferManager(Config{
+		LocalID:      ftFixtureIdentityFor(receiverID),
 		DownloadDir:  downloadDir,
 		MappingsPath: filepath.Join(root, "receiver-transfers.json"),
 		SendCommand:  wire.sendCommandFrom(receiverID),
@@ -3047,7 +3190,8 @@ func TestEveryCompletionFrameCarriesTheServingRunEpoch(t *testing.T) {
 	store.mu.Lock()
 	store.refs[fileHash] = 1
 	store.mu.Unlock()
-	sender.senderMaps[fileID] = &senderFileMapping{
+	sender.senderMaps[ftOutgoingRef(sender, fileID, receiverID)] = &senderFileMapping{
+		Ref:       ftOutgoingRef(sender, fileID, receiverID),
 		FileID:    fileID,
 		FileHash:  fileHash,
 		FileName:  "doc.bin",
@@ -3060,11 +3204,11 @@ func TestEveryCompletionFrameCarriesTheServingRunEpoch(t *testing.T) {
 		t.Fatalf("RegisterFileReceive: %v", err)
 	}
 	// Small chunks so the run spans several chunk_responses.
-	receiver.receiverMaps[fileID].ChunkSize = 8
+	receiver.receiverMaps[ftIncomingRef(receiver, fileID, senderID)].ChunkSize = 8
 
 	assertRunFramesCarry := func(run string, wantEpoch uint64) {
 		t.Helper()
-		if got := sender.senderMaps[fileID].ServingEpoch; got != wantEpoch {
+		if got := sender.senderMaps[ftOutgoingRef(sender, fileID, receiverID)].ServingEpoch; got != wantEpoch {
 			t.Fatalf("%s: sender ServingEpoch = %d, want %d", run, got, wantEpoch)
 		}
 		seen := make(map[domain.FileAction]int)
@@ -3095,7 +3239,7 @@ func TestEveryCompletionFrameCarriesTheServingRunEpoch(t *testing.T) {
 		t.Fatalf("StartDownload: %v", err)
 	}
 	wire.deliverAll()
-	if got := receiver.receiverMaps[fileID].State; got != receiverCompleted {
+	if got := receiver.receiverMaps[ftIncomingRef(receiver, fileID, senderID)].State; got != receiverCompleted {
 		t.Fatalf("run 1: receiver state = %s, want %s", got, receiverCompleted)
 	}
 	assertRunFramesCarry("run 1", 1)
@@ -3110,15 +3254,15 @@ func TestEveryCompletionFrameCarriesTheServingRunEpoch(t *testing.T) {
 	}
 	wire.loseNext[domain.FileActionDownloadedAck] = true
 	wire.deliverAll()
-	if got := receiver.receiverMaps[fileID].State; got != receiverWaitingAck {
+	if got := receiver.receiverMaps[ftIncomingRef(receiver, fileID, senderID)].State; got != receiverWaitingAck {
 		t.Fatalf("run 2 after lost ack: receiver state = %s, want %s", got, receiverWaitingAck)
 	}
-	receiver.sendFileDownloaded(fileID, senderID)
+	receiver.sendFileDownloaded(ftIncomingRef(receiver, fileID, senderID), senderID)
 	wire.deliverAll()
-	if got := receiver.receiverMaps[fileID].State; got != receiverCompleted {
+	if got := receiver.receiverMaps[ftIncomingRef(receiver, fileID, senderID)].State; got != receiverCompleted {
 		t.Fatalf("run 2 after retry: receiver state = %s, want %s", got, receiverCompleted)
 	}
-	if got := sender.senderMaps[fileID].State; got != senderCompleted {
+	if got := sender.senderMaps[ftOutgoingRef(sender, fileID, receiverID)].State; got != senderCompleted {
 		t.Fatalf("run 2: sender state = %s, want %s", got, senderCompleted)
 	}
 	assertRunFramesCarry("run 2", 2)
@@ -3131,8 +3275,9 @@ func TestReceiverChunkResponseStashesServingEpoch(t *testing.T) {
 	dir := t.TempDir()
 
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		downloadDir:  dir,
 		sendCommand:  func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error { return nil },
 		stopCh:       make(chan struct{}),
@@ -3142,7 +3287,9 @@ func TestReceiverChunkResponseStashesServingEpoch(t *testing.T) {
 	fileID := domain.FileID("epoch-stash-file")
 	payload := []byte("epoch-stash-payload-some-bytes")
 
-	m.receiverMaps[fileID] = &receiverFileMapping{
+	m.receiverMaps[ftIncomingRef(m, fileID, sender)] = &receiverFileMapping{
+		Ref:         ftIncomingRef(m, fileID, sender),
+		PartialPath: partialDownloadPath(m.downloadDir, fileID),
 		FileID:      fileID,
 		FileHash:    sha256Hex(payload),
 		FileName:    "doc.bin",
@@ -3163,7 +3310,7 @@ func TestReceiverChunkResponseStashesServingEpoch(t *testing.T) {
 		Epoch:  42,
 	})
 
-	if got := m.receiverMaps[fileID].ServingEpoch; got != 42 {
+	if got := m.receiverMaps[ftIncomingRef(m, fileID, sender)].ServingEpoch; got != 42 {
 		t.Fatalf("receiver ServingEpoch = %d, want 42", got)
 	}
 }
@@ -3178,8 +3325,9 @@ func TestReceiverChunkResponseEpochMonotonic(t *testing.T) {
 	dir := t.TempDir()
 
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		downloadDir:  dir,
 		sendCommand:  func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error { return nil },
 		stopCh:       make(chan struct{}),
@@ -3193,7 +3341,9 @@ func TestReceiverChunkResponseEpochMonotonic(t *testing.T) {
 	chunkB := []byte("bbbb")
 	full := append(chunkA, chunkB...)
 
-	m.receiverMaps[fileID] = &receiverFileMapping{
+	m.receiverMaps[ftIncomingRef(m, fileID, sender)] = &receiverFileMapping{
+		Ref:         ftIncomingRef(m, fileID, sender),
+		PartialPath: partialDownloadPath(m.downloadDir, fileID),
 		FileID:      fileID,
 		FileHash:    sha256Hex(full),
 		FileName:    "doc.bin",
@@ -3214,7 +3364,7 @@ func TestReceiverChunkResponseEpochMonotonic(t *testing.T) {
 		Epoch:  5,
 	})
 
-	if got := m.receiverMaps[fileID].ServingEpoch; got != 5 {
+	if got := m.receiverMaps[ftIncomingRef(m, fileID, sender)].ServingEpoch; got != 5 {
 		t.Fatalf("after chunk@0 epoch=5: ServingEpoch = %d, want 5", got)
 	}
 
@@ -3227,7 +3377,7 @@ func TestReceiverChunkResponseEpochMonotonic(t *testing.T) {
 		Epoch:  3,
 	})
 
-	if got := m.receiverMaps[fileID].ServingEpoch; got != 5 {
+	if got := m.receiverMaps[ftIncomingRef(m, fileID, sender)].ServingEpoch; got != 5 {
 		t.Errorf("after chunk@4 epoch=3: ServingEpoch = %d, want 5 (must not regress)", got)
 	}
 }
@@ -3237,8 +3387,9 @@ func TestReceiverChunkResponseEpochMonotonic(t *testing.T) {
 func TestReceiverSendFileDownloadedEchoesEpoch(t *testing.T) {
 	var sent []domain.FileDownloadedPayload
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		sendCommand: func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error {
 			if payload.Command != domain.FileActionDownloaded {
 				return nil
@@ -3256,7 +3407,9 @@ func TestReceiverSendFileDownloadedEchoesEpoch(t *testing.T) {
 	sender := domaintest.ID("sender-identity-echo-epoch-01")
 	fileID := domain.FileID("echo-epoch-file")
 
-	m.receiverMaps[fileID] = &receiverFileMapping{
+	m.receiverMaps[ftIncomingRef(m, fileID, sender)] = &receiverFileMapping{
+		Ref:          ftIncomingRef(m, fileID, sender),
+		PartialPath:  partialDownloadPath(m.downloadDir, fileID),
 		FileID:       fileID,
 		FileHash:     "deadbeef",
 		FileName:     "doc.bin",
@@ -3267,7 +3420,7 @@ func TestReceiverSendFileDownloadedEchoesEpoch(t *testing.T) {
 		CreatedAt:    time.Now(),
 	}
 
-	m.sendFileDownloaded(fileID, sender)
+	m.sendFileDownloaded(ftIncomingRef(m, fileID, sender), sender)
 
 	if len(sent) != 1 {
 		t.Fatalf("expected 1 file_downloaded, got %d", len(sent))
@@ -3286,8 +3439,9 @@ func TestReceiverSendFileDownloadedEchoesEpoch(t *testing.T) {
 // stale-replay defense.
 func TestReceiverHandleFileDownloadedAckRejectsStaleEpoch(t *testing.T) {
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		sendCommand:  func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error { return nil },
 		stopCh:       make(chan struct{}),
 	}
@@ -3295,7 +3449,9 @@ func TestReceiverHandleFileDownloadedAckRejectsStaleEpoch(t *testing.T) {
 	sender := domaintest.ID("sender-identity-stale-ack-01")
 	fileID := domain.FileID("stale-ack-file")
 
-	m.receiverMaps[fileID] = &receiverFileMapping{
+	m.receiverMaps[ftIncomingRef(m, fileID, sender)] = &receiverFileMapping{
+		Ref:          ftIncomingRef(m, fileID, sender),
+		PartialPath:  partialDownloadPath(m.downloadDir, fileID),
 		FileID:       fileID,
 		FileHash:     "deadbeef",
 		FileName:     "doc.bin",
@@ -3308,13 +3464,13 @@ func TestReceiverHandleFileDownloadedAckRejectsStaleEpoch(t *testing.T) {
 
 	// Stale ack with prior-run epoch must not transition to completed.
 	m.HandleFileDownloadedAck(sender, domain.FileDownloadedAckPayload{FileID: fileID, Epoch: 8})
-	if got := m.receiverMaps[fileID].State; got != receiverWaitingAck {
+	if got := m.receiverMaps[ftIncomingRef(m, fileID, sender)].State; got != receiverWaitingAck {
 		t.Fatalf("after stale ack: state = %s, want receiverWaitingAck", got)
 	}
 
 	// Matching ack transitions to completed.
 	m.HandleFileDownloadedAck(sender, domain.FileDownloadedAckPayload{FileID: fileID, Epoch: 9})
-	if got := m.receiverMaps[fileID].State; got != receiverCompleted {
+	if got := m.receiverMaps[ftIncomingRef(m, fileID, sender)].State; got != receiverCompleted {
 		t.Fatalf("after matching ack: state = %s, want receiverCompleted", got)
 	}
 }
@@ -3326,8 +3482,9 @@ func TestReceiverCancelDownloadResetsServingEpoch(t *testing.T) {
 	dir := t.TempDir()
 
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		downloadDir:  dir,
 		sendCommand:  func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error { return nil },
 		stopCh:       make(chan struct{}),
@@ -3336,7 +3493,9 @@ func TestReceiverCancelDownloadResetsServingEpoch(t *testing.T) {
 	sender := domaintest.ID("sender-identity-cancel-reset-1")
 	fileID := domain.FileID("cancel-reset-file")
 
-	m.receiverMaps[fileID] = &receiverFileMapping{
+	m.receiverMaps[ftIncomingRef(m, fileID, sender)] = &receiverFileMapping{
+		Ref:          ftIncomingRef(m, fileID, sender),
+		PartialPath:  partialDownloadPath(m.downloadDir, fileID),
 		FileID:       fileID,
 		FileHash:     "deadbeef",
 		FileName:     "doc.bin",
@@ -3351,7 +3510,7 @@ func TestReceiverCancelDownloadResetsServingEpoch(t *testing.T) {
 	if err := m.CancelDownload(fileID); err != nil {
 		t.Fatalf("CancelDownload: %v", err)
 	}
-	if got := m.receiverMaps[fileID].ServingEpoch; got != 0 {
+	if got := m.receiverMaps[ftIncomingRef(m, fileID, sender)].ServingEpoch; got != 0 {
 		t.Errorf("after CancelDownload: ServingEpoch = %d, want 0", got)
 	}
 }
@@ -3373,8 +3532,9 @@ func TestSendFileDownloadedSuppressedAfterStateChange(t *testing.T) {
 	var sent int
 
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		downloadDir:  dir,
 		sendCommand: func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error {
 			if payload.Command == domain.FileActionDownloaded {
@@ -3389,7 +3549,9 @@ func TestSendFileDownloadedSuppressedAfterStateChange(t *testing.T) {
 	fileID := domain.FileID("cancel-guard-file")
 
 	// Start in receiverWaitingAck — the state that triggers ack retries.
-	m.receiverMaps[fileID] = &receiverFileMapping{
+	m.receiverMaps[ftIncomingRef(m, fileID, sender)] = &receiverFileMapping{
+		Ref:          ftIncomingRef(m, fileID, sender),
+		PartialPath:  partialDownloadPath(m.downloadDir, fileID),
 		FileID:       fileID,
 		FileHash:     "deadbeef",
 		FileName:     "doc.bin",
@@ -3403,7 +3565,7 @@ func TestSendFileDownloadedSuppressedAfterStateChange(t *testing.T) {
 	}
 
 	// Sanity: sendFileDownloaded sends when mapping is in waitingAck.
-	m.sendFileDownloaded(fileID, sender)
+	m.sendFileDownloaded(ftIncomingRef(m, fileID, sender), sender)
 	if sent != 1 {
 		t.Fatalf("expected 1 send in waitingAck, got %d", sent)
 	}
@@ -3412,7 +3574,7 @@ func TestSendFileDownloadedSuppressedAfterStateChange(t *testing.T) {
 	// the mapping to receiverCompleted between the tick snapshot and
 	// sendFileDownloaded's lock acquisition.
 	m.mu.Lock()
-	rm := m.receiverMaps[fileID]
+	rm := m.receiverMaps[ftIncomingRef(m, fileID, sender)]
 	rm.State = receiverCompleted
 	rm.CompletedAt = time.Now()
 	m.mu.Unlock()
@@ -3420,7 +3582,7 @@ func TestSendFileDownloadedSuppressedAfterStateChange(t *testing.T) {
 	// A deferred retry action from the old waitingAck tick would call
 	// sendFileDownloaded here. It must NOT send — the mapping is no
 	// longer in receiverWaitingAck.
-	m.sendFileDownloaded(fileID, sender)
+	m.sendFileDownloaded(ftIncomingRef(m, fileID, sender), sender)
 	if sent != 1 {
 		t.Errorf("expected no additional send after state change, got %d total", sent)
 	}
@@ -3432,8 +3594,9 @@ func TestSendFileDownloadedSuppressedAfterStateChange(t *testing.T) {
 func TestSendFileDownloadedSuppressedWhenMappingMissing(t *testing.T) {
 	var sent int
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		sendCommand: func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error {
 			sent++
 			return nil
@@ -3442,7 +3605,7 @@ func TestSendFileDownloadedSuppressedWhenMappingMissing(t *testing.T) {
 	}
 
 	// No mapping exists — sendFileDownloaded must not panic or send.
-	m.sendFileDownloaded("nonexistent", domaintest.ID("sender"))
+	m.sendFileDownloaded(ftIncomingRef(m, "nonexistent", domaintest.ID("sender")), domaintest.ID("sender"))
 	if sent != 0 {
 		t.Errorf("expected 0 sends for missing mapping, got %d", sent)
 	}
@@ -3458,8 +3621,9 @@ func TestDeferredChunkRetrySuppressedAfterCancel(t *testing.T) {
 	var chunkReqs int
 
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		downloadDir:  dir,
 		sendCommand: func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error {
 			if payload.Command == domain.FileActionChunkReq {
@@ -3474,24 +3638,27 @@ func TestDeferredChunkRetrySuppressedAfterCancel(t *testing.T) {
 	sender := domaintest.ID("sender-deferred-chunk-guard-01")
 	fileID := domain.FileID("deferred-chunk-guard")
 
-	m.receiverMaps[fileID] = &receiverFileMapping{
-		FileID:     fileID,
-		FileHash:   "deadbeef",
-		FileName:   "doc.bin",
-		FileSize:   100,
-		Sender:     sender,
-		State:      receiverDownloading,
-		ChunkSize:  domain.DefaultChunkSize,
-		Generation: 1,
-		CreatedAt:  time.Now(),
+	m.receiverMaps[ftIncomingRef(m, fileID, sender)] = &receiverFileMapping{
+		Ref:         ftIncomingRef(m, fileID, sender),
+		PartialPath: partialDownloadPath(m.downloadDir, fileID),
+		FileID:      fileID,
+		FileHash:    "deadbeef",
+		FileName:    "doc.bin",
+		FileSize:    100,
+		Sender:      sender,
+		State:       receiverDownloading,
+		ChunkSize:   domain.DefaultChunkSize,
+		Generation:  1,
+		CreatedAt:   time.Now(),
 	}
 
 	// Build a deferred action that the tick loop would have created.
 	action := receiverTickAction{
+		partialPath:   partialDownloadPath(m.downloadDir, fileID),
 		kind:          actionRetryChunk,
 		requiredState: receiverDownloading,
 		generation:    1,
-		fileID:        fileID,
+		fileID:        ftIncomingRef(m, fileID, sender),
 		sender:        sender,
 		offset:        0,
 		chunkSize:     domain.DefaultChunkSize,
@@ -3519,8 +3686,9 @@ func TestDeferredResumeSuppressedAfterCancel(t *testing.T) {
 	var chunkReqs int
 
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		downloadDir:  dir,
 		sendCommand: func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error {
 			if payload.Command == domain.FileActionChunkReq {
@@ -3535,26 +3703,30 @@ func TestDeferredResumeSuppressedAfterCancel(t *testing.T) {
 	sender := domaintest.ID("sender-deferred-resume-guard-01")
 	fileID := domain.FileID("deferred-resume-guard")
 
-	m.receiverMaps[fileID] = &receiverFileMapping{
-		FileID:     fileID,
-		FileHash:   "deadbeef",
-		FileName:   "doc.bin",
-		FileSize:   100,
-		Sender:     sender,
-		State:      receiverWaitingRoute,
-		ChunkSize:  domain.DefaultChunkSize,
-		Generation: 1,
-		CreatedAt:  time.Now(),
+	m.receiverMaps[ftIncomingRef(m, fileID, sender)] = &receiverFileMapping{
+		Ref:         ftIncomingRef(m, fileID, sender),
+		PartialPath: partialDownloadPath(m.downloadDir, fileID),
+		FileID:      fileID,
+		FileHash:    "deadbeef",
+		FileName:    "doc.bin",
+		FileSize:    100,
+		Sender:      sender,
+		State:       receiverWaitingRoute,
+		ChunkSize:   domain.DefaultChunkSize,
+		Generation:  1,
+		CreatedAt:   time.Now(),
 	}
 
 	action := receiverTickAction{
+		partialPath:   partialDownloadPath(m.downloadDir, fileID),
 		kind:          actionResume,
 		requiredState: receiverWaitingRoute,
 		generation:    1,
-		fileID:        fileID,
+		fileID:        ftIncomingRef(m, fileID, sender),
 		sender:        sender,
 		snap: resumeSnapshot{
-			fileID:      fileID,
+			partialPath: partialDownloadPath(m.downloadDir, fileID),
+			fileID:      ftIncomingRef(m, fileID, sender),
 			sender:      sender,
 			startOffset: 0,
 			chunkSize:   domain.DefaultChunkSize,
@@ -3585,8 +3757,9 @@ func TestRollbackSkippedAfterGenerationBump(t *testing.T) {
 
 	sendErr := fmt.Errorf("simulated network failure")
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		downloadDir:  dir,
 		sendCommand: func(_ domain.PeerIdentity, _ domain.FileCommandPayload) error {
 			return sendErr
@@ -3599,21 +3772,24 @@ func TestRollbackSkippedAfterGenerationBump(t *testing.T) {
 	fileID := domain.FileID("rollback-gen-guard")
 
 	// Set up a mapping at generation 1 in receiverDownloading.
-	m.receiverMaps[fileID] = &receiverFileMapping{
-		FileID:     fileID,
-		FileHash:   "deadbeef",
-		FileName:   "doc.bin",
-		FileSize:   100,
-		Sender:     sender,
-		State:      receiverDownloading,
-		ChunkSize:  domain.DefaultChunkSize,
-		Generation: 1,
-		CreatedAt:  time.Now(),
+	m.receiverMaps[ftIncomingRef(m, fileID, sender)] = &receiverFileMapping{
+		Ref:         ftIncomingRef(m, fileID, sender),
+		PartialPath: partialDownloadPath(m.downloadDir, fileID),
+		FileID:      fileID,
+		FileHash:    "deadbeef",
+		FileName:    "doc.bin",
+		FileSize:    100,
+		Sender:      sender,
+		State:       receiverDownloading,
+		ChunkSize:   domain.DefaultChunkSize,
+		Generation:  1,
+		CreatedAt:   time.Now(),
 	}
 
 	// Snapshot taken at generation 1.
 	snap := resumeSnapshot{
-		fileID:            fileID,
+		partialPath:       partialDownloadPath(m.downloadDir, fileID),
+		fileID:            ftIncomingRef(m, fileID, sender),
 		sender:            sender,
 		prevState:         receiverWaitingRoute,
 		prevOffset:        0,
@@ -3633,7 +3809,7 @@ func TestRollbackSkippedAfterGenerationBump(t *testing.T) {
 	// receiverAvailable. The new download transitions to receiverDownloading
 	// at the bumped generation, with fresh progress.
 	m.mu.Lock()
-	rm := m.receiverMaps[fileID]
+	rm := m.receiverMaps[ftIncomingRef(m, fileID, sender)]
 	rm.State = receiverDownloading
 	rm.NextOffset = 4096
 	rm.BytesReceived = 4096
@@ -3645,7 +3821,7 @@ func TestRollbackSkippedAfterGenerationBump(t *testing.T) {
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	rmAfter := m.receiverMaps[fileID]
+	rmAfter := m.receiverMaps[ftIncomingRef(m, fileID, sender)]
 
 	if rmAfter.State != receiverDownloading {
 		t.Errorf("expected state receiverDownloading, got %s", rmAfter.State)
@@ -3667,8 +3843,9 @@ func TestGuardedResumeRollbackSkippedAfterGenerationBump(t *testing.T) {
 	dir := t.TempDir()
 
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		downloadDir:  dir,
 		sendCommand: func(_ domain.PeerIdentity, _ domain.FileCommandPayload) error {
 			return fmt.Errorf("simulated network failure")
@@ -3682,26 +3859,30 @@ func TestGuardedResumeRollbackSkippedAfterGenerationBump(t *testing.T) {
 
 	// Mapping at generation 1, state receiverDownloading (resume already
 	// transitioned from waitingRoute → downloading in the tick).
-	m.receiverMaps[fileID] = &receiverFileMapping{
-		FileID:     fileID,
-		FileHash:   "deadbeef",
-		FileName:   "doc.bin",
-		FileSize:   100,
-		Sender:     sender,
-		State:      receiverDownloading,
-		ChunkSize:  domain.DefaultChunkSize,
-		Generation: 1,
-		CreatedAt:  time.Now(),
+	m.receiverMaps[ftIncomingRef(m, fileID, sender)] = &receiverFileMapping{
+		Ref:         ftIncomingRef(m, fileID, sender),
+		PartialPath: partialDownloadPath(m.downloadDir, fileID),
+		FileID:      fileID,
+		FileHash:    "deadbeef",
+		FileName:    "doc.bin",
+		FileSize:    100,
+		Sender:      sender,
+		State:       receiverDownloading,
+		ChunkSize:   domain.DefaultChunkSize,
+		Generation:  1,
+		CreatedAt:   time.Now(),
 	}
 
 	action := receiverTickAction{
+		partialPath:   partialDownloadPath(m.downloadDir, fileID),
 		kind:          actionResume,
 		requiredState: receiverDownloading,
 		generation:    1,
-		fileID:        fileID,
+		fileID:        ftIncomingRef(m, fileID, sender),
 		sender:        sender,
 		snap: resumeSnapshot{
-			fileID:            fileID,
+			partialPath:       partialDownloadPath(m.downloadDir, fileID),
+			fileID:            ftIncomingRef(m, fileID, sender),
 			sender:            sender,
 			startOffset:       0,
 			chunkSize:         domain.DefaultChunkSize,
@@ -3719,7 +3900,7 @@ func TestGuardedResumeRollbackSkippedAfterGenerationBump(t *testing.T) {
 
 	// New download starts at generation 2, reaches receiverDownloading with progress.
 	m.mu.Lock()
-	rm := m.receiverMaps[fileID]
+	rm := m.receiverMaps[ftIncomingRef(m, fileID, sender)]
 	rm.State = receiverDownloading
 	rm.NextOffset = 8192
 	rm.BytesReceived = 8192
@@ -3733,7 +3914,7 @@ func TestGuardedResumeRollbackSkippedAfterGenerationBump(t *testing.T) {
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	rmAfter := m.receiverMaps[fileID]
+	rmAfter := m.receiverMaps[ftIncomingRef(m, fileID, sender)]
 
 	if rmAfter.State != receiverDownloading {
 		t.Errorf("expected state receiverDownloading, got %s", rmAfter.State)

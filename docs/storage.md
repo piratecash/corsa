@@ -308,6 +308,14 @@ transaction, and catalog validation rejects a statement that starts with one.
 
 ### Forward-only
 
+Migration 0009 replaces the message primary key with
+`(topic, id, sender, recipient)` and binds message journals to that reference.
+It preserves message rowids and applies transactionally. Older binaries with
+catalogs ending before 0009 reject the newer database: restore a
+SQLite-consistent pre-upgrade backup to perform a supported rollback. Keeping
+the historical filename does not imply that an older binary can read a newer
+schema. See [the local message identity repair](operations/s6-local-message-identity.md).
+
 There is no `Down` at runtime. Rolling a binary back is served by
 expand/contract releases: ship a backward-compatible extension first, let both
 binaries live with the same schema, backfill and switch readers in later
@@ -1035,6 +1043,14 @@ SQL миграции не должен содержать `BEGIN`/`COMMIT`: тр
 валидация каталога отвергает оператор, начинающийся с них.
 
 ### Только вперёд
+
+Миграция 0009 заменяет первичный ключ сообщения на
+`(topic, id, sender, recipient)` и привязывает журналы к этой ссылке. Она
+сохраняет rowid сообщений и выполняется транзакционно. Старый бинарник с
+каталогом до 0009 откажется открывать новую БД: для поддерживаемого отката
+нужно восстановить согласованную SQLite-копию, сделанную до обновления.
+Сохранение исторического имени файла не означает совместимость новой схемы
+со старым бинарником. Подробнее — [локальная идентичность сообщения](operations/s6-local-message-identity.md).
 
 В runtime нет `Down`. Откат бинаря обслуживается релизами expand/contract:
 сначала выпускается обратно совместимое расширение, обе версии живут с одной

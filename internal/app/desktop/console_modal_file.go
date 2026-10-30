@@ -144,7 +144,10 @@ func (c *consoleModal) collectFileTransfers() []filetransfer.TransferSnapshot {
 		if a != b {
 			return a > b
 		}
-		return transfers[i].FileID > transfers[j].FileID
+		if transfers[i].FileID != transfers[j].FileID {
+			return transfers[i].FileID > transfers[j].FileID
+		}
+		return transfers[i].Ref.Key() > transfers[j].Ref.Key()
 	})
 	return transfers
 }
@@ -206,7 +209,7 @@ func (c *consoleModal) hasPendingThumbnail(transfers []filetransfer.TransferSnap
 		if !isImageContentType(t.ContentType) {
 			continue
 		}
-		path := bridge.FilePath(t.FileID, t.Direction == "send")
+		path := bridge.FilePathRef(t.Ref, t.Direction == "send")
 		if path == "" {
 			continue
 		}
@@ -232,11 +235,11 @@ func isTerminalTransferState(state string) bool {
 // whose FileID no longer appears in the latest snapshot, so the
 // maps cannot grow without bound.
 func (c *consoleModal) pruneFileTabButtons(transfers []filetransfer.TransferSnapshot) {
-	live := make(map[domain.FileID]struct{}, len(transfers))
+	live := make(map[domain.MessageRef]struct{}, len(transfers))
 	for _, t := range transfers {
-		live[t.FileID] = struct{}{}
+		live[t.Ref] = struct{}{}
 	}
-	for _, m := range []map[domain.FileID]*widget.Clickable{
+	for _, m := range []map[domain.MessageRef]*widget.Clickable{
 		c.fileDeleteButtons,
 		c.fileDownloadButtons,
 		c.fileRestartButtons,
@@ -258,7 +261,7 @@ func (c *consoleModal) pruneFileTabButtons(transfers []filetransfer.TransferSnap
 // fileRowSelectableSet looks up (or lazily creates) the selectable
 // bundle for a given FileID. Caller MUST be on the UI goroutine —
 // the map is not concurrency-safe.
-func (c *consoleModal) fileRowSelectableSet(fileID domain.FileID) *fileRowSelectables {
+func (c *consoleModal) fileRowSelectableSet(fileID domain.MessageRef) *fileRowSelectables {
 	sel, ok := c.fileRowSelectables[fileID]
 	if ok {
 		return sel
@@ -271,7 +274,7 @@ func (c *consoleModal) fileRowSelectableSet(fileID domain.FileID) *fileRowSelect
 // fileRowButton looks up the Clickable for a (map, FileID), lazily
 // creating an entry on first access. Single helper used by every
 // per-row button accessor; callers MUST be on the UI goroutine.
-func fileRowButton(m map[domain.FileID]*widget.Clickable, fileID domain.FileID) *widget.Clickable {
+func fileRowButton(m map[domain.MessageRef]*widget.Clickable, fileID domain.MessageRef) *widget.Clickable {
 	btn, ok := m[fileID]
 	if ok {
 		return btn
@@ -281,19 +284,19 @@ func fileRowButton(m map[domain.FileID]*widget.Clickable, fileID domain.FileID) 
 	return btn
 }
 
-func (c *consoleModal) fileDeleteButton(id domain.FileID) *widget.Clickable {
+func (c *consoleModal) fileDeleteButton(id domain.MessageRef) *widget.Clickable {
 	return fileRowButton(c.fileDeleteButtons, id)
 }
 
-func (c *consoleModal) fileDownloadButton(id domain.FileID) *widget.Clickable {
+func (c *consoleModal) fileDownloadButton(id domain.MessageRef) *widget.Clickable {
 	return fileRowButton(c.fileDownloadButtons, id)
 }
 
-func (c *consoleModal) fileRestartButton(id domain.FileID) *widget.Clickable {
+func (c *consoleModal) fileRestartButton(id domain.MessageRef) *widget.Clickable {
 	return fileRowButton(c.fileRestartButtons, id)
 }
 
-func (c *consoleModal) fileThumbButton(id domain.FileID) *widget.Clickable {
+func (c *consoleModal) fileThumbButton(id domain.MessageRef) *widget.Clickable {
 	return fileRowButton(c.fileThumbButtons, id)
 }
 
@@ -349,7 +352,7 @@ func (c *consoleModal) layoutFileTransferRow(gtx layout.Context, t filetransfer.
 			}),
 			layout.Rigid(layout.Spacer{Height: unit.Dp(2)}.Layout),
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				sel := c.fileRowSelectableSet(t.FileID)
+				sel := c.fileRowSelectableSet(t.Ref)
 				return c.layoutSelectableText(gtx, &sel.Meta, c.fileRowMetaLine(t), textSecondary)
 			}),
 			layout.Rigid(layout.Spacer{Height: unit.Dp(6)}.Layout),
@@ -535,20 +538,20 @@ func (c *consoleModal) layoutFileRowThumbnail(gtx layout.Context, t filetransfer
 		return nil
 	}
 	mine := t.Direction == "send"
-	path := bridge.FilePath(t.FileID, mine)
+	path := bridge.FilePathRef(t.Ref, mine)
 	arriving := path == "" && transferIsArriving(t.State, mine)
 	if path == "" && !arriving {
 		return nil
 	}
 
-	btn := c.fileThumbButton(t.FileID)
+	btn := c.fileThumbButton(t.Ref)
 	for btn.Clicked(gtx) {
 		// The in-app viewer, over the console — the same picture the chat
 		// opens. A row here can belong to a conversation other than the open
 		// one, which the viewer answers by showing exactly this file rather
 		// than a strip of somebody else's chat.
 		c.parent.openImageViewer(viewerItem{
-			messageID: domain.MessageID(t.FileID),
+			messageID: t.Ref,
 			peer:      t.Peer,
 			path:      path,
 			contentID: t.FileHash,
@@ -640,7 +643,7 @@ func (c *consoleModal) layoutFileRowThumbPlaceholder(gtx layout.Context, waiting
 // and meta line are similarly selectable — see layoutFileRowPeerLine
 // and the meta-line builder in layoutFileTransferRow.
 func (c *consoleModal) layoutFileRowHeader(gtx layout.Context, t filetransfer.TransferSnapshot, fg color.NRGBA) layout.Dimensions {
-	sel := c.fileRowSelectableSet(t.FileID)
+	sel := c.fileRowSelectableSet(t.Ref)
 	return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			arrow := material.Body2(c.theme(), c.directionIcon(t.Direction))
@@ -671,7 +674,7 @@ func (c *consoleModal) layoutFileRowPeerLine(gtx layout.Context, t filetransfer.
 	// The frame's snapshot, taken once at the top of Window.layout — see
 	// consoleModal.layoutActiveTab.
 	status := c.parent.snap.NodeStatus
-	sel := c.fileRowSelectableSet(t.FileID)
+	sel := c.fileRowSelectableSet(t.Ref)
 	return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			return c.parent.layoutReachableIndicator(gtx, status, t.Peer)
@@ -749,17 +752,17 @@ func (c *consoleModal) layoutFileRowProgressOrButton(gtx layout.Context, t filet
 			// tight on the left. Cancel works regardless of
 			// peerOnline — the receiver is just resetting its own
 			// local mapping; no wire round-trip.
-			return c.layoutFileTabReceiverProgress(gtx, progressBg, progressFg, percent, t.FileID)
+			return c.layoutFileTabReceiverProgress(gtx, progressBg, progressFg, percent, t.Ref)
 		case "failed":
 			if !peerOnline {
 				return layout.Dimensions{}
 			}
-			return c.layoutFileTabRestartButton(gtx, t.FileID)
+			return c.layoutFileTabRestartButton(gtx, t.Ref)
 		case "available", "waiting_route":
 			if !peerOnline {
 				return layout.Dimensions{}
 			}
-			return c.layoutFileTabDownloadButton(gtx, t.FileID)
+			return c.layoutFileTabDownloadButton(gtx, t.Ref)
 		}
 	}
 	return layout.Dimensions{}
@@ -786,10 +789,10 @@ func (c *consoleModal) layoutFileRowProgressOrButton(gtx layout.Context, t filet
 // resolves to the same FileBridge.CancelDownload call. The map is
 // lazily initialised here defensively in case the file tab paints
 // before the chat thread.
-func (c *consoleModal) layoutFileTabReceiverProgress(gtx layout.Context, bg, fg color.NRGBA, percent int, fileID domain.FileID) layout.Dimensions {
-	messageID := string(fileID)
+func (c *consoleModal) layoutFileTabReceiverProgress(gtx layout.Context, bg, fg color.NRGBA, percent int, fileID domain.MessageRef) layout.Dimensions {
+	messageID := fileID
 	if c.parent.fileCancelDownloadBtns == nil {
-		c.parent.fileCancelDownloadBtns = make(map[string]*widget.Clickable)
+		c.parent.fileCancelDownloadBtns = make(map[domain.MessageRef]*widget.Clickable)
 	}
 	cancelBtn, ok := c.parent.fileCancelDownloadBtns[messageID]
 	if !ok {
@@ -803,7 +806,7 @@ func (c *consoleModal) layoutFileTabReceiverProgress(gtx layout.Context, bg, fg 
 		go func() {
 			defer c.parent.endUIOp()
 			defer c.invalidateWindow()
-			if err := c.parent.router.FileBridge().CancelDownload(fileID); err != nil {
+			if err := c.parent.router.FileBridge().CancelDownloadRef(fileID); err != nil {
 				_ = err
 			}
 		}()
@@ -834,7 +837,7 @@ func (c *consoleModal) layoutFileTabReceiverProgress(gtx layout.Context, bg, fg 
 // one frame, the goroutine completes asynchronously, and no further
 // frame fires until something unrelated happens — leaving the row
 // stuck on "Available + Download".
-func (c *consoleModal) layoutFileTabDownloadButton(gtx layout.Context, fileID domain.FileID) layout.Dimensions {
+func (c *consoleModal) layoutFileTabDownloadButton(gtx layout.Context, fileID domain.MessageRef) layout.Dimensions {
 	btn := c.fileDownloadButton(fileID)
 	for btn.Clicked(gtx) {
 		c.dispatchFileTabDownloadAsync(fileID)
@@ -861,7 +864,7 @@ func (c *consoleModal) layoutFileTabDownloadButton(gtx layout.Context, fileID do
 // invalidate-after-click so the row updates from "Failed + Restart"
 // → "Available" / "Downloading" without waiting for an unrelated
 // repaint event.
-func (c *consoleModal) layoutFileTabRestartButton(gtx layout.Context, fileID domain.FileID) layout.Dimensions {
+func (c *consoleModal) layoutFileTabRestartButton(gtx layout.Context, fileID domain.MessageRef) layout.Dimensions {
 	btn := c.fileRestartButton(fileID)
 	for btn.Clicked(gtx) {
 		c.dispatchFileTabRestartAsync(fileID)
@@ -886,7 +889,7 @@ func (c *consoleModal) layoutFileTabRestartButton(gtx layout.Context, fileID dom
 // dispatchFileTabDownloadAsync runs StartDownload off the UI
 // goroutine and invalidates the console window when it settles so
 // the row picks up the new state on the next frame.
-func (c *consoleModal) dispatchFileTabDownloadAsync(fileID domain.FileID) {
+func (c *consoleModal) dispatchFileTabDownloadAsync(fileID domain.MessageRef) {
 	if c.parent == nil || c.parent.router == nil {
 		return
 	}
@@ -900,7 +903,7 @@ func (c *consoleModal) dispatchFileTabDownloadAsync(fileID domain.FileID) {
 	go func() {
 		defer c.parent.endUIOp()
 		defer c.invalidateWindow()
-		if err := bridge.StartDownload(fileID); err != nil {
+		if err := bridge.StartDownloadRef(fileID); err != nil {
 			// Errors are intentionally swallowed: the row will stay
 			// in the original state and the user can retry. We do
 			// not surface a status string because the chat-thread
@@ -913,7 +916,7 @@ func (c *consoleModal) dispatchFileTabDownloadAsync(fileID domain.FileID) {
 // dispatchFileTabRestartAsync runs RestartDownload + StartDownload
 // off the UI goroutine and invalidates after the pair settles.
 // Mirrors the chat-thread layoutFileRestartButton goroutine.
-func (c *consoleModal) dispatchFileTabRestartAsync(fileID domain.FileID) {
+func (c *consoleModal) dispatchFileTabRestartAsync(fileID domain.MessageRef) {
 	if c.parent == nil || c.parent.router == nil {
 		return
 	}
@@ -927,11 +930,11 @@ func (c *consoleModal) dispatchFileTabRestartAsync(fileID domain.FileID) {
 	go func() {
 		defer c.parent.endUIOp()
 		defer c.invalidateWindow()
-		if err := bridge.RestartDownload(fileID); err != nil {
+		if err := bridge.RestartDownloadRef(fileID); err != nil {
 			_ = err
 			return
 		}
-		if err := bridge.StartDownload(fileID); err != nil {
+		if err := bridge.StartDownloadRef(fileID); err != nil {
 			_ = err
 		}
 	}()
@@ -1010,11 +1013,11 @@ func (c *consoleModal) layoutFileRowDiskActions(gtx layout.Context, t filetransf
 	if bridge == nil {
 		return layout.Dimensions{}
 	}
-	path := bridge.FilePath(t.FileID, t.Direction == "send")
+	path := bridge.FilePathRef(t.Ref, t.Direction == "send")
 	if path == "" {
 		return layout.Dimensions{}
 	}
-	messageID := string(t.FileID)
+	messageID := t.Ref
 	// Reuse the chat-thread Clickable maps (same package) so the
 	// click handlers stay in sync — the buttons control the same
 	// underlying file regardless of which surface the user clicks
@@ -1022,10 +1025,10 @@ func (c *consoleModal) layoutFileRowDiskActions(gtx layout.Context, t filetransf
 	// first paint; we initialise here defensively because the file
 	// tab could be the first surface to render this row.
 	if c.parent.fileRevealBtns == nil {
-		c.parent.fileRevealBtns = make(map[string]*widget.Clickable)
+		c.parent.fileRevealBtns = make(map[domain.MessageRef]*widget.Clickable)
 	}
 	if c.parent.fileOpenBtns == nil {
-		c.parent.fileOpenBtns = make(map[string]*widget.Clickable)
+		c.parent.fileOpenBtns = make(map[domain.MessageRef]*widget.Clickable)
 	}
 	revealBtn, ok := c.parent.fileRevealBtns[messageID]
 	if !ok {
@@ -1121,7 +1124,7 @@ func (c *consoleModal) layoutFileRowDeleteAction(gtx layout.Context, t filetrans
 	if t.State == "tombstone" {
 		return layout.Dimensions{}
 	}
-	btn := c.fileDeleteButton(t.FileID)
+	btn := c.fileDeleteButton(t.Ref)
 	for btn.Clicked(gtx) {
 		c.dispatchFileDeleteAsync(t)
 	}
@@ -1148,7 +1151,7 @@ func (c *consoleModal) dispatchFileDeleteAsync(t filetransfer.TransferSnapshot) 
 	router.SetSendStatus(c.parent.t("status.message_deleting"))
 
 	peer := t.Peer
-	target := domain.MessageID(t.FileID)
+	target := t.Ref
 	if !c.parent.beginUIOp() {
 		return
 	}
@@ -1156,7 +1159,7 @@ func (c *consoleModal) dispatchFileDeleteAsync(t filetransfer.TransferSnapshot) 
 		defer c.parent.endUIOp()
 		ctx, cancel := context.WithTimeout(context.Background(), fileDeleteTimeout)
 		defer cancel()
-		route, err := router.SendMessageDelete(ctx, peer, target)
+		route, err := router.SendMessageDeleteRef(ctx, target)
 		if err != nil {
 			router.SetSendStatus(c.parent.t("status.message_delete_failed", err.Error()))
 			return

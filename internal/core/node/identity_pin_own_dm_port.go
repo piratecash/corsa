@@ -93,7 +93,7 @@ func (p OwnDMProvenancePort) submitWithResidence(ctx, residence context.Context,
 		if !result.stored {
 			reply.Type = "message_known"
 		}
-		reply.Status = s.storedMessageStatus(prepared.sealed.message.ID)
+		reply.Status = s.storedMessageStatus(admissionRef(prepared.sealed.message))
 	}
 	if result.stamp == nil {
 		return reply, OwnDMSubmission{}, nil

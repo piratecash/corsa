@@ -33,8 +33,9 @@ func TestCleanupPeerTransfersSenderReleasesRef(t *testing.T) {
 	store.mu.Unlock()
 
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		store:        store,
 		downloadDir:  downloadDir,
 		stopCh:       make(chan struct{}),
@@ -44,7 +45,8 @@ func TestCleanupPeerTransfersSenderReleasesRef(t *testing.T) {
 	peerAlice := domaintest.ID("alice")
 
 	// Sender mapping: we sent file to bob (announced, not yet completed).
-	m.senderMaps["file-1"] = &senderFileMapping{
+	m.senderMaps[ftOutgoingRef(m, "file-1", peerBob)] = &senderFileMapping{
+		Ref:       ftOutgoingRef(m, "file-1", peerBob),
 		FileID:    "file-1",
 		FileHash:  hash,
 		FileName:  "photo.png",
@@ -58,7 +60,8 @@ func TestCleanupPeerTransfersSenderReleasesRef(t *testing.T) {
 	store.mu.Lock()
 	store.refs[hash] = 2
 	store.mu.Unlock()
-	m.senderMaps["file-2"] = &senderFileMapping{
+	m.senderMaps[ftOutgoingRef(m, "file-2", peerAlice)] = &senderFileMapping{
+		Ref:       ftOutgoingRef(m, "file-2", peerAlice),
 		FileID:    "file-2",
 		FileHash:  hash,
 		FileName:  "photo.png",
@@ -72,12 +75,12 @@ func TestCleanupPeerTransfersSenderReleasesRef(t *testing.T) {
 	m.CleanupPeerTransfers(peerBob)
 
 	// file-1 should be removed.
-	if _, ok := m.senderMaps["file-1"]; ok {
+	if _, ok := m.senderMaps[ftOutgoingRef(m, "file-1", peerBob)]; ok {
 		t.Error("file-1 should be removed after cleanup")
 	}
 
 	// file-2 (alice) should still exist.
-	if _, ok := m.senderMaps["file-2"]; !ok {
+	if _, ok := m.senderMaps[ftOutgoingRef(m, "file-2", peerAlice)]; !ok {
 		t.Error("file-2 (alice) should NOT be removed")
 	}
 
@@ -89,7 +92,7 @@ func TestCleanupPeerTransfersSenderReleasesRef(t *testing.T) {
 	// Now cleanup alice.
 	m.CleanupPeerTransfers(peerAlice)
 
-	if _, ok := m.senderMaps["file-2"]; ok {
+	if _, ok := m.senderMaps[ftOutgoingRef(m, "file-2", peerAlice)]; ok {
 		t.Error("file-2 should be removed after cleanup")
 	}
 
@@ -111,8 +114,9 @@ func TestCleanupPeerTransfersReceiverDeletesFiles(t *testing.T) {
 	_ = os.MkdirAll(partialDir, 0o700)
 
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		downloadDir:  downloadDir,
 		stopCh:       make(chan struct{}),
 	}
@@ -123,7 +127,9 @@ func TestCleanupPeerTransfersReceiverDeletesFiles(t *testing.T) {
 	// Completed download from alice.
 	completedFile := filepath.Join(receivedDir, "hash123.pdf")
 	_ = os.WriteFile(completedFile, []byte("pdf content"), 0o600)
-	m.receiverMaps["file-a1"] = &receiverFileMapping{
+	m.receiverMaps[ftIncomingRef(m, "file-a1", peerAlice)] = &receiverFileMapping{
+		Ref:           ftIncomingRef(m, "file-a1", peerAlice),
+		PartialPath:   partialDownloadPath(m.downloadDir, "file-a1"),
 		FileID:        "file-a1",
 		FileHash:      "hash123",
 		FileName:      "doc.pdf",
@@ -135,18 +141,22 @@ func TestCleanupPeerTransfersReceiverDeletesFiles(t *testing.T) {
 	// Partial download from alice.
 	partialFile := filepath.Join(partialDir, "file-a2.part")
 	_ = os.WriteFile(partialFile, []byte("partial"), 0o600)
-	m.receiverMaps["file-a2"] = &receiverFileMapping{
-		FileID:   "file-a2",
-		FileHash: "hash456",
-		FileName: "video.mp4",
-		Sender:   peerAlice,
-		State:    receiverDownloading,
+	m.receiverMaps[ftIncomingRef(m, "file-a2", peerAlice)] = &receiverFileMapping{
+		Ref:         ftIncomingRef(m, "file-a2", peerAlice),
+		PartialPath: partialDownloadPath(m.downloadDir, "file-a2"),
+		FileID:      "file-a2",
+		FileHash:    "hash456",
+		FileName:    "video.mp4",
+		Sender:      peerAlice,
+		State:       receiverDownloading,
 	}
 
 	// Download from bob — should NOT be touched.
 	bobFile := filepath.Join(receivedDir, "hash789.txt")
 	_ = os.WriteFile(bobFile, []byte("bob data"), 0o600)
-	m.receiverMaps["file-b1"] = &receiverFileMapping{
+	m.receiverMaps[ftIncomingRef(m, "file-b1", peerBob)] = &receiverFileMapping{
+		Ref:           ftIncomingRef(m, "file-b1", peerBob),
+		PartialPath:   partialDownloadPath(m.downloadDir, "file-b1"),
 		FileID:        "file-b1",
 		FileHash:      "hash789",
 		FileName:      "notes.txt",
@@ -159,10 +169,10 @@ func TestCleanupPeerTransfersReceiverDeletesFiles(t *testing.T) {
 	m.CleanupPeerTransfers(peerAlice)
 
 	// Alice's entries should be gone.
-	if _, ok := m.receiverMaps["file-a1"]; ok {
+	if _, ok := m.receiverMaps[ftIncomingRef(m, "file-a1", peerAlice)]; ok {
 		t.Error("file-a1 should be removed")
 	}
-	if _, ok := m.receiverMaps["file-a2"]; ok {
+	if _, ok := m.receiverMaps[ftIncomingRef(m, "file-a2", peerAlice)]; ok {
 		t.Error("file-a2 should be removed")
 	}
 
@@ -175,7 +185,7 @@ func TestCleanupPeerTransfersReceiverDeletesFiles(t *testing.T) {
 	}
 
 	// Bob's entry and file should still exist.
-	if _, ok := m.receiverMaps["file-b1"]; !ok {
+	if _, ok := m.receiverMaps[ftIncomingRef(m, "file-b1", peerBob)]; !ok {
 		t.Error("file-b1 (bob) should NOT be removed")
 	}
 	if _, err := os.Stat(bobFile); os.IsNotExist(err) {
@@ -207,15 +217,17 @@ func TestCleanupPeerTransfersCompletedSenderReleasesRef(t *testing.T) {
 	store.mu.Unlock()
 
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		store:        store,
 		downloadDir:  filepath.Join(dir, "downloads"),
 		stopCh:       make(chan struct{}),
 	}
 
 	peer := domaintest.ID("bob")
-	m.senderMaps["file-c1"] = &senderFileMapping{
+	m.senderMaps[ftOutgoingRef(m, "file-c1", peer)] = &senderFileMapping{
+		Ref:       ftOutgoingRef(m, "file-c1", peer),
 		FileID:    "file-c1",
 		FileHash:  hash,
 		Recipient: peer,
@@ -224,7 +236,7 @@ func TestCleanupPeerTransfersCompletedSenderReleasesRef(t *testing.T) {
 
 	m.CleanupPeerTransfers(peer)
 
-	if _, ok := m.senderMaps["file-c1"]; ok {
+	if _, ok := m.senderMaps[ftOutgoingRef(m, "file-c1", peer)]; ok {
 		t.Error("file-c1 should be removed from maps")
 	}
 
@@ -250,14 +262,16 @@ func TestCleanupPeerTransfersNilStoreDoesNotPanic(t *testing.T) {
 	peer := domaintest.ID("peer-nil-store")
 
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		store:        nil, // intentionally nil
 		stopCh:       make(chan struct{}),
 	}
 
 	// Active sender mapping — would need Release on a non-nil store.
-	m.senderMaps["file-nil"] = &senderFileMapping{
+	m.senderMaps[ftOutgoingRef(m, "file-nil", peer)] = &senderFileMapping{
+		Ref:       ftOutgoingRef(m, "file-nil", peer),
 		FileID:    "file-nil",
 		FileHash:  "aabbccdd",
 		Recipient: peer,
@@ -267,7 +281,7 @@ func TestCleanupPeerTransfersNilStoreDoesNotPanic(t *testing.T) {
 	// Must not panic.
 	m.CleanupPeerTransfers(peer)
 
-	if _, ok := m.senderMaps["file-nil"]; ok {
+	if _, ok := m.senderMaps[ftOutgoingRef(m, "file-nil", peer)]; ok {
 		t.Error("sender mapping should be removed")
 	}
 }

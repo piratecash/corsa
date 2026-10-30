@@ -277,7 +277,7 @@ func TestAHopTimeoutIsChargedToTheConnectionTheAttemptUsed(t *testing.T) {
 		t.Fatalf("pin: %v", err)
 	}
 
-	state, ok := svc.relayStates.snapshotForTest("via-legacy")
+	state, ok := svc.relayStates.snapshotForTest(envelopeRef(envelope))
 	if !ok {
 		t.Fatal("precondition: the relay state was stored")
 	}
@@ -304,7 +304,7 @@ func TestAHopTimeoutChargesTheConnectionTheAttemptUsed(t *testing.T) {
 		if outcome := svc.sendRelayMessage(address, envelope, time.Now()); !outcome.handled() {
 			t.Fatalf("precondition: the relay was handed over (%v)", outcome)
 		}
-		state, ok := svc.relayStates.snapshotForTest(id)
+		state, ok := svc.relayStates.snapshotForTest(envelopeRef(envelope))
 		if !ok {
 			t.Fatal("precondition: the relay state was stored")
 		}
@@ -399,7 +399,7 @@ func TestAHopAckIsAttributedToTheConnectionItArrivedOn(t *testing.T) {
 		t.Fatalf("pin: %v", err)
 	}
 	svc.relayStates.store(&relayForwardState{
-		MessageID:            "ack-attribution",
+		Message:              relayStateFixtureRef("ack-attribution"),
 		ForwardedTo:          genuine.address,
 		ForwardedVia:         sessionRoutingSender(genuine),
 		Recipient:            idTargetX,
@@ -408,15 +408,15 @@ func TestAHopAckIsAttributedToTheConnectionItArrivedOn(t *testing.T) {
 	ack := protocol.Frame{Type: "relay_hop_ack", ID: "ack-attribution", Status: "forwarded"}
 
 	svc.handleRelayHopAck(genuine.address, sessionRoutingSender(impostor), ack)
-	if observedHopAck(t, svc, "ack-attribution") {
+	if observedHopAck(t, svc, relayStateFixtureRef("ack-attribution")) {
 		t.Fatal("an ack that arrived over a legacy connection naming X was taken as X's because X's v2 session holds the address now")
 	}
 	svc.handleRelayHopAck(genuine.address, routingSender{}, ack)
-	if observedHopAck(t, svc, "ack-attribution") {
+	if observedHopAck(t, svc, relayStateFixtureRef("ack-attribution")) {
 		t.Fatal("an ack over a connection that names nobody was credited to X's v2 session holding the address")
 	}
 	svc.handleRelayHopAck(genuine.address, sessionRoutingSender(genuine), ack)
-	if !observedHopAck(t, svc, "ack-attribution") {
+	if !observedHopAck(t, svc, relayStateFixtureRef("ack-attribution")) {
 		t.Fatal("an ack over X's own v2 session did not suppress the timer")
 	}
 }
@@ -453,10 +453,10 @@ func TestALegacySessionCloseObligesThePurgeAtTheProof(t *testing.T) {
 
 // snapshotForTest returns a copy of one relay state, as the TTL ticker hands
 // it to onRelayHopAckTimeout.
-func (rs *relayStateStore) snapshotForTest(messageID string) (relayForwardState, bool) {
+func (rs *relayStateStore) snapshotForTest(ref domain.MessageRef) (relayForwardState, bool) {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
-	state, ok := rs.states[messageID]
+	state, ok := rs.states[ref]
 	if !ok {
 		return relayForwardState{}, false
 	}

@@ -495,16 +495,20 @@ func decryptDirectMessagesReporting(id *identity.Identity, contacts map[string]C
 		}
 		reportSuccess(msg)
 	}
-	receiptsByMessageID := make(map[string]DeliveryReceipt, len(receipts))
+	receiptsByMessageID := make(map[domain.MessageRef]DeliveryReceipt, len(receipts))
 	for _, receipt := range receipts {
-		existing, ok := receiptsByMessageID[receipt.MessageID]
+		if receipt.Status != protocol.ReceiptStatusDelivered && receipt.Status != protocol.ReceiptStatusSeen {
+			continue
+		}
+		ref := domain.MessageRef{Topic: "dm", ID: receipt.MessageID, Sender: receipt.Recipient.String(), Recipient: receipt.Sender.String()}
+		existing, ok := receiptsByMessageID[ref]
 		if !ok || receipt.Status == protocol.ReceiptStatusSeen || existing.Status != protocol.ReceiptStatusSeen {
-			receiptsByMessageID[receipt.MessageID] = receipt
+			receiptsByMessageID[ref] = receipt
 		}
 	}
-	pending := make(map[string]PendingMessage, len(pendingItems))
+	pending := make(map[domain.MessageRef]PendingMessage, len(pendingItems))
 	for _, item := range pendingItems {
-		pending[item.ID] = item
+		pending[domain.MessageRef{Topic: "dm", ID: item.ID, Sender: id.Address, Recipient: item.Recipient}] = item
 	}
 
 	out := make([]DirectMessage, 0, len(messages))
@@ -544,7 +548,7 @@ func decryptDirectMessagesReporting(id *identity.Identity, contacts map[string]C
 
 		// Layer in-memory receipt on top — but only if it advances the status.
 		fromReceipt := false
-		if receipt, ok := receiptsByMessageID[item.ID]; ok {
+		if receipt, ok := receiptsByMessageID[domain.MessageRef{Topic: "dm", ID: item.ID, Sender: item.Sender, Recipient: item.Recipient}]; ok {
 			deliveredAt = domain.TimeOf(receipt.DeliveredAt)
 			fromReceipt = true
 			if receiptStatusRank(receipt.Status) > receiptStatusRank(receiptStatus) {
@@ -563,7 +567,7 @@ func decryptDirectMessagesReporting(id *identity.Identity, contacts map[string]C
 
 		// For outgoing messages with no persisted or receipt status, check pending state.
 		if receiptStatus == "" && item.Sender == id.Address {
-			if pendingItem, ok := pending[item.ID]; ok {
+			if pendingItem, ok := pending[domain.MessageRef{Topic: "dm", ID: item.ID, Sender: item.Sender, Recipient: item.Recipient}]; ok {
 				receiptStatus = pendingItem.Status
 			} else {
 				receiptStatus = MessageStatusSent

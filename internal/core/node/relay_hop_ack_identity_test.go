@@ -35,24 +35,24 @@ func TestHopAckReroutePreservesReplacementTimerAndPayload(t *testing.T) {
 					}
 				}
 				svc.relayStates.store(&relayForwardState{
-					MessageID: "rerouted", Recipient: idTargetX, ForwardedTo: a.address,
+					Message: relayStateFixtureRef("rerouted"), Recipient: idTargetX, ForwardedTo: a.address,
 					ForwardedVia: sessionRoutingSender(a), NextHopSelection: relayNextHopRoutingTable,
 					HopAckObserved: true, FrameLine: "old-payload",
 				})
 				svc.sessions[b.address] = b
 				if transition == "upsert" {
 					svc.relayStates.store(&relayForwardState{
-						MessageID: "rerouted", Recipient: idTargetX, ForwardedTo: b.address,
+						Message: relayStateFixtureRef("rerouted"), Recipient: idTargetX, ForwardedTo: b.address,
 						ForwardedVia: sessionRoutingSender(b), NextHopSelection: relayNextHopRoutingTable,
 						HopAckRemainingTicks: defaultHopAckBudgetSeconds, FrameLine: "replacement-payload",
 					})
-				} else if !svc.relayStates.recordFailoverRetry("rerouted", b.address, sessionRoutingSender(b), "replacement-payload") {
+				} else if !svc.relayStates.recordFailoverRetry(relayStateFixtureRef("rerouted"), b.address, sessionRoutingSender(b), "replacement-payload") {
 					t.Fatal("failover fixture did not replace the attempt")
 				}
 				ack := protocol.Frame{Type: "relay_hop_ack", ID: "rerouted", Status: "forwarded"}
 				svc.handleRelayHopAck(a.address, sessionRoutingSender(a), ack)
 				svc.relayStates.mu.Lock()
-				state := *svc.relayStates.states["rerouted"]
+				state := *svc.relayStates.states[relayStateFixtureRef("rerouted")]
 				svc.relayStates.mu.Unlock()
 				if state.HopAckObserved || state.HopAckRemainingTicks != defaultHopAckBudgetSeconds || state.FrameLine != "replacement-payload" {
 					t.Fatalf("late old-identity ack consumed replacement: %+v", state)
@@ -62,7 +62,7 @@ func TestHopAckReroutePreservesReplacementTimerAndPayload(t *testing.T) {
 				}
 				svc.handleRelayHopAck(b.address, sessionRoutingSender(b), ack)
 				svc.relayStates.mu.Lock()
-				state = *svc.relayStates.states["rerouted"]
+				state = *svc.relayStates.states[relayStateFixtureRef("rerouted")]
 				svc.relayStates.mu.Unlock()
 				if !state.HopAckObserved || state.FrameLine != "" {
 					t.Fatal("current identity did not consume live timer payload")
@@ -104,7 +104,7 @@ func TestHopAckCreditsCapturedIdentityAcrossAddressReplacement(t *testing.T) {
 				}
 			}
 			svc.relayStates.store(&relayForwardState{
-				MessageID: "replacement-address", Recipient: idTargetX, ForwardedTo: original.address,
+				Message: relayStateFixtureRef("replacement-address"), Recipient: idTargetX, ForwardedTo: original.address,
 				ForwardedVia: sessionRoutingSender(original), NextHopSelection: relayNextHopRoutingTable,
 				HopAckRemainingTicks: 5, FrameLine: "held",
 			})
@@ -113,7 +113,7 @@ func TestHopAckCreditsCapturedIdentityAcrossAddressReplacement(t *testing.T) {
 			svc.handleRelayHopAck(actual.address, sessionRoutingSender(actual), protocol.Frame{
 				Type: "relay_hop_ack", ID: "replacement-address", Status: "delivered",
 			})
-			if !observedHopAck(t, svc, "replacement-address") {
+			if !observedHopAck(t, svc, relayStateFixtureRef("replacement-address")) {
 				t.Fatal("current identity was tied to a mutable address or exact session")
 			}
 			seenA, seenB := false, false
@@ -141,17 +141,17 @@ func TestHopAckUnpinnedHistoryRestrictsOnlyOtherIdentities(t *testing.T) {
 				if history == "unknown" {
 					first = routingSender{}
 				}
-				rs.store(&relayForwardState{MessageID: "history", ForwardedTo: "old", ForwardedVia: first, Recipient: idTargetX,
+				rs.store(&relayForwardState{Message: relayStateFixtureRef("history"), ForwardedTo: "old", ForwardedVia: first, Recipient: idTargetX,
 					NextHopSelection: selection, HopAckRemainingTicks: 5, FrameLine: "old"})
 				if history == "overflow" {
 					for i := 0; i < maxAbandonedHopAckIdentities; i++ {
 						id := domain.PeerIdentity{byte(i + 1)}
-						if !rs.recordFailoverRetry("history", domain.PeerAddress(fmt.Sprintf("hop-%d", i)), routingSender{identity: id}, "payload") {
+						if !rs.recordFailoverRetry(relayStateFixtureRef("history"), domain.PeerAddress(fmt.Sprintf("hop-%d", i)), routingSender{identity: id}, "payload") {
 							t.Fatal("history fixture lost state")
 						}
 					}
 				}
-				rs.store(&relayForwardState{MessageID: "history", ForwardedTo: "current", ForwardedVia: routingSender{identity: idPeerB}, Recipient: idTargetX,
+				rs.store(&relayForwardState{Message: relayStateFixtureRef("history"), ForwardedTo: "current", ForwardedVia: routingSender{identity: idPeerB}, Recipient: idTargetX,
 					NextHopSelection: selection, HopAckRemainingTicks: 5, FrameLine: "payload"})
 				if _, ok := rs.consumeHopAck("history", idPeerA); ok {
 					t.Fatal("captured abandoned identity was accepted")
@@ -162,7 +162,7 @@ func TestHopAckUnpinnedHistoryRestrictsOnlyOtherIdentities(t *testing.T) {
 				}
 				// Use a fresh live timer for the current-sender assertion.
 				rs.mu.Lock()
-				state := rs.states["history"]
+				state := rs.states[relayStateFixtureRef("history")]
 				count, incomplete := state.abandonedAckCount, state.abandonedAckIncomplete
 				state.HopAckObserved, state.FrameLine = false, "current-payload"
 				rs.mu.Unlock()
@@ -182,12 +182,12 @@ func TestHopAckUnpinnedHistoryRestrictsOnlyOtherIdentities(t *testing.T) {
 	// A current identity may occur in captured history after A→B→A. It is
 	// still current; the wire supplies no distinct attempt or session token.
 	rs := newRelayStateStore()
-	rs.store(&relayForwardState{MessageID: "returned", ForwardedTo: "A", ForwardedVia: routingSender{identity: idPeerA}, Recipient: idTargetX, NextHopSelection: relayNextHopRoutingTable})
-	rs.recordFailoverRetry("returned", "B", routingSender{identity: idPeerB}, "B")
-	rs.recordFailoverRetry("returned", "A2", routingSender{identity: idPeerA}, "A2")
-	rs.recordFailoverRetry("returned", "A3", routingSender{identity: idPeerA}, "A3")
+	rs.store(&relayForwardState{Message: relayStateFixtureRef("returned"), ForwardedTo: "A", ForwardedVia: routingSender{identity: idPeerA}, Recipient: idTargetX, NextHopSelection: relayNextHopRoutingTable})
+	rs.recordFailoverRetry(relayStateFixtureRef("returned"), "B", routingSender{identity: idPeerB}, "B")
+	rs.recordFailoverRetry(relayStateFixtureRef("returned"), "A2", routingSender{identity: idPeerA}, "A2")
+	rs.recordFailoverRetry(relayStateFixtureRef("returned"), "A3", routingSender{identity: idPeerA}, "A3")
 	rs.mu.Lock()
-	count := rs.states["returned"].abandonedAckCount
+	count := rs.states[relayStateFixtureRef("returned")].abandonedAckCount
 	rs.mu.Unlock()
 	if count != 2 {
 		t.Fatal("duplicate old identity consumed another history slot")
@@ -195,7 +195,7 @@ func TestHopAckUnpinnedHistoryRestrictsOnlyOtherIdentities(t *testing.T) {
 	if _, ok := rs.consumeHopAck("returned", idPeerA); !ok {
 		t.Fatal("known current identity was rejected merely because it was previously abandoned")
 	}
-	rs.store(&relayForwardState{MessageID: "unknown-pinned", ForwardedTo: "queued", Recipient: idTargetX, NextHopSelection: relayNextHopRoutingTable, FrameLine: "held"})
+	rs.store(&relayForwardState{Message: relayStateFixtureRef("unknown-pinned"), ForwardedTo: "queued", Recipient: idTargetX, NextHopSelection: relayNextHopRoutingTable, FrameLine: "held"})
 	if _, ok := rs.consumeHopAck("unknown-pinned", idPeerA); ok {
 		t.Fatal("unknown pinned send-time identity accepted a named ack")
 	}
@@ -209,19 +209,19 @@ func TestHopAckUnpinnedHistoryRestrictsOnlyOtherIdentities(t *testing.T) {
 
 func TestHopAckConsumeBeforeRerouteRearmsNewAttempt(t *testing.T) {
 	rs := newRelayStateStore()
-	rs.store(&relayForwardState{MessageID: "ordered", ForwardedTo: "A", ForwardedVia: routingSender{identity: idPeerA}, Recipient: idTargetX,
+	rs.store(&relayForwardState{Message: relayStateFixtureRef("ordered"), ForwardedTo: "A", ForwardedVia: routingSender{identity: idPeerA}, Recipient: idTargetX,
 		NextHopSelection: relayNextHopRoutingTable, HopAckRemainingTicks: 5, FrameLine: "A"})
 	if _, ok := rs.consumeHopAck("ordered", idPeerA); !ok {
 		t.Fatal("current ack was refused")
 	}
-	if !rs.recordFailoverRetry("ordered", "B", routingSender{identity: idPeerB}, "B") {
+	if !rs.recordFailoverRetry(relayStateFixtureRef("ordered"), "B", routingSender{identity: idPeerB}, "B") {
 		t.Fatal("subsequent reroute lost state")
 	}
 	if _, ok := rs.consumeHopAck("ordered", idPeerA); ok {
 		t.Fatal("old identity consumed an attempt created after its earlier consume")
 	}
 	rs.mu.Lock()
-	state := *rs.states["ordered"]
+	state := *rs.states[relayStateFixtureRef("ordered")]
 	rs.mu.Unlock()
 	if state.HopAckObserved || state.HopAckRemainingTicks != defaultHopAckBudgetSeconds || state.FrameLine != "B" {
 		t.Fatal("consume-before-reroute left replacement timer or payload suppressed")

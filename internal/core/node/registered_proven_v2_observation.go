@@ -148,7 +148,14 @@ func (o *k3RegisteredSource) readClock() (time.Duration, bool) {
 	if o.fault != "" {
 		return 0, false
 	}
+	returned := false
+	defer func() {
+		if !returned {
+			o.fail("duration-clock-incomplete")
+		}
+	}()
 	value, err := o.clock()
+	returned = true
 	if err != nil || value < 0 {
 		o.fail("duration-clock-unavailable")
 		return 0, false
@@ -375,41 +382,43 @@ func (s *Service) k3RegisteredSnapshot() k3RegisteredSnapshot {
 	if s.k3Registered == nil {
 		return out
 	}
-	s.peerMu.Lock()
-	o := s.k3Registered
-	if o == nil {
-		s.peerMu.Unlock()
-		return out
-	}
-	if o.fault == "" {
-		before, ok := o.readClock()
-		if ok {
-			after, valid := o.readClock()
-			if valid {
-				o.cut = k3RegisteredClock{Before: before, After: after}
+	var prefix []k3RegisteredTransition
+	func() {
+		s.peerMu.Lock()
+		defer s.peerMu.Unlock()
+		o := s.k3Registered
+		if o == nil {
+			return
+		}
+		if o.fault == "" {
+			before, ok := o.readClock()
+			if ok {
+				after, valid := o.readClock()
+				if valid {
+					o.cut = k3RegisteredClock{Before: before, After: after}
+				}
 			}
 		}
-	}
-	out.Instance = o.instance
-	out.Baseline = o.baseline
-	out.Cut = o.cut
-	out.Sequence = o.sequence
-	out.RegisteredOwners = len(o.owners)
-	out.DistinctIdentities = len(o.refs)
-	if o.fault != "" {
-		out.RegisteredOwners = o.frozenOwners
-		out.DistinctIdentities = o.frozenIdentities
-	}
-	out.Status = "PAST"
-	if o.fault != "" {
-		out.Status = "UNKNOWN"
-		out.Reason = o.fault
-	} else if o.cut.Before <= o.baseline.After {
-		out.Status = "NO_PROGRESS"
-		out.Reason = "no-positive-covered-interval"
-	}
-	prefix := o.history[:o.length:o.length]
-	s.peerMu.Unlock()
+		out.Instance = o.instance
+		out.Baseline = o.baseline
+		out.Cut = o.cut
+		out.Sequence = o.sequence
+		out.RegisteredOwners = len(o.owners)
+		out.DistinctIdentities = len(o.refs)
+		if o.fault != "" {
+			out.RegisteredOwners = o.frozenOwners
+			out.DistinctIdentities = o.frozenIdentities
+		}
+		out.Status = "PAST"
+		if o.fault != "" {
+			out.Status = "UNKNOWN"
+			out.Reason = o.fault
+		} else if o.cut.Before <= o.baseline.After {
+			out.Status = "NO_PROGRESS"
+			out.Reason = "no-positive-covered-interval"
+		}
+		prefix = o.history[:o.length:o.length]
+	}()
 	out.Transitions = make([]k3RegisteredTransition, len(prefix))
 	copy(out.Transitions, prefix)
 	return out

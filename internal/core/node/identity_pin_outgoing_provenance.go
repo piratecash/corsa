@@ -160,13 +160,13 @@ func (s *Service) registerR2aOrigin(d *r2aDispatch, envelope protocol.Envelope) 
 		d.failure = errR2aOrigin
 		return
 	}
-	if existing := s.awaitingDelivered[envelope.ID]; existing != nil {
+	if existing := s.awaitingDelivered[messageIdentityOf(envelope)]; existing != nil {
 		// A generic/previous owner is never promoted by a late opt-in call.
 		d.failure = errR2aOrigin
 		return
 	}
 	s.registerAwaitingDeliveredLocked(envelope, s.peerNow(), true)
-	entry := s.awaitingDelivered[envelope.ID]
+	entry := s.awaitingDelivered[messageIdentityOf(envelope)]
 	stamp := &r2aOwnSendStamp{prepared: d.prepared, entry: entry}
 	entry.outgoingProvenance = stamp
 	d.stamp, d.early = stamp, true
@@ -187,7 +187,7 @@ func (s *Service) r2aCurrentLocked(stamp *r2aOwnSendStamp) bool {
 	if stamp == nil || stamp.prepared == nil || stamp.prepared.owner != s || stamp.entry == nil {
 		return false
 	}
-	entry := s.awaitingDelivered[stamp.prepared.message.ID]
+	entry := s.awaitingDelivered[messageIdentity{MessageID: stamp.prepared.message.ID, Sender: stamp.prepared.message.Sender, Recipient: stamp.prepared.message.Recipient}]
 	return entry == stamp.entry && entry.outgoingProvenance == stamp && stamp.prepared.matches(entry.Envelope)
 }
 
@@ -288,7 +288,7 @@ func (s *Service) claimR2aFirstDirectedItemLocked(d *r2aDispatch, session *peerS
 	if d.ctx.Err() != nil || !s.r2aCurrentLocked(d.stamp) || d.stamp.consumed || d.stamp.candidate != nil || d.r2ResolvedHop == nil {
 		return nil
 	}
-	if _, frozen := s.frozenDeliveries[item.delivery.Envelope.ID]; frozen {
+	if _, frozen := s.frozenDeliveries[messageIdentityOf(item.delivery.Envelope)]; frozen {
 		return nil
 	}
 	hop := d.r2ResolvedHop
@@ -345,7 +345,7 @@ func (s *Service) settleR2aOwnHopLocked(ctx context.Context, stamp *r2aOwnSendSt
 	if !s.r2aCurrentLocked(stamp) || stamp.consumed || s.runCtx.Err() != nil {
 		return emptyX, emptyY, errR2aOrigin
 	}
-	if _, frozen := s.frozenDeliveries[stamp.prepared.message.ID]; frozen {
+	if _, frozen := s.frozenDeliveries[messageIdentity{MessageID: stamp.prepared.message.ID, Sender: stamp.prepared.message.Sender, Recipient: stamp.prepared.message.Recipient}]; frozen {
 		return emptyX, emptyY, errR2aOrigin
 	}
 	candidate := stamp.candidate
@@ -369,7 +369,7 @@ func (s *Service) settleR2aOwnHopLocked(ctx context.Context, stamp *r2aOwnSendSt
 func (s *Service) existingR2aOrigin(prepared *r2aPreparedEnvelope) *r2aOwnSendStamp {
 	s.deliveryMu.RLock()
 	defer s.deliveryMu.RUnlock()
-	entry := s.awaitingDelivered[prepared.message.ID]
+	entry := s.awaitingDelivered[messageIdentity{MessageID: prepared.message.ID, Sender: prepared.message.Sender, Recipient: prepared.message.Recipient}]
 	if entry == nil || entry.outgoingProvenance == nil || !prepared.matches(entry.Envelope) {
 		return nil
 	}

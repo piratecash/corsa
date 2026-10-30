@@ -439,7 +439,7 @@ type Service struct {
 	// acquiring a domain mutex — so it adds no edge to the canonical lock
 	// order. See docs/locking.md.
 	relayDeliveredMu sync.Mutex
-	relayDeliveredTo map[protocol.MessageID]map[domain.PeerIdentity]struct{}
+	relayDeliveredTo map[messageIdentity]map[domain.PeerIdentity]struct{}
 
 	peerMu                     sync.RWMutex
 	k3Advertised               *k3AdvertisedSource
@@ -500,12 +500,12 @@ type Service struct {
 	// Nil in ordinary roots. The candidate clock and source are fixed before use;
 	// all mutable source state is owned by deliveryMu, like pending itself.
 	pendingObservation *pendingQueueObservation
-	outbound           map[string]outboundDelivery
+	outbound           map[messageIdentity]outboundDelivery
 	// lastOutboundTerminalSweep throttles sweepTerminalOutbound (guarded
 	// by deliveryMu like the map it sweeps).
 	lastOutboundTerminalSweep time.Time
 	relayRetry                map[string]relayAttempt
-	awaitingDelivered         map[protocol.MessageID]*deliveryRetryEntry
+	awaitingDelivered         map[messageIdentity]*deliveryRetryEntry
 	// deliverySeq mints deliveryRetryEntry.Seq: the order deliveries were
 	// registered in, so a reading taken at one moment can tell the
 	// messages it measured from those written while it was working.
@@ -554,13 +554,13 @@ type Service struct {
 	//
 	// Entries are pruned by age on write; the window that matters is the
 	// life of one backlog push.
-	cancelledDeliveries map[protocol.MessageID]time.Time
+	cancelledDeliveries map[messageIdentity]time.Time
 	// frozenDeliveries are ids a conversation wipe is deciding about. No
 	// path may put them on the wire while they are here, and unlike
 	// cancelledDeliveries they never expire: the freeze ends when the
 	// wipe commits (the cancellation withdraws them) or aborts (a thaw
 	// puts them back), and nothing else. See delivery_freeze.go.
-	frozenDeliveries map[protocol.MessageID]struct{}
+	frozenDeliveries map[messageIdentity]struct{}
 	// markedNeverEmitted are the ids this process has a durable
 	// never-emitted claim standing for. It exists because the backlog
 	// replay reaches past the retry engine: it can emit a message whose
@@ -571,9 +571,9 @@ type Service struct {
 	// itself is destroyed by a withdrawal. Rebuilt implicitly after a
 	// restart — the reseed makes entries out of the same marks. See
 	// delivery_retry.go.
-	markedNeverEmitted map[protocol.MessageID]struct{}
-	awaitingSeenAck    map[protocol.MessageID]*seenAckRetryEntry
-	// sentDMIDs is a bounded LRU of message IDs this node has originated as
+	markedNeverEmitted map[messageIdentity]struct{}
+	awaitingSeenAck    map[messageIdentity]*seenAckRetryEntry
+	// sentDMIDs is a bounded LRU of full reference keys this node originated as
 	// DMs (populated when registering the end-to-end delivery retry). It is
 	// the "did we send this?" signal storeDeliveryReceipt uses to reject
 	// UNSOLICITED delivered/seen receipts addressed to our own identity, so an
@@ -618,9 +618,9 @@ type Service struct {
 	// the end: a receipt DELETES it, and if the receipt's own event was
 	// shed in the same burst the conversation is left showing queued for
 	// a message the peer has read, with nothing but a full reload to
-	// repair it. Delivery-domain state, keyed by message id so a newer
+	// repair it. Delivery-domain state, keyed by full reference so a newer
 	// event for the same message replaces an older one.
-	pendingUIEvents map[protocol.MessageID]pendingUIEvent
+	pendingUIEvents map[domain.MessageRef]pendingUIEvent
 	// pendingEventSeq stamps each kept snapshot, so a republish that
 	// succeeds removes the snapshot it sent rather than whatever the map
 	// holds by then. Delivery-domain state, written under deliveryMu.
@@ -2334,11 +2334,11 @@ func newServiceWithConstruction(cfg config.Node, id *identity.Identity, eventBus
 		pending:                  pending,
 		pendingKeys:              pendingKeys,
 		relayRetry:               relayRetry,
-		relayDeliveredTo:         make(map[protocol.MessageID]map[domain.PeerIdentity]struct{}),
-		outbound:                 make(map[string]outboundDelivery),
-		awaitingDelivered:        make(map[protocol.MessageID]*deliveryRetryEntry),
-		cancelledDeliveries:      make(map[protocol.MessageID]time.Time),
-		awaitingSeenAck:          make(map[protocol.MessageID]*seenAckRetryEntry),
+		relayDeliveredTo:         make(map[messageIdentity]map[domain.PeerIdentity]struct{}),
+		outbound:                 make(map[messageIdentity]outboundDelivery),
+		awaitingDelivered:        make(map[messageIdentity]*deliveryRetryEntry),
+		cancelledDeliveries:      make(map[messageIdentity]time.Time),
+		awaitingSeenAck:          make(map[messageIdentity]*seenAckRetryEntry),
 		sentDMIDs:                newBoundedKnownIdentities(maxSentDMIDs),
 		senderKeySyncInFlight:    make(map[string]struct{}),
 		senderKeySyncHopInFlight: make(map[string]struct{}),
@@ -5095,7 +5095,7 @@ func (s *Service) handleLocalFrameDispatch(frame protocol.Frame) protocol.Frame 
 	case "fetch_message_ids":
 		return s.fetchMessageIDsFrame(frame.Topic)
 	case "fetch_message":
-		return s.fetchMessageFrame(frame.Topic, frame.ID)
+		return s.fetchMessageFrame(frame.Topic, frame.ID, frame.Address, frame.Recipient)
 	case "fetch_inbox":
 		return s.fetchInboxFrame(frame.Topic, frame.Recipient)
 	case "fetch_delivery_receipts":
@@ -6058,12 +6058,12 @@ func (s *Service) clearConnAuth(id domain.ConnID) {
 	// membership. The nil branch below retains its original lock/read path.
 	if s.k3Registered != nil {
 		s.peerMu.Lock()
+		defer s.peerMu.Unlock()
 		if entry := s.connEntryByIDLocked(id); entry != nil && entry.core != nil {
 			k3 := s.k3BeginRegistryLocked(id)
 			entry.core.ClearAuth()
 			s.k3FinishRegistryLocked(k3)
 		}
-		s.peerMu.Unlock()
 		return
 	}
 	if pc := s.netCoreForID(id); pc != nil {
@@ -6091,12 +6091,12 @@ func (s *Service) setConnAuthStateByID(id domain.ConnID, state *connauth.State) 
 	// membership. The nil branch below retains its original lock/read path.
 	if s.k3Registered != nil {
 		s.peerMu.Lock()
+		defer s.peerMu.Unlock()
 		if entry := s.connEntryByIDLocked(id); entry != nil && entry.core != nil {
 			k3 := s.k3BeginRegistryLocked(id)
 			entry.core.SetAuth(state)
 			s.k3FinishRegistryLocked(k3)
 		}
-		s.peerMu.Unlock()
 		return
 	}
 	if pc := s.netCoreForID(id); pc != nil {
@@ -7219,11 +7219,14 @@ func (s *Service) pendingMessagesFrame(topic string) protocol.Frame {
 	}
 	var outboundItems []outboundSnap
 	for id, ob := range s.outbound {
+		if topic != "dm" {
+			continue
+		} // sender-owned delivery state has only data DMs
 		if ob.Status == "" || ob.Status == "sent" {
 			continue
 		}
 		outboundItems = append(outboundItems, outboundSnap{
-			ID:            id,
+			ID:            string(id.MessageID),
 			Recipient:     ob.Recipient,
 			Status:        ob.Status,
 			QueuedAt:      ob.QueuedAt,
@@ -7233,21 +7236,21 @@ func (s *Service) pendingMessagesFrame(topic string) protocol.Frame {
 		})
 	}
 	// Snapshot outbound map for enrichment lookups (last attempt, retries, error).
-	outboundByID := make(map[string]outboundSnap, len(outboundItems))
+	outboundByID := make(map[messageIdentity]outboundSnap, len(outboundItems))
 	for _, ob := range outboundItems {
-		outboundByID[ob.ID] = ob
+		outboundByID[s.ownMessageIdentity(protocol.MessageID(ob.ID), ob.Recipient)] = ob
 	}
 	s.deliveryMu.RUnlock()
 
 	// Build frames from snapshots — no lock held.
 	ids := make([]string, 0)
-	seen := make(map[string]struct{})
+	seen := make(map[messageIdentity]struct{})
 	items := make([]protocol.PendingMessageFrame, 0)
 	for _, p := range pendingItems {
-		if _, ok := seen[p.ID]; ok {
+		if _, ok := seen[s.ownMessageIdentity(protocol.MessageID(p.ID), p.Recipient)]; ok {
 			continue
 		}
-		seen[p.ID] = struct{}{}
+		seen[s.ownMessageIdentity(protocol.MessageID(p.ID), p.Recipient)] = struct{}{}
 		ids = append(ids, p.ID)
 
 		status := "queued"
@@ -7257,7 +7260,7 @@ func (s *Service) pendingMessagesFrame(topic string) protocol.Frame {
 		lastAttempt := time.Time{}
 		retries := p.Retries
 		errStr := ""
-		if ob, ok := outboundByID[p.ID]; ok {
+		if ob, ok := outboundByID[s.ownMessageIdentity(protocol.MessageID(p.ID), p.Recipient)]; ok {
 			lastAttempt = ob.LastAttemptAt
 			if ob.Retries > retries {
 				retries = ob.Retries
@@ -7275,10 +7278,10 @@ func (s *Service) pendingMessagesFrame(topic string) protocol.Frame {
 		})
 	}
 	for _, ob := range outboundItems {
-		if _, ok := seen[ob.ID]; ok {
+		if _, ok := seen[s.ownMessageIdentity(protocol.MessageID(ob.ID), ob.Recipient)]; ok {
 			continue
 		}
-		seen[ob.ID] = struct{}{}
+		seen[s.ownMessageIdentity(protocol.MessageID(ob.ID), ob.Recipient)] = struct{}{}
 		ids = append(ids, ob.ID)
 		items = append(items, protocol.PendingMessageFrame{
 			ID:            ob.ID,
@@ -7479,14 +7482,14 @@ func (s *Service) storeMessageFrame(frame protocol.Frame) protocol.Frame {
 		// as success and reads the status off it, so leaving the field
 		// empty here told an idempotent retry that a message still being
 		// held for an unreachable recipient had gone out.
-		return protocol.Frame{Type: "message_known", Topic: msg.Topic, Count: count, ID: string(msg.ID), Status: s.storedMessageStatus(msg.ID)}
+		return protocol.Frame{Type: "message_known", Topic: msg.Topic, Count: count, ID: string(msg.ID), Status: s.storedMessageStatus(admissionRef(msg))}
 	}
 	// Status tells the caller whether the message actually went anywhere.
 	// The row is written either way, so without this the sender is told
 	// "sent" for a message the node is holding because the recipient is
 	// unreachable — and keeps believing it until something else makes them
 	// reload the conversation.
-	return protocol.Frame{Type: "message_stored", Topic: msg.Topic, Count: count, ID: string(msg.ID), Status: s.storedMessageStatus(msg.ID)}
+	return protocol.Frame{Type: "message_stored", Topic: msg.Topic, Count: count, ID: string(msg.ID), Status: s.storedMessageStatus(admissionRef(msg))}
 }
 
 // storedMessageStatus reports how a just-stored outgoing DM left the node:
@@ -7508,7 +7511,11 @@ func (s *Service) storeMessageFrame(frame protocol.Frame) protocol.Frame {
 // the sinks are still working, and the honest word for that is queued.
 // TopicMessageEmitted moves it to sent a moment later, which is the same
 // event the held case waits for — one path, not two.
-func (s *Service) storedMessageStatus(id protocol.MessageID) string {
+func (s *Service) storedMessageStatus(ref domain.MessageRef) string {
+	if ref.Topic != "dm" {
+		return ""
+	}
+	id := messageIdentity{MessageID: protocol.MessageID(ref.ID), Sender: ref.Sender, Recipient: ref.Recipient}
 	s.deliveryMu.RLock()
 	defer s.deliveryMu.RUnlock()
 	if entry, awaiting := s.awaitingDelivered[id]; awaiting && !entry.Announced {
@@ -7594,6 +7601,10 @@ func (s *Service) handleAckDeleteFrameOwned(id domain.ConnID, frame protocol.Fra
 	switch strings.TrimSpace(frame.AckType) {
 	case "dm":
 		count = s.deleteBacklogMessageForRecipient(frame.Address, protocol.MessageID(frame.ID))
+		if count < 0 {
+			owner.end()
+			return protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidAckDelete, Error: "ambiguous message identity"}, false
+		}
 		// The acking peer confirmed it holds this id. For a TRANSIT DM
 		// (recipient is a third party) deleteBacklog removes nothing, so
 		// record the acker to stop the gossip fan-out re-sending the id to a
@@ -8007,13 +8018,23 @@ func (s *Service) storeIncomingMessageWithR2a(msg incomingMessage, validateTimes
 			Msg("store_own_outgoing_message_failed_send_abandoned")
 		return false, count, protocol.ErrCodeStoreFailed
 	}
-	s.seen.Add(string(msg.ID))
+	s.seen.Add(admissionRef(msg).Key())
+	if storeResult == StoreDuplicate {
+		// The store confirms this exact local tuple, including after restart.
+		// It is not a new arrival and must not re-enter routing or notifications.
+		count := len(s.topics[msg.Topic])
+		s.unlockMessageAdmission(msg.ID, admission, "lock_released_stored_duplicate")
+		if s.owesDeliveryReceipt(msg) {
+			s.goBackground(func() { s.resendDeliveryReceipt(msg) })
+		}
+		return true, count, ""
+	}
 
 	beforeCount := len(s.topics[msg.Topic])
 	// evictedIDs collects messages displaced by the transit caps. Their
 	// relayRetry entries are dropped inside this commit; only the leaf-lock
 	// ack_delete suppression sets are pruned after it.
-	var evictedIDs []protocol.MessageID
+	var evictedIDs []messageIdentity
 	if storeResult != StoreDuplicate && msg.Topic != protocol.TopicControlDM && !forwardOnceTransit {
 		// Single admission pass over the backlog (transit_retention.go):
 		// exact-ID dedup plus transit accounting. The rotating bloom
@@ -8023,7 +8044,7 @@ func (s *Service) storeIncomingMessageWithR2a(msg incomingMessage, validateTimes
 		// ring drains, reconnect backlog replays) would otherwise be
 		// re-admitted as duplicate envelopes — previously only spotted
 		// by the duplicate *diagnostics* below, never prevented.
-		scan := scanTopicForAdmission(s.topics[msg.Topic], msg.ID, msg.Recipient, s.isTransitEnvelope)
+		scan := scanTopicForAdmission(s.topics[msg.Topic], admissionRef(msg), s.isTransitEnvelope)
 		if scan.duplicate {
 			count := len(s.topics[msg.Topic])
 			s.unlockMessageAdmission(msg.ID, admission, "lock_released_exact_dedup")
@@ -8363,13 +8384,13 @@ type bloomDuplicateVerdict struct {
 // StoreInserted means the bloom hit was a false positive and the message is
 // genuinely new.
 func (s *Service) bloomDuplicateLocked(msg incomingMessage) bloomDuplicateVerdict {
-	if !s.seen.Has(string(msg.ID)) {
+	if !s.seen.Has(admissionRef(msg).Key()) {
 		return bloomDuplicateVerdict{}
 	}
 	confirmedPresent := false
 	if s.owesDeliveryReceipt(msg) {
 		for i := range s.topics[msg.Topic] {
-			if s.topics[msg.Topic][i].ID == msg.ID {
+			if envelopeRef(s.topics[msg.Topic][i]) == admissionRef(msg) {
 				confirmedPresent = true
 				break
 			}
@@ -8529,7 +8550,7 @@ func (s *Service) unlockMessageAdmission(id protocol.MessageID, mode topicsCommi
 // message) in this same section, so no ack_delete, eviction or expiry can
 // take the envelope between the append and the arm. Dropped first so the
 // evictions' slots are free for the arm.
-func (s *Service) appendTransitEnvelopeLocked(envelope protocol.Envelope, scan transitAdmissionScan, armRelayRetry bool) []protocol.MessageID {
+func (s *Service) appendTransitEnvelopeLocked(envelope protocol.Envelope, scan transitAdmissionScan, armRelayRetry bool) []messageIdentity {
 	// Transit retention (layer 1): enforce the per-recipient FIFO cap and
 	// the global byte budget before appending.
 	backlog, evicted := evictTransitOverflowLocked(s.topics[envelope.Topic], scan, envelope.Recipient, len(envelope.Payload), s.isTransitEnvelope)
@@ -8800,7 +8821,7 @@ const (
 func (s *Service) finishReceipt(key string, receipt protocol.DeliveryReceipt, endsRetry bool) (
 	count int, deltas []ebus.PeerPendingDelta, aggregate domain.AggregateStatusSnapshot, result commitResult,
 ) {
-	id := receipt.MessageID
+	id := madeByMessageRecipient(receipt)
 	now := time.Now().UTC()
 	s.deliveryMu.Lock()
 	s.beginPendingQueueObservationLocked()
@@ -8829,7 +8850,7 @@ func (s *Service) finishReceipt(key string, receipt protocol.DeliveryReceipt, en
 		offline := len(s.subs[receipt.Recipient]) == 0
 		s.gossipMu.RUnlock()
 		if offline {
-			log.Debug().Str("message_id", string(id)).Str("recipient", receipt.Recipient).
+			log.Debug().Str("message_id", string(id.MessageID)).Str("recipient", receipt.Recipient).
 				Msg("delivery receipt dropped at commit: recipient subscriber gone")
 			return len(s.receipts[receipt.Recipient]), nil, aggregate, droppedAtCommit
 		}
@@ -9003,7 +9024,7 @@ func (s *Service) storeDeliveryReceipt(receipt protocol.DeliveryReceipt) receipt
 	// scopes the status update to the conversation.)
 	if receipt.Recipient == s.identity.Address &&
 		(receipt.Status == protocol.ReceiptStatusDelivered || receipt.Status == protocol.ReceiptStatusSeen) {
-		if entry, awaiting := s.awaitingDelivered[receipt.MessageID]; awaiting && entry.Envelope.Recipient != receipt.Sender {
+		if entry, awaiting := s.awaitingDelivered[madeByMessageRecipient(receipt)]; awaiting && entry.Envelope.Recipient != receipt.Sender {
 			count := len(s.receipts[receipt.Recipient])
 			s.deliveryMu.Unlock()
 			s.peerMu.Unlock()
@@ -9020,7 +9041,7 @@ func (s *Service) storeDeliveryReceipt(receipt protocol.DeliveryReceipt) receipt
 	// dropped BEFORE the seenReceipts insert, so a spoofed ack can neither
 	// stop the retry nor occupy the dedupe key and shadow the genuine ack.
 	if receipt.Status == protocol.ReceiptStatusSeenAck && receipt.Recipient == s.identity.Address {
-		entry, awaiting := s.awaitingSeenAck[receipt.MessageID]
+		entry, awaiting := s.awaitingSeenAck[madeByMessageAuthor(receipt)]
 		if !awaiting || entry.Receipt.Recipient != receipt.Sender {
 			count := len(s.receipts[receipt.Recipient])
 			s.deliveryMu.Unlock()
@@ -9041,10 +9062,10 @@ func (s *Service) storeDeliveryReceipt(receipt protocol.DeliveryReceipt) receipt
 	// deletes the awaitingDelivered entry), the former covers the edge where a
 	// still-outstanding id was evicted from the bounded LRU. A genuine receipt
 	// passes; a phantom one is dropped before any store / persist / event.
-	_, stillAwaiting := s.awaitingDelivered[receipt.MessageID]
+	_, stillAwaiting := s.awaitingDelivered[madeByMessageRecipient(receipt)]
 	if receipt.Recipient == s.identity.Address &&
 		(receipt.Status == protocol.ReceiptStatusDelivered || receipt.Status == protocol.ReceiptStatusSeen) &&
-		!stillAwaiting && !s.sentDMIDs.Has(string(receipt.MessageID)) {
+		!stillAwaiting && !s.sentDMIDs.Has(deliveryMessageRef(madeByMessageRecipient(receipt)).Key()) {
 		count := len(s.receipts[receipt.Recipient])
 		s.deliveryMu.Unlock()
 		log.Trace().Str("site", "storeDeliveryReceipt").Str("phase", "lock_released_unsolicited").Str("msg_id", string(receipt.MessageID)).Msg("delivery_mu_writer")
@@ -9123,12 +9144,12 @@ func (s *Service) storeDeliveryReceipt(receipt protocol.DeliveryReceipt) receipt
 		// recipient would never receipt it again, and the row would read
 		// `sent` until this node restarts. It is committed in
 		// finishReceipt, after the write.
-		if _, awaiting := s.awaitingDelivered[receipt.MessageID]; awaiting {
+		if _, awaiting := s.awaitingDelivered[madeByMessageRecipient(receipt)]; awaiting {
 			endsRetry = true
 		}
 	case receipt.Recipient == s.identity.Address && receipt.Status == protocol.ReceiptStatusSeenAck:
 		// The original sender confirmed our seen receipt — stop retrying it.
-		delete(s.awaitingSeenAck, receipt.MessageID)
+		delete(s.awaitingSeenAck, madeByMessageAuthor(receipt))
 	case receipt.Sender == s.identity.Address && receipt.Status == protocol.ReceiptStatusSeen:
 		// Our own outgoing seen receipt — retry it until the original
 		// sender's seen_ack arrives (etap 3.3 contract).
@@ -9236,7 +9257,7 @@ func (s *Service) storeDeliveryReceipt(receipt protocol.DeliveryReceipt) receipt
 			journal := s.seenAckJournal
 			id := receipt.MessageID
 			s.goBackground(func() {
-				if err := journal.MarkSeenConfirmed(id); err != nil {
+				if err := journal.MarkSeenConfirmedRef(deliveryMessageRef(madeByMessageAuthor(receipt))); err != nil {
 					log.Warn().Str("message_id", string(id)).Err(err).Msg("seen_ack_journal_write_failed")
 				}
 			})
@@ -9544,22 +9565,44 @@ func (s *Service) fetchMessageIDsFrame(topic string) protocol.Frame {
 	return protocol.Frame{Type: "message_ids", Topic: topic, Count: len(ids), IDs: ids}
 }
 
-func (s *Service) fetchMessageFrame(topic, messageID string) protocol.Frame {
+func (s *Service) fetchMessageFrame(topic, messageID string, parties ...string) protocol.Frame {
 	if strings.TrimSpace(topic) == "" || strings.TrimSpace(messageID) == "" {
 		return protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidFetchMessage}
 	}
-	s.cleanupExpiredMessagesForce()
-
-	messages := s.localTopicSnapshot(topic)
-
-	for _, msg := range messages {
-		if string(msg.ID) == messageID {
-			item := messageFrame(msg)
-			return protocol.Frame{Type: "message", Topic: topic, ID: messageID, Item: &item}
+	scoped := false
+	sender, recipient := "", ""
+	switch len(parties) {
+	case 0:
+	case 2:
+		sender, recipient = parties[0], parties[1]
+		if sender != "" || recipient != "" {
+			if strings.TrimSpace(sender) == "" || strings.TrimSpace(recipient) == "" {
+				return protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidFetchMessage}
+			}
+			scoped = true
 		}
+	default:
+		return protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidFetchMessage}
 	}
-
-	return protocol.Frame{Type: "error", Code: protocol.ErrCodeUnknownMessageID}
+	s.cleanupExpiredMessagesForce()
+	messages := s.localTopicSnapshot(topic)
+	var selected protocol.Envelope
+	found := false
+	for _, message := range messages {
+		if string(message.ID) != messageID || (scoped && (message.Sender != sender || message.Recipient != recipient)) {
+			continue
+		}
+		if found {
+			return protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidFetchMessage, Error: "ambiguous message identity"}
+		}
+		selected = message
+		found = true
+	}
+	if !found {
+		return protocol.Frame{Type: "error", Code: protocol.ErrCodeUnknownMessageID}
+	}
+	item := messageFrame(selected)
+	return protocol.Frame{Type: "message", Topic: topic, ID: messageID, Item: &item}
 }
 
 func (s *Service) fetchInboxFrame(topic, recipient string) protocol.Frame {
@@ -9654,6 +9697,32 @@ func (s *Service) registerInboundConn(conn net.Conn, reservation *connbudget.Res
 	if err := s.refuseRealConnectionUnderNetworkOverride(); err != nil {
 		return err
 	}
+	var pc *netcore.NetCore
+	birthCompleted := false
+	if s.k3Registered != nil || s.k3Advertised != nil {
+		defer func() {
+			if pc == nil || birthCompleted {
+				return
+			}
+			// The registry-lock defer runs first. An uncompleted birth cannot
+			// supply complete observation or transfer its writer to the caller.
+			s.peerMu.Lock()
+			if s.k3Registered != nil {
+				s.k3Registered.fail("registry-birth-incomplete")
+			}
+			s.k3Advertised.fail("registry-birth-incomplete")
+			s.terminalObservation.fail("registry-birth-incomplete")
+			s.peerMu.Unlock()
+			// Original Close closes the socket and joins the actual writer.
+			// Keep it outside peerMu, as in unregisterInboundConn.
+			pc.Close()
+			s.peerMu.Lock()
+			defer s.peerMu.Unlock()
+			if id, ok := s.connIDForLocked(conn); ok && id == pc.ConnID() && s.coreForIDLocked(id) == pc {
+				s.unregisterConnLocked(conn)
+			}
+		}()
+	}
 	// conn is what the session's frames travel on; on a v2 session that is
 	// TLS over the metered socket, which MeteredOf finds underneath.
 	metered := netcore.MeteredOf(conn)
@@ -9676,12 +9745,13 @@ func (s *Service) registerInboundConn(conn net.Conn, reservation *connbudget.Res
 	k10Previous := s.connIDCounter
 	s.connIDCounter++
 	s.k10IssuedLocked(domain.ConnID(k10Previous), domain.ConnID(s.connIDCounter))
-	pc := netcore.New(netcore.ConnID(s.connIDCounter), conn, netcore.Inbound, netcore.Options{})
+	pc = netcore.New(netcore.ConnID(s.connIDCounter), conn, netcore.Inbound, netcore.Options{})
 	if addr, ok := conn.RemoteAddr().(*net.TCPAddr); ok && addr.IP.IsLoopback() {
 		pc.SetLocal(true)
 	}
 
 	s.registerInboundConnLocked(conn, pc, metered, reservation)
+	birthCompleted = true
 	return nil
 }
 
@@ -9712,12 +9782,37 @@ func (s *Service) attachOutboundNetCore(session *peerSession) error {
 		return fmt.Errorf("attach outbound conn %d: %w", session.connID, err)
 	}
 	pc := netcore.New(session.connID, session.conn, netcore.Outbound, netcore.Options{})
+	birthCompleted := false
+	if s.k3Registered != nil || s.k3Advertised != nil {
+		defer func() {
+			if pc == nil || birthCompleted {
+				return
+			}
+			// The registry-lock defer runs first. An uncompleted birth cannot
+			// supply complete observation or transfer its writer to the caller.
+			s.peerMu.Lock()
+			if s.k3Registered != nil {
+				s.k3Registered.fail("registry-birth-incomplete")
+			}
+			s.k3Advertised.fail("registry-birth-incomplete")
+			s.terminalObservation.fail("registry-birth-incomplete")
+			s.peerMu.Unlock()
+			// Original Close closes the socket and joins the actual writer.
+			// Keep it outside peerMu, as in unregisterInboundConn.
+			pc.Close()
+			s.peerMu.Lock()
+			defer s.peerMu.Unlock()
+			if id, ok := s.connIDForLocked(session.conn); ok && id == pc.ConnID() && s.coreForIDLocked(id) == pc {
+				s.unregisterConnLocked(session.conn)
+			}
+		}()
+	}
 
 	log.Trace().Str("site", "attachOutboundNetCore").Str("phase", "lock_wait").Uint64("conn_id", uint64(session.connID)).Msg("peer_mu_writer")
 	s.peerMu.Lock()
 	var adTicket *k3AdvertisedTicket
 	adLocked := true
-	if s.k3Advertised != nil {
+	if s.k3Advertised != nil || s.k3Registered != nil {
 		defer func() {
 			if adLocked {
 				s.guardK3AdvertisedPeerLocked(adTicket)
@@ -9754,7 +9849,7 @@ func (s *Service) attachOutboundNetCore(session *peerSession) error {
 		log.Trace().Str("site", "attachOutboundNetCore_onClose").Str("phase", "lock_wait").Uint64("conn_id", uint64(connID)).Msg("peer_mu_writer")
 		s.peerMu.Lock()
 		adCloseLocked := true
-		if s.k3Advertised != nil {
+		if s.k3Advertised != nil || s.k3Registered != nil {
 			defer func() {
 				if adCloseLocked {
 					s.guardK3AdvertisedPeerLocked(s.k3AdvertisedActive)
@@ -9768,6 +9863,7 @@ func (s *Service) attachOutboundNetCore(session *peerSession) error {
 		s.peerMu.Unlock()
 		log.Trace().Str("site", "attachOutboundNetCore_onClose").Str("phase", "lock_released").Uint64("conn_id", uint64(connID)).Msg("peer_mu_writer")
 	}
+	birthCompleted = true
 	return nil
 }
 
@@ -9797,7 +9893,7 @@ func (s *Service) unregisterInboundConn(conn net.Conn) {
 	log.Trace().Str("site", "unregisterInboundConn").Str("phase", "lock_wait").Msg("peer_mu_writer")
 	s.peerMu.Lock()
 	adLocked := true
-	if s.k3Advertised != nil {
+	if s.k3Advertised != nil || s.k3Registered != nil {
 		defer func() {
 			if adLocked {
 				s.guardK3AdvertisedPeerLocked(s.k3AdvertisedActive)
@@ -9928,7 +10024,7 @@ func (s *Service) pushToSubscriberSnapshot(msg protocol.Envelope, subs []*subscr
 	// already passed the two-senders rule (pushOwnEnvelopeToSubscribers is
 	// its only caller), so it asks the freeze and the durable claim and
 	// nothing about other senders. See emissionSender.
-	if len(subs) > 0 && !s.noteOwnEnvelopeEmitted(msg.Sender, msg.ID, time.Now().UTC()) {
+	if len(subs) > 0 && !s.noteOwnEnvelopeEmitted(msg, time.Now().UTC()) {
 		// Withdrawn while we were building the frame, or the durable
 		// "never emitted" claim could not be withdrawn — either way this
 		// push must not happen. The retry engine still owns the message.
@@ -9994,10 +10090,10 @@ func (s *Service) pushBacklogToSubscriber(sub *subscriber) {
 	// writer mutex once per row of the backlog from this background
 	// goroutine; the answer is the same either way, and it has to be
 	// written first — see noteOwnEnvelopesEmitted.
-	own := make([]protocol.MessageID, 0, len(inbox.Messages))
+	own := make([]messageIdentity, 0, len(inbox.Messages))
 	for _, item := range inbox.Messages {
 		if item.Sender == s.identity.Address {
-			own = append(own, protocol.MessageID(item.ID))
+			own = append(own, messageIdentity{MessageID: protocol.MessageID(item.ID), Sender: item.Sender, Recipient: item.Recipient})
 		}
 	}
 	// Marking and asking "was any of this withdrawn while we were
@@ -10022,7 +10118,7 @@ func (s *Service) pushBacklogToSubscriber(sub *subscriber) {
 	var written []protocol.Envelope
 
 	for _, item := range inbox.Messages {
-		if _, skip := emission.Withheld[protocol.MessageID(item.ID)]; skip {
+		if _, skip := emission.Withheld[messageIdentity{MessageID: protocol.MessageID(item.ID), Sender: item.Sender, Recipient: item.Recipient}]; skip {
 			log.Info().
 				Str("recipient", sub.recipient).
 				Str("message_id", item.ID).
@@ -11481,7 +11577,7 @@ func (s *Service) cleanupExpiredMessagesForce() {
 	// Phase 1: collect expired IDs under read lock.
 	type expiredEntry struct {
 		topic string
-		id    string
+		ref   domain.MessageRef
 	}
 	var expired []expiredEntry
 	// The removal phase's mode: with relayRetry only when an expired
@@ -11491,7 +11587,7 @@ func (s *Service) cleanupExpiredMessagesForce() {
 	// deliveryMu.
 	sweep := topicsCommitGossipOnly
 	markExpired := func(topic string, message protocol.Envelope) {
-		expired = append(expired, expiredEntry{topic, string(message.ID)})
+		expired = append(expired, expiredEntry{topic, envelopeRef(message)})
 		if s.topicsCommitModeFor(message) == topicsCommitWithRelayRetry {
 			sweep = topicsCommitWithRelayRetry
 		}
@@ -11548,12 +11644,12 @@ func (s *Service) cleanupExpiredMessagesForce() {
 	// Phase 2: remove collected entries under write lock. The critical
 	// section touches only topics that have expired messages — all other
 	// topics are untouched.
-	expiredIDs := make(map[string]map[string]struct{}, len(expired))
+	expiredIDs := make(map[string]map[domain.MessageRef]struct{}, len(expired))
 	for _, e := range expired {
 		if expiredIDs[e.topic] == nil {
-			expiredIDs[e.topic] = make(map[string]struct{})
+			expiredIDs[e.topic] = make(map[domain.MessageRef]struct{})
 		}
-		expiredIDs[e.topic][e.id] = struct{}{}
+		expiredIDs[e.topic][e.ref] = struct{}{}
 	}
 
 	// With relayRetry, deliveryMu OUTER (relayRetry), gossipMu INNER
@@ -11594,21 +11690,21 @@ func (s *Service) cleanupExpiredMessagesForce() {
 // DM — can sit under the same id by now. A gossipMu-only sweep keeps such an
 // envelope; the next sweep that sees it expired takes the relay-retry mode.
 //
-// The relay state is keyed by id alone, and for the same reason an id does
-// not identify one envelope across topics: a broadcast can carry the id of a
-// live transit DM. So only a removed envelope that itself enters relay retry
+// Both phase selection and removal use the full local message reference.
+// A wire id alone cannot identify an envelope within or across topics. Only
+// a removed envelope that itself enters relay retry
 // gives its id to the drop and to the caller's forget; removing anything else
 // must leave the live DM's entry and suppression set alone.
-func (s *Service) removeExpiredEnvelopesLocked(expiredIDs map[string]map[string]struct{}, mode topicsCommitMode) []protocol.MessageID {
-	var relayedIDs []protocol.MessageID
+func (s *Service) removeExpiredEnvelopesLocked(expiredIDs map[string]map[domain.MessageRef]struct{}, mode topicsCommitMode) []messageIdentity {
+	var relayedIDs []messageIdentity
 	for topic, ids := range expiredIDs {
 		messages := s.topics[topic]
 		filtered := messages[:0]
 		for _, msg := range messages {
-			if _, drop := ids[string(msg.ID)]; drop && s.topicsCommitCovers(mode, msg) {
+			if _, drop := ids[envelopeRef(msg)]; drop && s.topicsCommitCovers(mode, msg) {
 				log.Debug().Str("node", s.identity.Address).Str("topic", topic).Str("id", string(msg.ID)).Msg("cleanupExpiredMessages: removing expired")
 				if s.topicsCommitModeFor(msg) == topicsCommitWithRelayRetry {
-					relayedIDs = append(relayedIDs, msg.ID)
+					relayedIDs = append(relayedIDs, messageIdentityOf(msg))
 				}
 				continue
 			}

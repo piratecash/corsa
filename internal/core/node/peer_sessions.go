@@ -172,7 +172,7 @@ func sessionCloseProvidesPeerOfflineEvidence(err error) bool {
 func (s *Service) runPeerSession(ctx context.Context, address domain.PeerAddress) {
 	var adTicket *k3AdvertisedTicket
 	var adLocked bool
-	if s.k3Advertised != nil {
+	if s.k3Advertised != nil || s.k3Registered != nil {
 		defer func() {
 			if adLocked {
 				s.guardK3AdvertisedPeerLocked(adTicket)
@@ -326,6 +326,17 @@ func (s *Service) openPeerSession(ctx context.Context, address domain.PeerAddres
 		}
 		_ = conn.Close()
 	}()
+	// Runs before session.Close above, which can reacquire peerMu. Install
+	// before both metadata and registered-session observation callbacks.
+	if s.k3Registered != nil || s.k3Advertised != nil {
+		defer func() {
+			if adLocked {
+				s.guardK3AdvertisedPeerLocked(adTicket)
+				adLocked = false
+				s.peerMu.Unlock()
+			}
+		}()
+	}
 	enableTCPKeepAlive(rawConn)
 
 	go func() {
@@ -1774,7 +1785,7 @@ func (s *Service) registerCMSession(session *peerSession, slotAddress domain.Pee
 		} else {
 			s.guardK3AdvertisedPeerLocked(adTicket)
 		}
-		if s.k3Advertised != nil && adDeliveryLocked {
+		if (s.k3Advertised != nil || s.k3Registered != nil) && adDeliveryLocked {
 			s.deliveryMu.Unlock()
 			adDeliveryLocked = false
 		}
@@ -1923,10 +1934,14 @@ func (s *Service) publishAndServeCMSession(session *peerSession, slotAddress dom
 // onCMDialFailed does not charge to the address.
 func (s *Service) withdrawRefusedCMSession(session *peerSession, slotAddress domain.PeerAddress, slotGeneration uint64, refusal error) {
 	var adTicket *k3AdvertisedTicket
-	var adLocked bool
-	if s.k3Advertised != nil {
+	var adLocked, adDeliveryLocked bool
+	if s.k3Advertised != nil || s.k3Registered != nil {
 		defer func() {
 			if adLocked {
+				if adDeliveryLocked {
+					s.deliveryMu.Unlock()
+					adDeliveryLocked = false
+				}
 				s.guardK3AdvertisedPeerLocked(adTicket)
 				s.peerMu.Unlock()
 			}
@@ -1940,6 +1955,7 @@ func (s *Service) withdrawRefusedCMSession(session *peerSession, slotAddress dom
 	adLocked = true
 	adTicket = s.beginK3AdvertisedPeerLocked()
 	s.deliveryMu.Lock()
+	adDeliveryLocked = true
 	if s.sessions[dialAddress] == session {
 		var k3 k3RegisteredTicket
 		if s.k3Registered != nil {
@@ -1957,6 +1973,7 @@ func (s *Service) withdrawRefusedCMSession(session *peerSession, slotAddress dom
 			s.k3FinishSessionLocked(k3)
 		}
 	}
+	adDeliveryLocked = false
 	s.deliveryMu.Unlock()
 	s.finishK3AdvertisedPeerLocked(adTicket)
 	adTicket = nil
@@ -1988,10 +2005,14 @@ func (s *Service) withdrawRefusedCMSession(session *peerSession, slotAddress dom
 // the serve loop's error otherwise.
 func (s *Service) withdrawServedCMSession(session *peerSession, slotAddress domain.PeerAddress, slotGeneration uint64, err error) {
 	var adTicket *k3AdvertisedTicket
-	var adLocked bool
-	if s.k3Advertised != nil {
+	var adLocked, adDeliveryLocked bool
+	if s.k3Advertised != nil || s.k3Registered != nil {
 		defer func() {
 			if adLocked {
+				if adDeliveryLocked {
+					s.deliveryMu.Unlock()
+					adDeliveryLocked = false
+				}
 				s.guardK3AdvertisedPeerLocked(adTicket)
 				s.peerMu.Unlock()
 			}
@@ -2009,6 +2030,7 @@ func (s *Service) withdrawServedCMSession(session *peerSession, slotAddress doma
 	log.Trace().Str("site", "withdrawServedCMSession").Str("phase", "lock_held").Str("address", string(dialAddress)).Msg("peer_mu_writer")
 	log.Trace().Str("site", "withdrawServedCMSession").Str("phase", "lock_wait").Str("address", string(dialAddress)).Msg("delivery_mu_writer")
 	s.deliveryMu.Lock()
+	adDeliveryLocked = true
 	log.Trace().Str("site", "withdrawServedCMSession").Str("phase", "lock_held").Str("address", string(dialAddress)).Msg("delivery_mu_writer")
 	ownedCleanup := s.sessions[dialAddress] == session
 	if ownedCleanup {
@@ -2028,6 +2050,7 @@ func (s *Service) withdrawServedCMSession(session *peerSession, slotAddress doma
 			s.k3FinishSessionLocked(k3)
 		}
 	}
+	adDeliveryLocked = false
 	s.deliveryMu.Unlock()
 	log.Trace().Str("site", "withdrawServedCMSession").Str("phase", "lock_released").Str("address", string(dialAddress)).Msg("delivery_mu_writer")
 	s.finishK3AdvertisedPeerLocked(adTicket)
@@ -2097,10 +2120,14 @@ func (s *Service) deregisterServedCMSessionRouting(session *peerSession, err err
 // suppressed by the generation guard.
 func (s *Service) onCMSessionTeardown(info SessionInfo) {
 	var adTicket *k3AdvertisedTicket
-	var adLocked bool
-	if s.k3Advertised != nil {
+	var adLocked, adDeliveryLocked bool
+	if s.k3Advertised != nil || s.k3Registered != nil {
 		defer func() {
 			if adLocked {
+				if adDeliveryLocked {
+					s.deliveryMu.Unlock()
+					adDeliveryLocked = false
+				}
 				s.guardK3AdvertisedPeerLocked(adTicket)
 				s.peerMu.Unlock()
 			}
@@ -2130,6 +2157,7 @@ func (s *Service) onCMSessionTeardown(info SessionInfo) {
 	log.Trace().Str("site", "onCMSessionTeardown").Str("phase", "lock_held").Str("address", string(addr)).Msg("peer_mu_writer")
 	log.Trace().Str("site", "onCMSessionTeardown").Str("phase", "lock_wait").Str("address", string(addr)).Msg("delivery_mu_writer")
 	s.deliveryMu.Lock()
+	adDeliveryLocked = true
 	log.Trace().Str("site", "onCMSessionTeardown").Str("phase", "lock_held").Str("address", string(addr)).Msg("delivery_mu_writer")
 	ownedCleanup := info.Session != nil && s.sessions[addr] == info.Session
 	if ownedCleanup {
@@ -2149,6 +2177,7 @@ func (s *Service) onCMSessionTeardown(info SessionInfo) {
 			s.k3FinishSessionLocked(k3)
 		}
 	}
+	adDeliveryLocked = false
 	s.deliveryMu.Unlock()
 	log.Trace().Str("site", "onCMSessionTeardown").Str("phase", "lock_released").Str("address", string(addr)).Msg("delivery_mu_writer")
 	s.finishK3AdvertisedPeerLocked(adTicket)

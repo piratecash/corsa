@@ -148,8 +148,8 @@ func TestQuickReactionIsWhereTheGestureLeftIt(t *testing.T) {
 func TestChipsAreDrawnFromTheLoadedConversation(t *testing.T) {
 	self := domain.PeerIdentityFromWire(strings.Repeat("11", 20))
 	other := domain.PeerIdentityFromWire(strings.Repeat("22", 20))
-	w := &Window{msgReactionState: map[domain.MessageID][]domain.Reaction{
-		"m1": {
+	w := &Window{msgReactionState: map[domain.MessageRef][]domain.Reaction{
+		fixtureMessageRef("m1"): {
 			{Emoji: "👍", Actors: []domain.PeerIdentity{self, other}, Mine: true},
 			{Emoji: "🔥", Actors: []domain.PeerIdentity{other}},
 		},
@@ -1013,14 +1013,14 @@ type recordingReactionRouter struct {
 	statuses     []string
 }
 
-func (r *recordingReactionRouter) MessageReactions(context.Context, domain.PeerIdentity) (map[domain.MessageID][]domain.Reaction, error) {
+func (r *recordingReactionRouter) MessageReactionsRefs(context.Context, domain.PeerIdentity) (map[domain.MessageRef][]domain.Reaction, error) {
 	return nil, nil
 }
 
-func (r *recordingReactionRouter) ToggleReaction(
-	_ context.Context, _ domain.PeerIdentity, messageID domain.MessageID, emoji string, _ time.Time,
+func (r *recordingReactionRouter) ToggleReactionRef(
+	_ context.Context, messageID domain.MessageRef, emoji string, _ time.Time,
 ) (domain.ReactionFact, error) {
-	r.toggled = append(r.toggled, string(messageID)+" "+emoji)
+	r.toggled = append(r.toggled, messageID.ID+" "+emoji)
 	return domain.ReactionFact{}, nil
 }
 
@@ -1059,8 +1059,8 @@ func TestTappingAChipReachesTheDecision(t *testing.T) {
 	w := &Window{theme: newAppTheme(), language: "en", reactionRouter: router}
 	w.snap.ActivePeer = domain.PeerIdentityFromWire(strings.Repeat("aa", 20))
 	message := service.DirectMessage{ID: "m1", Body: "hi"}
-	w.msgReactionState = map[domain.MessageID][]domain.Reaction{
-		domain.MessageID(message.ID): {{Emoji: "👍", Actors: []domain.PeerIdentity{{}}, Mine: true}},
+	w.msgReactionState = map[domain.MessageRef][]domain.Reaction{
+		messageRef(message): {{Emoji: "👍", Actors: []domain.PeerIdentity{{}}, Mine: true}},
 	}
 	bubble := w.bubbleReactions(message)
 	if bubble == nil {
@@ -1105,7 +1105,7 @@ func TestAReactionThePeerCannotReceiveIsReportedAsLocal(t *testing.T) {
 	w := &Window{theme: newAppTheme(), language: "en", reactionRouter: router}
 	w.snap.ActivePeer = domain.PeerIdentityFromWire(strings.Repeat("aa", 20))
 
-	w.toggleReactionOn("m1", "👍")
+	w.toggleReactionOn(fixtureMessageRef("m1"), "👍")
 
 	if len(router.statuses) != 1 || router.statuses[0] != w.t("status.reaction_local_only") {
 		t.Fatalf("the user was told %v", router.statuses)
@@ -1131,8 +1131,8 @@ func TestThePillMarksEveryReactionAlreadyHeld(t *testing.T) {
 		}
 	}
 
-	w.msgReactionState = map[domain.MessageID][]domain.Reaction{
-		"m1": {
+	w.msgReactionState = map[domain.MessageRef][]domain.Reaction{
+		fixtureMessageRef("m1"): {
 			// Somebody else's 👍 is not ours and must not be marked.
 			{Emoji: "👍", Actors: []domain.PeerIdentity{{}}},
 			{Emoji: "❤️", Actors: []domain.PeerIdentity{{}}, Mine: true},
@@ -1165,7 +1165,7 @@ func TestALaterRefusalStillTellsTheUserTheReactionStayedHere(t *testing.T) {
 	w.snap.ActivePeer = domain.PeerIdentityFromWire(strings.Repeat("aa", 20))
 
 	// The tap: nothing is known about the peer's build yet, so nothing is said.
-	w.toggleReactionOn("m1", "👍")
+	w.toggleReactionOn(fixtureMessageRef("m1"), "👍")
 	if len(router.statuses) != 0 {
 		t.Fatalf("the user was told %v before anything was known", router.statuses)
 	}
@@ -1279,7 +1279,7 @@ func TestReactingWithAnEmojiPutsItInTheRecents(t *testing.T) {
 	w := &Window{theme: newAppTheme(), language: "en", reactionRouter: router, prefs: &Preferences{}}
 	w.snap.ActivePeer = domain.PeerIdentityFromWire(strings.Repeat("aa", 20))
 
-	w.toggleReactionOn("m1", "🔥")
+	w.toggleReactionOn(fixtureMessageRef("m1"), "🔥")
 
 	if len(w.emojiPicker.recents) == 0 || w.emojiPicker.recents[0] != "🔥" {
 		t.Fatalf("the recents are %v, want the reaction's emoji at the head", w.emojiPicker.recents)
@@ -1289,7 +1289,7 @@ func TestReactingWithAnEmojiPutsItInTheRecents(t *testing.T) {
 	}
 	// Taking it back counts too: the user picked that emoji to act on, and which
 	// way the toggle went is not what "recently used" is about.
-	w.toggleReactionOn("m1", "👍")
+	w.toggleReactionOn(fixtureMessageRef("m1"), "👍")
 	if w.emojiPicker.recents[0] != "👍" {
 		t.Fatalf("the recents are %v, want the last emoji used at the head", w.emojiPicker.recents)
 	}

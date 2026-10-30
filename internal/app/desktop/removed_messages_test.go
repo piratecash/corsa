@@ -34,22 +34,22 @@ func drawMessage(t *testing.T, w *Window, id, path string) {
 	if got := decodedBounds(t, &w.thumbCache, imageSource{Path: path, ContentID: id}); got != image.Pt(8, 8) {
 		t.Fatalf("%s decoded as %v, want 8x8", id, got)
 	}
-	w.rememberImagePath(id, path)
+	w.rememberImagePath(fixtureMessageRef(id), path)
 
 	menuBtn := new(widget.Clickable)
-	w.messageSelectables[id] = new(widget.Selectable)
-	w.msgRightClick[id] = new(rightClickState)
-	w.replyQuoteTags[id] = new(widget.Clickable)
-	w.msgMenuBtns[id] = menuBtn
+	w.messageSelectables[fixtureMessageRef(id)] = new(widget.Selectable)
+	w.msgRightClick[fixtureMessageRef(id)] = new(rightClickState)
+	w.replyQuoteTags[fixtureMessageRef(id)] = new(widget.Clickable)
+	w.msgMenuBtns[fixtureMessageRef(id)] = menuBtn
 	w.menuBtnRects[menuBtn] = image.Rect(0, 0, 10, 10)
-	w.msgReactionChips[domain.MessageID(id)] = new(ui.ReactionChipsState)
-	w.thumbClickBtns[id] = new(widget.Clickable)
-	w.fileDownloadBtns[id] = new(widget.Clickable)
-	w.fileCancelDownloadBtns[id] = new(widget.Clickable)
-	w.fileRestartBtns[id] = new(widget.Clickable)
-	w.fileRevealBtns[id] = new(widget.Clickable)
-	w.fileOpenBtns[id] = new(widget.Clickable)
-	w.fileRowDeleteBtns[id] = new(widget.Clickable)
+	w.msgReactionChips[fixtureMessageRef(id)] = new(ui.ReactionChipsState)
+	w.thumbClickBtns[fixtureMessageRef(id)] = new(widget.Clickable)
+	w.fileDownloadBtns[fixtureMessageRef(id)] = new(widget.Clickable)
+	w.fileCancelDownloadBtns[fixtureMessageRef(id)] = new(widget.Clickable)
+	w.fileRestartBtns[fixtureMessageRef(id)] = new(widget.Clickable)
+	w.fileRevealBtns[fixtureMessageRef(id)] = new(widget.Clickable)
+	w.fileOpenBtns[fixtureMessageRef(id)] = new(widget.Clickable)
+	w.fileRowDeleteBtns[fixtureMessageRef(id)] = new(widget.Clickable)
 }
 
 // windowShowingTwoPictures is a conversation of two image messages, both
@@ -60,19 +60,19 @@ func windowShowingTwoPictures(t *testing.T) (*Window, map[string]string) {
 	peer := domaintest.ID("peer-a")
 	w := &Window{
 		lastChatPeer:           peer,
-		messageSelectables:     map[string]*widget.Selectable{},
-		msgRightClick:          map[string]*rightClickState{},
-		replyQuoteTags:         map[string]*widget.Clickable{},
-		msgMenuBtns:            map[string]*widget.Clickable{},
+		messageSelectables:     map[domain.MessageRef]*widget.Selectable{},
+		msgRightClick:          map[domain.MessageRef]*rightClickState{},
+		replyQuoteTags:         map[domain.MessageRef]*widget.Clickable{},
+		msgMenuBtns:            map[domain.MessageRef]*widget.Clickable{},
 		menuBtnRects:           map[*widget.Clickable]image.Rectangle{},
-		msgReactionChips:       map[domain.MessageID]*ui.ReactionChipsState{},
-		thumbClickBtns:         map[string]*widget.Clickable{},
-		fileDownloadBtns:       map[string]*widget.Clickable{},
-		fileCancelDownloadBtns: map[string]*widget.Clickable{},
-		fileRestartBtns:        map[string]*widget.Clickable{},
-		fileRevealBtns:         map[string]*widget.Clickable{},
-		fileOpenBtns:           map[string]*widget.Clickable{},
-		fileRowDeleteBtns:      map[string]*widget.Clickable{},
+		msgReactionChips:       map[domain.MessageRef]*ui.ReactionChipsState{},
+		thumbClickBtns:         map[domain.MessageRef]*widget.Clickable{},
+		fileDownloadBtns:       map[domain.MessageRef]*widget.Clickable{},
+		fileCancelDownloadBtns: map[domain.MessageRef]*widget.Clickable{},
+		fileRestartBtns:        map[domain.MessageRef]*widget.Clickable{},
+		fileRevealBtns:         map[domain.MessageRef]*widget.Clickable{},
+		fileOpenBtns:           map[domain.MessageRef]*widget.Clickable{},
+		fileRowDeleteBtns:      map[domain.MessageRef]*widget.Clickable{},
 	}
 	w.snap = service.RouterSnapshot{
 		ActivePeer:     peer,
@@ -112,35 +112,35 @@ func mapsHolding(w *Window, id string) []string {
 			held = append(held, name)
 		}
 	}
-	_, ok := w.messageSelectables[id]
+	_, ok := w.messageSelectables[fixtureMessageRef(id)]
 	note("messageSelectables", ok)
-	_, ok = w.msgRightClick[id]
+	_, ok = w.msgRightClick[fixtureMessageRef(id)]
 	note("msgRightClick", ok)
-	_, ok = w.replyQuoteTags[id]
+	_, ok = w.replyQuoteTags[fixtureMessageRef(id)]
 	note("replyQuoteTags", ok)
-	menuBtn, ok := w.msgMenuBtns[id]
+	menuBtn, ok := w.msgMenuBtns[fixtureMessageRef(id)]
 	note("msgMenuBtns", ok)
 	if menuBtn != nil {
 		_, ok = w.menuBtnRects[menuBtn]
 		note("menuBtnRects", ok)
 	}
-	_, ok = w.msgReactionChips[domain.MessageID(id)]
+	_, ok = w.msgReactionChips[fixtureMessageRef(id)]
 	note("msgReactionChips", ok)
-	_, ok = w.thumbClickBtns[id]
+	_, ok = w.thumbClickBtns[fixtureMessageRef(id)]
 	note("thumbClickBtns", ok)
-	_, ok = w.fileDownloadBtns[id]
+	_, ok = w.fileDownloadBtns[fixtureMessageRef(id)]
 	note("fileDownloadBtns", ok)
-	_, ok = w.fileCancelDownloadBtns[id]
+	_, ok = w.fileCancelDownloadBtns[fixtureMessageRef(id)]
 	note("fileCancelDownloadBtns", ok)
-	_, ok = w.fileRestartBtns[id]
+	_, ok = w.fileRestartBtns[fixtureMessageRef(id)]
 	note("fileRestartBtns", ok)
-	_, ok = w.fileRevealBtns[id]
+	_, ok = w.fileRevealBtns[fixtureMessageRef(id)]
 	note("fileRevealBtns", ok)
-	_, ok = w.fileOpenBtns[id]
+	_, ok = w.fileOpenBtns[fixtureMessageRef(id)]
 	note("fileOpenBtns", ok)
-	_, ok = w.fileRowDeleteBtns[id]
+	_, ok = w.fileRowDeleteBtns[fixtureMessageRef(id)]
 	note("fileRowDeleteBtns", ok)
-	_, ok = w.msgImagePaths[id]
+	_, ok = w.msgImagePaths[fixtureMessageRef(id)]
 	note("msgImagePaths", ok)
 	return held
 }
@@ -289,7 +289,7 @@ func TestClosingTheConsolePaysWhatItDeferred(t *testing.T) {
 	}
 	// And the surviving message keeps its buttons: the debt is paid against
 	// the live set, not by emptying the maps.
-	if _, ok := w.fileRevealBtns["msg-2"]; !ok {
+	if _, ok := w.fileRevealBtns[fixtureMessageRef("msg-2")]; !ok {
 		t.Error("the surviving message lost the buttons the console had drawn")
 	}
 }
@@ -311,9 +311,9 @@ func TestConsoleLeavesNothingOfItsOwnBehind(t *testing.T) {
 	w.consoleModal.visible.Store(true)
 	w.dropStateOfRemovedMessages()
 	const elsewhere = "msg-of-another-chat"
-	w.fileCancelDownloadBtns[elsewhere] = new(widget.Clickable)
-	w.fileRevealBtns[elsewhere] = new(widget.Clickable)
-	w.fileOpenBtns[elsewhere] = new(widget.Clickable)
+	w.fileCancelDownloadBtns[fixtureMessageRef(elsewhere)] = new(widget.Clickable)
+	w.fileRevealBtns[fixtureMessageRef(elsewhere)] = new(widget.Clickable)
+	w.fileOpenBtns[fixtureMessageRef(elsewhere)] = new(widget.Clickable)
 
 	// It closes. Nothing about the conversation moved.
 	w.consoleModal.visible.Store(false)
@@ -322,7 +322,7 @@ func TestConsoleLeavesNothingOfItsOwnBehind(t *testing.T) {
 	if held := mapsHolding(w, elsewhere); len(held) != 0 {
 		t.Errorf("the console's own rows outlived it in %v", held)
 	}
-	if _, ok := w.fileOpenBtns["msg-1"]; !ok {
+	if _, ok := w.fileOpenBtns[fixtureMessageRef("msg-1")]; !ok {
 		t.Error("the open conversation lost buttons it is still drawing")
 	}
 }

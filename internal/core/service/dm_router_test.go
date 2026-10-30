@@ -375,8 +375,8 @@ func TestOnReceiptUpdateActiveConversation(t *testing.T) {
 	event := protocol.LocalChangeEvent{
 		Type:        protocol.LocalChangeReceiptUpdate,
 		MessageID:   "msg-1",
-		Sender:      domaintest.ID("me").String(),
-		Recipient:   domaintest.ID("peer-1").String(),
+		Sender:      domaintest.ID("peer-1").String(),
+		Recipient:   domaintest.ID("me").String(),
 		Status:      "delivered",
 		DeliveredAt: deliveredAt,
 	}
@@ -1581,7 +1581,7 @@ func TestOnNewMessageRegistersSeenMessageID(t *testing.T) {
 	r.onNewMessage(event)
 
 	r.mu.RLock()
-	seen := r.seenMessageIDs["msg-123"].handled
+	seen := r.seenMessageIDs[localMessageRef(event).Key()].handled
 	r.mu.RUnlock()
 	if !seen {
 		t.Fatal("onNewMessage should register MessageID in seenMessageIDs for repair-path dedup")
@@ -1623,7 +1623,7 @@ func TestOnNewMessageNonActivePeerRegistersSeenID(t *testing.T) {
 	r.onNewMessage(event)
 
 	r.mu.RLock()
-	seen := r.seenMessageIDs["msg-456"].handled
+	seen := r.seenMessageIDs[localMessageRef(event).Key()].handled
 	r.mu.RUnlock()
 	if !seen {
 		t.Fatal("onNewMessage should register MessageID in seenMessageIDs even for non-active peer")
@@ -1660,9 +1660,9 @@ func TestRepairUnreadFirstSyncDoesNotDoubleCount(t *testing.T) {
 
 	r.mu.RLock()
 	unread := r.peers[domaintest.ID("peer-1")].Unread
-	seen1 := r.seenMessageIDs["msg-1"].handled
-	seen2 := r.seenMessageIDs["msg-2"].handled
-	seen3 := r.seenMessageIDs["msg-3"].handled
+	seen1 := r.seenMessageIDs[domain.MessageRef{Topic: "dm", ID: "msg-1", Sender: domaintest.ID("peer-1").String(), Recipient: domaintest.ID("me").String()}.Key()].handled
+	seen2 := r.seenMessageIDs[domain.MessageRef{Topic: "dm", ID: "msg-2", Sender: domaintest.ID("peer-1").String(), Recipient: domaintest.ID("me").String()}.Key()].handled
+	seen3 := r.seenMessageIDs[domain.MessageRef{Topic: "dm", ID: "msg-3", Sender: domaintest.ID("peer-1").String(), Recipient: domaintest.ID("me").String()}.Key()].handled
 	synced := r.initialSynced
 	r.mu.RUnlock()
 
@@ -1976,7 +1976,7 @@ func TestHeaderRepairDoesNotResurrectARemovedContact(t *testing.T) {
 
 	r.mu.RLock()
 	_, resurrected := r.peers[peer]
-	dedupGateClosed := r.seenMessageIDs["arrives-too-late"].handled
+	dedupGateClosed := r.seenMessageIDs[domain.MessageRef{Topic: "dm", ID: "arrives-too-late", Sender: peer.String(), Recipient: me.String()}.Key()].handled
 	r.mu.RUnlock()
 	if resurrected {
 		t.Fatal("the header repair put a removed contact back on the sidebar")
@@ -1998,8 +1998,8 @@ func TestRepairUnreadSubsequentSyncIncrements(t *testing.T) {
 	r.activePeer = domaintest.ID("peer-2")
 	r.initialSynced = true // already synced
 	// Pre-register some old messages.
-	r.seenMessageIDs["msg-old-1"] = messageGate{handled: true}
-	r.seenMessageIDs["msg-old-2"] = messageGate{handled: true}
+	r.seenMessageIDs[domain.MessageRef{Topic: "dm", ID: "msg-old-1", Sender: domaintest.ID("peer-1").String(), Recipient: domaintest.ID("me").String()}.Key()] = messageGate{ref: domain.MessageRef{Topic: "dm", ID: "msg-old-1", Sender: domaintest.ID("peer-1").String(), Recipient: domaintest.ID("me").String()}, handled: true}
+	r.seenMessageIDs[domain.MessageRef{Topic: "dm", ID: "msg-old-2", Sender: domaintest.ID("peer-1").String(), Recipient: domaintest.ID("me").String()}.Key()] = messageGate{ref: domain.MessageRef{Topic: "dm", ID: "msg-old-2", Sender: domaintest.ID("peer-1").String(), Recipient: domaintest.ID("me").String()}, handled: true}
 	r.mu.Unlock()
 
 	status := NodeStatus{
@@ -2987,7 +2987,7 @@ func TestRepairUnreadNotClearedOnFailedReload(t *testing.T) {
 	// active-peer reload path evicts it when loadConversation fails.
 	if !pollCondition(2*time.Second, func() bool {
 		r.mu.RLock()
-		ok := r.seenMessageIDs["new-msg-1"].handled
+		ok := r.seenMessageIDs[domain.MessageRef{Topic: "dm", ID: "new-msg-1", Sender: domaintest.ID("peer-1").String(), Recipient: domaintest.ID("me").String()}.Key()].handled
 		r.mu.RUnlock()
 		return !ok
 	}) {
@@ -3003,7 +3003,7 @@ func TestRepairUnreadNotClearedOnFailedReload(t *testing.T) {
 	r.repairUnreadFromHeaders(status)
 
 	r.mu.RLock()
-	seenRetry := r.seenMessageIDs["new-msg-1"].handled
+	seenRetry := r.seenMessageIDs[domain.MessageRef{Topic: "dm", ID: "new-msg-1", Sender: domaintest.ID("peer-1").String(), Recipient: domaintest.ID("me").String()}.Key()].handled
 	r.mu.RUnlock()
 
 	// It will still fail (no chatlog), so the ID should be evicted again.
@@ -3057,7 +3057,7 @@ func TestOnNewMessageEventPathRollsBackSeenOnFailedReload(t *testing.T) {
 	// Poll until the goroutine evicts the message ID (replaces fixed sleep).
 	if !pollCondition(2*time.Second, func() bool {
 		r.mu.RLock()
-		ok := r.seenMessageIDs["msg-rollback-1"].handled
+		ok := r.seenMessageIDs[localMessageRef(event).Key()].handled
 		r.mu.RUnlock()
 		return !ok
 	}) {
@@ -3100,7 +3100,7 @@ func TestOnNewMessageNonActiveFallbackRollsBackSeenOnPreviewFailure(t *testing.T
 	// Poll until the goroutine evicts the message ID (replaces fixed sleep).
 	if !pollCondition(2*time.Second, func() bool {
 		r.mu.RLock()
-		ok := r.seenMessageIDs["msg-nonactive-rollback-1"].handled
+		ok := r.seenMessageIDs[localMessageRef(event).Key()].handled
 		r.mu.RUnlock()
 		return !ok
 	}) {
@@ -3118,8 +3118,8 @@ func TestRefreshPreviewForPeerRollsBackSeenOnFailure(t *testing.T) {
 
 	// Pre-register message IDs in seenMessageIDs as repairUnreadFromHeaders does.
 	r.mu.Lock()
-	r.seenMessageIDs["repair-msg-1"] = messageGate{handled: true}
-	r.seenMessageIDs["repair-msg-2"] = messageGate{handled: true}
+	r.seenMessageIDs[domain.MessageRef{Topic: "dm", ID: "repair-msg-1", Sender: domaintest.ID("peer-1").String(), Recipient: domaintest.ID("me").String()}.Key()] = messageGate{ref: domain.MessageRef{Topic: "dm", ID: "repair-msg-1", Sender: domaintest.ID("peer-1").String(), Recipient: domaintest.ID("me").String()}, handled: true}
+	r.seenMessageIDs[domain.MessageRef{Topic: "dm", ID: "repair-msg-2", Sender: domaintest.ID("peer-1").String(), Recipient: domaintest.ID("me").String()}.Key()] = messageGate{ref: domain.MessageRef{Topic: "dm", ID: "repair-msg-2", Sender: domaintest.ID("peer-1").String(), Recipient: domaintest.ID("me").String()}, handled: true}
 	r.mu.Unlock()
 
 	// The repair path creates the row before queueing the refresh; do the
@@ -3131,8 +3131,8 @@ func TestRefreshPreviewForPeerRollsBackSeenOnFailure(t *testing.T) {
 	r.refreshPreviewForPeer(domaintest.ID("peer-1"), []string{"repair-msg-1", "repair-msg-2"})
 
 	r.mu.RLock()
-	seen1 := r.seenMessageIDs["repair-msg-1"].handled
-	seen2 := r.seenMessageIDs["repair-msg-2"].handled
+	seen1 := r.seenMessageIDs[domain.MessageRef{Topic: "dm", ID: "repair-msg-1", Sender: domaintest.ID("peer-1").String(), Recipient: domaintest.ID("me").String()}.Key()].handled
+	seen2 := r.seenMessageIDs[domain.MessageRef{Topic: "dm", ID: "repair-msg-2", Sender: domaintest.ID("peer-1").String(), Recipient: domaintest.ID("me").String()}.Key()].handled
 	r.mu.RUnlock()
 
 	if seen1 || seen2 {
@@ -3164,7 +3164,7 @@ func TestRefreshPreviewForPeerNilPreviewPreservesPeer(t *testing.T) {
 	r.mu.Lock()
 	r.tryEnsurePeerLocked(domaintest.ID("peer-header-only"))
 	r.peers[domaintest.ID("peer-header-only")].Unread = 1
-	r.seenMessageIDs["header-msg-1"] = messageGate{handled: true}
+	r.seenMessageIDs[domain.MessageRef{Topic: "dm", ID: "header-msg-1", Sender: domaintest.ID("peer-header-only").String(), Recipient: domaintest.ID("me").String()}.Key()] = messageGate{ref: domain.MessageRef{Topic: "dm", ID: "header-msg-1", Sender: domaintest.ID("peer-header-only").String(), Recipient: domaintest.ID("me").String()}, handled: true}
 	r.mu.Unlock()
 
 	// refreshPreviewForPeer calls updatePreviewFromStore which gets nil preview
@@ -3177,7 +3177,7 @@ func TestRefreshPreviewForPeerNilPreviewPreservesPeer(t *testing.T) {
 	if ps != nil {
 		unread = ps.Unread
 	}
-	seenOK := r.seenMessageIDs["header-msg-1"].handled
+	seenOK := r.seenMessageIDs[domain.MessageRef{Topic: "dm", ID: "header-msg-1", Sender: domaintest.ID("peer-header-only").String(), Recipient: domaintest.ID("me").String()}.Key()].handled
 	r.mu.RUnlock()
 
 	if !exists {
@@ -3249,7 +3249,7 @@ func TestRepairPathHeaderOnlyMessagePreservedAfterNilPreview(t *testing.T) {
 	if ps != nil {
 		unread = ps.Unread
 	}
-	seenOK := r.seenMessageIDs["store-failed-msg-1"].handled
+	seenOK := r.seenMessageIDs[domain.MessageRef{Topic: "dm", ID: "store-failed-msg-1", Sender: domaintest.ID("peer-headonly").String(), Recipient: domaintest.ID("me").String()}.Key()].handled
 	r.mu.RUnlock()
 
 	if !exists {
@@ -3487,7 +3487,7 @@ func TestOnNewMessageNonActivePeerIncrementsUnread(t *testing.T) {
 	// → returns without incrementing Unread.
 	if !pollCondition(2*time.Second, func() bool {
 		r.mu.RLock()
-		ok := r.seenMessageIDs["msg-non-active-1"].handled
+		ok := r.seenMessageIDs[localMessageRef(event).Key()].handled
 		r.mu.RUnlock()
 		return !ok
 	}) {
@@ -3506,7 +3506,7 @@ func TestOnNewMessageNonActivePeerIncrementsUnread(t *testing.T) {
 
 	// seenMessageIDs eviction already verified above by pollCondition.
 	r.mu.RLock()
-	registered := r.seenMessageIDs["msg-non-active-1"].handled
+	registered := r.seenMessageIDs[localMessageRef(event).Key()].handled
 	r.mu.RUnlock()
 	if registered {
 		t.Fatal("seenMessageIDs must be rolled back after updatePreviewFromStore failure")
@@ -4599,7 +4599,7 @@ func TestOnNewMessageMidSwitchFallbackStalePeerGuard(t *testing.T) {
 	ok := pollCondition(2*time.Second, func() bool {
 		r.mu.RLock()
 		defer r.mu.RUnlock()
-		exists := r.seenMessageIDs["stale-peer-guard-1"].handled
+		exists := r.seenMessageIDs[localMessageRef(event).Key()].handled
 		return !exists
 	})
 	if !ok {
@@ -4664,7 +4664,7 @@ func TestReloadAndRefreshPreviewRollsBackOnLoadFailure(t *testing.T) {
 	r.mu.Lock()
 	r.activePeer = domaintest.ID("peer-1")
 	r.peerClicked = true
-	r.seenMessageIDs["msg-reload-fail"] = messageGate{handled: true}
+	r.seenMessageIDs[domain.MessageRef{ID: "msg-reload-fail"}.Key()] = messageGate{ref: domain.MessageRef{ID: "msg-reload-fail"}, handled: true}
 	r.mu.Unlock()
 
 	// newTestRouter has no chatlog → loadConversation fails → must evict.
@@ -4674,7 +4674,7 @@ func TestReloadAndRefreshPreviewRollsBackOnLoadFailure(t *testing.T) {
 	}
 
 	r.mu.RLock()
-	seen := r.seenMessageIDs["msg-reload-fail"].handled
+	seen := r.seenMessageIDs[domain.MessageRef{ID: "msg-reload-fail"}.Key()].handled
 	r.mu.RUnlock()
 	if seen {
 		t.Fatal("reloadAndRefreshPreview must evict seenMessageIDs when loadConversation fails")
@@ -4752,7 +4752,7 @@ func TestReloadAndRefreshPreviewNoEvictOnPartialSuccess(t *testing.T) {
 	r.mu.Lock()
 	r.activePeer = peerID
 	r.peerClicked = true
-	r.seenMessageIDs["partial-success-1"] = messageGate{handled: true}
+	r.seenMessageIDs[domain.MessageRef{ID: "partial-success-1"}.Key()] = messageGate{ref: domain.MessageRef{ID: "partial-success-1"}, handled: true}
 	r.mu.Unlock()
 
 	// Goroutine: wait for loadConversation to populate activeMessages,
@@ -4780,7 +4780,7 @@ func TestReloadAndRefreshPreviewNoEvictOnPartialSuccess(t *testing.T) {
 	// The critical assertion: messageID must still be in seenMessageIDs.
 	// If evictSeenMessages was called on partial success, this fails.
 	r.mu.RLock()
-	seen := r.seenMessageIDs["partial-success-1"].handled
+	seen := r.seenMessageIDs[domain.MessageRef{ID: "partial-success-1"}.Key()].handled
 	r.mu.RUnlock()
 	if !seen {
 		t.Fatal("seenMessageIDs was evicted on partial success — " +
@@ -5038,7 +5038,7 @@ func TestPartialSuccessFallbackHelpers(t *testing.T) {
 	// is the gap the cache fallback is for; it does not overwrite a row that
 	// already carries an answer (see TestUpdatePreviewFromCacheFallback).
 	r.tryEnsurePeerLocked(peerID)
-	r.seenMessageIDs["partial-1"] = messageGate{handled: true}
+	r.seenMessageIDs[domain.MessageRef{ID: "partial-1"}.Key()] = messageGate{ref: domain.MessageRef{ID: "partial-1"}, handled: true}
 	r.mu.Unlock()
 
 	// Step 1: loadConversation succeeds, populating cache with the
@@ -5550,7 +5550,7 @@ func TestRepairUnreadFromHeadersSplitLock(t *testing.T) {
 
 	// Pre-seed one message as already seen.
 	r.mu.Lock()
-	r.seenMessageIDs["old-msg"] = messageGate{handled: true}
+	r.seenMessageIDs[domain.MessageRef{Topic: "dm", ID: "old-msg", Sender: domaintest.ID("peer-1").String(), Recipient: domaintest.ID("me").String()}.Key()] = messageGate{ref: domain.MessageRef{Topic: "dm", ID: "old-msg", Sender: domaintest.ID("peer-1").String(), Recipient: domaintest.ID("me").String()}, handled: true}
 	r.mu.Unlock()
 
 	status := NodeStatus{
@@ -5567,10 +5567,10 @@ func TestRepairUnreadFromHeadersSplitLock(t *testing.T) {
 	defer r.mu.RUnlock()
 
 	// old-msg was already seen, so only 2 new messages processed.
-	if !r.seenMessageIDs["new-msg-1"].handled {
+	if !r.seenMessageIDs[domain.MessageRef{Topic: "dm", ID: "new-msg-1", Sender: domaintest.ID("peer-1").String(), Recipient: domaintest.ID("me").String()}.Key()].handled {
 		t.Fatal("new-msg-1 should be in seenMessageIDs")
 	}
-	if !r.seenMessageIDs["new-msg-2"].handled {
+	if !r.seenMessageIDs[domain.MessageRef{Topic: "dm", ID: "new-msg-2", Sender: domaintest.ID("peer-2").String(), Recipient: domaintest.ID("me").String()}.Key()].handled {
 		t.Fatal("new-msg-2 should be in seenMessageIDs")
 	}
 	// peer-1 gets 1 new unread (new-msg-1), peer-2 gets 1 (new-msg-2).
@@ -6360,8 +6360,8 @@ func (m *movingHistoryReader) UnseenIncomingIDsFor(ctx context.Context, peer dom
 	return m.inner.UnseenIncomingIDsFor(ctx, peer)
 }
 
-func (m *movingHistoryReader) StoredMessageStatuses(ctx context.Context, ids []domain.MessageID) (map[domain.MessageID]string, error) {
-	return m.inner.StoredMessageStatuses(ctx, ids)
+func (m *movingHistoryReader) StoredMessageRefStatuses(ctx context.Context, ids []domain.MessageRef) (map[domain.MessageRef]string, error) {
+	return m.inner.StoredMessageRefStatuses(ctx, ids)
 }
 
 // TestDeleteKeepsABadgeWhoseRowHasNotLanded covers the gap between the node
@@ -6781,7 +6781,7 @@ func TestRecoveryUsesTheStampItTookBeforeAsking(t *testing.T) {
 		t.Fatalf("append: %v", err)
 	}
 
-	mgr := newTestFileTransferManager(t)
+	mgr := newTestFileTransferManager(t, client)
 	r := newSyncTestRouter()
 	r.client = client
 	r.presenceClock = func() time.Time { return now }
@@ -6851,7 +6851,7 @@ func TestIncompleteRecoveryReopensTheDedupGate(t *testing.T) {
 	r.presenceClock = func() time.Time { return now }
 	r.mu.Lock()
 	r.tryEnsurePeerLocked(peer)
-	r.seenMessageIDs["arriving"] = messageGate{handled: true}
+	r.seenMessageIDs[domain.MessageRef{Topic: "dm", ID: "arriving", Sender: peer.String(), Recipient: me.String()}.Key()] = messageGate{ref: domain.MessageRef{Topic: "dm", ID: "arriving", Sender: peer.String(), Recipient: me.String()}, handled: true}
 	stampAtEvent := peerStamp{gen: r.peerGen[peer], epochs: r.backwardsEpoch[peer]}
 	r.moveHistoryBackwardsLocked(peer)
 	r.mu.Unlock()
@@ -6867,7 +6867,7 @@ func TestIncompleteRecoveryReopensTheDedupGate(t *testing.T) {
 	}, peer, stampAtEvent)
 
 	r.mu.RLock()
-	stillGated := r.seenMessageIDs["arriving"].handled
+	stillGated := r.seenMessageIDs[domain.MessageRef{Topic: "dm", ID: "arriving", Sender: peer.String(), Recipient: me.String()}.Key()].handled
 	r.mu.RUnlock()
 	if stillGated {
 		t.Fatal("a half-finished recovery kept the message behind the dedup gate: nothing will ever pick it up")
@@ -6897,7 +6897,7 @@ func TestRecoveryRedoesPromotionAndFileMapping(t *testing.T) {
 		t.Fatalf("append: %v", err)
 	}
 
-	mgr := newTestFileTransferManager(t)
+	mgr := newTestFileTransferManager(t, client)
 	r := newSyncTestRouter()
 	r.client = client
 	r.presenceClock = func() time.Time { return now }
@@ -6955,7 +6955,7 @@ func TestRepeatedDeleteDoesNotMoveTheVersion(t *testing.T) {
 
 	store := client.chatLog
 	if err := r.removeLocalMessage(ctx, store, peer, domain.MessageID("target"),
-		domain.MessageDeleteRouteRecalled, chatlog.DeleteIntent{}); err != nil {
+		domain.MessageDeleteRouteRecalled, chatlog.DeleteIntent{Ref: domain.MessageRef{Topic: "dm", ID: "target", Sender: peer.String(), Recipient: me.String()}}); err != nil {
 		t.Fatalf("first delete: %v", err)
 	}
 	r.mu.RLock()
@@ -6964,7 +6964,7 @@ func TestRepeatedDeleteDoesNotMoveTheVersion(t *testing.T) {
 
 	// The same delete again: nothing left to remove.
 	if err := r.removeLocalMessage(ctx, store, peer, domain.MessageID("target"),
-		domain.MessageDeleteRouteRecalled, chatlog.DeleteIntent{}); err != nil {
+		domain.MessageDeleteRouteRecalled, chatlog.DeleteIntent{Ref: domain.MessageRef{Topic: "dm", ID: "target", Sender: peer.String(), Recipient: me.String()}}); err != nil {
 		t.Fatalf("second delete: %v", err)
 	}
 	r.mu.RLock()
@@ -7003,7 +7003,7 @@ func TestRefusedEnsureLeavesNoOrphanState(t *testing.T) {
 	r.mu.RLock()
 	_, row := r.peers[peer]
 	badges := len(r.unreadIDs[peer])
-	gated := r.seenMessageIDs["header-during-removal"].handled
+	gated := r.seenMessageIDs[domain.MessageRef{Topic: "dm", ID: "header-during-removal", Sender: peer.String(), Recipient: me.String()}.Key()].handled
 	inOrder := false
 	for _, p := range r.peerOrder {
 		if p == peer {
@@ -8320,11 +8320,11 @@ func (f *failingHistoryReader) UnseenIncomingIDs(ctx context.Context) (map[domai
 	return f.store.UnseenIncomingIDs(ctx)
 }
 
-func (f *failingHistoryReader) StoredMessageStatuses(ctx context.Context, ids []domain.MessageID) (map[domain.MessageID]string, error) {
+func (f *failingHistoryReader) StoredMessageRefStatuses(ctx context.Context, ids []domain.MessageRef) (map[domain.MessageRef]string, error) {
 	if f.failPerPeerReads {
 		return nil, errors.New("chatlog unavailable")
 	}
-	return f.store.StoredMessageStatuses(ctx, ids)
+	return f.store.StoredMessageRefStatuses(ctx, ids)
 }
 
 func (f *failingHistoryReader) scans() int32 { return atomic.LoadInt32(&f.scanCount) }
@@ -8339,8 +8339,8 @@ type afterStatusReader struct {
 	hook  func()
 }
 
-func (a *afterStatusReader) StoredMessageStatuses(ctx context.Context, ids []domain.MessageID) (map[domain.MessageID]string, error) {
-	statuses, err := a.inner.StoredMessageStatuses(ctx, ids)
+func (a *afterStatusReader) StoredMessageRefStatuses(ctx context.Context, ids []domain.MessageRef) (map[domain.MessageRef]string, error) {
+	statuses, err := a.inner.StoredMessageRefStatuses(ctx, ids)
 	a.once.Do(a.hook)
 	return statuses, err
 }
@@ -8400,12 +8400,12 @@ func (i *interleavingReader) UnseenIncomingIDs(ctx context.Context) (map[domain.
 	return i.inner.UnseenIncomingIDs(ctx)
 }
 
-func (i *interleavingReader) StoredMessageStatuses(ctx context.Context, ids []domain.MessageID) (map[domain.MessageID]string, error) {
+func (i *interleavingReader) StoredMessageRefStatuses(ctx context.Context, ids []domain.MessageRef) (map[domain.MessageRef]string, error) {
 	// Whichever read the path under test performs first runs the hook; the
 	// window being reproduced is "between the reads and the lock", and both
 	// reads sit inside it.
 	i.once.Do(func() { i.hook(domain.PeerIdentity{}) })
-	return i.inner.StoredMessageStatuses(ctx, ids)
+	return i.inner.StoredMessageRefStatuses(ctx, ids)
 }
 
 // Removing a contact stops the send queue for the length of the history delete,

@@ -21,9 +21,9 @@ const validTestFileHash = "00000000000000000000000000000000000000000000000000000
 // that delegates to a real filetransfer.Manager. Combined with the
 // FileTransferBridge.registerIncomingFn seam this lets us exercise
 // the full registration → snapshot path without standing up a node.Service.
-func fakeManagerRegisterIncoming(m *filetransfer.Manager) func(domain.FileID, string, string, string, uint64, domain.PeerIdentity) error {
-	return func(fileID domain.FileID, fileHash, fileName, contentType string, fileSize uint64, sender domain.PeerIdentity) error {
-		return m.RegisterFileReceive(fileID, fileHash, fileName, contentType, fileSize, sender)
+func fakeManagerRegisterIncoming(m *filetransfer.Manager) func(domain.MessageRef, string, string, string, uint64, domain.PeerIdentity) error {
+	return func(ref domain.MessageRef, fileHash, fileName, contentType string, fileSize uint64, sender domain.PeerIdentity) error {
+		return m.RegisterFileReceiveRef(ref, fileHash, fileName, contentType, fileSize, sender)
 	}
 }
 
@@ -33,11 +33,15 @@ func fakeManagerRegisterIncoming(m *filetransfer.Manager) func(domain.FileID, st
 // and we don't need to clean up disk artefacts. DownloadDir is set
 // to t.TempDir() so any incidental code path that materialises a
 // partialDownloadPath has somewhere valid to land.
-func newTestFileTransferManager(t *testing.T) *filetransfer.Manager {
+func newTestFileTransferManager(t *testing.T, client *DesktopClient) *filetransfer.Manager {
 	t.Helper()
+	if client == nil || client.id == nil || client.Address().IsZero() {
+		t.Fatal("file-transfer fixture requires the actual local client identity")
+	}
 	return filetransfer.NewFileTransferManager(filetransfer.Config{
 		DownloadDir:  t.TempDir(),
 		MappingsPath: "",
+		LocalID:      client.id,
 	})
 }
 
@@ -81,8 +85,8 @@ func TestTryRegisterFileReceiveRegistersAndPublishesOnSuccess(t *testing.T) {
 		mu.Unlock()
 	}, ebus.WithSync())
 
-	mgr := newTestFileTransferManager(t)
 	r := newTestRouter()
+	mgr := newTestFileTransferManager(t, r.client)
 	r.eventBus = bus
 	r.fileBridge.registerIncomingFn = fakeManagerRegisterIncoming(mgr)
 
@@ -156,7 +160,7 @@ func TestTryRegisterFileReceiveSkipsPublishOnRegistrationFailure(t *testing.T) {
 	r := newTestRouter()
 	r.eventBus = bus
 	// Force registration to fail.
-	r.fileBridge.registerIncomingFn = func(domain.FileID, string, string, string, uint64, domain.PeerIdentity) error {
+	r.fileBridge.registerIncomingFn = func(domain.MessageRef, string, string, string, uint64, domain.PeerIdentity) error {
 		return errNoLocalNode
 	}
 
@@ -188,8 +192,8 @@ func TestTryRegisterFileReceiveSkipsPublishOnMalformedPayload(t *testing.T) {
 		atomic.AddInt32(&seen, 1)
 	}, ebus.WithSync())
 
-	mgr := newTestFileTransferManager(t)
 	r := newTestRouter()
+	mgr := newTestFileTransferManager(t, r.client)
 	r.eventBus = bus
 	r.fileBridge.registerIncomingFn = fakeManagerRegisterIncoming(mgr)
 
@@ -227,8 +231,8 @@ func TestTryRegisterFileReceiveSkipsOutgoing(t *testing.T) {
 		atomic.AddInt32(&seen, 1)
 	}, ebus.WithSync())
 
-	mgr := newTestFileTransferManager(t)
 	r := newTestRouter()
+	mgr := newTestFileTransferManager(t, r.client)
 	r.eventBus = bus
 	r.fileBridge.registerIncomingFn = fakeManagerRegisterIncoming(mgr)
 
@@ -341,8 +345,8 @@ func TestApplyDecryptedMessageToSidebarRegistersFileReceiveForNonActive(t *testi
 		mu.Unlock()
 	}, ebus.WithSync())
 
-	mgr := newTestFileTransferManager(t)
 	r := newTestRouter()
+	mgr := newTestFileTransferManager(t, r.client)
 	r.eventBus = bus
 	r.fileBridge.registerIncomingFn = fakeManagerRegisterIncoming(mgr)
 
@@ -465,8 +469,8 @@ func TestTryRegisterFileReceiveDefensiveNils(t *testing.T) {
 // deleted, or the thread wiped, since the snapshot that carried it was read.
 // Registering it then would put a transfer back for a row that is gone.
 func TestFileRegistrationRefusesAConversationThatMovedBackwards(t *testing.T) {
-	mgr := newTestFileTransferManager(t)
 	r := newTestRouter()
+	mgr := newTestFileTransferManager(t, r.client)
 	r.fileBridge.registerIncomingFn = fakeManagerRegisterIncoming(mgr)
 
 	peer := domaintest.ID("thread-wiped-mid-load")
@@ -502,8 +506,8 @@ func TestFileRegistrationRefusesAConversationThatMovedBackwards(t *testing.T) {
 // every transfer in a freshly opened chat look stale, which is the one moment
 // they all have to be restored.
 func TestOpeningAChatStillRestoresItsFileTransfers(t *testing.T) {
-	mgr := newTestFileTransferManager(t)
 	r := newTestRouter()
+	mgr := newTestFileTransferManager(t, r.client)
 	r.fileBridge.registerIncomingFn = fakeManagerRegisterIncoming(mgr)
 
 	peer := domaintest.ID("chat-being-opened")
@@ -547,7 +551,7 @@ func TestFileRegistrationExcludesCleanupWhileItRuns(t *testing.T) {
 	// Observed from INSIDE the registration: every cleanup path takes this
 	// lock before it removes anything, so it cannot be free here.
 	cleanupCouldRun := false
-	r.fileBridge.registerIncomingFn = func(domain.FileID, string, string, string, uint64, domain.PeerIdentity) error {
+	r.fileBridge.registerIncomingFn = func(domain.MessageRef, string, string, string, uint64, domain.PeerIdentity) error {
 		cleanupCouldRun = r.fileOpLock(peer).TryLock()
 		if cleanupCouldRun {
 			r.fileOpLock(peer).Unlock()
@@ -579,8 +583,8 @@ func TestFileRegistrationExcludesCleanupWhileItRuns(t *testing.T) {
 // barrier resumes AFTER the last cleanup — and must find no row rather than
 // register a mapping that would outlive the deleted contact.
 func TestRegistrationRefusesAPeerWhoseRowIsGone(t *testing.T) {
-	mgr := newTestFileTransferManager(t)
 	r := newTestRouter()
+	mgr := newTestFileTransferManager(t, r.client)
 	r.fileBridge.registerIncomingFn = fakeManagerRegisterIncoming(mgr)
 
 	peer := domaintest.ID("row-already-dropped")

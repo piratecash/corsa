@@ -198,7 +198,7 @@ func (s *Service) registerOwnDMRecordAdmission(ctx context.Context, result r2aSu
 	c := &ownDMRelationClaim{stamp: stamp}
 	stamp.r2Claim = c
 	now, ok := r.recordAdmission.sampleLocked()
-	if !ok || !origin.liveLocked(r, now) || ctx.Err() != nil || !s.r2aCurrentLocked(stamp) || stamp.consumed || stamp.candidate == nil || !stamp.candidate.offered || s.deliveryFrozenLocked(stamp.prepared.message.ID) || store.pinMetadataMutationRefusalLocked() != nil || !c.ownersMatchLocked(store) {
+	if !ok || !origin.liveLocked(r, now) || ctx.Err() != nil || !s.r2aCurrentLocked(stamp) || stamp.consumed || stamp.candidate == nil || !stamp.candidate.offered || s.deliveryFrozenLocked(s.ownMessageIdentity(stamp.prepared.message.ID, stamp.prepared.message.Recipient)) || store.pinMetadataMutationRefusalLocked() != nil || !c.ownersMatchLocked(store) {
 		return
 	}
 	for role := uint8(0); role < 2; role++ {
@@ -246,7 +246,7 @@ func (r *identityResolver) ownDMClaimCurrentLocked(slot *relationAdmissionSlot, 
 		return false
 	}
 	s := r.svc
-	return c.stamp.prepared.r2Residence.liveLocked(r, now) && s.r2aCurrentLocked(c.stamp) && !s.deliveryFrozenLocked(c.stamp.prepared.message.ID) && c.ownersMatchLocked(store)
+	return c.stamp.prepared.r2Residence.liveLocked(r, now) && s.r2aCurrentLocked(c.stamp) && !s.deliveryFrozenLocked(s.ownMessageIdentity(c.stamp.prepared.message.ID, c.stamp.prepared.message.Recipient)) && c.ownersMatchLocked(store)
 }
 
 func verifyOwnDMRelationRecord(c *ownDMRelationClaim, role uint8, network domain.NetworkID, record protocol.SignedIdentityRecord) (verifiedOwnDMRelationRecord, error) {

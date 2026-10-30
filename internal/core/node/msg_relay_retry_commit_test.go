@@ -82,11 +82,16 @@ func (f transitDMFixture) onFirstRoute(hook func()) *atomic.Bool {
 	return &fired
 }
 
-// hasRelayRetryEntry reports whether s.relayRetry holds a msg| entry for id.
-func (s *Service) hasRelayRetryEntry(id protocol.MessageID) bool {
+// reference returns the exact transit message tested by this fixture.
+func (f transitDMFixture) reference(id protocol.MessageID) messageIdentity {
+	return messageIdentity{MessageID: id, Sender: f.sender.Address, Recipient: f.recipient.Address}
+}
+
+// hasRelayRetryEntry reports whether s.relayRetry holds an entry for this message.
+func (s *Service) hasRelayRetryEntry(ref messageIdentity) bool {
 	s.deliveryMu.RLock()
 	defer s.deliveryMu.RUnlock()
-	_, ok := s.relayRetry[relayMessageKey(id)]
+	_, ok := s.relayRetry[relayMessageIdentityKey(ref)]
 	return ok
 }
 
@@ -110,11 +115,11 @@ func assertNoOrphanRelayMessageEntries(t *testing.T, svc *Service) {
 	svc.gossipMu.RLock()
 	present := make(map[string]struct{}, len(svc.topics["dm"]))
 	for _, envelope := range svc.topics["dm"] {
-		present[relayMessageKey(envelope.ID)] = struct{}{}
+		present[relayMessageIdentityKey(messageIdentityOf(envelope))] = struct{}{}
 	}
 	var orphans []string
 	for key := range svc.relayRetry {
-		if !strings.HasPrefix(key, relayMessageKey("")) {
+		if !strings.HasPrefix(key, "msg|") {
 			continue
 		}
 		if _, ok := present[key]; !ok {
@@ -142,7 +147,7 @@ func TestStoreIncomingMessage_TransitCommitArmsRelayRetryWithTheBacklog(t *testi
 	if !backlogHasMessage(f.svc, id) {
 		t.Fatal("the transit DM must be in the dm backlog after admission")
 	}
-	if !f.svc.hasRelayRetryEntry(id) {
+	if !f.svc.hasRelayRetryEntry(f.reference(id)) {
 		t.Fatal("the admission that backlogged a transit DM must arm its relay retry")
 	}
 	assertNoOrphanRelayMessageEntries(t, f.svc)
@@ -171,7 +176,7 @@ func TestStoreIncomingMessage_AckDeleteAfterAdmissionLeavesNoOrphanRelayRetry(t 
 	if backlogHasMessage(f.svc, id) {
 		t.Fatal("the acked envelope must be gone from the dm backlog")
 	}
-	if f.svc.hasRelayRetryEntry(id) {
+	if f.svc.hasRelayRetryEntry(f.reference(id)) {
 		t.Fatal("relayRetry holds msg| for an envelope ack_delete already removed: it is never retried, reaped or expired")
 	}
 	assertNoOrphanRelayMessageEntries(t, f.svc)
@@ -206,7 +211,7 @@ func TestStoreIncomingMessage_TransitCapEvictionAfterAdmissionLeavesNoOrphanRela
 	if backlogHasMessage(f.svc, victim) {
 		t.Fatal("the burst must have evicted the oldest transit envelope for the recipient; the assertion below would prove nothing")
 	}
-	if f.svc.hasRelayRetryEntry(victim) {
+	if f.svc.hasRelayRetryEntry(f.reference(victim)) {
 		t.Fatal("relayRetry holds msg| for an envelope the transit cap already evicted: it is never retried, reaped or expired")
 	}
 	assertNoOrphanRelayMessageEntries(t, f.svc)
@@ -222,7 +227,7 @@ func TestCleanupExpiredMessages_TransitExpiryDropsRelayRetryWithTheEnvelope(t *t
 
 	f.store(t, f.message(t, id))
 	f.svc.WaitBackground()
-	if !f.svc.hasRelayRetryEntry(id) {
+	if !f.svc.hasRelayRetryEntry(f.reference(id)) {
 		t.Fatal("fixture: the admission must arm the relay retry, or the assertion below proves nothing")
 	}
 
@@ -239,7 +244,7 @@ func TestCleanupExpiredMessages_TransitExpiryDropsRelayRetryWithTheEnvelope(t *t
 	if backlogHasMessage(f.svc, id) {
 		t.Fatal("the transit envelope outlived its in-flight window")
 	}
-	if f.svc.hasRelayRetryEntry(id) {
+	if f.svc.hasRelayRetryEntry(f.reference(id)) {
 		t.Fatal("the expiry sweep removed the envelope but left its msg| relay retry entry")
 	}
 	assertNoOrphanRelayMessageEntries(t, f.svc)
@@ -274,7 +279,7 @@ func TestStoreIncomingMessage_OriginAuthoredAdmissionArmsNoRelayRetry(t *testing
 	if !backlogHasMessage(svc, id) {
 		t.Fatal("origin-authored DM must be in the dm backlog; the assertion below would prove nothing")
 	}
-	if svc.hasRelayRetryEntry(id) {
+	if svc.hasRelayRetryEntry(svc.ownMessageIdentity(id, recipient.Address)) {
 		t.Fatal("an origin-authored DM must not be armed for relay retry")
 	}
 }
@@ -306,7 +311,7 @@ func TestStoreIncomingMessage_UnroutedTransitAdmissionArmsNoRelayRetry(t *testin
 	if !backlogHasMessage(svc, id) {
 		t.Fatal("the transit DM must be in the dm backlog; the assertion below would prove nothing")
 	}
-	if svc.hasRelayRetryEntry(id) {
+	if svc.hasRelayRetryEntry(f.reference(id)) {
 		t.Fatal("a transit DM this node does not route must not be armed for relay retry")
 	}
 }
@@ -331,7 +336,7 @@ func TestStoreIncomingMessage_FullRelayRetryMapLeavesTransitUnarmed(t *testing.T
 	if !backlogHasMessage(f.svc, id) {
 		t.Fatal("a full relayRetry map must not keep the transit DM out of the backlog")
 	}
-	if f.svc.hasRelayRetryEntry(id) {
+	if f.svc.hasRelayRetryEntry(f.reference(id)) {
 		t.Fatal("the arm went past maxRelayRetryEntries")
 	}
 	f.svc.deliveryMu.RLock()
@@ -471,11 +476,11 @@ func orphanRelayMessageEntries(svc *Service) int {
 	defer svc.gossipMu.RUnlock()
 	present := make(map[string]struct{}, len(svc.topics["dm"]))
 	for _, envelope := range svc.topics["dm"] {
-		present[relayMessageKey(envelope.ID)] = struct{}{}
+		present[relayMessageIdentityKey(messageIdentityOf(envelope))] = struct{}{}
 	}
 	orphans := 0
 	for key := range svc.relayRetry {
-		if !strings.HasPrefix(key, relayMessageKey("")) {
+		if !strings.HasPrefix(key, "msg|") {
 			continue
 		}
 		if _, ok := present[key]; !ok {
@@ -562,7 +567,7 @@ func TestCleanupExpiredMessages_ExpiryNeverExposesOrphanRelayRetry(t *testing.T)
 	go func() {
 		defer close(readerDone)
 		for !stopReader.Load() {
-			f.svc.hasRelayRetryEntry(batch[0].ID)
+			f.svc.hasRelayRetryEntry(f.reference(batch[0].ID))
 			runtime.Gosched()
 		}
 	}()
@@ -596,11 +601,11 @@ func TestCleanupExpiredMessages_ExpiryNeverExposesOrphanRelayRetry(t *testing.T)
 	assertNoOrphanRelayMessageEntries(t, f.svc)
 }
 
-// relayDeliveredTracked reports whether s.relayDeliveredTo holds a set for id.
-func relayDeliveredTracked(svc *Service, id protocol.MessageID) bool {
+// relayDeliveredTracked reports whether s.relayDeliveredTo holds a set for this message.
+func relayDeliveredTracked(svc *Service, ref messageIdentity) bool {
 	svc.relayDeliveredMu.Lock()
 	defer svc.relayDeliveredMu.Unlock()
-	_, ok := svc.relayDeliveredTo[id]
+	_, ok := svc.relayDeliveredTo[ref]
 	return ok
 }
 
@@ -656,7 +661,7 @@ func TestAckDeleteSuppressionRecordNeverOutlivesItsEnvelope(t *testing.T) {
 		// round's included: a round that ends the run is a round like any
 		// other.
 		for _, id := range removed {
-			if relayDeliveredTracked(f.svc, id) {
+			if relayDeliveredTracked(f.svc, f.reference(id)) {
 				leaked++
 			}
 		}
@@ -777,7 +782,7 @@ func TestCleanupExpiredMessages_TransitExpiryForgetsSuppressionSet(t *testing.T)
 	if backlogHasMessage(f.svc, id) {
 		t.Fatal("fixture: the transit envelope must have expired")
 	}
-	if relayDeliveredTracked(f.svc, id) {
+	if relayDeliveredTracked(f.svc, f.reference(id)) {
 		t.Fatal("the expiry sweep removed the envelope but left its ack_delete suppression set")
 	}
 }
@@ -801,7 +806,7 @@ func TestStoreIncomingMessage_TransitCapEvictionForgetsSuppressionSet(t *testing
 	if backlogHasMessage(f.svc, victim) {
 		t.Fatal("fixture: the burst must have evicted the oldest transit envelope")
 	}
-	if relayDeliveredTracked(f.svc, victim) {
+	if relayDeliveredTracked(f.svc, f.reference(victim)) {
 		t.Fatal("the transit cap evicted the envelope but left its ack_delete suppression set")
 	}
 }
@@ -834,7 +839,7 @@ func TestStoreIncomingMessage_ConcurrentAckDeleteLeavesNoOrphanRelayRetry(t *tes
 	go func() {
 		defer close(readerDone)
 		for !stopReader.Load() {
-			f.svc.hasRelayRetryEntry(*current.Load())
+			f.svc.hasRelayRetryEntry(f.reference(*current.Load()))
 			runtime.Gosched()
 		}
 	}()
@@ -921,11 +926,11 @@ func TestCleanupExpiredMessages_GossipOnlyRemovalKeepsRelayRetryEnvelope(t *test
 	f := newTransitDMFixture(t)
 	const id = protocol.MessageID("reused-outer-id-1")
 	f.store(t, f.message(t, id))
-	if !f.svc.hasRelayRetryEntry(id) {
+	if !f.svc.hasRelayRetryEntry(f.reference(id)) {
 		t.Fatal("fixture: the transit DM must be armed, or the assertion below proves nothing")
 	}
 
-	expiredIDs := map[string]map[string]struct{}{"dm": {string(id): {}}}
+	expiredIDs := map[string]map[domain.MessageRef]struct{}{"dm": {deliveryMessageRef(f.reference(id)): {}}}
 	f.svc.lockTopicsCommit(topicsCommitGossipOnly)
 	removed := f.svc.removeExpiredEnvelopesLocked(expiredIDs, topicsCommitGossipOnly)
 	f.svc.unlockTopicsCommit(topicsCommitGossipOnly)
@@ -942,9 +947,9 @@ func TestCleanupExpiredMessages_GossipOnlyRemovalKeepsRelayRetryEnvelope(t *test
 	f.svc.lockTopicsCommit(topicsCommitWithRelayRetry)
 	removed = f.svc.removeExpiredEnvelopesLocked(expiredIDs, topicsCommitWithRelayRetry)
 	f.svc.unlockTopicsCommit(topicsCommitWithRelayRetry)
-	if len(removed) != 1 || backlogHasMessage(f.svc, id) || f.svc.hasRelayRetryEntry(id) {
+	if len(removed) != 1 || backlogHasMessage(f.svc, id) || f.svc.hasRelayRetryEntry(f.reference(id)) {
 		t.Fatalf("the relay-retry removal: removed=%v, envelope left=%v, entry left=%v; want the envelope and its entry gone",
-			removed, backlogHasMessage(f.svc, id), f.svc.hasRelayRetryEntry(id))
+			removed, backlogHasMessage(f.svc, id), f.svc.hasRelayRetryEntry(f.reference(id)))
 	}
 }
 
@@ -978,7 +983,7 @@ func TestStoreIncomingMessage_TransitCommitRechecksTheBloom(t *testing.T) {
 		runtime.Gosched()
 	}
 	// Meanwhile the same id was admitted and acked away: seen, not backlogged.
-	f.svc.seen.Add(string(msg.ID))
+	f.svc.seen.Add(admissionRef(msg).Key())
 	f.svc.deliveryMu.RUnlock()
 	outcome := <-result
 	f.svc.WaitBackground()
@@ -992,7 +997,7 @@ func TestStoreIncomingMessage_TransitCommitRechecksTheBloom(t *testing.T) {
 	if backlogHasMessage(f.svc, msg.ID) {
 		t.Fatal("the duplicate re-entered the dm backlog")
 	}
-	if f.svc.hasRelayRetryEntry(msg.ID) {
+	if f.svc.hasRelayRetryEntry(f.reference(msg.ID)) {
 		t.Fatal("the duplicate re-armed a relay retry")
 	}
 }
@@ -1061,10 +1066,10 @@ func TestCleanupExpiredMessages_ExpiredBroadcastLeavesLiveTransitWithTheSameID(t
 			if !backlogHasMessage(f.svc, shared) {
 				t.Fatal("the live transit DM left the backlog with a broadcast that shares its id")
 			}
-			if !f.svc.hasRelayRetryEntry(shared) {
+			if !f.svc.hasRelayRetryEntry(f.reference(shared)) {
 				t.Fatal("the sweep dropped the live transit DM's msg| entry for a broadcast that shares its id")
 			}
-			if !relayDeliveredTracked(f.svc, shared) {
+			if !relayDeliveredTracked(f.svc, f.reference(shared)) {
 				t.Fatal("the sweep forgot the live transit DM's suppression set for a broadcast that shares its id")
 			}
 			assertNoOrphanRelayMessageEntries(t, f.svc)
@@ -1087,7 +1092,7 @@ func TestCleanupExpiredMessages_KeptTransitEnvelopeLeavesWithTheNextSweep(t *tes
 
 	// A gossipMu-only removal phase that was handed this id keeps it.
 	f.svc.lockTopicsCommit(topicsCommitGossipOnly)
-	kept := f.svc.removeExpiredEnvelopesLocked(map[string]map[string]struct{}{"dm": {string(id): {}}}, topicsCommitGossipOnly)
+	kept := f.svc.removeExpiredEnvelopesLocked(map[string]map[domain.MessageRef]struct{}{"dm": {deliveryMessageRef(f.reference(id)): {}}}, topicsCommitGossipOnly)
 	f.svc.unlockTopicsCommit(topicsCommitGossipOnly)
 	if len(kept) != 0 || !backlogHasMessage(f.svc, id) {
 		t.Fatalf("fixture: the gossipMu-only removal must keep the transit envelope (it reported %v)", kept)
@@ -1099,10 +1104,10 @@ func TestCleanupExpiredMessages_KeptTransitEnvelopeLeavesWithTheNextSweep(t *tes
 	if backlogHasMessage(f.svc, id) {
 		t.Fatal("the next sweep left the kept transit envelope in the backlog past its in-flight window")
 	}
-	if f.svc.hasRelayRetryEntry(id) {
+	if f.svc.hasRelayRetryEntry(f.reference(id)) {
 		t.Fatal("the next sweep removed the kept envelope but left its msg| entry")
 	}
-	if relayDeliveredTracked(f.svc, id) {
+	if relayDeliveredTracked(f.svc, f.reference(id)) {
 		t.Fatal("the next sweep removed the kept envelope but left its ack_delete suppression set")
 	}
 	assertNoOrphanRelayMessageEntries(t, f.svc)
@@ -1134,7 +1139,7 @@ func TestOwnDeliveryWithdrawalLeavesTransitRelayRetryAlone(t *testing.T) {
 			// A terminal outbound status entry is what still names the own
 			// message for this recipient.
 			svc.deliveryMu.Lock()
-			svc.outbound[string(shared)] = outboundDelivery{MessageID: string(shared), Recipient: ownRecipient.Address, Status: "failed"}
+			svc.outbound[svc.ownMessageIdentity(shared, ownRecipient.Address)] = outboundDelivery{MessageID: string(shared), Recipient: ownRecipient.Address, Status: "failed"}
 			svc.deliveryMu.Unlock()
 			if _, err := svc.CancelOutgoingDeliveriesTo(domain.PeerIdentityFromWire(ownRecipient.Address), nil); err != nil {
 				t.Fatalf("CancelOutgoingDeliveriesTo: %v", err)
@@ -1148,7 +1153,7 @@ func TestOwnDeliveryWithdrawalLeavesTransitRelayRetryAlone(t *testing.T) {
 			t.Parallel()
 			f := newTransitDMFixture(t)
 			f.store(t, f.message(t, shared))
-			if !f.svc.hasRelayRetryEntry(shared) {
+			if !f.svc.hasRelayRetryEntry(f.reference(shared)) {
 				t.Fatal("fixture: the transit DM must be armed, or the assertion below proves nothing")
 			}
 
@@ -1158,7 +1163,7 @@ func TestOwnDeliveryWithdrawalLeavesTransitRelayRetryAlone(t *testing.T) {
 			if !backlogHasMessage(f.svc, shared) {
 				t.Fatal("fixture: the transit DM must still be backlogged")
 			}
-			if !f.svc.hasRelayRetryEntry(shared) {
+			if !f.svc.hasRelayRetryEntry(f.reference(shared)) {
 				t.Fatal("withdrawing an own DM deleted the msg| entry of a live transit DM that shares its id")
 			}
 		})
@@ -1173,10 +1178,10 @@ type relayRetrySighting struct {
 
 // readRelayRetryAfterCommit is the reader queued behind a transit
 // admission's commit. Its name is what goroutineParkedOn looks for.
-func readRelayRetryAfterCommit(svc *Service, id protocol.MessageID, out chan<- relayRetrySighting) {
+func readRelayRetryAfterCommit(svc *Service, ref messageIdentity, out chan<- relayRetrySighting) {
 	svc.deliveryMu.RLock()
-	_, entry := svc.relayRetry[relayMessageKey(id)]
-	envelope := backlogHasMessage(svc, id)
+	_, entry := svc.relayRetry[relayMessageIdentityKey(ref)]
+	envelope := backlogHasMessage(svc, ref.MessageID)
 	svc.deliveryMu.RUnlock()
 	out <- relayRetrySighting{envelope: envelope, entry: entry}
 }
@@ -1218,7 +1223,7 @@ func TestStoreIncomingMessage_FirstReaderAfterTransitCommitSeesItsArm(t *testing
 	}
 
 	sighting := make(chan relayRetrySighting, 1)
-	go readRelayRetryAfterCommit(f.svc, msg.ID, sighting)
+	go readRelayRetryAfterCommit(f.svc, f.reference(msg.ID), sighting)
 	readerQueued := false
 	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); runtime.Gosched() {
 		if goroutineParkedOn(waitReasonRWMutexRLock, "readRelayRetryAfterCommit") {

@@ -21,7 +21,7 @@ func TestMarkHopAckObservedReleasesFrameLine(t *testing.T) {
 	rs := newRelayStateStore()
 	line := `{"type":"relay_message","payload":"` + string(make([]byte, 4096)) + `"}`
 	rs.store(&relayForwardState{
-		MessageID:            "msg-acked",
+		Message:              relayStateFixtureRef("msg-acked"),
 		ForwardedTo:          domain.PeerAddress("peer-b"),
 		Recipient:            domaintest.ID("id-recipient"),
 		RemainingTTL:         60,
@@ -29,7 +29,7 @@ func TestMarkHopAckObservedReleasesFrameLine(t *testing.T) {
 		FrameLine:            line,
 	})
 	rs.store(&relayForwardState{
-		MessageID:            "msg-pending",
+		Message:              relayStateFixtureRef("msg-pending"),
 		ForwardedTo:          domain.PeerAddress("peer-c"),
 		Recipient:            domaintest.ID("id-recipient"),
 		RemainingTTL:         60,
@@ -40,13 +40,13 @@ func TestMarkHopAckObservedReleasesFrameLine(t *testing.T) {
 		t.Fatalf("frameLineBytes before ack = %d, want %d", got, 2*len(line))
 	}
 
-	if !rs.markHopAckObserved("msg-acked") {
+	if !rs.markHopAckObserved(relayStateFixtureRef("msg-acked")) {
 		t.Fatal("markHopAckObserved returned false for a live state")
 	}
 
 	rs.mu.Lock()
-	acked := rs.states["msg-acked"].FrameLine
-	pending := rs.states["msg-pending"].FrameLine
+	acked := rs.states[relayStateFixtureRef("msg-acked")].FrameLine
+	pending := rs.states[relayStateFixtureRef("msg-pending")].FrameLine
 	rs.mu.Unlock()
 	if acked != "" {
 		t.Fatalf("FrameLine still held after the hop ack (%d bytes)", len(acked))
@@ -59,7 +59,7 @@ func TestMarkHopAckObservedReleasesFrameLine(t *testing.T) {
 	}
 	// The ack-observed state must still be a dedupe marker: releasing
 	// the payload is not releasing the entry.
-	if !rs.hasSeen("msg-acked") {
+	if !rs.hasSeen(relayStateFixtureRef("msg-acked")) {
 		t.Fatal("state must survive the payload release for the rest of its TTL")
 	}
 }
@@ -72,16 +72,16 @@ func TestRerouteAfterAckRestoresFrameLine(t *testing.T) {
 	t.Parallel()
 	rs := newRelayStateStore()
 	rs.store(&relayForwardState{
-		MessageID: "msg-reroute", ForwardedTo: domain.PeerAddress("peer-b"),
+		Message: relayStateFixtureRef("msg-reroute"), ForwardedTo: domain.PeerAddress("peer-b"),
 		Recipient: domaintest.ID("id-recipient"), RemainingTTL: 60, HopAckRemainingTicks: 3, FrameLine: "first",
 	})
-	rs.markHopAckObserved("msg-reroute")
+	rs.markHopAckObserved(relayStateFixtureRef("msg-reroute"))
 	rs.store(&relayForwardState{
-		MessageID: "msg-reroute", ForwardedTo: domain.PeerAddress("peer-c"),
+		Message: relayStateFixtureRef("msg-reroute"), ForwardedTo: domain.PeerAddress("peer-c"),
 		Recipient: domaintest.ID("id-recipient"), RemainingTTL: 60, HopAckRemainingTicks: 3, FrameLine: "second",
 	})
 	rs.mu.Lock()
-	got := rs.states["msg-reroute"].FrameLine
+	got := rs.states[relayStateFixtureRef("msg-reroute")].FrameLine
 	rs.mu.Unlock()
 	if got != "second" {
 		t.Fatalf("FrameLine after reroute = %q, want the reroute's own frame", got)
@@ -109,7 +109,7 @@ func TestNoteRelayAttemptDoesNotResurrectRemovedEntry(t *testing.T) {
 	svc.topics["dm"] = []protocol.Envelope{transit}
 	svc.gossipMu.Unlock()
 	svc.deliveryMu.Lock()
-	svc.relayRetry[relayMessageKey(transit.ID)] = relayAttempt{FirstSeen: now}
+	svc.relayRetry[relayMessageIdentityKey(messageIdentityOf(transit))] = relayAttempt{FirstSeen: now}
 	svc.deliveryMu.Unlock()
 
 	snapshot := svc.retryableRelayMessages(now)
@@ -123,13 +123,13 @@ func TestNoteRelayAttemptDoesNotResurrectRemovedEntry(t *testing.T) {
 		t.Fatalf("ack_delete removed %d envelopes, want 1", removed)
 	}
 
-	attempts, live := svc.noteRelayAttempt(relayMessageKey(snapshot[0].ID), now)
+	attempts, live := svc.noteRelayAttempt(relayMessageIdentityKey(messageIdentityOf(snapshot[0])), now)
 	if live {
 		t.Fatalf("noteRelayAttempt reported a live entry (attempts=%d) for a message that was removed", attempts)
 	}
 
 	svc.deliveryMu.RLock()
-	_, resurrected := svc.relayRetry[relayMessageKey(transit.ID)]
+	_, resurrected := svc.relayRetry[relayMessageIdentityKey(messageIdentityOf(transit))]
 	svc.deliveryMu.RUnlock()
 	if resurrected {
 		t.Fatal("relayRetry entry resurrected after its message left the backlog")
@@ -142,7 +142,7 @@ func TestNoteRelayAttemptCountsLiveEntry(t *testing.T) {
 	t.Parallel()
 	svc := newTestService(t, config.NodeTypeFull)
 	now := time.Now().UTC()
-	key := relayMessageKey("live-dm")
+	key := relayMessageIdentityKey(messageIdentity{MessageID: "live-dm", Sender: "alice", Recipient: "bob"})
 	svc.deliveryMu.Lock()
 	svc.relayRetry[key] = relayAttempt{FirstSeen: now}
 	svc.deliveryMu.Unlock()
@@ -166,7 +166,7 @@ func TestLateHopAckKeepsPayloadOfInFlightFailover(t *testing.T) {
 	rs := newRelayStateStore()
 	const line = `{"type":"relay_message","id":"msg-race"}`
 	rs.store(&relayForwardState{
-		MessageID:            "msg-race",
+		Message:              relayStateFixtureRef("msg-race"),
 		ForwardedTo:          domain.PeerAddress("peer-b"),
 		Recipient:            domaintest.ID("id-recipient"),
 		RemainingTTL:         60,
@@ -182,16 +182,16 @@ func TestLateHopAckKeepsPayloadOfInFlightFailover(t *testing.T) {
 
 	// 2. A late ACK for the uplink that just timed out arrives while the
 	//    failover is still running.
-	rs.markHopAckObserved("msg-race")
+	rs.markHopAckObserved(relayStateFixtureRef("msg-race"))
 
 	// 3. The failover sends its snapshot through another uplink and
 	//    re-arms the budget for it.
-	if !rs.recordFailoverRetry("msg-race", domain.PeerAddress("peer-c"), routingSender{}, fired[0].FrameLine) {
+	if !rs.recordFailoverRetry(relayStateFixtureRef("msg-race"), domain.PeerAddress("peer-c"), routingSender{}, fired[0].FrameLine) {
 		t.Fatal("recordFailoverRetry returned false for a live state")
 	}
 
 	rs.mu.Lock()
-	stored := rs.states["msg-race"].FrameLine
+	stored := rs.states[relayStateFixtureRef("msg-race")].FrameLine
 	rs.mu.Unlock()
 	if stored != line {
 		t.Fatalf("FrameLine after the failover re-arm = %q, want the frame it just sent", stored)
@@ -219,15 +219,15 @@ func TestHopAckBeforeTimeoutStillReleasesPayload(t *testing.T) {
 	t.Parallel()
 	rs := newRelayStateStore()
 	rs.store(&relayForwardState{
-		MessageID: "msg-clean", ForwardedTo: domain.PeerAddress("peer-b"),
+		Message: relayStateFixtureRef("msg-clean"), ForwardedTo: domain.PeerAddress("peer-b"),
 		Recipient: domaintest.ID("id-recipient"), RemainingTTL: 60,
 		HopAckRemainingTicks: 5, FrameLine: "payload",
 	})
-	if !rs.markHopAckObserved("msg-clean") {
+	if !rs.markHopAckObserved(relayStateFixtureRef("msg-clean")) {
 		t.Fatal("markHopAckObserved returned false for a live state")
 	}
 	rs.mu.Lock()
-	stored := rs.states["msg-clean"].FrameLine
+	stored := rs.states[relayStateFixtureRef("msg-clean")].FrameLine
 	rs.mu.Unlock()
 	if stored != "" {
 		t.Fatalf("FrameLine = %q after a cancelling ack, want released", stored)

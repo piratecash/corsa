@@ -52,10 +52,10 @@ func (s *Service) initMaps() {
 	s.pending = make(map[domain.PeerAddress][]pendingFrame)
 	s.pendingKeys = make(map[pendingKey]struct{})
 	s.relayRetry = make(map[string]relayAttempt)
-	s.outbound = make(map[string]outboundDelivery)
-	s.awaitingDelivered = make(map[protocol.MessageID]*deliveryRetryEntry)
+	s.outbound = make(map[messageIdentity]outboundDelivery)
+	s.awaitingDelivered = make(map[messageIdentity]*deliveryRetryEntry)
 	s.sentDMIDs = newBoundedKnownIdentities(maxSentDMIDs)
-	s.awaitingSeenAck = make(map[protocol.MessageID]*seenAckRetryEntry)
+	s.awaitingSeenAck = make(map[messageIdentity]*seenAckRetryEntry)
 	s.upstream = make(map[domain.PeerAddress]struct{})
 	s.health = make(map[domain.PeerAddress]*peerHealth)
 	s.peerTypes = make(map[domain.PeerAddress]domain.NodeType)
@@ -159,7 +159,7 @@ func TestPushDeliveryReceiptAcceptsOwnIdentity(t *testing.T) {
 
 	conn := drainPipe(t)
 
-	svc.sentDMIDs.Add("msg-2") // we sent this message; the delivered receipt is solicited
+	svc.sentDMIDs.Add(deliveryMessageRef(svc.ownMessageIdentity("msg-2", "some-sender")).Key()) // we sent this message; the delivered receipt is solicited
 	receiptFrame := protocol.ReceiptFrame{
 		MessageID:   "msg-2",
 		Sender:      "some-sender",
@@ -323,10 +323,12 @@ func TestRelayDeliveryReceiptForwardsTransitReceipt(t *testing.T) {
 	// Seed relay state: receipt for "msg-transit-1" should be forwarded
 	// to "original-sender-bbb".
 	forwardTarget := domain.PeerAddress("original-sender-bbb")
-	svc.relayStates.states["msg-transit-1"] = &relayForwardState{
-		MessageID:        "msg-transit-1",
+	if !svc.relayStates.store(&relayForwardState{
+		Message:          domain.MessageRef{Topic: "dm", ID: "msg-transit-1", Sender: "remote-recipient-ccc", Recipient: "some-sender"},
 		ReceiptForwardTo: forwardTarget,
 		RemainingTTL:     5,
+	}) {
+		t.Fatal("fixture: exact reverse-path relay state was not stored")
 	}
 
 	// Create a session for the forward target with mesh_relay_v1
@@ -402,10 +404,12 @@ func TestSessionRelayDeliveryReceiptForwardsTransitReceipt(t *testing.T) {
 	// Seed relay state: receipt for "msg-sess-transit-1" should be
 	// forwarded to "original-sender-sess".
 	forwardTarget := domain.PeerAddress("original-sender-sess")
-	svc.relayStates.states["msg-sess-transit-1"] = &relayForwardState{
-		MessageID:        "msg-sess-transit-1",
+	if !svc.relayStates.store(&relayForwardState{
+		Message:          domain.MessageRef{Topic: "dm", ID: "msg-sess-transit-1", Sender: "remote-recipient-ddd", Recipient: "some-sender"},
 		ReceiptForwardTo: forwardTarget,
 		RemainingTTL:     5,
+	}) {
+		t.Fatal("fixture: exact reverse-path relay state was not stored")
 	}
 
 	// Create a session for the forward target with mesh_relay_v1 and
@@ -613,10 +617,12 @@ func TestRelayDeliveryReceiptDedupeForwardInbound(t *testing.T) {
 	svc.identity = &identity.Identity{Address: "dedupe-forward-local"}
 
 	forwardTarget := domain.PeerAddress("dedupe-forward-target")
-	svc.relayStates.states["msg-dedupe-fwd-1"] = &relayForwardState{
-		MessageID:        "msg-dedupe-fwd-1",
+	if !svc.relayStates.store(&relayForwardState{
+		Message:          domain.MessageRef{Topic: "dm", ID: "msg-dedupe-fwd-1", Sender: "remote-recipient-yyy", Recipient: "some-sender"},
 		ReceiptForwardTo: forwardTarget,
 		RemainingTTL:     5,
+	}) {
+		t.Fatal("fixture: exact reverse-path relay state was not stored")
 	}
 	svc.sessions[forwardTarget] = &peerSession{
 		address:      forwardTarget,
@@ -740,10 +746,12 @@ func TestSessionRelayDeliveryReceiptDedupeForward(t *testing.T) {
 	svc.identity = &identity.Identity{Address: "dedupe-sess-fwd-local"}
 
 	forwardTarget := domain.PeerAddress("dedupe-sess-fwd-target")
-	svc.relayStates.states["msg-dedupe-sess-fwd-1"] = &relayForwardState{
-		MessageID:        "msg-dedupe-sess-fwd-1",
+	if !svc.relayStates.store(&relayForwardState{
+		Message:          domain.MessageRef{Topic: "dm", ID: "msg-dedupe-sess-fwd-1", Sender: "remote-recipient-www", Recipient: "some-sender"},
 		ReceiptForwardTo: forwardTarget,
 		RemainingTTL:     5,
+	}) {
+		t.Fatal("fixture: exact reverse-path relay state was not stored")
 	}
 	svc.sessions[forwardTarget] = &peerSession{
 		address:      forwardTarget,
@@ -1085,7 +1093,7 @@ func TestRelayDeliveryReceiptAcceptsOwnIdentity(t *testing.T) {
 	conn, _ := net.Pipe()
 	defer func() { _ = conn.Close() }()
 
-	svc.sentDMIDs.Add("msg-relay-2") // we sent this message; the delivered receipt is solicited
+	svc.sentDMIDs.Add(deliveryMessageRef(svc.ownMessageIdentity("msg-relay-2", "some-sender")).Key()) // we sent this message; the delivered receipt is solicited
 	svc.handleInboundRelayDeliveryReceipt(mustConnIDForTest(svc, conn), protocol.Frame{
 		Type:        "relay_delivery_receipt",
 		ID:          "msg-relay-2",

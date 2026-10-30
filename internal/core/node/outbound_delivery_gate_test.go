@@ -275,7 +275,7 @@ func TestConfirmationStampsTheRowAndRefusalWritesNothing(t *testing.T) {
 		ID: target, Topic: "dm", Sender: svc.Address(), Recipient: "peer-a",
 		CreatedAt: time.Now().UTC(),
 	}
-	markOnDisk(t, outbox, target)
+	markOnDisk(t, outbox, envelopeRef(envelope))
 	first := time.Now().UTC()
 	svc.deliveryMu.Lock()
 	svc.registerAwaitingDeliveredLocked(envelope, first, false)
@@ -290,10 +290,10 @@ func TestConfirmationStampsTheRowAndRefusalWritesNothing(t *testing.T) {
 		netcore.SendBufferFull)
 	svc.WaitBackground()
 
-	if outbox.marked(target) {
+	if outbox.marked(envelopeRef(envelope)) {
 		t.Error("the refusal put the never-emitted claim back; the bit is supposed to be monotone")
 	}
-	if outbox.onWireStamped(target) {
+	if outbox.onWireStamped(envelopeRef(envelope)) {
 		t.Fatal("a refused frame was stamped as on the wire")
 	}
 
@@ -309,10 +309,10 @@ func TestConfirmationStampsTheRowAndRefusalWritesNothing(t *testing.T) {
 	// would buy nothing.
 	svc.WaitBackground()
 
-	if !outbox.onWireStamped(target) {
+	if !outbox.onWireStamped(envelopeRef(envelope)) {
 		t.Fatal("the confirmation did not stamp the row")
 	}
-	if outbox.marked(target) {
+	if outbox.marked(envelopeRef(envelope)) {
 		t.Error("a stale refusal un-said a confirmation; that is the race the two-bit model removes")
 	}
 }
@@ -352,7 +352,7 @@ func TestRecalledMessageIsRefusedEvenWithNoRetryEntry(t *testing.T) {
 		t.Fatalf("CancelOutgoingDelivery: %v", err)
 	}
 	svc.deliveryMu.RLock()
-	_, stillTracked := svc.awaitingDelivered[target]
+	_, stillTracked := svc.awaitingDelivered[messageIdentityOf(envelope)]
 	svc.deliveryMu.RUnlock()
 	if stillTracked {
 		t.Fatal("the recall left the retry entry in place, so this test proves nothing")
@@ -429,7 +429,7 @@ func TestPeerReturningWakesAnUnconfirmedDelivery(t *testing.T) {
 
 	now := time.Now().UTC()
 	svc.deliveryMu.Lock()
-	svc.awaitingDelivered["dispatched-nobody-took-it"] = &deliveryRetryEntry{
+	svc.awaitingDelivered[svc.ownMessageIdentity("dispatched-nobody-took-it", recipientID.Address)] = &deliveryRetryEntry{
 		Envelope: protocol.Envelope{
 			ID: "dispatched-nobody-took-it", Topic: "dm",
 			Sender: svc.Address(), Recipient: recipientID.Address,
@@ -443,7 +443,7 @@ func TestPeerReturningWakesAnUnconfirmedDelivery(t *testing.T) {
 	svc.noteRecipientWentOffline(recipient)
 
 	svc.deliveryMu.RLock()
-	reopened := svc.awaitingDelivered["dispatched-nobody-took-it"].Hold
+	reopened := svc.awaitingDelivered[svc.ownMessageIdentity("dispatched-nobody-took-it", recipientID.Address)].Hold
 	svc.deliveryMu.RUnlock()
 	if reopened != holdUnreachable {
 		t.Fatalf("hold = %d after the recipient left, want holdUnreachable so their return can wake it", reopened)

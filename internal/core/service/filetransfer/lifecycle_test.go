@@ -54,29 +54,32 @@ func newTestTransferManager(t *testing.T, downloadDir string, cc *commandCollect
 		send = cc.send
 	}
 	return &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		downloadDir:  downloadDir,
 		sendCommand:  send,
 		stopCh:       make(chan struct{}),
 	}
 }
 
-// testReceiverMapping creates a receiverFileMapping pre-filled with common
+// testReceiverMapping injects a legacy-path receiverFileMapping pre-filled with common
 // test defaults including a custom chunkSize. Unlike the production
 // constructor newReceiverMapping, this helper does not set ContentType and
 // accepts chunkSize directly. Caller should override fields as needed
 // before inserting into the manager's receiverMaps.
-func testReceiverMapping(fileID domain.FileID, sender domain.PeerIdentity, fileHash string, fileName string, fileSize uint64, chunkSize uint32, state receiverState) *receiverFileMapping {
+func testReceiverMapping(m *Manager, fileID domain.FileID, sender domain.PeerIdentity, fileHash string, fileName string, fileSize uint64, chunkSize uint32, state receiverState) *receiverFileMapping {
 	return &receiverFileMapping{
-		FileID:    fileID,
-		FileHash:  fileHash,
-		FileName:  fileName,
-		FileSize:  fileSize,
-		Sender:    sender,
-		State:     state,
-		ChunkSize: chunkSize,
-		CreatedAt: time.Now(),
+		Ref:         ftIncomingRef(m, fileID, sender),
+		PartialPath: partialDownloadPath(m.downloadDir, fileID),
+		FileID:      fileID,
+		FileHash:    fileHash,
+		FileName:    fileName,
+		FileSize:    fileSize,
+		Sender:      sender,
+		State:       state,
+		ChunkSize:   chunkSize,
+		CreatedAt:   time.Now(),
 	}
 }
 
@@ -105,11 +108,11 @@ func TestReceiverFullLifecycle(t *testing.T) {
 	fileHash := hashContent(fileContent)
 
 	// Step 1: Register incoming file — state should be Available.
-	m.receiverMaps[fileID] = testReceiverMapping(
+	m.receiverMaps[ftIncomingRef(m, fileID, sender)] = testReceiverMapping(m,
 		fileID, sender, fileHash, "lifecycle.txt", fileSize, 1024, receiverAvailable,
 	)
 
-	mapping := m.receiverMaps[fileID]
+	mapping := m.receiverMaps[ftIncomingRef(m, fileID, sender)]
 	if mapping.State != receiverAvailable {
 		t.Fatalf("initial state = %s, want %s", mapping.State, receiverAvailable)
 	}
@@ -133,7 +136,7 @@ func TestReceiverFullLifecycle(t *testing.T) {
 		Epoch:  1,
 	})
 
-	mapping = m.receiverMaps[fileID]
+	mapping = m.receiverMaps[ftIncomingRef(m, fileID, sender)]
 	if mapping.State != receiverWaitingAck {
 		t.Fatalf("after download complete, state = %s, want %s", mapping.State, receiverWaitingAck)
 	}
@@ -164,7 +167,7 @@ func TestReceiverFullLifecycle(t *testing.T) {
 		Epoch:  1,
 	})
 
-	mapping = m.receiverMaps[fileID]
+	mapping = m.receiverMaps[ftIncomingRef(m, fileID, sender)]
 	if mapping.State != receiverCompleted {
 		t.Fatalf("after ack, state = %s, want %s", mapping.State, receiverCompleted)
 	}
@@ -194,7 +197,7 @@ func TestEOFByBytesReceivedEqualsFileSize(t *testing.T) {
 		fileContent[i] = byte(i % 256)
 	}
 
-	m.receiverMaps[fileID] = testReceiverMapping(
+	m.receiverMaps[ftIncomingRef(m, fileID, sender)] = testReceiverMapping(m,
 		fileID, sender, hashContent(fileContent), "aligned.bin",
 		uint64(len(fileContent)), chunkSize, receiverDownloading,
 	)
@@ -207,7 +210,7 @@ func TestEOFByBytesReceivedEqualsFileSize(t *testing.T) {
 		Data:   base64.RawURLEncoding.EncodeToString(chunk1),
 	})
 
-	mapping := m.receiverMaps[fileID]
+	mapping := m.receiverMaps[ftIncomingRef(m, fileID, sender)]
 	if mapping.State != receiverDownloading {
 		t.Fatalf("after chunk 1, state = %s, want downloading", mapping.State)
 	}
@@ -223,7 +226,7 @@ func TestEOFByBytesReceivedEqualsFileSize(t *testing.T) {
 		Data:   base64.RawURLEncoding.EncodeToString(chunk2),
 	})
 
-	mapping = m.receiverMaps[fileID]
+	mapping = m.receiverMaps[ftIncomingRef(m, fileID, sender)]
 	// Should have transitioned through verifying → waitingAck.
 	if mapping.State != receiverWaitingAck {
 		t.Errorf("after final chunk, state = %s, want %s", mapping.State, receiverWaitingAck)
@@ -245,7 +248,7 @@ func TestSHA256VerificationPass(t *testing.T) {
 	sender := domaintest.ID("hash-pass-sender")
 	fileID := domain.FileID("hash-pass-test")
 
-	m.receiverMaps[fileID] = testReceiverMapping(
+	m.receiverMaps[ftIncomingRef(m, fileID, sender)] = testReceiverMapping(m,
 		fileID, sender, hashContent(fileContent), "hashtest.dat",
 		uint64(len(fileContent)), 4096, receiverDownloading,
 	)
@@ -257,7 +260,7 @@ func TestSHA256VerificationPass(t *testing.T) {
 		Data:   encoded,
 	})
 
-	mapping := m.receiverMaps[fileID]
+	mapping := m.receiverMaps[ftIncomingRef(m, fileID, sender)]
 	if mapping.State != receiverWaitingAck {
 		t.Errorf("state = %s, want %s (hash verification should pass)", mapping.State, receiverWaitingAck)
 	}
@@ -277,7 +280,7 @@ func TestSHA256VerificationFail(t *testing.T) {
 	sender := domaintest.ID("hash-fail-sender")
 	fileID := domain.FileID("hash-fail-test")
 
-	m.receiverMaps[fileID] = testReceiverMapping(
+	m.receiverMaps[ftIncomingRef(m, fileID, sender)] = testReceiverMapping(m,
 		fileID, sender, wrongHash, "tampered.dat",
 		uint64(len(fileContent)), 4096, receiverDownloading,
 	)
@@ -289,7 +292,7 @@ func TestSHA256VerificationFail(t *testing.T) {
 		Data:   encoded,
 	})
 
-	mapping := m.receiverMaps[fileID]
+	mapping := m.receiverMaps[ftIncomingRef(m, fileID, sender)]
 	if mapping.State != receiverFailed {
 		t.Errorf("state = %s, want %s (hash mismatch should fail)", mapping.State, receiverFailed)
 	}
@@ -378,7 +381,7 @@ func TestStaleChunkResponseDoesNotCorruptPartialFile(t *testing.T) {
 		fileContent[i] = byte(i % 256)
 	}
 
-	m.receiverMaps[fileID] = testReceiverMapping(
+	m.receiverMaps[ftIncomingRef(m, fileID, sender)] = testReceiverMapping(m,
 		fileID, sender, hashContent(fileContent), "stale.bin",
 		uint64(len(fileContent)), chunkSize, receiverDownloading,
 	)
@@ -391,7 +394,7 @@ func TestStaleChunkResponseDoesNotCorruptPartialFile(t *testing.T) {
 		Data:   base64.RawURLEncoding.EncodeToString(chunk0),
 	})
 
-	mapping := m.receiverMaps[fileID]
+	mapping := m.receiverMaps[ftIncomingRef(m, fileID, sender)]
 	if mapping.NextOffset != uint64(chunkSize) {
 		t.Fatalf("NextOffset = %d, want %d", mapping.NextOffset, chunkSize)
 	}
@@ -417,7 +420,7 @@ func TestStaleChunkResponseDoesNotCorruptPartialFile(t *testing.T) {
 	})
 
 	// NextOffset must NOT have changed (stale response was ignored).
-	mapping = m.receiverMaps[fileID]
+	mapping = m.receiverMaps[ftIncomingRef(m, fileID, sender)]
 	if mapping.NextOffset != uint64(chunkSize) {
 		t.Errorf("NextOffset changed to %d after stale response, want %d", mapping.NextOffset, chunkSize)
 	}
@@ -450,8 +453,9 @@ func TestReceiverRetryBackoffOnStall(t *testing.T) {
 
 	var retryCount int
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		downloadDir:  t.TempDir(),
 		sendCommand: func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error {
 			if payload.Command == domain.FileActionChunkReq {
@@ -464,10 +468,10 @@ func TestReceiverRetryBackoffOnStall(t *testing.T) {
 	}
 
 	stalledTime := time.Now().Add(-2 * chunkRequestStallTimeout)
-	m.receiverMaps[fileID] = testReceiverMapping(
+	m.receiverMaps[ftIncomingRef(m, fileID, sender)] = testReceiverMapping(m,
 		fileID, sender, "somehash", "stall.bin", 100000, 1024, receiverDownloading,
 	)
-	m.receiverMaps[fileID].LastChunkAt = stalledTime
+	m.receiverMaps[ftIncomingRef(m, fileID, sender)].LastChunkAt = stalledTime
 
 	// Run tickReceiverMappings to simulate the background loop detecting the stall.
 	m.tickReceiverMappings()
@@ -476,7 +480,7 @@ func TestReceiverRetryBackoffOnStall(t *testing.T) {
 		t.Error("expected retry after stall timeout, but no chunk_request was sent")
 	}
 
-	mapping := m.receiverMaps[fileID]
+	mapping := m.receiverMaps[ftIncomingRef(m, fileID, sender)]
 	if mapping.ChunkRetries != 1 {
 		t.Errorf("ChunkRetries = %d, want 1", mapping.ChunkRetries)
 	}
@@ -517,8 +521,8 @@ func TestCancelDuringVerifyDoesNotResurrectTransfer(t *testing.T) {
 
 	// Register in verifying state (simulates the first half of
 	// onDownloadComplete having already run).
-	rm := testReceiverMapping(fileID, sender, hash, "test.bin", uint64(len(content)), 1024, receiverVerifying)
-	m.receiverMaps[fileID] = rm
+	rm := testReceiverMapping(m, fileID, sender, hash, "test.bin", uint64(len(content)), 1024, receiverVerifying)
+	m.receiverMaps[ftIncomingRef(m, fileID, sender)] = rm
 
 	// Cancel while "verification is running" (lock is not held by verifier).
 	if err := m.CancelDownload(fileID); err != nil {
@@ -535,11 +539,11 @@ func TestCancelDuringVerifyDoesNotResurrectTransfer(t *testing.T) {
 	// here to honour the contract; the early-return branch makes the
 	// lock functionally inert in this case.
 	rm.writePartialMu.Lock()
-	m.onDownloadComplete(fileID, partialPath, hash, sender)
+	m.onDownloadComplete(ftIncomingRef(m, fileID, sender), partialPath, hash, sender)
 	rm.writePartialMu.Unlock()
 
 	m.mu.Lock()
-	finalState := m.receiverMaps[fileID].State
+	finalState := m.receiverMaps[ftIncomingRef(m, fileID, sender)].State
 	m.mu.Unlock()
 
 	if finalState == receiverWaitingAck {
@@ -593,9 +597,9 @@ func TestFinalizeVerifiedDownloadStaleGenerationDoesNotResurrect(t *testing.T) {
 	// generation), but Verifier A still holds a captured generation from
 	// the previous attempt and a completedPath pointing to the stale blob.
 	newGeneration := uint64(42)
-	rm := testReceiverMapping(fileID, sender, newHash, "file.bin", uint64(len(newContent)), 1024, receiverVerifying)
+	rm := testReceiverMapping(m, fileID, sender, newHash, "file.bin", uint64(len(newContent)), 1024, receiverVerifying)
 	rm.Generation = newGeneration
-	m.receiverMaps[fileID] = rm
+	m.receiverMaps[ftIncomingRef(m, fileID, sender)] = rm
 
 	// Write the stale blob to the final downloads location, as if Verifier A
 	// had already completed os.Rename of its own .part file.
@@ -614,7 +618,7 @@ func TestFinalizeVerifiedDownloadStaleGenerationDoesNotResurrect(t *testing.T) {
 	// Verifier A's captured generation from before the cancel+restart race.
 	staleGeneration := newGeneration - 10
 
-	proceeded := m.finalizeVerifiedDownload(fileID, rm, staleGeneration, staleCompletedPath, staleInfo, sender)
+	proceeded := m.finalizeVerifiedDownload(ftIncomingRef(m, fileID, sender), rm, staleGeneration, staleCompletedPath, staleInfo, sender)
 	if proceeded {
 		t.Fatal("finalizeVerifiedDownload must return false when generation is stale")
 	}
@@ -683,9 +687,9 @@ func TestFinalizeVerifiedDownloadAfterCleanupAborts(t *testing.T) {
 	hash := hashContent(content)
 
 	generation := uint64(11)
-	rm := testReceiverMapping(fileID, sender, hash, "file.bin", uint64(len(content)), 1024, receiverVerifying)
+	rm := testReceiverMapping(m, fileID, sender, hash, "file.bin", uint64(len(content)), 1024, receiverVerifying)
 	rm.Generation = generation
-	m.receiverMaps[fileID] = rm
+	m.receiverMaps[ftIncomingRef(m, fileID, sender)] = rm
 
 	completedPath := completedDownloadPath(downloadDir, "file.bin", hash)
 	if err := os.MkdirAll(filepath.Dir(completedPath), 0o700); err != nil {
@@ -728,7 +732,7 @@ func TestFinalizeVerifiedDownloadAfterCleanupAborts(t *testing.T) {
 	// Finalize with the captured (now-stale) pointer + generation.
 	// MUST return false: the entry is gone from receiverMaps so the
 	// map-ownership check fires regardless of state/generation.
-	if m.finalizeVerifiedDownload(fileID, rm, generation, completedPath, completedInfo, sender) {
+	if m.finalizeVerifiedDownload(ftIncomingRef(m, fileID, sender), rm, generation, completedPath, completedInfo, sender) {
 		t.Fatal("finalizeVerifiedDownload must return false when receiverMaps entry was deleted by cleanup")
 	}
 
@@ -767,9 +771,9 @@ func TestFinalizeVerifiedDownloadAfterReplaceMappingAborts(t *testing.T) {
 
 	// Old mapping — verifier captures this pointer.
 	staleGeneration := uint64(7)
-	staleMapping := testReceiverMapping(fileID, sender, hash, "file.bin", uint64(len(content)), 1024, receiverVerifying)
+	staleMapping := testReceiverMapping(m, fileID, sender, hash, "file.bin", uint64(len(content)), 1024, receiverVerifying)
 	staleMapping.Generation = staleGeneration
-	m.receiverMaps[fileID] = staleMapping
+	m.receiverMaps[ftIncomingRef(m, fileID, sender)] = staleMapping
 
 	completedPath := completedDownloadPath(downloadDir, "file.bin", hash)
 	if err := os.MkdirAll(filepath.Dir(completedPath), 0o700); err != nil {
@@ -787,9 +791,9 @@ func TestFinalizeVerifiedDownloadAfterReplaceMappingAborts(t *testing.T) {
 	m.CleanupTransferByMessageID(fileID)
 	// ...and a fresh register-receive for the same FileID populates
 	// a NEW mapping pointer with the SAME Generation by coincidence.
-	freshMapping := testReceiverMapping(fileID, sender, hash, "file.bin", uint64(len(content)), 1024, receiverVerifying)
+	freshMapping := testReceiverMapping(m, fileID, sender, hash, "file.bin", uint64(len(content)), 1024, receiverVerifying)
 	freshMapping.Generation = staleGeneration
-	m.receiverMaps[fileID] = freshMapping
+	m.receiverMaps[ftIncomingRef(m, fileID, sender)] = freshMapping
 
 	// Recreate the renamed file so the verifier's cleanup branch
 	// has something to consider unlinking.
@@ -799,14 +803,14 @@ func TestFinalizeVerifiedDownloadAfterReplaceMappingAborts(t *testing.T) {
 
 	// Finalize with the OLD pointer + matching state/generation.
 	// MUST return false because receiverMaps[fileID] != staleMapping.
-	if m.finalizeVerifiedDownload(fileID, staleMapping, staleGeneration, completedPath, completedInfo, sender) {
+	if m.finalizeVerifiedDownload(ftIncomingRef(m, fileID, sender), staleMapping, staleGeneration, completedPath, completedInfo, sender) {
 		t.Fatal("finalizeVerifiedDownload must return false when receiverMaps[fileID] points at a different (replaced) mapping")
 	}
 
 	// The fresh mapping must NOT have been moved to waiting_ack
 	// by the stale verifier.
 	m.mu.Lock()
-	current := m.receiverMaps[fileID]
+	current := m.receiverMaps[ftIncomingRef(m, fileID, sender)]
 	freshState := current.State
 	m.mu.Unlock()
 	if freshState != receiverVerifying {
@@ -833,9 +837,9 @@ func TestFinalizeVerifiedDownloadHappyPath(t *testing.T) {
 	hash := hashContent(content)
 
 	generation := uint64(7)
-	rm := testReceiverMapping(fileID, sender, hash, "file.bin", uint64(len(content)), 1024, receiverVerifying)
+	rm := testReceiverMapping(m, fileID, sender, hash, "file.bin", uint64(len(content)), 1024, receiverVerifying)
 	rm.Generation = generation
-	m.receiverMaps[fileID] = rm
+	m.receiverMaps[ftIncomingRef(m, fileID, sender)] = rm
 
 	completedPath := completedDownloadPath(downloadDir, "file.bin", hash)
 	if err := os.MkdirAll(filepath.Dir(completedPath), 0o700); err != nil {
@@ -849,7 +853,7 @@ func TestFinalizeVerifiedDownloadHappyPath(t *testing.T) {
 		t.Fatalf("lstat completed blob: %v", err)
 	}
 
-	if !m.finalizeVerifiedDownload(fileID, rm, generation, completedPath, completedInfo, sender) {
+	if !m.finalizeVerifiedDownload(ftIncomingRef(m, fileID, sender), rm, generation, completedPath, completedInfo, sender) {
 		t.Fatal("finalizeVerifiedDownload must return true on matching generation")
 	}
 
@@ -896,10 +900,10 @@ func TestFinalizeVerifiedDownloadFiresCompletionCallback(t *testing.T) {
 	hash := hashContent(content)
 
 	generation := uint64(11)
-	rm := testReceiverMapping(fileID, sender, hash, "doc.bin", uint64(len(content)), 1024, receiverVerifying)
+	rm := testReceiverMapping(m, fileID, sender, hash, "doc.bin", uint64(len(content)), 1024, receiverVerifying)
 	rm.Generation = generation
 	rm.ContentType = "application/octet-stream"
-	m.receiverMaps[fileID] = rm
+	m.receiverMaps[ftIncomingRef(m, fileID, sender)] = rm
 
 	completedPath := completedDownloadPath(downloadDir, "doc.bin", hash)
 	if err := os.MkdirAll(filepath.Dir(completedPath), 0o700); err != nil {
@@ -913,7 +917,7 @@ func TestFinalizeVerifiedDownloadFiresCompletionCallback(t *testing.T) {
 		t.Fatalf("lstat completed blob: %v", err)
 	}
 
-	if !m.finalizeVerifiedDownload(fileID, rm, generation, completedPath, completedInfo, sender) {
+	if !m.finalizeVerifiedDownload(ftIncomingRef(m, fileID, sender), rm, generation, completedPath, completedInfo, sender) {
 		t.Fatal("finalizeVerifiedDownload must return true on matching generation")
 	}
 
@@ -962,9 +966,9 @@ func TestFinalizeVerifiedDownloadDoesNotFireCallbackOnStaleGeneration(t *testing
 
 	const currentGeneration uint64 = 9
 	const staleGeneration uint64 = 7
-	rm := testReceiverMapping(fileID, sender, hash, "stale.bin", uint64(len(content)), 1024, receiverVerifying)
+	rm := testReceiverMapping(m, fileID, sender, hash, "stale.bin", uint64(len(content)), 1024, receiverVerifying)
 	rm.Generation = currentGeneration
-	m.receiverMaps[fileID] = rm
+	m.receiverMaps[ftIncomingRef(m, fileID, sender)] = rm
 
 	completedPath := completedDownloadPath(downloadDir, "stale.bin", hash)
 	if err := os.MkdirAll(filepath.Dir(completedPath), 0o700); err != nil {
@@ -978,7 +982,7 @@ func TestFinalizeVerifiedDownloadDoesNotFireCallbackOnStaleGeneration(t *testing
 		t.Fatalf("lstat completed blob: %v", err)
 	}
 
-	if m.finalizeVerifiedDownload(fileID, rm, staleGeneration, completedPath, completedInfo, sender) {
+	if m.finalizeVerifiedDownload(ftIncomingRef(m, fileID, sender), rm, staleGeneration, completedPath, completedInfo, sender) {
 		t.Fatal("finalizeVerifiedDownload must return false when generation is stale")
 	}
 	if calls != 0 {
@@ -1056,15 +1060,15 @@ func TestFinalizeVerifiedDownloadStaleCleanupPreservesNewAttemptFile(t *testing.
 	// The mapping reflects the NEW attempt — verifying with a fresh
 	// generation. The stale verifier holds an older generation.
 	newGeneration := uint64(77)
-	rm := testReceiverMapping(fileID, sender, hash, fileName, uint64(len(newContent)), 1024, receiverVerifying)
+	rm := testReceiverMapping(m, fileID, sender, hash, fileName, uint64(len(newContent)), 1024, receiverVerifying)
 	rm.Generation = newGeneration
-	m.receiverMaps[fileID] = rm
+	m.receiverMaps[ftIncomingRef(m, fileID, sender)] = rm
 
 	staleGeneration := newGeneration - 5
 
 	// Step 3: Verifier A enters finalize with its own pre-rename Fstat
 	// identity — the stale branch must NOT delete the new attempt's file.
-	proceeded := m.finalizeVerifiedDownload(fileID, rm, staleGeneration, completedPath, staleVerifierInfo, sender)
+	proceeded := m.finalizeVerifiedDownload(ftIncomingRef(m, fileID, sender), rm, staleGeneration, completedPath, staleVerifierInfo, sender)
 	if proceeded {
 		t.Fatal("finalizeVerifiedDownload must return false when generation is stale")
 	}
@@ -1099,22 +1103,26 @@ func TestFinalizeVerifiedDownloadStaleCleanupPreservesNewAttemptFile(t *testing.
 // markReceiverFailed blindly set receiverFailed regardless of current state.
 func TestMarkReceiverFailedRespectsCancel(t *testing.T) {
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		stopCh:       make(chan struct{}),
 	}
 
 	fileID := domain.FileID("fail-cancel-race")
+	sender := domaintest.ID("sender-identity-1234567890abcd")
 	rm := &receiverFileMapping{
-		FileID:    fileID,
-		FileHash:  "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
-		FileName:  "test.bin",
-		FileSize:  1024,
-		Sender:    domaintest.ID("sender-identity-1234567890abcd"),
-		State:     receiverAvailable, // cancelled
-		CreatedAt: time.Now(),
+		Ref:         ftIncomingRef(m, fileID, sender),
+		PartialPath: partialDownloadPath(m.downloadDir, fileID),
+		FileID:      fileID,
+		FileHash:    "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+		FileName:    "test.bin",
+		FileSize:    1024,
+		Sender:      sender,
+		State:       receiverAvailable, // cancelled
+		CreatedAt:   time.Now(),
 	}
-	m.receiverMaps[fileID] = rm
+	m.receiverMaps[ftIncomingRef(m, fileID, sender)] = rm
 
 	// markReceiverFailed expects receiverVerifying, but state is available.
 	// Generation 0 matches the zero-value mapping — the guard rejects on state mismatch.

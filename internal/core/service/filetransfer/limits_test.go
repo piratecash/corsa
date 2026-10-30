@@ -31,8 +31,9 @@ func TestPrepareFileAnnounceRejectsWhenFull(t *testing.T) {
 	store.mu.Unlock()
 
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		store:        store,
 		stopCh:       make(chan struct{}),
 	}
@@ -42,7 +43,8 @@ func TestPrepareFileAnnounceRejectsWhenFull(t *testing.T) {
 	// Fill up to the limit.
 	for i := 0; i < maxFileMappings; i++ {
 		fid := domain.FileID(fmt.Sprintf("file-%d", i))
-		m.senderMaps[fid] = &senderFileMapping{
+		m.senderMaps[ftOutgoingRef(m, fid, receiver)] = &senderFileMapping{
+			Ref:       ftOutgoingRef(m, fid, receiver),
 			FileID:    fid,
 			FileHash:  fmt.Sprintf("hash-%d", i),
 			FileName:  fmt.Sprintf("file-%d.bin", i),
@@ -79,8 +81,9 @@ func TestPrepareFileAnnounceAndCommitSucceeds(t *testing.T) {
 	store.mu.Unlock()
 
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		store:        store,
 		mappingsPath: "",
 		stopCh:       make(chan struct{}),
@@ -106,7 +109,7 @@ func TestPrepareFileAnnounceAndCommitSucceeds(t *testing.T) {
 		t.Fatalf("Commit: %v", err)
 	}
 
-	sm, ok := m.senderMaps[fileID]
+	sm, ok := m.senderMaps[ftOutgoingRef(m, fileID, recipient)]
 	if !ok {
 		t.Fatal("sender mapping should exist after Commit")
 	}
@@ -132,8 +135,9 @@ func TestPrepareFileAnnounceAndCommitSucceeds(t *testing.T) {
 func TestPrepareFileAnnounceRejectsNilStore(t *testing.T) {
 	t.Parallel()
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		stopCh:       make(chan struct{}),
 		// store intentionally nil
 	}
@@ -163,17 +167,20 @@ func TestPrepareFileAnnounceRejectsAtQuota(t *testing.T) {
 	store.mu.Unlock()
 
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		store:        store,
 		stopCh:       make(chan struct{}),
 	}
 
 	for i := 0; i < maxFileMappings; i++ {
 		fid := domain.FileID(fmt.Sprintf("fill-%d", i))
-		m.senderMaps[fid] = &senderFileMapping{
-			FileID: fid,
-			State:  senderAnnounced,
+		m.senderMaps[ftOutgoingRef(m, fid, domaintest.ID("file-transfer-bookkeeping-peer"))] = &senderFileMapping{
+			Ref:       ftOutgoingRef(m, fid, domaintest.ID("file-transfer-bookkeeping-peer")),
+			Recipient: domaintest.ID("file-transfer-bookkeeping-peer"),
+			FileID:    fid,
+			State:     senderAnnounced,
 		}
 	}
 
@@ -202,8 +209,9 @@ func TestPrepareFileAnnounceSucceedsBelowQuota(t *testing.T) {
 	store.mu.Unlock()
 
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		store:        store,
 		stopCh:       make(chan struct{}),
 	}
@@ -250,8 +258,9 @@ func TestPrepareFileAnnounceCountsPendingAgainstQuota(t *testing.T) {
 	store.mu.Unlock()
 
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		store:        store,
 		stopCh:       make(chan struct{}),
 	}
@@ -259,9 +268,11 @@ func TestPrepareFileAnnounceCountsPendingAgainstQuota(t *testing.T) {
 	// Fill committed mappings to one below the limit.
 	for i := 0; i < maxFileMappings-1; i++ {
 		fid := domain.FileID(fmt.Sprintf("fill-%d", i))
-		m.senderMaps[fid] = &senderFileMapping{
-			FileID: fid,
-			State:  senderAnnounced,
+		m.senderMaps[ftOutgoingRef(m, fid, domaintest.ID("file-transfer-bookkeeping-peer"))] = &senderFileMapping{
+			Ref:       ftOutgoingRef(m, fid, domaintest.ID("file-transfer-bookkeeping-peer")),
+			Recipient: domaintest.ID("file-transfer-bookkeeping-peer"),
+			FileID:    fid,
+			State:     senderAnnounced,
 		}
 	}
 
@@ -317,8 +328,9 @@ func TestConcurrentPrepareFileAnnounceRespectsQuota(t *testing.T) {
 	store.mu.Unlock()
 
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		store:        store,
 		stopCh:       make(chan struct{}),
 	}
@@ -326,9 +338,11 @@ func TestConcurrentPrepareFileAnnounceRespectsQuota(t *testing.T) {
 	// Leave exactly 10 slots open.
 	for i := 0; i < maxFileMappings-10; i++ {
 		fid := domain.FileID(fmt.Sprintf("fill-%d", i))
-		m.senderMaps[fid] = &senderFileMapping{
-			FileID: fid,
-			State:  senderAnnounced,
+		m.senderMaps[ftOutgoingRef(m, fid, domaintest.ID("file-transfer-bookkeeping-peer"))] = &senderFileMapping{
+			Ref:       ftOutgoingRef(m, fid, domaintest.ID("file-transfer-bookkeeping-peer")),
+			Recipient: domaintest.ID("file-transfer-bookkeeping-peer"),
+			FileID:    fid,
+			State:     senderAnnounced,
 		}
 	}
 
@@ -400,8 +414,9 @@ func TestRollbackIdempotent(t *testing.T) {
 	store.mu.Unlock()
 
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		store:        store,
 		stopCh:       make(chan struct{}),
 	}
@@ -443,8 +458,9 @@ func TestRollbackIsNoOpAfterCommit(t *testing.T) {
 	store.mu.Unlock()
 
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		store:        store,
 		mappingsPath: "",
 		stopCh:       make(chan struct{}),
@@ -464,7 +480,7 @@ func TestRollbackIsNoOpAfterCommit(t *testing.T) {
 	// Rollback after Commit should be a no-op.
 	token.Rollback()
 
-	if _, ok := m.senderMaps[fileID]; !ok {
+	if _, ok := m.senderMaps[ftOutgoingRef(m, fileID, recipient)]; !ok {
 		t.Error("sender mapping should still exist after Rollback-after-Commit")
 	}
 }
@@ -491,8 +507,9 @@ func TestCommitReleasesPending(t *testing.T) {
 	store.mu.Unlock()
 
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		store:        store,
 		mappingsPath: "",
 		stopCh:       make(chan struct{}),
@@ -582,8 +599,9 @@ func TestCommitKeepsMappingOnPersistFailure(t *testing.T) {
 	}
 
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		store:        store,
 		mappingsPath: unwritablePath,
 		stopCh:       make(chan struct{}),
@@ -604,7 +622,7 @@ func TestCommitKeepsMappingOnPersistFailure(t *testing.T) {
 
 	// Sender mapping MUST exist in memory — the transfer is live.
 	m.mu.Lock()
-	mapping, ok := m.senderMaps[fileID]
+	mapping, ok := m.senderMaps[ftOutgoingRef(m, fileID, recipient)]
 	m.mu.Unlock()
 	if !ok {
 		t.Fatal("sender mapping must be kept in memory on persist failure")
@@ -625,7 +643,7 @@ func TestCommitKeepsMappingOnPersistFailure(t *testing.T) {
 	token.Rollback()
 
 	m.mu.Lock()
-	_, stillExists := m.senderMaps[fileID]
+	_, stillExists := m.senderMaps[ftOutgoingRef(m, fileID, recipient)]
 	m.mu.Unlock()
 	if !stillExists {
 		t.Fatal("Rollback must be no-op after Commit (even with persist failure)")
@@ -675,8 +693,9 @@ func TestPrepareFileAnnounceAtomicReservation(t *testing.T) {
 	store.mu.Unlock()
 
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		store:        store,
 		mappingsPath: "",
 		stopCh:       make(chan struct{}),
@@ -710,7 +729,7 @@ func TestPrepareFileAnnounceAtomicReservation(t *testing.T) {
 		t.Fatalf("Commit after concurrent Rollback: %v", err)
 	}
 
-	if _, ok := m.senderMaps[fileID]; !ok {
+	if _, ok := m.senderMaps[ftOutgoingRef(m, fileID, recipient)]; !ok {
 		t.Error("sender mapping should exist after successful Commit")
 	}
 }
@@ -730,8 +749,9 @@ func TestPrepareFileAnnounceRejectsDeletedFile(t *testing.T) {
 	// Do NOT create the file on disk — simulating post-Rollback deletion.
 
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		store:        store,
 		mappingsPath: "",
 		stopCh:       make(chan struct{}),
@@ -755,8 +775,9 @@ func TestPrepareFileAnnounceRejectsDeletedFile(t *testing.T) {
 // tombstoneTTL has passed.
 func TestTombstoneCleanupAfterTTL(t *testing.T) {
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		mappingsPath: "",
 		stopCh:       make(chan struct{}),
 	}
@@ -765,28 +786,36 @@ func TestTombstoneCleanupAfterTTL(t *testing.T) {
 	recentTime := time.Now().Add(-time.Hour)
 
 	// Expired tombstone — should be cleaned.
-	m.senderMaps["expired-tombstone"] = &senderFileMapping{
+	m.senderMaps[ftOutgoingRef(m, "expired-tombstone", domaintest.ID("file-transfer-bookkeeping-peer"))] = &senderFileMapping{
+		Ref:         ftOutgoingRef(m, "expired-tombstone", domaintest.ID("file-transfer-bookkeeping-peer")),
+		Recipient:   domaintest.ID("file-transfer-bookkeeping-peer"),
 		FileID:      "expired-tombstone",
 		State:       senderTombstone,
 		CompletedAt: expiredTime,
 	}
 
 	// Expired completed — should be cleaned.
-	m.senderMaps["expired-completed"] = &senderFileMapping{
+	m.senderMaps[ftOutgoingRef(m, "expired-completed", domaintest.ID("file-transfer-bookkeeping-peer"))] = &senderFileMapping{
+		Ref:         ftOutgoingRef(m, "expired-completed", domaintest.ID("file-transfer-bookkeeping-peer")),
+		Recipient:   domaintest.ID("file-transfer-bookkeeping-peer"),
 		FileID:      "expired-completed",
 		State:       senderCompleted,
 		CompletedAt: expiredTime,
 	}
 
 	// Recent tombstone — should NOT be cleaned.
-	m.senderMaps["recent-tombstone"] = &senderFileMapping{
+	m.senderMaps[ftOutgoingRef(m, "recent-tombstone", domaintest.ID("file-transfer-bookkeeping-peer"))] = &senderFileMapping{
+		Ref:         ftOutgoingRef(m, "recent-tombstone", domaintest.ID("file-transfer-bookkeeping-peer")),
+		Recipient:   domaintest.ID("file-transfer-bookkeeping-peer"),
 		FileID:      "recent-tombstone",
 		State:       senderTombstone,
 		CompletedAt: recentTime,
 	}
 
 	// Active mapping — should NOT be cleaned.
-	m.senderMaps["active-serving"] = &senderFileMapping{
+	m.senderMaps[ftOutgoingRef(m, "active-serving", domaintest.ID("file-transfer-bookkeeping-peer"))] = &senderFileMapping{
+		Ref:          ftOutgoingRef(m, "active-serving", domaintest.ID("file-transfer-bookkeeping-peer")),
+		Recipient:    domaintest.ID("file-transfer-bookkeeping-peer"),
 		FileID:       "active-serving",
 		State:        senderServing,
 		LastServedAt: time.Now(),
@@ -797,28 +826,40 @@ func TestTombstoneCleanupAfterTTL(t *testing.T) {
 	// leaves the attachment on disk with nothing able to name it: clearing that
 	// chat later erases the message and cannot erase the file. It goes with the
 	// message, not with a timer.
-	m.receiverMaps["expired-recv"] = &receiverFileMapping{
+	m.receiverMaps[ftIncomingRef(m, "expired-recv", domaintest.ID("file-transfer-bookkeeping-peer"))] = &receiverFileMapping{
+		Ref:         ftIncomingRef(m, "expired-recv", domaintest.ID("file-transfer-bookkeeping-peer")),
+		PartialPath: partialDownloadPath(m.downloadDir, "expired-recv"),
+		Sender:      domaintest.ID("file-transfer-bookkeeping-peer"),
 		FileID:      "expired-recv",
 		State:       receiverCompleted,
 		CompletedAt: expiredTime,
 	}
 
 	// Recent completed receiver — should NOT be cleaned.
-	m.receiverMaps["recent-recv"] = &receiverFileMapping{
+	m.receiverMaps[ftIncomingRef(m, "recent-recv", domaintest.ID("file-transfer-bookkeeping-peer"))] = &receiverFileMapping{
+		Ref:         ftIncomingRef(m, "recent-recv", domaintest.ID("file-transfer-bookkeeping-peer")),
+		PartialPath: partialDownloadPath(m.downloadDir, "recent-recv"),
+		Sender:      domaintest.ID("file-transfer-bookkeeping-peer"),
 		FileID:      "recent-recv",
 		State:       receiverCompleted,
 		CompletedAt: recentTime,
 	}
 
 	// Expired failed receiver — should be cleaned (same TTL as completed).
-	m.receiverMaps["expired-failed"] = &receiverFileMapping{
+	m.receiverMaps[ftIncomingRef(m, "expired-failed", domaintest.ID("file-transfer-bookkeeping-peer"))] = &receiverFileMapping{
+		Ref:         ftIncomingRef(m, "expired-failed", domaintest.ID("file-transfer-bookkeeping-peer")),
+		PartialPath: partialDownloadPath(m.downloadDir, "expired-failed"),
+		Sender:      domaintest.ID("file-transfer-bookkeeping-peer"),
 		FileID:      "expired-failed",
 		State:       receiverFailed,
 		CompletedAt: expiredTime,
 	}
 
 	// Recent failed receiver — should NOT be cleaned.
-	m.receiverMaps["recent-failed"] = &receiverFileMapping{
+	m.receiverMaps[ftIncomingRef(m, "recent-failed", domaintest.ID("file-transfer-bookkeeping-peer"))] = &receiverFileMapping{
+		Ref:         ftIncomingRef(m, "recent-failed", domaintest.ID("file-transfer-bookkeeping-peer")),
+		PartialPath: partialDownloadPath(m.downloadDir, "recent-failed"),
+		Sender:      domaintest.ID("file-transfer-bookkeeping-peer"),
 		FileID:      "recent-failed",
 		State:       receiverFailed,
 		CompletedAt: recentTime,
@@ -828,30 +869,30 @@ func TestTombstoneCleanupAfterTTL(t *testing.T) {
 	m.tickReceiverMappings()
 
 	// Verify expired entries are gone.
-	if _, ok := m.senderMaps["expired-tombstone"]; ok {
+	if _, ok := m.senderMaps[ftOutgoingRef(m, "expired-tombstone", domaintest.ID("file-transfer-bookkeeping-peer"))]; ok {
 		t.Error("expired tombstone should be removed")
 	}
-	if _, ok := m.senderMaps["expired-completed"]; ok {
+	if _, ok := m.senderMaps[ftOutgoingRef(m, "expired-completed", domaintest.ID("file-transfer-bookkeeping-peer"))]; ok {
 		t.Error("expired completed sender should be removed")
 	}
-	if _, ok := m.receiverMaps["expired-recv"]; !ok {
+	if _, ok := m.receiverMaps[ftIncomingRef(m, "expired-recv", domaintest.ID("file-transfer-bookkeeping-peer"))]; !ok {
 		t.Error("an old completed download lost the mapping that ties its message to the file")
 	}
-	if _, ok := m.receiverMaps["expired-failed"]; ok {
+	if _, ok := m.receiverMaps[ftIncomingRef(m, "expired-failed", domaintest.ID("file-transfer-bookkeeping-peer"))]; ok {
 		t.Error("expired failed receiver should be removed")
 	}
 
 	// Verify recent/active entries remain.
-	if _, ok := m.senderMaps["recent-tombstone"]; !ok {
+	if _, ok := m.senderMaps[ftOutgoingRef(m, "recent-tombstone", domaintest.ID("file-transfer-bookkeeping-peer"))]; !ok {
 		t.Error("recent tombstone should NOT be removed")
 	}
-	if _, ok := m.senderMaps["active-serving"]; !ok {
+	if _, ok := m.senderMaps[ftOutgoingRef(m, "active-serving", domaintest.ID("file-transfer-bookkeeping-peer"))]; !ok {
 		t.Error("active serving should NOT be removed")
 	}
-	if _, ok := m.receiverMaps["recent-recv"]; !ok {
+	if _, ok := m.receiverMaps[ftIncomingRef(m, "recent-recv", domaintest.ID("file-transfer-bookkeeping-peer"))]; !ok {
 		t.Error("recent completed receiver should NOT be removed")
 	}
-	if _, ok := m.receiverMaps["recent-failed"]; !ok {
+	if _, ok := m.receiverMaps[ftIncomingRef(m, "recent-failed", domaintest.ID("file-transfer-bookkeeping-peer"))]; !ok {
 		t.Error("recent failed receiver should NOT be removed")
 	}
 }
@@ -882,6 +923,7 @@ func TestTickSenderMappingsTombstoneTTLDoesNotReleaseRef(t *testing.T) {
 	store.mu.Unlock()
 
 	m := NewFileTransferManager(Config{
+		LocalID:     ftFixtureIdentity(),
 		Store:       store,
 		DownloadDir: dir,
 	})
@@ -894,7 +936,8 @@ func TestTickSenderMappingsTombstoneTTLDoesNotReleaseRef(t *testing.T) {
 	activeID := domain.FileID("active-serving")
 
 	m.mu.Lock()
-	m.senderMaps[tombstoneID] = &senderFileMapping{
+	m.senderMaps[ftOutgoingRef(m, tombstoneID, domaintest.ID("bob"))] = &senderFileMapping{
+		Ref:         ftOutgoingRef(m, tombstoneID, domaintest.ID("bob")),
 		FileID:      tombstoneID,
 		FileHash:    hash,
 		FileName:    "resurrected.txt",
@@ -903,7 +946,8 @@ func TestTickSenderMappingsTombstoneTTLDoesNotReleaseRef(t *testing.T) {
 		State:       senderTombstone,
 		CompletedAt: expiredTime,
 	}
-	m.senderMaps[activeID] = &senderFileMapping{
+	m.senderMaps[ftOutgoingRef(m, activeID, domaintest.ID("carol"))] = &senderFileMapping{
+		Ref:          ftOutgoingRef(m, activeID, domaintest.ID("carol")),
 		FileID:       activeID,
 		FileHash:     hash,
 		FileName:     "resurrected.txt",
@@ -918,8 +962,8 @@ func TestTickSenderMappingsTombstoneTTLDoesNotReleaseRef(t *testing.T) {
 
 	// Expired tombstone must be removed from the map.
 	m.mu.Lock()
-	_, tombstoneStillPresent := m.senderMaps[tombstoneID]
-	_, activeStillPresent := m.senderMaps[activeID]
+	_, tombstoneStillPresent := m.senderMaps[ftOutgoingRef(m, tombstoneID, domaintest.ID("bob"))]
+	_, activeStillPresent := m.senderMaps[ftOutgoingRef(m, activeID, domaintest.ID("carol"))]
 	m.mu.Unlock()
 
 	if tombstoneStillPresent {
@@ -966,6 +1010,7 @@ func TestTickSenderMappingsCompletedTTLReleasesRef(t *testing.T) {
 	store.mu.Unlock()
 
 	m := NewFileTransferManager(Config{
+		LocalID:     ftFixtureIdentity(),
 		Store:       store,
 		DownloadDir: dir,
 	})
@@ -974,7 +1019,8 @@ func TestTickSenderMappingsCompletedTTLReleasesRef(t *testing.T) {
 	completedID := domain.FileID("expired-completed")
 
 	m.mu.Lock()
-	m.senderMaps[completedID] = &senderFileMapping{
+	m.senderMaps[ftOutgoingRef(m, completedID, domaintest.ID("bob"))] = &senderFileMapping{
+		Ref:         ftOutgoingRef(m, completedID, domaintest.ID("bob")),
 		FileID:      completedID,
 		FileHash:    hash,
 		FileName:    "done.txt",
@@ -1016,8 +1062,9 @@ func TestTickSenderMappingsCompletedTTLReleasesRef(t *testing.T) {
 func TestTickSenderMappingsStallReclaimRestoresPreServeStateForReDownload(t *testing.T) {
 	t.Parallel()
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		stopCh:       make(chan struct{}),
 	}
 
@@ -1026,7 +1073,8 @@ func TestTickSenderMappingsStallReclaimRestoresPreServeStateForReDownload(t *tes
 	// PreServeState records that it was senderCompleted before the current
 	// chunk_request promoted it. LastServedAt is well beyond the stall
 	// timeout so tickSenderMappings will reclaim the slot.
-	m.senderMaps[fileID] = &senderFileMapping{
+	m.senderMaps[ftOutgoingRef(m, fileID, domaintest.ID("bob"))] = &senderFileMapping{
+		Ref:           ftOutgoingRef(m, fileID, domaintest.ID("bob")),
 		FileID:        fileID,
 		FileHash:      "aaaa1111bbbb2222cccc3333dddd4444eeee5555ffff6666aaaa1111bbbb2222",
 		FileName:      "photo.jpg",
@@ -1040,7 +1088,7 @@ func TestTickSenderMappingsStallReclaimRestoresPreServeStateForReDownload(t *tes
 
 	m.tickSenderMappings()
 
-	sm := m.senderMaps[fileID]
+	sm := m.senderMaps[ftOutgoingRef(m, fileID, domaintest.ID("bob"))]
 	if sm == nil {
 		t.Fatal("mapping must not be removed on reclaim")
 	}
@@ -1061,13 +1109,15 @@ func TestTickSenderMappingsStallReclaimRestoresPreServeStateForReDownload(t *tes
 func TestTickSenderMappingsStallReclaimFirstDownloadFallsBackToAnnounced(t *testing.T) {
 	t.Parallel()
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		stopCh:       make(chan struct{}),
 	}
 
 	fileID := domain.FileID("first-download-stalled")
-	m.senderMaps[fileID] = &senderFileMapping{
+	m.senderMaps[ftOutgoingRef(m, fileID, domaintest.ID("bob"))] = &senderFileMapping{
+		Ref:           ftOutgoingRef(m, fileID, domaintest.ID("bob")),
 		FileID:        fileID,
 		FileHash:      "bbbb2222cccc3333dddd4444eeee5555ffff6666aaaa1111bbbb2222cccc3333",
 		FileName:      "first.bin",
@@ -1080,7 +1130,7 @@ func TestTickSenderMappingsStallReclaimFirstDownloadFallsBackToAnnounced(t *test
 
 	m.tickSenderMappings()
 
-	sm := m.senderMaps[fileID]
+	sm := m.senderMaps[ftOutgoingRef(m, fileID, domaintest.ID("bob"))]
 	if sm == nil {
 		t.Fatal("mapping must not be removed on reclaim")
 	}
@@ -1100,13 +1150,15 @@ func TestTickSenderMappingsStallReclaimFirstDownloadFallsBackToAnnounced(t *test
 func TestTickSenderMappingsStallReclaimEmptyPreServeStateDefaultsToAnnounced(t *testing.T) {
 	t.Parallel()
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		stopCh:       make(chan struct{}),
 	}
 
 	fileID := domain.FileID("legacy-stalled")
-	m.senderMaps[fileID] = &senderFileMapping{
+	m.senderMaps[ftOutgoingRef(m, fileID, domaintest.ID("bob"))] = &senderFileMapping{
+		Ref:       ftOutgoingRef(m, fileID, domaintest.ID("bob")),
 		FileID:    fileID,
 		FileHash:  "cccc3333dddd4444eeee5555ffff6666aaaa1111bbbb2222cccc3333dddd4444",
 		FileName:  "legacy.bin",
@@ -1119,7 +1171,7 @@ func TestTickSenderMappingsStallReclaimEmptyPreServeStateDefaultsToAnnounced(t *
 
 	m.tickSenderMappings()
 
-	sm := m.senderMaps[fileID]
+	sm := m.senderMaps[ftOutgoingRef(m, fileID, domaintest.ID("bob"))]
 	if sm.State != senderAnnounced {
 		t.Errorf("State = %s, want senderAnnounced (legacy fallback)", sm.State)
 	}
@@ -1143,17 +1195,20 @@ func TestCommitDuplicateFileIDRejected(t *testing.T) {
 	store.mu.Unlock()
 
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		store:        store,
 		mappingsPath: "",
 		stopCh:       make(chan struct{}),
 	}
 
 	fileID := domain.FileID("dup-file-id")
-	m.senderMaps[fileID] = &senderFileMapping{
-		FileID: fileID,
-		State:  senderAnnounced,
+	m.senderMaps[ftOutgoingRef(m, fileID, domaintest.ID("receiver"))] = &senderFileMapping{
+		Ref:       ftOutgoingRef(m, fileID, domaintest.ID("receiver")),
+		Recipient: domaintest.ID("receiver"),
+		FileID:    fileID,
+		State:     senderAnnounced,
 	}
 
 	token, err := m.PrepareFileAnnounce(hash, "name.bin", "application/octet-stream", 1000)
@@ -1173,15 +1228,17 @@ func TestCommitDuplicateFileIDRejected(t *testing.T) {
 func TestHandleChunkRequestRejectsNilStore(t *testing.T) {
 	t.Parallel()
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		stopCh:       make(chan struct{}),
 		// store intentionally nil
 	}
 
 	fileID := domain.FileID("persisted-sender")
 	recipient := domaintest.ID("recipient-1234567890abcdef")
-	m.senderMaps[fileID] = &senderFileMapping{
+	m.senderMaps[ftOutgoingRef(m, fileID, recipient)] = &senderFileMapping{
+		Ref:       ftOutgoingRef(m, fileID, recipient),
 		FileID:    fileID,
 		FileHash:  "abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234",
 		FileName:  "test.bin",
@@ -1202,8 +1259,9 @@ func TestHandleChunkRequestRejectsNilStore(t *testing.T) {
 // twice with the same FileID is a no-op (does not overwrite existing mapping).
 func TestRegisterFileReceiveIdempotent(t *testing.T) {
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		mappingsPath: "",
 		stopCh:       make(chan struct{}),
 	}
@@ -1218,17 +1276,17 @@ func TestRegisterFileReceiveIdempotent(t *testing.T) {
 	}
 
 	// Set state to downloading to track if it gets overwritten.
-	m.receiverMaps[fileID].State = receiverDownloading
+	m.receiverMaps[ftIncomingRef(m, fileID, sender)].State = receiverDownloading
 
 	// Second call should be a no-op.
 	if err := m.RegisterFileReceive(fileID, hash2, "file2.bin", "text/html", 9000, sender); err != nil {
 		t.Fatalf("second RegisterFileReceive (idempotent): %v", err)
 	}
 
-	if m.receiverMaps[fileID].FileHash != hash1 {
+	if m.receiverMaps[ftIncomingRef(m, fileID, sender)].FileHash != hash1 {
 		t.Error("second RegisterFileReceive should not overwrite existing mapping")
 	}
-	if m.receiverMaps[fileID].State != receiverDownloading {
+	if m.receiverMaps[ftIncomingRef(m, fileID, sender)].State != receiverDownloading {
 		t.Error("state should remain downloading")
 	}
 }
@@ -1237,8 +1295,9 @@ func TestRegisterFileReceiveIdempotent(t *testing.T) {
 // returns an error when the receiver mapping count reaches maxFileMappings.
 func TestMaxReceiverMappingsRejectsWhenFull(t *testing.T) {
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		mappingsPath: "",
 		stopCh:       make(chan struct{}),
 	}
@@ -1248,13 +1307,15 @@ func TestMaxReceiverMappingsRejectsWhenFull(t *testing.T) {
 	// Fill receiver maps to the limit.
 	for i := 0; i < maxFileMappings; i++ {
 		fid := domain.FileID(fmt.Sprintf("recv-%d", i))
-		m.receiverMaps[fid] = &receiverFileMapping{
-			FileID:   fid,
-			FileHash: fmt.Sprintf("%064x", i),
-			FileName: fmt.Sprintf("file-%d.bin", i),
-			FileSize: 1000,
-			Sender:   sender,
-			State:    receiverAvailable,
+		m.receiverMaps[ftIncomingRef(m, fid, sender)] = &receiverFileMapping{
+			Ref:         ftIncomingRef(m, fid, sender),
+			PartialPath: partialDownloadPath(m.downloadDir, fid),
+			FileID:      fid,
+			FileHash:    fmt.Sprintf("%064x", i),
+			FileName:    fmt.Sprintf("file-%d.bin", i),
+			FileSize:    1000,
+			Sender:      sender,
+			State:       receiverAvailable,
 		}
 	}
 
@@ -1270,7 +1331,7 @@ func TestMaxReceiverMappingsRejectsWhenFull(t *testing.T) {
 	}
 
 	// Verify the overflow entry was NOT added.
-	if _, exists := m.receiverMaps[domain.FileID("overflow-recv")]; exists {
+	if _, exists := m.receiverMaps[ftIncomingRef(m, domain.FileID("overflow-recv"), sender)]; exists {
 		t.Error("overflow mapping should not be inserted")
 	}
 }
@@ -1279,8 +1340,9 @@ func TestMaxReceiverMappingsRejectsWhenFull(t *testing.T) {
 // succeeds when below the limit.
 func TestMaxReceiverMappingsAllowsBelowLimit(t *testing.T) {
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		mappingsPath: "",
 		stopCh:       make(chan struct{}),
 	}
@@ -1297,7 +1359,7 @@ func TestMaxReceiverMappingsAllowsBelowLimit(t *testing.T) {
 		t.Fatalf("RegisterFileReceive should succeed below limit: %v", err)
 	}
 
-	rm, exists := m.receiverMaps[domain.FileID("new-recv")]
+	rm, exists := m.receiverMaps[ftIncomingRef(m, domain.FileID("new-recv"), sender)]
 	if !exists {
 		t.Fatal("receiver mapping should be created")
 	}
@@ -1311,8 +1373,9 @@ func TestMaxReceiverMappingsAllowsBelowLimit(t *testing.T) {
 func TestForceRetryChunkResetsRetryCounter(t *testing.T) {
 	var chunkRequested bool
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		sendCommand: func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error {
 			if payload.Command == domain.FileActionChunkReq {
 				chunkRequested = true
@@ -1325,7 +1388,9 @@ func TestForceRetryChunkResetsRetryCounter(t *testing.T) {
 	sender := domaintest.ID("sender-identity-1234567890abcd")
 	fileID := domain.FileID("force-retry-file")
 
-	m.receiverMaps[fileID] = &receiverFileMapping{
+	m.receiverMaps[ftIncomingRef(m, fileID, sender)] = &receiverFileMapping{
+		Ref:          ftIncomingRef(m, fileID, sender),
+		PartialPath:  partialDownloadPath(m.downloadDir, fileID),
 		FileID:       fileID,
 		Sender:       sender,
 		State:        receiverDownloading,
@@ -1343,8 +1408,8 @@ func TestForceRetryChunkResetsRetryCounter(t *testing.T) {
 		t.Error("force retry should send chunk_request immediately")
 	}
 
-	if m.receiverMaps[fileID].ChunkRetries != 0 {
-		t.Errorf("ChunkRetries = %d, want 0 (reset)", m.receiverMaps[fileID].ChunkRetries)
+	if m.receiverMaps[ftIncomingRef(m, fileID, sender)].ChunkRetries != 0 {
+		t.Errorf("ChunkRetries = %d, want 0 (reset)", m.receiverMaps[ftIncomingRef(m, fileID, sender)].ChunkRetries)
 	}
 }
 
@@ -1354,8 +1419,9 @@ func TestForceRetryChunkResetsRetryCounter(t *testing.T) {
 func TestForceRetryChunkRejectsUnreachableSender(t *testing.T) {
 	var chunkRequested bool
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		sendCommand: func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error {
 			if payload.Command == domain.FileActionChunkReq {
 				chunkRequested = true
@@ -1371,7 +1437,9 @@ func TestForceRetryChunkRejectsUnreachableSender(t *testing.T) {
 	sender := domaintest.ID("sender-identity-1234567890abcd")
 	fileID := domain.FileID("force-retry-unreachable")
 
-	m.receiverMaps[fileID] = &receiverFileMapping{
+	m.receiverMaps[ftIncomingRef(m, fileID, sender)] = &receiverFileMapping{
+		Ref:          ftIncomingRef(m, fileID, sender),
+		PartialPath:  partialDownloadPath(m.downloadDir, fileID),
 		FileID:       fileID,
 		Sender:       sender,
 		State:        receiverDownloading,
@@ -1389,8 +1457,8 @@ func TestForceRetryChunkRejectsUnreachableSender(t *testing.T) {
 		t.Error("no chunk_request should be sent to an unreachable sender")
 	}
 
-	if m.receiverMaps[fileID].State != receiverWaitingRoute {
-		t.Errorf("state = %s, want waiting_route", m.receiverMaps[fileID].State)
+	if m.receiverMaps[ftIncomingRef(m, fileID, sender)].State != receiverWaitingRoute {
+		t.Errorf("state = %s, want waiting_route", m.receiverMaps[ftIncomingRef(m, fileID, sender)].State)
 	}
 }
 
@@ -1399,8 +1467,9 @@ func TestForceRetryChunkRejectsUnreachableSender(t *testing.T) {
 func TestForceRetryChunkSucceedsWhenSenderReachable(t *testing.T) {
 	var chunkRequested bool
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		sendCommand: func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error {
 			if payload.Command == domain.FileActionChunkReq {
 				chunkRequested = true
@@ -1416,7 +1485,9 @@ func TestForceRetryChunkSucceedsWhenSenderReachable(t *testing.T) {
 	sender := domaintest.ID("sender-identity-1234567890abcd")
 	fileID := domain.FileID("force-retry-reachable")
 
-	m.receiverMaps[fileID] = &receiverFileMapping{
+	m.receiverMaps[ftIncomingRef(m, fileID, sender)] = &receiverFileMapping{
+		Ref:          ftIncomingRef(m, fileID, sender),
+		PartialPath:  partialDownloadPath(m.downloadDir, fileID),
 		FileID:       fileID,
 		Sender:       sender,
 		State:        receiverDownloading,
@@ -1434,8 +1505,8 @@ func TestForceRetryChunkSucceedsWhenSenderReachable(t *testing.T) {
 		t.Error("force retry should send chunk_request when sender is reachable")
 	}
 
-	if m.receiverMaps[fileID].ChunkRetries != 0 {
-		t.Errorf("ChunkRetries = %d, want 0 (reset)", m.receiverMaps[fileID].ChunkRetries)
+	if m.receiverMaps[ftIncomingRef(m, fileID, sender)].ChunkRetries != 0 {
+		t.Errorf("ChunkRetries = %d, want 0 (reset)", m.receiverMaps[ftIncomingRef(m, fileID, sender)].ChunkRetries)
 	}
 }
 
@@ -1445,8 +1516,9 @@ func TestForceRetryChunkSucceedsWhenSenderReachable(t *testing.T) {
 func TestForceRetryChunkResumesFromWaitingRoute(t *testing.T) {
 	var chunkRequested bool
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		sendCommand: func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error {
 			if payload.Command == domain.FileActionChunkReq {
 				chunkRequested = true
@@ -1462,7 +1534,9 @@ func TestForceRetryChunkResumesFromWaitingRoute(t *testing.T) {
 	sender := domaintest.ID("sender-identity-1234567890abcd")
 	fileID := domain.FileID("waiting-route-resume")
 
-	m.receiverMaps[fileID] = &receiverFileMapping{
+	m.receiverMaps[ftIncomingRef(m, fileID, sender)] = &receiverFileMapping{
+		Ref:          ftIncomingRef(m, fileID, sender),
+		PartialPath:  partialDownloadPath(m.downloadDir, fileID),
 		FileID:       fileID,
 		Sender:       sender,
 		State:        receiverWaitingRoute,
@@ -1480,12 +1554,12 @@ func TestForceRetryChunkResumesFromWaitingRoute(t *testing.T) {
 		t.Error("force retry should send chunk_request after resuming from waiting_route")
 	}
 
-	if m.receiverMaps[fileID].State != receiverDownloading {
-		t.Errorf("state = %s, want downloading", m.receiverMaps[fileID].State)
+	if m.receiverMaps[ftIncomingRef(m, fileID, sender)].State != receiverDownloading {
+		t.Errorf("state = %s, want downloading", m.receiverMaps[ftIncomingRef(m, fileID, sender)].State)
 	}
 
-	if m.receiverMaps[fileID].ChunkRetries != 0 {
-		t.Errorf("ChunkRetries = %d, want 0 (reset on resume)", m.receiverMaps[fileID].ChunkRetries)
+	if m.receiverMaps[ftIncomingRef(m, fileID, sender)].ChunkRetries != 0 {
+		t.Errorf("ChunkRetries = %d, want 0 (reset on resume)", m.receiverMaps[ftIncomingRef(m, fileID, sender)].ChunkRetries)
 	}
 }
 
@@ -1495,8 +1569,9 @@ func TestForceRetryChunkResumesFromWaitingRoute(t *testing.T) {
 func TestForceRetryChunkWaitingRouteSenderStillOffline(t *testing.T) {
 	var chunkRequested bool
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		sendCommand: func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error {
 			if payload.Command == domain.FileActionChunkReq {
 				chunkRequested = true
@@ -1512,12 +1587,14 @@ func TestForceRetryChunkWaitingRouteSenderStillOffline(t *testing.T) {
 	sender := domaintest.ID("sender-identity-1234567890abcd")
 	fileID := domain.FileID("waiting-route-still-offline")
 
-	m.receiverMaps[fileID] = &receiverFileMapping{
-		FileID:     fileID,
-		Sender:     sender,
-		State:      receiverWaitingRoute,
-		NextOffset: 80000,
-		ChunkSize:  domain.DefaultChunkSize,
+	m.receiverMaps[ftIncomingRef(m, fileID, sender)] = &receiverFileMapping{
+		Ref:         ftIncomingRef(m, fileID, sender),
+		PartialPath: partialDownloadPath(m.downloadDir, fileID),
+		FileID:      fileID,
+		Sender:      sender,
+		State:       receiverWaitingRoute,
+		NextOffset:  80000,
+		ChunkSize:   domain.DefaultChunkSize,
 	}
 
 	err := m.ForceRetryChunk(fileID)
@@ -1529,8 +1606,8 @@ func TestForceRetryChunkWaitingRouteSenderStillOffline(t *testing.T) {
 		t.Error("no chunk_request should be sent to an unreachable sender")
 	}
 
-	if m.receiverMaps[fileID].State != receiverWaitingRoute {
-		t.Errorf("state = %s, want waiting_route (unchanged)", m.receiverMaps[fileID].State)
+	if m.receiverMaps[ftIncomingRef(m, fileID, sender)].State != receiverWaitingRoute {
+		t.Errorf("state = %s, want waiting_route (unchanged)", m.receiverMaps[ftIncomingRef(m, fileID, sender)].State)
 	}
 }
 
@@ -1543,8 +1620,9 @@ func TestStartDownloadIgnoresOtherActiveDownloads(t *testing.T) {
 
 	var chunkRequested bool
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		downloadDir:  dir,
 		sendCommand: func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error {
 			if payload.Command == domain.FileActionChunkReq {
@@ -1561,12 +1639,14 @@ func TestStartDownloadIgnoresOtherActiveDownloads(t *testing.T) {
 	// Several already-active downloads must NOT block a fresh start.
 	for i := 0; i < 4; i++ {
 		fid := domain.FileID(fmt.Sprintf("active-download-%d", i))
-		m.receiverMaps[fid] = &receiverFileMapping{
-			FileID:     fid,
-			Sender:     domaintest.ID(fmt.Sprintf("sender-%d", i)),
-			State:      receiverDownloading,
-			NextOffset: 0,
-			ChunkSize:  domain.DefaultChunkSize,
+		m.receiverMaps[ftIncomingRef(m, fid, domaintest.ID(fmt.Sprintf("sender-%d", i)))] = &receiverFileMapping{
+			Ref:         ftIncomingRef(m, fid, domaintest.ID(fmt.Sprintf("sender-%d", i))),
+			PartialPath: partialDownloadPath(m.downloadDir, fid),
+			FileID:      fid,
+			Sender:      domaintest.ID(fmt.Sprintf("sender-%d", i)),
+			State:       receiverDownloading,
+			NextOffset:  0,
+			ChunkSize:   domain.DefaultChunkSize,
 		}
 	}
 
@@ -1574,15 +1654,17 @@ func TestStartDownloadIgnoresOtherActiveDownloads(t *testing.T) {
 	fileID := domain.FileID("fresh-start-with-others-active")
 	validHash := "b1b2b3b4b5b6b7b8c1c2c3c4c5c6c7c8d1d2d3d4d5d6d7d8e1e2e3e4e5e6e7e8"
 
-	m.receiverMaps[fileID] = &receiverFileMapping{
-		FileID:    fileID,
-		FileHash:  validHash,
-		FileName:  "fresh.bin",
-		FileSize:  100000,
-		Sender:    sender,
-		State:     receiverAvailable,
-		ChunkSize: domain.DefaultChunkSize,
-		CreatedAt: time.Now(),
+	m.receiverMaps[ftIncomingRef(m, fileID, sender)] = &receiverFileMapping{
+		Ref:         ftIncomingRef(m, fileID, sender),
+		PartialPath: partialDownloadPath(m.downloadDir, fileID),
+		FileID:      fileID,
+		FileHash:    validHash,
+		FileName:    "fresh.bin",
+		FileSize:    100000,
+		Sender:      sender,
+		State:       receiverAvailable,
+		ChunkSize:   domain.DefaultChunkSize,
+		CreatedAt:   time.Now(),
 	}
 
 	if err := m.StartDownload(fileID); err != nil {
@@ -1593,8 +1675,8 @@ func TestStartDownloadIgnoresOtherActiveDownloads(t *testing.T) {
 		t.Error("StartDownload should send chunk_request even when other downloads are active")
 	}
 
-	if m.receiverMaps[fileID].State != receiverDownloading {
-		t.Errorf("state = %s, want downloading", m.receiverMaps[fileID].State)
+	if m.receiverMaps[ftIncomingRef(m, fileID, sender)].State != receiverDownloading {
+		t.Errorf("state = %s, want downloading", m.receiverMaps[ftIncomingRef(m, fileID, sender)].State)
 	}
 }
 
@@ -1605,8 +1687,9 @@ func TestStartDownloadIgnoresOtherActiveDownloads(t *testing.T) {
 func TestForceRetryChunkWaitingRouteIgnoresOtherActiveDownloads(t *testing.T) {
 	var chunkRequested bool
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		sendCommand: func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error {
 			if payload.Command == domain.FileActionChunkReq {
 				chunkRequested = true
@@ -1624,22 +1707,26 @@ func TestForceRetryChunkWaitingRouteIgnoresOtherActiveDownloads(t *testing.T) {
 	// Several already-active downloads must NOT block resume.
 	for i := 0; i < 4; i++ {
 		fid := domain.FileID(fmt.Sprintf("active-download-%d", i))
-		m.receiverMaps[fid] = &receiverFileMapping{
-			FileID:     fid,
-			Sender:     domaintest.ID(fmt.Sprintf("sender-%d", i)),
-			State:      receiverDownloading,
-			NextOffset: 0,
-			ChunkSize:  domain.DefaultChunkSize,
+		m.receiverMaps[ftIncomingRef(m, fid, domaintest.ID(fmt.Sprintf("sender-%d", i)))] = &receiverFileMapping{
+			Ref:         ftIncomingRef(m, fid, domaintest.ID(fmt.Sprintf("sender-%d", i))),
+			PartialPath: partialDownloadPath(m.downloadDir, fid),
+			FileID:      fid,
+			Sender:      domaintest.ID(fmt.Sprintf("sender-%d", i)),
+			State:       receiverDownloading,
+			NextOffset:  0,
+			ChunkSize:   domain.DefaultChunkSize,
 		}
 	}
 
 	fileID := domain.FileID("waiting-route-resume")
-	m.receiverMaps[fileID] = &receiverFileMapping{
-		FileID:     fileID,
-		Sender:     sender,
-		State:      receiverWaitingRoute,
-		NextOffset: 50000,
-		ChunkSize:  domain.DefaultChunkSize,
+	m.receiverMaps[ftIncomingRef(m, fileID, sender)] = &receiverFileMapping{
+		Ref:         ftIncomingRef(m, fileID, sender),
+		PartialPath: partialDownloadPath(m.downloadDir, fileID),
+		FileID:      fileID,
+		Sender:      sender,
+		State:       receiverWaitingRoute,
+		NextOffset:  50000,
+		ChunkSize:   domain.DefaultChunkSize,
 	}
 
 	if err := m.ForceRetryChunk(fileID); err != nil {
@@ -1650,8 +1737,8 @@ func TestForceRetryChunkWaitingRouteIgnoresOtherActiveDownloads(t *testing.T) {
 		t.Error("force retry should send chunk_request even when other downloads are active")
 	}
 
-	if m.receiverMaps[fileID].State != receiverDownloading {
-		t.Errorf("state = %s, want downloading", m.receiverMaps[fileID].State)
+	if m.receiverMaps[ftIncomingRef(m, fileID, sender)].State != receiverDownloading {
+		t.Errorf("state = %s, want downloading", m.receiverMaps[ftIncomingRef(m, fileID, sender)].State)
 	}
 }
 
@@ -1659,8 +1746,9 @@ func TestForceRetryChunkWaitingRouteIgnoresOtherActiveDownloads(t *testing.T) {
 // rejects transfers in states other than downloading or waiting_route.
 func TestForceRetryChunkRejectsIncompatibleState(t *testing.T) {
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		stopCh:       make(chan struct{}),
 	}
 
@@ -1674,10 +1762,12 @@ func TestForceRetryChunkRejectsIncompatibleState(t *testing.T) {
 
 	for _, state := range incompatible {
 		fid := domain.FileID("state-" + string(state))
-		m.receiverMaps[fid] = &receiverFileMapping{
-			FileID: fid,
-			Sender: domaintest.ID("sender"),
-			State:  state,
+		m.receiverMaps[ftIncomingRef(m, fid, domaintest.ID("sender"))] = &receiverFileMapping{
+			Ref:         ftIncomingRef(m, fid, domaintest.ID("sender")),
+			PartialPath: partialDownloadPath(m.downloadDir, fid),
+			FileID:      fid,
+			Sender:      domaintest.ID("sender"),
+			State:       state,
 		}
 
 		err := m.ForceRetryChunk(fid)
@@ -1703,8 +1793,9 @@ func TestForceRetryChunkRollsBackOnSendFailureFromWaitingRoute(t *testing.T) {
 	}
 
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		downloadDir:  downloadDir,
 		sendCommand: func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error {
 			return fmt.Errorf("simulated send failure")
@@ -1717,7 +1808,9 @@ func TestForceRetryChunkRollsBackOnSendFailureFromWaitingRoute(t *testing.T) {
 
 	sender := domaintest.ID("sender-identity-1234567890abcd")
 
-	m.receiverMaps[fileID] = &receiverFileMapping{
+	m.receiverMaps[ftIncomingRef(m, fileID, sender)] = &receiverFileMapping{
+		Ref:           ftIncomingRef(m, fileID, sender),
+		PartialPath:   partialDownloadPath(m.downloadDir, fileID),
 		FileID:        fileID,
 		Sender:        sender,
 		State:         receiverWaitingRoute,
@@ -1732,7 +1825,7 @@ func TestForceRetryChunkRollsBackOnSendFailureFromWaitingRoute(t *testing.T) {
 		t.Fatal("ForceRetryChunk should fail when send fails")
 	}
 
-	rm := m.receiverMaps[fileID]
+	rm := m.receiverMaps[ftIncomingRef(m, fileID, sender)]
 	if rm.State != receiverWaitingRoute {
 		t.Errorf("state = %s, want waiting_route (rolled back)", rm.State)
 	}
@@ -1746,8 +1839,9 @@ func TestForceRetryChunkRollsBackOnSendFailureFromWaitingRoute(t *testing.T) {
 // the state stays downloading (it was already downloading before).
 func TestForceRetryChunkRollsBackOnSendFailureFromDownloading(t *testing.T) {
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		sendCommand: func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error {
 			return fmt.Errorf("simulated send failure")
 		},
@@ -1760,7 +1854,9 @@ func TestForceRetryChunkRollsBackOnSendFailureFromDownloading(t *testing.T) {
 	sender := domaintest.ID("sender-identity-1234567890abcd")
 	fileID := domain.FileID("rollback-downloading")
 
-	m.receiverMaps[fileID] = &receiverFileMapping{
+	m.receiverMaps[ftIncomingRef(m, fileID, sender)] = &receiverFileMapping{
+		Ref:           ftIncomingRef(m, fileID, sender),
+		PartialPath:   partialDownloadPath(m.downloadDir, fileID),
 		FileID:        fileID,
 		Sender:        sender,
 		State:         receiverDownloading,
@@ -1774,7 +1870,7 @@ func TestForceRetryChunkRollsBackOnSendFailureFromDownloading(t *testing.T) {
 		t.Fatal("ForceRetryChunk should fail when send fails")
 	}
 
-	rm := m.receiverMaps[fileID]
+	rm := m.receiverMaps[ftIncomingRef(m, fileID, sender)]
 	if rm.State != receiverDownloading {
 		t.Errorf("state = %s, want downloading (was already downloading)", rm.State)
 	}
@@ -1791,8 +1887,9 @@ func TestForceRetryChunkRollsBackOnSendFailureFromDownloading(t *testing.T) {
 // appeared in the UI for a rejected announce.
 func TestRejectedReceiverMappingNotDownloadable(t *testing.T) {
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		mappingsPath: "",
 		stopCh:       make(chan struct{}),
 	}
@@ -1802,13 +1899,15 @@ func TestRejectedReceiverMappingNotDownloadable(t *testing.T) {
 	// Fill receiver maps to the limit so the next registration is rejected.
 	for i := 0; i < maxFileMappings; i++ {
 		fid := domain.FileID(fmt.Sprintf("fill-%d", i))
-		m.receiverMaps[fid] = &receiverFileMapping{
-			FileID:   fid,
-			FileHash: fmt.Sprintf("%064x", i),
-			FileName: fmt.Sprintf("file-%d.bin", i),
-			FileSize: 1000,
-			Sender:   sender,
-			State:    receiverAvailable,
+		m.receiverMaps[ftIncomingRef(m, fid, sender)] = &receiverFileMapping{
+			Ref:         ftIncomingRef(m, fid, sender),
+			PartialPath: partialDownloadPath(m.downloadDir, fid),
+			FileID:      fid,
+			FileHash:    fmt.Sprintf("%064x", i),
+			FileName:    fmt.Sprintf("file-%d.bin", i),
+			FileSize:    1000,
+			Sender:      sender,
+			State:       receiverAvailable,
 		}
 	}
 
@@ -1860,8 +1959,9 @@ func TestCompletedSenderMappingsDoNotBlockQuota(t *testing.T) {
 	store.mu.Unlock()
 
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		store:        store,
 		stopCh:       make(chan struct{}),
 	}
@@ -1876,7 +1976,8 @@ func TestCompletedSenderMappingsDoNotBlockQuota(t *testing.T) {
 		if i%2 == 0 {
 			state = senderTombstone
 		}
-		m.senderMaps[fid] = &senderFileMapping{
+		m.senderMaps[ftOutgoingRef(m, fid, receiver)] = &senderFileMapping{
+			Ref:         ftOutgoingRef(m, fid, receiver),
 			FileID:      fid,
 			FileHash:    fmt.Sprintf("hash-%d", i),
 			FileName:    fmt.Sprintf("file-%d.bin", i),
@@ -1899,7 +2000,8 @@ func TestCompletedSenderMappingsDoNotBlockQuota(t *testing.T) {
 	// Verify that active mappings DO block when at capacity.
 	for i := 0; i < maxFileMappings; i++ {
 		fid := domain.FileID(fmt.Sprintf("active-%d", i))
-		m.senderMaps[fid] = &senderFileMapping{
+		m.senderMaps[ftOutgoingRef(m, fid, receiver)] = &senderFileMapping{
+			Ref:       ftOutgoingRef(m, fid, receiver),
 			FileID:    fid,
 			FileHash:  fmt.Sprintf("ahash-%d", i),
 			FileName:  fmt.Sprintf("afile-%d.bin", i),
@@ -1919,12 +2021,19 @@ func TestCompletedSenderMappingsDoNotBlockQuota(t *testing.T) {
 // TestActiveSenderCountLocked verifies that the helper counts only
 // announced and serving states, ignoring completed and tombstone.
 func TestActiveSenderCountLocked(t *testing.T) {
+	owner := ftFixtureIdentity()
+	peer := domaintest.ID("active-sender-count-peer")
+	aRef := domain.MessageRef{Topic: "dm", ID: "a", Sender: owner.Address, Recipient: peer.String()}
+	sRef := domain.MessageRef{Topic: "dm", ID: "s", Sender: owner.Address, Recipient: peer.String()}
+	cRef := domain.MessageRef{Topic: "dm", ID: "c", Sender: owner.Address, Recipient: peer.String()}
+	tRef := domain.MessageRef{Topic: "dm", ID: "t", Sender: owner.Address, Recipient: peer.String()}
 	m := &Manager{
-		senderMaps: map[domain.FileID]*senderFileMapping{
-			"a": {State: senderAnnounced},
-			"s": {State: senderServing},
-			"c": {State: senderCompleted},
-			"t": {State: senderTombstone},
+		localID: owner,
+		senderMaps: map[domain.MessageRef]*senderFileMapping{
+			aRef: {Ref: aRef, FileID: "a", Recipient: peer, State: senderAnnounced},
+			sRef: {Ref: sRef, FileID: "s", Recipient: peer, State: senderServing},
+			cRef: {Ref: cRef, FileID: "c", Recipient: peer, State: senderCompleted},
+			tRef: {Ref: tRef, FileID: "t", Recipient: peer, State: senderTombstone},
 		},
 		stopCh: make(chan struct{}),
 	}
@@ -1943,8 +2052,9 @@ func TestActiveSenderCountLocked(t *testing.T) {
 // maxFileMappings quota for incoming file announces.
 func TestFailedReceiverMappingsDoNotBlockQuota(t *testing.T) {
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		mappingsPath: "",
 		stopCh:       make(chan struct{}),
 	}
@@ -1959,7 +2069,9 @@ func TestFailedReceiverMappingsDoNotBlockQuota(t *testing.T) {
 		if i%2 == 0 {
 			state = receiverFailed
 		}
-		m.receiverMaps[fid] = &receiverFileMapping{
+		m.receiverMaps[ftIncomingRef(m, fid, sender)] = &receiverFileMapping{
+			Ref:         ftIncomingRef(m, fid, sender),
+			PartialPath: partialDownloadPath(m.downloadDir, fid),
 			FileID:      fid,
 			FileHash:    fmt.Sprintf("%064x", i),
 			FileName:    fmt.Sprintf("file-%d.bin", i),
@@ -1985,13 +2097,15 @@ func TestFailedReceiverMappingsDoNotBlockQuota(t *testing.T) {
 	// Verify that active mappings DO block when at capacity.
 	for i := 0; i < maxFileMappings; i++ {
 		fid := domain.FileID(fmt.Sprintf("active-%d", i))
-		m.receiverMaps[fid] = &receiverFileMapping{
-			FileID:   fid,
-			FileHash: fmt.Sprintf("%064x", i+maxFileMappings),
-			FileName: fmt.Sprintf("active-%d.bin", i),
-			FileSize: 1000,
-			Sender:   sender,
-			State:    receiverAvailable,
+		m.receiverMaps[ftIncomingRef(m, fid, sender)] = &receiverFileMapping{
+			Ref:         ftIncomingRef(m, fid, sender),
+			PartialPath: partialDownloadPath(m.downloadDir, fid),
+			FileID:      fid,
+			FileHash:    fmt.Sprintf("%064x", i+maxFileMappings),
+			FileName:    fmt.Sprintf("active-%d.bin", i),
+			FileSize:    1000,
+			Sender:      sender,
+			State:       receiverAvailable,
 		}
 	}
 
@@ -2009,15 +2123,25 @@ func TestFailedReceiverMappingsDoNotBlockQuota(t *testing.T) {
 // TestActiveReceiverCountLocked verifies that the helper counts only
 // non-terminal states, ignoring completed and failed.
 func TestActiveReceiverCountLocked(t *testing.T) {
+	owner := ftFixtureIdentity()
+	peer := domaintest.ID("active-receiver-count-peer")
+	availRef := domain.MessageRef{Topic: "dm", ID: "avail", Sender: peer.String(), Recipient: owner.Address}
+	dlRef := domain.MessageRef{Topic: "dm", ID: "dl", Sender: peer.String(), Recipient: owner.Address}
+	verifyRef := domain.MessageRef{Topic: "dm", ID: "verify", Sender: peer.String(), Recipient: owner.Address}
+	wackRef := domain.MessageRef{Topic: "dm", ID: "wack", Sender: peer.String(), Recipient: owner.Address}
+	wrouteRef := domain.MessageRef{Topic: "dm", ID: "wroute", Sender: peer.String(), Recipient: owner.Address}
+	doneRef := domain.MessageRef{Topic: "dm", ID: "done", Sender: peer.String(), Recipient: owner.Address}
+	failedRef := domain.MessageRef{Topic: "dm", ID: "failed", Sender: peer.String(), Recipient: owner.Address}
 	m := &Manager{
-		receiverMaps: map[domain.FileID]*receiverFileMapping{
-			"avail":  {State: receiverAvailable},
-			"dl":     {State: receiverDownloading},
-			"verify": {State: receiverVerifying},
-			"wack":   {State: receiverWaitingAck},
-			"wroute": {State: receiverWaitingRoute},
-			"done":   {State: receiverCompleted},
-			"failed": {State: receiverFailed},
+		localID: owner,
+		receiverMaps: map[domain.MessageRef]*receiverFileMapping{
+			availRef:  {Ref: availRef, FileID: "avail", Sender: peer, State: receiverAvailable},
+			dlRef:     {Ref: dlRef, FileID: "dl", Sender: peer, State: receiverDownloading},
+			verifyRef: {Ref: verifyRef, FileID: "verify", Sender: peer, State: receiverVerifying},
+			wackRef:   {Ref: wackRef, FileID: "wack", Sender: peer, State: receiverWaitingAck},
+			wrouteRef: {Ref: wrouteRef, FileID: "wroute", Sender: peer, State: receiverWaitingRoute},
+			doneRef:   {Ref: doneRef, FileID: "done", Sender: peer, State: receiverCompleted},
+			failedRef: {Ref: failedRef, FileID: "failed", Sender: peer, State: receiverFailed},
 		},
 		stopCh: make(chan struct{}),
 	}
@@ -2035,8 +2159,9 @@ func TestActiveReceiverCountLocked(t *testing.T) {
 
 func TestRejectedReceiverMappingInvalidMetadata(t *testing.T) {
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		mappingsPath: "",
 		stopCh:       make(chan struct{}),
 	}
@@ -2074,8 +2199,9 @@ func TestRejectedReceiverMappingInvalidMetadata(t *testing.T) {
 // does not return sender mappings in completed or tombstone state.
 func TestTransfersSnapshotExcludesTerminalSenders(t *testing.T) {
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		mappingsPath: "",
 		stopCh:       make(chan struct{}),
 	}
@@ -2085,16 +2211,20 @@ func TestTransfersSnapshotExcludesTerminalSenders(t *testing.T) {
 
 	// One active (announced), one active (serving), one terminal (completed),
 	// one terminal (tombstone).
-	m.senderMaps[domain.FileID("s-announced")] = &senderFileMapping{
+	m.senderMaps[ftOutgoingRef(m, domain.FileID("s-announced"), peer)] = &senderFileMapping{
+		Ref:    ftOutgoingRef(m, domain.FileID("s-announced"), peer),
 		FileID: "s-announced", State: senderAnnounced, Recipient: peer, CreatedAt: now,
 	}
-	m.senderMaps[domain.FileID("s-serving")] = &senderFileMapping{
+	m.senderMaps[ftOutgoingRef(m, domain.FileID("s-serving"), peer)] = &senderFileMapping{
+		Ref:    ftOutgoingRef(m, domain.FileID("s-serving"), peer),
 		FileID: "s-serving", State: senderServing, Recipient: peer, CreatedAt: now,
 	}
-	m.senderMaps[domain.FileID("s-completed")] = &senderFileMapping{
+	m.senderMaps[ftOutgoingRef(m, domain.FileID("s-completed"), peer)] = &senderFileMapping{
+		Ref:    ftOutgoingRef(m, domain.FileID("s-completed"), peer),
 		FileID: "s-completed", State: senderCompleted, Recipient: peer, CreatedAt: now, CompletedAt: now,
 	}
-	m.senderMaps[domain.FileID("s-tombstone")] = &senderFileMapping{
+	m.senderMaps[ftOutgoingRef(m, domain.FileID("s-tombstone"), peer)] = &senderFileMapping{
+		Ref:    ftOutgoingRef(m, domain.FileID("s-tombstone"), peer),
 		FileID: "s-tombstone", State: senderTombstone, Recipient: peer, CreatedAt: now, CompletedAt: now,
 	}
 
@@ -2122,8 +2252,9 @@ func TestTransfersSnapshotExcludesTerminalSenders(t *testing.T) {
 // does not return receiver mappings in completed or failed state.
 func TestTransfersSnapshotExcludesTerminalReceivers(t *testing.T) {
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		mappingsPath: "",
 		stopCh:       make(chan struct{}),
 	}
@@ -2132,28 +2263,42 @@ func TestTransfersSnapshotExcludesTerminalReceivers(t *testing.T) {
 	sender := domaintest.ID("peer-snap-recv-1234567890abcd")
 
 	// Active states.
-	m.receiverMaps[domain.FileID("r-available")] = &receiverFileMapping{
-		FileID: "r-available", State: receiverAvailable, Sender: sender, CreatedAt: now,
+	m.receiverMaps[ftIncomingRef(m, domain.FileID("r-available"), sender)] = &receiverFileMapping{
+		Ref:         ftIncomingRef(m, domain.FileID("r-available"), sender),
+		PartialPath: partialDownloadPath(m.downloadDir, domain.FileID("r-available")),
+		FileID:      "r-available", State: receiverAvailable, Sender: sender, CreatedAt: now,
 	}
-	m.receiverMaps[domain.FileID("r-downloading")] = &receiverFileMapping{
-		FileID: "r-downloading", State: receiverDownloading, Sender: sender, CreatedAt: now,
+	m.receiverMaps[ftIncomingRef(m, domain.FileID("r-downloading"), sender)] = &receiverFileMapping{
+		Ref:         ftIncomingRef(m, domain.FileID("r-downloading"), sender),
+		PartialPath: partialDownloadPath(m.downloadDir, domain.FileID("r-downloading")),
+		FileID:      "r-downloading", State: receiverDownloading, Sender: sender, CreatedAt: now,
 	}
-	m.receiverMaps[domain.FileID("r-verifying")] = &receiverFileMapping{
-		FileID: "r-verifying", State: receiverVerifying, Sender: sender, CreatedAt: now,
+	m.receiverMaps[ftIncomingRef(m, domain.FileID("r-verifying"), sender)] = &receiverFileMapping{
+		Ref:         ftIncomingRef(m, domain.FileID("r-verifying"), sender),
+		PartialPath: partialDownloadPath(m.downloadDir, domain.FileID("r-verifying")),
+		FileID:      "r-verifying", State: receiverVerifying, Sender: sender, CreatedAt: now,
 	}
-	m.receiverMaps[domain.FileID("r-waiting-ack")] = &receiverFileMapping{
-		FileID: "r-waiting-ack", State: receiverWaitingAck, Sender: sender, CreatedAt: now,
+	m.receiverMaps[ftIncomingRef(m, domain.FileID("r-waiting-ack"), sender)] = &receiverFileMapping{
+		Ref:         ftIncomingRef(m, domain.FileID("r-waiting-ack"), sender),
+		PartialPath: partialDownloadPath(m.downloadDir, domain.FileID("r-waiting-ack")),
+		FileID:      "r-waiting-ack", State: receiverWaitingAck, Sender: sender, CreatedAt: now,
 	}
-	m.receiverMaps[domain.FileID("r-waiting-route")] = &receiverFileMapping{
-		FileID: "r-waiting-route", State: receiverWaitingRoute, Sender: sender, CreatedAt: now,
+	m.receiverMaps[ftIncomingRef(m, domain.FileID("r-waiting-route"), sender)] = &receiverFileMapping{
+		Ref:         ftIncomingRef(m, domain.FileID("r-waiting-route"), sender),
+		PartialPath: partialDownloadPath(m.downloadDir, domain.FileID("r-waiting-route")),
+		FileID:      "r-waiting-route", State: receiverWaitingRoute, Sender: sender, CreatedAt: now,
 	}
 
 	// Terminal states.
-	m.receiverMaps[domain.FileID("r-completed")] = &receiverFileMapping{
-		FileID: "r-completed", State: receiverCompleted, Sender: sender, CreatedAt: now, CompletedAt: now,
+	m.receiverMaps[ftIncomingRef(m, domain.FileID("r-completed"), sender)] = &receiverFileMapping{
+		Ref:         ftIncomingRef(m, domain.FileID("r-completed"), sender),
+		PartialPath: partialDownloadPath(m.downloadDir, domain.FileID("r-completed")),
+		FileID:      "r-completed", State: receiverCompleted, Sender: sender, CreatedAt: now, CompletedAt: now,
 	}
-	m.receiverMaps[domain.FileID("r-failed")] = &receiverFileMapping{
-		FileID: "r-failed", State: receiverFailed, Sender: sender, CreatedAt: now, CompletedAt: now,
+	m.receiverMaps[ftIncomingRef(m, domain.FileID("r-failed"), sender)] = &receiverFileMapping{
+		Ref:         ftIncomingRef(m, domain.FileID("r-failed"), sender),
+		PartialPath: partialDownloadPath(m.downloadDir, domain.FileID("r-failed")),
+		FileID:      "r-failed", State: receiverFailed, Sender: sender, CreatedAt: now, CompletedAt: now,
 	}
 
 	entries := m.TransfersSnapshot()
@@ -2172,8 +2317,9 @@ func TestTransfersSnapshotExcludesTerminalReceivers(t *testing.T) {
 // sender and receiver mappings are present in active and terminal states.
 func TestTransfersSnapshotMixedSenderReceiver(t *testing.T) {
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		mappingsPath: "",
 		stopCh:       make(chan struct{}),
 	}
@@ -2181,17 +2327,23 @@ func TestTransfersSnapshotMixedSenderReceiver(t *testing.T) {
 	now := time.Now()
 	peer := domaintest.ID("peer-snap-mixed-123456789abcde")
 
-	m.senderMaps[domain.FileID("s-active")] = &senderFileMapping{
+	m.senderMaps[ftOutgoingRef(m, domain.FileID("s-active"), peer)] = &senderFileMapping{
+		Ref:    ftOutgoingRef(m, domain.FileID("s-active"), peer),
 		FileID: "s-active", State: senderAnnounced, Recipient: peer, CreatedAt: now,
 	}
-	m.senderMaps[domain.FileID("s-done")] = &senderFileMapping{
+	m.senderMaps[ftOutgoingRef(m, domain.FileID("s-done"), peer)] = &senderFileMapping{
+		Ref:    ftOutgoingRef(m, domain.FileID("s-done"), peer),
 		FileID: "s-done", State: senderCompleted, Recipient: peer, CreatedAt: now, CompletedAt: now,
 	}
-	m.receiverMaps[domain.FileID("r-active")] = &receiverFileMapping{
-		FileID: "r-active", State: receiverDownloading, Sender: peer, CreatedAt: now,
+	m.receiverMaps[ftIncomingRef(m, domain.FileID("r-active"), peer)] = &receiverFileMapping{
+		Ref:         ftIncomingRef(m, domain.FileID("r-active"), peer),
+		PartialPath: partialDownloadPath(m.downloadDir, domain.FileID("r-active")),
+		FileID:      "r-active", State: receiverDownloading, Sender: peer, CreatedAt: now,
 	}
-	m.receiverMaps[domain.FileID("r-done")] = &receiverFileMapping{
-		FileID: "r-done", State: receiverFailed, Sender: peer, CreatedAt: now, CompletedAt: now,
+	m.receiverMaps[ftIncomingRef(m, domain.FileID("r-done"), peer)] = &receiverFileMapping{
+		Ref:         ftIncomingRef(m, domain.FileID("r-done"), peer),
+		PartialPath: partialDownloadPath(m.downloadDir, domain.FileID("r-done")),
+		FileID:      "r-done", State: receiverFailed, Sender: peer, CreatedAt: now, CompletedAt: now,
 	}
 
 	entries := m.TransfersSnapshot()
@@ -2212,8 +2364,9 @@ func TestTransfersSnapshotMixedSenderReceiver(t *testing.T) {
 // does not return sender mappings in completed or tombstone state.
 func TestMappingsSnapshotExcludesTerminalSenders(t *testing.T) {
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		mappingsPath: "",
 		stopCh:       make(chan struct{}),
 	}
@@ -2221,16 +2374,20 @@ func TestMappingsSnapshotExcludesTerminalSenders(t *testing.T) {
 	now := time.Now()
 	peer := domaintest.ID("peer-mapping-snap-12345678abcdef")
 
-	m.senderMaps[domain.FileID("m-announced")] = &senderFileMapping{
+	m.senderMaps[ftOutgoingRef(m, domain.FileID("m-announced"), peer)] = &senderFileMapping{
+		Ref:    ftOutgoingRef(m, domain.FileID("m-announced"), peer),
 		FileID: "m-announced", State: senderAnnounced, Recipient: peer, CreatedAt: now,
 	}
-	m.senderMaps[domain.FileID("m-serving")] = &senderFileMapping{
+	m.senderMaps[ftOutgoingRef(m, domain.FileID("m-serving"), peer)] = &senderFileMapping{
+		Ref:    ftOutgoingRef(m, domain.FileID("m-serving"), peer),
 		FileID: "m-serving", State: senderServing, Recipient: peer, CreatedAt: now,
 	}
-	m.senderMaps[domain.FileID("m-completed")] = &senderFileMapping{
+	m.senderMaps[ftOutgoingRef(m, domain.FileID("m-completed"), peer)] = &senderFileMapping{
+		Ref:    ftOutgoingRef(m, domain.FileID("m-completed"), peer),
 		FileID: "m-completed", State: senderCompleted, Recipient: peer, CreatedAt: now, CompletedAt: now,
 	}
-	m.senderMaps[domain.FileID("m-tombstone")] = &senderFileMapping{
+	m.senderMaps[ftOutgoingRef(m, domain.FileID("m-tombstone"), peer)] = &senderFileMapping{
+		Ref:    ftOutgoingRef(m, domain.FileID("m-tombstone"), peer),
 		FileID: "m-tombstone", State: senderTombstone, Recipient: peer, CreatedAt: now, CompletedAt: now,
 	}
 
@@ -2252,8 +2409,9 @@ func TestMappingsSnapshotExcludesTerminalSenders(t *testing.T) {
 // returns an empty slice when all mappings are in terminal states.
 func TestTransfersSnapshotEmptyWhenAllTerminal(t *testing.T) {
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		mappingsPath: "",
 		stopCh:       make(chan struct{}),
 	}
@@ -2261,17 +2419,23 @@ func TestTransfersSnapshotEmptyWhenAllTerminal(t *testing.T) {
 	now := time.Now()
 	peer := domaintest.ID("peer-all-terminal-12345678abcdef")
 
-	m.senderMaps[domain.FileID("t-completed")] = &senderFileMapping{
+	m.senderMaps[ftOutgoingRef(m, domain.FileID("t-completed"), peer)] = &senderFileMapping{
+		Ref:    ftOutgoingRef(m, domain.FileID("t-completed"), peer),
 		FileID: "t-completed", State: senderCompleted, Recipient: peer, CreatedAt: now, CompletedAt: now,
 	}
-	m.senderMaps[domain.FileID("t-tombstone")] = &senderFileMapping{
+	m.senderMaps[ftOutgoingRef(m, domain.FileID("t-tombstone"), peer)] = &senderFileMapping{
+		Ref:    ftOutgoingRef(m, domain.FileID("t-tombstone"), peer),
 		FileID: "t-tombstone", State: senderTombstone, Recipient: peer, CreatedAt: now, CompletedAt: now,
 	}
-	m.receiverMaps[domain.FileID("t-recv-done")] = &receiverFileMapping{
-		FileID: "t-recv-done", State: receiverCompleted, Sender: peer, CreatedAt: now, CompletedAt: now,
+	m.receiverMaps[ftIncomingRef(m, domain.FileID("t-recv-done"), peer)] = &receiverFileMapping{
+		Ref:         ftIncomingRef(m, domain.FileID("t-recv-done"), peer),
+		PartialPath: partialDownloadPath(m.downloadDir, domain.FileID("t-recv-done")),
+		FileID:      "t-recv-done", State: receiverCompleted, Sender: peer, CreatedAt: now, CompletedAt: now,
 	}
-	m.receiverMaps[domain.FileID("t-recv-fail")] = &receiverFileMapping{
-		FileID: "t-recv-fail", State: receiverFailed, Sender: peer, CreatedAt: now, CompletedAt: now,
+	m.receiverMaps[ftIncomingRef(m, domain.FileID("t-recv-fail"), peer)] = &receiverFileMapping{
+		Ref:         ftIncomingRef(m, domain.FileID("t-recv-fail"), peer),
+		PartialPath: partialDownloadPath(m.downloadDir, domain.FileID("t-recv-fail")),
+		FileID:      "t-recv-fail", State: receiverFailed, Sender: peer, CreatedAt: now, CompletedAt: now,
 	}
 
 	entries := m.TransfersSnapshot()
@@ -2287,8 +2451,9 @@ func TestTransfersSnapshotEmptyWhenAllTerminal(t *testing.T) {
 // state so the UI can render history rows alongside active transfers.
 func TestAllTransfersSnapshotIncludesTerminal(t *testing.T) {
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		mappingsPath: "",
 		stopCh:       make(chan struct{}),
 	}
@@ -2298,42 +2463,60 @@ func TestAllTransfersSnapshotIncludesTerminal(t *testing.T) {
 
 	// Senders covering every state class: announced (active),
 	// serving (active), completed (terminal), tombstone (terminal).
-	m.senderMaps[domain.FileID("s-announced")] = &senderFileMapping{
+	m.senderMaps[ftOutgoingRef(m, domain.FileID("s-announced"), peer)] = &senderFileMapping{
+		Ref:    ftOutgoingRef(m, domain.FileID("s-announced"), peer),
 		FileID: "s-announced", State: senderAnnounced, Recipient: peer, CreatedAt: now,
 	}
-	m.senderMaps[domain.FileID("s-serving")] = &senderFileMapping{
+	m.senderMaps[ftOutgoingRef(m, domain.FileID("s-serving"), peer)] = &senderFileMapping{
+		Ref:    ftOutgoingRef(m, domain.FileID("s-serving"), peer),
 		FileID: "s-serving", State: senderServing, Recipient: peer, CreatedAt: now,
 	}
-	m.senderMaps[domain.FileID("s-completed")] = &senderFileMapping{
+	m.senderMaps[ftOutgoingRef(m, domain.FileID("s-completed"), peer)] = &senderFileMapping{
+		Ref:    ftOutgoingRef(m, domain.FileID("s-completed"), peer),
 		FileID: "s-completed", State: senderCompleted, Recipient: peer, CreatedAt: now, CompletedAt: now,
 	}
-	m.senderMaps[domain.FileID("s-tombstone")] = &senderFileMapping{
+	m.senderMaps[ftOutgoingRef(m, domain.FileID("s-tombstone"), peer)] = &senderFileMapping{
+		Ref:    ftOutgoingRef(m, domain.FileID("s-tombstone"), peer),
 		FileID: "s-tombstone", State: senderTombstone, Recipient: peer, CreatedAt: now, CompletedAt: now,
 	}
 
 	// Receivers covering every state class: available (active),
 	// downloading (active), verifying (active), waitingAck (active),
 	// waitingRoute (active), completed (terminal), failed (terminal).
-	m.receiverMaps[domain.FileID("r-available")] = &receiverFileMapping{
-		FileID: "r-available", State: receiverAvailable, Sender: peer, CreatedAt: now,
+	m.receiverMaps[ftIncomingRef(m, domain.FileID("r-available"), peer)] = &receiverFileMapping{
+		Ref:         ftIncomingRef(m, domain.FileID("r-available"), peer),
+		PartialPath: partialDownloadPath(m.downloadDir, domain.FileID("r-available")),
+		FileID:      "r-available", State: receiverAvailable, Sender: peer, CreatedAt: now,
 	}
-	m.receiverMaps[domain.FileID("r-downloading")] = &receiverFileMapping{
-		FileID: "r-downloading", State: receiverDownloading, Sender: peer, CreatedAt: now,
+	m.receiverMaps[ftIncomingRef(m, domain.FileID("r-downloading"), peer)] = &receiverFileMapping{
+		Ref:         ftIncomingRef(m, domain.FileID("r-downloading"), peer),
+		PartialPath: partialDownloadPath(m.downloadDir, domain.FileID("r-downloading")),
+		FileID:      "r-downloading", State: receiverDownloading, Sender: peer, CreatedAt: now,
 	}
-	m.receiverMaps[domain.FileID("r-verifying")] = &receiverFileMapping{
-		FileID: "r-verifying", State: receiverVerifying, Sender: peer, CreatedAt: now,
+	m.receiverMaps[ftIncomingRef(m, domain.FileID("r-verifying"), peer)] = &receiverFileMapping{
+		Ref:         ftIncomingRef(m, domain.FileID("r-verifying"), peer),
+		PartialPath: partialDownloadPath(m.downloadDir, domain.FileID("r-verifying")),
+		FileID:      "r-verifying", State: receiverVerifying, Sender: peer, CreatedAt: now,
 	}
-	m.receiverMaps[domain.FileID("r-waitingAck")] = &receiverFileMapping{
-		FileID: "r-waitingAck", State: receiverWaitingAck, Sender: peer, CreatedAt: now,
+	m.receiverMaps[ftIncomingRef(m, domain.FileID("r-waitingAck"), peer)] = &receiverFileMapping{
+		Ref:         ftIncomingRef(m, domain.FileID("r-waitingAck"), peer),
+		PartialPath: partialDownloadPath(m.downloadDir, domain.FileID("r-waitingAck")),
+		FileID:      "r-waitingAck", State: receiverWaitingAck, Sender: peer, CreatedAt: now,
 	}
-	m.receiverMaps[domain.FileID("r-waitingRoute")] = &receiverFileMapping{
-		FileID: "r-waitingRoute", State: receiverWaitingRoute, Sender: peer, CreatedAt: now,
+	m.receiverMaps[ftIncomingRef(m, domain.FileID("r-waitingRoute"), peer)] = &receiverFileMapping{
+		Ref:         ftIncomingRef(m, domain.FileID("r-waitingRoute"), peer),
+		PartialPath: partialDownloadPath(m.downloadDir, domain.FileID("r-waitingRoute")),
+		FileID:      "r-waitingRoute", State: receiverWaitingRoute, Sender: peer, CreatedAt: now,
 	}
-	m.receiverMaps[domain.FileID("r-completed")] = &receiverFileMapping{
-		FileID: "r-completed", State: receiverCompleted, Sender: peer, CreatedAt: now, CompletedAt: now,
+	m.receiverMaps[ftIncomingRef(m, domain.FileID("r-completed"), peer)] = &receiverFileMapping{
+		Ref:         ftIncomingRef(m, domain.FileID("r-completed"), peer),
+		PartialPath: partialDownloadPath(m.downloadDir, domain.FileID("r-completed")),
+		FileID:      "r-completed", State: receiverCompleted, Sender: peer, CreatedAt: now, CompletedAt: now,
 	}
-	m.receiverMaps[domain.FileID("r-failed")] = &receiverFileMapping{
-		FileID: "r-failed", State: receiverFailed, Sender: peer, CreatedAt: now, CompletedAt: now,
+	m.receiverMaps[ftIncomingRef(m, domain.FileID("r-failed"), peer)] = &receiverFileMapping{
+		Ref:         ftIncomingRef(m, domain.FileID("r-failed"), peer),
+		PartialPath: partialDownloadPath(m.downloadDir, domain.FileID("r-failed")),
+		FileID:      "r-failed", State: receiverFailed, Sender: peer, CreatedAt: now, CompletedAt: now,
 	}
 
 	all := m.AllTransfersSnapshot()
@@ -2390,8 +2573,9 @@ func TestAllTransfersSnapshotIncludesTerminal(t *testing.T) {
 // "[]" output, and the UI relies on a stable list type.
 func TestAllTransfersSnapshotEmptyWhenNoMappings(t *testing.T) {
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		mappingsPath: "",
 		stopCh:       make(chan struct{}),
 	}
@@ -2465,6 +2649,7 @@ func TestRemoveSenderMappingTargeted(t *testing.T) {
 	store.mu.Unlock()
 
 	m := NewFileTransferManager(Config{
+		LocalID:     ftFixtureIdentity(),
 		Store:       store,
 		DownloadDir: dir,
 	})
@@ -2475,7 +2660,8 @@ func TestRemoveSenderMappingTargeted(t *testing.T) {
 
 	// Manually insert two sender mappings for the same peer.
 	m.mu.Lock()
-	m.senderMaps[orphanedID] = &senderFileMapping{
+	m.senderMaps[ftOutgoingRef(m, orphanedID, peer)] = &senderFileMapping{
+		Ref:       ftOutgoingRef(m, orphanedID, peer),
 		FileID:    orphanedID,
 		FileHash:  hash,
 		FileName:  "orphaned.txt",
@@ -2484,7 +2670,8 @@ func TestRemoveSenderMappingTargeted(t *testing.T) {
 		State:     senderAnnounced,
 		CreatedAt: time.Now(),
 	}
-	m.senderMaps[legitimateID] = &senderFileMapping{
+	m.senderMaps[ftOutgoingRef(m, legitimateID, peer)] = &senderFileMapping{
+		Ref:       ftOutgoingRef(m, legitimateID, peer),
 		FileID:    legitimateID,
 		FileHash:  hash,
 		FileName:  "legit.txt",
@@ -2506,8 +2693,8 @@ func TestRemoveSenderMappingTargeted(t *testing.T) {
 
 	// Orphaned mapping must be gone.
 	m.mu.Lock()
-	_, orphanExists := m.senderMaps[orphanedID]
-	_, legitExists := m.senderMaps[legitimateID]
+	_, orphanExists := m.senderMaps[ftOutgoingRef(m, orphanedID, peer)]
+	_, legitExists := m.senderMaps[ftOutgoingRef(m, legitimateID, peer)]
 	m.mu.Unlock()
 
 	if orphanExists {
@@ -2547,6 +2734,7 @@ func TestRemoveSenderMappingCompletedReleasesRef(t *testing.T) {
 	store.mu.Unlock()
 
 	m := NewFileTransferManager(Config{
+		LocalID:     ftFixtureIdentity(),
 		Store:       store,
 		DownloadDir: dir,
 	})
@@ -2554,7 +2742,8 @@ func TestRemoveSenderMappingCompletedReleasesRef(t *testing.T) {
 	completedID := domain.FileID("completed-msg-1")
 
 	m.mu.Lock()
-	m.senderMaps[completedID] = &senderFileMapping{
+	m.senderMaps[ftOutgoingRef(m, completedID, domaintest.ID("bob"))] = &senderFileMapping{
+		Ref:       ftOutgoingRef(m, completedID, domaintest.ID("bob")),
 		FileID:    completedID,
 		FileHash:  hash,
 		FileName:  "done.txt",
@@ -2605,6 +2794,7 @@ func TestRemoveSenderMappingTombstoneSkipsRefRelease(t *testing.T) {
 	store.mu.Unlock()
 
 	m := NewFileTransferManager(Config{
+		LocalID:     ftFixtureIdentity(),
 		Store:       store,
 		DownloadDir: dir,
 	})
@@ -2612,7 +2802,8 @@ func TestRemoveSenderMappingTombstoneSkipsRefRelease(t *testing.T) {
 	tombstoneID := domain.FileID("tombstone-msg-1")
 
 	m.mu.Lock()
-	m.senderMaps[tombstoneID] = &senderFileMapping{
+	m.senderMaps[ftOutgoingRef(m, tombstoneID, domaintest.ID("bob"))] = &senderFileMapping{
+		Ref:       ftOutgoingRef(m, tombstoneID, domaintest.ID("bob")),
 		FileID:    tombstoneID,
 		FileHash:  hash,
 		FileName:  "lost.txt",
@@ -2668,14 +2859,16 @@ func TestEnsureStoredCleanupOnPrepareFailure(t *testing.T) {
 
 	// Build a manager at maxFileMappings so PrepareFileAnnounce fails.
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		store:        store,
 		stopCh:       make(chan struct{}),
 	}
 	for i := 0; i < maxFileMappings; i++ {
 		fid := domain.FileID(fmt.Sprintf("fill-%d", i))
-		m.senderMaps[fid] = &senderFileMapping{
+		m.senderMaps[ftOutgoingRef(m, fid, domaintest.ID("peer"))] = &senderFileMapping{
+			Ref:       ftOutgoingRef(m, fid, domaintest.ID("peer")),
 			FileID:    fid,
 			FileHash:  fmt.Sprintf("aa%062x", i),
 			FileName:  fmt.Sprintf("fill-%d.bin", i),
@@ -2728,8 +2921,9 @@ func TestEnsureStoredCleanupSafeWithConcurrentSender(t *testing.T) {
 
 	// RemoveUnreferencedTransmitFile must NOT delete — refs=1.
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		store:        store,
 		stopCh:       make(chan struct{}),
 	}
@@ -2765,8 +2959,9 @@ func TestEnsureStoredCleanupSafeWithPendingReservation(t *testing.T) {
 
 	// RemoveUnreferencedTransmitFile must NOT delete — pending=1.
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		store:        store,
 		stopCh:       make(chan struct{}),
 	}

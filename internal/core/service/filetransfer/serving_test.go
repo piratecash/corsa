@@ -49,8 +49,9 @@ func TestHandleChunkRequest_ServesBatchLargerThanFormerServingLimit(t *testing.T
 
 	var sentCount int
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		store:        store,
 		sendCommand: func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error {
 			if payload.Command == domain.FileActionChunkResp {
@@ -65,7 +66,8 @@ func TestHandleChunkRequest_ServesBatchLargerThanFormerServingLimit(t *testing.T
 
 	for i := 0; i < batchSize; i++ {
 		fid := domain.FileID(fmt.Sprintf("batch-file-%d", i))
-		m.senderMaps[fid] = &senderFileMapping{
+		m.senderMaps[ftOutgoingRef(m, fid, receiver)] = &senderFileMapping{
+			Ref:       ftOutgoingRef(m, fid, receiver),
 			FileID:    fid,
 			FileHash:  hashes[i],
 			FileName:  fmt.Sprintf("file-%d.bin", i),
@@ -91,7 +93,7 @@ func TestHandleChunkRequest_ServesBatchLargerThanFormerServingLimit(t *testing.T
 
 	for i := 0; i < batchSize; i++ {
 		fid := domain.FileID(fmt.Sprintf("batch-file-%d", i))
-		if got := m.senderMaps[fid].State; got != senderServing {
+		if got := m.senderMaps[ftOutgoingRef(m, fid, receiver)].State; got != senderServing {
 			t.Errorf("file %s state = %s, want senderServing", fid, got)
 		}
 	}
@@ -121,8 +123,9 @@ func TestHandleChunkRequest_RevivalGatedByMappingQuota(t *testing.T) {
 
 	var sentCount int
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		store:        store,
 		sendCommand: func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error {
 			if payload.Command == domain.FileActionChunkResp {
@@ -140,7 +143,8 @@ func TestHandleChunkRequest_RevivalGatedByMappingQuota(t *testing.T) {
 	// first-time transfers competing for the same cap.
 	for i := 0; i < maxFileMappings; i++ {
 		fid := domain.FileID(fmt.Sprintf("active-%d", i))
-		m.senderMaps[fid] = &senderFileMapping{
+		m.senderMaps[ftOutgoingRef(m, fid, receiver)] = &senderFileMapping{
+			Ref:       ftOutgoingRef(m, fid, receiver),
 			FileID:    fid,
 			FileHash:  fmt.Sprintf("active-hash-%d", i),
 			FileName:  fmt.Sprintf("active-%d.bin", i),
@@ -153,7 +157,8 @@ func TestHandleChunkRequest_RevivalGatedByMappingQuota(t *testing.T) {
 
 	// One extra senderCompleted mapping kept around for re-download.
 	revivalID := domain.FileID("revival-target")
-	m.senderMaps[revivalID] = &senderFileMapping{
+	m.senderMaps[ftOutgoingRef(m, revivalID, receiver)] = &senderFileMapping{
+		Ref:         ftOutgoingRef(m, revivalID, receiver),
 		FileID:      revivalID,
 		FileHash:    revivalHash,
 		FileName:    "revival.bin",
@@ -175,12 +180,12 @@ func TestHandleChunkRequest_RevivalGatedByMappingQuota(t *testing.T) {
 	if sentCount != 0 {
 		t.Errorf("revival at quota cap should not send chunk_response, got %d", sentCount)
 	}
-	if got := m.senderMaps[revivalID].State; got != senderCompleted {
+	if got := m.senderMaps[ftOutgoingRef(m, revivalID, receiver)].State; got != senderCompleted {
 		t.Errorf("revival rejected: state = %s, want senderCompleted (unchanged)", got)
 	}
 
 	// Drop one announced mapping → quota frees by exactly one slot.
-	delete(m.senderMaps, domain.FileID("active-0"))
+	delete(m.senderMaps, ftOutgoingRef(m, "active-0", receiver))
 
 	m.HandleChunkRequest(receiver, domain.ChunkRequestPayload{
 		FileID: revivalID,
@@ -191,7 +196,7 @@ func TestHandleChunkRequest_RevivalGatedByMappingQuota(t *testing.T) {
 	if sentCount != 1 {
 		t.Errorf("after freeing a slot, revival should serve one chunk_response, got %d", sentCount)
 	}
-	if got := m.senderMaps[revivalID].State; got != senderServing {
+	if got := m.senderMaps[ftOutgoingRef(m, revivalID, receiver)].State; got != senderServing {
 		t.Errorf("after revival: state = %s, want senderServing", got)
 	}
 }
@@ -217,8 +222,9 @@ func TestHandleChunkRequest_TombstoneRevivalGatedBeforeAcquire(t *testing.T) {
 	}
 
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		store:        store,
 		sendCommand: func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error {
 			return nil
@@ -231,7 +237,8 @@ func TestHandleChunkRequest_TombstoneRevivalGatedBeforeAcquire(t *testing.T) {
 	// Saturate the active quota.
 	for i := 0; i < maxFileMappings; i++ {
 		fid := domain.FileID(fmt.Sprintf("active-%d", i))
-		m.senderMaps[fid] = &senderFileMapping{
+		m.senderMaps[ftOutgoingRef(m, fid, receiver)] = &senderFileMapping{
+			Ref:       ftOutgoingRef(m, fid, receiver),
 			FileID:    fid,
 			FileHash:  fmt.Sprintf("active-hash-%d", i),
 			FileName:  fmt.Sprintf("active-%d.bin", i),
@@ -243,7 +250,8 @@ func TestHandleChunkRequest_TombstoneRevivalGatedBeforeAcquire(t *testing.T) {
 	}
 
 	tombstoneID := domain.FileID("tombstone-target")
-	m.senderMaps[tombstoneID] = &senderFileMapping{
+	m.senderMaps[ftOutgoingRef(m, tombstoneID, receiver)] = &senderFileMapping{
+		Ref:         ftOutgoingRef(m, tombstoneID, receiver),
 		FileID:      tombstoneID,
 		FileHash:    tombstoneHash,
 		FileName:    "tombstone.bin",
@@ -262,7 +270,7 @@ func TestHandleChunkRequest_TombstoneRevivalGatedBeforeAcquire(t *testing.T) {
 
 	// The mapping must remain in senderTombstone — quota gate fired
 	// before the resurrection block.
-	if got := m.senderMaps[tombstoneID].State; got != senderTombstone {
+	if got := m.senderMaps[ftOutgoingRef(m, tombstoneID, receiver)].State; got != senderTombstone {
 		t.Errorf("tombstone state changed to %s; quota gate should reject before resurrection", got)
 	}
 
@@ -293,8 +301,9 @@ func TestHandleChunkRequest_RepeatedOffsetDoesNotAdvanceSenderProgress(t *testin
 	}
 
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		store:        store,
 		sendCommand: func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error {
 			return nil
@@ -305,7 +314,8 @@ func TestHandleChunkRequest_RepeatedOffsetDoesNotAdvanceSenderProgress(t *testin
 	receiver := domaintest.ID("receiver-progress")
 	fileID := domain.FileID("repeated-offset-progress")
 	chunkSize := uint32(8)
-	m.senderMaps[fileID] = &senderFileMapping{
+	m.senderMaps[ftOutgoingRef(m, fileID, receiver)] = &senderFileMapping{
+		Ref:       ftOutgoingRef(m, fileID, receiver),
 		FileID:    fileID,
 		FileHash:  fileHash,
 		FileName:  "progress.bin",
@@ -349,11 +359,11 @@ func TestHandleChunkRequest_RepeatedOffsetDoesNotAdvanceSenderProgress(t *testin
 		t.Errorf("SenderProgress after repeated offset = %d, want %d", bytesTransferred, chunkSize)
 	}
 
-	if m.senderMaps[fileID].BytesServed != uint64(chunkSize)*2 {
-		t.Errorf("BytesServed = %d, want %d", m.senderMaps[fileID].BytesServed, uint64(chunkSize)*2)
+	if m.senderMaps[ftOutgoingRef(m, fileID, receiver)].BytesServed != uint64(chunkSize)*2 {
+		t.Errorf("BytesServed = %d, want %d", m.senderMaps[ftOutgoingRef(m, fileID, receiver)].BytesServed, uint64(chunkSize)*2)
 	}
-	if m.senderMaps[fileID].ProgressBytes != uint64(chunkSize) {
-		t.Errorf("ProgressBytes = %d, want %d", m.senderMaps[fileID].ProgressBytes, chunkSize)
+	if m.senderMaps[ftOutgoingRef(m, fileID, receiver)].ProgressBytes != uint64(chunkSize) {
+		t.Errorf("ProgressBytes = %d, want %d", m.senderMaps[ftOutgoingRef(m, fileID, receiver)].ProgressBytes, chunkSize)
 	}
 }
 
@@ -378,8 +388,9 @@ func TestHandleChunkRequest_AnnouncedTransitionsToServing(t *testing.T) {
 
 	var sentCount int
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		store:        store,
 		sendCommand: func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error {
 			sentCount++
@@ -391,7 +402,8 @@ func TestHandleChunkRequest_AnnouncedTransitionsToServing(t *testing.T) {
 	receiver := domaintest.ID("receiver-identity")
 
 	fileID := domain.FileID("new-file")
-	m.senderMaps[fileID] = &senderFileMapping{
+	m.senderMaps[ftOutgoingRef(m, fileID, receiver)] = &senderFileMapping{
+		Ref:       ftOutgoingRef(m, fileID, receiver),
 		FileID:    fileID,
 		FileHash:  fileHash,
 		FileName:  "test.bin",
@@ -407,8 +419,8 @@ func TestHandleChunkRequest_AnnouncedTransitionsToServing(t *testing.T) {
 		Size:   domain.DefaultChunkSize,
 	})
 
-	if m.senderMaps[fileID].State != senderServing {
-		t.Errorf("mapping should transition to serving, got %s", m.senderMaps[fileID].State)
+	if m.senderMaps[ftOutgoingRef(m, fileID, receiver)].State != senderServing {
+		t.Errorf("mapping should transition to serving, got %s", m.senderMaps[ftOutgoingRef(m, fileID, receiver)].State)
 	}
 	if sentCount != 1 {
 		t.Errorf("expected 1 chunk_response, got %d", sentCount)
@@ -430,8 +442,9 @@ func TestHandleChunkRequest_ReadChunkFailureRollsBackState(t *testing.T) {
 
 	var sentCount int
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		store:        store,
 		sendCommand: func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error {
 			sentCount++
@@ -444,7 +457,8 @@ func TestHandleChunkRequest_ReadChunkFailureRollsBackState(t *testing.T) {
 	fileID := domain.FileID("readfail-file")
 	fileHash := "a1a2a3a4a5a6a7a8b1b2b3b4b5b6b7b8c1c2c3c4c5c6c7c8d1d2d3d4d5d6d7d8"
 
-	m.senderMaps[fileID] = &senderFileMapping{
+	m.senderMaps[ftOutgoingRef(m, fileID, receiver)] = &senderFileMapping{
+		Ref:       ftOutgoingRef(m, fileID, receiver),
 		FileID:    fileID,
 		FileHash:  fileHash,
 		FileName:  "missing.bin",
@@ -461,8 +475,8 @@ func TestHandleChunkRequest_ReadChunkFailureRollsBackState(t *testing.T) {
 	})
 
 	// State should be rolled back to senderAnnounced so the serving slot is freed.
-	if m.senderMaps[fileID].State != senderAnnounced {
-		t.Errorf("state after ReadChunk failure = %s, want announced (rolled back)", m.senderMaps[fileID].State)
+	if m.senderMaps[ftOutgoingRef(m, fileID, receiver)].State != senderAnnounced {
+		t.Errorf("state after ReadChunk failure = %s, want announced (rolled back)", m.senderMaps[ftOutgoingRef(m, fileID, receiver)].State)
 	}
 	if sentCount != 0 {
 		t.Errorf("no chunk_response should be sent on ReadChunk failure, got %d", sentCount)
@@ -489,8 +503,9 @@ func TestHandleChunkRequest_SendFailureRollsBackState(t *testing.T) {
 	}
 
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		store:        store,
 		sendCommand: func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error {
 			return fmt.Errorf("simulated send failure")
@@ -501,7 +516,8 @@ func TestHandleChunkRequest_SendFailureRollsBackState(t *testing.T) {
 	receiver := domaintest.ID("receiver-identity")
 	fileID := domain.FileID("sendfail-file")
 
-	m.senderMaps[fileID] = &senderFileMapping{
+	m.senderMaps[ftOutgoingRef(m, fileID, receiver)] = &senderFileMapping{
+		Ref:       ftOutgoingRef(m, fileID, receiver),
 		FileID:    fileID,
 		FileHash:  fileHash,
 		FileName:  "test.bin",
@@ -518,8 +534,8 @@ func TestHandleChunkRequest_SendFailureRollsBackState(t *testing.T) {
 	})
 
 	// State should be rolled back to senderAnnounced so the serving slot is freed.
-	if m.senderMaps[fileID].State != senderAnnounced {
-		t.Errorf("state after sendCommand failure = %s, want announced (rolled back)", m.senderMaps[fileID].State)
+	if m.senderMaps[ftOutgoingRef(m, fileID, receiver)].State != senderAnnounced {
+		t.Errorf("state after sendCommand failure = %s, want announced (rolled back)", m.senderMaps[ftOutgoingRef(m, fileID, receiver)].State)
 	}
 }
 
@@ -552,8 +568,9 @@ func TestHandleChunkRequest_SendFailureDoesNotPoisonOtherTransfers(t *testing.T)
 	sendFails := true
 	var sentCount int
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		store:        store,
 		sendCommand: func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error {
 			if sendFails {
@@ -568,7 +585,8 @@ func TestHandleChunkRequest_SendFailureDoesNotPoisonOtherTransfers(t *testing.T)
 	receiver := domaintest.ID("receiver-identity")
 
 	failID := domain.FileID("will-fail")
-	m.senderMaps[failID] = &senderFileMapping{
+	m.senderMaps[ftOutgoingRef(m, failID, receiver)] = &senderFileMapping{
+		Ref:       ftOutgoingRef(m, failID, receiver),
 		FileID:    failID,
 		FileHash:  failHash,
 		FileName:  "fail.bin",
@@ -584,15 +602,16 @@ func TestHandleChunkRequest_SendFailureDoesNotPoisonOtherTransfers(t *testing.T)
 		Size:   domain.DefaultChunkSize,
 	})
 
-	if m.senderMaps[failID].State != senderAnnounced {
-		t.Errorf("failed transfer should roll back to announced, state = %s", m.senderMaps[failID].State)
+	if m.senderMaps[ftOutgoingRef(m, failID, receiver)].State != senderAnnounced {
+		t.Errorf("failed transfer should roll back to announced, state = %s", m.senderMaps[ftOutgoingRef(m, failID, receiver)].State)
 	}
 
 	// Second transfer with sendCommand restored — must succeed independently.
 	sendFails = false
 
 	successID := domain.FileID("should-succeed")
-	m.senderMaps[successID] = &senderFileMapping{
+	m.senderMaps[ftOutgoingRef(m, successID, receiver)] = &senderFileMapping{
+		Ref:       ftOutgoingRef(m, successID, receiver),
 		FileID:    successID,
 		FileHash:  successHash,
 		FileName:  "success.bin",
@@ -608,8 +627,8 @@ func TestHandleChunkRequest_SendFailureDoesNotPoisonOtherTransfers(t *testing.T)
 		Size:   domain.DefaultChunkSize,
 	})
 
-	if m.senderMaps[successID].State != senderServing {
-		t.Errorf("second transfer state = %s, want senderServing", m.senderMaps[successID].State)
+	if m.senderMaps[ftOutgoingRef(m, successID, receiver)].State != senderServing {
+		t.Errorf("second transfer state = %s, want senderServing", m.senderMaps[ftOutgoingRef(m, successID, receiver)].State)
 	}
 	if sentCount != 1 {
 		t.Errorf("expected 1 successful chunk_response, got %d", sentCount)
@@ -641,8 +660,9 @@ func TestHandleChunkRequest_RejectsOffsetBeyondFileSize(t *testing.T) {
 
 	var sentCount int
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		store:        store,
 		sendCommand: func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error {
 			sentCount++
@@ -653,7 +673,8 @@ func TestHandleChunkRequest_RejectsOffsetBeyondFileSize(t *testing.T) {
 
 	receiver := domaintest.ID("receiver-identity")
 	fileID := domain.FileID("offset-beyond-eof")
-	m.senderMaps[fileID] = &senderFileMapping{
+	m.senderMaps[ftOutgoingRef(m, fileID, receiver)] = &senderFileMapping{
+		Ref:       ftOutgoingRef(m, fileID, receiver),
 		FileID:    fileID,
 		FileHash:  fileHash,
 		FileName:  "test.bin",
@@ -673,8 +694,8 @@ func TestHandleChunkRequest_RejectsOffsetBeyondFileSize(t *testing.T) {
 	if sentCount != 0 {
 		t.Errorf("expected 0 sends for offset==FileSize, got %d", sentCount)
 	}
-	if m.senderMaps[fileID].State != senderAnnounced {
-		t.Errorf("state should remain announced, got %s", m.senderMaps[fileID].State)
+	if m.senderMaps[ftOutgoingRef(m, fileID, receiver)].State != senderAnnounced {
+		t.Errorf("state should remain announced, got %s", m.senderMaps[ftOutgoingRef(m, fileID, receiver)].State)
 	}
 
 	// Request well beyond FileSize — should also be rejected.
@@ -710,8 +731,9 @@ func TestHandleChunkRequest_ClampsChunkSizeToRemainingBytes(t *testing.T) {
 
 	var sentCount int
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		store:        store,
 		sendCommand: func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error {
 			sentCount++
@@ -722,7 +744,8 @@ func TestHandleChunkRequest_ClampsChunkSizeToRemainingBytes(t *testing.T) {
 
 	receiver := domaintest.ID("receiver-identity")
 	fileID := domain.FileID("clamp-chunk-size")
-	m.senderMaps[fileID] = &senderFileMapping{
+	m.senderMaps[ftOutgoingRef(m, fileID, receiver)] = &senderFileMapping{
+		Ref:       ftOutgoingRef(m, fileID, receiver),
 		FileID:    fileID,
 		FileHash:  fileHash,
 		FileName:  "test.bin",
@@ -743,11 +766,11 @@ func TestHandleChunkRequest_ClampsChunkSizeToRemainingBytes(t *testing.T) {
 	if sentCount != 1 {
 		t.Errorf("expected 1 chunk_response for clamped read, got %d", sentCount)
 	}
-	if m.senderMaps[fileID].State != senderServing {
-		t.Errorf("state should be serving, got %s", m.senderMaps[fileID].State)
+	if m.senderMaps[ftOutgoingRef(m, fileID, receiver)].State != senderServing {
+		t.Errorf("state should be serving, got %s", m.senderMaps[ftOutgoingRef(m, fileID, receiver)].State)
 	}
 	// BytesServed should reflect the clamped amount (27 - 20 = 7).
-	if m.senderMaps[fileID].BytesServed != 7 {
-		t.Errorf("BytesServed = %d, want 7", m.senderMaps[fileID].BytesServed)
+	if m.senderMaps[ftOutgoingRef(m, fileID, receiver)].BytesServed != 7 {
+		t.Errorf("BytesServed = %d, want 7", m.senderMaps[ftOutgoingRef(m, fileID, receiver)].BytesServed)
 	}
 }

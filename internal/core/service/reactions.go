@@ -24,8 +24,9 @@ import (
 // without a database, and the router must not reach past it.
 type reactionStore interface {
 	ApplyReactionFact(ctx context.Context, fact domain.ReactionFact, now time.Time) (bool, error)
-	ReactionFacts(ctx context.Context, messageID domain.MessageID) ([]domain.ReactionFact, error)
+	ReactionFactsInConversation(ctx context.Context, peer domain.PeerIdentity, messageID domain.MessageID) ([]domain.ReactionFact, error)
 	ReactionsForScope(ctx context.Context, scope domain.ReactionScope, self domain.PeerIdentity) (map[domain.MessageID][]domain.Reaction, error)
+	ReactionsForScopeRefs(ctx context.Context, scope domain.ReactionScope, self domain.PeerIdentity) (map[domain.MessageRef][]domain.Reaction, error)
 	NextReactionClock(ctx context.Context, self domain.PeerIdentity) (domain.ReactionClock, error)
 	ReleaseHeldReactions(ctx context.Context, scope domain.ReactionScope, messageID domain.MessageID, now time.Time) (int, error)
 	SweepHeldReactions(ctx context.Context, now time.Time) (int, error)
@@ -395,6 +396,16 @@ func (r *DMRouter) MessageReactions(ctx context.Context, peer domain.PeerIdentit
 	return store.ReactionsForScope(ctx, domain.ReactionScopeForPeer(peer), r.MyAddress())
 }
 
+// MessageReactionsRefs preserves both original endpoints for local clients.
+// The old ID-only projection refuses ambiguous IDs instead of merging chips.
+func (r *DMRouter) MessageReactionsRefs(ctx context.Context, peer domain.PeerIdentity) (map[domain.MessageRef][]domain.Reaction, error) {
+	store := r.reactions()
+	if store == nil {
+		return nil, ErrNoReactionStore
+	}
+	return store.ReactionsForScopeRefs(ctx, domain.ReactionScopeForPeer(peer), r.MyAddress())
+}
+
 // ToggleReaction flips the local user's reaction on one message, stores the
 // decision and hands it to the peer.
 //
@@ -408,6 +419,20 @@ func (r *DMRouter) MessageReactions(ctx context.Context, peer domain.PeerIdentit
 // the peer's build understands reactions is answered by ReactionsSupportOf,
 // separately and later, because the send is deliberately asynchronous.
 func (r *DMRouter) ToggleReaction(ctx context.Context, peer domain.PeerIdentity, messageID domain.MessageID, emoji string, now time.Time) (domain.ReactionFact, error) {
+	return r.toggleReaction(ctx, peer, messageID, emoji, now, nil)
+}
+
+// ToggleReactionRef preserves the selected local row. It still refuses a
+// directionless wire-ID collision rather than promising a targeted remote tap.
+func (r *DMRouter) ToggleReactionRef(ctx context.Context, ref domain.MessageRef, emoji string, now time.Time) (domain.ReactionFact, error) {
+	peer, err := r.messageRefPeer(ref)
+	if err != nil {
+		return domain.ReactionFact{}, err
+	}
+	return r.toggleReaction(ctx, peer, domain.MessageID(ref.ID), emoji, now, &ref)
+}
+
+func (r *DMRouter) toggleReaction(ctx context.Context, peer domain.PeerIdentity, messageID domain.MessageID, emoji string, now time.Time, expected *domain.MessageRef) (domain.ReactionFact, error) {
 	store := r.reactions()
 	if store == nil {
 		return domain.ReactionFact{}, ErrNoReactionStore
@@ -423,7 +448,11 @@ func (r *DMRouter) ToggleReaction(ctx context.Context, peer domain.PeerIdentity,
 		}
 		defer releaseWrite()
 	}
-	fact, err := toggleReactionWith(ctx, store, r.MyAddress(), peer, messageID, emoji, now)
+	var refs []domain.MessageRef
+	if expected != nil {
+		refs = []domain.MessageRef{*expected}
+	}
+	fact, err := toggleReactionWith(ctx, store, r.MyAddress(), peer, messageID, emoji, now, refs...)
 	if err != nil {
 		return domain.ReactionFact{}, err
 	}
@@ -478,6 +507,7 @@ func toggleReactionWith(
 	messageID domain.MessageID,
 	emoji string,
 	now time.Time,
+	refs ...domain.MessageRef,
 ) (domain.ReactionFact, error) {
 	if self.IsZero() {
 		return domain.ReactionFact{}, fmt.Errorf("service: reaction needs a local identity")
@@ -486,7 +516,36 @@ func toggleReactionWith(
 		return domain.ReactionFact{}, fmt.Errorf("service: reaction needs an emoji")
 	}
 
-	held, err := store.ReactionFacts(ctx, messageID)
+	type exactReactionStore interface {
+		RefInConversation(context.Context, domain.PeerIdentity, domain.MessageID) (domain.MessageRef, bool, error)
+		ReactionFactsForRef(context.Context, domain.MessageRef) ([]domain.ReactionFact, error)
+		ApplyReactionFactRef(context.Context, domain.MessageRef, domain.ReactionFact, time.Time) (bool, error)
+	}
+	var exact exactReactionStore
+	var expected domain.MessageRef
+	var held []domain.ReactionFact
+	var err error
+	if len(refs) != 0 {
+		if len(refs) != 1 {
+			return domain.ReactionFact{}, fmt.Errorf("service: one exact reaction target is required")
+		}
+		expected = refs[0]
+		var ok bool
+		exact, ok = store.(exactReactionStore)
+		if !ok {
+			return domain.ReactionFact{}, fmt.Errorf("service: reaction store does not support exact references")
+		}
+		actual, found, lookupErr := exact.RefInConversation(ctx, peer, messageID)
+		if lookupErr != nil {
+			return domain.ReactionFact{}, lookupErr
+		}
+		if !found || actual != expected {
+			return domain.ReactionFact{}, fmt.Errorf("service: selected reaction target is no longer present")
+		}
+		held, err = exact.ReactionFactsForRef(ctx, expected)
+	} else {
+		held, err = store.ReactionFactsInConversation(ctx, peer, messageID)
+	}
 	if err != nil {
 		return domain.ReactionFact{}, err
 	}
@@ -517,7 +576,12 @@ func toggleReactionWith(
 		Op:    op,
 		Clock: clock,
 	}
-	applied, err := store.ApplyReactionFact(ctx, fact, now)
+	var applied bool
+	if exact != nil {
+		applied, err = exact.ApplyReactionFactRef(ctx, expected, fact, now)
+	} else {
+		applied, err = store.ApplyReactionFact(ctx, fact, now)
+	}
 	if err != nil {
 		return domain.ReactionFact{}, err
 	}

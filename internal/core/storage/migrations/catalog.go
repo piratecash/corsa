@@ -60,6 +60,9 @@ var conversationDeleteSQL string
 //go:embed 0008_delete_intent_time_order.sql
 var deleteIntentTimeOrderSQL string
 
+//go:embed 0009_message_identity.sql
+var messageIdentitySQL string
+
 // deleteIntentTimeOrderHolds qualifies only active requests for the indexed
 // UTC/nanosecond key. Supported old/new writers use UTC RFC3339Nano; a database
 // edited to contain another spelling must not be silently indexed as that time.
@@ -149,6 +152,30 @@ func conversationDeleteHolds(ctx context.Context, tx storage.SchemaReader) error
 	return nil
 }
 
+// messageIdentityHolds checks the active journal's exact target and keeps
+// unbound historical facts outside all positive delivery witnesses. Shape and
+// composite keys are independently derived from the migration's SQL.
+func messageIdentityHolds(ctx context.Context, tx storage.SchemaReader) error {
+	for _, table := range []string{"seen_ack", "delivery_failed"} {
+		var n int
+		query := `SELECT COUNT(*) FROM ` + table + ` j WHERE NOT EXISTS(SELECT 1 FROM messages m WHERE m.topic=j.topic AND m.id=j.id AND m.sender=j.sender AND m.recipient=j.recipient)`
+		if err := storage.ScanOne(ctx, tx, &n, query); err != nil {
+			return fmt.Errorf("qualify %s identity: %w", table, err)
+		}
+		if n != 0 {
+			return fmt.Errorf("%s has unbound active message identities", table)
+		}
+	}
+	var temporary int
+	if err := storage.ScanOne(ctx, tx, &temporary, `SELECT COUNT(*) FROM sqlite_schema WHERE name GLOB 'h1_*_v8'`); err != nil {
+		return err
+	}
+	if temporary != 0 {
+		return fmt.Errorf("message identity migration retained old working tables")
+	}
+	return nil
+}
+
 // Catalog returns the ordered migration list for storage.Open.
 func Catalog() []storage.Migration {
 	return []storage.Migration{
@@ -193,6 +220,12 @@ func Catalog() []storage.Migration {
 			Name:      "delete_intent_time_order",
 			SQL:       deleteIntentTimeOrderSQL,
 			Invariant: deleteIntentTimeOrderHolds,
+		},
+		{
+			Version:   9,
+			Name:      "message_identity",
+			SQL:       messageIdentitySQL,
+			Invariant: messageIdentityHolds,
 		},
 	}
 }

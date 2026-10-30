@@ -72,6 +72,9 @@ type DeleteIntent struct {
 	// for this node to finish deciding, and a peer reconnecting must
 	// release the first without touching the second.
 	Hold DeleteIntentHold
+	// Ref is the exact deleted message when known; empty parties mean a
+	// legacy unresolved task, never evidence for a duplicate-delivery receipt.
+	Ref domain.MessageRef
 }
 
 // DeleteIntentHold is why a request is parked.
@@ -104,17 +107,35 @@ const (
 // budget belongs to the request, not to the click, and one that resets on
 // every re-issue is one a user can make immortal without meaning to.
 //
-// The peer is NOT rewritten on conflict. The message id is a UUID v4 owned
-// by exactly one conversation, so a second intent naming a different peer
-// for the same id is a caller bug; re-pointing a pending deletion at
-// somebody else is the one thing that must never follow from it.
+// The conflict key includes the peer and original message endpoints. A wire
+// UUID alone is not conversation authority; another peer or direction may
+// legitimately use that same ID without changing this pending request.
 func (s *Store) NoteDeleteIntent(ctx context.Context, intent DeleteIntent) error {
-	return noteDeleteIntent(ctx, s.db, intent)
+	if intent.Ref.Sender == "" && intent.Ref.Recipient == "" {
+		ref, found, err := s.RefInConversation(ctx, intent.Peer, intent.MessageID)
+		if err != nil {
+			return err
+		}
+		if found {
+			intent.Ref = ref
+		}
+	}
+	return noteDeleteIntent(ctx, s.db, intent, s.identityAddr)
 }
 
 // noteDeleteIntent is NoteDeleteIntent against any executor, so the
 // delete-and-schedule transaction can reuse it.
-func noteDeleteIntent(ctx context.Context, db execContext, intent DeleteIntent) error {
+func noteDeleteIntent(ctx context.Context, db execContext, intent DeleteIntent, self domain.PeerIdentity) error {
+	ref := intent.Ref
+	if ref.ID != "" && ref.ID != string(intent.MessageID) {
+		return fmt.Errorf("delete intent reference differs from id")
+	}
+	if ref.Sender != "" || ref.Recipient != "" {
+		validParties := (ref.Sender == self.String() && ref.Recipient == intent.Peer.String()) || (ref.Sender == intent.Peer.String() && ref.Recipient == self.String())
+		if ref.Topic != "dm" || !validParties {
+			return fmt.Errorf("delete intent reference differs from conversation")
+		}
+	}
 	if !intent.MessageID.IsValid() {
 		return fmt.Errorf("chatlog: delete intent for %q: message id is not a valid UUID v4", intent.MessageID)
 	}
@@ -123,14 +144,9 @@ func noteDeleteIntent(ctx context.Context, db execContext, intent DeleteIntent) 
 	}
 
 	_, err := db.ExecContext(ctx, `
-		INSERT INTO message_delete_intents (kind, message_id, request_id, peer, created_at, next_attempt_at, attempts, held, owed, refuse_until)
-		VALUES ('message', ?, '', ?, ?, ?, ?, ?, 1, '')
-		ON CONFLICT(message_id) DO UPDATE SET
-			-- A refusal-only row names no peer; an owed one does, and its
-			-- peer is never rewritten. A message id belongs to exactly one
-			-- conversation, so re-pointing a pending deletion at somebody
-			-- else is the one thing that must not follow from a caller bug.
-			peer = CASE WHEN message_delete_intents.peer = '' THEN excluded.peer ELSE message_delete_intents.peer END,
+		INSERT INTO message_delete_intents (kind, message_id, request_id, peer, created_at, next_attempt_at, attempts, held, owed, refuse_until,original_sender,original_recipient)
+		VALUES ('message', ?, '', ?, ?, ?, ?, ?, 1, '',?,?)
+		ON CONFLICT(kind,peer,message_id,original_sender,original_recipient) DO UPDATE SET
 			next_attempt_at = excluded.next_attempt_at,
 			attempts = MAX(message_delete_intents.attempts, excluded.attempts),
 			held = excluded.held,
@@ -140,7 +156,7 @@ func noteDeleteIntent(ctx context.Context, db execContext, intent DeleteIntent) 
 		intent.CreatedAt.UTC().Format(time.RFC3339Nano),
 		intent.NextAttemptAt.UTC().Format(time.RFC3339Nano),
 		intent.Attempts,
-		int(intent.Hold),
+		int(intent.Hold), ref.Sender, ref.Recipient,
 	)
 	if err != nil {
 		return fmt.Errorf("chatlog: note delete intent: %w", err)
@@ -193,11 +209,28 @@ func (s *Store) DeleteWithIntent(ctx context.Context, intent DeleteIntent) (bool
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	removed, err := deleteMessageTx(ctx, tx, intent.MessageID)
+	ref := intent.Ref
+	if ref.Sender == "" && ref.Recipient == "" {
+		query, args := s.peerQuery("dm", intent.Peer, `SELECT topic,id,sender,recipient FROM messages WHERE id=? AND `, ` LIMIT 2`)
+		args = append([]interface{}{intent.MessageID}, args...)
+		resolved, found, err := uniqueMessageRefQuery(ctx, tx, query, args...)
+		if err != nil {
+			return false, err
+		}
+		if found {
+			ref = resolved
+			intent.Ref = ref
+		}
+	}
+	var removed bool
+	if ref.Sender != "" && ref.Recipient != "" {
+		removed, err = deleteMessageRefTx(ctx, tx, ref, s.identityAddr)
+	}
+
 	if err != nil {
 		return false, err
 	}
-	if err := noteDeleteIntent(ctx, tx, intent); err != nil {
+	if err := noteDeleteIntent(ctx, tx, intent, s.identityAddr); err != nil {
 		return false, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -257,24 +290,30 @@ func (s *Store) ReviveDeleteIntentsForPeer(ctx context.Context, peer domain.Peer
 // kept indefinitely, so a per-row park is a write floor the sweep pays
 // every tick for the life of the install.
 func (s *Store) HoldDeleteIntents(ctx context.Context, ids []domain.MessageID, until time.Time) error {
-	stamp := until.UTC().Format(time.RFC3339Nano)
-
-	for start := 0; start < len(ids); start += holdDeleteIntentBatch {
-		end := min(start+holdDeleteIntentBatch, len(ids))
-		chunk := ids[start:end]
-
-		placeholders := make([]string, 0, len(chunk))
-		args := make([]any, 0, len(chunk)+2)
-		args = append(args, stamp, int(HoldPeerAbsent))
-		for _, id := range chunk {
-			placeholders = append(placeholders, "?")
-			args = append(args, string(id))
+	intents := make([]DeleteIntent, 0, len(ids))
+	for _, id := range ids {
+		intent, found, err := s.DeleteIntentByID(ctx, id)
+		if err != nil {
+			return err
 		}
-		if _, err := s.db.ExecContext(ctx, `
-			UPDATE message_delete_intents
-			SET next_attempt_at = ?, held = ?
-			WHERE message_id IN (`+strings.Join(placeholders, ", ")+`)`, args...); err != nil {
-			return fmt.Errorf("chatlog: hold %d delete intents: %w", len(chunk), err)
+		if found {
+			intents = append(intents, intent)
+		}
+	}
+	return s.HoldDeleteIntentRefs(ctx, intents, until)
+}
+
+func (s *Store) HoldDeleteIntentRefs(ctx context.Context, intents []DeleteIntent, until time.Time) error {
+	for start := 0; start < len(intents); start += holdDeleteIntentBatch {
+		end := min(start+holdDeleteIntentBatch, len(intents))
+		terms := make([]string, 0, end-start)
+		args := []any{until.UTC().Format(time.RFC3339Nano), int(HoldPeerAbsent)}
+		for _, intent := range intents[start:end] {
+			terms = append(terms, "(?,?,?,?)")
+			args = append(args, deleteIntentArgs(intent)...)
+		}
+		if _, err := s.db.ExecContext(ctx, `UPDATE message_delete_intents SET next_attempt_at=?,held=? WHERE kind='message' AND (peer,message_id,original_sender,original_recipient) IN (`+strings.Join(terms, ",")+`)`, args...); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -445,35 +484,29 @@ func (s *Store) OwedDeleteIntentMessageIDs(ctx context.Context) ([]domain.Messag
 // an inbound ack against the peer the request was actually addressed to;
 // a row that has settled and only lingers to refuse the id is not a
 // request any more, so an ack cannot match it.
-func (s *Store) DeleteIntentByID(ctx context.Context, messageID domain.MessageID) (DeleteIntent, bool, error) {
-	row := s.db.QueryRowContext(ctx, `
-		SELECT `+deleteIntentColumns+`
-		FROM message_delete_intents
-		WHERE message_id = ? AND kind = 'message' AND owed = 1`, string(messageID))
+func (s *Store) DeleteIntentByID(ctx context.Context, id domain.MessageID) (DeleteIntent, bool, error) {
+	return uniqueDeleteIntent(ctx, s.db, `message_id=?`, id)
+}
 
-	intent, err := scanDeleteIntent(row)
-	if errors.Is(err, sql.ErrNoRows) {
-		return DeleteIntent{}, false, nil
-	}
-	if err != nil {
-		return DeleteIntent{}, false, err
-	}
-	return intent, true, nil
+func (s *Store) DeleteIntentForPeer(ctx context.Context, peer domain.PeerIdentity, id domain.MessageID) (DeleteIntent, bool, error) {
+	return uniqueDeleteIntent(ctx, s.db, `peer=? AND message_id=?`, peer.String(), id)
 }
 
 // RecordDeleteIntentAttempt charges one dispatch to the intent and moves it
 // to its next due time. A no-op when the intent is already gone (the ack
 // won the race), which is why it reports nothing but an error.
-func (s *Store) RecordDeleteIntentAttempt(ctx context.Context, messageID domain.MessageID, nextAttemptAt time.Time) error {
-	_, err := s.db.ExecContext(ctx, `
-		UPDATE message_delete_intents
-		SET attempts = attempts + 1, next_attempt_at = ?, held = 0
-		WHERE message_id = ?`,
-		nextAttemptAt.UTC().Format(time.RFC3339Nano), string(messageID))
-	if err != nil {
-		return fmt.Errorf("chatlog: record delete intent attempt: %w", err)
+func (s *Store) RecordDeleteIntentAttempt(ctx context.Context, id domain.MessageID, next time.Time) error {
+	intent, found, err := s.DeleteIntentByID(ctx, id)
+	if err != nil || !found {
+		return err
 	}
-	return nil
+	return s.RecordDeleteIntentAttemptFor(ctx, intent, next)
+}
+
+func (s *Store) RecordDeleteIntentAttemptFor(ctx context.Context, intent DeleteIntent, next time.Time) error {
+	args := append([]any{next.UTC().Format(time.RFC3339Nano)}, deleteIntentArgs(intent)...)
+	_, err := s.db.ExecContext(ctx, `UPDATE message_delete_intents SET attempts=attempts+1,next_attempt_at=?,held=0 WHERE `+exactDeleteIntent, args...)
+	return err
 }
 
 // DropDeleteIntentUnlessCarried retires a per-message request unless a standing
@@ -493,63 +526,60 @@ func (s *Store) RecordDeleteIntentAttempt(ctx context.Context, messageID domain.
 // One transaction, because the caller decides whether to tell the user based on
 // the answer: reading "not carried" and deleting a moment later would let a
 // wipe started in between lose the row it had just taken over.
-func (s *Store) DropDeleteIntentUnlessCarried(ctx context.Context, messageID domain.MessageID) (settled, carried bool, err error) {
-	if messageID == "" {
-		return false, false, nil
+func (s *Store) DropDeleteIntentUnlessCarried(ctx context.Context, id domain.MessageID) (bool, bool, error) {
+	intent, found, err := s.DeleteIntentByID(ctx, id)
+	if err != nil || !found {
+		return false, false, err
 	}
+	return s.DropDeleteIntentUnlessCarriedFor(ctx, intent)
+}
+
+func (s *Store) DropDeleteIntentUnlessCarriedFor(ctx context.Context, intent DeleteIntent) (bool, bool, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return false, false, fmt.Errorf("chatlog: begin drop delete intent: %w", err)
+		return false, false, err
 	}
 	defer func() { _ = tx.Rollback() }()
-
-	var carriedRow int
-	err = tx.QueryRowContext(ctx, `
-		SELECT EXISTS (
-			SELECT 1 FROM message_delete_intents AS i
-			WHERE i.message_id = ? AND (`+coveredByAStandingWipe+`))`,
-		string(messageID)).Scan(&carriedRow)
+	var carried int
+	err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM message_delete_intents AS i WHERE i.kind='message' AND i.peer=? AND i.message_id=? AND i.original_sender=? AND i.original_recipient=? AND (`+coveredByAStandingWipe+`))`, deleteIntentArgs(intent)...).Scan(&carried)
 	if err != nil {
-		return false, false, fmt.Errorf("chatlog: check whether a wipe carries the request: %w", err)
+		return false, false, err
 	}
-	if carriedRow == 1 {
+	if carried == 1 {
 		return false, true, nil
 	}
-	res, err := tx.ExecContext(ctx, `
-		DELETE FROM message_delete_intents
-		WHERE message_id = ? AND kind = 'message'`, string(messageID))
+	result, err := tx.ExecContext(ctx, `DELETE FROM message_delete_intents WHERE `+exactDeleteIntent, deleteIntentArgs(intent)...)
 	if err != nil {
-		return false, false, fmt.Errorf("chatlog: drop delete intent: %w", err)
+		return false, false, err
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return false, false, err
 	}
 	if err := tx.Commit(); err != nil {
-		return false, false, fmt.Errorf("chatlog: commit drop delete intent: %w", err)
+		return false, false, err
 	}
-	dropped, _ := res.RowsAffected()
-	return dropped > 0, false, nil
+	return n > 0, false, nil
 }
 
 // DropDeleteIntent removes the intent and reports whether it was there.
 // Called on any terminal outcome: the peer acknowledged the request, or the
 // scheduler gave up on it.
-func (s *Store) DropDeleteIntent(ctx context.Context, messageID domain.MessageID) (bool, error) {
-	// The request GOES. It named the message in order to ask for it, and the
-	// asking is over; a settled row kept for its id would be a durable note
-	// that this message existed and was destroyed, which is the trace the
-	// deletion was for.
-	//
-	// Nothing durable takes its place. From here the id is refused only by the
-	// in-memory window (wipe_tombstone_set.go), and after a restart not at all
-	// — deliberately, because anything that kept refusing it would be a record
-	// of the deletion, and the peer has by now confirmed erasing their copy,
-	// which is what stops the replay at its source.
-	res, err := s.db.ExecContext(ctx, `
-		DELETE FROM message_delete_intents
-		WHERE message_id = ? AND kind = 'message' AND owed = 1`, string(messageID))
-	if err != nil {
-		return false, fmt.Errorf("chatlog: settle delete intent: %w", err)
+func (s *Store) DropDeleteIntent(ctx context.Context, id domain.MessageID) (bool, error) {
+	intent, found, err := s.DeleteIntentByID(ctx, id)
+	if err != nil || !found {
+		return false, err
 	}
-	settled, _ := res.RowsAffected()
-	return settled > 0, nil
+	return s.DropDeleteIntentFor(ctx, intent)
+}
+
+func (s *Store) DropDeleteIntentFor(ctx context.Context, intent DeleteIntent) (bool, error) {
+	result, err := s.db.ExecContext(ctx, `DELETE FROM message_delete_intents WHERE `+exactDeleteIntent, deleteIntentArgs(intent)...)
+	if err != nil {
+		return false, err
+	}
+	n, err := result.RowsAffected()
+	return n > 0, err
 }
 
 // rowScanner is the shared shape of *sql.Row and *sql.Rows.
@@ -560,20 +590,22 @@ type rowScanner interface {
 // deleteIntentColumns is the column list every intent read shares, in the
 // order scanDeleteIntent expects. One constant so a new column cannot be
 // added to one query and forgotten in another.
-const deleteIntentColumns = `kind, message_id, request_id, peer, created_at, next_attempt_at, attempts, held`
+const deleteIntentColumns = `kind, message_id, request_id, peer, created_at, next_attempt_at, attempts, held, original_sender, original_recipient`
 
 func scanDeleteIntent(scanner rowScanner) (DeleteIntent, error) {
 	var (
-		kind          string
-		messageID     sql.NullString
-		requestID     string
-		peer          string
-		createdAt     string
-		nextAttemptAt string
-		attempts      int
-		held          int
+		kind              string
+		messageID         sql.NullString
+		requestID         string
+		peer              string
+		createdAt         string
+		nextAttemptAt     string
+		attempts          int
+		held              int
+		originalSender    string
+		originalRecipient string
 	)
-	if err := scanner.Scan(&kind, &messageID, &requestID, &peer, &createdAt, &nextAttemptAt, &attempts, &held); err != nil {
+	if err := scanner.Scan(&kind, &messageID, &requestID, &peer, &createdAt, &nextAttemptAt, &attempts, &held, &originalSender, &originalRecipient); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return DeleteIntent{}, err
 		}
@@ -586,6 +618,7 @@ func scanDeleteIntent(scanner rowScanner) (DeleteIntent, error) {
 	}
 	return DeleteIntent{
 		Kind:          DeleteIntentKind(kind),
+		Ref:           domain.MessageRef{Topic: "dm", ID: messageID.String, Sender: originalSender, Recipient: originalRecipient},
 		MessageID:     domain.MessageID(messageID.String),
 		RequestID:     domain.ConversationDeleteRequestID(requestID),
 		Peer:          domain.PeerIdentityFromWire(peer),
@@ -604,7 +637,8 @@ func scanDeleteIntent(scanner rowScanner) (DeleteIntent, error) {
 // the documented asymmetry, and is preferable to one destroyed here while
 // falling outside what the peer is told about.
 type ConversationWipeScope struct {
-	IDs []domain.MessageID
+	IDs  []domain.MessageID
+	Refs []domain.MessageRef
 }
 
 // ConversationWipeResult is what one wipe transaction did.
@@ -613,7 +647,8 @@ type ConversationWipeResult struct {
 	// evicts, never the ids merely considered. A wipe of a thread this node
 	// has already emptied removes nothing and is still a wipe: the request
 	// it leaves behind is the whole point of it.
-	Removed []domain.MessageID
+	Removed     []domain.MessageID
+	RemovedRefs []domain.MessageRef
 }
 
 // ConversationCandidateIDs lists the rows a wipe of this conversation would
@@ -634,7 +669,7 @@ func (s *Store) ConversationCandidateIDs(ctx context.Context, peer domain.PeerId
 
 	id := peer.String()
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id FROM messages
+		SELECT id,sender,recipient FROM messages
 		WHERE topic = 'dm'
 		  AND ((sender = ? AND recipient = ?) OR (sender = ? AND recipient = ?))
 		  AND COALESCE(flag, '') <> ?
@@ -646,15 +681,108 @@ func (s *Store) ConversationCandidateIDs(ctx context.Context, peer domain.PeerId
 	defer func() { _ = rows.Close() }()
 
 	var ids []domain.MessageID
+	var refs []domain.MessageRef
 	for rows.Next() {
-		var messageID string
-		if err := rows.Scan(&messageID); err != nil {
+		var messageID, sender, recipient string
+		if err := rows.Scan(&messageID, &sender, &recipient); err != nil {
 			return ConversationWipeScope{}, fmt.Errorf("chatlog: scan conversation row: %w", err)
 		}
 		ids = append(ids, domain.MessageID(messageID))
+		refs = append(refs, domain.MessageRef{Topic: "dm", ID: messageID, Sender: sender, Recipient: recipient})
 	}
 	if err := rows.Err(); err != nil {
 		return ConversationWipeScope{}, fmt.Errorf("chatlog: read conversation rows: %w", err)
 	}
-	return ConversationWipeScope{IDs: ids}, nil
+	return ConversationWipeScope{IDs: ids, Refs: refs}, nil
+}
+
+// OwedDeleteIntentRefs preserves exact tasks and explicit legacy-unbound ones.
+// The volatile refusal set normalizes unknown parties to an ID-only hold.
+func (s *Store) OwedDeleteIntentRefs(ctx context.Context) ([]domain.MessageRef, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT message_id,original_sender,original_recipient FROM message_delete_intents WHERE kind='message' AND owed=1 AND message_id IS NOT NULL AND message_id<>''`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var refs []domain.MessageRef
+	for rows.Next() {
+		ref := domain.MessageRef{Topic: "dm"}
+		if err := rows.Scan(&ref.ID, &ref.Sender, &ref.Recipient); err != nil {
+			return nil, err
+		}
+		refs = append(refs, ref)
+	}
+	return refs, rows.Err()
+}
+
+// OwedDeleteIntents carries the known peer even when a legacy task has no
+// recoverable original author. Its caller must not invent an exact reference.
+func (s *Store) OwedDeleteIntents(ctx context.Context) ([]DeleteIntent, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT `+deleteIntentColumns+` FROM message_delete_intents WHERE kind='message' AND owed=1 AND message_id IS NOT NULL AND message_id<>''`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var intents []DeleteIntent
+	for rows.Next() {
+		intent, err := scanDeleteIntent(rows)
+		if err != nil {
+			return nil, err
+		}
+		intents = append(intents, intent)
+	}
+	return intents, rows.Err()
+}
+
+// OwnIDs names only this side's sends; an incoming colliding id must not
+// freeze or cancel an immutable/outgoing message in the opposite direction.
+func (scope ConversationWipeScope) OwnIDs(self domain.PeerIdentity) []domain.MessageID {
+	var ids []domain.MessageID
+	for _, ref := range scope.Refs {
+		if ref.Sender == self.String() {
+			ids = append(ids, domain.MessageID(ref.ID))
+		}
+	}
+	return ids
+}
+
+func uniqueDeleteIntent(ctx context.Context, db messageRows, where string, args ...any) (DeleteIntent, bool, error) {
+	rows, err := db.QueryContext(ctx, `SELECT `+deleteIntentColumns+` FROM message_delete_intents WHERE kind='message' AND owed=1 AND (`+where+`) LIMIT 2`, args...)
+	if err != nil {
+		return DeleteIntent{}, false, err
+	}
+	defer func() { _ = rows.Close() }()
+	var intent DeleteIntent
+	count := 0
+	for rows.Next() {
+		value, err := scanDeleteIntent(rows)
+		if err != nil {
+			return DeleteIntent{}, false, err
+		}
+		intent = value
+		count++
+	}
+	if err := rows.Err(); err != nil {
+		return DeleteIntent{}, false, err
+	}
+	if count > 1 {
+		return DeleteIntent{}, false, ErrAmbiguousMessage
+	}
+	return intent, count == 1, nil
+}
+
+func deleteIntentArgs(intent DeleteIntent) []any {
+	return []any{intent.Peer.String(), string(intent.MessageID), intent.Ref.Sender, intent.Ref.Recipient}
+}
+
+const exactDeleteIntent = `kind='message' AND peer=? AND message_id=? AND original_sender=? AND original_recipient=?`
+
+func (result ConversationWipeResult) OwnIDs(self domain.PeerIdentity) []domain.MessageID {
+	var ids []domain.MessageID
+	for _, ref := range result.RemovedRefs {
+		if ref.Sender == self.String() {
+			ids = append(ids, domain.MessageID(ref.ID))
+		}
+	}
+	return ids
 }

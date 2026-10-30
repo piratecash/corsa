@@ -47,7 +47,10 @@ package node
 // ---------------------------------------------------------------------------
 
 import (
+	"fmt"
 	"sort"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -65,7 +68,7 @@ type DeliveryOutbox interface {
 	// UndeliveredOutgoing returns the sealed envelopes of locally-sent DMs
 	// whose delivery status is still "sent".
 	UndeliveredOutgoing() ([]OutboxEntry, error)
-	// SentMessageIDs returns the ids of DMs this node authored, whatever
+	// SentMessageRefs returns the full references of DMs this node authored, whatever
 	// their status, so the solicited-receipt gate survives a restart. A
 	// message that reached `delivered` before the restart is not reseeded
 	// for retry — correctly — but its `seen` still has to be accepted when
@@ -76,7 +79,7 @@ type DeliveryOutbox interface {
 	// NEWEST FIRST, at most limit of them. The set they refill is a
 	// bounded LRU, so the caller decides how many it can hold and gets
 	// the ones most likely to still earn a receipt.
-	SentMessageIDs(limit int) ([]protocol.MessageID, error)
+	SentMessageRefs(limit int) ([]domain.MessageRef, error)
 }
 
 // OutboxEntry is one reseeded row: the envelope, plus the durable answer
@@ -115,12 +118,12 @@ type OutboxEntry struct {
 //   - MarkOnWire may land whenever: a crash before it reads as "not yet
 //     sent", so the badge says queued and the engine sends again.
 type DeliveryEmissionJournal interface {
-	// ClearNeverEmitted records that a writer may have taken the frame.
+	// ClearNeverEmittedRefs records that a writer may have taken the frame.
 	// Written once; nothing ever puts the claim back.
-	ClearNeverEmitted(ids []protocol.MessageID) error
-	// MarkOnWire records that a sink confirmed the frame on the wire.
+	ClearNeverEmittedRefs(refs []domain.MessageRef) error
+	// MarkOnWireRefs records that a sink confirmed the frame on the wire.
 	// Written once; nothing ever clears it.
-	MarkOnWire(ids []protocol.MessageID) error
+	MarkOnWireRefs(refs []domain.MessageRef) error
 }
 
 // DeliveryFailureJournal is the optional durable journal for messages the
@@ -132,9 +135,9 @@ type DeliveryEmissionJournal interface {
 // expired — anything else in that table was put there by the attempt cap
 // this engine used to have.
 type DeliveryFailureJournal interface {
-	// MarkDeliveryFailed durably records that automatic retries for the
+	// MarkDeliveryFailedRef durably records that automatic retries for the
 	// message have been abandoned.
-	MarkDeliveryFailed(id protocol.MessageID) error
+	MarkDeliveryFailedRef(ref domain.MessageRef) error
 }
 
 // SeenAckJournal is the optional durable journal for outgoing seen
@@ -146,9 +149,9 @@ type SeenAckJournal interface {
 	// UnconfirmedSeen returns the outgoing seen receipts that have not been
 	// confirmed with a seen_ack yet.
 	UnconfirmedSeen() ([]protocol.DeliveryReceipt, error)
-	// MarkSeenConfirmed durably records that the seen receipt for the
+	// MarkSeenConfirmedRef durably records that the seen receipt for the
 	// message was confirmed by the original sender.
-	MarkSeenConfirmed(id protocol.MessageID) error
+	MarkSeenConfirmedRef(ref domain.MessageRef) error
 }
 
 // deliveryRetrySchedule are the exponential retry intervals; the last value
@@ -492,12 +495,12 @@ type seenAckRetryEntry struct {
 // announcement is NOT reported here: it belongs to whoever writes the
 // frame, AFTER writing it, and publishMessagesEmitted is idempotent so
 // that caller needs no permission slip from this one.
-func (s *Service) noteOwnEnvelopeEmitted(sender string, messageID protocol.MessageID, now time.Time) bool {
-	if s.identity == nil || sender != s.identity.Address {
+func (s *Service) noteOwnEnvelopeEmitted(envelope protocol.Envelope, now time.Time) bool {
+	if s.identity == nil || envelope.Topic != "dm" || envelope.Sender != s.identity.Address {
 		return true
 	}
-	outcome := s.noteOwnEnvelopesEmitted([]protocol.MessageID{messageID}, now, nil)
-	_, blocked := outcome.Withheld[messageID]
+	outcome := s.noteOwnEnvelopesEmitted([]messageIdentity{messageIdentityOf(envelope)}, now, nil)
+	_, blocked := outcome.Withheld[messageIdentityOf(envelope)]
 	return !blocked
 }
 
@@ -525,13 +528,13 @@ func (s *Service) noteOwnEnvelopeEmitted(sender string, messageID protocol.Messa
 // since is another sender's however its stamp reads. A sender with no such
 // baseline asks only whether something is in flight now.
 type emissionSender struct {
-	id        protocol.MessageID
+	id        messageIdentity
 	claimedAt time.Time
 }
 
 // wouldCollide reports whether this sender must stand down for one id.
 // Caller MUST hold s.deliveryMu.
-func (e *emissionSender) wouldCollide(entry *deliveryRetryEntry, id protocol.MessageID, now time.Time) bool {
+func (e *emissionSender) wouldCollide(entry *deliveryRetryEntry, id messageIdentity, now time.Time) bool {
 	if e == nil {
 		return false // a writer finishing a send that already passed here
 	}
@@ -574,16 +577,16 @@ func (r emissionClaimRollback) undo(entry *deliveryRetryEntry) {
 //     found it, or it would park a message that has just gone out and, in
 //     the version before this check, send a second copy of it.
 func (s *Service) claimEnvelopeForDispatch(envelope protocol.Envelope, claimedAt, now time.Time) (cleared, superseded bool, wrote time.Time) {
-	if s.identity == nil || envelope.Sender != s.identity.Address {
+	if s.identity == nil || envelope.Topic != "dm" || envelope.Sender != s.identity.Address {
 		return true, false, time.Time{}
 	}
-	sender := &emissionSender{id: envelope.ID, claimedAt: claimedAt}
-	outcome := s.noteOwnEnvelopesEmitted([]protocol.MessageID{envelope.ID}, now, sender)
-	if _, beaten := outcome.Superseded[envelope.ID]; beaten {
+	sender := &emissionSender{id: messageIdentityOf(envelope), claimedAt: claimedAt}
+	outcome := s.noteOwnEnvelopesEmitted([]messageIdentity{messageIdentityOf(envelope)}, now, sender)
+	if _, beaten := outcome.Superseded[messageIdentityOf(envelope)]; beaten {
 		return false, true, time.Time{}
 	}
-	_, blocked := outcome.Withheld[envelope.ID]
-	return !blocked, false, outcome.Claimed[envelope.ID]
+	_, blocked := outcome.Withheld[messageIdentityOf(envelope)]
+	return !blocked, false, outcome.Claimed[messageIdentityOf(envelope)]
 }
 
 // noteOwnEnvelopesEmitted is the batch form, for a caller that is about
@@ -597,7 +600,7 @@ func (s *Service) claimEnvelopeForDispatch(envelope protocol.Envelope, claimedAt
 //
 // The outcome names the ids the caller must NOT write. What it must
 // ANNOUNCE is not reported here — see emissionOutcome.
-func (s *Service) noteOwnEnvelopesEmitted(ids []protocol.MessageID, now time.Time, sender *emissionSender) emissionOutcome {
+func (s *Service) noteOwnEnvelopesEmitted(ids []messageIdentity, now time.Time, sender *emissionSender) emissionOutcome {
 	if len(ids) == 0 {
 		return emissionOutcome{}
 	}
@@ -628,19 +631,19 @@ type emissionOutcome struct {
 	// Withheld are the ids the caller must NOT write: withdrawn while this
 	// ran, frozen by a wipe, or still carrying a durable never-emitted
 	// claim the journal refused to withdraw.
-	Withheld map[protocol.MessageID]struct{}
+	Withheld map[messageIdentity]struct{}
 	// Unproven are the ids whose durable never-emitted claim still has to
 	// come off the disk before their frame may go out.
-	Unproven []protocol.MessageID
+	Unproven []messageIdentity
 	// Claimed names, for each id this call took through the boundary, the
 	// instant the claim was stamped with. A sender that ends up not writing
 	// the frame gives exactly that claim back — see emissionClaimRollback.
-	Claimed map[protocol.MessageID]time.Time
+	Claimed map[messageIdentity]time.Time
 	// Superseded names the guarded id when another sender emitted it after
 	// the caller decided to. It is a Withheld id with a REASON attached,
 	// because the two reasons are undone differently — see
 	// claimEnvelopeForDispatch. Only a call from a sender can produce it.
-	Superseded map[protocol.MessageID]struct{}
+	Superseded map[messageIdentity]struct{}
 }
 
 // claimEmissionLocked is the first half of noteOwnEnvelopesEmitted: it
@@ -653,7 +656,7 @@ type emissionOutcome struct {
 // disk write at all, which is what the two-phase form exists to preserve.
 // An outgoing message's FIRST emission does pay the withdrawal, because
 // its row was born carrying the claim.
-func (s *Service) claimEmissionLocked(ids []protocol.MessageID, now time.Time, sender *emissionSender) emissionOutcome {
+func (s *Service) claimEmissionLocked(ids []messageIdentity, now time.Time, sender *emissionSender) emissionOutcome {
 	var claim emissionOutcome
 	s.deliveryMu.Lock()
 	// Read INSIDE the section, and not merely at the boundary: waiting for
@@ -726,7 +729,7 @@ func (s *Service) claimEmissionLocked(ids []protocol.MessageID, now time.Time, s
 // The withdrawal shadow is re-read here, not carried over from the first
 // hold: the durable write happened between the two, and a cancellation
 // landing in that gap has already told the user the message was recalled.
-func (s *Service) confirmEmission(claim emissionOutcome, stranded map[protocol.MessageID]struct{}, now time.Time) emissionOutcome {
+func (s *Service) confirmEmission(claim emissionOutcome, stranded map[messageIdentity]struct{}, now time.Time) emissionOutcome {
 	s.deliveryMu.Lock()
 	claimedAt := s.deliveryNow() // inside the section — see claimEmissionLocked
 	for _, id := range claim.Unproven {
@@ -844,20 +847,74 @@ func emissionTakenElsewhere(entry *deliveryRetryEntry, claimedAtPlan, now time.T
 // MUST hold s.deliveryMu.
 func (e *deliveryRetryEntry) confirmed() bool { return !e.LastEmittedAt.IsZero() }
 
-func stampClaim(set map[protocol.MessageID]time.Time, id protocol.MessageID, at time.Time) map[protocol.MessageID]time.Time {
+func stampClaim(set map[messageIdentity]time.Time, id messageIdentity, at time.Time) map[messageIdentity]time.Time {
 	if set == nil {
-		set = make(map[protocol.MessageID]time.Time, 1)
+		set = make(map[messageIdentity]time.Time, 1)
 	}
 	set[id] = at
 	return set
 }
 
-func withhold(set map[protocol.MessageID]struct{}, id protocol.MessageID) map[protocol.MessageID]struct{} {
+func withhold(set map[messageIdentity]struct{}, id messageIdentity) map[messageIdentity]struct{} {
 	if set == nil {
-		set = make(map[protocol.MessageID]struct{}, 1)
+		set = make(map[messageIdentity]struct{}, 1)
 	}
 	set[id] = struct{}{}
 	return set
+}
+
+// deliveryMessageRef names an own DM outside the node package. The retry
+// sets are DM-only; the durable journal still receives the explicit namespace.
+func deliveryMessageRef(id messageIdentity) domain.MessageRef {
+	return domain.MessageRef{Topic: "dm", ID: string(id.MessageID), Sender: id.Sender, Recipient: id.Recipient}
+}
+
+// emissionLaneTokens adapts full references to the unchanged lane's batching
+// type. These length-framed strings are local tokens, NEVER wire message IDs.
+// Pre-wire turns absorb other callers' tokens, so decoding must be self-contained
+// rather than using the current request's map. The lane's 128-row bound stays.
+func emissionLaneTokens(ids []messageIdentity) []protocol.MessageID {
+	tokens := make([]protocol.MessageID, 0, len(ids))
+	for _, id := range ids {
+		tokens = append(tokens, protocol.MessageID(deliveryMessageRef(id).Key()))
+	}
+	return tokens
+}
+
+// emissionLaneRefs rejects malformed tokens before any journal write. Identical
+// full references coalesced from concurrent waiters name the same row and are
+// written once; the unchanged lane completes every absorbed waiter. No bare-ID
+// fallback may turn an unknown reference into a write to another message's row.
+func (s *Service) emissionLaneRefs(tokens []protocol.MessageID) ([]domain.MessageRef, error) {
+	refs := make([]domain.MessageRef, 0, len(tokens))
+	seen := make(map[domain.MessageRef]struct{}, len(tokens))
+	for _, token := range tokens {
+		rest := string(token)
+		var parts [4]string
+		for i := range parts {
+			colon := strings.IndexByte(rest, ':')
+			if colon < 1 {
+				return nil, fmt.Errorf("invalid emission reference token")
+			}
+			n, err := strconv.Atoi(rest[:colon])
+			rest = rest[colon+1:]
+			if err != nil || n < 0 || n > len(rest) {
+				return nil, fmt.Errorf("invalid emission reference token")
+			}
+			parts[i], rest = rest[:n], rest[n:]
+		}
+		ref := domain.MessageRef{Topic: parts[0], ID: parts[1], Sender: parts[2], Recipient: parts[3]}
+		if rest != "" || ref.Key() != string(token) || ref.Topic != "dm" || ref.ID == "" ||
+			ref.Recipient == "" || s.identity == nil || ref.Sender != s.identity.Address {
+			return nil, fmt.Errorf("invalid emission reference token")
+		}
+		if _, duplicate := seen[ref]; duplicate {
+			continue
+		}
+		seen[ref] = struct{}{}
+		refs = append(refs, ref)
+	}
+	return refs, nil
 }
 
 // markDeliveryOnWire stamps the durable "a sink confirmed this" bit.
@@ -895,7 +952,7 @@ func withhold(set map[protocol.MessageID]struct{}, id protocol.MessageID) map[pr
 // further event coming, because the announcement is claimed once. Every
 // false here is owed to repairLocalDeliveryRecord, which re-derives the
 // debt from state and needs no hand-off.
-func (s *Service) markDeliveryOnWire(ids ...protocol.MessageID) bool {
+func (s *Service) markDeliveryOnWire(ids ...messageIdentity) bool {
 	if len(ids) == 0 {
 		return false
 	}
@@ -904,8 +961,12 @@ func (s *Service) markDeliveryOnWire(ids ...protocol.MessageID) bool {
 		// there is nothing that could disagree with the badge later.
 		return true
 	}
-	admitted, err := s.emissionLane.runBookkeeping(ids, func(chunk []protocol.MessageID) error {
-		return s.emissionJournal.MarkOnWire(chunk)
+	admitted, err := s.emissionLane.runBookkeeping(emissionLaneTokens(ids), func(chunk []protocol.MessageID) error {
+		refs, err := s.emissionLaneRefs(chunk)
+		if err != nil {
+			return err
+		}
+		return s.emissionJournal.MarkOnWireRefs(refs)
 	})
 	if !admitted {
 		// Not a failure and not a loss: the lane is full of stamps and
@@ -927,7 +988,7 @@ func (s *Service) markDeliveryOnWire(ids ...protocol.MessageID) bool {
 	return true
 }
 
-func (s *Service) forgetMarkedNeverEmitted(ids []protocol.MessageID) {
+func (s *Service) forgetMarkedNeverEmitted(ids []messageIdentity) {
 	s.deliveryMu.Lock()
 	for _, id := range ids {
 		delete(s.markedNeverEmitted, id)
@@ -939,7 +1000,7 @@ func (s *Service) forgetMarkedNeverEmitted(ids []protocol.MessageID) {
 // destroyed, so nothing is left in the set that no later emission could
 // ever consume. Memory only — the mark goes with the row.
 // Caller MUST hold s.deliveryMu.Lock.
-func (s *Service) clearClaimsLocked(ids map[protocol.MessageID]struct{}) {
+func (s *Service) clearClaimsLocked(ids map[messageIdentity]struct{}) {
 	for id := range ids {
 		delete(s.markedNeverEmitted, id)
 	}
@@ -954,7 +1015,7 @@ func (s *Service) clearClaimsLocked(ids map[protocol.MessageID]struct{}) {
 // batch. Nothing is retried here — the caller withholds the frames, the
 // entries keep their schedule, and the next retry tick repeats both the
 // clear and the send.
-func (s *Service) clearEmissionMarks(ids []protocol.MessageID) map[protocol.MessageID]struct{} {
+func (s *Service) clearEmissionMarks(ids []messageIdentity) map[messageIdentity]struct{} {
 	if len(ids) == 0 || s.emissionJournal == nil {
 		return nil
 	}
@@ -964,8 +1025,12 @@ func (s *Service) clearEmissionMarks(ids []protocol.MessageID) map[protocol.Mess
 	// is busiest with stamps for the conversation being replayed. It goes
 	// in as URGENT: it waits for at most the statement already running
 	// and never for the bookkeeping queued behind it. See emission_lane.go.
-	if err := s.emissionLane.runPreWire(ids, func(batched []protocol.MessageID) error {
-		return s.emissionJournal.ClearNeverEmitted(batched)
+	if err := s.emissionLane.runPreWire(emissionLaneTokens(ids), func(batched []protocol.MessageID) error {
+		refs, err := s.emissionLaneRefs(batched)
+		if err != nil {
+			return err
+		}
+		return s.emissionJournal.ClearNeverEmittedRefs(refs)
 	}); err == nil {
 		s.forgetMarkedNeverEmitted(ids)
 		return nil
@@ -973,7 +1038,7 @@ func (s *Service) clearEmissionMarks(ids []protocol.MessageID) map[protocol.Mess
 		log.Error().Err(err).Int("count", len(ids)).
 			Msg("emission_journal_clear_failed_send_withheld")
 	}
-	stranded := make(map[protocol.MessageID]struct{}, len(ids))
+	stranded := make(map[messageIdentity]struct{}, len(ids))
 	for _, id := range ids {
 		stranded[id] = struct{}{}
 	}
@@ -983,9 +1048,9 @@ func (s *Service) clearEmissionMarks(ids []protocol.MessageID) map[protocol.Mess
 // noteDeliveryCancelledLocked remembers a withdrawn delivery for as long
 // as a backlog push built just before it could still be writing frames.
 // Caller MUST hold s.deliveryMu.Lock.
-func (s *Service) noteDeliveryCancelledLocked(id protocol.MessageID, now time.Time) {
+func (s *Service) noteDeliveryCancelledLocked(id messageIdentity, now time.Time) {
 	if s.cancelledDeliveries == nil {
-		s.cancelledDeliveries = make(map[protocol.MessageID]time.Time, 1)
+		s.cancelledDeliveries = make(map[messageIdentity]time.Time, 1)
 	}
 	for old, at := range s.cancelledDeliveries {
 		if now.Sub(at) > cancelledDeliveryMemory {
@@ -1009,7 +1074,7 @@ func (s *Service) deliveryRetryMaxAttempts() int {
 
 // registerAwaitingDeliveredLocked schedules the locally-sent envelope for
 // end-to-end retry until its delivered/seen receipt arrives. Caller MUST
-// hold s.deliveryMu.Lock. Idempotent per MessageID — a re-send of the same
+// hold s.deliveryMu.Lock. Idempotent per full message identity — a re-send of the same
 // id keeps the original schedule. held records whether the first send was
 // withheld (recipient unreachable) so kickDeliveryRetriesForReachable can
 // wake it the moment a route/connection appears; an emitted send registers
@@ -1020,8 +1085,8 @@ func (s *Service) registerAwaitingDeliveredLocked(envelope protocol.Envelope, no
 	// the idempotency check so a re-send promotes the id in the LRU; the entry
 	// survives the delivered→seen transition because it is evicted only by LRU
 	// capacity, never on receipt arrival.
-	s.sentDMIDs.Add(string(envelope.ID))
-	if _, exists := s.awaitingDelivered[envelope.ID]; exists {
+	s.sentDMIDs.Add(envelopeRef(envelope).Key())
+	if _, exists := s.awaitingDelivered[messageIdentityOf(envelope)]; exists {
 		return
 	}
 	// A HELD entry is due IMMEDIATELY. The backoff schedule times a wait
@@ -1067,9 +1132,9 @@ func (s *Service) registerAwaitingDeliveredLocked(envelope protocol.Envelope, no
 	// ordinary path honest.
 	if s.emissionJournal != nil {
 		if s.markedNeverEmitted == nil {
-			s.markedNeverEmitted = make(map[protocol.MessageID]struct{}, 1)
+			s.markedNeverEmitted = make(map[messageIdentity]struct{}, 1)
 		}
-		s.markedNeverEmitted[envelope.ID] = struct{}{}
+		s.markedNeverEmitted[messageIdentityOf(envelope)] = struct{}{}
 	}
 	// LastEmittedAt is deliberately left ZERO even for a send that is
 	// going out right now. It is the CONFIRMATION stamp — the instant a
@@ -1077,7 +1142,7 @@ func (s *Service) registerAwaitingDeliveredLocked(envelope protocol.Envelope, no
 	// the envelope over. Stamping it here would claim the recipient's
 	// queue slot for a frame no writer may ever accept, and would make
 	// confirmEnvelopeOnWire mistake this attempt for one already answered.
-	s.awaitingDelivered[envelope.ID] = entry
+	s.awaitingDelivered[messageIdentityOf(envelope)] = entry
 }
 
 // holdReasonFor turns the caller's "was this send withheld?" into the
@@ -1116,17 +1181,23 @@ func deliveryQueueOrder(a, b *deliveryRetryEntry) bool {
 	if !a.Envelope.CreatedAt.Equal(b.Envelope.CreatedAt) {
 		return a.Envelope.CreatedAt.Before(b.Envelope.CreatedAt)
 	}
-	return a.Envelope.ID < b.Envelope.ID
+	if a.Envelope.ID != b.Envelope.ID {
+		return a.Envelope.ID < b.Envelope.ID
+	}
+	if a.Envelope.Sender != b.Envelope.Sender {
+		return a.Envelope.Sender < b.Envelope.Sender
+	}
+	return a.Envelope.Recipient < b.Envelope.Recipient
 }
 
 // registerAwaitingSeenAckLocked schedules the locally-sent seen receipt for
 // retry until the original sender's seen_ack arrives. Caller MUST hold
-// s.deliveryMu.Lock. Idempotent per MessageID.
+// s.deliveryMu.Lock. Idempotent per full message identity.
 func (s *Service) registerAwaitingSeenAckLocked(receipt protocol.DeliveryReceipt, now time.Time) {
-	if _, exists := s.awaitingSeenAck[receipt.MessageID]; exists {
+	if _, exists := s.awaitingSeenAck[madeByMessageRecipient(receipt)]; exists {
 		return
 	}
-	s.awaitingSeenAck[receipt.MessageID] = &seenAckRetryEntry{
+	s.awaitingSeenAck[madeByMessageRecipient(receipt)] = &seenAckRetryEntry{
 		Receipt: receipt,
 		// Attempts counts RE-SENDS, and starts at zero: the send this
 		// registration accompanies has not happened yet — distributeReceipt
@@ -1184,7 +1255,7 @@ func (s *Service) RegisterDeliveryOutbox(outbox DeliveryOutbox) {
 	// we sent it — so its `seen`, which arrives whenever the recipient
 	// opens the conversation, would be dropped as unsolicited and their
 	// seen retry would never be acked.
-	if ids, err := outbox.SentMessageIDs(maxSentDMIDs); err != nil {
+	if ids, err := outbox.SentMessageRefs(maxSentDMIDs); err != nil {
 		log.Error().Err(err).Msg("delivery_retry_sent_ids_reseed_failed")
 	} else {
 		// OLDEST FIRST into the LRU, from a list that arrives newest
@@ -1197,7 +1268,9 @@ func (s *Service) RegisterDeliveryOutbox(outbox DeliveryOutbox) {
 		// the limit makes the overflow unreachable, and a test that
 		// cannot fail is worse than none.
 		for i := len(ids) - 1; i >= 0; i-- {
-			s.sentDMIDs.Add(string(ids[i]))
+			if ref := ids[i]; s.identity != nil && ref.Topic == "dm" && ref.Sender == s.identity.Address && ref.ID != "" && ref.Recipient != "" {
+				s.sentDMIDs.Add(ref.Key())
+			}
 		}
 		if len(ids) > 0 {
 			log.Debug().Int("count", len(ids)).Msg("delivery_retry_sent_ids_reseeded")
@@ -1224,7 +1297,7 @@ func (s *Service) RegisterDeliveryOutbox(outbox DeliveryOutbox) {
 			// sends or flips Held, instead of every reseeded undelivered DM
 			// idling a full backoff interval before its first attempt.
 			s.registerAwaitingDeliveredLocked(row.Envelope, now, false)
-			e, ok := s.awaitingDelivered[row.Envelope.ID]
+			e, ok := s.awaitingDelivered[messageIdentityOf(row.Envelope)]
 			if !ok {
 				continue
 			}
@@ -1266,7 +1339,7 @@ func (s *Service) RegisterDeliveryOutbox(outbox DeliveryOutbox) {
 				// withdrawal withholds the send by contract. A returning
 				// recipient would then wait on a write with nothing to
 				// write.
-				delete(s.markedNeverEmitted, row.Envelope.ID)
+				delete(s.markedNeverEmitted, messageIdentityOf(row.Envelope))
 			}
 			// The conversation is read fresh after a restart, so what the
 			// sender is looking at comes from the row — and from the bit
@@ -1318,7 +1391,7 @@ type abandonedDelivery struct {
 // and written atomically with the schedule, so no kick observes a
 // half-updated entry.
 type dueCandidate struct {
-	id  protocol.MessageID
+	id  messageIdentity
 	env protocol.Envelope
 	// claimedAt is the entry's standing emission claim when the plan chose
 	// it. The arm asks again: anything else claiming this message for the
@@ -1885,7 +1958,7 @@ func (s *Service) noteReconnectDispatch(recipient string, sent []protocol.Envelo
 	// visit these messages have already answered.
 	s.noteRecipientHereLocked(recipient)
 	for _, envelope := range sent {
-		entry, ok := s.awaitingDelivered[envelope.ID]
+		entry, ok := s.awaitingDelivered[messageIdentityOf(envelope)]
 		if !ok {
 			continue
 		}
@@ -2077,7 +2150,7 @@ func (s *Service) planDueDeliveries(now time.Time, reachable recipientReachabili
 // classifyAbandonedLocked reports the terminal verdict for one awaiting
 // entry, if it has one. There is exactly one — its own TTL. Caller MUST
 // hold s.deliveryMu.Lock.
-func (s *Service) classifyAbandonedLocked(id protocol.MessageID, entry *deliveryRetryEntry, now time.Time) (abandonedDelivery, bool) {
+func (s *Service) classifyAbandonedLocked(id messageIdentity, entry *deliveryRetryEntry, now time.Time) (abandonedDelivery, bool) {
 	if s.deliveryFrozenLocked(id) {
 		// A wipe is deciding about this message. Nothing about its
 		// delivery moves while that lasts — terminalizing it here would
@@ -2092,7 +2165,7 @@ func (s *Service) classifyAbandonedLocked(id protocol.MessageID, entry *delivery
 	// Ordinary DMs carry TTLSeconds=0, so this is the auto-delete case and
 	// nothing else: the message was sent to expire, and it has.
 	if s.messageDeliveryExpiredAt(now, entry.Envelope.CreatedAt, entry.Envelope.TTLSeconds) {
-		log.Warn().Str("message_id", string(id)).Str("recipient", entry.Envelope.Recipient).Msg("delivery_retry_expired_ttl")
+		log.Warn().Str("message_id", string(id.MessageID)).Str("recipient", entry.Envelope.Recipient).Msg("delivery_retry_expired_ttl")
 		return abandonedDelivery{entry.Envelope, "expired", "message delivery expired"}, true
 	}
 	return abandonedDelivery{}, false
@@ -2140,7 +2213,7 @@ func (s *Service) selectQueueHeadsLocked(queues map[string][]*deliveryRetryEntry
 //     whole conversation behind it for up to eleven minutes.
 func (s *Service) pickQueueHeadLocked(queue []*deliveryRetryEntry, now time.Time) (dueCandidate, bool) {
 	for _, entry := range queue {
-		id := entry.Envelope.ID
+		id := messageIdentityOf(entry.Envelope)
 		if s.deliveryFrozenLocked(id) {
 			// A wipe is deciding whether the peer may ever hold this
 			// message, and a freeze has no expiry of its own — it ends
@@ -2194,7 +2267,7 @@ func (s *Service) planDueSeenAcks(now time.Time) []protocol.DeliveryReceipt {
 		}
 		if entry.Attempts >= maxAttempts {
 			delete(s.awaitingSeenAck, id)
-			log.Warn().Str("message_id", string(id)).Str("recipient", entry.Receipt.Recipient).Int("attempts", entry.Attempts).Msg("seen_ack_retry_exhausted")
+			log.Warn().Str("message_id", string(id.MessageID)).Str("recipient", entry.Receipt.Recipient).Int("attempts", entry.Attempts).Msg("seen_ack_retry_exhausted")
 			continue
 		}
 		// backoff, not backoffAfter: Attempts counts re-sends and the
@@ -2313,7 +2386,7 @@ func (s *Service) armDueDeliveries(candidates []dueCandidate, reachable recipien
 // keep that step after its recipient walks back in, and the person who
 // just came online would wait a quarter of an hour for a message that has
 // been ready since yesterday. Caller MUST hold s.deliveryMu.Lock.
-func (s *Service) resetBackoffOnReturn(entry *deliveryRetryEntry, id protocol.MessageID) {
+func (s *Service) resetBackoffOnReturn(entry *deliveryRetryEntry, id messageIdentity) {
 	// With the reachability gate off nothing is ever genuinely held, so
 	// there is no such thing as a return to observe — and leaving the
 	// schedule alone keeps flag-off behaviour identical to the legacy
@@ -2324,7 +2397,7 @@ func (s *Service) resetBackoffOnReturn(entry *deliveryRetryEntry, id protocol.Me
 	if entry.Hold != holdUnreachable || entry.Attempts == 0 {
 		return
 	}
-	log.Debug().Str("message_id", string(id)).Str("recipient", entry.Envelope.Recipient).
+	log.Debug().Str("message_id", string(id.MessageID)).Str("recipient", entry.Envelope.Recipient).
 		Int("attempts", entry.Attempts).Msg("delivery_retry_backoff_reset_on_return")
 	entry.Attempts = 0
 }
@@ -2371,7 +2444,7 @@ func (s *Service) emitDueDelivery(due dueDispatch, now time.Time) {
 		// about their reachability. A freeze also gives the schedule back:
 		// this node paused itself, and a thawed message must go out when
 		// it was due rather than pay for the pause.
-		s.holdDeliveryRetry(envelope.ID, due.parkedAt, holdUnconfirmed, due.wokenBefore, emissionClaimRollback{})
+		s.holdDeliveryRetry(messageIdentityOf(envelope), due.parkedAt, holdUnconfirmed, due.wokenBefore, emissionClaimRollback{})
 		return
 	}
 	if !s.dispatchEnvelopeRetry(envelope, now) {
@@ -2380,7 +2453,7 @@ func (s *Service) emitDueDelivery(due dueDispatch, now time.Time) {
 		// unreachable and a returning peer resets the backoff.
 		// The claim this dispatch took goes back with the schedule: no
 		// frame was written, so nothing is in flight.
-		s.holdDeliveryRetry(envelope.ID, now, holdUnreachable, due.wokenBefore,
+		s.holdDeliveryRetry(messageIdentityOf(envelope), now, holdUnreachable, due.wokenBefore,
 			emissionClaimRollback{wrote: wroteClaim, restore: due.claimedAt})
 		return
 	}
@@ -2424,7 +2497,7 @@ func (s *Service) confirmEnvelopeOnWire(envelope protocol.Envelope, dispatchedAt
 	// comes because the announcement is claimed once. Staying at queued
 	// until the disk agrees is the direction that cannot go backwards.
 	s.goBackground(func() {
-		s.confirmEnvelopesDurably([]protocol.Envelope{envelope}, s.owesAnnouncement(envelope.ID))
+		s.confirmEnvelopesDurably([]protocol.Envelope{envelope}, s.owesAnnouncement(messageIdentityOf(envelope)))
 	})
 }
 
@@ -2436,7 +2509,7 @@ func (s *Service) confirmEnvelopeOnWire(envelope protocol.Envelope, dispatchedAt
 func (s *Service) confirmEnvelopeInMemory(envelope protocol.Envelope, dispatchedAt time.Time) bool {
 	var confirmedNow bool
 	s.deliveryMu.Lock()
-	entry, awaiting := s.awaitingDelivered[envelope.ID]
+	entry, awaiting := s.awaitingDelivered[messageIdentityOf(envelope)]
 	if awaiting && entry.LastEmittedAt.Before(dispatchedAt) {
 		entry.Attempts++
 		rebuilt := dispatchedAt.Add(deliveryRetryBackoffAfter(entry.Attempts))
@@ -2476,7 +2549,7 @@ func (s *Service) confirmEnvelopeInMemory(envelope protocol.Envelope, dispatched
 // message left the machine. Read separately from the confirmation because
 // the two are answered at different moments: the entry moves under the
 // delivery mutex, the announcement waits for the disk.
-func (s *Service) owesAnnouncement(id protocol.MessageID) bool {
+func (s *Service) owesAnnouncement(id messageIdentity) bool {
 	s.deliveryMu.RLock()
 	defer s.deliveryMu.RUnlock()
 	entry, awaiting := s.awaitingDelivered[id]
@@ -2604,10 +2677,10 @@ func envelopesOldestFirst(entries []*deliveryRetryEntry) []protocol.Envelope {
 	return out
 }
 
-func idsOf(envelopes []protocol.Envelope) []protocol.MessageID {
-	ids := make([]protocol.MessageID, 0, len(envelopes))
+func idsOf(envelopes []protocol.Envelope) []messageIdentity {
+	ids := make([]messageIdentity, 0, len(envelopes))
 	for _, envelope := range envelopes {
-		ids = append(ids, envelope.ID)
+		ids = append(ids, messageIdentityOf(envelope))
 	}
 	return ids
 }
@@ -2676,7 +2749,7 @@ func (s *Service) publishRetryableSnapshot(topic string, event protocol.LocalCha
 		// Taking it out before the publish let a pass that then returned
 		// early drop it for good; removing it unconditionally let a stale
 		// copy's success delete a newer status that had arrived since.
-		s.forgetShedEvent(protocol.MessageID(event.MessageID), seq, event.Status)
+		s.forgetShedEvent(localChangeMessageRef(event), seq, event.Status)
 		return
 	}
 	s.keepShedEvent(topic, event)
@@ -2698,7 +2771,17 @@ func receiptUpdateEvent(receipt protocol.DeliveryReceipt) protocol.LocalChangeEv
 	}
 }
 
-// keepShedEvent stores a shed event for a later pass. Keyed by message id,
+// localChangeMessageRef returns the message a local event updates. Receipt
+// events carry receipt endpoints, the reverse of the original message.
+func localChangeMessageRef(event protocol.LocalChangeEvent) domain.MessageRef {
+	ref := domain.MessageRef{Topic: event.Topic, ID: event.MessageID, Sender: event.Sender, Recipient: event.Recipient}
+	if event.Type == protocol.LocalChangeReceiptUpdate {
+		ref.Sender, ref.Recipient = ref.Recipient, ref.Sender
+	}
+	return ref
+}
+
+// keepShedEvent stores a shed event for a later pass. Keyed by full message reference,
 // so a newer status for the same message replaces an older one rather than
 // queueing behind it — the client applies statuses monotonically, and the
 // latest is the only one worth repeating.
@@ -2706,9 +2789,9 @@ func (s *Service) keepShedEvent(topic string, event protocol.LocalChangeEvent) {
 	next := time.Now().UTC().Add(deliveryAnnounceRetry)
 	s.deliveryMu.Lock()
 	if s.pendingUIEvents == nil {
-		s.pendingUIEvents = make(map[protocol.MessageID]pendingUIEvent, 1)
+		s.pendingUIEvents = make(map[domain.MessageRef]pendingUIEvent, 1)
 	}
-	id := protocol.MessageID(event.MessageID)
+	id := localChangeMessageRef(event)
 	existing, known := s.pendingUIEvents[id]
 	switch {
 	case known && localChangeRank(event.Status) < localChangeRank(existing.event.Status):
@@ -2727,7 +2810,7 @@ func (s *Service) keepShedEvent(topic string, event protocol.LocalChangeEvent) {
 
 // forgetShedEvent removes a settled debt, but only if the map still holds
 // the snapshot that was published — or one this publish supersedes.
-func (s *Service) forgetShedEvent(id protocol.MessageID, seq uint64, status string) {
+func (s *Service) forgetShedEvent(id domain.MessageRef, seq uint64, status string) {
 	s.deliveryMu.Lock()
 	if existing, known := s.pendingUIEvents[id]; known {
 		superseded := existing.seq == seq ||
@@ -2769,7 +2852,7 @@ const maxPendingUIEvents = 512
 
 // deferAnnouncement pushes a shed event's next attempt out, so the repair
 // pass does not republish into an inbox that is still full.
-func (s *Service) deferAnnouncement(id protocol.MessageID) {
+func (s *Service) deferAnnouncement(id messageIdentity) {
 	next := time.Now().UTC().Add(deliveryAnnounceRetry)
 	s.deliveryMu.Lock()
 	if entry, awaiting := s.awaitingDelivered[id]; awaiting {
@@ -2786,26 +2869,33 @@ func (s *Service) deferAnnouncement(id protocol.MessageID) {
 // and a separate UPDATE for each of them, all contending for the same
 // database as the pre-wire withdrawals of freshly-typed messages.
 func (s *Service) confirmEnvelopesDurably(envelopes []protocol.Envelope, announce bool) {
-	if len(envelopes) == 0 {
+	if len(envelopes) == 0 || s.identity == nil {
 		return
 	}
-	ids := make([]protocol.MessageID, 0, len(envelopes))
+	own := make([]protocol.Envelope, 0, len(envelopes))
+	ids := make([]messageIdentity, 0, len(envelopes))
 	for _, envelope := range envelopes {
-		ids = append(ids, envelope.ID)
+		// A reconnect backlog can also contain transit DMs. Their rows do
+		// not belong to our outbox or its emission journal.
+		if envelope.Topic != "dm" || envelope.Sender != s.identity.Address {
+			continue
+		}
+		own = append(own, envelope)
+		ids = append(ids, messageIdentityOf(envelope))
 	}
 	if !s.markDeliveryOnWire(ids...) {
 		return
 	}
 	s.noteStamped(ids)
 	if announce {
-		s.publishMessagesEmitted(envelopes)
+		s.publishMessagesEmitted(own)
 	}
 }
 
 // noteStamped memoises a landed journal write, so the repair pass stops
 // asking for it. The durable bit is monotone, so this flag only ever moves
 // one way too.
-func (s *Service) noteStamped(ids []protocol.MessageID) {
+func (s *Service) noteStamped(ids []messageIdentity) {
 	s.deliveryMu.Lock()
 	for _, id := range ids {
 		if entry, awaiting := s.awaitingDelivered[id]; awaiting {
@@ -2839,7 +2929,7 @@ func (s *Service) publishMessagesEmitted(envelopes []protocol.Envelope) {
 	claimed := make([]protocol.Envelope, 0, len(envelopes))
 	s.deliveryMu.Lock()
 	for _, envelope := range envelopes {
-		entry, awaiting := s.awaitingDelivered[envelope.ID]
+		entry, awaiting := s.awaitingDelivered[messageIdentityOf(envelope)]
 		if !awaiting || entry.Announced {
 			continue
 		}
@@ -2867,16 +2957,16 @@ func (s *Service) publishMessagesEmitted(envelopes []protocol.Envelope) {
 			// GIVEN BACK and the next confirmed emission says it again.
 			// The cost of the other direction — announcing twice — is
 			// nothing, because the subscriber applies it monotonically.
-			s.returnEmissionAnnouncement(envelope.ID)
-			s.deferAnnouncement(envelope.ID)
+			s.returnEmissionAnnouncement(messageIdentityOf(envelope))
+			s.deferAnnouncement(messageIdentityOf(envelope))
 		}
 	}
 }
 
 // returnEmissionAnnouncement un-claims an announcement the bus could not
 // deliver, so a later emission of the same message re-announces it.
-func (s *Service) returnEmissionAnnouncement(id protocol.MessageID) {
-	log.Warn().Str("message_id", string(id)).
+func (s *Service) returnEmissionAnnouncement(id messageIdentity) {
+	log.Warn().Str("message_id", string(id.MessageID)).
 		Msg("delivery_queued_message_emitted_event_dropped_will_retry")
 	s.deliveryMu.Lock()
 	if entry, awaiting := s.awaitingDelivered[id]; awaiting {
@@ -2919,7 +3009,7 @@ func (s *Service) runRetryDispatchBarrier() {
 // only what was displaced, never a bare true, keeps an entry that nobody
 // woke unmarked; and because the mark is only ever raised here, a wake-up
 // that arrived in the unlocked gap survives too.
-func (s *Service) holdDeliveryRetry(id protocol.MessageID, from time.Time, reason deliveryHoldReason, wokenBefore bool, claim emissionClaimRollback) {
+func (s *Service) holdDeliveryRetry(id messageIdentity, from time.Time, reason deliveryHoldReason, wokenBefore bool, claim emissionClaimRollback) {
 	s.deliveryMu.Lock()
 	if entry, awaiting := s.awaitingDelivered[id]; awaiting {
 		entry.Hold = reason
@@ -3103,7 +3193,7 @@ func (s *Service) kickDeliveryRetriesForReachable(identities map[domain.PeerIden
 	// Phase 1 (deliveryMu): collect held entries whose recipient is in the
 	// set. No mutation yet — reachability is decided lock-free below.
 	type heldEnvelope struct {
-		id  protocol.MessageID
+		id  messageIdentity
 		env protocol.Envelope
 	}
 	var held []heldEnvelope
@@ -3141,7 +3231,7 @@ func (s *Service) kickDeliveryRetriesForReachable(identities map[domain.PeerIden
 	// non-relay-capable peer connect, or a route that did not resolve to a
 	// next hop) produces no re-arm, so no scheduled retry wastes an attempt
 	// holding again.
-	reachable := make(map[protocol.MessageID]bool, len(held))
+	reachable := make(map[messageIdentity]bool, len(held))
 	for _, h := range held {
 		d := s.router.Route(h.env)
 		reachable[h.id] = d.RelayNextHop != nil || len(d.PushSubscribers) > 0
@@ -3252,7 +3342,7 @@ func (s *Service) failDelivery(envelope protocol.Envelope, status, reason string
 	// after Run returns, silently dropping the write and resurrecting the
 	// abandoned retry on the next start.
 	if s.deliveryFailureJournal != nil {
-		if err := s.deliveryFailureJournal.MarkDeliveryFailed(envelope.ID); err != nil {
+		if err := s.deliveryFailureJournal.MarkDeliveryFailedRef(envelopeRef(envelope)); err != nil {
 			log.Warn().Str("message_id", string(envelope.ID)).Err(err).Msg("delivery_failure_journal_write_failed")
 		}
 	}
@@ -3405,5 +3495,5 @@ func (s *Service) clearedToWrite(ref deliveryDispatchRef, now time.Time) bool {
 	// A writer finishing a send that already passed the two-senders rule at
 	// its decision point, not a new decision: it asks the freeze and the
 	// durable claim, and nothing about other senders.
-	return s.noteOwnEnvelopeEmitted(ref.Envelope.Sender, ref.Envelope.ID, now)
+	return s.noteOwnEnvelopeEmitted(ref.Envelope, now)
 }

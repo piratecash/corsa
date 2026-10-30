@@ -123,7 +123,7 @@ func TestInboundPushMessage_NonDM_ForgedSenderRejected(t *testing.T) {
 	// Reads are independent, so we acquire each lock separately rather
 	// than nest under the canonical knowledgeMu OUTER → gossipMu INNER order.
 	svc.gossipMu.RLock()
-	seen := svc.seen.Has("forged-msg-1")
+	seen := svc.seen.Has((domain.MessageRef{Topic: "global", ID: "forged-msg-1", Sender: "completely-fake-sender", Recipient: "*"}).Key())
 	svc.gossipMu.RUnlock()
 	svc.knowledgeMu.RLock()
 	inKnown := svc.known.Has("completely-fake-sender")
@@ -190,7 +190,7 @@ func TestInboundPushMessage_NonDM_VerifiedSenderAccepted(t *testing.T) {
 	// Verify: message IS stored.
 	// s.seen is guarded by s.gossipMu, not s.peerMu.
 	svc.gossipMu.RLock()
-	seen := svc.seen.Has("legit-msg-1")
+	seen := svc.seen.Has((domain.MessageRef{Topic: "global", ID: "legit-msg-1", Sender: senderID.Address, Recipient: "*"}).Key())
 	svc.gossipMu.RUnlock()
 
 	if !seen {
@@ -240,7 +240,7 @@ func TestInboundPushMessage_NonDM_RelayPeerAsSenderAccepted(t *testing.T) {
 
 	// s.seen is guarded by s.gossipMu, not s.peerMu.
 	svc.gossipMu.RLock()
-	seen := svc.seen.Has("peer-authored-msg-1")
+	seen := svc.seen.Has((domain.MessageRef{Topic: "global", ID: "peer-authored-msg-1", Sender: peerID.Address, Recipient: "*"}).Key())
 	svc.gossipMu.RUnlock()
 
 	if !seen {
@@ -303,7 +303,7 @@ func TestInboundPushMessage_DM_BypassesSenderGate(t *testing.T) {
 	// "unknown sender key" instead.
 	// s.seen is guarded by s.gossipMu, not s.peerMu.
 	svc.gossipMu.RLock()
-	seen := svc.seen.Has("dm-msg-unknown-sender")
+	seen := svc.seen.Has((domain.MessageRef{Topic: "dm", ID: "dm-msg-unknown-sender", Sender: "unknown-dm-sender", Recipient: svc.identity.Address}).Key())
 	svc.gossipMu.RUnlock()
 
 	// Message should NOT be in seen because VerifyEnvelope will reject it —
@@ -442,7 +442,7 @@ func TestInboundPushMessage_NonDM_UnknownAuthorNotStored(t *testing.T) {
 
 	// s.seen is guarded by s.gossipMu, not s.peerMu.
 	svc.gossipMu.RLock()
-	seen := svc.seen.Has("ban-test-msg-1")
+	seen := svc.seen.Has((domain.MessageRef{Topic: "announcements", ID: "ban-test-msg-1", Sender: "forged-author", Recipient: "*"}).Key())
 	svc.gossipMu.RUnlock()
 
 	if seen {

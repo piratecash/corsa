@@ -3,6 +3,7 @@ package service
 import (
 	"sync"
 
+	"github.com/piratecash/corsa/internal/core/chatlog"
 	"github.com/piratecash/corsa/internal/core/domain"
 )
 
@@ -14,7 +15,7 @@ type ConversationCache struct {
 	mu          sync.RWMutex
 	peerAddress domain.PeerIdentity
 	messages    []DirectMessage
-	index       map[string]int // message ID → index in messages slice
+	index       map[string]int // length-framed full MessageRef → slice index
 }
 
 func NewConversationCache() *ConversationCache {
@@ -72,7 +73,7 @@ func (c *ConversationCache) Load(peerAddress domain.PeerIdentity, messages []Dir
 	c.messages = loaded
 	c.index = make(map[string]int, len(loaded))
 	for i := range c.messages {
-		c.index[c.messages[i].ID] = i
+		c.index[directMessageRef(c.messages[i]).Key()] = i
 	}
 }
 
@@ -81,11 +82,11 @@ func (c *ConversationCache) Load(peerAddress domain.PeerIdentity, messages []Dir
 func reconcileWithLive(prior []DirectMessage, priorIndex map[string]int, loaded []DirectMessage, authoritativeUpTo int64) []DirectMessage {
 	inSnapshot := make(map[string]struct{}, len(loaded))
 	for i := range loaded {
-		inSnapshot[loaded[i].ID] = struct{}{}
+		inSnapshot[directMessageRef(loaded[i]).Key()] = struct{}{}
 	}
 
 	for i := range loaded {
-		at, known := priorIndex[loaded[i].ID]
+		at, known := priorIndex[directMessageRef(loaded[i]).Key()]
 		if !known || at >= len(prior) {
 			continue
 		}
@@ -95,7 +96,7 @@ func reconcileWithLive(prior []DirectMessage, priorIndex map[string]int, loaded 
 	// Messages the read could not have seen: stored after its snapshot was
 	// taken, or not yet stored at all.
 	for i := range prior {
-		if _, carried := inSnapshot[prior[i].ID]; carried {
+		if _, carried := inSnapshot[directMessageRef(prior[i]).Key()]; carried {
 			continue
 		}
 		if prior[i].Seq != 0 && prior[i].Seq <= authoritativeUpTo {
@@ -209,7 +210,7 @@ func (c *ConversationCache) AppendForPeer(peer domain.PeerIdentity, msg DirectMe
 	if c.peerAddress != peer {
 		return cacheAppendRefused
 	}
-	if _, exists := c.index[msg.ID]; exists {
+	if _, exists := c.index[directMessageRef(msg).Key()]; exists {
 		return cacheAppendAlreadyHeld
 	}
 	c.placeLocked(msg)
@@ -222,7 +223,7 @@ func (c *ConversationCache) AppendMessage(msg DirectMessage) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if _, exists := c.index[msg.ID]; exists {
+	if _, exists := c.index[directMessageRef(msg).Key()]; exists {
 		return false
 	}
 
@@ -269,7 +270,7 @@ func (c *ConversationCache) placeLocked(msg DirectMessage) {
 	c.messages[at] = msg
 
 	for i := at; i < len(c.messages); i++ {
-		c.index[c.messages[i].ID] = i
+		c.index[directMessageRef(c.messages[i]).Key()] = i
 	}
 }
 
@@ -286,12 +287,24 @@ func (c *ConversationCache) placeLocked(msg DirectMessage) {
 func (c *ConversationCache) UpdateStatus(messageID, status string, deliveredAt domain.OptionalTime, fromReceipt bool) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-
-	idx, exists := c.index[messageID]
+	idx, exists := c.uniqueIndexLocked(messageID)
 	if !exists {
 		return false
 	}
+	return c.updateStatusLocked(idx, status, deliveredAt, fromReceipt)
+}
 
+func (c *ConversationCache) UpdateStatusRef(ref domain.MessageRef, status string, deliveredAt domain.OptionalTime, fromReceipt bool) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	idx, exists := c.index[ref.Key()]
+	if !exists {
+		return false
+	}
+	return c.updateStatusLocked(idx, status, deliveredAt, fromReceipt)
+}
+
+func (c *ConversationCache) updateStatusLocked(idx int, status string, deliveredAt domain.OptionalTime, fromReceipt bool) bool {
 	msg := &c.messages[idx]
 
 	// Enforce monotonic transitions: sent < delivered < seen.
@@ -337,13 +350,28 @@ func (c *ConversationCache) RemoveMessage(messageID string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	idx, exists := c.index[messageID]
+	idx, exists := c.uniqueIndexLocked(messageID)
 	if !exists {
 		return false
 	}
 
+	return c.removeIndexLocked(idx)
+}
+
+func (c *ConversationCache) RemoveMessageRef(ref domain.MessageRef) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	idx, exists := c.index[ref.Key()]
+	if !exists {
+		return false
+	}
+	return c.removeIndexLocked(idx)
+}
+
+func (c *ConversationCache) removeIndexLocked(idx int) bool {
+	key := directMessageRef(c.messages[idx]).Key()
 	c.messages = append(c.messages[:idx], c.messages[idx+1:]...)
-	delete(c.index, messageID)
+	delete(c.index, key)
 	// Compact the index — every entry whose stored offset was beyond
 	// the removed slot must shift down by one.
 	for id, offset := range c.index {
@@ -374,7 +402,7 @@ func (c *ConversationCache) MatchesPeer(peerAddress domain.PeerIdentity) bool {
 func (c *ConversationCache) HasMessage(messageID string) bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	_, exists := c.index[messageID]
+	_, exists := c.uniqueIndexLocked(messageID)
 	return exists
 }
 
@@ -398,4 +426,41 @@ func statusRank(status string) int {
 	default:
 		return 0
 	}
+}
+
+// uniqueIndexLocked is the legacy ID-only resolver. Opposite directions may
+// share a wire id even in one conversation; such an id must not mutate either.
+func (c *ConversationCache) uniqueIndexLocked(id string) (int, bool) {
+	index, count := 0, 0
+	for i := range c.messages {
+		if c.messages[i].ID == id {
+			index = i
+			count++
+		}
+	}
+	return index, count == 1
+}
+
+func (c *ConversationCache) ResolveMessageID(id string) (domain.MessageRef, bool, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	var ref domain.MessageRef
+	count := 0
+	for _, message := range c.messages {
+		if message.ID == id {
+			ref = directMessageRef(message)
+			count++
+		}
+	}
+	if count > 1 {
+		return domain.MessageRef{}, false, chatlog.ErrAmbiguousMessage
+	}
+	return ref, count == 1, nil
+}
+
+func (c *ConversationCache) HasMessageRef(ref domain.MessageRef) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	_, exists := c.index[ref.Key()]
+	return exists
 }

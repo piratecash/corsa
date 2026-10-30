@@ -29,7 +29,7 @@ func TestRelayStateStoreBasic(t *testing.T) {
 	rs := newRelayStateStore()
 
 	state := &relayForwardState{
-		MessageID:        "msg-1",
+		Message:          relayStateFixtureRef("msg-1"),
 		PreviousHop:      "peer-a",
 		ReceiptForwardTo: "peer-a",
 		ForwardedTo:      "peer-b",
@@ -37,7 +37,7 @@ func TestRelayStateStoreBasic(t *testing.T) {
 		RemainingTTL:     relayStateTTLSeconds,
 	}
 
-	if rs.hasSeen("msg-1") {
+	if rs.hasSeen(relayStateFixtureRef("msg-1")) {
 		t.Fatal("should not have seen msg-1 before store")
 	}
 
@@ -46,7 +46,7 @@ func TestRelayStateStoreBasic(t *testing.T) {
 		t.Fatal("store should return true on first insert")
 	}
 
-	if !rs.hasSeen("msg-1") {
+	if !rs.hasSeen(relayStateFixtureRef("msg-1")) {
 		t.Fatal("should have seen msg-1 after store")
 	}
 
@@ -59,7 +59,7 @@ func TestRelayStateStoreIdempotentUpsertSameDestNewSelection(t *testing.T) {
 	rs := newRelayStateStore()
 
 	state1 := &relayForwardState{
-		MessageID:        "msg-1",
+		Message:          relayStateFixtureRef("msg-1"),
 		PreviousHop:      "peer-a",
 		ReceiptForwardTo: "peer-a",
 		ForwardedTo:      "peer-b",
@@ -71,7 +71,7 @@ func TestRelayStateStoreIdempotentUpsertSameDestNewSelection(t *testing.T) {
 	// fields must be updated: the stale-ack guard judges the ack by the
 	// path of the attempt actually outstanding.
 	state2 := &relayForwardState{
-		MessageID:        "msg-1",
+		Message:          relayStateFixtureRef("msg-1"),
 		PreviousHop:      "peer-c",
 		ReceiptForwardTo: "peer-c",
 		ForwardedTo:      "peer-b", // same destination
@@ -92,11 +92,11 @@ func TestRelayStateStoreIdempotentUpsertSameDestNewSelection(t *testing.T) {
 		t.Fatalf("expected count 1 after upsert, got %d", rs.count())
 	}
 	// PreviousHop and ReceiptForwardTo must be preserved from the original.
-	if fwd := rs.lookupReceiptForwardTo("msg-1"); fwd != "peer-a" {
+	if fwd := rs.lookupReceiptForwardTo(relayStateFixtureRef("msg-1")); fwd != "peer-a" {
 		t.Fatalf("expected ReceiptForwardTo='peer-a' (original), got %q", fwd)
 	}
 	rs.mu.Lock()
-	s := rs.states["msg-1"]
+	s := rs.states[relayStateFixtureRef("msg-1")]
 	rs.mu.Unlock()
 	// NextHopSelection must be updated even if ForwardedTo is the same.
 	if s.NextHopSelection != relayNextHopGossipFanOut {
@@ -111,7 +111,7 @@ func TestRelayStateStoreIdempotentUpsertReroute(t *testing.T) {
 	rs := newRelayStateStore()
 
 	state1 := &relayForwardState{
-		MessageID:        "msg-1",
+		Message:          relayStateFixtureRef("msg-1"),
 		PreviousHop:      "peer-a",
 		ReceiptForwardTo: "peer-a",
 		ForwardedTo:      "peer-b",
@@ -120,7 +120,7 @@ func TestRelayStateStoreIdempotentUpsertReroute(t *testing.T) {
 	}
 	// Route changed — ForwardedTo and NextHopSelection must both update.
 	state2 := &relayForwardState{
-		MessageID:        "msg-1",
+		Message:          relayStateFixtureRef("msg-1"),
 		PreviousHop:      "peer-c",
 		ReceiptForwardTo: "peer-c",
 		ForwardedTo:      "peer-d", // different destination
@@ -132,7 +132,7 @@ func TestRelayStateStoreIdempotentUpsertReroute(t *testing.T) {
 	rs.store(state2)
 
 	rs.mu.Lock()
-	s := rs.states["msg-1"]
+	s := rs.states[relayStateFixtureRef("msg-1")]
 	rs.mu.Unlock()
 	if s.ForwardedTo != "peer-d" {
 		t.Fatalf("expected ForwardedTo='peer-d' (rerouted), got %q", s.ForwardedTo)
@@ -141,11 +141,11 @@ func TestRelayStateStoreIdempotentUpsertReroute(t *testing.T) {
 		t.Fatalf("expected NextHopSelection=%s (updated for new route), got %s", relayNextHopGossipFanOut, s.NextHopSelection)
 	}
 	// PreviousHop preserved from original.
-	if fwd := rs.lookupReceiptForwardTo("msg-1"); fwd != "peer-a" {
+	if fwd := rs.lookupReceiptForwardTo(relayStateFixtureRef("msg-1")); fwd != "peer-a" {
 		t.Fatalf("expected ReceiptForwardTo='peer-a' (original), got %q", fwd)
 	}
 	// AbandonedForwardedTo captures old ForwardedTo before reroute.
-	abandoned := rs.lookupAbandonedForwardedTo("msg-1")
+	abandoned := rs.lookupAbandonedForwardedTo(relayStateFixtureRef("msg-1"))
 	if len(abandoned) != 1 || abandoned[0] != "peer-b" {
 		t.Fatalf("expected AbandonedForwardedTo=['peer-b'] (old route), got %v", abandoned)
 	}
@@ -156,7 +156,7 @@ func TestRelayStateStoreAbandonedForwardedToAccumulates(t *testing.T) {
 
 	// First send: table-routed via peer-a.
 	rs.store(&relayForwardState{
-		MessageID:        "msg-1",
+		Message:          relayStateFixtureRef("msg-1"),
 		PreviousHop:      "upstream",
 		ForwardedTo:      "peer-a:1234",
 		NextHopSelection: relayNextHopRoutingTable,
@@ -165,7 +165,7 @@ func TestRelayStateStoreAbandonedForwardedToAccumulates(t *testing.T) {
 
 	// Reroute 1: table via peer-b (peer-a abandoned).
 	rs.store(&relayForwardState{
-		MessageID:        "msg-1",
+		Message:          relayStateFixtureRef("msg-1"),
 		ForwardedTo:      "peer-b:5678",
 		NextHopSelection: relayNextHopRoutingTable,
 		RemainingTTL:     relayStateTTLSeconds,
@@ -173,13 +173,13 @@ func TestRelayStateStoreAbandonedForwardedToAccumulates(t *testing.T) {
 
 	// Reroute 2: gossip via peer-c (peer-b abandoned).
 	rs.store(&relayForwardState{
-		MessageID:        "msg-1",
+		Message:          relayStateFixtureRef("msg-1"),
 		ForwardedTo:      "peer-c:9012",
 		NextHopSelection: relayNextHopGossipFanOut,
 		RemainingTTL:     relayStateTTLSeconds,
 	})
 
-	abandoned := rs.lookupAbandonedForwardedTo("msg-1")
+	abandoned := rs.lookupAbandonedForwardedTo(relayStateFixtureRef("msg-1"))
 	if len(abandoned) != 2 {
 		t.Fatalf("expected 2 abandoned entries, got %d: %v", len(abandoned), abandoned)
 	}
@@ -192,12 +192,12 @@ func TestRelayStateStoreAbandonedForwardedToAccumulates(t *testing.T) {
 
 	// Same ForwardedTo upsert should NOT append a duplicate.
 	rs.store(&relayForwardState{
-		MessageID:        "msg-1",
+		Message:          relayStateFixtureRef("msg-1"),
 		ForwardedTo:      "peer-c:9012",
 		NextHopSelection: relayNextHopGossipFanOut,
 		RemainingTTL:     relayStateTTLSeconds,
 	})
-	abandoned = rs.lookupAbandonedForwardedTo("msg-1")
+	abandoned = rs.lookupAbandonedForwardedTo(relayStateFixtureRef("msg-1"))
 	if len(abandoned) != 2 {
 		t.Fatalf("expected still 2 abandoned after same-dest upsert, got %d: %v", len(abandoned), abandoned)
 	}
@@ -207,18 +207,18 @@ func TestRelayStateStoreReceiptLookup(t *testing.T) {
 	rs := newRelayStateStore()
 
 	rs.store(&relayForwardState{
-		MessageID:        "msg-1",
+		Message:          relayStateFixtureRef("msg-1"),
 		PreviousHop:      "peer-a",
 		ReceiptForwardTo: "peer-a",
 		RemainingTTL:     relayStateTTLSeconds,
 	})
 
-	addr := rs.lookupReceiptForwardTo("msg-1")
+	addr := rs.lookupReceiptForwardTo(relayStateFixtureRef("msg-1"))
 	if addr != domain.PeerAddress("peer-a") {
 		t.Fatalf("expected receipt_forward_to = peer-a, got %q", addr)
 	}
 
-	addr = rs.lookupReceiptForwardTo("msg-unknown")
+	addr = rs.lookupReceiptForwardTo(relayStateFixtureRef("msg-unknown"))
 	if addr != domain.PeerAddress("") {
 		t.Fatalf("expected empty for unknown message, got %q", addr)
 	}
@@ -228,7 +228,7 @@ func TestRelayStateStoreTTLCleanup(t *testing.T) {
 	rs := newRelayStateStore()
 
 	rs.store(&relayForwardState{
-		MessageID:    "msg-1",
+		Message:      relayStateFixtureRef("msg-1"),
 		RemainingTTL: 2, // 2 seconds
 	})
 
@@ -251,7 +251,7 @@ func TestRelayStateStoreTTLCleanup(t *testing.T) {
 
 func TestRelayForwardStateFields(t *testing.T) {
 	state := relayForwardState{
-		MessageID:        "abc-123",
+		Message:          relayStateFixtureRef("abc-123"),
 		PreviousHop:      "10.0.0.1:64646",
 		ReceiptForwardTo: "10.0.0.1:64646",
 		ForwardedTo:      "10.0.0.2:64646",
@@ -259,7 +259,7 @@ func TestRelayForwardStateFields(t *testing.T) {
 		RemainingTTL:     relayStateTTLSeconds,
 	}
 
-	if state.MessageID != "abc-123" {
+	if state.Message.ID != "abc-123" {
 		t.Fatal("MessageID mismatch")
 	}
 	if state.PreviousHop != "10.0.0.1:64646" {
@@ -506,7 +506,7 @@ func TestRelayStateStoreStartStop(t *testing.T) {
 	rs.start()
 
 	rs.store(&relayForwardState{
-		MessageID:    "msg-1",
+		Message:      relayStateFixtureRef("msg-1"),
 		RemainingTTL: 1,
 	})
 
@@ -908,7 +908,7 @@ func TestSendRelayMessageOriginReceiptForwardTo(t *testing.T) {
 	// Since we can't easily mock enqueuePeerFrame, we test relayStates
 	// directly to verify the invariant about ReceiptForwardTo.
 	svc.relayStates.store(&relayForwardState{
-		MessageID:        string(msg.ID),
+		Message:          envelopeRef(msg),
 		PreviousHop:      "",
 		ReceiptForwardTo: "",
 		ForwardedTo:      "10.0.0.1:64646",
@@ -916,7 +916,7 @@ func TestSendRelayMessageOriginReceiptForwardTo(t *testing.T) {
 		RemainingTTL:     relayStateTTLSeconds,
 	})
 
-	forwardTo := svc.relayStates.lookupReceiptForwardTo(string(msg.ID))
+	forwardTo := svc.relayStates.lookupReceiptForwardTo(envelopeRef(msg))
 	if forwardTo != domain.PeerAddress("") {
 		t.Fatalf("origin node ReceiptForwardTo should be empty, got %q", forwardTo)
 	}
@@ -924,7 +924,8 @@ func TestSendRelayMessageOriginReceiptForwardTo(t *testing.T) {
 	// handleRelayReceipt should return false for origin node (no forwarding needed).
 	receipt := protocol.DeliveryReceipt{
 		MessageID: msg.ID,
-		Recipient: msg.Recipient,
+		Sender:    msg.Recipient,
+		Recipient: msg.Sender,
 		Status:    protocol.ReceiptStatusDelivered,
 	}
 	forwarded := svc.handleRelayReceipt(receipt)
@@ -966,7 +967,7 @@ func TestFinalHopStoresRelayStateForReceipt(t *testing.T) {
 	}
 
 	// Verify relay state was stored with correct ReceiptForwardTo.
-	forwardTo := svc.relayStates.lookupReceiptForwardTo("final-hop-state-1")
+	forwardTo := svc.relayStates.lookupReceiptForwardTo(envelopeRef(frameEnvelope(frame)))
 	if forwardTo != domain.PeerAddress(senderTransport) {
 		t.Fatalf("ReceiptForwardTo = %q, want %q", forwardTo, senderTransport)
 	}
@@ -974,7 +975,7 @@ func TestFinalHopStoresRelayStateForReceipt(t *testing.T) {
 	// Verify handleRelayReceipt can now route the receipt back.
 	// We don't have a real session, so it will fall through the capability
 	// check, but the lookup itself must succeed.
-	if !svc.relayStates.hasSeen("final-hop-state-1") {
+	if !svc.relayStates.hasSeen(envelopeRef(frameEnvelope(frame))) {
 		t.Fatal("relay state not stored for final hop — receipt reverse path broken")
 	}
 }
@@ -1015,7 +1016,10 @@ func TestRejectedRelayDMReturnsEmptyStatus(t *testing.T) {
 	}
 
 	// Verify no relay state was stored for the rejected message.
-	if svc.relayStates.hasSeen("rejected-dm-1") {
+	svc.relayStates.mu.Lock()
+	statesForRejectedID := len(svc.relayStates.byID[frame.ID])
+	svc.relayStates.mu.Unlock()
+	if statesForRejectedID != 0 {
 		t.Fatal("relay state should NOT be stored for rejected DM")
 	}
 }
@@ -1063,17 +1067,17 @@ func TestTryReserveAtomicDedupe(t *testing.T) {
 	rs := newRelayStateStore()
 
 	// First reservation succeeds.
-	if !rs.tryReserve("msg-1", "") {
+	if !rs.tryReserve(relayStateFixtureRef("msg-1"), "") {
 		t.Fatal("first tryReserve should succeed")
 	}
 
 	// Second reservation for the same ID fails (already reserved).
-	if rs.tryReserve("msg-1", "") {
+	if rs.tryReserve(relayStateFixtureRef("msg-1"), "") {
 		t.Fatal("second tryReserve should fail — message already reserved")
 	}
 
 	// Different message ID still succeeds.
-	if !rs.tryReserve("msg-2", "") {
+	if !rs.tryReserve(relayStateFixtureRef("msg-2"), "") {
 		t.Fatal("tryReserve for a different ID should succeed")
 	}
 }
@@ -1094,7 +1098,7 @@ func TestTryReserveUnderConcurrentClaims(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-ready
-			if rs.tryReserve("concurrent-msg", "") {
+			if rs.tryReserve(relayStateFixtureRef("concurrent-msg"), "") {
 				atomic.AddInt64(&claimed, 1)
 			}
 		}()
@@ -1113,13 +1117,13 @@ func TestReleaseAfterReserve(t *testing.T) {
 	t.Parallel()
 	rs := newRelayStateStore()
 
-	if !rs.tryReserve("release-test", "") {
+	if !rs.tryReserve(relayStateFixtureRef("release-test"), "") {
 		t.Fatal("initial reserve should succeed")
 	}
-	rs.release("release-test")
+	rs.release(relayStateFixtureRef("release-test"))
 
 	// After release, the same ID can be reserved again.
-	if !rs.tryReserve("release-test", "") {
+	if !rs.tryReserve(relayStateFixtureRef("release-test"), "") {
 		t.Fatal("reserve after release should succeed")
 	}
 }
@@ -1130,12 +1134,12 @@ func TestUpdateStateOverwritesReservation(t *testing.T) {
 	t.Parallel()
 	rs := newRelayStateStore()
 
-	if !rs.tryReserve("update-test", "") {
+	if !rs.tryReserve(relayStateFixtureRef("update-test"), "") {
 		t.Fatal("reserve should succeed")
 	}
 
 	rs.updateState(&relayForwardState{
-		MessageID:        "update-test",
+		Message:          relayStateFixtureRef("update-test"),
 		PreviousHop:      "10.0.0.1:64646",
 		ReceiptForwardTo: "10.0.0.1:64646",
 		ForwardedTo:      "10.0.0.2:64646",
@@ -1144,7 +1148,7 @@ func TestUpdateStateOverwritesReservation(t *testing.T) {
 	})
 
 	// Verify the state was updated.
-	forwardTo := rs.lookupReceiptForwardTo("update-test")
+	forwardTo := rs.lookupReceiptForwardTo(relayStateFixtureRef("update-test"))
 	if forwardTo != domain.PeerAddress("10.0.0.1:64646") {
 		t.Fatalf("expected ReceiptForwardTo=10.0.0.1:64646, got %q", forwardTo)
 	}
@@ -1219,7 +1223,7 @@ func TestHandleRelayReceiptPropagatesSendResult(t *testing.T) {
 	svc.peerMu.Unlock()
 
 	svc.relayStates.store(&relayForwardState{
-		MessageID:        "receipt-prop-test-1",
+		Message:          domain.MessageRef{Topic: "dm", ID: "receipt-prop-test-1", Sender: svc.Address(), Recipient: "original-sender"},
 		PreviousHop:      domain.PeerAddress(peerAddr),
 		ReceiptForwardTo: domain.PeerAddress(peerAddr),
 		ForwardedTo:      "",
@@ -1275,7 +1279,7 @@ func TestDuplicateFinalHopRelayPreservesState(t *testing.T) {
 	}
 
 	// Relay state must exist after first delivery.
-	state := svc.relayStates.lookupReceiptForwardTo("dup-final-hop-1")
+	state := svc.relayStates.lookupReceiptForwardTo(envelopeRef(frameEnvelope(relayFrame)))
 	if state == domain.PeerAddress("") {
 		t.Fatal("relay state missing after first delivery")
 	}
@@ -1287,7 +1291,7 @@ func TestDuplicateFinalHopRelayPreservesState(t *testing.T) {
 	}
 
 	// The relay state from the first delivery must still be intact.
-	stateAfterDup := svc.relayStates.lookupReceiptForwardTo("dup-final-hop-1")
+	stateAfterDup := svc.relayStates.lookupReceiptForwardTo(envelopeRef(frameEnvelope(relayFrame)))
 	if stateAfterDup == domain.PeerAddress("") {
 		t.Fatal("relay state was erased by duplicate final-hop delivery — receipt routing broken")
 	}
@@ -1339,7 +1343,10 @@ func TestRelayMessageRejectsNonDMTopic(t *testing.T) {
 				t.Fatalf("topic %q: got status %q, want \"\" (drop non-DM)", topic, status)
 			}
 
-			if svc.relayStates.hasSeen("non-dm-" + topic) {
+			svc.relayStates.mu.Lock()
+			statesForRejectedID := len(svc.relayStates.byID[frame.ID])
+			svc.relayStates.mu.Unlock()
+			if statesForRejectedID != 0 {
 				t.Fatalf("topic %q: relay state should not be stored for non-DM relay", topic)
 			}
 		})
@@ -1614,7 +1621,7 @@ func TestRetryRelayDeliveriesCallsTryRelay(t *testing.T) {
 	svc.gossipMu.Unlock()
 
 	svc.deliveryMu.Lock()
-	svc.relayRetry[relayMessageKey(envelope.ID)] = relayAttempt{
+	svc.relayRetry[relayMessageIdentityKey(messageIdentityOf(envelope))] = relayAttempt{
 		FirstSeen: time.Now().UTC().Add(-2 * time.Minute),
 	}
 	svc.deliveryMu.Unlock()
@@ -1871,7 +1878,7 @@ func TestRetryRelayReceiptTriesRelayChainFirst(t *testing.T) {
 
 	// Store relay forward state so handleRelayReceipt can find the return path.
 	svc.relayStates.store(&relayForwardState{
-		MessageID:        "receipt-retry-1",
+		Message:          domain.MessageRef{Topic: "dm", ID: "receipt-retry-1", Sender: "original-recipient", Recipient: "original-sender"},
 		PreviousHop:      domain.PeerAddress(peerAddr),
 		ReceiptForwardTo: domain.PeerAddress(peerAddr),
 		ForwardedTo:      "",
@@ -1931,13 +1938,13 @@ func TestRelayStateStoreGlobalCapacity(t *testing.T) {
 	// Fill up to the global limit.
 	for i := 0; i < maxRelayStates; i++ {
 		id := fmt.Sprintf("cap-test-%d", i)
-		if !rs.tryReserve(id, "") {
+		if !rs.tryReserve(relayStateFixtureRef(id), "") {
 			t.Fatalf("tryReserve should succeed for entry %d (under limit)", i)
 		}
 	}
 
 	// One more should be rejected.
-	if rs.tryReserve("over-limit", "") {
+	if rs.tryReserve(relayStateFixtureRef("over-limit"), "") {
 		t.Fatal("tryReserve should reject when global capacity is reached")
 	}
 
@@ -1960,18 +1967,18 @@ func TestRelayStateStorePerPeerCapacity(t *testing.T) {
 	// Fill one peer's quota.
 	for i := 0; i < maxRelayStatesPerPeer; i++ {
 		id := fmt.Sprintf("peer-cap-%d", i)
-		if !rs.tryReserve(id, "10.0.0.1:9000") {
+		if !rs.tryReserve(relayStateFixtureRef(id), "10.0.0.1:9000") {
 			t.Fatalf("tryReserve should succeed for entry %d (under per-peer limit)", i)
 		}
 	}
 
 	// Same peer, one more — rejected.
-	if rs.tryReserve("peer-over", "10.0.0.1:9000") {
+	if rs.tryReserve(relayStateFixtureRef("peer-over"), "10.0.0.1:9000") {
 		t.Fatal("tryReserve should reject when per-peer capacity is reached")
 	}
 
 	// Different peer — should still succeed.
-	if !rs.tryReserve("other-peer", "10.0.0.2:9000") {
+	if !rs.tryReserve(relayStateFixtureRef("other-peer"), "10.0.0.2:9000") {
 		t.Fatal("tryReserve should succeed for a different peer")
 	}
 }
@@ -1984,14 +1991,14 @@ func TestRelayStateStoreReleaseFreesPerPeerQuota(t *testing.T) {
 
 	// Fill one peer's quota.
 	for i := 0; i < maxRelayStatesPerPeer; i++ {
-		rs.tryReserve(fmt.Sprintf("fill-%d", i), "10.0.0.1:9000")
+		rs.tryReserve(relayStateFixtureRef(fmt.Sprintf("fill-%d", i)), "10.0.0.1:9000")
 	}
 
 	// Release one entry.
-	rs.release("fill-0")
+	rs.release(relayStateFixtureRef("fill-0"))
 
 	// Now a new reservation from the same peer should succeed.
-	if !rs.tryReserve("after-release", "10.0.0.1:9000") {
+	if !rs.tryReserve(relayStateFixtureRef("after-release"), "10.0.0.1:9000") {
 		t.Fatal("tryReserve should succeed after release freed a slot")
 	}
 }
@@ -2002,11 +2009,11 @@ func TestRelayStateStoreTTLFreesPerPeerQuota(t *testing.T) {
 	t.Parallel()
 	rs := newRelayStateStore()
 
-	rs.tryReserve("ttl-test", "10.0.0.1:9000")
+	rs.tryReserve(relayStateFixtureRef("ttl-test"), "10.0.0.1:9000")
 
 	// Set TTL to 1 so next tick expires it.
 	rs.mu.Lock()
-	rs.states["ttl-test"].RemainingTTL = 1
+	rs.states[relayStateFixtureRef("ttl-test")].RemainingTTL = 1
 	rs.mu.Unlock()
 
 	rs.decrementTTLs()
@@ -2030,7 +2037,7 @@ func TestRelayStateStoreOriginBypassesPerPeerLimit(t *testing.T) {
 	// Origin entries with empty previousHop should not be per-peer limited.
 	for i := 0; i < maxRelayStatesPerPeer+10; i++ {
 		id := fmt.Sprintf("origin-%d", i)
-		if !rs.tryReserve(id, "") {
+		if !rs.tryReserve(relayStateFixtureRef(id), "") {
 			t.Fatalf("origin entry %d should succeed (no per-peer limit for empty hop)", i)
 		}
 	}
@@ -2059,9 +2066,9 @@ func TestRelayStateStore_ForwardedStateWithoutSelectionIsLogged(t *testing.T) {
 	defer func() { log.Logger = origLogger }()
 
 	rs := newRelayStateStore()
-	rs.store(&relayForwardState{MessageID: "msg-no-selection", ForwardedTo: "peer-b", RemainingTTL: relayStateTTLSeconds})
-	rs.updateState(&relayForwardState{MessageID: "msg-no-selection-update", ForwardedTo: "peer-c", RemainingTTL: relayStateTTLSeconds})
-	rs.store(&relayForwardState{MessageID: "msg-local", NextHopSelection: relayNextHopNotForwarded, RemainingTTL: relayStateTTLSeconds})
+	rs.store(&relayForwardState{Message: relayStateFixtureRef("msg-no-selection"), ForwardedTo: "peer-b", RemainingTTL: relayStateTTLSeconds})
+	rs.updateState(&relayForwardState{Message: relayStateFixtureRef("msg-no-selection-update"), ForwardedTo: "peer-c", RemainingTTL: relayStateTTLSeconds})
+	rs.store(&relayForwardState{Message: relayStateFixtureRef("msg-local"), NextHopSelection: relayNextHopNotForwarded, RemainingTTL: relayStateTTLSeconds})
 
 	logged := buf.String()
 	for _, id := range []string{"msg-no-selection", "msg-no-selection-update"} {
@@ -2072,4 +2079,11 @@ func TestRelayStateStore_ForwardedStateWithoutSelectionIsLogged(t *testing.T) {
 	if strings.Contains(logged, `"id":"msg-local"`) {
 		t.Fatalf("a state that forwarded nothing was reported: %s", logged)
 	}
+}
+
+// relayStateFixtureRef names the synthetic message used only by store/timer/ACK
+// bookkeeping fixtures. Live forwarding and receipt tests use their actual
+// frame/envelope endpoints instead. It is not an ID-only production resolver.
+func relayStateFixtureRef(id string) domain.MessageRef {
+	return domain.MessageRef{Topic: "dm", ID: id, Sender: idNodeA.String(), Recipient: idTargetX.String()}
 }

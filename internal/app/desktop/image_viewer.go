@@ -41,7 +41,7 @@ import (
 // menu's Delete — and that needs both the conversation peer and the message
 // id.
 type viewerItem struct {
-	messageID domain.MessageID
+	messageID domain.MessageRef
 	peer      domain.PeerIdentity
 	// path is the file on disk, EMPTY while it is still arriving. An item
 	// with no path is drawn as the loading state and re-resolved on the poll
@@ -440,7 +440,7 @@ func (v *imageViewer) rebuildItems(now time.Time) {
 	// the open conversation by construction — a viewer opened from the
 	// console's Files tab shows another chat's file and never comes here.
 	for _, item := range v.items {
-		v.parent.rememberImagePath(string(item.messageID), item.path)
+		v.parent.rememberImagePath(item.messageID, item.path)
 	}
 	v.noteItemsBuilt(now)
 	if len(v.thumbBtns) < len(v.items) {
@@ -489,7 +489,7 @@ func (v *imageViewer) refreshStandalone(now time.Time) {
 // the path is checked against the disk rather than trusted. And a file still
 // downloading has no path at all, which is not the same as "no picture here":
 // it is the picture the viewer draws as loading and picks up when it lands.
-func (w *Window) resolveViewerFile(id domain.MessageID, isMine bool) (string, bool) {
+func (w *Window) resolveViewerFile(id domain.MessageRef, isMine bool) (string, bool) {
 	if w.router == nil {
 		return "", false
 	}
@@ -497,13 +497,13 @@ func (w *Window) resolveViewerFile(id domain.MessageID, isMine bool) (string, bo
 	if bridge == nil {
 		return "", false
 	}
-	fileID := domain.FileID(id)
-	if path := bridge.FilePath(fileID, isMine); path != "" {
+	fileID := id
+	if path := bridge.FilePathRef(fileID, isMine); path != "" {
 		if _, err := os.Stat(path); err == nil {
 			return path, false
 		}
 	}
-	_, _, state, found := bridge.Progress(fileID, isMine)
+	_, _, state, found := bridge.ProgressRef(fileID, isMine)
 	return "", found && transferIsArriving(state, isMine)
 }
 
@@ -525,7 +525,7 @@ func transferIsArriving(state string, isMine bool) bool {
 // viewerPathResolver reports the on-disk file of a message's attachment, or
 // — with no path — whether one is arriving. Injected so the collection rule
 // can be tested without a file-transfer subsystem behind it.
-type viewerPathResolver func(id domain.MessageID, isMine bool) (path string, arriving bool)
+type viewerPathResolver func(id domain.MessageRef, isMine bool) (path string, arriving bool)
 
 // collectViewerItems walks a conversation in message order and keeps the
 // image attachments whose file is on disk — the same test the chat bubble
@@ -553,12 +553,12 @@ func collectViewerItems(
 			continue
 		}
 		mine := message.Sender == me
-		path, arriving := resolve(domain.MessageID(message.ID), mine)
+		path, arriving := resolve(messageRef(message), mine)
 		if path == "" && !arriving {
 			continue
 		}
 		items = append(items, viewerItem{
-			messageID: domain.MessageID(message.ID),
+			messageID: messageRef(message),
 			peer:      peer,
 			path:      path,
 			contentID: payload.FileHash,
@@ -579,7 +579,7 @@ func collectViewerItems(
 // however the list moved around it. When it is gone — deleted here or at the
 // peer — the viewer lands on what took its place, which is the NEXT image
 // and, for a deleted last image, the previous one.
-func viewerIndexAfterRebuild(current domain.MessageID, items []viewerItem, previousIndex int) int {
+func viewerIndexAfterRebuild(current domain.MessageRef, items []viewerItem, previousIndex int) int {
 	for i := range items {
 		if items[i].messageID == current {
 			return i
@@ -869,7 +869,7 @@ func (w *Window) deleteLocalFileCopy(item viewerItem) {
 		defer w.endUIOp()
 		// The erasure is disk work — an unlink, a directory flush and a
 		// rewrite of the mappings file — so it does not belong on the frame.
-		err := bridge.DeleteLocalCopy(domain.FileID(item.messageID))
+		err := bridge.DeleteLocalCopyRef(item.messageID)
 		switch {
 		case err == nil, errors.Is(err, filetransfer.ErrNoLocalCopy):
 			// Nothing on disk to delete is the state the user asked for.

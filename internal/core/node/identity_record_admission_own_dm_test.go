@@ -373,10 +373,16 @@ func TestOwnDMAdmissionACKResidenceCancellationAndOriginalOwner(t *testing.T) {
 			case "Y_removed":
 				r2aRemoveActualPin(t, f.svc, f.publication.sealed.binding.identity)
 			case "freeze":
-				f.svc.freezeDeliveries([]protocol.MessageID{e.ID})
+				if _, err := f.svc.FreezeOutgoingDeliveriesTo(domain.PeerIdentityFromWire(e.Recipient), []protocol.MessageID{e.ID}); err != nil {
+					t.Fatal(err)
+				}
 			case "freeze_thaw":
-				f.svc.freezeDeliveries([]protocol.MessageID{e.ID})
-				f.svc.ThawOutgoingDeliveries([]protocol.MessageID{e.ID})
+				if _, err := f.svc.FreezeOutgoingDeliveriesTo(domain.PeerIdentityFromWire(e.Recipient), []protocol.MessageID{e.ID}); err != nil {
+					t.Fatal(err)
+				}
+				if err := f.svc.ThawOutgoingDeliveriesTo(domain.PeerIdentityFromWire(e.Recipient), []protocol.MessageID{e.ID}); err != nil {
+					t.Fatal(err)
+				}
 			case "failed_write":
 				if err := f.publication.sealed.session.Close(); err != nil {
 					t.Fatal(err)

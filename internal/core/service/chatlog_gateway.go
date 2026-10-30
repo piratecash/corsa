@@ -303,3 +303,16 @@ func (g *ChatlogGateway) setStoreForTest(s *chatlog.Store) {
 	}
 	g.store = s
 }
+
+// LookupEntryRef is the endpoint-qualified local DM lookup. The old
+// peer/ID-only API remains available but refuses opposite-direction ambiguity.
+func (g *ChatlogGateway) LookupEntryRef(ctx context.Context, ref domain.MessageRef) (bool, error) {
+	if g == nil || g.store == nil {
+		return false, nil
+	}
+	if ref.Topic != "dm" || (ref.Sender != g.selfAddr.String() && ref.Recipient != g.selfAddr.String()) {
+		return false, fmt.Errorf("message reference is outside this identity's conversation")
+	}
+	_, found, err := g.store.EntryByRef(ctx, ref)
+	return found, err
+}

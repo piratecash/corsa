@@ -2858,7 +2858,7 @@ func TestStoreDeliveryReceiptForSelfClearsPendingOutboundAndDoesNotRelay(t *test
 	}
 	svc.pending[domain.PeerAddress("198.51.100.1:64646")] = []pendingFrame{{Frame: receiptFrame, QueuedAt: time.Now().UTC()}}
 	svc.pendingKeys[pendingFrameKey(domain.PeerAddress("198.51.100.1:64646"), receiptFrame)] = struct{}{}
-	svc.outbound[frame.ID] = outboundDelivery{
+	svc.outbound[messageIdentityOf(frameEnvelope(frame))] = outboundDelivery{
 		MessageID: frame.ID,
 		Recipient: frame.Recipient,
 		Status:    "queued",
@@ -2874,7 +2874,7 @@ func TestStoreDeliveryReceiptForSelfClearsPendingOutboundAndDoesNotRelay(t *test
 		DeliveredAt: time.Now().UTC(),
 	}
 
-	svc.sentDMIDs.Add(frame.ID) // we sent this message; the delivered receipt is solicited
+	svc.sentDMIDs.Add(envelopeRef(frameEnvelope(frame)).Key()) // we sent this message; the delivered receipt is solicited
 	stored := storedReceipt(svc, receipt)
 	if !stored {
 		t.Fatalf("expected receipt to be stored")
@@ -2942,11 +2942,11 @@ func TestRecipientNodeDoesNotRouteMessageAddressedToSelf(t *testing.T) {
 
 	svc.deliveryMu.RLock()
 	defer svc.deliveryMu.RUnlock()
-	if _, ok := svc.relayRetry[relayMessageKey(protocol.MessageID("self-dm-1"))]; ok {
+	if _, ok := svc.relayRetry[relayMessageIdentityKey(messageIdentity{MessageID: "self-dm-1", Sender: senderID.Address, Recipient: recipientID.Address})]; ok {
 		t.Fatalf("recipient-local dm should not be tracked for relay retry: %#v", svc.relayRetry)
 	}
-	if _, ok := svc.outbound["self-dm-1"]; ok {
-		t.Fatalf("recipient-local dm should not create outbound state: %#v", svc.outbound["self-dm-1"])
+	if _, ok := svc.outbound[messageIdentity{MessageID: "self-dm-1", Sender: senderID.Address, Recipient: recipientID.Address}]; ok {
+		t.Fatalf("recipient-local dm should not create outbound state: %#v", svc.outbound[messageIdentity{MessageID: "self-dm-1", Sender: senderID.Address, Recipient: recipientID.Address}])
 	}
 }
 
@@ -2968,6 +2968,7 @@ func TestPendingMessagesFrameIncludesLifecycleStatuses(t *testing.T) {
 		{
 			Frame: protocol.Frame{
 				Type:      "send_message",
+				Address:   id.Address,
 				Topic:     "dm",
 				ID:        "queued-1",
 				Recipient: "alice",
@@ -2977,6 +2978,7 @@ func TestPendingMessagesFrameIncludesLifecycleStatuses(t *testing.T) {
 		{
 			Frame: protocol.Frame{
 				Type:      "send_message",
+				Address:   id.Address,
 				Topic:     "dm",
 				ID:        "retrying-1",
 				Recipient: "bob",
@@ -2985,7 +2987,7 @@ func TestPendingMessagesFrameIncludesLifecycleStatuses(t *testing.T) {
 			Retries:  2,
 		},
 	}
-	svc.outbound["retrying-1"] = outboundDelivery{
+	svc.outbound[svc.ownMessageIdentity("retrying-1", "bob")] = outboundDelivery{
 		MessageID:     "retrying-1",
 		Recipient:     "bob",
 		Status:        "retrying",
@@ -2994,7 +2996,7 @@ func TestPendingMessagesFrameIncludesLifecycleStatuses(t *testing.T) {
 		Retries:       2,
 		Error:         "retry queued delivery",
 	}
-	svc.outbound["failed-1"] = outboundDelivery{
+	svc.outbound[svc.ownMessageIdentity("failed-1", "carol")] = outboundDelivery{
 		MessageID:     "failed-1",
 		Recipient:     "carol",
 		Status:        "failed",
@@ -3003,7 +3005,7 @@ func TestPendingMessagesFrameIncludesLifecycleStatuses(t *testing.T) {
 		Retries:       5,
 		Error:         "max retries exceeded",
 	}
-	svc.outbound["expired-1"] = outboundDelivery{
+	svc.outbound[svc.ownMessageIdentity("expired-1", "dan")] = outboundDelivery{
 		MessageID:     "expired-1",
 		Recipient:     "dan",
 		Status:        "expired",
@@ -3078,9 +3080,9 @@ func TestFlushPendingPeerFramesExpiresDirectMessageByTTL(t *testing.T) {
 	if len(svc.pending[address]) != 0 {
 		t.Fatalf("expected expired dm to be removed from pending queue, got %#v", svc.pending[address])
 	}
-	state, ok := svc.outbound["ttl-expire-1"]
+	state, ok := svc.outbound[svc.ownMessageIdentity("ttl-expire-1", "recipient-1")]
 	if !ok || state.Status != "expired" {
-		t.Fatalf("expected outbound expired state, got %#v", svc.outbound["ttl-expire-1"])
+		t.Fatalf("expected outbound expired state, got %#v", svc.outbound[svc.ownMessageIdentity("ttl-expire-1", "recipient-1")])
 	}
 }
 
@@ -4930,7 +4932,7 @@ func TestQueuePeerFrame_RingEvictsOldest(t *testing.T) {
 		t.Fatalf("pendingKeys not reconciled with ring: got %d, want 3", len(svc.pendingKeys))
 	}
 	for _, gone := range []string{"m1", "m2"} {
-		if _, ok := svc.outbound[gone]; ok {
+		if _, ok := svc.outbound[svc.ownMessageIdentity(protocol.MessageID(gone), "recipient-1")]; ok {
 			t.Fatalf("evicted frame %s left a dangling outbound entry", gone)
 		}
 	}
@@ -4975,14 +4977,14 @@ func TestCapPendingRingLocked_EvictsOldestByQueuedAt(t *testing.T) {
 		fr := mkFrame(s.id)
 		svc.pending[addr] = append(svc.pending[addr], pendingFrame{Frame: fr, QueuedAt: base.Add(s.off)})
 		svc.pendingKeys[pendingFrameKey(addr, fr)] = struct{}{}
-		svc.outbound[s.id] = outboundDelivery{MessageID: s.id, Status: "queued"}
+		svc.outbound[messageIdentityOf(frameEnvelope(fr))] = outboundDelivery{MessageID: s.id, Status: "queued"}
 	}
 	svc.capPendingRingLocked(addr, 3)
 	got := append([]pendingFrame(nil), svc.pending[addr]...)
 	keysLeft := len(svc.pendingKeys)
-	_, f1Out := svc.outbound["f1"]
-	_, f2Out := svc.outbound["f2"]
-	_, f4Out := svc.outbound["f4"]
+	_, f1Out := svc.outbound[svc.ownMessageIdentity("f1", "r")]
+	_, f2Out := svc.outbound[svc.ownMessageIdentity("f2", "r")]
+	_, f4Out := svc.outbound[svc.ownMessageIdentity("f4", "r")]
 	svc.deliveryMu.Unlock()
 
 	// Newest three by QueuedAt (f3,f4,f5) survive in their ORIGINAL slice
@@ -5008,7 +5010,7 @@ func TestCapPendingRingLocked_EvictsOldestByQueuedAt(t *testing.T) {
 }
 
 // TestCapPendingRingLocked_DoesNotDropForeignOutbound pins the type guard:
-// s.outbound is keyed by send_message ID, but pending also holds frames of
+// s.outbound is keyed by the send_message reference, but pending also holds frames of
 // other types whose Frame.ID lives in a different namespace. Evicting a
 // non-send_message frame must NOT delete an s.outbound entry that happens to
 // share its ID — that entry belongs to an unrelated, still-in-flight DM.
@@ -5028,9 +5030,9 @@ func TestCapPendingRingLocked_DoesNotDropForeignOutbound(t *testing.T) {
 
 	addr := domain.PeerAddress("127.0.0.1:65011")
 	base := time.Now().UTC()
-	// A real in-flight DM's delivery state, keyed by its send_message ID.
+	// A real in-flight DM's delivery state, keyed by its send_message reference.
 	svc.deliveryMu.Lock()
-	svc.outbound["msgA"] = outboundDelivery{MessageID: "msgA", Status: "retrying"}
+	svc.outbound[svc.ownMessageIdentity("msgA", "r")] = outboundDelivery{MessageID: "msgA", Status: "retrying"}
 	// Pending queue: a relay_delivery_receipt that REUSES ID "msgA" (older, so
 	// it is the one evicted) plus a newer send_message that survives.
 	receipt := protocol.Frame{Type: "relay_delivery_receipt", ID: "msgA", Recipient: "r", Status: "delivered"}
@@ -5041,13 +5043,13 @@ func TestCapPendingRingLocked_DoesNotDropForeignOutbound(t *testing.T) {
 	}
 	svc.pendingKeys[pendingFrameKey(addr, receipt)] = struct{}{}
 	svc.pendingKeys[pendingFrameKey(addr, keep)] = struct{}{}
-	svc.outbound["msgB"] = outboundDelivery{MessageID: "msgB", Status: "queued"}
+	svc.outbound[svc.ownMessageIdentity("msgB", "r")] = outboundDelivery{MessageID: "msgB", Status: "queued"}
 
 	svc.capPendingRingLocked(addr, 1) // evict the oldest (the receipt)
 
 	survivors := frameIDs(svc.pending[addr])
-	_, msgAStillTracked := svc.outbound["msgA"]
-	_, msgBStillTracked := svc.outbound["msgB"]
+	_, msgAStillTracked := svc.outbound[svc.ownMessageIdentity("msgA", "r")]
+	_, msgBStillTracked := svc.outbound[svc.ownMessageIdentity("msgB", "r")]
 	svc.deliveryMu.Unlock()
 
 	if len(survivors) != 1 || survivors[0] != "msgB" {
@@ -6298,7 +6300,7 @@ func TestReceiptDelegatedToMessageStoreBeforeEvent(t *testing.T) {
 		DeliveredAt: time.Now().UTC(),
 	}
 
-	svc.sentDMIDs.Add("race-msg-1") // we sent this message; the delivered receipt is solicited
+	svc.sentDMIDs.Add(deliveryMessageRef(messageIdentity{MessageID: "race-msg-1", Sender: senderID.Address, Recipient: recipientID.Address}).Key()) // we sent this message; the delivered receipt is solicited
 	receiptStored := storedReceipt(svc, receipt)
 	if !receiptStored {
 		t.Fatal("expected delivery receipt to be stored")
@@ -9705,16 +9707,16 @@ func TestDeleteTrustedContactDropsPendingMessages(t *testing.T) {
 
 	svc.deliveryMu.Lock()
 	svc.pending[relay] = []pendingFrame{
-		{Frame: protocol.Frame{Type: "send_message", ID: "msg-1", Recipient: peerID.Address}, QueuedAt: time.Now()},
-		{Frame: protocol.Frame{Type: "send_message", ID: "msg-2", Recipient: peerID.Address}, QueuedAt: time.Now()},
-		{Frame: protocol.Frame{Type: "send_message", ID: "msg-3", Recipient: otherRecipient}, QueuedAt: time.Now()},
+		{Frame: protocol.Frame{Type: "send_message", Topic: "dm", Address: svc.Address(), ID: "msg-1", Recipient: peerID.Address}, QueuedAt: time.Now()},
+		{Frame: protocol.Frame{Type: "send_message", Topic: "dm", Address: svc.Address(), ID: "msg-2", Recipient: peerID.Address}, QueuedAt: time.Now()},
+		{Frame: protocol.Frame{Type: "send_message", Topic: "dm", Address: svc.Address(), ID: "msg-3", Recipient: otherRecipient}, QueuedAt: time.Now()},
 	}
 	for _, pf := range svc.pending[relay] {
 		svc.pendingKeys[pendingFrameKey(relay, pf.Frame)] = struct{}{}
 	}
-	svc.outbound["msg-1"] = outboundDelivery{MessageID: "msg-1", Recipient: peerID.Address, Status: "queued"}
-	svc.outbound["msg-2"] = outboundDelivery{MessageID: "msg-2", Recipient: peerID.Address, Status: "retrying"}
-	svc.outbound["msg-3"] = outboundDelivery{MessageID: "msg-3", Recipient: otherRecipient, Status: "queued"}
+	svc.outbound[svc.ownMessageIdentity("msg-1", peerID.Address)] = outboundDelivery{MessageID: "msg-1", Recipient: peerID.Address, Status: "queued"}
+	svc.outbound[svc.ownMessageIdentity("msg-2", peerID.Address)] = outboundDelivery{MessageID: "msg-2", Recipient: peerID.Address, Status: "retrying"}
+	svc.outbound[svc.ownMessageIdentity("msg-3", otherRecipient)] = outboundDelivery{MessageID: "msg-3", Recipient: otherRecipient, Status: "queued"}
 	svc.deliveryMu.Unlock()
 
 	// Delete the contact.
@@ -9729,9 +9731,9 @@ func TestDeleteTrustedContactDropsPendingMessages(t *testing.T) {
 	// Verify: pending messages for deleted contact are gone, other messages remain.
 	svc.deliveryMu.RLock()
 	remaining := svc.pending[relay]
-	outbound1 := svc.outbound["msg-1"]
-	outbound2 := svc.outbound["msg-2"]
-	outbound3 := svc.outbound["msg-3"]
+	outbound1 := svc.outbound[svc.ownMessageIdentity("msg-1", peerID.Address)]
+	outbound2 := svc.outbound[svc.ownMessageIdentity("msg-2", peerID.Address)]
+	outbound3 := svc.outbound[svc.ownMessageIdentity("msg-3", otherRecipient)]
 	svc.deliveryMu.RUnlock()
 
 	if len(remaining) != 1 {
@@ -9786,7 +9788,7 @@ func TestDeleteTrustedContactClearsOutboundWithNoPending(t *testing.T) {
 
 	// Only outbound entries, no pending frames.
 	svc.deliveryMu.Lock()
-	svc.outbound["ob-1"] = outboundDelivery{MessageID: "ob-1", Recipient: peerID.Address, Status: "delivered"}
+	svc.outbound[svc.ownMessageIdentity("ob-1", peerID.Address)] = outboundDelivery{MessageID: "ob-1", Recipient: peerID.Address, Status: "delivered"}
 	svc.deliveryMu.Unlock()
 
 	// Delete the contact — outbound tracking must be cleared even though
@@ -9804,7 +9806,7 @@ func TestDeleteTrustedContactClearsOutboundWithNoPending(t *testing.T) {
 	})
 
 	svc.deliveryMu.RLock()
-	_, ok := svc.outbound["ob-1"]
+	_, ok := svc.outbound[svc.ownMessageIdentity("ob-1", peerID.Address)]
 	svc.deliveryMu.RUnlock()
 	if ok {
 		t.Fatal("outbound entry ob-1 should have been removed")

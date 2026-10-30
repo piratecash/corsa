@@ -82,9 +82,9 @@ func TestCollectViewerItemsKeepsChatOrder(t *testing.T) {
 	}
 
 	var sawSender []bool
-	resolve := func(id domain.MessageID, isMine bool) (string, bool) {
+	resolve := func(id domain.MessageRef, isMine bool) (string, bool) {
 		sawSender = append(sawSender, isMine)
-		switch id {
+		switch id.ID {
 		case "missing":
 			return "", false
 		case "arriving":
@@ -93,16 +93,16 @@ func TestCollectViewerItemsKeepsChatOrder(t *testing.T) {
 			// open has nowhere to appear.
 			return "", true
 		}
-		return "/files/" + string(id), true
+		return "/files/" + id.ID, true
 	}
 
 	items := collectViewerItems(messages, me, peer, resolve)
 	if len(items) != 3 {
 		t.Fatalf("items = %d, want 3 (%+v)", len(items), items)
 	}
-	if items[0].messageID != "first" || items[1].messageID != "arriving" || items[2].messageID != "mine" {
+	if items[0].messageID.ID != "first" || items[1].messageID.ID != "arriving" || items[2].messageID.ID != "mine" {
 		t.Fatalf("order = %s, %s, %s; want first, arriving, mine",
-			items[0].messageID, items[1].messageID, items[2].messageID)
+			items[0].messageID.ID, items[1].messageID.ID, items[2].messageID.ID)
 	}
 	if items[0].name != "one.png" || items[0].size != 100 || items[0].path != "/files/first" {
 		t.Fatalf("first item = %+v", items[0])
@@ -139,7 +139,7 @@ func TestTransferIsArriving(t *testing.T) {
 
 func TestCollectViewerItemsEmpty(t *testing.T) {
 	me := peerFromByte(1)
-	resolve := func(domain.MessageID, bool) (string, bool) { return "/x", false }
+	resolve := func(domain.MessageRef, bool) (string, bool) { return "/x", false }
 	if items := collectViewerItems(nil, me, peerFromByte(2), resolve); items != nil {
 		t.Fatalf("items = %+v, want nil", items)
 	}
@@ -153,24 +153,24 @@ func TestCollectViewerItemsEmpty(t *testing.T) {
 // gone — the next one, or the previous one if it was last.
 func TestViewerIndexAfterRebuild(t *testing.T) {
 	items := []viewerItem{
-		{messageID: "a"}, {messageID: "b"}, {messageID: "c"},
+		{messageID: fixtureMessageRef("a")}, {messageID: fixtureMessageRef("b")}, {messageID: fixtureMessageRef("c")},
 	}
 	tests := []struct {
 		name     string
-		current  domain.MessageID
+		current  domain.MessageRef
 		items    []viewerItem
 		previous int
 		want     int
 	}{
-		{name: "unmoved", current: "b", items: items, previous: 1, want: 1},
-		{name: "shifted by an insert", current: "c", items: []viewerItem{
-			{messageID: "new"}, {messageID: "a"}, {messageID: "b"}, {messageID: "c"},
+		{name: "unmoved", current: fixtureMessageRef("b"), items: items, previous: 1, want: 1},
+		{name: "shifted by an insert", current: fixtureMessageRef("c"), items: []viewerItem{
+			{messageID: fixtureMessageRef("new")}, {messageID: fixtureMessageRef("a")}, {messageID: fixtureMessageRef("b")}, {messageID: fixtureMessageRef("c")},
 		}, previous: 2, want: 3},
-		{name: "deleted in the middle", current: "b", items: []viewerItem{
-			{messageID: "a"}, {messageID: "c"},
+		{name: "deleted in the middle", current: fixtureMessageRef("b"), items: []viewerItem{
+			{messageID: fixtureMessageRef("a")}, {messageID: fixtureMessageRef("c")},
 		}, previous: 1, want: 1},
-		{name: "deleted last", current: "c", items: []viewerItem{
-			{messageID: "a"}, {messageID: "b"},
+		{name: "deleted last", current: fixtureMessageRef("c"), items: []viewerItem{
+			{messageID: fixtureMessageRef("a")}, {messageID: fixtureMessageRef("b")},
 		}, previous: 2, want: 1},
 	}
 	for _, test := range tests {
@@ -377,7 +377,7 @@ func newViewerForTest(items ...viewerItem) *imageViewer {
 }
 
 func TestViewerStepResetsZoomAndPan(t *testing.T) {
-	viewer := newViewerForTest(viewerItem{messageID: "a"}, viewerItem{messageID: "b"})
+	viewer := newViewerForTest(viewerItem{messageID: fixtureMessageRef("a")}, viewerItem{messageID: fixtureMessageRef("b")})
 	viewer.viewport = image.Pt(400, 300)
 	viewer.fit = image.Pt(400, 300)
 	viewer.zoom = 400
@@ -398,7 +398,7 @@ func TestViewerStepResetsZoomAndPan(t *testing.T) {
 }
 
 func TestViewerStepIsInertUnderTheConfirmation(t *testing.T) {
-	viewer := newViewerForTest(viewerItem{messageID: "a"}, viewerItem{messageID: "b"})
+	viewer := newViewerForTest(viewerItem{messageID: fixtureMessageRef("a")}, viewerItem{messageID: fixtureMessageRef("b")})
 	viewer.confirmDelete = true
 	viewer.step(1)
 	if viewer.index != 0 {
@@ -414,24 +414,24 @@ func TestViewerStepIsInertUnderTheConfirmation(t *testing.T) {
 // empty list.
 func TestViewerDropCurrentItem(t *testing.T) {
 	viewer := newViewerForTest(
-		viewerItem{messageID: "a", path: "/a"},
-		viewerItem{messageID: "b", path: "/b"},
-		viewerItem{messageID: "c", path: "/c"},
+		viewerItem{messageID: fixtureMessageRef("a"), path: "/a"},
+		viewerItem{messageID: fixtureMessageRef("b"), path: "/b"},
+		viewerItem{messageID: fixtureMessageRef("c"), path: "/c"},
 	)
 	viewer.parent.imageViewer = viewer
 
 	viewer.show(1)
 	viewer.dropCurrentItem()
-	if len(viewer.items) != 2 || viewer.items[1].messageID != "c" {
+	if len(viewer.items) != 2 || viewer.items[1].messageID.ID != "c" {
 		t.Fatalf("items = %+v, want a and c", viewer.items)
 	}
-	if viewer.index != 1 || viewer.items[viewer.index].messageID != "c" {
+	if viewer.index != 1 || viewer.items[viewer.index].messageID.ID != "c" {
 		t.Fatalf("index = %d, want the next image", viewer.index)
 	}
 
 	// The last image: the viewer falls back to the previous one.
 	viewer.dropCurrentItem()
-	if viewer.index != 0 || viewer.items[0].messageID != "a" {
+	if viewer.index != 0 || viewer.items[0].messageID.ID != "a" {
 		t.Fatalf("after deleting the last = index %d, items %+v", viewer.index, viewer.items)
 	}
 
@@ -446,8 +446,8 @@ func TestViewerDropCurrentItem(t *testing.T) {
 // changes the disk, which no router generation counts — and never otherwise.
 func TestViewerItemsPollOnlyWhileAFileIsMissing(t *testing.T) {
 	viewer := newViewerForTest(
-		viewerItem{messageID: "a", path: "/a"},
-		viewerItem{messageID: "b"},
+		viewerItem{messageID: fixtureMessageRef("a"), path: "/a"},
+		viewerItem{messageID: fixtureMessageRef("b")},
 	)
 	built := time.Unix(1000, 0)
 	viewer.noteItemsBuilt(built)
@@ -648,7 +648,7 @@ func TestViewerPinchZoomsByTheFingerRatio(t *testing.T) {
 }
 
 func TestViewerApplyToggleZoom(t *testing.T) {
-	viewer := newViewerForTest(viewerItem{messageID: "a"})
+	viewer := newViewerForTest(viewerItem{messageID: fixtureMessageRef("a")})
 	viewer.viewport = image.Pt(400, 400)
 	viewer.fit = image.Pt(400, 400)
 
@@ -663,7 +663,7 @@ func TestViewerApplyToggleZoom(t *testing.T) {
 }
 
 func TestViewerZoomClampsToTheStops(t *testing.T) {
-	viewer := newViewerForTest(viewerItem{messageID: "a"})
+	viewer := newViewerForTest(viewerItem{messageID: fixtureMessageRef("a")})
 	viewer.viewport = image.Pt(400, 400)
 	viewer.fit = image.Pt(400, 400)
 
@@ -687,9 +687,9 @@ func TestViewerZoomClampsToTheStops(t *testing.T) {
 func TestViewerConfirmDeletesOnlyOnce(t *testing.T) {
 	router := new(input.Router)
 	viewer := newViewerForTest(
-		viewerItem{messageID: "a", path: "/a"},
-		viewerItem{messageID: "b", path: "/b"},
-		viewerItem{messageID: "c", path: "/c"},
+		viewerItem{messageID: fixtureMessageRef("a"), path: "/a"},
+		viewerItem{messageID: fixtureMessageRef("b"), path: "/b"},
+		viewerItem{messageID: fixtureMessageRef("c"), path: "/c"},
 	)
 	viewer.parent.imageViewer = viewer
 	viewer.confirmDelete = true
@@ -724,7 +724,7 @@ func TestViewerConfirmDeletesOnlyOnce(t *testing.T) {
 	}
 	frame(true)
 
-	if len(viewer.items) != 2 || viewer.items[0].messageID != "b" {
+	if len(viewer.items) != 2 || viewer.items[0].messageID.ID != "b" {
 		t.Fatalf("items = %+v, want b and c: a double click deleted more than one image", viewer.items)
 	}
 	if viewer.confirmDelete {
@@ -745,8 +745,8 @@ func TestViewerConfirmDeletesOnlyOnce(t *testing.T) {
 // by content between messages and impossible to restore.
 func TestViewerDeleteIsRefusedForOutgoingImages(t *testing.T) {
 	viewer := newViewerForTest(
-		viewerItem{messageID: "mine", path: "/mine", mine: true},
-		viewerItem{messageID: "theirs", path: "/theirs"},
+		viewerItem{messageID: fixtureMessageRef("mine"), path: "/mine", mine: true},
+		viewerItem{messageID: fixtureMessageRef("theirs"), path: "/theirs"},
 	)
 	if viewer.canDelete(viewer.items[0]) {
 		t.Fatal("an outgoing image must not be deletable on its own")
@@ -755,7 +755,7 @@ func TestViewerDeleteIsRefusedForOutgoingImages(t *testing.T) {
 		t.Fatal("a received image must be deletable")
 	}
 	// A file that has not arrived has nothing to delete either.
-	if viewer.canDelete(viewerItem{messageID: "arriving"}) {
+	if viewer.canDelete(viewerItem{messageID: fixtureMessageRef("arriving")}) {
 		t.Fatal("a file still arriving must not be deletable")
 	}
 
@@ -890,13 +890,13 @@ func TestViewerFrameLaysOutEveryState(t *testing.T) {
 			t.Run(name, func(t *testing.T) {
 				window := &Window{theme: newAppTheme()}
 				window.openImageViewer(viewerItem{
-					messageID: "a", path: "/does/not/exist/a.png", name: "a.png", size: 1234,
+					messageID: fixtureMessageRef("a"), path: "/does/not/exist/a.png", name: "a.png", size: 1234,
 				}, time.Unix(1000, 0))
 				viewer := window.viewer()
 				// A second image, so the arrows and the thumbnail strip are
 				// drawn rather than skipped.
 				viewer.items = append(viewer.items, viewerItem{
-					messageID: "b", path: "/does/not/exist/b.png", name: "b.png", size: 99,
+					messageID: fixtureMessageRef("b"), path: "/does/not/exist/b.png", name: "b.png", size: 99,
 				})
 				viewer.thumbBtns = make([]widget.Clickable, len(viewer.items))
 				viewer.confirmDelete = confirm

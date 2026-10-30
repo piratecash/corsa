@@ -155,10 +155,10 @@ func (s *Service) CancelOutgoingDelivery(messageID protocol.MessageID, recipient
 	// message withdrawn after its own TTL dropped the entry, or one whose
 	// entry a concurrent refusal re-marked, would otherwise keep its id
 	// here for the life of the process.
-	delete(s.markedNeverEmitted, messageID)
-	if entry, awaiting := s.awaitingDelivered[messageID]; awaiting && entry.Envelope.Recipient == wireRecipient {
+	delete(s.markedNeverEmitted, s.ownMessageIdentity(messageID, wireRecipient))
+	if entry, awaiting := s.awaitingDelivered[s.ownMessageIdentity(messageID, wireRecipient)]; awaiting && entry.Envelope.Recipient == wireRecipient {
 		result.NeverEmitted = !entry.Emitted
-		delete(s.awaitingDelivered, messageID)
+		delete(s.awaitingDelivered, s.ownMessageIdentity(messageID, wireRecipient))
 		result.RetryCancelled = true
 		// The withdrawn message may have been holding this recipient's
 		// queue slot. Freeing it without promoting the next one would
@@ -170,13 +170,13 @@ func (s *Service) CancelOutgoingDelivery(messageID protocol.MessageID, recipient
 	// Shadow the id for a while: a backlog push that snapshotted the
 	// inbox a moment ago still holds this envelope and would hand it over
 	// after we have just told the caller it never went out.
-	s.noteDeliveryCancelledLocked(messageID, time.Now().UTC())
+	s.noteDeliveryCancelledLocked(s.ownMessageIdentity(messageID, wireRecipient), time.Now().UTC())
 	// A single-message delete freezes the id before it classifies, for
 	// the same reason a wipe does. The withdrawal is what that freeze was
 	// waiting for.
-	delete(s.frozenDeliveries, messageID)
-	if _, tracked := s.outbound[string(messageID)]; tracked {
-		delete(s.outbound, string(messageID))
+	delete(s.frozenDeliveries, s.ownMessageIdentity(messageID, wireRecipient))
+	if _, tracked := s.outbound[s.ownMessageIdentity(messageID, wireRecipient)]; tracked {
+		delete(s.outbound, s.ownMessageIdentity(messageID, wireRecipient))
 		result.OutboundCleared = true
 	}
 
@@ -303,14 +303,14 @@ func (s *Service) CancelOutgoingDeliveriesTo(recipient domain.PeerIdentity, scop
 
 	neverEmitted := make(map[protocol.MessageID]struct{})
 	for id, entry := range s.awaitingDelivered {
-		if entry.Envelope.Recipient == wireRecipient && entry.Envelope.Sender == s.identity.Address && inScope(id) {
-			withdrawn[id] = struct{}{}
+		if entry.Envelope.Recipient == wireRecipient && entry.Envelope.Sender == s.identity.Address && inScope(id.MessageID) {
+			withdrawn[id.MessageID] = struct{}{}
 			if !entry.Emitted {
 				// Same claim the single-message withdrawal makes, and
 				// for the same reason: nobody has ever seen this
 				// message, so asking the peer to delete it would be
 				// how they learn it existed.
-				neverEmitted[id] = struct{}{}
+				neverEmitted[id.MessageID] = struct{}{}
 			}
 			delete(s.awaitingDelivered, id)
 		}
@@ -319,8 +319,8 @@ func (s *Service) CancelOutgoingDeliveriesTo(recipient domain.PeerIdentity, scop
 	// slot the wipe just freed belongs to the oldest of them.
 	s.promoteQueueHeadLocked(wireRecipient, time.Now().UTC())
 	for id := range s.outbound {
-		if s.outbound[id].Recipient == wireRecipient && inScope(protocol.MessageID(id)) {
-			withdrawn[protocol.MessageID(id)] = struct{}{}
+		if s.outbound[id].Recipient == wireRecipient && inScope(id.MessageID) {
+			withdrawn[id.MessageID] = struct{}{}
 			delete(s.outbound, id)
 		}
 	}
@@ -329,7 +329,7 @@ func (s *Service) CancelOutgoingDeliveriesTo(recipient domain.PeerIdentity, scop
 	// of it over now.
 	cancelledAt := time.Now().UTC()
 	for id := range withdrawn {
-		s.noteDeliveryCancelledLocked(id, cancelledAt)
+		s.noteDeliveryCancelledLocked(s.ownMessageIdentity(id, wireRecipient), cancelledAt)
 	}
 	// The withdrawal is what a freeze was waiting for: these ids are gone
 	// for good now, and the shadow above is what keeps a backlog push
@@ -342,9 +342,9 @@ func (s *Service) CancelOutgoingDeliveriesTo(recipient domain.PeerIdentity, scop
 	// message frozen for the life of the process, with nothing left that
 	// could ever release it.
 	if scope != nil {
-		s.clearFreezeLocked(scope)
+		s.clearFreezeLocked(s.ownMessageSet(scope, wireRecipient))
 	} else {
-		s.clearFreezeLocked(withdrawn)
+		s.clearFreezeLocked(s.ownMessageSet(withdrawn, wireRecipient))
 	}
 	// The durable never-emitted claims go the same way, and by the same
 	// argument. markedNeverEmitted deliberately OUTLIVES a retry entry —
@@ -354,9 +354,9 @@ func (s *Service) CancelOutgoingDeliveriesTo(recipient domain.PeerIdentity, scop
 	// Their rows are being destroyed with the mark on them, so this is
 	// memory only: there is no row left to write to.
 	if scope != nil {
-		s.clearClaimsLocked(scope)
+		s.clearClaimsLocked(s.ownMessageSet(scope, wireRecipient))
 	} else {
-		s.clearClaimsLocked(withdrawn)
+		s.clearClaimsLocked(s.ownMessageSet(withdrawn, wireRecipient))
 	}
 
 	// No relayRetry delete, for the reason CancelOutgoingDelivery gives:
@@ -409,12 +409,16 @@ func (s *Service) CancelOutgoingDeliveriesTo(recipient domain.PeerIdentity, scop
 // while its retry entry is still scheduled.
 // Caller MUST hold s.gossipMu (reads s.topics).
 func (s *Service) backlogEnvelopeIsForeign(messageID protocol.MessageID, recipient string) bool {
+	foreign := false
 	for _, envelope := range s.topics["dm"] {
 		if envelope.ID == messageID && envelope.Recipient == recipient {
-			return envelope.Sender != s.identity.Address
+			if envelope.Sender == s.identity.Address {
+				return false
+			}
+			foreign = true
 		}
 	}
-	return false
+	return foreign
 }
 
 // dropBacklogEnvelopeLocked removes our envelope for (messageID,
@@ -427,7 +431,7 @@ func (s *Service) dropBacklogEnvelopeLocked(messageID protocol.MessageID, recipi
 	messages := s.topics["dm"]
 	filtered := messages[:0]
 	for _, envelope := range messages {
-		if envelope.ID == messageID && envelope.Recipient == recipient {
+		if envelope.ID == messageID && envelope.Recipient == recipient && envelope.Sender == s.identity.Address {
 			continue
 		}
 		filtered = append(filtered, envelope)

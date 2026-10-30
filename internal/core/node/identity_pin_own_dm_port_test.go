@@ -260,7 +260,7 @@ func TestOwnDMPortDefaultRawDuplicateAndForeignRemainNoOrigin(t *testing.T) {
 		t.Fatal("generic duplicate promoted to typed authority", err)
 	}
 	s.deliveryMu.RLock()
-	entry := s.awaitingDelivered[e.ID]
+	entry := s.awaitingDelivered[messageIdentityOf(e)]
 	origin := entry != nil && entry.outgoingProvenance != nil
 	s.deliveryMu.RUnlock()
 	if origin {

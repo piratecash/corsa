@@ -94,6 +94,15 @@ func (s *Store) ApplyReactionFact(ctx context.Context, fact domain.ReactionFact,
 	return s.writeReactionFact(ctx, fact, false, now)
 }
 
+// ApplyReactionFactRef keeps a local selection bound to its exact row. The
+// directionless wire fact is refused when this conversation's ID is ambiguous.
+func (s *Store) ApplyReactionFactRef(ctx context.Context, ref domain.MessageRef, fact domain.ReactionFact, now time.Time) (bool, error) {
+	if ref.Topic != "dm" || ref.ID != string(fact.Key.MessageID) {
+		return false, fmt.Errorf("chatlog: reaction target reference does not match the fact")
+	}
+	return s.writeReactionFactExpected(ctx, fact, false, now, &ref)
+}
+
 // HoldReactionFact records a fact whose message has not arrived yet, to be
 // released when it does.
 //
@@ -164,12 +173,12 @@ func (s *Store) HoldReactionFact(ctx context.Context, fact domain.ReactionFact, 
 // update straight past the ceilings to the clock comparison that belongs there.
 const reactionKeyExists = `
 	EXISTS (SELECT 1 FROM message_reactions
-	        WHERE message_id = ? AND actor = ? AND emoji = ?)`
+	        WHERE scope=? AND message_id=? AND message_sender=? AND message_recipient=? AND actor=? AND emoji=?)`
 
 // reactionPerMessageGuard bounds how wide one actor may make one message.
 const reactionPerMessageGuard = `
 	AND (` + reactionKeyExists + ` OR (SELECT COUNT(*) FROM message_reactions
-	     WHERE message_id = ? AND actor = ?) < ?)`
+	     WHERE scope=? AND message_id=? AND message_sender=? AND message_recipient=? AND actor=?) < ?)`
 
 // reactionHeldGuard bounds how many facts one actor may keep WAITING.
 //
@@ -214,7 +223,7 @@ const reactionHeldGuard = `
 // nothing: a held row is invisible until its message arrives, and the release
 // path re-applies it through this same guard.
 const reactionMessageInConversation = `
-	AND EXISTS (SELECT 1 FROM messages WHERE id = ? AND `
+	AND 1 = (SELECT COUNT(*) FROM messages WHERE id = ? AND `
 
 // conversationClause turns a reaction scope into the WHERE fragment that says
 // "this message belongs to that conversation", with its arguments.
@@ -235,6 +244,32 @@ func (s *Store) conversationClause(scope domain.ReactionScope) (string, []any, e
 }
 
 func (s *Store) writeReactionFact(ctx context.Context, fact domain.ReactionFact, pending bool, now time.Time) (bool, error) {
+	return s.writeReactionFactExpected(ctx, fact, pending, now, nil)
+}
+
+func (s *Store) writeReactionFactExpected(ctx context.Context, fact domain.ReactionFact, pending bool, now time.Time, expected *domain.MessageRef) (bool, error) {
+	if _, _, err := s.conversationClause(fact.Scope); err != nil {
+		return false, err
+	}
+	ref, found, identityErr := s.RefInConversation(ctx, domain.PeerIdentityFromWire(string(fact.Scope)), fact.Key.MessageID)
+	if identityErr != nil {
+		return false, identityErr
+	}
+	if expected != nil && (!found || ref != *expected) {
+		return false, fmt.Errorf("chatlog: selected reaction target is no longer present")
+	}
+	if found {
+		peer := ref.Sender
+		if peer == s.identityAddr.String() {
+			peer = ref.Recipient
+		}
+		if ref.Topic != "dm" || peer != string(fact.Scope) {
+			return false, nil
+		}
+	} else if !pending {
+		return false, nil
+	}
+
 	if fact.Clock > math.MaxInt64 {
 		// SQLite has no unsigned integer, so a clock past MaxInt64 would be
 		// stored negative and silently REVERSE the merge for that key. Refused
@@ -244,6 +279,16 @@ func (s *Store) writeReactionFact(ctx context.Context, fact domain.ReactionFact,
 			"chatlog: reaction %s/%s carries clock %d, past what the store can order",
 			fact.Key.MessageID, fact.Key.Emoji, fact.Clock)
 	}
+	// Resolve an old directionless held key before merging a same-clock
+	// applied repeat. Its stored decision must win an equal-clock conflict.
+	released := 0
+	if found && !pending {
+		var err error
+		released, err = s.releaseHeldReactionsExpected(ctx, fact.Scope, fact.Key.MessageID, now, &ref)
+		if err != nil {
+			return false, err
+		}
+	}
 	id, actor, emoji := string(fact.Key.MessageID), fact.Key.Actor.String(), fact.Key.Emoji
 	// Sortable and fixed width, unlike RFC3339Nano, which strips trailing zeros
 	// and therefore is NOT order-preserving as a string — and this column is
@@ -251,17 +296,15 @@ func (s *Store) writeReactionFact(ctx context.Context, fact domain.ReactionFact,
 	stamp := now.UTC().Format(sortableStamp)
 
 	guard := reactionPerMessageGuard
-	args := []any{
-		string(fact.Scope), id, actor, emoji,
-		int(fact.Op), int64(fact.Clock), boolToInt(pending), stamp, stamp,
-		id, actor, emoji, id, actor, MaxReactionsPerActorPerMessage,
-	}
+	keyArgs := []any{string(fact.Scope), id, ref.Sender, ref.Recipient, actor, emoji}
+	args := []any{string(fact.Scope), id, actor, emoji, int(fact.Op), int64(fact.Clock), boolToInt(pending), stamp, stamp, ref.Sender, ref.Recipient}
+	args = append(args, keyArgs...)
+	args = append(args, string(fact.Scope), id, ref.Sender, ref.Recipient, actor, MaxReactionsPerActorPerMessage)
 	if pending {
 		guard += reactionHeldGuard
-		args = append(args, id, actor, emoji, actor, MaxHeldReactionsPerActor)
+		args = append(args, keyArgs...)
+		args = append(args, actor, MaxHeldReactionsPerActor)
 	} else {
-		// A HELD fact is about a message that is legitimately not here yet, so
-		// only the applied write asks for one.
 		clause, clauseArgs, err := s.conversationClause(fact.Scope)
 		if err != nil {
 			return false, err
@@ -269,13 +312,17 @@ func (s *Store) writeReactionFact(ctx context.Context, fact domain.ReactionFact,
 		guard += reactionMessageInConversation + clause + `)`
 		args = append(args, id)
 		args = append(args, clauseArgs...)
+		guard += ` AND EXISTS(SELECT 1 FROM messages WHERE topic='dm' AND id=? AND sender=? AND recipient=?)`
+		args = append(args, id, ref.Sender, ref.Recipient)
 	}
 
 	res, err := s.db.ExecContext(ctx, `
-		INSERT INTO message_reactions (scope, message_id, actor, emoji, op, clock, pending, first_seen_at, updated_at)
-		SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?
+		INSERT INTO message_reactions (scope, message_id, actor, emoji, op, clock, pending, first_seen_at, updated_at, message_sender, message_recipient)
+		SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 		WHERE TRUE`+guard+`
-		ON CONFLICT(message_id, actor, emoji) DO UPDATE SET
+		ON CONFLICT(scope,message_id,message_sender,message_recipient,actor,emoji) DO UPDATE SET
+            message_sender=excluded.message_sender,
+            message_recipient=excluded.message_recipient,
 			-- At an EQUAL clock nothing about the decision may move: only the
 			-- pending flag, which is not part of the decision. Writing op from
 			-- excluded there would make the outcome of two same-clock facts
@@ -287,14 +334,17 @@ func (s *Store) writeReactionFact(ctx context.Context, fact domain.ReactionFact,
 			clock      = excluded.clock,
 			pending    = excluded.pending,
 			updated_at = excluded.updated_at
-		WHERE excluded.clock > message_reactions.clock
-		   OR (excluded.clock = message_reactions.clock
-		       AND message_reactions.pending = 1 AND excluded.pending = 0)`, args...)
+		WHERE message_reactions.scope=excluded.scope
+          AND ((message_reactions.message_sender=excluded.message_sender AND message_reactions.message_recipient=excluded.message_recipient)
+               OR (message_reactions.pending=1 AND message_reactions.message_sender='' AND message_reactions.message_recipient=''))
+          AND (excluded.clock > message_reactions.clock
+           OR (excluded.clock = message_reactions.clock
+               AND message_reactions.pending = 1 AND excluded.pending = 0))`, args...)
 	if err != nil {
 		return false, fmt.Errorf("chatlog: write reaction %s/%s: %w", fact.Key.MessageID, fact.Key.Emoji, err)
 	}
 	n, _ := res.RowsAffected()
-	return n > 0, nil
+	return n > 0 || released > 0, nil
 }
 
 // sortableStamp is the layout of `first_seen_at`: fixed width, so lexical order
@@ -372,34 +422,62 @@ func boolToInt(value bool) int {
 // No clock comparison is needed here and none is done: the comparison happened
 // when each fact was written, against the same row this statement is about to
 // clear the flag on. Releasing is only ever "the message is here now".
-func (s *Store) ReleaseHeldReactions(
-	ctx context.Context,
-	scope domain.ReactionScope,
-	messageID domain.MessageID,
-	now time.Time,
-) (int, error) {
-	// The same membership condition the applied write is guarded by, and for the
-	// same reason: releasing is what MAKES a fact applied, so a release that
-	// only matches on scope and id is a second door into the state the guard
-	// exists to protect. Two ways in without it — an id that exists in another
-	// conversation, and a delete landing between the caller's "the message is
-	// here" and this UPDATE — and both leave an applied row for a message this
-	// conversation does not have, which no deletion path reaches afterwards.
-	clause, clauseArgs, err := s.conversationClause(scope)
+func (s *Store) ReleaseHeldReactions(ctx context.Context, scope domain.ReactionScope, messageID domain.MessageID, now time.Time) (int, error) {
+	return s.releaseHeldReactionsExpected(ctx, scope, messageID, now, nil)
+}
+
+func (s *Store) releaseHeldReactionsExpected(ctx context.Context, scope domain.ReactionScope, messageID domain.MessageID, now time.Time, expected *domain.MessageRef) (int, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err
 	}
-	args := append([]any{
-		now.UTC().Format(sortableStamp), string(scope), string(messageID), string(messageID),
-	}, clauseArgs...)
-	res, err := s.db.ExecContext(ctx, `
-		UPDATE message_reactions SET pending = 0, updated_at = ?
-		WHERE scope = ? AND message_id = ? AND pending = 1
-		  AND EXISTS (SELECT 1 FROM messages WHERE id = ? AND `+clause+`)`, args...)
+	defer func() { _ = tx.Rollback() }()
+	n, err := s.releaseHeldReactionsTx(ctx, tx, scope, messageID, now, expected)
 	if err != nil {
-		return 0, fmt.Errorf("chatlog: release held reactions %s: %w", messageID, err)
+		return 0, err
 	}
-	n, _ := res.RowsAffected()
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
+func (s *Store) releaseHeldReactionsTx(ctx context.Context, tx *sql.Tx, scope domain.ReactionScope, messageID domain.MessageID, now time.Time, expected *domain.MessageRef) (int, error) {
+	peer := domain.PeerIdentityFromWire(string(scope))
+	if peer.IsZero() {
+		return 0, fmt.Errorf("reaction scope is not a peer")
+	}
+	query, args := s.peerQuery("dm", peer, `SELECT topic,id,sender,recipient FROM messages WHERE id=? AND `, ` LIMIT 2`)
+	args = append([]interface{}{messageID}, args...)
+	ref, found, err := uniqueMessageRefQuery(ctx, tx, query, args...)
+	if err != nil {
+		return 0, err
+	}
+	if expected != nil && (!found || ref != *expected) {
+		return 0, fmt.Errorf("chatlog: selected reaction target is no longer present")
+	}
+	if !found {
+		return 0, nil
+	}
+	result, err := tx.ExecContext(ctx, `
+  INSERT INTO message_reactions(scope,message_id,actor,emoji,op,clock,pending,first_seen_at,updated_at,message_sender,message_recipient)
+  SELECT scope,message_id,actor,emoji,op,clock,0,first_seen_at,?,?,? FROM message_reactions
+  WHERE scope=? AND message_id=? AND pending=1 AND ((message_sender='' AND message_recipient='') OR (message_sender=? AND message_recipient=?))
+  ON CONFLICT(scope,message_id,message_sender,message_recipient,actor,emoji) DO UPDATE SET
+   op=CASE WHEN excluded.clock>message_reactions.clock THEN excluded.op ELSE message_reactions.op END,
+   clock=MAX(message_reactions.clock,excluded.clock),pending=0,updated_at=excluded.updated_at
+  WHERE excluded.clock>message_reactions.clock OR (excluded.clock=message_reactions.clock AND message_reactions.pending=1)`,
+		now.UTC().Format(sortableStamp), ref.Sender, ref.Recipient, string(scope), string(messageID), ref.Sender, ref.Recipient)
+	if err != nil {
+		return 0, err
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM message_reactions WHERE scope=? AND message_id=? AND pending=1 AND message_sender='' AND message_recipient=''`, string(scope), string(messageID)); err != nil {
+		return 0, err
+	}
 	return int(n), nil
 }
 
@@ -411,15 +489,35 @@ func (s *Store) ReleaseHeldReactions(
 // this node cannot show, and handing them on would spread a claim we cannot
 // place ourselves.
 func (s *Store) ReactionFacts(ctx context.Context, messageID domain.MessageID) ([]domain.ReactionFact, error) {
+	ref, found, err := uniqueMessageRef(ctx, s.db, string(messageID))
+	if err != nil || !found {
+		return nil, err
+	}
+	return s.ReactionFactsForRef(ctx, ref)
+}
+
+func (s *Store) ReactionFactsInConversation(ctx context.Context, peer domain.PeerIdentity, id domain.MessageID) ([]domain.ReactionFact, error) {
+	ref, found, err := s.RefInConversation(ctx, peer, id)
+	if err != nil || !found {
+		return nil, err
+	}
+	return s.ReactionFactsForRef(ctx, ref)
+}
+
+func (s *Store) ReactionFactsForRef(ctx context.Context, ref domain.MessageRef) ([]domain.ReactionFact, error) {
+	if ref.Topic != "dm" {
+		return nil, nil
+	}
+
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT scope, actor, emoji, op, clock
-		FROM message_reactions WHERE message_id = ? AND pending = 0
-		ORDER BY actor, emoji`, string(messageID))
+		FROM message_reactions WHERE message_id = ? AND message_sender=? AND message_recipient=? AND pending = 0
+		ORDER BY actor, emoji`, ref.ID, ref.Sender, ref.Recipient)
 	if err != nil {
-		return nil, fmt.Errorf("chatlog: read reactions %s: %w", messageID, err)
+		return nil, fmt.Errorf("chatlog: read reactions %s: %w", ref.ID, err)
 	}
 	defer func() { _ = rows.Close() }()
-	return scanReactionFacts(rows, messageID)
+	return scanReactionFacts(rows, domain.MessageID(ref.ID))
 }
 
 func scanReactionFacts(rows *sql.Rows, messageID domain.MessageID) ([]domain.ReactionFact, error) {
@@ -456,28 +554,50 @@ func scanReactionFacts(rows *sql.Rows, messageID domain.MessageID) ([]domain.Rea
 // read in the wrong place entirely. The caller loads the conversation once and
 // redraws from memory.
 func (s *Store) ReactionsForScope(ctx context.Context, scope domain.ReactionScope, self domain.PeerIdentity) (map[domain.MessageID][]domain.Reaction, error) {
+	scoped, err := s.ReactionsForScopeRefs(ctx, scope, self)
+	if err != nil {
+		return nil, err
+	}
+	result := make(map[domain.MessageID][]domain.Reaction, len(scoped))
+	for ref, facts := range scoped {
+		if found, err := s.LookupEntryInConversation(ctx, domain.PeerIdentityFromWire(string(scope)), domain.MessageID(ref.ID)); err != nil {
+			return nil, err
+		} else if !found {
+			continue
+		}
+		id := domain.MessageID(ref.ID)
+		if _, duplicate := result[id]; duplicate {
+			return nil, ErrAmbiguousMessage
+		}
+		result[id] = facts
+	}
+	return result, nil
+}
+
+func (s *Store) ReactionsForScopeRefs(ctx context.Context, scope domain.ReactionScope, self domain.PeerIdentity) (map[domain.MessageRef][]domain.Reaction, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT message_id, actor, emoji, op, clock
+		SELECT message_id, message_sender,message_recipient,actor, emoji, op, clock
 		FROM message_reactions WHERE scope = ? AND pending = 0
+ AND EXISTS(SELECT 1 FROM messages m WHERE m.topic='dm' AND m.id=message_reactions.message_id AND m.sender=message_reactions.message_sender AND m.recipient=message_reactions.message_recipient)
 		ORDER BY message_id, actor, emoji`, string(scope))
 	if err != nil {
 		return nil, fmt.Errorf("chatlog: read reactions for %s: %w", scope, err)
 	}
 	defer func() { _ = rows.Close() }()
 
-	byMessage := map[domain.MessageID][]domain.ReactionFact{}
+	byMessage := map[domain.MessageRef][]domain.ReactionFact{}
 	for rows.Next() {
-		var messageID, actor, emoji string
+		var messageID, messageSender, messageRecipient, actor, emoji string
 		var op int
 		var clock int64
-		if err := rows.Scan(&messageID, &actor, &emoji, &op, &clock); err != nil {
+		if err := rows.Scan(&messageID, &messageSender, &messageRecipient, &actor, &emoji, &op, &clock); err != nil {
 			return nil, fmt.Errorf("chatlog: scan reactions for %s: %w", scope, err)
 		}
-		id := domain.MessageID(messageID)
+		id := domain.MessageRef{Topic: "dm", ID: messageID, Sender: messageSender, Recipient: messageRecipient}
 		byMessage[id] = append(byMessage[id], domain.ReactionFact{
 			Scope: scope,
 			Key: domain.ReactionKey{
-				MessageID: id,
+				MessageID: domain.MessageID(id.ID),
 				Actor:     domain.PeerIdentityFromWire(actor),
 				Emoji:     emoji,
 			},
@@ -489,7 +609,7 @@ func (s *Store) ReactionsForScope(ctx context.Context, scope domain.ReactionScop
 		return nil, fmt.Errorf("chatlog: read reactions for %s: %w", scope, err)
 	}
 
-	folded := make(map[domain.MessageID][]domain.Reaction, len(byMessage))
+	folded := make(map[domain.MessageRef][]domain.Reaction, len(byMessage))
 	for id, facts := range byMessage {
 		if reactions := FoldReactions(facts, self); len(reactions) > 0 {
 			folded[id] = reactions
@@ -506,21 +626,28 @@ func (s *Store) ReactionsForScope(ctx context.Context, scope domain.ReactionScop
 // executes. A test carrying its own copy of the SQL passes while the query it
 // is supposed to guard drifts away from the index — which is exactly what
 // happened to the first version of this index.
+// Wire reaction keys do not carry the original message endpoints. A fact on
+// a colliding ID in the same conversation cannot be projected safely.
+const reactionWireTargetUnique = ` AND 1=(SELECT COUNT(*) FROM messages m
+ WHERE m.topic='dm' AND m.id=message_reactions.message_id
+ AND ((m.sender=message_reactions.message_sender AND m.recipient=message_reactions.message_recipient)
+ OR (m.sender=message_reactions.message_recipient AND m.recipient=message_reactions.message_sender)))`
+
 const (
 	reactionsAuthoredByQuery = `
 		SELECT message_id, emoji, op, clock
 		FROM message_reactions
-		WHERE actor = ? AND scope = ? AND pending = 0
+		WHERE actor = ? AND scope = ? AND pending = 0` + reactionWireTargetUnique + `
 		ORDER BY updated_at DESC, message_id DESC, emoji DESC
 		LIMIT ? OFFSET ?`
 
 	countReactionsAuthoredByQuery = `
 		SELECT COUNT(*) FROM message_reactions
-		WHERE actor = ? AND scope = ? AND pending = 0`
+		WHERE actor = ? AND scope = ? AND pending = 0` + reactionWireTargetUnique
 
 	conversationsWithReactionsByQuery = `
 		SELECT DISTINCT scope FROM message_reactions
-		WHERE actor = ? AND pending = 0`
+		WHERE actor = ? AND pending = 0` + reactionWireTargetUnique
 )
 
 // ReactionsAuthoredBy is one conversation's facts by ONE actor, newest first,
@@ -627,7 +754,7 @@ func (s *Store) ReactionFactsByKey(
 			SELECT message_id, emoji, op, clock
 			FROM message_reactions
 			WHERE scope = ? AND actor = ? AND pending = 0
-			  AND (`+strings.Join(placeholders, " OR ")+`)`, args...)
+			  AND (`+strings.Join(placeholders, " OR ")+`)`+reactionWireTargetUnique, args...)
 		if err != nil {
 			return nil, fmt.Errorf("chatlog: read reactions by key in %s: %w", scope, err)
 		}
@@ -756,6 +883,7 @@ func deleteOrphanReactionsTx(ctx context.Context, db execContext, self domain.Pe
 		  AND NOT EXISTS (
 			SELECT 1 FROM messages m
 			WHERE m.id = message_reactions.message_id AND m.topic = 'dm'
+ AND ((message_reactions.message_sender='' AND message_reactions.message_recipient='') OR (m.sender=message_reactions.message_sender AND m.recipient=message_reactions.message_recipient))
 			  AND ((m.sender = ? AND m.recipient = message_reactions.scope)
 			    OR (m.sender = message_reactions.scope AND m.recipient = ?))
 		  )`, string(scope), self.String(), self.String())
@@ -784,53 +912,54 @@ func deleteOrphanReactionsTx(ctx context.Context, db execContext, self domain.Pe
 // TopicReactionsChanged for THAT conversation reloads. A count alone would leave
 // the reaction invisible until the user switched chats.
 func (s *Store) ReleaseArrivedReactions(ctx context.Context, now time.Time) ([]domain.ReactionScope, error) {
-	const arrived = `
-		pending = 1 AND EXISTS (
-			SELECT 1 FROM messages m
-			WHERE m.id = message_reactions.message_id AND m.topic = 'dm'
-			  AND ((m.sender = ? AND m.recipient = message_reactions.scope)
-			    OR (m.sender = message_reactions.scope AND m.recipient = ?))
-		)`
-
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return nil, fmt.Errorf("chatlog: begin release of arrived reactions: %w", err)
+		return nil, err
 	}
 	defer func() { _ = tx.Rollback() }()
-
-	// Read the scopes first and update in the SAME transaction, so the answer
-	// names exactly the rows the update touches.
-	rows, err := tx.QueryContext(ctx,
-		`SELECT DISTINCT scope FROM message_reactions WHERE `+arrived,
-		s.identityAddr, s.identityAddr)
+	// No wire direction exists for held facts. Only a sole message in the pair
+	// can resolve an unknown target; opposite-direction collisions stay held.
+	rows, err := tx.QueryContext(ctx, `SELECT DISTINCT scope,message_id FROM message_reactions
+ WHERE pending=1 AND 1=(SELECT COUNT(*) FROM messages m WHERE m.topic='dm'
+ AND m.id=message_reactions.message_id AND ((m.sender=? AND m.recipient=message_reactions.scope) OR (m.recipient=? AND m.sender=message_reactions.scope)))`, s.identityAddr, s.identityAddr)
 	if err != nil {
-		return nil, fmt.Errorf("chatlog: find arrived reactions: %w", err)
+		return nil, err
+	}
+	type target struct {
+		scope domain.ReactionScope
+		id    domain.MessageID
+	}
+	var targets []target
+	for rows.Next() {
+		var t target
+		if err := rows.Scan(&t.scope, &t.id); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		targets = append(targets, t)
+	}
+	err = rows.Err()
+	closeErr := rows.Close()
+	if err != nil {
+		return nil, err
+	}
+	if closeErr != nil {
+		return nil, closeErr
 	}
 	var scopes []domain.ReactionScope
-	for rows.Next() {
-		var scope string
-		if err := rows.Scan(&scope); err != nil {
-			_ = rows.Close()
-			return nil, fmt.Errorf("chatlog: scan arrived reaction scope: %w", err)
+	seen := map[domain.ReactionScope]bool{}
+	for _, t := range targets {
+		n, err := s.releaseHeldReactionsTx(ctx, tx, t.scope, t.id, now, nil)
+		if err != nil {
+			return nil, err
 		}
-		scopes = append(scopes, domain.ReactionScope(scope))
-	}
-	if err := rows.Err(); err != nil {
-		_ = rows.Close()
-		return nil, fmt.Errorf("chatlog: find arrived reactions: %w", err)
-	}
-	_ = rows.Close()
-	if len(scopes) == 0 {
-		return nil, nil
-	}
-
-	if _, err := tx.ExecContext(ctx,
-		`UPDATE message_reactions SET pending = 0, updated_at = ? WHERE `+arrived,
-		now.UTC().Format(sortableStamp), s.identityAddr, s.identityAddr); err != nil {
-		return nil, fmt.Errorf("chatlog: release arrived reactions: %w", err)
+		if n > 0 && !seen[t.scope] {
+			scopes = append(scopes, t.scope)
+			seen[t.scope] = true
+		}
 	}
 	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("chatlog: commit release of arrived reactions: %w", err)
+		return nil, err
 	}
 	return scopes, nil
 }

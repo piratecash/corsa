@@ -42,7 +42,7 @@ func TestDeleteIntentTimeIndexesUpgradeWithoutRewritingLegacyTasks(t *testing.T)
 	t.Parallel()
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "state.db")
-	catalog := migrations.Catalog()
+	catalog := migrations.Catalog()[:8] // qualify the published version8 transition independently
 	if len(catalog) != 8 || catalog[7].Version != 8 {
 		t.Fatal("test must qualify the exact version8 transition")
 	}
@@ -125,7 +125,7 @@ func TestDeleteIntentTimeIndexRejectsUnsupportedActiveRowsAtomically(t *testing.
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
 			path := filepath.Join(t.TempDir(), "state.db")
-			catalog := migrations.Catalog()
+			catalog := migrations.Catalog()[:8] // qualify the published version8 transition independently
 			if len(catalog) != 8 {
 				t.Fatal("expected exact eight-step catalog")
 			}

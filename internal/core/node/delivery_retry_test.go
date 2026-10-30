@@ -62,7 +62,7 @@ func TestOwnOutgoingDMRegistersForRetryAndDeliveredStops(t *testing.T) {
 	}
 
 	svc.deliveryMu.RLock()
-	entry, registered := svc.awaitingDelivered["retry-own-1"]
+	entry, registered := svc.awaitingDelivered[svc.ownMessageIdentity("retry-own-1", recipientID.Address)]
 	svc.deliveryMu.RUnlock()
 	if !registered {
 		t.Fatal("own outgoing DM must be registered in awaitingDelivered")
@@ -81,7 +81,7 @@ func TestOwnOutgoingDMRegistersForRetryAndDeliveredStops(t *testing.T) {
 	})
 
 	svc.deliveryMu.RLock()
-	_, stillThere := svc.awaitingDelivered["retry-own-1"]
+	_, stillThere := svc.awaitingDelivered[svc.ownMessageIdentity("retry-own-1", recipientID.Address)]
 	svc.deliveryMu.RUnlock()
 	if stillThere {
 		t.Fatal("delivered receipt must clear awaitingDelivered")
@@ -108,7 +108,7 @@ func TestRetryDueDeliveriesResendsViaLiveRoute(t *testing.T) {
 		Payload: []byte("sealed"), CreatedAt: now, StoredAt: now,
 	}
 	svc.deliveryMu.Lock()
-	svc.awaitingDelivered["retry-due-1"] = &deliveryRetryEntry{
+	svc.awaitingDelivered[svc.ownMessageIdentity("retry-due-1", recipientID.Address)] = &deliveryRetryEntry{
 		Envelope:      envelope,
 		NextAttemptAt: now.Add(-time.Second), // already due
 	}
@@ -122,7 +122,7 @@ func TestRetryDueDeliveriesResendsViaLiveRoute(t *testing.T) {
 	}
 
 	svc.deliveryMu.RLock()
-	entry := svc.awaitingDelivered["retry-due-1"]
+	entry := svc.awaitingDelivered[svc.ownMessageIdentity("retry-due-1", recipientID.Address)]
 	svc.deliveryMu.RUnlock()
 	if entry == nil {
 		t.Fatal("entry must stay registered until a receipt arrives")
@@ -164,7 +164,7 @@ func TestRetryDueDeliveriesDropsExpiredMessage(t *testing.T) {
 	// a later flush would re-emit a finished delivery.
 	relayFrame := protocol.Frame{Type: "relay_message", Topic: "dm", ID: "retry-cap-1", Address: svc.Address(), Recipient: "someone", Body: "x", CreatedAt: createdAt.Format(time.RFC3339)}
 	svc.deliveryMu.Lock()
-	svc.awaitingDelivered["retry-cap-1"] = &deliveryRetryEntry{
+	svc.awaitingDelivered[svc.ownMessageIdentity("retry-cap-1", "someone")] = &deliveryRetryEntry{
 		Envelope: protocol.Envelope{
 			ID: "retry-cap-1", Topic: "dm", Sender: svc.Address(), Recipient: "someone",
 			CreatedAt: createdAt, TTLSeconds: 60,
@@ -185,8 +185,8 @@ func TestRetryDueDeliveriesDropsExpiredMessage(t *testing.T) {
 	svc.WaitBackground()
 
 	svc.deliveryMu.RLock()
-	_, stillThere := svc.awaitingDelivered["retry-cap-1"]
-	outboundState := svc.outbound["retry-cap-1"]
+	_, stillThere := svc.awaitingDelivered[svc.ownMessageIdentity("retry-cap-1", "someone")]
+	outboundState := svc.outbound[svc.ownMessageIdentity("retry-cap-1", "someone")]
 	pendingLeft := len(svc.pending["peer-x:64646"])
 	relayPendingLeft := len(svc.pending["peer-y:64646"])
 	svc.deliveryMu.RUnlock()
@@ -203,9 +203,9 @@ func TestRetryDueDeliveriesDropsExpiredMessage(t *testing.T) {
 		t.Fatalf("pending ring must drop the queued relay_message of the abandoned id, %d left", relayPendingLeft)
 	}
 	journal.mu.Lock()
-	failed := append([]protocol.MessageID(nil), journal.failed...)
+	failed := append([]domain.MessageRef(nil), journal.failed...)
 	journal.mu.Unlock()
-	if len(failed) != 1 || failed[0] != "retry-cap-1" {
+	if len(failed) != 1 || failed[0] != deliveryMessageRef(svc.ownMessageIdentity("retry-cap-1", "someone")) {
 		t.Fatalf("abandonment must be journaled, got %v", failed)
 	}
 }
@@ -220,7 +220,7 @@ func TestNoAttemptCapEndsAMessage(t *testing.T) {
 
 	now := time.Now().UTC()
 	svc.deliveryMu.Lock()
-	svc.awaitingDelivered["uncapped-1"] = &deliveryRetryEntry{
+	svc.awaitingDelivered[svc.ownMessageIdentity("uncapped-1", "someone")] = &deliveryRetryEntry{
 		Envelope:      protocol.Envelope{ID: "uncapped-1", Topic: "dm", Sender: svc.Address(), Recipient: "someone", CreatedAt: now},
 		Attempts:      svc.deliveryRetryMaxAttempts() * 10,
 		NextAttemptAt: now.Add(-time.Second),
@@ -231,7 +231,7 @@ func TestNoAttemptCapEndsAMessage(t *testing.T) {
 	svc.WaitBackground()
 
 	svc.deliveryMu.RLock()
-	_, stillThere := svc.awaitingDelivered["uncapped-1"]
+	_, stillThere := svc.awaitingDelivered[svc.ownMessageIdentity("uncapped-1", "someone")]
 	svc.deliveryMu.RUnlock()
 	if !stillThere {
 		t.Fatal("the engine gave up on a message for no reason but the number of tries")
@@ -262,7 +262,7 @@ func TestSeenReceiptRegistersAwaitingAckAndSeenAckClears(t *testing.T) {
 	})
 
 	svc.deliveryMu.RLock()
-	_, registered := svc.awaitingSeenAck["seen-ack-1"]
+	_, registered := svc.awaitingSeenAck[messageIdentity{MessageID: "seen-ack-1", Sender: counterpartyID.Address, Recipient: svc.Address()}]
 	svc.deliveryMu.RUnlock()
 	if !registered {
 		t.Fatal("outgoing seen receipt must be registered in awaitingSeenAck")
@@ -287,7 +287,7 @@ func TestSeenReceiptRegistersAwaitingAckAndSeenAckClears(t *testing.T) {
 	})
 
 	svc.deliveryMu.RLock()
-	_, stillThere := svc.awaitingSeenAck["seen-ack-1"]
+	_, stillThere := svc.awaitingSeenAck[messageIdentity{MessageID: "seen-ack-1", Sender: counterpartyID.Address, Recipient: svc.Address()}]
 	svc.deliveryMu.RUnlock()
 	if stillThere {
 		t.Fatal("seen_ack must clear awaitingSeenAck")
@@ -308,7 +308,7 @@ func TestSeenReceiptTriggersSeenAckFromOriginalSender(t *testing.T) {
 	reader := attachPushObserver(t, svc, seenSenderID.Address, netcore.ConnID(7403))
 
 	// This node originated the message, so the seen receipt is solicited.
-	svc.sentDMIDs.Add("seen-ack-2")
+	svc.sentDMIDs.Add(deliveryMessageRef(svc.ownMessageIdentity("seen-ack-2", seenSenderID.Address)).Key())
 	seen := protocol.DeliveryReceipt{
 		MessageID:   "seen-ack-2",
 		Sender:      seenSenderID.Address,
@@ -351,8 +351,9 @@ func TestRegisterDeliveryOutboxReseedsUndelivered(t *testing.T) {
 
 	svc.deliveryMu.RLock()
 	defer svc.deliveryMu.RUnlock()
-	for _, id := range []protocol.MessageID{"reseed-1", "reseed-2"} {
-		entry, ok := svc.awaitingDelivered[id]
+	for _, envelope := range outbox.envelopes {
+		id := envelope.ID
+		entry, ok := svc.awaitingDelivered[messageIdentityOf(envelope)]
 		if !ok {
 			t.Fatalf("outbox envelope %s must be reseeded into awaitingDelivered", id)
 		}
@@ -395,7 +396,7 @@ func TestDMOptOutStillReseedsItsOwnOutgoing(t *testing.T) {
 	svc.RegisterDeliveryOutbox(optOutOutbox{outbox})
 
 	svc.deliveryMu.RLock()
-	_, reseeded := svc.awaitingDelivered[owed]
+	_, reseeded := svc.awaitingDelivered[svc.ownMessageIdentity(owed, "peer-a")]
 	svc.deliveryMu.RUnlock()
 	if !reseeded {
 		t.Error("an opt-out node lost its own undelivered message across the restart; nothing will ever send it again")
@@ -411,7 +412,7 @@ func TestDMOptOutStillReseedsItsOwnOutgoing(t *testing.T) {
 // which an opt-out node needs for its own outbound sends.
 type optOutOutbox struct{ *emissionOutbox }
 
-func (optOutOutbox) MarkDeliveryFailed(protocol.MessageID) error { return nil }
+func (optOutOutbox) MarkDeliveryFailedRef(domain.MessageRef) error { return nil }
 
 // TestSeenAckPushedToSubscriberAtMinimumProtocolVersion pins that seen_ack
 // reaches every subscriber the node serves: the oldest connection it accepts
@@ -427,7 +428,7 @@ func TestSeenAckPushedToSubscriberAtMinimumProtocolVersion(t *testing.T) {
 	}
 	reader := attachPushObserverWithVersion(t, svc, seenSenderID.Address, netcore.ConnID(7404), config.MinimumProtocolVersion)
 
-	svc.sentDMIDs.Add("seen-ack-3") // we sent this message; the seen receipt is solicited
+	svc.sentDMIDs.Add(deliveryMessageRef(svc.ownMessageIdentity("seen-ack-3", seenSenderID.Address)).Key()) // we sent this message; the seen receipt is solicited
 	svc.storeDeliveryReceipt(protocol.DeliveryReceipt{
 		MessageID:   "seen-ack-3",
 		Sender:      seenSenderID.Address,
@@ -498,19 +499,19 @@ func TestRelayHopForReceiptDirection(t *testing.T) {
 	t.Parallel()
 	svc := newTestService(t, config.NodeTypeFull)
 	svc.relayStates.store(&relayForwardState{
-		MessageID:        "dir-1",
+		Message:          domain.MessageRef{Topic: "dm", ID: "dir-1", Sender: "original-author", Recipient: "original-reader"},
 		ReceiptForwardTo: "hop-back",
 		ForwardedTo:      "hop-forward",
 		RemainingTTL:     100,
 	})
 
-	if got := svc.relayHopForReceipt(protocol.DeliveryReceipt{MessageID: "dir-1", Status: protocol.ReceiptStatusDelivered}); got != "hop-back" {
+	if got := svc.relayHopForReceipt(protocol.DeliveryReceipt{MessageID: "dir-1", Sender: "original-reader", Recipient: "original-author", Status: protocol.ReceiptStatusDelivered}); got != "hop-back" {
 		t.Fatalf("delivered hop = %q, want hop-back", got)
 	}
-	if got := svc.relayHopForReceipt(protocol.DeliveryReceipt{MessageID: "dir-1", Status: protocol.ReceiptStatusSeen}); got != "hop-back" {
+	if got := svc.relayHopForReceipt(protocol.DeliveryReceipt{MessageID: "dir-1", Sender: "original-reader", Recipient: "original-author", Status: protocol.ReceiptStatusSeen}); got != "hop-back" {
 		t.Fatalf("seen hop = %q, want hop-back", got)
 	}
-	if got := svc.relayHopForReceipt(protocol.DeliveryReceipt{MessageID: "dir-1", Status: protocol.ReceiptStatusSeenAck}); got != "hop-forward" {
+	if got := svc.relayHopForReceipt(protocol.DeliveryReceipt{MessageID: "dir-1", Sender: "original-author", Recipient: "original-reader", Status: protocol.ReceiptStatusSeenAck}); got != "hop-forward" {
 		t.Fatalf("seen_ack hop = %q, want hop-forward", got)
 	}
 }
@@ -558,7 +559,7 @@ func TestRetryDueDeliveriesDropsExpiredTTL(t *testing.T) {
 
 	now := time.Now().UTC()
 	svc.deliveryMu.Lock()
-	svc.awaitingDelivered["retry-ttl-1"] = &deliveryRetryEntry{
+	svc.awaitingDelivered[svc.ownMessageIdentity("retry-ttl-1", "someone")] = &deliveryRetryEntry{
 		Envelope: protocol.Envelope{
 			ID: "retry-ttl-1", Topic: "dm",
 			Sender: svc.Address(), Recipient: "someone",
@@ -573,8 +574,8 @@ func TestRetryDueDeliveriesDropsExpiredTTL(t *testing.T) {
 	svc.WaitBackground()
 
 	svc.deliveryMu.RLock()
-	_, stillThere := svc.awaitingDelivered["retry-ttl-1"]
-	outboundState := svc.outbound["retry-ttl-1"]
+	_, stillThere := svc.awaitingDelivered[svc.ownMessageIdentity("retry-ttl-1", "someone")]
+	outboundState := svc.outbound[svc.ownMessageIdentity("retry-ttl-1", "someone")]
 	svc.deliveryMu.RUnlock()
 	if stillThere {
 		t.Fatal("expired-TTL entry must be dropped from the retry set")
@@ -602,7 +603,7 @@ func TestSeenAckJournalReseedAndConfirm(t *testing.T) {
 	svc.RegisterDeliveryOutbox(journal)
 
 	svc.deliveryMu.RLock()
-	_, reseeded := svc.awaitingSeenAck["journal-1"]
+	_, reseeded := svc.awaitingSeenAck[messageIdentity{MessageID: "journal-1", Sender: "remote-sender", Recipient: svc.Address()}]
 	svc.deliveryMu.RUnlock()
 	if !reseeded {
 		t.Fatal("unconfirmed seen receipt must be reseeded into awaitingSeenAck")
@@ -618,15 +619,15 @@ func TestSeenAckJournalReseedAndConfirm(t *testing.T) {
 	svc.WaitBackground()
 
 	svc.deliveryMu.RLock()
-	_, stillThere := svc.awaitingSeenAck["journal-1"]
+	_, stillThere := svc.awaitingSeenAck[messageIdentity{MessageID: "journal-1", Sender: "remote-sender", Recipient: svc.Address()}]
 	svc.deliveryMu.RUnlock()
 	if stillThere {
 		t.Fatal("seen_ack must clear the reseeded awaitingSeenAck entry")
 	}
 	journal.mu.Lock()
-	confirmed := append([]protocol.MessageID(nil), journal.confirmed...)
+	confirmed := append([]domain.MessageRef(nil), journal.confirmed...)
 	journal.mu.Unlock()
-	if len(confirmed) != 1 || confirmed[0] != "journal-1" {
+	if len(confirmed) != 1 || confirmed[0] != (domain.MessageRef{Topic: "dm", ID: "journal-1", Sender: "remote-sender", Recipient: svc.Address()}) {
 		t.Fatalf("seen_ack must be journaled via MarkSeenConfirmed, got %v", confirmed)
 	}
 }
@@ -670,7 +671,7 @@ func TestSeenAckRejectedFromUnexpectedSender(t *testing.T) {
 	}
 	svc.WaitBackground()
 	svc.deliveryMu.RLock()
-	_, stillAwaiting := svc.awaitingSeenAck["bind-1"]
+	_, stillAwaiting := svc.awaitingSeenAck[messageIdentity{MessageID: "bind-1", Sender: originalSenderID.Address, Recipient: svc.Address()}]
 	svc.deliveryMu.RUnlock()
 	if !stillAwaiting {
 		t.Fatal("spoofed seen_ack must not stop the seen retry")
@@ -696,15 +697,15 @@ func TestSeenAckRejectedFromUnexpectedSender(t *testing.T) {
 	}
 	svc.WaitBackground()
 	svc.deliveryMu.RLock()
-	_, stillAwaiting = svc.awaitingSeenAck["bind-1"]
+	_, stillAwaiting = svc.awaitingSeenAck[messageIdentity{MessageID: "bind-1", Sender: originalSenderID.Address, Recipient: svc.Address()}]
 	svc.deliveryMu.RUnlock()
 	if stillAwaiting {
 		t.Fatal("genuine seen_ack must clear the seen retry")
 	}
 	journal.mu.Lock()
-	confirmedIDs := append([]protocol.MessageID(nil), journal.confirmed...)
+	confirmedIDs := append([]domain.MessageRef(nil), journal.confirmed...)
 	journal.mu.Unlock()
-	if len(confirmedIDs) != 1 || confirmedIDs[0] != "bind-1" {
+	if len(confirmedIDs) != 1 || confirmedIDs[0] != (domain.MessageRef{Topic: "dm", ID: "bind-1", Sender: originalSenderID.Address, Recipient: svc.Address()}) {
 		t.Fatalf("genuine seen_ack must be journaled exactly once, got %v", confirmedIDs)
 	}
 }
@@ -735,7 +736,7 @@ func TestLocalSendDeliveryReceiptRejectsSeenAck(t *testing.T) {
 // rows report themselves emitted, matching a store that carries no mark.
 type stubDeliveryOutbox struct{ envelopes []protocol.Envelope }
 
-func (s stubDeliveryOutbox) SentMessageIDs(int) ([]protocol.MessageID, error) { return nil, nil }
+func (s stubDeliveryOutbox) SentMessageRefs(int) ([]domain.MessageRef, error) { return nil, nil }
 
 func (s stubDeliveryOutbox) UndeliveredOutgoing() ([]OutboxEntry, error) {
 	rows := make([]OutboxEntry, 0, len(s.envelopes))
@@ -763,7 +764,7 @@ func TestFailDeliverySkipsWhenReceiptAlreadyArrived(t *testing.T) {
 	}
 	now := time.Now().UTC()
 	envelope := protocol.Envelope{ID: "race-1", Topic: "dm", Sender: svc.Address(), Recipient: recipientID.Address, CreatedAt: now}
-	svc.sentDMIDs.Add("race-1") // this node originated the message; its delivered receipt is solicited
+	svc.sentDMIDs.Add(envelopeRef(envelope).Key()) // this node originated the message; its delivered receipt is solicited
 
 	// The receipt lands in the unlocked window before failDelivery runs.
 	svc.storeDeliveryReceipt(protocol.DeliveryReceipt{
@@ -778,7 +779,7 @@ func TestFailDeliverySkipsWhenReceiptAlreadyArrived(t *testing.T) {
 	svc.WaitBackground()
 
 	svc.deliveryMu.RLock()
-	outboundState, outboundExists := svc.outbound["race-1"]
+	outboundState, outboundExists := svc.outbound[messageIdentityOf(envelope)]
 	svc.deliveryMu.RUnlock()
 	if outboundExists && (outboundState.Status == "failed" || outboundState.Status == "expired") {
 		t.Fatalf("failDelivery must not overwrite a confirmed delivery, got %#v", outboundState)
@@ -794,10 +795,10 @@ func TestFailDeliverySkipsWhenReceiptAlreadyArrived(t *testing.T) {
 // stubFailureJournal records MarkDeliveryFailed calls.
 type stubFailureJournal struct {
 	mu     sync.Mutex
-	failed []protocol.MessageID
+	failed []domain.MessageRef
 }
 
-func (s *stubFailureJournal) MarkDeliveryFailed(id protocol.MessageID) error {
+func (s *stubFailureJournal) MarkDeliveryFailedRef(id domain.MessageRef) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.failed = append(s.failed, id)
@@ -808,12 +809,12 @@ func (s *stubFailureJournal) MarkDeliveryFailed(id protocol.MessageID) error {
 type stubSeenAckJournal struct {
 	mu          sync.Mutex
 	unconfirmed []protocol.DeliveryReceipt
-	confirmed   []protocol.MessageID
+	confirmed   []domain.MessageRef
 }
 
 func (s *stubSeenAckJournal) UndeliveredOutgoing() ([]OutboxEntry, error) { return nil, nil }
 
-func (s *stubSeenAckJournal) SentMessageIDs(int) ([]protocol.MessageID, error) { return nil, nil }
+func (s *stubSeenAckJournal) SentMessageRefs(int) ([]domain.MessageRef, error) { return nil, nil }
 
 func (s *stubSeenAckJournal) UnconfirmedSeen() ([]protocol.DeliveryReceipt, error) {
 	s.mu.Lock()
@@ -821,7 +822,7 @@ func (s *stubSeenAckJournal) UnconfirmedSeen() ([]protocol.DeliveryReceipt, erro
 	return append([]protocol.DeliveryReceipt(nil), s.unconfirmed...), nil
 }
 
-func (s *stubSeenAckJournal) MarkSeenConfirmed(id protocol.MessageID) error {
+func (s *stubSeenAckJournal) MarkSeenConfirmedRef(id domain.MessageRef) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.confirmed = append(s.confirmed, id)

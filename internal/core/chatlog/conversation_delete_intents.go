@@ -400,14 +400,52 @@ func wipeConversationTx(
 	self, peer domain.PeerIdentity,
 	scope ConversationWipeScope,
 ) (ConversationWipeResult, error) {
-	result := ConversationWipeResult{Removed: make([]domain.MessageID, 0, len(scope.IDs))}
-	for _, id := range scope.IDs {
-		gone, err := deleteMessageTx(ctx, tx, id)
+	refs := scope.Refs
+	if len(refs) > 0 && len(scope.IDs) > 0 {
+		if len(refs) != len(scope.IDs) {
+			return ConversationWipeResult{}, fmt.Errorf("conversation scope ids differ from references")
+		}
+		for i, ref := range refs {
+			if ref.ID != string(scope.IDs[i]) {
+				return ConversationWipeResult{}, fmt.Errorf("conversation scope ids differ from references")
+			}
+		}
+	}
+	if len(refs) == 0 && len(scope.IDs) > 0 {
+		for _, id := range scope.IDs {
+			ref, found, err := uniqueMessageRefQuery(ctx, tx, `SELECT topic,id,sender,recipient FROM messages WHERE topic='dm' AND id=? AND ((sender=? AND recipient=?) OR (sender=? AND recipient=?)) LIMIT 2`, id, self.String(), peer.String(), peer.String(), self.String())
+			if err != nil {
+				return ConversationWipeResult{}, err
+			}
+			if found {
+				refs = append(refs, ref)
+			}
+		}
+	}
+	result := ConversationWipeResult{Removed: make([]domain.MessageID, 0, len(refs))}
+	for _, ref := range refs {
+		validParties := (ref.Sender == self.String() && ref.Recipient == peer.String()) || (ref.Sender == peer.String() && ref.Recipient == self.String())
+		if ref.Topic != "dm" || !validParties {
+			return ConversationWipeResult{}, fmt.Errorf("conversation scope contains a foreign message")
+		}
+		var flag string
+		err := tx.QueryRowContext(ctx, `SELECT flag FROM messages WHERE topic=? AND id=? AND sender=? AND recipient=?`, ref.Topic, ref.ID, ref.Sender, ref.Recipient).Scan(&flag)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return ConversationWipeResult{}, err
+		}
+		if flag == FlagImmutable {
+			continue
+		}
+		gone, err := deleteMessageRefTx(ctx, tx, ref, self)
 		if err != nil {
 			return ConversationWipeResult{}, err
 		}
 		if gone {
-			result.Removed = append(result.Removed, id)
+			result.Removed = append(result.Removed, domain.MessageID(ref.ID))
+			result.RemovedRefs = append(result.RemovedRefs, ref)
 		}
 	}
 

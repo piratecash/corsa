@@ -64,7 +64,7 @@ func newArmedTransitWithQueuedFrame(t *testing.T, id protocol.MessageID) transit
 	t.Helper()
 	f := newTransitDMFixture(t)
 	f.store(t, f.message(t, id))
-	if !f.svc.hasRelayRetryEntry(id) {
+	if !f.svc.hasRelayRetryEntry(f.reference(id)) {
 		t.Fatal("fixture: the transit DM must be armed, or the assertions below prove nothing")
 	}
 	queueTestPendingFrame(f.svc, transitFramePeer, transitRelayFrame(f, id))
@@ -79,14 +79,14 @@ func assertTransitDeliveryStateIntact(t *testing.T, f transitDMFixture, id proto
 	if !backlogHasMessage(f.svc, id) {
 		t.Fatal("fixture: the transit DM must still be backlogged")
 	}
-	if !f.svc.hasRelayRetryEntry(id) {
+	if !f.svc.hasRelayRetryEntry(f.reference(id)) {
 		t.Fatal("the msg| entry of a live transit DM was deleted by state about another message that shares its id")
 	}
 	if !pendingFrameQueued(f.svc, transitFramePeer, id, f.sender.Address, f.recipient.Address) {
 		t.Fatal("the queued relay frame of a live transit DM was dropped by state about another message that shares its id")
 	}
 	_ = f.svc.retryableRelayMessages(time.Now().UTC())
-	if !f.svc.hasRelayRetryEntry(id) {
+	if !f.svc.hasRelayRetryEntry(f.reference(id)) {
 		t.Fatal("the relay retry walk took a receipt for another message as confirmation of the transit DM and dropped its msg| entry")
 	}
 }
@@ -108,7 +108,7 @@ func TestReceiptForAnotherMessageLeavesTransitDeliveryStateAlone(t *testing.T) {
 			ownRecipient := mustGenerateIdentity(t)
 			ownPeer := domain.PeerAddress("10.20.0.2:64646")
 			f.svc.deliveryMu.Lock()
-			f.svc.sentDMIDs.Add(string(shared))
+			f.svc.sentDMIDs.Add(deliveryMessageRef(f.svc.ownMessageIdentity(shared, ownRecipient.Address)).Key())
 			f.svc.deliveryMu.Unlock()
 			queueTestPendingFrame(f.svc, ownPeer, protocol.Frame{
 				Type: "relay_message", ID: string(shared), Address: f.svc.Address(), Recipient: ownRecipient.Address, Topic: "dm",
@@ -174,7 +174,7 @@ func TestReceiptForTheTransitMessageEndsItsRelay(t *testing.T) {
 		t.Fatalf("fixture: the receipt must be committed, got %+v", outcome)
 	}
 
-	if f.svc.hasRelayRetryEntry(id) {
+	if f.svc.hasRelayRetryEntry(f.reference(id)) {
 		t.Error("the transit DM's own receipt left its msg| entry armed")
 	}
 	if pendingFrameQueued(f.svc, transitFramePeer, id, f.sender.Address, f.recipient.Address) {
@@ -204,7 +204,7 @@ func TestOwnDeliveryWithdrawalLeavesTransitPendingFrameAlone(t *testing.T) {
 		}},
 		{"CancelOutgoingDeliveriesTo", func(t *testing.T, svc *Service) {
 			svc.deliveryMu.Lock()
-			svc.outbound[string(shared)] = outboundDelivery{MessageID: string(shared), Recipient: ownRecipient.Address, Status: "failed"}
+			svc.outbound[svc.ownMessageIdentity(shared, ownRecipient.Address)] = outboundDelivery{MessageID: string(shared), Recipient: ownRecipient.Address, Status: "failed"}
 			svc.deliveryMu.Unlock()
 			if _, err := svc.CancelOutgoingDeliveriesTo(domain.PeerIdentityFromWire(ownRecipient.Address), nil); err != nil {
 				t.Fatalf("CancelOutgoingDeliveriesTo: %v", err)
@@ -282,7 +282,7 @@ func storeTestReceipt(t *testing.T, svc *Service, receipt protocol.DeliveryRecei
 	}
 }
 
-// s.outbound tracks this node's own messages by their bare id. A receipt
+// s.outbound tracks this node's own messages by their exact tuple. A receipt
 // clears an entry only when it confirms that own message — the author is this
 // node and the confirming party is the entry's recipient. Anything else under
 // the same id, a transit receipt in particular, leaves the entry: its status
@@ -303,7 +303,7 @@ func TestReceiptClearsOutboundOnlyForTheOwnMessageItConfirms(t *testing.T) {
 				Status: protocol.ReceiptStatusDelivered, DeliveredAt: time.Now().UTC(),
 			}
 		}, false},
-		{"receipt to this node from someone other than the entry's recipient", func(t *testing.T, f transitDMFixture, _ *identity.Identity) protocol.DeliveryReceipt {
+		{"receipt for another own message to a different recipient", func(t *testing.T, f transitDMFixture, _ *identity.Identity) protocol.DeliveryReceipt {
 			return protocol.DeliveryReceipt{
 				MessageID: shared, Sender: mustGenerateIdentity(t).Address, Recipient: f.svc.Address(),
 				Status: protocol.ReceiptStatusDelivered, DeliveredAt: time.Now().UTC(),
@@ -334,15 +334,40 @@ func TestReceiptClearsOutboundOnlyForTheOwnMessageItConfirms(t *testing.T) {
 			// The own message gave up earlier: failDelivery left a terminal
 			// status entry, and the id is still one this node sent.
 			f.svc.deliveryMu.Lock()
-			f.svc.sentDMIDs.Add(string(shared))
-			f.svc.outbound[string(shared)] = outboundDelivery{MessageID: string(shared), Recipient: ownRecipient.Address, Status: "expired"}
+			f.svc.sentDMIDs.Add(deliveryMessageRef(f.svc.ownMessageIdentity(shared, ownRecipient.Address)).Key())
+			f.svc.outbound[f.svc.ownMessageIdentity(shared, ownRecipient.Address)] = outboundDelivery{MessageID: string(shared), Recipient: ownRecipient.Address, Status: "expired"}
 			f.svc.deliveryMu.Unlock()
 
-			storeTestReceipt(t, f.svc, tc.receipt(t, f, ownRecipient))
+			receipt := tc.receipt(t, f, ownRecipient)
+			secondOwn := receipt.Recipient == f.svc.Address() && receipt.Sender != ownRecipient.Address
+			if secondOwn {
+				// Knowing the wire ID of one own message must not admit a
+				// receipt from another recipient. The refusal must not poison
+				// the key: after a factual second send it becomes meaningful.
+				outcome := f.svc.storeDeliveryReceipt(receipt)
+				f.svc.WaitBackground()
+				if outcome.stored || !outcome.ackable {
+					t.Fatalf("unseeded exact own reference was admitted: %+v", outcome)
+				}
+				f.svc.deliveryMu.Lock()
+				_, originalKept := f.svc.outbound[f.svc.ownMessageIdentity(shared, ownRecipient.Address)]
+				second := f.svc.ownMessageIdentity(shared, receipt.Sender)
+				f.svc.sentDMIDs.Add(deliveryMessageRef(second).Key())
+				f.svc.outbound[second] = outboundDelivery{MessageID: string(shared), Recipient: receipt.Sender, Status: "expired"}
+				f.svc.deliveryMu.Unlock()
+				if !originalKept {
+					t.Fatal("unsolicited receipt retired the original recipient's state")
+				}
+			}
+			storeTestReceipt(t, f.svc, receipt)
 
 			f.svc.deliveryMu.RLock()
-			_, kept := f.svc.outbound[string(shared)]
+			_, kept := f.svc.outbound[f.svc.ownMessageIdentity(shared, ownRecipient.Address)]
+			_, secondKept := f.svc.outbound[f.svc.ownMessageIdentity(shared, receipt.Sender)]
 			f.svc.deliveryMu.RUnlock()
+			if secondOwn && secondKept {
+				t.Fatal("the committed receipt did not retire its own second exact row")
+			}
 			if kept == tc.cleared {
 				t.Fatalf("outbound entry kept = %v, want %v", kept, !tc.cleared)
 			}
@@ -440,7 +465,7 @@ func TestSeenReceiptEndsTheRelayOnlyWithTheRolesSwapped(t *testing.T) {
 // otherwise both are still there.
 func assertRelayEnded(t *testing.T, f transitDMFixture, id protocol.MessageID, ended bool) {
 	t.Helper()
-	if armed := f.svc.hasRelayRetryEntry(id); armed == ended {
+	if armed := f.svc.hasRelayRetryEntry(f.reference(id)); armed == ended {
 		t.Errorf("msg| entry armed = %v, want %v", armed, !ended)
 	}
 	if queued := pendingFrameQueued(f.svc, transitFramePeer, id, f.sender.Address, f.recipient.Address); queued == ended {
@@ -523,7 +548,7 @@ func TestFailDeliveryLateReceiptRecheckNeedsAConfirmingReceipt(t *testing.T) {
 			svc.failDelivery(protocol.Envelope{ID: id, Topic: "dm", Sender: svc.Address(), Recipient: recipient.Address}, "expired", "ttl")
 
 			svc.deliveryMu.RLock()
-			status := svc.outbound[string(id)].Status
+			status := svc.outbound[svc.ownMessageIdentity(id, recipient.Address)].Status
 			svc.deliveryMu.RUnlock()
 			if terminal := status == "expired"; terminal != tc.wantTerminal {
 				t.Fatalf("own message went terminal = %v (status %q), want %v", terminal, status, tc.wantTerminal)
@@ -547,14 +572,14 @@ func TestReceiptReapsAnOrphanRelayRetryEntry(t *testing.T) {
 	ownRecipient := mustGenerateIdentity(t)
 	const id = protocol.MessageID("orphan-relay-retry-id-1")
 	svc.deliveryMu.Lock()
-	svc.sentDMIDs.Add(string(id))
-	svc.relayRetry[relayMessageKey(id)] = relayAttempt{FirstSeen: time.Now().UTC()}
+	svc.sentDMIDs.Add(deliveryMessageRef(svc.ownMessageIdentity(id, ownRecipient.Address)).Key())
+	svc.relayRetry[relayMessageIdentityKey(svc.ownMessageIdentity(id, ownRecipient.Address))] = relayAttempt{FirstSeen: time.Now().UTC()}
 	svc.deliveryMu.Unlock()
-	svc.recordRelayDeliveredTo(id, domain.PeerIdentityFromWire(mustGenerateIdentity(t).Address))
+	svc.recordRelayDeliveredTo(svc.ownMessageIdentity(id, ownRecipient.Address), domain.PeerIdentityFromWire(mustGenerateIdentity(t).Address))
 	if backlogHasMessage(svc, id) {
 		t.Fatal("fixture: no envelope may be backlogged under the id, or this is no orphan")
 	}
-	if !relayDeliveredTracked(svc, id) {
+	if !relayDeliveredTracked(svc, svc.ownMessageIdentity(id, ownRecipient.Address)) {
 		t.Fatal("fixture: the orphan must carry a suppression set, or the assertion below proves nothing")
 	}
 
@@ -563,10 +588,10 @@ func TestReceiptReapsAnOrphanRelayRetryEntry(t *testing.T) {
 		Status: protocol.ReceiptStatusDelivered, DeliveredAt: time.Now().UTC(),
 	})
 
-	if svc.hasRelayRetryEntry(id) {
+	if svc.hasRelayRetryEntry(svc.ownMessageIdentity(id, ownRecipient.Address)) {
 		t.Fatal("a msg| entry with no backlogged envelope survived a receipt confirming a message under its id")
 	}
-	if relayDeliveredTracked(svc, id) {
+	if relayDeliveredTracked(svc, svc.ownMessageIdentity(id, ownRecipient.Address)) {
 		t.Fatal("the orphan's ack_delete suppression set survived the reap of its msg| entry")
 	}
 }

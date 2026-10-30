@@ -7,6 +7,7 @@ import (
 
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/domain/domaintest"
+	"github.com/piratecash/corsa/internal/core/identity"
 )
 
 // mustID decodes a canonical 40-char hex fingerprint into a PeerIdentity,
@@ -30,8 +31,9 @@ func TestUnauthorizedChunkRequestDropped(t *testing.T) {
 	var commandCount int
 
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		sendCommand: func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error {
 			mu.Lock()
 			commandCount++
@@ -46,7 +48,8 @@ func TestUnauthorizedChunkRequestDropped(t *testing.T) {
 	fileID := domain.FileID("bf9e6c24-63ee-48b3-84fd-12cedb7f999a")
 
 	// Register a sender mapping: file announced to legitimateReceiver.
-	m.senderMaps[fileID] = &senderFileMapping{
+	m.senderMaps[ftOutgoingRef(m, fileID, legitimateReceiver)] = &senderFileMapping{
+		Ref:       ftOutgoingRef(m, fileID, legitimateReceiver),
 		FileID:    fileID,
 		FileHash:  "abc123",
 		FileName:  "secret.pdf",
@@ -73,7 +76,7 @@ func TestUnauthorizedChunkRequestDropped(t *testing.T) {
 	}
 
 	// Mapping state should remain unchanged (no transition to serving).
-	mapping := m.senderMaps[fileID]
+	mapping := m.senderMaps[ftOutgoingRef(m, fileID, legitimateReceiver)]
 	if mapping.State != senderAnnounced {
 		t.Errorf("state should remain announced, got %s", mapping.State)
 	}
@@ -88,8 +91,9 @@ func TestUnknownFileIDChunkRequestDropped(t *testing.T) {
 	commandsSent := 0
 
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		sendCommand: func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error {
 			commandsSent++
 			return nil
@@ -132,8 +136,9 @@ func TestLegitimateReceiverGetsChunk(t *testing.T) {
 	var sentPayloads []domain.FileCommandPayload
 
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		store:        store,
 		sendCommand: func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error {
 			sentPayloads = append(sentPayloads, payload)
@@ -145,7 +150,8 @@ func TestLegitimateReceiverGetsChunk(t *testing.T) {
 	legitimateReceiver := mustID(t, "11ed04572e7d37cbfb36f297e3027c72ae14b385")
 	fileID := domain.FileID("test-file-id")
 
-	m.senderMaps[fileID] = &senderFileMapping{
+	m.senderMaps[ftOutgoingRef(m, fileID, legitimateReceiver)] = &senderFileMapping{
+		Ref:       ftOutgoingRef(m, fileID, legitimateReceiver),
 		FileID:    fileID,
 		FileHash:  fileHash,
 		FileName:  "test.txt",
@@ -170,8 +176,8 @@ func TestLegitimateReceiverGetsChunk(t *testing.T) {
 	}
 
 	// State should transition to serving.
-	if m.senderMaps[fileID].State != senderServing {
-		t.Errorf("state should be serving, got %s", m.senderMaps[fileID].State)
+	if m.senderMaps[ftOutgoingRef(m, fileID, legitimateReceiver)].State != senderServing {
+		t.Errorf("state should be serving, got %s", m.senderMaps[ftOutgoingRef(m, fileID, legitimateReceiver)].State)
 	}
 }
 
@@ -183,8 +189,9 @@ func TestRegisterFileReceive_RejectsMalformedHash(t *testing.T) {
 	t.Parallel()
 
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		stopCh:       make(chan struct{}),
 	}
 
@@ -208,7 +215,7 @@ func TestRegisterFileReceive_RejectsMalformedHash(t *testing.T) {
 		if err == nil {
 			t.Errorf("hash %q (%s): expected error, got nil", tc.hash, tc.name)
 		}
-		if _, exists := m.receiverMaps[fid]; exists {
+		if _, exists := m.receiverMaps[ftIncomingRef(m, fid, sender)]; exists {
 			t.Errorf("hash %q (%s): mapping should not be persisted", tc.hash, tc.name)
 		}
 	}
@@ -220,8 +227,9 @@ func TestRegisterFileReceive_AcceptsValidHash(t *testing.T) {
 	t.Parallel()
 
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		stopCh:       make(chan struct{}),
 	}
 
@@ -234,7 +242,7 @@ func TestRegisterFileReceive_AcceptsValidHash(t *testing.T) {
 		t.Fatalf("RegisterFileReceive with valid hash: %v", err)
 	}
 
-	rm, exists := m.receiverMaps[fileID]
+	rm, exists := m.receiverMaps[ftIncomingRef(m, fileID, sender)]
 	if !exists {
 		t.Fatal("mapping should be created for valid hash")
 	}
@@ -253,8 +261,9 @@ func TestRegisterFileReceive_RejectsZeroSize(t *testing.T) {
 	t.Parallel()
 
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		stopCh:       make(chan struct{}),
 	}
 
@@ -266,7 +275,7 @@ func TestRegisterFileReceive_RejectsZeroSize(t *testing.T) {
 	if err == nil {
 		t.Fatal("RegisterFileReceive should reject zero file size")
 	}
-	if _, exists := m.receiverMaps[fileID]; exists {
+	if _, exists := m.receiverMaps[ftIncomingRef(m, fileID, sender)]; exists {
 		t.Error("mapping should not be persisted for zero-size file")
 	}
 }
@@ -278,8 +287,9 @@ func TestRegisterFileReceive_RejectsEmptyFileName(t *testing.T) {
 	t.Parallel()
 
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		stopCh:       make(chan struct{}),
 	}
 
@@ -302,7 +312,7 @@ func TestRegisterFileReceive_RejectsEmptyFileName(t *testing.T) {
 		if err == nil {
 			t.Errorf("name %q (%s): expected error, got nil", tc.input, tc.name)
 		}
-		if _, exists := m.receiverMaps[fid]; exists {
+		if _, exists := m.receiverMaps[ftIncomingRef(m, fid, sender)]; exists {
 			t.Errorf("name %q (%s): mapping should not be persisted", tc.input, tc.name)
 		}
 	}
@@ -315,8 +325,9 @@ func TestRegisterFileReceive_AcceptsSanitizableFileName(t *testing.T) {
 	t.Parallel()
 
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		stopCh:       make(chan struct{}),
 	}
 
@@ -329,7 +340,7 @@ func TestRegisterFileReceive_AcceptsSanitizableFileName(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RegisterFileReceive should accept sanitizable name: %v", err)
 	}
-	if m.receiverMaps[fileID].FileName == "../../../evil.txt" {
+	if m.receiverMaps[ftIncomingRef(m, fileID, sender)].FileName == "../../../evil.txt" {
 		t.Error("file name should have been sanitized")
 	}
 }
@@ -340,8 +351,9 @@ func TestRegisterFileReceive_DuplicateReturnsNil(t *testing.T) {
 	t.Parallel()
 
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		stopCh:       make(chan struct{}),
 	}
 
@@ -360,4 +372,26 @@ func TestRegisterFileReceive_DuplicateReturnsNil(t *testing.T) {
 
 func writeTestFile(path string, data []byte) error {
 	return writeChunkToFile(path, 0, data, uint64(len(data)))
+}
+
+// ftFixtureIdentity names the local owner of Manager-only state fixtures. It
+// supplies no signing/session proof; real two-endpoint fixtures use their actual
+// endpoint identities instead.
+func ftFixtureIdentity() *identity.Identity {
+	return &identity.Identity{Address: domaintest.ID("file-transfer-fixture-local-owner").String()}
+}
+
+// These fixture keys require the exact peer, rather than selecting a mapping
+// by an unsigned ID. They stay independent of Manager's production key helpers.
+func ftOutgoingRef(m *Manager, id domain.FileID, peer domain.PeerIdentity) domain.MessageRef {
+	return domain.MessageRef{Topic: "dm", ID: string(id), Sender: m.localID.Address, Recipient: peer.String()}
+}
+func ftIncomingRef(m *Manager, id domain.FileID, peer domain.PeerIdentity) domain.MessageRef {
+	return domain.MessageRef{Topic: "dm", ID: string(id), Sender: peer.String(), Recipient: m.localID.Address}
+}
+
+// ftFixtureIdentityFor binds an existing in-process wire endpoint; it does not
+// invent signing authority for a Manager-only fixture.
+func ftFixtureIdentityFor(peer domain.PeerIdentity) *identity.Identity {
+	return &identity.Identity{Address: peer.String()}
 }

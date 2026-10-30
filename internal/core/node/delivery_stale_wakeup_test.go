@@ -104,7 +104,7 @@ func stalledOnWireEntry(t *testing.T, svc *Service, envelope protocol.Envelope, 
 	}
 
 	svc.deliveryMu.Lock()
-	entry, ok := svc.awaitingDelivered[envelope.ID]
+	entry, ok := svc.awaitingDelivered[messageIdentityOf(envelope)]
 	if !ok {
 		svc.deliveryMu.Unlock()
 		t.Fatal("the entry must still be awaiting its receipt")
@@ -123,13 +123,13 @@ func stalledOnWireEntry(t *testing.T, svc *Service, envelope protocol.Envelope, 
 // scheduleOf reads an entry's next attempt time. The schedule is what a
 // wake-up actually writes, so asserting on it is what tells a test that did
 // nothing from a test that proved something.
-func scheduleOf(t *testing.T, svc *Service, id protocol.MessageID) time.Time {
+func scheduleOf(t *testing.T, svc *Service, ref messageIdentity) time.Time {
 	t.Helper()
 	svc.deliveryMu.RLock()
 	defer svc.deliveryMu.RUnlock()
-	entry, ok := svc.awaitingDelivered[id]
+	entry, ok := svc.awaitingDelivered[ref]
 	if !ok {
-		t.Fatalf("%s is no longer awaiting delivery", id)
+		t.Fatalf("%+v is no longer awaiting delivery", ref)
 	}
 	return entry.NextAttemptAt
 }
@@ -251,13 +251,13 @@ func TestPathThatNeverWentAwayLeavesTheBackoffAlone(t *testing.T) {
 	stalledOnWireEntry(t, svc, envelope, 5*time.Minute)
 
 	stream := newPushMessageStream(t, attachPushObserver(t, svc, recipientID.Address, netcore.ConnID(7502)))
-	parked := scheduleOf(t, svc, envelope.ID)
+	parked := scheduleOf(t, svc, messageIdentityOf(envelope))
 
 	now := time.Now().UTC()
 	svc.retryDueDeliveries(now)
 	svc.retryDueDeliveries(now.Add(time.Second))
 
-	if got := scheduleOf(t, svc, envelope.ID); !got.Equal(parked) {
+	if got := scheduleOf(t, svc, messageIdentityOf(envelope)); !got.Equal(parked) {
 		t.Errorf("an unbroken path pulled the entry forward: %v → %v", parked, got)
 	}
 	stream.expectQuiet(t, 200*time.Millisecond)
@@ -292,7 +292,7 @@ func TestRecentlyEmittedMessageIsDeferredNotDropped(t *testing.T) {
 	stalledOnWireEntry(t, svc, envelope, time.Second)
 
 	stream := newPushMessageStream(t, attachPushObserver(t, svc, recipientID.Address, netcore.ConnID(7503)))
-	parked := scheduleOf(t, svc, envelope.ID)
+	parked := scheduleOf(t, svc, messageIdentityOf(envelope))
 
 	now := time.Now().UTC()
 	sub := detachPushObserver(t, svc, recipientID.Address)
@@ -301,9 +301,9 @@ func TestRecentlyEmittedMessageIsDeferredNotDropped(t *testing.T) {
 	svc.retryDueDeliveries(now.Add(time.Second))
 
 	svc.deliveryMu.RLock()
-	emitted := svc.awaitingDelivered[envelope.ID].LastEmittedAt
+	emitted := svc.awaitingDelivered[messageIdentityOf(envelope)].LastEmittedAt
 	svc.deliveryMu.RUnlock()
-	got := scheduleOf(t, svc, envelope.ID)
+	got := scheduleOf(t, svc, messageIdentityOf(envelope))
 	if want := emitted.Add(deliveryQueueWindow); !got.Equal(want) {
 		t.Errorf("a recent message must be deferred to the end of the queue window: got %v, want %v (was %v)", got, want, parked)
 	}
@@ -358,7 +358,7 @@ func TestMessageNoSinkEverTookIsWokenByAReturn(t *testing.T) {
 	}
 	svc.deliveryMu.Lock()
 	svc.registerAwaitingDeliveredLocked(envelope, now.Add(-2*time.Minute), false)
-	entry := svc.awaitingDelivered[envelope.ID]
+	entry := svc.awaitingDelivered[messageIdentityOf(envelope)]
 	// What armDueDeliveries writes for a dispatch no sink confirmed.
 	entry.Hold = holdUnconfirmed
 	entry.NextAttemptAt = now.Add(deliveryHoldPollInterval)
@@ -410,10 +410,10 @@ func TestTheSameReturnDoesNotFireTwice(t *testing.T) {
 	svc.WaitBackground()
 
 	// The recipient has not gone away since: a further tick must not re-arm it.
-	parked := scheduleOf(t, svc, envelope.ID)
+	parked := scheduleOf(t, svc, messageIdentityOf(envelope))
 	svc.retryDueDeliveries(time.Now().UTC().Add(2 * time.Second))
 	svc.WaitBackground()
-	if got := scheduleOf(t, svc, envelope.ID); !got.Equal(parked) {
+	if got := scheduleOf(t, svc, messageIdentityOf(envelope)); !got.Equal(parked) {
 		t.Errorf("the same return woke the entry twice: %v → %v", parked, got)
 	}
 }
@@ -457,13 +457,13 @@ func TestMultiHopNextHopFlapWakesTheMessage(t *testing.T) {
 		Payload: []byte("sealed"), CreatedAt: createdAt, StoredAt: createdAt,
 	}
 	stalledOnWireEntry(t, svc, envelope, 5*time.Minute)
-	parked := scheduleOf(t, svc, envelope.ID)
+	parked := scheduleOf(t, svc, messageIdentityOf(envelope))
 
 	// The next hop drops; the route through it stays in the table.
 	_ = setRoutingPeerConnected(t, svc, "uplink:64646", uplinkID, false, sendCh)
 	now := time.Now().UTC()
 	svc.retryDueDeliveries(now)
-	if got := scheduleOf(t, svc, envelope.ID); !got.Equal(parked) {
+	if got := scheduleOf(t, svc, messageIdentityOf(envelope)); !got.Equal(parked) {
 		t.Fatalf("losing the next hop must not by itself re-arm anything: %v → %v", parked, got)
 	}
 
@@ -471,7 +471,7 @@ func TestMultiHopNextHopFlapWakesTheMessage(t *testing.T) {
 	_ = setRoutingPeerConnected(t, svc, "uplink:64646", uplinkID, true, sendCh)
 	svc.retryDueDeliveries(now.Add(time.Second))
 
-	if got := scheduleOf(t, svc, envelope.ID); got.After(parked) {
+	if got := scheduleOf(t, svc, messageIdentityOf(envelope)); got.After(parked) {
 		t.Fatalf("the next hop returned and the message was not woken: still %v", got)
 	}
 	select {
@@ -522,7 +522,7 @@ func TestOneConversationReturningLeavesTheOthersAlone(t *testing.T) {
 
 	returningStream := newPushMessageStream(t, attachPushObserver(t, svc, returning.Address, netcore.ConnID(7507)))
 	otherStream := newPushMessageStream(t, attachPushObserver(t, svc, other.Address, netcore.ConnID(7508)))
-	otherParked := scheduleOf(t, svc, "scoped-other")
+	otherParked := scheduleOf(t, svc, svc.ownMessageIdentity("scoped-other", other.Address))
 
 	// Only one of them goes away and comes back. The other was reachable
 	// throughout and must not be touched.
@@ -534,7 +534,7 @@ func TestOneConversationReturningLeavesTheOthersAlone(t *testing.T) {
 
 	returningStream.expect(t, "scoped-returning")
 	otherStream.expectQuiet(t, 200*time.Millisecond)
-	if got := scheduleOf(t, svc, "scoped-other"); !got.Equal(otherParked) {
+	if got := scheduleOf(t, svc, svc.ownMessageIdentity("scoped-other", other.Address)); !got.Equal(otherParked) {
 		t.Errorf("an unrelated conversation was re-armed: %v → %v", otherParked, got)
 	}
 }
@@ -568,18 +568,18 @@ func TestUnreachableRecipientKeepsThePollInterval(t *testing.T) {
 	// Due now, so the tick actually tries it and finds nothing.
 	now := time.Now().UTC()
 	svc.deliveryMu.Lock()
-	svc.awaitingDelivered[envelope.ID].NextAttemptAt = now
+	svc.awaitingDelivered[messageIdentityOf(envelope)].NextAttemptAt = now
 	svc.deliveryMu.Unlock()
 	svc.retryDueDeliveries(now)
 
-	parked := scheduleOf(t, svc, envelope.ID)
+	parked := scheduleOf(t, svc, messageIdentityOf(envelope))
 	if parked.Before(now.Add(deliveryHoldPollInterval - time.Second)) {
 		t.Fatalf("an unreachable recipient must be parked on the hold poll, got %v", parked)
 	}
 
 	// Still nobody. The next tick must leave the poll alone.
 	svc.retryDueDeliveries(now.Add(2 * time.Second))
-	if got := scheduleOf(t, svc, envelope.ID); !got.Equal(parked) {
+	if got := scheduleOf(t, svc, messageIdentityOf(envelope)); !got.Equal(parked) {
 		t.Fatalf("the hold was re-armed without a return: %v → %v", parked, got)
 	}
 }
@@ -608,10 +608,10 @@ func TestFreshMessageIsNotWokenBeforeItsFirstBackoff(t *testing.T) {
 	svc.deliveryMu.Lock()
 	svc.registerAwaitingDeliveredLocked(envelope, now, false)
 	svc.deliveryMu.Unlock()
-	parked := scheduleOf(t, svc, envelope.ID)
+	parked := scheduleOf(t, svc, messageIdentityOf(envelope))
 
 	svc.retryDueDeliveries(now)
-	if got := scheduleOf(t, svc, envelope.ID); !got.Equal(parked) {
+	if got := scheduleOf(t, svc, messageIdentityOf(envelope)); !got.Equal(parked) {
 		t.Errorf("a message written a moment ago was re-armed: %v → %v", parked, got)
 	}
 	stream.expectQuiet(t, 200*time.Millisecond)
@@ -639,14 +639,14 @@ func TestGateOffLeavesTheScheduleUntouched(t *testing.T) {
 		Payload: []byte("sealed"), CreatedAt: createdAt, StoredAt: createdAt,
 	}
 	stalledOnWireEntry(t, svc, envelope, 5*time.Minute)
-	parked := scheduleOf(t, svc, envelope.ID)
+	parked := scheduleOf(t, svc, messageIdentityOf(envelope))
 
 	// No subscriber and no route: with the gate ON this would be a loss.
 	now := time.Now().UTC()
 	svc.retryDueDeliveries(now)
 	svc.retryDueDeliveries(now.Add(time.Second))
 
-	if got := scheduleOf(t, svc, envelope.ID); !got.Equal(parked) {
+	if got := scheduleOf(t, svc, messageIdentityOf(envelope)); !got.Equal(parked) {
 		t.Errorf("the wake-up ran with the reachability gate off: %v → %v", parked, got)
 	}
 	svc.deliveryMu.RLock()
@@ -685,7 +685,7 @@ func TestDeliveryRegisteredMidTickIsNotReArmedByIt(t *testing.T) {
 	}
 	svc.deliveryMu.Lock()
 	svc.registerAwaitingDeliveredLocked(envelope, now, false)
-	entry := svc.awaitingDelivered[envelope.ID]
+	entry := svc.awaitingDelivered[messageIdentityOf(envelope)]
 	parked := entry.NextAttemptAt
 	svc.applyReachabilityReturnLocked(entry, reachable, now)
 	rearmed := !entry.NextAttemptAt.Equal(parked)
@@ -729,8 +729,8 @@ func TestSessionArrivingBoundsTheWaitToTheFirstStep(t *testing.T) {
 	svc.retryDueDeliveries(time.Now().UTC())
 	svc.WaitBackground()
 	svc.deliveryMu.Lock()
-	svc.awaitingDelivered[envelope.ID].NextAttemptAt = time.Now().UTC().Add(11 * time.Minute)
-	svc.awaitingDelivered[envelope.ID].LastEmittedAt = time.Now().UTC().Add(-5 * time.Minute)
+	svc.awaitingDelivered[messageIdentityOf(envelope)].NextAttemptAt = time.Now().UTC().Add(11 * time.Minute)
+	svc.awaitingDelivered[messageIdentityOf(envelope)].LastEmittedAt = time.Now().UTC().Add(-5 * time.Minute)
 	svc.deliveryMu.Unlock()
 	if reachable, measured := lastReadingFor(svc, recipientID.Address); !measured || !reachable {
 		t.Fatal("the tick must have recorded them as reachable, or this is not the case under test")
@@ -739,7 +739,7 @@ func TestSessionArrivingBoundsTheWaitToTheFirstStep(t *testing.T) {
 	now := time.Now().UTC()
 	svc.wakeOverdueForReturningPeer(domain.PeerIdentityFromWire(recipientID.Address), now)
 
-	got := scheduleOf(t, svc, envelope.ID)
+	got := scheduleOf(t, svc, messageIdentityOf(envelope))
 	if want := now.Add(deliveryRetryBackoff(0)); !got.Equal(want) {
 		t.Fatalf("the wait after a session arrives must be the first schedule step: got %v, want %v", got, want)
 	}
@@ -776,7 +776,7 @@ func TestRepeatedSessionsCannotBeatTheFirstStep(t *testing.T) {
 	peer := domain.PeerIdentityFromWire(recipientID.Address)
 	start := time.Now().UTC()
 	svc.wakeOverdueForReturningPeer(peer, start)
-	first := scheduleOf(t, svc, envelope.ID)
+	first := scheduleOf(t, svc, messageIdentityOf(envelope))
 	if floor := start.Add(deliveryRetryBackoff(0)); first.Before(floor) {
 		t.Fatalf("the floor is the first schedule step: got %v, want no earlier than %v", first, floor)
 	}
@@ -789,14 +789,14 @@ func TestRepeatedSessionsCannotBeatTheFirstStep(t *testing.T) {
 	// overdue, clamp, emit...
 	emitted := start.Add(deliveryRetryBackoff(0))
 	svc.deliveryMu.Lock()
-	svc.awaitingDelivered[envelope.ID].NextAttemptAt = emitted
+	svc.awaitingDelivered[messageIdentityOf(envelope)].NextAttemptAt = emitted
 	svc.deliveryMu.Unlock()
 	_, candidates := svc.planDueDeliveries(emitted, svc.measureRecipientReachability())
 	svc.armDueDeliveries(candidates, recipientReachability{gateOff: true}, emitted)
 	if !svc.confirmEnvelopeInMemory(envelope, emitted) {
 		t.Fatal("the accelerated attempt was not confirmed")
 	}
-	rebuilt := scheduleOf(t, svc, envelope.ID)
+	rebuilt := scheduleOf(t, svc, messageIdentityOf(envelope))
 	// Later than the hold park the arm leaves behind (60 s), or the test
 	// would pass on an entry that was never rebuilt at all.
 	if !rebuilt.After(emitted.Add(deliveryHoldPollInterval)) {
@@ -809,7 +809,7 @@ func TestRepeatedSessionsCannotBeatTheFirstStep(t *testing.T) {
 		svc.wakeOverdueForReturningPeer(peer, emitted.Add(deliveryQueueWindow+time.Duration(i)*time.Second))
 	}
 
-	if got := scheduleOf(t, svc, envelope.ID); !got.Equal(rebuilt) {
+	if got := scheduleOf(t, svc, messageIdentityOf(envelope)); !got.Equal(rebuilt) {
 		t.Fatalf("repeated sessions kept pulling the message off its backoff: %v → %v", rebuilt, got)
 	}
 }
@@ -845,22 +845,22 @@ func TestArrivingSessionKeepsTheWindowAndOtherConversations(t *testing.T) {
 		Payload: []byte("sealed"), CreatedAt: createdAt, StoredAt: createdAt,
 	}, 5*time.Minute)
 
-	recentParked := scheduleOf(t, svc, "returning-recent")
-	otherParked := scheduleOf(t, svc, "somebody-else")
+	recentParked := scheduleOf(t, svc, svc.ownMessageIdentity("returning-recent", returning.Address))
+	otherParked := scheduleOf(t, svc, svc.ownMessageIdentity("somebody-else", other.Address))
 
 	svc.wakeOverdueForReturningPeer(domain.PeerIdentityFromWire(returning.Address), time.Now().UTC())
 
 	svc.deliveryMu.RLock()
-	emitted := svc.awaitingDelivered["returning-recent"].LastEmittedAt
+	emitted := svc.awaitingDelivered[svc.ownMessageIdentity("returning-recent", returning.Address)].LastEmittedAt
 	svc.deliveryMu.RUnlock()
-	got := scheduleOf(t, svc, "returning-recent")
+	got := scheduleOf(t, svc, svc.ownMessageIdentity("returning-recent", returning.Address))
 	if !got.Before(recentParked) {
 		t.Errorf("an arriving session must shorten the wait even for a recent message: %v → %v", recentParked, got)
 	}
 	if window := emitted.Add(deliveryQueueWindow); got.Before(window) {
 		t.Errorf("nothing may be scheduled while a receipt could still be in flight: got %v, window ends %v", got, window)
 	}
-	if got := scheduleOf(t, svc, "somebody-else"); !got.Equal(otherParked) {
+	if got := scheduleOf(t, svc, svc.ownMessageIdentity("somebody-else", other.Address)); !got.Equal(otherParked) {
 		t.Errorf("another conversation was clamped by a stranger arriving: %v → %v", otherParked, got)
 	}
 }
@@ -883,11 +883,11 @@ func TestArrivingSessionStandsDownWithTheGateOff(t *testing.T) {
 		Payload: []byte("sealed"), CreatedAt: createdAt, StoredAt: createdAt,
 	}
 	stalledOnWireEntry(t, svc, envelope, 5*time.Minute)
-	parked := scheduleOf(t, svc, envelope.ID)
+	parked := scheduleOf(t, svc, messageIdentityOf(envelope))
 
 	svc.wakeOverdueForReturningPeer(domain.PeerIdentityFromWire(recipientID.Address), time.Now().UTC())
 
-	if got := scheduleOf(t, svc, envelope.ID); !got.Equal(parked) {
+	if got := scheduleOf(t, svc, messageIdentityOf(envelope)); !got.Equal(parked) {
 		t.Errorf("the arriving-session clamp ran with the reachability gate off: %v → %v", parked, got)
 	}
 }
@@ -935,12 +935,12 @@ func TestPresenceObservedAbsenceEarnsTheAcceleration(t *testing.T) {
 	peer := domain.PeerIdentityFromWire(recipientID.Address)
 
 	svc.wakeOverdueForReturningPeer(peer, time.Now().UTC())
-	parked := parkDeliveryOnTheTail(t, svc, envelope.ID)
+	parked := parkDeliveryOnTheTail(t, svc, messageIdentityOf(envelope))
 
 	// A second return with nothing in between is a repeat, and must do
 	// nothing.
 	svc.wakeOverdueForReturningPeer(peer, time.Now().UTC())
-	if got := scheduleOf(t, svc, envelope.ID); !got.Equal(parked) {
+	if got := scheduleOf(t, svc, messageIdentityOf(envelope)); !got.Equal(parked) {
 		t.Fatalf("a repeated return must not step over the backoff: %v → %v", parked, got)
 	}
 
@@ -949,7 +949,7 @@ func TestPresenceObservedAbsenceEarnsTheAcceleration(t *testing.T) {
 	svc.presenceProjector.noteProbeUnanswered(peer, svc.presenceNow())
 	now := time.Now().UTC()
 	svc.wakeOverdueForReturningPeer(peer, now)
-	if want, got := now.Add(deliveryRetryBackoff(0)), scheduleOf(t, svc, envelope.ID); !got.Equal(want) {
+	if want, got := now.Add(deliveryRetryBackoff(0)), scheduleOf(t, svc, messageIdentityOf(envelope)); !got.Equal(want) {
 		t.Fatalf("the return after a presence-observed absence earned nothing: parked %v, want %v, got %v", parked, want, got)
 	}
 }
@@ -1019,18 +1019,18 @@ func TestOnePhysicalReturnIsOneAccelerationHoweverManySawIt(t *testing.T) {
 				t.Fatal("the pass must have measured them unreachable, or this is not the case under test")
 			}
 			reattachPushObserver(t, svc, recipientID.Address, gone)
-			parkDeliveryOnTheTail(t, svc, envelope.ID)
+			parkDeliveryOnTheTail(t, svc, messageIdentityOf(envelope))
 
 			// The return, seen by the first observer: it spends the occasion.
 			order.first(svc, peer, time.Now().UTC())
 			svc.WaitBackground()
-			parked := parkDeliveryOnTheTail(t, svc, envelope.ID)
+			parked := parkDeliveryOnTheTail(t, svc, messageIdentityOf(envelope))
 
 			// And by the second, which is the SAME return: nothing more is
 			// owed, so the schedule must not move.
 			order.second(svc, peer, time.Now().UTC())
 			svc.WaitBackground()
-			if got := scheduleOf(t, svc, envelope.ID); !got.Equal(parked) {
+			if got := scheduleOf(t, svc, messageIdentityOf(envelope)); !got.Equal(parked) {
 				t.Fatalf("one return earned two accelerations: %v → %v", parked, got)
 			}
 		})
@@ -1040,13 +1040,13 @@ func TestOnePhysicalReturnIsOneAccelerationHoweverManySawIt(t *testing.T) {
 // parkDeliveryOnTheTail puts one delivery back on the far end of its backoff
 // with its receipt window long expired, so the next acceleration — or its
 // absence — is unambiguous.
-func parkDeliveryOnTheTail(t *testing.T, svc *Service, id protocol.MessageID) time.Time {
+func parkDeliveryOnTheTail(t *testing.T, svc *Service, ref messageIdentity) time.Time {
 	t.Helper()
 	svc.deliveryMu.Lock()
 	defer svc.deliveryMu.Unlock()
-	svc.awaitingDelivered[id].NextAttemptAt = time.Now().UTC().Add(11 * time.Minute)
-	svc.awaitingDelivered[id].LastEmittedAt = time.Now().UTC().Add(-5 * time.Minute)
-	return svc.awaitingDelivered[id].NextAttemptAt
+	svc.awaitingDelivered[ref].NextAttemptAt = time.Now().UTC().Add(11 * time.Minute)
+	svc.awaitingDelivered[ref].LastEmittedAt = time.Now().UTC().Add(-5 * time.Minute)
+	return svc.awaitingDelivered[ref].NextAttemptAt
 }
 
 // TestAccelerationIsEarnedAgainByAnAbsence is the other half of the same
@@ -1076,16 +1076,16 @@ func TestAccelerationIsEarnedAgainByAnAbsence(t *testing.T) {
 
 	peer := domain.PeerIdentityFromWire(recipientID.Address)
 	svc.wakeOverdueForReturningPeer(peer, time.Now().UTC())
-	spent := scheduleOf(t, svc, envelope.ID)
+	spent := scheduleOf(t, svc, messageIdentityOf(envelope))
 
 	// Park it on the tail again and confirm the acceleration is spent.
 	svc.deliveryMu.Lock()
-	svc.awaitingDelivered[envelope.ID].NextAttemptAt = time.Now().UTC().Add(11 * time.Minute)
-	svc.awaitingDelivered[envelope.ID].LastEmittedAt = time.Now().UTC().Add(-5 * time.Minute)
-	parked := svc.awaitingDelivered[envelope.ID].NextAttemptAt
+	svc.awaitingDelivered[messageIdentityOf(envelope)].NextAttemptAt = time.Now().UTC().Add(11 * time.Minute)
+	svc.awaitingDelivered[messageIdentityOf(envelope)].LastEmittedAt = time.Now().UTC().Add(-5 * time.Minute)
+	parked := svc.awaitingDelivered[messageIdentityOf(envelope)].NextAttemptAt
 	svc.deliveryMu.Unlock()
 	svc.wakeOverdueForReturningPeer(peer, time.Now().UTC())
-	if got := scheduleOf(t, svc, envelope.ID); !got.Equal(parked) {
+	if got := scheduleOf(t, svc, messageIdentityOf(envelope)); !got.Equal(parked) {
 		t.Fatalf("the accelerated attempt was already spent: %v → %v", parked, got)
 	}
 	_ = spent
@@ -1097,13 +1097,13 @@ func TestAccelerationIsEarnedAgainByAnAbsence(t *testing.T) {
 		t.Fatal("the pass must have measured them unreachable, or this is not the case under test")
 	}
 	svc.deliveryMu.Lock()
-	svc.awaitingDelivered[envelope.ID].NextAttemptAt = time.Now().UTC().Add(11 * time.Minute)
-	svc.awaitingDelivered[envelope.ID].LastEmittedAt = time.Now().UTC().Add(-5 * time.Minute)
+	svc.awaitingDelivered[messageIdentityOf(envelope)].NextAttemptAt = time.Now().UTC().Add(11 * time.Minute)
+	svc.awaitingDelivered[messageIdentityOf(envelope)].LastEmittedAt = time.Now().UTC().Add(-5 * time.Minute)
 	svc.deliveryMu.Unlock()
 
 	now := time.Now().UTC()
 	svc.wakeOverdueForReturningPeer(peer, now)
-	if want, got := now.Add(deliveryRetryBackoff(0)), scheduleOf(t, svc, envelope.ID); !got.Equal(want) {
+	if want, got := now.Add(deliveryRetryBackoff(0)), scheduleOf(t, svc, messageIdentityOf(envelope)); !got.Equal(want) {
 		t.Fatalf("an absence must earn the acceleration back: got %v, want %v", got, want)
 	}
 }
@@ -1150,7 +1150,7 @@ func TestReadingCommittedAtTheEndKeepsWhatThePassLearnedLate(t *testing.T) {
 		Payload: []byte("sealed"), CreatedAt: createdAt, StoredAt: createdAt,
 	}, 5*time.Minute)
 	svc.deliveryMu.Lock()
-	svc.awaitingDelivered["measured-late"].NextAttemptAt = now
+	svc.awaitingDelivered[svc.ownMessageIdentity("measured-late", late.Address)].NextAttemptAt = now
 	svc.deliveryMu.Unlock()
 
 	_, candidates := svc.planDueDeliveries(now, reachable)
@@ -1212,14 +1212,14 @@ func TestSessionEventDuringAPassIsNotOverwritten(t *testing.T) {
 	// Park it back on the tail: a second session event must now find the
 	// acceleration already spent.
 	svc.deliveryMu.Lock()
-	svc.awaitingDelivered[envelope.ID].NextAttemptAt = now.Add(11 * time.Minute)
-	svc.awaitingDelivered[envelope.ID].LastEmittedAt = now.Add(-5 * time.Minute)
-	parked := svc.awaitingDelivered[envelope.ID].NextAttemptAt
+	svc.awaitingDelivered[messageIdentityOf(envelope)].NextAttemptAt = now.Add(11 * time.Minute)
+	svc.awaitingDelivered[messageIdentityOf(envelope)].LastEmittedAt = now.Add(-5 * time.Minute)
+	parked := svc.awaitingDelivered[messageIdentityOf(envelope)].NextAttemptAt
 	svc.deliveryMu.Unlock()
 
 	svc.wakeOverdueForReturningPeer(peer, now.Add(time.Second))
 
-	if got := scheduleOf(t, svc, envelope.ID); !got.Equal(parked) {
+	if got := scheduleOf(t, svc, messageIdentityOf(envelope)); !got.Equal(parked) {
 		t.Errorf("the pass overwrote a session event's spent acceleration: %v → %v", parked, got)
 	}
 }
@@ -1259,7 +1259,7 @@ func TestUnmeasuredNewRecipientIsNotWrittenDownAsUnreachable(t *testing.T) {
 	svc.deliveryMu.Lock()
 	svc.registerAwaitingDeliveredLocked(envelope, now, false)
 	svc.deliveryMu.Unlock()
-	parked := scheduleOf(t, svc, envelope.ID)
+	parked := scheduleOf(t, svc, messageIdentityOf(envelope))
 
 	_, candidates := svc.planDueDeliveries(now, reachable)
 	svc.finishRecipientReading(reachable, candidates)
@@ -1270,7 +1270,7 @@ func TestUnmeasuredNewRecipientIsNotWrittenDownAsUnreachable(t *testing.T) {
 
 	// The next pass, two seconds later, must not read a transition.
 	svc.retryDueDeliveries(now.Add(2 * time.Second))
-	if got := scheduleOf(t, svc, envelope.ID); !got.Equal(parked) {
+	if got := scheduleOf(t, svc, messageIdentityOf(envelope)); !got.Equal(parked) {
 		t.Errorf("a fabricated reading re-armed a message whose recipient never left: %v → %v", parked, got)
 	}
 	stream.expectQuiet(t, 200*time.Millisecond)
@@ -1306,15 +1306,15 @@ func TestReconnectInsideTheWindowIsNotLost(t *testing.T) {
 	// On the eleven-minute step, emitted ten seconds ago.
 	now := time.Now().UTC()
 	svc.deliveryMu.Lock()
-	svc.awaitingDelivered[envelope.ID].LastEmittedAt = now.Add(-10 * time.Second)
-	svc.awaitingDelivered[envelope.ID].NextAttemptAt = now.Add(11 * time.Minute)
-	tail := svc.awaitingDelivered[envelope.ID].NextAttemptAt
-	emitted := svc.awaitingDelivered[envelope.ID].LastEmittedAt
+	svc.awaitingDelivered[messageIdentityOf(envelope)].LastEmittedAt = now.Add(-10 * time.Second)
+	svc.awaitingDelivered[messageIdentityOf(envelope)].NextAttemptAt = now.Add(11 * time.Minute)
+	tail := svc.awaitingDelivered[messageIdentityOf(envelope)].NextAttemptAt
+	emitted := svc.awaitingDelivered[messageIdentityOf(envelope)].LastEmittedAt
 	svc.deliveryMu.Unlock()
 
 	svc.wakeOverdueForReturningPeer(domain.PeerIdentityFromWire(recipientID.Address), now)
 
-	got := scheduleOf(t, svc, envelope.ID)
+	got := scheduleOf(t, svc, messageIdentityOf(envelope))
 	if !got.Before(tail) {
 		t.Fatalf("a reconnect inside the queue window was lost: still %v", got)
 	}
@@ -1359,16 +1359,16 @@ func TestTransitionInsideTheWindowIsDeferredToItsEnd(t *testing.T) {
 
 	now := time.Now().UTC()
 	svc.deliveryMu.Lock()
-	svc.awaitingDelivered[envelope.ID].LastEmittedAt = now.Add(-10 * time.Second)
-	svc.awaitingDelivered[envelope.ID].NextAttemptAt = now.Add(11 * time.Minute)
-	tail := svc.awaitingDelivered[envelope.ID].NextAttemptAt
-	emitted := svc.awaitingDelivered[envelope.ID].LastEmittedAt
+	svc.awaitingDelivered[messageIdentityOf(envelope)].LastEmittedAt = now.Add(-10 * time.Second)
+	svc.awaitingDelivered[messageIdentityOf(envelope)].NextAttemptAt = now.Add(11 * time.Minute)
+	tail := svc.awaitingDelivered[messageIdentityOf(envelope)].NextAttemptAt
+	emitted := svc.awaitingDelivered[messageIdentityOf(envelope)].LastEmittedAt
 	svc.deliveryMu.Unlock()
 
 	reachable := svc.measureRecipientReachability()
 	svc.deliveryMu.Lock()
-	svc.applyReachabilityReturnLocked(svc.awaitingDelivered[envelope.ID], reachable, now)
-	got := svc.awaitingDelivered[envelope.ID].NextAttemptAt
+	svc.applyReachabilityReturnLocked(svc.awaitingDelivered[messageIdentityOf(envelope)], reachable, now)
+	got := svc.awaitingDelivered[messageIdentityOf(envelope)].NextAttemptAt
 	svc.deliveryMu.Unlock()
 
 	if want := emitted.Add(deliveryQueueWindow); !got.Equal(want) {
@@ -1409,14 +1409,14 @@ func TestLateConfirmationDoesNotUndoAReconnect(t *testing.T) {
 
 	// The client reconnects at t2 and the schedule is shortened.
 	svc.wakeOverdueForReturningPeer(domain.PeerIdentityFromWire(recipientID.Address), now.Add(time.Second))
-	shortened := scheduleOf(t, svc, envelope.ID)
+	shortened := scheduleOf(t, svc, messageIdentityOf(envelope))
 
 	// The t1 confirmation lands at t3, after the reconnect.
 	if !svc.confirmEnvelopeInMemory(envelope, dispatchedAt) {
 		t.Fatal("the late confirmation was not recorded")
 	}
 
-	if got := scheduleOf(t, svc, envelope.ID); !got.Equal(shortened) {
+	if got := scheduleOf(t, svc, messageIdentityOf(envelope)); !got.Equal(shortened) {
 		t.Fatalf("a confirmation from before the reconnect undid it: %v → %v", shortened, got)
 	}
 
@@ -1425,14 +1425,14 @@ func TestLateConfirmationDoesNotUndoAReconnect(t *testing.T) {
 	// otherwise the entry would never leave the fast end.
 	afterWake := shortened.Add(time.Second)
 	svc.deliveryMu.Lock()
-	svc.awaitingDelivered[envelope.ID].NextAttemptAt = afterWake
+	svc.awaitingDelivered[messageIdentityOf(envelope)].NextAttemptAt = afterWake
 	svc.deliveryMu.Unlock()
 	_, candidates := svc.planDueDeliveries(afterWake, svc.measureRecipientReachability())
 	svc.armDueDeliveries(candidates, recipientReachability{gateOff: true}, afterWake)
 	if !svc.confirmEnvelopeInMemory(envelope, afterWake) {
 		t.Fatal("the accelerated attempt's confirmation was not recorded")
 	}
-	if got := scheduleOf(t, svc, envelope.ID); !got.After(afterWake.Add(deliveryHoldPollInterval)) {
+	if got := scheduleOf(t, svc, messageIdentityOf(envelope)); !got.After(afterWake.Add(deliveryHoldPollInterval)) {
 		t.Errorf("a confirmation of the accelerated attempt must rebuild the backoff, got %v (arm parks at %v)", got, afterWake.Add(deliveryHoldPollInterval))
 	}
 }
@@ -1469,33 +1469,33 @@ func TestOrderSurvivesAFrozenClock(t *testing.T) {
 	// An attempt is dispatched, the client reconnects, and the dispatch's
 	// confirmation lands — all at the same instant, in that order.
 	svc.deliveryMu.Lock()
-	svc.awaitingDelivered[envelope.ID].NextAttemptAt = frozen
+	svc.awaitingDelivered[messageIdentityOf(envelope)].NextAttemptAt = frozen
 	svc.deliveryMu.Unlock()
 	_, candidates := svc.planDueDeliveries(frozen, svc.measureRecipientReachability())
 	svc.armDueDeliveries(candidates, recipientReachability{gateOff: true}, frozen)
 
 	svc.wakeOverdueForReturningPeer(domain.PeerIdentityFromWire(recipientID.Address), frozen)
-	shortened := scheduleOf(t, svc, envelope.ID)
+	shortened := scheduleOf(t, svc, messageIdentityOf(envelope))
 
 	if !svc.confirmEnvelopeInMemory(envelope, frozen) {
 		t.Fatal("the late confirmation was not recorded")
 	}
-	if got := scheduleOf(t, svc, envelope.ID); !got.Equal(shortened) {
+	if got := scheduleOf(t, svc, messageIdentityOf(envelope)); !got.Equal(shortened) {
 		t.Fatalf("with a frozen clock the older confirmation undid the reconnect: %v → %v", shortened, got)
 	}
 
 	// The accelerated attempt is armed — still the same instant — and its
 	// confirmation does rebuild the backoff.
 	svc.deliveryMu.Lock()
-	svc.awaitingDelivered[envelope.ID].NextAttemptAt = frozen
-	svc.awaitingDelivered[envelope.ID].LastEmittedAt = frozen.Add(-time.Minute)
+	svc.awaitingDelivered[messageIdentityOf(envelope)].NextAttemptAt = frozen
+	svc.awaitingDelivered[messageIdentityOf(envelope)].LastEmittedAt = frozen.Add(-time.Minute)
 	svc.deliveryMu.Unlock()
 	_, candidates = svc.planDueDeliveries(frozen, svc.measureRecipientReachability())
 	svc.armDueDeliveries(candidates, recipientReachability{gateOff: true}, frozen)
 	if !svc.confirmEnvelopeInMemory(envelope, frozen) {
 		t.Fatal("the accelerated attempt's confirmation was not recorded")
 	}
-	if got := scheduleOf(t, svc, envelope.ID); !got.After(frozen.Add(deliveryHoldPollInterval)) {
+	if got := scheduleOf(t, svc, messageIdentityOf(envelope)); !got.After(frozen.Add(deliveryHoldPollInterval)) {
 		t.Errorf("the accelerated attempt's own confirmation must rebuild the backoff, got %v (arm parks at %v)", got, frozen.Add(deliveryHoldPollInterval))
 	}
 }
@@ -1564,7 +1564,7 @@ func TestBacklogReplayAnswersTheWakeUpInEitherOrder(t *testing.T) {
 			}
 			svc.WaitBackground()
 
-			got := scheduleOf(t, svc, envelope.ID)
+			got := scheduleOf(t, svc, messageIdentityOf(envelope))
 			if order.wakeFirst {
 				// The replay IS the accelerated attempt, so what follows
 				// it is the ordinary backoff — later than the hold park
@@ -1581,7 +1581,7 @@ func TestBacklogReplayAnswersTheWakeUpInEitherOrder(t *testing.T) {
 				t.Fatalf("the replay's own backoff must stand after the wake-up: got %v", got)
 			}
 			svc.wakeOverdueForReturningPeer(peer, now.Add(time.Second))
-			if again := scheduleOf(t, svc, envelope.ID); !again.Equal(got) {
+			if again := scheduleOf(t, svc, messageIdentityOf(envelope)); !again.Equal(got) {
 				t.Fatalf("a further session event shortened the wait again: %v → %v", got, again)
 			}
 		})
@@ -1640,7 +1640,7 @@ func TestPartialReplayLeavesTheRestAccelerable(t *testing.T) {
 			svc.topics["dm"] = append(svc.topics["dm"], inBacklog)
 			svc.gossipMu.Unlock()
 
-			missedParked := scheduleOf(t, svc, missed.ID)
+			missedParked := scheduleOf(t, svc, messageIdentityOf(missed))
 			peer := domain.PeerIdentityFromWire(recipientID.Address)
 			now := time.Now().UTC()
 			if order.wakeFirst {
@@ -1654,13 +1654,13 @@ func TestPartialReplayLeavesTheRestAccelerable(t *testing.T) {
 
 			// The message the replay could not cover must be accelerated:
 			// it is exactly the "sent, unconfirmed, peer is back" case.
-			got := scheduleOf(t, svc, missed.ID)
+			got := scheduleOf(t, svc, messageIdentityOf(missed))
 			if !got.Before(missedParked) {
 				t.Fatalf("the message the replay did not send was left on the tail: %v (was %v)", got, missedParked)
 			}
 			// And the one the replay DID send is on its ordinary backoff,
 			// not on the first step: it has had its accelerated attempt.
-			if replayed := scheduleOf(t, svc, inBacklog.ID); !replayed.After(now.Add(deliveryHoldPollInterval)) {
+			if replayed := scheduleOf(t, svc, messageIdentityOf(inBacklog)); !replayed.After(now.Add(deliveryHoldPollInterval)) {
 				t.Fatalf("the replayed message must be back on its own backoff, got %v", replayed)
 			}
 		})
@@ -1715,9 +1715,9 @@ func TestAbsenceAndReturnCommute(t *testing.T) {
 			// absence may earn another.
 			svc.wakeOverdueForReturningPeer(peer, time.Now().UTC())
 			svc.deliveryMu.Lock()
-			svc.awaitingDelivered[envelope.ID].NextAttemptAt = time.Now().UTC().Add(11 * time.Minute)
-			svc.awaitingDelivered[envelope.ID].LastEmittedAt = time.Now().UTC().Add(-5 * time.Minute)
-			tail := svc.awaitingDelivered[envelope.ID].NextAttemptAt
+			svc.awaitingDelivered[messageIdentityOf(envelope)].NextAttemptAt = time.Now().UTC().Add(11 * time.Minute)
+			svc.awaitingDelivered[messageIdentityOf(envelope)].LastEmittedAt = time.Now().UTC().Add(-5 * time.Minute)
+			tail := svc.awaitingDelivered[messageIdentityOf(envelope)].NextAttemptAt
 			svc.deliveryMu.Unlock()
 
 			// They go away: the pass measures it, but does not apply the
@@ -1750,7 +1750,7 @@ func TestAbsenceAndReturnCommute(t *testing.T) {
 			// session event granted it, or this pass measures the return
 			// and grants it. Either way the message is off the tail.
 			svc.retryDueDeliveries(now.Add(2 * time.Second))
-			due := scheduleOf(t, svc, envelope.ID)
+			due := scheduleOf(t, svc, messageIdentityOf(envelope))
 			if !due.Before(tail) {
 				t.Fatalf("a real absence-then-return granted nothing: still %v", due)
 			}
@@ -1762,12 +1762,12 @@ func TestAbsenceAndReturnCommute(t *testing.T) {
 			// And exactly one acceleration: with the visit spent, a
 			// further session event leaves the rebuilt schedule alone.
 			svc.deliveryMu.Lock()
-			svc.awaitingDelivered[envelope.ID].NextAttemptAt = now.Add(11 * time.Minute)
-			svc.awaitingDelivered[envelope.ID].LastEmittedAt = now.Add(-5 * time.Minute)
-			parked := svc.awaitingDelivered[envelope.ID].NextAttemptAt
+			svc.awaitingDelivered[messageIdentityOf(envelope)].NextAttemptAt = now.Add(11 * time.Minute)
+			svc.awaitingDelivered[messageIdentityOf(envelope)].LastEmittedAt = now.Add(-5 * time.Minute)
+			parked := svc.awaitingDelivered[messageIdentityOf(envelope)].NextAttemptAt
 			svc.deliveryMu.Unlock()
 			svc.wakeOverdueForReturningPeer(peer, now.Add(3*time.Second))
-			if again := scheduleOf(t, svc, envelope.ID); !again.Equal(parked) {
+			if again := scheduleOf(t, svc, messageIdentityOf(envelope)); !again.Equal(parked) {
 				t.Fatalf("a second return in the same visit granted another acceleration: %v → %v", parked, again)
 			}
 		})
@@ -1800,8 +1800,8 @@ func TestMeasuredReturnSpendsTheVisitToo(t *testing.T) {
 	svc.WaitBackground()
 	attachPushObserver(t, svc, recipientID.Address, netcore.ConnID(7527))
 	svc.deliveryMu.Lock()
-	svc.awaitingDelivered[envelope.ID].NextAttemptAt = time.Now().UTC().Add(11 * time.Minute)
-	svc.awaitingDelivered[envelope.ID].LastEmittedAt = time.Now().UTC().Add(-5 * time.Minute)
+	svc.awaitingDelivered[messageIdentityOf(envelope)].NextAttemptAt = time.Now().UTC().Add(11 * time.Minute)
+	svc.awaitingDelivered[messageIdentityOf(envelope)].LastEmittedAt = time.Now().UTC().Add(-5 * time.Minute)
 	svc.deliveryMu.Unlock()
 	svc.retryDueDeliveries(time.Now().UTC())
 	svc.WaitBackground()
@@ -1809,17 +1809,17 @@ func TestMeasuredReturnSpendsTheVisitToo(t *testing.T) {
 	// Whatever the pass did with it, the schedule now belongs to this
 	// visit's one accelerated attempt — a session event from the same
 	// reconnect must not grant another.
-	parked := scheduleOf(t, svc, envelope.ID)
+	parked := scheduleOf(t, svc, messageIdentityOf(envelope))
 	svc.deliveryMu.Lock()
-	svc.awaitingDelivered[envelope.ID].NextAttemptAt = time.Now().UTC().Add(11 * time.Minute)
-	tail := svc.awaitingDelivered[envelope.ID].NextAttemptAt
-	svc.awaitingDelivered[envelope.ID].LastEmittedAt = time.Now().UTC().Add(-5 * time.Minute)
+	svc.awaitingDelivered[messageIdentityOf(envelope)].NextAttemptAt = time.Now().UTC().Add(11 * time.Minute)
+	tail := svc.awaitingDelivered[messageIdentityOf(envelope)].NextAttemptAt
+	svc.awaitingDelivered[messageIdentityOf(envelope)].LastEmittedAt = time.Now().UTC().Add(-5 * time.Minute)
 	svc.deliveryMu.Unlock()
 	_ = parked
 
 	svc.wakeOverdueForReturningPeer(domain.PeerIdentityFromWire(recipientID.Address), time.Now().UTC())
 
-	if got := scheduleOf(t, svc, envelope.ID); !got.Equal(tail) {
+	if got := scheduleOf(t, svc, messageIdentityOf(envelope)); !got.Equal(tail) {
 		t.Fatalf("the measured return did not spend the visit: a session event granted a second acceleration %v → %v", tail, got)
 	}
 }
@@ -1862,8 +1862,8 @@ func TestReturnOnAnAlreadyDueMessageIsStillOneSend(t *testing.T) {
 	stream := newPushMessageStream(t, attachPushObserver(t, svc, recipientID.Address, netcore.ConnID(7528)))
 	now := time.Now().UTC()
 	svc.deliveryMu.Lock()
-	svc.awaitingDelivered[envelope.ID].NextAttemptAt = now.Add(-time.Second)
-	svc.awaitingDelivered[envelope.ID].LastEmittedAt = now.Add(-5 * time.Minute)
+	svc.awaitingDelivered[messageIdentityOf(envelope)].NextAttemptAt = now.Add(-time.Second)
+	svc.awaitingDelivered[messageIdentityOf(envelope)].LastEmittedAt = now.Add(-5 * time.Minute)
 	svc.deliveryMu.Unlock()
 
 	svc.retryDueDeliveries(now)
@@ -1872,13 +1872,13 @@ func TestReturnOnAnAlreadyDueMessageIsStillOneSend(t *testing.T) {
 
 	// That send rebuilt the backoff. The session event of the same
 	// reconnect arrives late — and must find the visit already spent.
-	rebuilt := scheduleOf(t, svc, envelope.ID)
+	rebuilt := scheduleOf(t, svc, messageIdentityOf(envelope))
 	if !rebuilt.After(now.Add(deliveryHoldPollInterval)) {
 		t.Fatalf("the send must have rebuilt the backoff, got %v", rebuilt)
 	}
 	svc.wakeOverdueForReturningPeer(domain.PeerIdentityFromWire(recipientID.Address), now.Add(time.Second))
 
-	if got := scheduleOf(t, svc, envelope.ID); !got.Equal(rebuilt) {
+	if got := scheduleOf(t, svc, messageIdentityOf(envelope)); !got.Equal(rebuilt) {
 		t.Fatalf("a late session event sent the same message a second time for one return: %v → %v", rebuilt, got)
 	}
 	stream.expectQuiet(t, 200*time.Millisecond)
@@ -1916,12 +1916,12 @@ func TestReturnThatNeededNoChangeStillGuardsTheSchedule(t *testing.T) {
 	now := time.Now().UTC()
 	soon := now.Add(5 * time.Second)
 	svc.deliveryMu.Lock()
-	svc.awaitingDelivered[envelope.ID].NextAttemptAt = soon
-	svc.awaitingDelivered[envelope.ID].LastEmittedAt = now.Add(-5 * time.Minute)
+	svc.awaitingDelivered[messageIdentityOf(envelope)].NextAttemptAt = soon
+	svc.awaitingDelivered[messageIdentityOf(envelope)].LastEmittedAt = now.Add(-5 * time.Minute)
 	svc.deliveryMu.Unlock()
 
 	svc.wakeOverdueForReturningPeer(domain.PeerIdentityFromWire(recipientID.Address), now)
-	if got := scheduleOf(t, svc, envelope.ID); !got.Equal(soon) {
+	if got := scheduleOf(t, svc, messageIdentityOf(envelope)); !got.Equal(soon) {
 		t.Fatalf("a return must not push a nearer schedule out: %v → %v", soon, got)
 	}
 
@@ -1929,14 +1929,14 @@ func TestReturnThatNeededNoChangeStillGuardsTheSchedule(t *testing.T) {
 	if !svc.confirmEnvelopeInMemory(envelope, now.Add(-time.Minute)) {
 		t.Fatal("the late confirmation was not recorded")
 	}
-	if got := scheduleOf(t, svc, envelope.ID); !got.Equal(soon) {
+	if got := scheduleOf(t, svc, messageIdentityOf(envelope)); !got.Equal(soon) {
 		t.Fatalf("a confirmation from before the return replaced the attempt it was owed: %v → %v", soon, got)
 	}
 
 	// A second session event cannot help — the visit is spent — which is
 	// exactly why the guard above has to hold.
 	svc.wakeOverdueForReturningPeer(domain.PeerIdentityFromWire(recipientID.Address), now.Add(time.Second))
-	if got := scheduleOf(t, svc, envelope.ID); !got.Equal(soon) {
+	if got := scheduleOf(t, svc, messageIdentityOf(envelope)); !got.Equal(soon) {
 		t.Fatalf("the visit must stay spent: %v → %v", soon, got)
 	}
 }
@@ -1985,17 +1985,17 @@ func TestMidPassMessageDoesNotInheritTheConversationsReturn(t *testing.T) {
 	}
 	svc.deliveryMu.Lock()
 	svc.registerAwaitingDeliveredLocked(fresh, now, false)
-	freshParked := svc.awaitingDelivered[fresh.ID].NextAttemptAt
+	freshParked := svc.awaitingDelivered[messageIdentityOf(fresh)].NextAttemptAt
 	svc.deliveryMu.Unlock()
 
 	_, candidates := svc.planDueDeliveries(now, reachable)
 	svc.finishRecipientReading(reachable, candidates)
 
-	if got := scheduleOf(t, svc, fresh.ID); !got.Equal(freshParked) {
+	if got := scheduleOf(t, svc, messageIdentityOf(fresh)); !got.Equal(freshParked) {
 		t.Errorf("a message written after the reading inherited its return: %v → %v", freshParked, got)
 	}
 	// And the message the reading WAS about is accelerated.
-	if got := scheduleOf(t, svc, old.ID); got.After(now) {
+	if got := scheduleOf(t, svc, messageIdentityOf(old)); got.After(now) {
 		t.Errorf("the message the pass measured must be accelerated by the return, got %v", got)
 	}
 }
@@ -2034,7 +2034,7 @@ func TestFrozenDispatchGivesTheWakeUpBack(t *testing.T) {
 	wokeAt := time.Now().UTC()
 	preReturnDispatch := wokeAt.Add(-time.Second)
 	svc.wakeOverdueForReturningPeer(domain.PeerIdentityFromWire(recipientID.Address), wokeAt)
-	shortened := scheduleOf(t, svc, envelope.ID)
+	shortened := scheduleOf(t, svc, messageIdentityOf(envelope))
 	if !shortened.After(wokeAt) || shortened.After(wokeAt.Add(deliveryRetryBackoff(0))) {
 		t.Fatalf("the return did not clamp the schedule to the first step: %v", shortened)
 	}
@@ -2053,7 +2053,7 @@ func TestFrozenDispatchGivesTheWakeUpBack(t *testing.T) {
 	svc.retryDispatchBarrier = nil
 
 	svc.deliveryMu.RLock()
-	entry, awaiting := svc.awaitingDelivered[envelope.ID]
+	entry, awaiting := svc.awaitingDelivered[messageIdentityOf(envelope)]
 	parked, held := time.Time{}, holdNone
 	if awaiting {
 		parked, held = entry.NextAttemptAt, entry.Hold
@@ -2075,11 +2075,13 @@ func TestFrozenDispatchGivesTheWakeUpBack(t *testing.T) {
 	// The deletion is called off, and the pre-return attempt's confirmation
 	// finally lands. It measures an attempt older than the return and may
 	// not spend the schedule the return earned.
-	svc.ThawOutgoingDeliveries([]protocol.MessageID{envelope.ID})
+	if err := svc.ThawOutgoingDeliveriesTo(domain.PeerIdentityFromWire(envelope.Recipient), []protocol.MessageID{envelope.ID}); err != nil {
+		t.Fatal(err)
+	}
 	if !svc.confirmEnvelopeInMemory(envelope, preReturnDispatch) {
 		t.Fatal("the late confirmation was not recorded")
 	}
-	if got := scheduleOf(t, svc, envelope.ID); !got.Equal(shortened) {
+	if got := scheduleOf(t, svc, messageIdentityOf(envelope)); !got.Equal(shortened) {
 		t.Fatalf("a confirmation from before the return undid it across the freeze: %v → %v", shortened, got)
 	}
 }
@@ -2138,7 +2140,7 @@ func TestReplayDuringAPassDoesNotOpenAVisit(t *testing.T) {
 	reattachPushObserver(t, svc, recipientID.Address, observer)
 	svc.pushBacklogToSubscriber(sub)
 	svc.WaitBackground()
-	afterReplay := scheduleOf(t, svc, envelope.ID)
+	afterReplay := scheduleOf(t, svc, messageIdentityOf(envelope))
 
 	svc.finishRecipientReading(reading, nil)
 
@@ -2150,7 +2152,7 @@ func TestReplayDuringAPassDoesNotOpenAVisit(t *testing.T) {
 		t.Fatal("the recipient must measure reachable again for this to prove anything")
 	}
 	svc.planDueDeliveries(time.Now().UTC(), next)
-	if got := scheduleOf(t, svc, envelope.ID); !got.Equal(afterReplay) {
+	if got := scheduleOf(t, svc, messageIdentityOf(envelope)); !got.Equal(afterReplay) {
 		t.Fatalf("a stale absence bought the reconnect a second send: %v → %v", afterReplay, got)
 	}
 }
@@ -2197,20 +2199,20 @@ func TestReplayBetweenThePlanAndTheArmStopsTheRetry(t *testing.T) {
 	// Due, and the tick picks it.
 	now := time.Now().UTC()
 	svc.deliveryMu.Lock()
-	svc.awaitingDelivered[envelope.ID].NextAttemptAt = now.Add(-time.Second)
+	svc.awaitingDelivered[messageIdentityOf(envelope)].NextAttemptAt = now.Add(-time.Second)
 	svc.deliveryMu.Unlock()
 	reading := svc.measureRecipientReachability()
 	_, candidates := svc.planDueDeliveries(now, reading)
-	if len(candidates) != 1 || candidates[0].id != envelope.ID {
+	if len(candidates) != 1 || candidates[0].id != messageIdentityOf(envelope) {
 		t.Fatalf("the pass must have chosen this message to re-send, got %d candidates", len(candidates))
 	}
 
 	// The reconnect's replay sends it in the gap the plan cannot see past.
 	svc.pushBacklogToSubscriber(sub)
 	svc.WaitBackground()
-	afterReplay := scheduleOf(t, svc, envelope.ID)
+	afterReplay := scheduleOf(t, svc, messageIdentityOf(envelope))
 	svc.deliveryMu.RLock()
-	heldAfterReplay := svc.awaitingDelivered[envelope.ID].Hold
+	heldAfterReplay := svc.awaitingDelivered[messageIdentityOf(envelope)].Hold
 	svc.deliveryMu.RUnlock()
 	if !afterReplay.After(now) {
 		t.Fatalf("the replay must have confirmed and rebuilt the backoff, got %v", afterReplay)
@@ -2219,11 +2221,11 @@ func TestReplayBetweenThePlanAndTheArmStopsTheRetry(t *testing.T) {
 	if due := svc.armDueDeliveries(candidates, reading, now); len(due) != 0 {
 		t.Fatalf("the tick armed a second copy of a message the replay had just sent: %d dispatches", len(due))
 	}
-	if got := scheduleOf(t, svc, envelope.ID); !got.Equal(afterReplay) {
+	if got := scheduleOf(t, svc, messageIdentityOf(envelope)); !got.Equal(afterReplay) {
 		t.Errorf("the arm overwrote the confirmation's schedule: %v → %v", afterReplay, got)
 	}
 	svc.deliveryMu.RLock()
-	held := svc.awaitingDelivered[envelope.ID].Hold
+	held := svc.awaitingDelivered[messageIdentityOf(envelope)].Hold
 	svc.deliveryMu.RUnlock()
 	if held != heldAfterReplay {
 		t.Errorf("the arm overwrote the confirmation's hold: %v → %v", heldAfterReplay, held)
@@ -2270,7 +2272,7 @@ func TestReplayAfterTheArmStopsTheDispatch(t *testing.T) {
 
 	now := time.Now().UTC()
 	svc.deliveryMu.Lock()
-	svc.awaitingDelivered[envelope.ID].NextAttemptAt = now.Add(-time.Second)
+	svc.awaitingDelivered[messageIdentityOf(envelope)].NextAttemptAt = now.Add(-time.Second)
 	svc.deliveryMu.Unlock()
 
 	// The reconnect replays the backlog after the tick has armed the
@@ -2289,7 +2291,7 @@ func TestReplayAfterTheArmStopsTheDispatch(t *testing.T) {
 
 	// And the entry belongs to the replay's confirmation: the rebuilt
 	// backoff, not the park an arm leaves behind.
-	if got := scheduleOf(t, svc, envelope.ID); !got.After(now.Add(deliveryHoldPollInterval)) {
+	if got := scheduleOf(t, svc, messageIdentityOf(envelope)); !got.After(now.Add(deliveryHoldPollInterval)) {
 		t.Errorf("the abandoned dispatch wrote its park over the confirmation: %v", got)
 	}
 }
@@ -2329,17 +2331,17 @@ func TestRetryStandsDownWhileAReplayIsStillWriting(t *testing.T) {
 
 	now := time.Now().UTC()
 	svc.deliveryMu.Lock()
-	svc.awaitingDelivered[envelope.ID].NextAttemptAt = now.Add(-time.Second)
+	svc.awaitingDelivered[messageIdentityOf(envelope)].NextAttemptAt = now.Add(-time.Second)
 	svc.deliveryMu.Unlock()
 
 	// Phase one of the replay: the batch is claimed for the wire. Nothing
 	// is confirmed yet — the frames are still being written.
-	claim := svc.noteOwnEnvelopesEmitted([]protocol.MessageID{envelope.ID}, now, nil)
-	if _, withheld := claim.Withheld[envelope.ID]; withheld {
+	claim := svc.noteOwnEnvelopesEmitted([]messageIdentity{messageIdentityOf(envelope)}, now, nil)
+	if _, withheld := claim.Withheld[messageIdentityOf(envelope)]; withheld {
 		t.Fatal("the replay's claim was refused, so this is not the case under test")
 	}
 	svc.deliveryMu.RLock()
-	attemptsMidReplay := svc.awaitingDelivered[envelope.ID].Attempts
+	attemptsMidReplay := svc.awaitingDelivered[messageIdentityOf(envelope)].Attempts
 	svc.deliveryMu.RUnlock()
 
 	// A whole retry pass runs while that write is in progress.
@@ -2349,7 +2351,7 @@ func TestRetryStandsDownWhileAReplayIsStillWriting(t *testing.T) {
 	// Nothing of ours reached the wire: the copy in flight is the replay's.
 	stream.expectQuiet(t, 300*time.Millisecond)
 	svc.deliveryMu.RLock()
-	attemptsAfterPass := svc.awaitingDelivered[envelope.ID].Attempts
+	attemptsAfterPass := svc.awaitingDelivered[messageIdentityOf(envelope)].Attempts
 	svc.deliveryMu.RUnlock()
 	if attemptsAfterPass != attemptsMidReplay {
 		t.Fatalf("the tick sent behind the replay: attempts %d → %d", attemptsMidReplay, attemptsAfterPass)
@@ -2360,7 +2362,7 @@ func TestRetryStandsDownWhileAReplayIsStillWriting(t *testing.T) {
 	if !svc.confirmEnvelopeInMemory(envelope, now.Add(time.Millisecond)) {
 		t.Fatal("the replay's own confirmation was refused")
 	}
-	if got := scheduleOf(t, svc, envelope.ID); !got.After(now.Add(deliveryHoldPollInterval)) {
+	if got := scheduleOf(t, svc, messageIdentityOf(envelope)); !got.After(now.Add(deliveryHoldPollInterval)) {
 		t.Errorf("the confirmation must own the schedule after the pass stood down, got %v", got)
 	}
 }
@@ -2396,7 +2398,7 @@ func TestAClaimTakenDuringThePassStandsEvenWithASkewedStamp(t *testing.T) {
 
 	now := time.Now().UTC()
 	svc.deliveryMu.Lock()
-	svc.awaitingDelivered[envelope.ID].NextAttemptAt = now.Add(-time.Second)
+	svc.awaitingDelivered[messageIdentityOf(envelope)].NextAttemptAt = now.Add(-time.Second)
 	svc.deliveryMu.Unlock()
 
 	reading := svc.measureRecipientReachability()
@@ -2408,7 +2410,7 @@ func TestAClaimTakenDuringThePassStandsEvenWithASkewedStamp(t *testing.T) {
 	// Another sender claims it while the pass is working, stamping with a
 	// clock that is an hour ahead of ours.
 	svc.deliveryMu.Lock()
-	markEntryEmitted(svc.awaitingDelivered[envelope.ID], now.Add(time.Hour))
+	markEntryEmitted(svc.awaitingDelivered[messageIdentityOf(envelope)], now.Add(time.Hour))
 	svc.deliveryMu.Unlock()
 
 	if due := svc.armDueDeliveries(candidates, reading, now); len(due) != 0 {
@@ -2453,7 +2455,7 @@ func TestAFailedDispatchDoesNotStandTheNextPassDown(t *testing.T) {
 	}
 	svc.deliveryMu.Lock()
 	svc.registerAwaitingDeliveredLocked(envelope, now.Add(-time.Minute), true)
-	svc.awaitingDelivered[envelope.ID].NextAttemptAt = now.Add(-time.Second)
+	svc.awaitingDelivered[messageIdentityOf(envelope)].NextAttemptAt = now.Add(-time.Second)
 	svc.deliveryMu.Unlock()
 
 	// Nobody to send to: the pass claims the message at the last boundary
@@ -2517,7 +2519,7 @@ func TestReplayStandsDownWhileTheRetryIsStillWriting(t *testing.T) {
 	// nothing confirmed yet.
 	now := time.Now().UTC()
 	svc.deliveryMu.RLock()
-	claimedAtArm := svc.awaitingDelivered[envelope.ID].ClaimedAt
+	claimedAtArm := svc.awaitingDelivered[messageIdentityOf(envelope)].ClaimedAt
 	svc.deliveryMu.RUnlock()
 	cleared, superseded, _ := svc.claimEnvelopeForDispatch(envelope, claimedAtArm, now)
 	if !cleared || superseded {
@@ -2530,7 +2532,7 @@ func TestReplayStandsDownWhileTheRetryIsStillWriting(t *testing.T) {
 
 	stream.expectQuiet(t, 300*time.Millisecond)
 	svc.deliveryMu.RLock()
-	confirmed := svc.awaitingDelivered[envelope.ID].LastEmittedAt
+	confirmed := svc.awaitingDelivered[messageIdentityOf(envelope)].LastEmittedAt
 	svc.deliveryMu.RUnlock()
 	if confirmed.After(now) {
 		t.Fatal("the replay wrote and confirmed a copy of a message the tick was already sending")
@@ -2582,7 +2584,7 @@ func TestALongPassDoesNotAgeItsOwnClaim(t *testing.T) {
 	// message's last boundary. The claim it takes is being taken NOW.
 	startedAt := time.Now().UTC().Add(-30 * time.Second)
 	svc.deliveryMu.RLock()
-	claimedAtArm := svc.awaitingDelivered[envelope.ID].ClaimedAt
+	claimedAtArm := svc.awaitingDelivered[messageIdentityOf(envelope)].ClaimedAt
 	svc.deliveryMu.RUnlock()
 	cleared, superseded, wrote := svc.claimEnvelopeForDispatch(envelope, claimedAtArm, startedAt)
 	if !cleared || superseded {
@@ -2597,7 +2599,7 @@ func TestALongPassDoesNotAgeItsOwnClaim(t *testing.T) {
 	svc.WaitBackground()
 	stream.expectQuiet(t, 300*time.Millisecond)
 	svc.deliveryMu.RLock()
-	confirmed := svc.awaitingDelivered[envelope.ID].LastEmittedAt
+	confirmed := svc.awaitingDelivered[messageIdentityOf(envelope)].LastEmittedAt
 	svc.deliveryMu.RUnlock()
 	if confirmed.After(startedAt) {
 		t.Fatal("the replay wrote a second copy of a message the tick had just claimed")
@@ -2652,7 +2654,7 @@ func TestTheClaimIsStampedInsideTheSection(t *testing.T) {
 
 	now := time.Now().UTC()
 	svc.deliveryMu.Lock()
-	svc.awaitingDelivered[envelope.ID].NextAttemptAt = now.Add(-time.Second)
+	svc.awaitingDelivered[messageIdentityOf(envelope)].NextAttemptAt = now.Add(-time.Second)
 	svc.deliveryMu.Unlock()
 
 	// A whole pass: the arm reads the claim, the last boundary takes it.

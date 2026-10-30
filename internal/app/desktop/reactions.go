@@ -46,8 +46,8 @@ import (
 // UNWIRED row swallows a press exactly as silently as a wired one, and the only
 // place the difference shows is the call this interface names.
 type reactionRouter interface {
-	MessageReactions(ctx context.Context, peer domain.PeerIdentity) (map[domain.MessageID][]domain.Reaction, error)
-	ToggleReaction(ctx context.Context, peer domain.PeerIdentity, messageID domain.MessageID, emoji string, now time.Time) (domain.ReactionFact, error)
+	MessageReactionsRefs(ctx context.Context, peer domain.PeerIdentity) (map[domain.MessageRef][]domain.Reaction, error)
+	ToggleReactionRef(ctx context.Context, ref domain.MessageRef, emoji string, now time.Time) (domain.ReactionFact, error)
 	ReactionsSupportOf(peer domain.PeerIdentity) domain.ReactionsSupport
 	// SetSendStatusIfCurrent replaces the status line only while it still says
 	// what the caller expects, so a message that has become false can be taken
@@ -82,7 +82,7 @@ var defaultQuickReactions = []string{"👍", "👌", "❤️", "🔥", "😂", "
 // messageReactions is what the chip row under a message draws, read from the
 // cache this file keeps rather than from the database: see the file comment.
 func (w *Window) messageReactions(message service.DirectMessage) []ui.Reaction {
-	reactions := w.msgReactionState[domain.MessageID(message.ID)]
+	reactions := w.msgReactionState[messageRef(message)]
 	if len(reactions) == 0 {
 		return nil
 	}
@@ -113,7 +113,7 @@ func (w *Window) reloadReactions() {
 	ctx, cancel := context.WithTimeout(context.Background(), reactionReadTimeout)
 	defer cancel()
 
-	state, err := router.MessageReactions(ctx, peer)
+	state, err := router.MessageReactionsRefs(ctx, peer)
 	if err != nil {
 		// A node without chat history has nowhere to keep reactions; every
 		// other failure is a database that will be asked again on the next
@@ -138,11 +138,11 @@ const reactionReadTimeout = 2 * time.Second
 // creating it on first access. Like every other per-message cache it is dropped
 // on a conversation change (resetConversationStateOnPeerChange), which is what keeps it
 // from growing across peers.
-func (w *Window) messageReactionChips(id domain.MessageID) *ui.ReactionChipsState {
+func (w *Window) messageReactionChips(id domain.MessageRef) *ui.ReactionChipsState {
 	chips := w.msgReactionChips[id]
 	if chips == nil {
 		if w.msgReactionChips == nil {
-			w.msgReactionChips = make(map[domain.MessageID]*ui.ReactionChipsState)
+			w.msgReactionChips = make(map[domain.MessageRef]*ui.ReactionChipsState)
 		}
 		chips = &ui.ReactionChipsState{Describe: w.describeReactionChip}
 		w.msgReactionChips[id] = chips
@@ -370,7 +370,7 @@ func (w *Window) applyReaction(emoji string) {
 	if message == nil {
 		return
 	}
-	w.toggleReactionOn(domain.MessageID(message.ID), emoji)
+	w.toggleReactionOn(messageRef(*message), emoji)
 }
 
 // toggleReactionOn is the one place a reaction decision is made, whichever
@@ -381,10 +381,10 @@ func (w *Window) applyReaction(emoji string) {
 // is decided by the service against STORED state — not here against the chips,
 // which are a frame old, so two quick taps read from them would both decide
 // "set".
-func (w *Window) toggleReactionOn(messageID domain.MessageID, emoji string) {
+func (w *Window) toggleReactionOn(messageID domain.MessageRef, emoji string) {
 	peer := w.snap.ActivePeer
 	router := w.reactions()
-	if router == nil || peer.IsZero() || messageID == "" || emoji == "" {
+	if router == nil || peer.IsZero() || messageID.ID == "" || emoji == "" {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), reactionReadTimeout)
@@ -396,14 +396,14 @@ func (w *Window) toggleReactionOn(messageID domain.MessageID, emoji string) {
 	// to act on, and which direction the toggle went is not what "recently used"
 	// is about.
 	w.rememberEmojiAt(emoji, time.Now())
-	if _, err := router.ToggleReaction(ctx, peer, messageID, emoji, time.Now().UTC()); err != nil {
+	if _, err := router.ToggleReactionRef(ctx, messageID, emoji, time.Now().UTC()); err != nil {
 		if errors.Is(err, service.ErrNoReactionStore) {
 			// This node keeps no chat history, so there is nowhere for a
 			// reaction to live and there never will be. Nothing to redraw and
 			// nothing the user can do about it.
 			return
 		}
-		log.Warn().Err(err).Str("message", string(messageID)).Str("emoji", emoji).Msg("toggle reaction")
+		log.Warn().Err(err).Str("message", messageID.ID).Str("emoji", emoji).Msg("toggle reaction")
 		// The tap did not take — the write lost a race, it crossed a storage
 		// ceiling, or the conversation is being wiped. All three leave the chips
 		// exactly as they were, and saying so is the point of the error: without
@@ -457,7 +457,7 @@ func (w *Window) handleReactionChipTap(
 		if !ok {
 			return
 		}
-		w.toggleReactionOn(domain.MessageID(message.ID), emoji)
+		w.toggleReactionOn(messageRef(message), emoji)
 	}
 }
 
@@ -665,7 +665,7 @@ func (w *Window) holdsReaction(emoji string) bool {
 	if w.msgContextMsg == nil {
 		return false
 	}
-	for _, reaction := range w.msgReactionState[domain.MessageID(w.msgContextMsg.ID)] {
+	for _, reaction := range w.msgReactionState[messageRef(*w.msgContextMsg)] {
 		if reaction.Mine && reaction.Emoji == emoji {
 			return true
 		}

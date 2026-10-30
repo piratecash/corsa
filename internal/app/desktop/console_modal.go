@@ -252,16 +252,16 @@ type consoleModal struct {
 	// chat-thread *Window methods because their post-click state is
 	// always polled-active or terminal-with-disk-actions-only, so
 	// the missing invalidate doesn't manifest.
-	fileDeleteButtons   map[domain.FileID]*widget.Clickable
-	fileDownloadButtons map[domain.FileID]*widget.Clickable
-	fileRestartButtons  map[domain.FileID]*widget.Clickable
-	fileThumbButtons    map[domain.FileID]*widget.Clickable
+	fileDeleteButtons   map[domain.MessageRef]*widget.Clickable
+	fileDownloadButtons map[domain.MessageRef]*widget.Clickable
+	fileRestartButtons  map[domain.MessageRef]*widget.Clickable
+	fileThumbButtons    map[domain.MessageRef]*widget.Clickable
 
 	// fileRowSelectables holds widget.Selectable instances per file
 	// row so the user can click-drag to highlight and Cmd/Ctrl-C
 	// the filename, peer identity, and meta line (size + timestamp).
 	// Same lazy-allocate / prune pattern as the Clickable maps.
-	fileRowSelectables map[domain.FileID]*fileRowSelectables
+	fileRowSelectables map[domain.MessageRef]*fileRowSelectables
 
 	consoleEditor widget.Editor
 	runButton     widget.Clickable
@@ -363,11 +363,11 @@ func newConsoleModal(parent *Window) *consoleModal {
 		tabMenuList: widget.List{
 			List: layout.List{Axis: layout.Vertical},
 		},
-		fileDeleteButtons:   make(map[domain.FileID]*widget.Clickable),
-		fileDownloadButtons: make(map[domain.FileID]*widget.Clickable),
-		fileRestartButtons:  make(map[domain.FileID]*widget.Clickable),
-		fileThumbButtons:    make(map[domain.FileID]*widget.Clickable),
-		fileRowSelectables:  make(map[domain.FileID]*fileRowSelectables),
+		fileDeleteButtons:   make(map[domain.MessageRef]*widget.Clickable),
+		fileDownloadButtons: make(map[domain.MessageRef]*widget.Clickable),
+		fileRestartButtons:  make(map[domain.MessageRef]*widget.Clickable),
+		fileThumbButtons:    make(map[domain.MessageRef]*widget.Clickable),
+		fileRowSelectables:  make(map[domain.MessageRef]*fileRowSelectables),
 		peerSelectables:     make(map[string]*peerCardSelectables),
 		suggestButtons:      make(map[string]*widget.Clickable),
 		selectedSuggest:     -1,

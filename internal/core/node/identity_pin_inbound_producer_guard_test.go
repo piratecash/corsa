@@ -405,7 +405,7 @@ func ninN1SourceErrors(sources map[string][]byte) []string {
 		"service.go:dispatchNetworkFrameOwned":                     9,
 		"service.go:enqueueFrameByID":                              1,
 		"service.go:enqueueFrameSyncByID":                          2,
-		"service.go:handleAckDeleteFrameOwned":                     5,
+		"service.go:handleAckDeleteFrameOwned":                     6,
 		"service.go:handleAuthSessionOwned":                        2,
 		"service.go:handleCommandOwned":                            1,
 		"service.go:handleConn":                                    6,
@@ -895,6 +895,30 @@ func TestInboundN1ClosedOriginalOwnerAuthorityInventory(t *testing.T) {
 			t.Fatal("scalar/key role obscured true owner method-value", tc.path, failures)
 		}
 	}
+
+	// The H1 ambiguity refusal is a real new owned terminal path: removing
+	// only its end must fail the exact inventory, while keeping the refusal.
+	t.Run("ambiguous-ack-delete-missing-terminal", func(t *testing.T) {
+		mutated := map[string][]byte{}
+		for path, raw := range sources {
+			mutated[path] = raw
+		}
+		const before = `if count < 0 {
+			owner.end()
+			return protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidAckDelete, Error: "ambiguous message identity"}, false
+		}`
+		const after = `if count < 0 {
+			return protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidAckDelete, Error: "ambiguous message identity"}, false
+		}`
+		raw := string(sources["service.go"])
+		if strings.Count(raw, before) != 1 {
+			t.Fatal("ambiguity terminal source control is not unique")
+		}
+		mutated["service.go"] = []byte(strings.Replace(raw, before, after, 1))
+		if failures := strings.Join(ninN1SourceErrors(mutated), "\n"); !strings.Contains(failures, "terminal inventory") {
+			t.Fatal("ambiguity refusal escaped without ending its original owner", failures)
+		}
+	})
 }
 
 // Exact synchronous incoming edges. No context/owner is added to any outgoing

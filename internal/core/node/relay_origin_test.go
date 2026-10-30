@@ -79,8 +79,8 @@ func TestRetryableRelayMessages_SkipsOriginAuthored(t *testing.T) {
 
 	// Arm BOTH so the test proves the read-side filter, not just an absent arm.
 	svc.deliveryMu.Lock()
-	svc.relayRetry[relayMessageKey(origin.ID)] = relayAttempt{FirstSeen: now}
-	svc.relayRetry[relayMessageKey(transit.ID)] = relayAttempt{FirstSeen: now}
+	svc.relayRetry[relayMessageIdentityKey(messageIdentityOf(origin))] = relayAttempt{FirstSeen: now}
+	svc.relayRetry[relayMessageIdentityKey(messageIdentityOf(transit))] = relayAttempt{FirstSeen: now}
 	svc.deliveryMu.Unlock()
 
 	got := svc.retryableRelayMessages(now)
@@ -102,7 +102,7 @@ func TestRetryableRelayMessages_SkipsOriginAuthored(t *testing.T) {
 
 	// The stale origin arm must be reaped so it does not linger in the map.
 	svc.deliveryMu.RLock()
-	_, originStillArmed := svc.relayRetry[relayMessageKey(origin.ID)]
+	_, originStillArmed := svc.relayRetry[relayMessageIdentityKey(messageIdentityOf(origin))]
 	svc.deliveryMu.RUnlock()
 	if originStillArmed {
 		t.Fatal("retryableRelayMessages must drop the stale relayRetry entry for an origin-authored DM")

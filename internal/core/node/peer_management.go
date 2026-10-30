@@ -872,10 +872,14 @@ func (s *Service) ensurePeerSessions(ctx context.Context) {
 		go func(c peerDialCandidate) {
 			defer func() {
 				var adTicket *k3AdvertisedTicket
-				var adLocked bool
-				if s.k3Advertised != nil {
+				var adLocked, adDeliveryLocked bool
+				if s.k3Advertised != nil || s.k3Registered != nil {
 					defer func() {
 						if adLocked {
+							if adDeliveryLocked {
+								s.deliveryMu.Unlock()
+								adDeliveryLocked = false
+							}
 							s.guardK3AdvertisedPeerLocked(adTicket)
 							s.peerMu.Unlock()
 						}
@@ -887,6 +891,7 @@ func (s *Service) ensurePeerSessions(ctx context.Context) {
 				adTicket = s.beginK3AdvertisedPeerLocked()
 				log.Trace().Str("site", "ensurePeerSessions_cleanup").Str("phase", "lock_held").Str("address", string(c.address)).Msg("peer_mu_writer")
 				s.deliveryMu.Lock()
+				adDeliveryLocked = true
 				var k3 k3RegisteredTicket
 				if s.k3Registered != nil {
 					k3 = s.k3BeginSessionLocked(c.address)
@@ -902,6 +907,7 @@ func (s *Service) ensurePeerSessions(ctx context.Context) {
 				if s.k3Registered != nil {
 					s.k3FinishSessionLocked(k3)
 				}
+				adDeliveryLocked = false
 				s.deliveryMu.Unlock()
 				s.finishK3AdvertisedPeerLocked(adTicket)
 				adTicket = nil
@@ -5891,8 +5897,9 @@ func (s *Service) capPendingRingLocked(primary domain.PeerAddress, ringSize int)
 // s.deliveryMu.Lock. ringSize is passed through for the diagnostic log only.
 func (s *Service) releaseEvictedPendingLocked(primary domain.PeerAddress, frame protocol.Frame, ringSize int) {
 	delete(s.pendingKeys, pendingFrameKey(primary, frame))
-	if frame.Type == "send_message" && frame.ID != "" {
-		delete(s.outbound, frame.ID)
+	envelope := frameEnvelope(frame)
+	if frame.Type == "send_message" && envelope.Topic == "dm" && envelope.ID != "" {
+		delete(s.outbound, messageIdentityOf(envelope))
 	}
 	log.Debug().
 		Str("address", string(primary)).
@@ -6010,6 +6017,7 @@ func (s *Service) queuePeerFrame(address domain.PeerAddress, frame protocol.Fram
 type pendingKey struct {
 	Address domain.PeerAddress
 	Type    string
+	Topic   string // namespaces message-carrying keys; empty for non-message frames
 	A, B, C string
 }
 
@@ -6061,7 +6069,7 @@ func pendingFrameKey(address domain.PeerAddress, frame protocol.Frame) pendingKe
 // own message with a peer's transit frame under the same id.
 func messagePendingKey(address domain.PeerAddress, frame protocol.Frame) pendingKey {
 	message := messageIdentityOf(frameEnvelope(frame))
-	return pendingKey{Address: address, Type: frame.Type, A: string(message.MessageID), B: message.Recipient, C: message.Sender}
+	return pendingKey{Address: address, Type: frame.Type, Topic: frameEnvelope(frame).Topic, A: string(message.MessageID), B: message.Recipient, C: message.Sender}
 }
 
 // flushPendingPeerFrames is cross-domain:
@@ -6115,7 +6123,7 @@ func (s *Service) flushPendingPeerFrames(address domain.PeerAddress) {
 		// really did go out unconfirmed, so it read as queued and was
 		// re-sent on the next tick.
 		if s.enqueueSessionSendItem(session, legacyPeerSendItem(item.Frame)) {
-			s.clearOutboundQueued(item.Frame.ID)
+			s.clearOutboundQueued(s.ownMessageIdentity(protocol.MessageID(item.Frame.ID), item.Frame.Recipient))
 			continue
 		}
 		item.Retries++

@@ -66,11 +66,12 @@ import (
 var (
 	pendingFrameBytes     = domain.SizeOfAll(domain.PeerAddress(""), pendingFrame{})
 	relayAttemptBytes     = domain.SizeOfAll("", relayAttempt{})
-	outboundBytes         = domain.SizeOfAll("", outboundDelivery{})
-	deliveryRetryBytes    = domain.SizeOfAll(protocol.MessageID(""), deliveryRetryEntry{})
+	outboundBytes         = domain.SizeOfAll(messageIdentity{}, outboundDelivery{})
+	deliveryRetryBytes    = domain.SizeOfAll(messageIdentity{}, deliveryRetryEntry{})
 	receiptRecipientBytes = domain.SizeOfAll("", []protocol.DeliveryReceipt(nil))
 	envelopeBytes         = domain.SizeOfAll(protocol.Envelope{})
 	messageIDBytes        = domain.SizeOfAll(protocol.MessageID(""))
+	messageIdentityBytes  = domain.SizeOfAll(messageIdentity{})
 	sessionBytes          = domain.SizeOfAll(domain.PeerAddress(""), peerSession{})
 	peerHealthBytes       = domain.SizeOfAll(domain.PeerAddress(""), peerHealth{})
 	connEntryBytes        = domain.SizeOfAll(netcore.ConnID(0), connEntry{})
@@ -81,7 +82,9 @@ var (
 	observedIPPeerBytes   = domain.SizeOfAll(domain.PeerAddress(""), []domain.PeerIP(nil))
 	knownIdentityBytes    = domain.SizeOfAll(domain.PeerIdentity{}, time.Time{})
 	receiptDedupKeyBytes  = domain.SizeOfAll([16]byte{})
-	relayStateBytes       = domain.SizeOfAll("", relayForwardState{})
+	// One exact primary key plus one exact per-ID candidate index entry.
+	// Outer index/map metadata remains excluded, as do all map buckets.
+	relayStateBytes       = domain.SizeOfAll(domain.MessageRef{}, relayForwardState{}, domain.MessageRef{}, (*relayForwardState)(nil))
 	trustContactBytes     = domain.SizeOfAll("", trustedContact{})
 	trustRecordBytes      = domain.SizeOfAll(trustRecordKey{}, trustedIdentityRecord{})
 	identityCooldownBytes = domain.SizeOfAll(domain.PeerIdentity{}, time.Time{})
@@ -472,8 +475,8 @@ func (s *Service) deliveryUsage() domain.SubsystemUsage {
 		domain.NewResourceGauge("relay_retry", relayRetry, relayAttemptBytes),
 		domain.NewResourceGauge("outbound_deliveries", outbound, outboundBytes),
 		domain.NewResourceGauge("awaiting_receipt", awaiting, deliveryRetryBytes),
-		domain.NewResourceGauge("frozen_deliveries", frozen, messageIDBytes),
-		domain.NewResourceGauge("never_emitted_marks", neverEmitted, messageIDBytes),
+		domain.NewResourceGauge("frozen_deliveries", frozen, messageIdentityBytes),
+		domain.NewResourceGauge("never_emitted_marks", neverEmitted, messageIdentityBytes),
 	)
 }
 

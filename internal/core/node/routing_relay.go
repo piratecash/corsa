@@ -109,14 +109,14 @@ func (s *Service) onRelayHopAckTimeout(state relayForwardState) {
 		// HopAckRemainingTicks, so reaching this branch is a sign
 		// the call-site stamping logic drifted. Log so we notice.
 		log.Debug().
-			Str("id", state.MessageID).
+			Str("id", state.Message.ID).
 			Str("recipient", state.Recipient.String()).
 			Msg("relay_hop_ack_timeout_empty_forwarded_to")
 		return
 	}
 	if state.Recipient.IsZero() {
 		log.Debug().
-			Str("id", state.MessageID).
+			Str("id", state.Message.ID).
 			Str("forwarded_to", string(state.ForwardedTo)).
 			Msg("relay_hop_ack_timeout_empty_recipient")
 		return
@@ -137,7 +137,7 @@ func (s *Service) onRelayHopAckTimeout(state relayForwardState) {
 			failoverFrom = domain.PeerIdentityFromWire(string(state.ForwardedTo))
 		}
 		log.Debug().
-			Str("id", state.MessageID).
+			Str("id", state.Message.ID).
 			Str("recipient", state.Recipient.String()).
 			Str("forwarded_to", string(state.ForwardedTo)).
 			Msg("relay_hop_ack_timeout_unattributed")
@@ -161,7 +161,7 @@ func (s *Service) onRelayHopAckTimeout(state relayForwardState) {
 	release()
 
 	log.Debug().
-		Str("id", state.MessageID).
+		Str("id", state.Message.ID).
 		Str("recipient", state.Recipient.String()).
 		Str("next_hop", nextHopIdentity.String()).
 		Int("budget_seconds", defaultHopAckBudgetSeconds).
@@ -218,7 +218,7 @@ func (s *Service) onRelayHopAckTimeout(state relayForwardState) {
 func (s *Service) tryFailoverRelay(state relayForwardState, failedUplink domain.PeerIdentity) {
 	if state.FrameLine == "" {
 		log.Debug().
-			Str("id", state.MessageID).
+			Str("id", state.Message.ID).
 			Str("recipient", state.Recipient.String()).
 			Msg("relay_failover_skipped_no_frame")
 		return
@@ -228,14 +228,14 @@ func (s *Service) tryFailoverRelay(state relayForwardState, failedUplink domain.
 	// and a concurrent recordFailoverRetry from a different
 	// hop-ack-timeout fire (different MessageID, same address)
 	// could have advanced our limit while we were not looking.
-	currentAttempt, present := s.relayStates.retryAttemptCountFor(state.MessageID)
+	currentAttempt, present := s.relayStates.retryAttemptCountFor(state.Message)
 	if !present {
 		// TTL eviction beat us between callback fire and now.
 		return
 	}
 	if currentAttempt >= MaxFailoverRetries {
 		log.Debug().
-			Str("id", state.MessageID).
+			Str("id", state.Message.ID).
 			Str("recipient", state.Recipient.String()).
 			Int("retry_attempt", currentAttempt).
 			Int("max", MaxFailoverRetries).
@@ -258,7 +258,7 @@ func (s *Service) tryFailoverRelay(state relayForwardState, failedUplink domain.
 		// converge. Phase 0 overload gate documented in
 		// docs/cluster-mesh-architecture-plan.md §0.2.
 		log.Debug().
-			Str("id", state.MessageID).
+			Str("id", state.Message.ID).
 			Str("recipient", state.Recipient.String()).
 			Msg("relay_failover_skipped_overload")
 		return
@@ -268,7 +268,7 @@ func (s *Service) tryFailoverRelay(state relayForwardState, failedUplink domain.
 	if err != nil {
 		log.Warn().
 			Err(err).
-			Str("id", state.MessageID).
+			Str("id", state.Message.ID).
 			Str("recipient", state.Recipient.String()).
 			Msg("relay_failover_skipped_unparseable_frame")
 		return
@@ -317,7 +317,7 @@ func (s *Service) tryFailoverRelay(state relayForwardState, failedUplink domain.
 		// forwarding and TableRouter paths uphold.
 		if s.routeIsBlockedByQuarantine(route.NextHop, route.Hops) {
 			log.Debug().
-				Str("id", state.MessageID).
+				Str("id", state.Message.ID).
 				Str("recipient", state.Recipient.String()).
 				Str("next_hop", route.NextHop.String()).
 				Int("hops", route.Hops).
@@ -336,18 +336,18 @@ func (s *Service) tryFailoverRelay(state relayForwardState, failedUplink domain.
 		// re-armed hop-ack budget has something to resend or gossip
 		// when it elapses — a late ack for the abandoned uplink may
 		// have released the stored copy while we were sending.
-		if !s.relayStates.recordFailoverRetry(state.MessageID, address, via, state.FrameLine) {
+		if !s.relayStates.recordFailoverRetry(state.Message, address, via, state.FrameLine) {
 			// TTL evicted between send and bookkeeping. The
 			// frame is already on the wire; the receiver will
 			// dedupe by ID if the original arrived too.
 			log.Debug().
-				Str("id", state.MessageID).
+				Str("id", state.Message.ID).
 				Str("recipient", state.Recipient.String()).
 				Msg("relay_failover_state_evicted_after_send")
 			return
 		}
 		log.Info().
-			Str("id", state.MessageID).
+			Str("id", state.Message.ID).
 			Str("recipient", state.Recipient.String()).
 			Str("failed_uplink", failedUplink.String()).
 			Str("retry_uplink", route.NextHop.String()).
@@ -359,7 +359,7 @@ func (s *Service) tryFailoverRelay(state relayForwardState, failedUplink domain.
 	}
 
 	log.Debug().
-		Str("id", state.MessageID).
+		Str("id", state.Message.ID).
 		Str("recipient", state.Recipient.String()).
 		Str("failed_uplink", failedUplink.String()).
 		Int("candidates_considered", len(routes)).
@@ -397,7 +397,7 @@ func (s *Service) failoverGossipFallback(state relayForwardState, failedUplink d
 	if err != nil {
 		log.Debug().
 			Err(err).
-			Str("id", state.MessageID).
+			Str("id", state.Message.ID).
 			Str("recipient", state.Recipient.String()).
 			Msg("relay_failover_gossip_skipped_unparseable_frame")
 		return
@@ -421,14 +421,14 @@ func (s *Service) failoverGossipFallback(state relayForwardState, failedUplink d
 	forwardedTo, _ := s.relayViaGossip(frame, excludeAddr)
 	if forwardedTo == "" {
 		log.Debug().
-			Str("id", state.MessageID).
+			Str("id", state.Message.ID).
 			Str("recipient", state.Recipient.String()).
 			Str("failed_uplink", failedUplink.String()).
 			Msg("relay_failover_gossip_no_candidates")
 		return
 	}
 	log.Info().
-		Str("id", state.MessageID).
+		Str("id", state.Message.ID).
 		Str("recipient", state.Recipient.String()).
 		Str("failed_uplink", failedUplink.String()).
 		Str("gossip_first_target", string(forwardedTo)).
@@ -770,7 +770,7 @@ func (s *Service) sendTableRoutedRelayToAddressWithR2a(ctx context.Context, addr
 		}
 		// Persist relay state — mirrors what sendRelayMessage does for outbound.
 		stored := s.relayStates.store(&relayForwardState{
-			MessageID:            string(msg.ID),
+			Message:              envelopeRef(msg),
 			PreviousHop:          "",
 			ReceiptForwardTo:     "",
 			ForwardedTo:          address,

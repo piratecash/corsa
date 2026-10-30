@@ -192,15 +192,30 @@ func (s *Store) ClearNeverEmitted(ctx context.Context, ids []domain.MessageID) e
 }
 
 func (s *Store) updateEmissionMarks(ctx context.Context, ids []domain.MessageID, prefix, what string) error {
-	for start := 0; start < len(ids); start += emissionMarkBatch {
-		end := min(start+emissionMarkBatch, len(ids))
-		chunk := ids[start:end]
+	refs := make([]domain.MessageRef, 0, len(ids))
+	for _, id := range ids {
+		ref, found, err := uniqueMessageRef(ctx, s.db, string(id))
+		if err != nil {
+			return err
+		}
+		if found {
+			refs = append(refs, ref)
+		}
+	}
+	return s.updateEmissionRefMarks(ctx, refs, prefix, what)
+}
+
+func (s *Store) updateEmissionRefMarks(ctx context.Context, refs []domain.MessageRef, prefix, what string) error {
+	prefix = strings.ReplaceAll(prefix, "id IN (", "(topic,id,sender,recipient) IN (")
+	for start := 0; start < len(refs); start += emissionMarkBatch {
+		end := min(start+emissionMarkBatch, len(refs))
+		chunk := refs[start:end]
 
 		placeholders := make([]string, 0, len(chunk))
-		args := make([]any, 0, len(chunk))
-		for _, id := range chunk {
-			placeholders = append(placeholders, "?")
-			args = append(args, string(id))
+		args := make([]any, 0, 4*len(chunk))
+		for _, ref := range chunk {
+			placeholders = append(placeholders, "(?,?,?,?)")
+			args = append(args, ref.Topic, ref.ID, ref.Sender, ref.Recipient)
 		}
 		if _, err := s.db.ExecContext(ctx, prefix+strings.Join(placeholders, ", ")+`)`, args...); err != nil {
 			return fmt.Errorf("chatlog: %s for %d messages: %w", what, len(chunk), err)
@@ -212,3 +227,54 @@ func (s *Store) updateEmissionMarks(ctx context.Context, ids []domain.MessageID,
 // emissionMarkBatch bounds one UPDATE so a backlog replay cannot build a
 // statement with more placeholders than SQLite takes.
 const emissionMarkBatch = 128
+
+func (s *Store) MarkNeverEmittedRefs(ctx context.Context, refs []domain.MessageRef) error {
+	// A metadata blob that is not a JSON OBJECT is replaced wholesale:
+	// json_set on a non-object returns it unchanged while still counting
+	// the row as affected, so the mark would be reported written without
+	// landing. Same guard as MarkDecryptFailed.
+	return s.updateEmissionRefMarks(ctx, refs, `
+		UPDATE messages
+		SET metadata = json_set(
+			CASE WHEN metadata IS NULL OR NOT json_valid(metadata) OR json_type(metadata) <> 'object'
+			     THEN '{}' ELSE metadata END,
+			'`+metadataNeverEmitted+`', json('true'))
+		WHERE id IN (`, "mark never-emitted")
+}
+
+func (s *Store) MarkOnWireRefs(ctx context.Context, refs []domain.MessageRef) error {
+	// A metadata blob that is not a JSON OBJECT is replaced wholesale:
+	// json_set on a non-object returns it unchanged while still counting
+	// the row as affected, so the stamp would be reported written without
+	// landing. Same guard as MarkDecryptFailed.
+	//
+	// The predicate keeps this off the rows that already carry it, so a
+	// re-send of a confirmed message pays no write.
+	//
+	// Compared against 0 and not against json('true'): json_extract
+	// returns SQLite's INTEGER 1/0 for a JSON boolean, so
+	// `json_extract(...) IS NOT json('true')` compares an integer with the
+	// TEXT "true" and is therefore true for every row — the predicate
+	// silently did nothing. COALESCE folds "absent" and "false" into the
+	// same 0, which is exactly the set that still needs the write.
+	return s.updateEmissionRefMarks(ctx, refs, `
+		UPDATE messages
+		SET metadata = json_set(
+			CASE WHEN metadata IS NULL OR NOT json_valid(metadata) OR json_type(metadata) <> 'object'
+			     THEN '{}' ELSE metadata END,
+			'`+metadataOnWire+`', json('true'))
+		WHERE COALESCE(json_extract(
+			CASE WHEN json_valid(metadata) AND json_type(metadata) = 'object'
+			     THEN metadata ELSE '{}' END,
+			'`+metadataOnWire+`'), 0) = 0
+		  AND id IN (`, "mark on-wire")
+}
+
+func (s *Store) ClearNeverEmittedRefs(ctx context.Context, refs []domain.MessageRef) error {
+	return s.updateEmissionRefMarks(ctx, refs, `
+		UPDATE messages
+		SET metadata = json_remove(metadata, '`+metadataNeverEmitted+`')
+		WHERE json_valid(metadata) AND json_type(metadata) = 'object'
+		  AND json_extract(metadata, '`+metadataNeverEmitted+`') IS NOT NULL
+		  AND id IN (`, "clear never-emitted")
+}

@@ -56,7 +56,7 @@ type pendingDownload struct {
 // destination, and an erasure that replaced its list instead of adding to it
 // would forget a file it had not managed to unlink yet.
 type pendingCleanup struct {
-	FileID domain.FileID
+	Ref domain.MessageRef
 	// TransmitHashes are the sender-side content-addressed blobs, each erased
 	// only when nothing else references it.
 	TransmitHashes []string
@@ -194,13 +194,13 @@ func (m *Manager) noteCleanupLocked(intent pendingCleanup) {
 		return
 	}
 	if m.pendingCleanups == nil {
-		m.pendingCleanups = make(map[domain.FileID]*pendingCleanup, 1)
+		m.pendingCleanups = make(map[domain.MessageRef]*pendingCleanup, 1)
 	}
-	existing, ok := m.pendingCleanups[intent.FileID]
+	existing, ok := m.pendingCleanups[intent.Ref]
 	if !ok {
 		copied := intent.clone()
 		copied.gen++
-		m.pendingCleanups[intent.FileID] = &copied
+		m.pendingCleanups[intent.Ref] = &copied
 		return
 	}
 	// A second deletion of the same file id ADDS to what is owed. It may name a
@@ -239,9 +239,9 @@ func (m *Manager) noteCleanupLocked(intent pendingCleanup) {
 // to settle, because whoever holds the attempt will settle it.
 func (m *Manager) attemptCleanup(intent pendingCleanup) (pendingCleanup, bool, bool) {
 	m.mu.Lock()
-	claimed := m.claimCleanupLocked(intent.FileID)
+	claimed := m.claimCleanupLocked(intent.Ref)
 	if claimed {
-		if current, ok := m.pendingCleanups[intent.FileID]; ok {
+		if current, ok := m.pendingCleanups[intent.Ref]; ok {
 			// The generation of what is owed NOW, which may already include
 			// paths this caller's own intent did not name. Cloned, because from
 			// here it is read with the mutex released.
@@ -259,18 +259,18 @@ func (m *Manager) attemptCleanup(intent pendingCleanup) (pendingCleanup, bool, b
 // claimCleanupLocked reserves the only attempt an intent may have in flight and
 // says whether this caller got it. releaseCleanupLocked gives it back. Caller
 // MUST hold m.mu for both.
-func (m *Manager) claimCleanupLocked(fileID domain.FileID) bool {
+func (m *Manager) claimCleanupLocked(fileID domain.MessageRef) bool {
 	if _, running := m.runningCleanups[fileID]; running {
 		return false
 	}
 	if m.runningCleanups == nil {
-		m.runningCleanups = make(map[domain.FileID]struct{}, 1)
+		m.runningCleanups = make(map[domain.MessageRef]struct{}, 1)
 	}
 	m.runningCleanups[fileID] = struct{}{}
 	return true
 }
 
-func (m *Manager) releaseCleanupLocked(fileID domain.FileID) {
+func (m *Manager) releaseCleanupLocked(fileID domain.MessageRef) {
 	delete(m.runningCleanups, fileID)
 }
 
@@ -283,7 +283,7 @@ func (m *Manager) releaseCleanupLocked(fileID domain.FileID) {
 // blob must not be forgotten because the download succeeded.
 func (m *Manager) runCleanupIntent(intent pendingCleanup) (pendingCleanup, bool) {
 	remaining := pendingCleanup{
-		FileID:        intent.FileID,
+		Ref:           intent.Ref,
 		NotedAt:       intent.NotedAt,
 		Attempts:      intent.Attempts + 1,
 		NextAttemptAt: time.Now().Add(cleanupRetryDelay(intent.Attempts)),
@@ -296,17 +296,17 @@ func (m *Manager) runCleanupIntent(intent pendingCleanup) (pendingCleanup, bool)
 		}
 		if err := m.store.PurgeUnreferenced(hash); err != nil {
 			remaining.TransmitHashes, _ = addString(remaining.TransmitHashes, hash)
-			log.Warn().Err(err).Str("file_id", logID(string(intent.FileID))).
+			log.Warn().Err(err).Str("file_id", logID(intent.Ref.ID)).
 				Msg("file_transfer: transmit blob of a deleted message is still on disk")
 		}
 	}
 	for _, download := range intent.Downloads {
-		if left, keep := m.eraseDownload(intent.FileID, download); keep {
+		if left, keep := m.eraseDownload(intent.Ref, download); keep {
 			remaining.Downloads, _ = addDownload(remaining.Downloads, left)
 		}
 	}
 	for _, partial := range intent.Partials {
-		if left := m.erasePartial(intent.FileID, partial); left != "" {
+		if left := m.erasePartial(intent.Ref, partial); left != "" {
 			remaining.Partials, _ = addString(remaining.Partials, left)
 		}
 	}
@@ -325,11 +325,11 @@ func (m *Manager) runCleanupIntent(intent pendingCleanup) (pendingCleanup, bool)
 // again on the next attempt, and it settles itself — the new download either
 // renames the partial away when it completes, or goes and leaves the path to
 // this erasure.
-func (m *Manager) erasePartial(fileID domain.FileID, partial string) string {
+func (m *Manager) erasePartial(fileID domain.MessageRef, partial string) string {
 	// This file id's .part stripe FIRST — the lock every writer, verifier and
 	// canceller of that file takes — and then the namespace, so the two
 	// orderings of the download directory are the one ordering.
-	releasePartial := m.lockPartial(fileID)
+	releasePartial := m.lockPartialPath(partial)
 	defer releasePartial()
 
 	m.downloadNamespaceMu.Lock()
@@ -342,13 +342,13 @@ func (m *Manager) erasePartial(fileID domain.FileID, partial string) string {
 	// deleted message that stays on the disk for good.
 	if _, err := os.Lstat(partial); err != nil {
 		if !os.IsNotExist(err) {
-			log.Warn().Err(err).Str("file_id", logID(string(fileID))).
+			log.Warn().Err(err).Str("file_id", logID(fileID.ID)).
 				Msg("file_transfer: cannot tell whether the partial download is still there")
 			return partial
 		}
 		// The unlink still has to be durable, whoever made it.
 		if err := syncDirectory(filepath.Dir(partial)); err != nil && !errors.Is(err, os.ErrNotExist) {
-			log.Warn().Err(err).Str("file_id", logID(string(fileID))).
+			log.Warn().Err(err).Str("file_id", logID(fileID.ID)).
 				Msg("file_transfer: the removal of the partial download is not on disk yet")
 			return partial
 		}
@@ -356,15 +356,21 @@ func (m *Manager) erasePartial(fileID domain.FileID, partial string) string {
 	}
 
 	m.mu.Lock()
-	_, live := m.receiverMaps[fileID]
+	live := false
+	for _, mapping := range m.receiverMaps {
+		if filepath.Clean(mapping.PartialPath) == filepath.Clean(partial) {
+			live = true
+			break
+		}
+	}
 	m.mu.Unlock()
 	if live {
-		deletionLog().Debug().Str("file_id", logID(string(fileID))).
+		deletionLog().Debug().Str("file_id", logID(fileID.ID)).
 			Msg("file_transfer: a transfer is registered for this id again; its partial is not this erasure's to take")
 		return partial
 	}
 	if err := m.eraseInDownloadDir(partial); err != nil {
-		log.Warn().Err(err).Str("file_id", logID(string(fileID))).
+		log.Warn().Err(err).Str("file_id", logID(fileID.ID)).
 			Msg("file_transfer: partial download of a deleted message is still on disk")
 		return partial
 	}
@@ -378,7 +384,7 @@ func (m *Manager) erasePartial(fileID domain.FileID, partial string) string {
 // was to record. Resolving it here — at the attempt, after a restart if need be
 // — is what finds the file a verifier renamed into place after the mapping that
 // knew about it was already gone.
-func (m *Manager) eraseDownload(fileID domain.FileID, download pendingDownload) (pendingDownload, bool) {
+func (m *Manager) eraseDownload(fileID domain.MessageRef, download pendingDownload) (pendingDownload, bool) {
 	path := download.Path
 	if path == "" {
 		path = resolveExistingDownload(m.downloadDir, download.Name, download.Hash)
@@ -403,7 +409,7 @@ func (m *Manager) eraseDownload(fileID domain.FileID, download pendingDownload) 
 	case erasureOwnedByAnother:
 		// Another message still shows this file, and takes it along when it
 		// goes. Nothing left for this erasure to do.
-		deletionLog().Debug().Str("file_id", logID(string(fileID))).
+		deletionLog().Debug().Str("file_id", logID(fileID.ID)).
 			Msg("file_transfer: the downloaded file belongs to another message as well; only the mapping went")
 		return pendingDownload{}, false
 	case erasureMayBeClaimed:
@@ -417,7 +423,7 @@ func (m *Manager) eraseDownload(fileID domain.FileID, download pendingDownload) 
 	default:
 		if err := m.eraseInDownloadDir(path); err != nil {
 			download.Path = path
-			log.Warn().Err(err).Str("file_id", logID(string(fileID))).
+			log.Warn().Err(err).Str("file_id", logID(fileID.ID)).
 				Msg("file_transfer: download of a deleted message is still on disk")
 			return download, true
 		}
@@ -471,8 +477,8 @@ func (m *Manager) eraseInDownloadDir(path string) error {
 // through flushCleanupsLocked before returning to its own idle state.
 func (m *Manager) settleCleanupLocked(remaining pendingCleanup, done bool) {
 	// The claim goes back here, at the one place every attempt ends.
-	m.releaseCleanupLocked(remaining.FileID)
-	if current, ok := m.pendingCleanups[remaining.FileID]; ok && current.gen != remaining.gen {
+	m.releaseCleanupLocked(remaining.Ref)
+	if current, ok := m.pendingCleanups[remaining.Ref]; ok && current.gen != remaining.gen {
 		// The intent was added to while this attempt was running — another
 		// deletion of the same file id named paths this attempt never saw.
 		// Its outcome describes work that is no longer the whole of what is
@@ -483,10 +489,10 @@ func (m *Manager) settleCleanupLocked(remaining pendingCleanup, done bool) {
 		return
 	}
 	if done {
-		delete(m.pendingCleanups, remaining.FileID)
+		delete(m.pendingCleanups, remaining.Ref)
 	} else {
 		copied := remaining
-		m.pendingCleanups[remaining.FileID] = &copied
+		m.pendingCleanups[remaining.Ref] = &copied
 	}
 	m.cleanupsDirty = true
 }
@@ -553,7 +559,7 @@ func (m *Manager) tickPendingCleanups() {
 		}
 		// Skipped rather than queued: an attempt is already running for this
 		// intent, and a second one would only race it to write the outcome.
-		if !m.claimCleanupLocked(intent.FileID) {
+		if !m.claimCleanupLocked(intent.Ref) {
 			continue
 		}
 		due = append(due, intent.clone())

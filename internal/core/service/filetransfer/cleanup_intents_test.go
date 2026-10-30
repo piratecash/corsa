@@ -37,8 +37,9 @@ func newCleanupIntentManager(t *testing.T) (*Manager, string, string) {
 		t.Fatalf("NewFileStore: %v", err)
 	}
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		store:        store,
 		downloadDir:  downloadDir,
 		mappingsPath: filepath.Join(dir, "transfers.json"),
@@ -64,7 +65,9 @@ func TestAnErasureIsNotFinishedUntilTheDirectoryIsOnDisk(t *testing.T) {
 	if err := os.WriteFile(completed, []byte("bytes of a deleted message"), 0o600); err != nil {
 		t.Fatalf("prepare the download: %v", err)
 	}
-	m.receiverMaps[fileID] = &receiverFileMapping{
+	m.receiverMaps[ftIncomingRef(m, fileID, domaintest.ID("bob"))] = &receiverFileMapping{
+		Ref:           ftIncomingRef(m, fileID, domaintest.ID("bob")),
+		PartialPath:   partialDownloadPath(m.downloadDir, fileID),
 		FileID:        fileID,
 		FileName:      "receipt.pdf",
 		Sender:        domaintest.ID("bob"),
@@ -87,7 +90,7 @@ func TestAnErasureIsNotFinishedUntilTheDirectoryIsOnDisk(t *testing.T) {
 		t.Fatal("the directory was never flushed after the unlink")
 	}
 	m.mu.Lock()
-	intent, owed := m.pendingCleanups[fileID]
+	intent, owed := m.pendingCleanups[ftIncomingRef(m, fileID, domaintest.ID("bob"))]
 	m.mu.Unlock()
 	if !owed {
 		t.Fatal("the erasure was reported as finished although the directory entry may still be on disk")
@@ -116,7 +119,9 @@ func TestRemovingAContactKeepsTheFileAnotherChatShows(t *testing.T) {
 	}
 	alice, carol := domaintest.ID("alice"), domaintest.ID("carol")
 	for id, sender := range map[domain.FileID]domain.PeerIdentity{fromAlice: alice, fromCarol: carol} {
-		m.receiverMaps[id] = &receiverFileMapping{
+		m.receiverMaps[ftIncomingRef(m, id, sender)] = &receiverFileMapping{
+			Ref:           ftIncomingRef(m, id, sender),
+			PartialPath:   partialDownloadPath(m.downloadDir, id),
 			FileID:        id,
 			FileName:      "agenda.pdf",
 			Sender:        sender,
@@ -132,8 +137,8 @@ func TestRemovingAContactKeepsTheFileAnotherChatShows(t *testing.T) {
 		t.Fatalf("removing a contact erased the file another chat shows: %v", err)
 	}
 	m.mu.Lock()
-	_, aliceGone := m.receiverMaps[fromAlice]
-	_, carolKept := m.receiverMaps[fromCarol]
+	_, aliceGone := m.receiverMaps[ftIncomingRef(m, fromAlice, alice)]
+	_, carolKept := m.receiverMaps[ftIncomingRef(m, fromCarol, carol)]
 	m.mu.Unlock()
 	if aliceGone {
 		t.Error("the removed contact kept its mapping")
@@ -164,7 +169,9 @@ func TestARetryAfterAFailedFlushStillOwesTheErasure(t *testing.T) {
 	if err := os.WriteFile(completed, []byte("bytes of a deleted message"), 0o600); err != nil {
 		t.Fatalf("prepare the download: %v", err)
 	}
-	m.receiverMaps[fileID] = &receiverFileMapping{
+	m.receiverMaps[ftIncomingRef(m, fileID, domaintest.ID("bob"))] = &receiverFileMapping{
+		Ref:           ftIncomingRef(m, fileID, domaintest.ID("bob")),
+		PartialPath:   partialDownloadPath(m.downloadDir, fileID),
 		FileID:        fileID,
 		FileName:      "invoice.pdf",
 		Sender:        domaintest.ID("bob"),
@@ -190,11 +197,11 @@ func TestARetryAfterAFailedFlushStillOwesTheErasure(t *testing.T) {
 		t.Fatalf("the fixture did not unlink the file: err=%v", err)
 	}
 	m.mu.Lock()
-	intent, owed := m.pendingCleanups[fileID]
+	intent, owed := m.pendingCleanups[ftIncomingRef(m, fileID, domaintest.ID("bob"))]
 	if owed {
 		// Due now, so the tick below picks it up.
 		intent.NextAttemptAt = time.Now().Add(-time.Minute)
-		m.pendingCleanups[fileID] = intent
+		m.pendingCleanups[ftIncomingRef(m, fileID, domaintest.ID("bob"))] = intent
 	}
 	m.mu.Unlock()
 	if !owed {
@@ -207,7 +214,7 @@ func TestARetryAfterAFailedFlushStillOwesTheErasure(t *testing.T) {
 		t.Error("the retry did not flush the directory: it took ENOENT for a finished erasure")
 	}
 	m.mu.Lock()
-	_, stillOwed := m.pendingCleanups[fileID]
+	_, stillOwed := m.pendingCleanups[ftIncomingRef(m, fileID, domaintest.ID("bob"))]
 	m.mu.Unlock()
 	if !stillOwed {
 		t.Fatal("the retry reported success over a directory entry that was never flushed")
@@ -216,14 +223,14 @@ func TestARetryAfterAFailedFlushStillOwesTheErasure(t *testing.T) {
 	// And once the flush goes through, the erasure is finished.
 	failing = false
 	m.mu.Lock()
-	intent = m.pendingCleanups[fileID]
+	intent = m.pendingCleanups[ftIncomingRef(m, fileID, domaintest.ID("bob"))]
 	intent.NextAttemptAt = time.Now().Add(-time.Minute)
-	m.pendingCleanups[fileID] = intent
+	m.pendingCleanups[ftIncomingRef(m, fileID, domaintest.ID("bob"))] = intent
 	m.mu.Unlock()
 	m.tickPendingCleanups()
 
 	m.mu.Lock()
-	_, owedAfterFlush := m.pendingCleanups[fileID]
+	_, owedAfterFlush := m.pendingCleanups[ftIncomingRef(m, fileID, domaintest.ID("bob"))]
 	m.mu.Unlock()
 	if owedAfterFlush {
 		t.Error("a flushed erasure is still owed")
@@ -251,7 +258,9 @@ func TestADownloadInFlightKeepsTheFileItIsAboutToClaim(t *testing.T) {
 	if err := os.WriteFile(shared, []byte("the same bytes in both chats"), 0o600); err != nil {
 		t.Fatalf("prepare the shared download: %v", err)
 	}
-	m.receiverMaps[fromAlice] = &receiverFileMapping{
+	m.receiverMaps[ftIncomingRef(m, fromAlice, domaintest.ID("alice"))] = &receiverFileMapping{
+		Ref:           ftIncomingRef(m, fromAlice, domaintest.ID("alice")),
+		PartialPath:   partialDownloadPath(m.downloadDir, fromAlice),
 		FileID:        fromAlice,
 		FileName:      "contract.pdf",
 		FileHash:      hash,
@@ -261,13 +270,15 @@ func TestADownloadInFlightKeepsTheFileItIsAboutToClaim(t *testing.T) {
 		CreatedAt:     time.Now(),
 	}
 	// Carol's copy: every chunk in, hash being verified, no path yet.
-	m.receiverMaps[fromCarol] = &receiverFileMapping{
-		FileID:    fromCarol,
-		FileName:  "contract.pdf",
-		FileHash:  hash,
-		Sender:    domaintest.ID("carol"),
-		State:     receiverVerifying,
-		CreatedAt: time.Now(),
+	m.receiverMaps[ftIncomingRef(m, fromCarol, domaintest.ID("carol"))] = &receiverFileMapping{
+		Ref:         ftIncomingRef(m, fromCarol, domaintest.ID("carol")),
+		PartialPath: partialDownloadPath(m.downloadDir, fromCarol),
+		FileID:      fromCarol,
+		FileName:    "contract.pdf",
+		FileHash:    hash,
+		Sender:      domaintest.ID("carol"),
+		State:       receiverVerifying,
+		CreatedAt:   time.Now(),
 	}
 
 	m.CleanupTransferByMessageID(fromAlice)
@@ -276,8 +287,8 @@ func TestADownloadInFlightKeepsTheFileItIsAboutToClaim(t *testing.T) {
 		t.Fatalf("the file Carol's download is about to claim was erased: %v", err)
 	}
 	m.mu.Lock()
-	_, carolKept := m.receiverMaps[fromCarol]
-	intent, owed := m.pendingCleanups[fromAlice]
+	_, carolKept := m.receiverMaps[ftIncomingRef(m, fromCarol, domaintest.ID("carol"))]
+	intent, owed := m.pendingCleanups[ftIncomingRef(m, fromAlice, domaintest.ID("alice"))]
 	m.mu.Unlock()
 	if !carolKept {
 		t.Error("the other conversation lost its mapping")
@@ -292,10 +303,10 @@ func TestADownloadInFlightKeepsTheFileItIsAboutToClaim(t *testing.T) {
 	// Carol's download gives up. Nothing is going to claim the path any more,
 	// so the retry finishes what the first attempt could not.
 	m.mu.Lock()
-	delete(m.receiverMaps, fromCarol)
-	pending := m.pendingCleanups[fromAlice]
+	delete(m.receiverMaps, ftIncomingRef(m, fromCarol, domaintest.ID("carol")))
+	pending := m.pendingCleanups[ftIncomingRef(m, fromAlice, domaintest.ID("alice"))]
 	pending.NextAttemptAt = time.Now().Add(-time.Minute)
-	m.pendingCleanups[fromAlice] = pending
+	m.pendingCleanups[ftIncomingRef(m, fromAlice, domaintest.ID("alice"))] = pending
 	m.mu.Unlock()
 	m.tickPendingCleanups()
 
@@ -303,7 +314,7 @@ func TestADownloadInFlightKeepsTheFileItIsAboutToClaim(t *testing.T) {
 		t.Errorf("the file outlived every message that held it: err=%v", err)
 	}
 	m.mu.Lock()
-	_, stillOwed := m.pendingCleanups[fromAlice]
+	_, stillOwed := m.pendingCleanups[ftIncomingRef(m, fromAlice, domaintest.ID("alice"))]
 	m.mu.Unlock()
 	if stillOwed {
 		t.Error("a finished erasure is still owed")
@@ -334,23 +345,25 @@ func TestTheSuffixedCopyIsRecognisedAsTheSameFile(t *testing.T) {
 
 	m.mu.Lock()
 	if m.pendingCleanups == nil {
-		m.pendingCleanups = make(map[domain.FileID]*pendingCleanup)
+		m.pendingCleanups = make(map[domain.MessageRef]*pendingCleanup)
 	}
-	m.pendingCleanups[deleted] = &pendingCleanup{
-		FileID:        deleted,
+	m.pendingCleanups[ftIncomingRef(m, deleted, domaintest.ID("cleanup-fixture-former-sender"))] = &pendingCleanup{
+		Ref:           ftIncomingRef(m, deleted, domaintest.ID("cleanup-fixture-former-sender")),
 		Downloads:     []pendingDownload{{Path: suffixed, Hash: hash}},
 		NotedAt:       time.Now().Add(-time.Hour),
 		NextAttemptAt: time.Now().Add(-time.Minute),
 	}
 	// The other chat is receiving the same file. Its mapping carries the plain
 	// name, and it will land on the suffixed path.
-	m.receiverMaps[inFlight] = &receiverFileMapping{
-		FileID:    inFlight,
-		FileName:  "report.pdf",
-		FileHash:  hash,
-		Sender:    domaintest.ID("carol"),
-		State:     receiverVerifying,
-		CreatedAt: time.Now(),
+	m.receiverMaps[ftIncomingRef(m, inFlight, domaintest.ID("carol"))] = &receiverFileMapping{
+		Ref:         ftIncomingRef(m, inFlight, domaintest.ID("carol")),
+		PartialPath: partialDownloadPath(m.downloadDir, inFlight),
+		FileID:      inFlight,
+		FileName:    "report.pdf",
+		FileHash:    hash,
+		Sender:      domaintest.ID("carol"),
+		State:       receiverVerifying,
+		CreatedAt:   time.Now(),
 	}
 	m.mu.Unlock()
 
@@ -360,7 +373,7 @@ func TestTheSuffixedCopyIsRecognisedAsTheSameFile(t *testing.T) {
 		t.Fatalf("the file the other download is about to claim was erased: %v", err)
 	}
 	m.mu.Lock()
-	_, owed := m.pendingCleanups[deleted]
+	_, owed := m.pendingCleanups[ftIncomingRef(m, deleted, domaintest.ID("cleanup-fixture-former-sender"))]
 	m.mu.Unlock()
 	if !owed {
 		t.Error("the erasure was written off although the file is still there")
@@ -385,10 +398,10 @@ func TestAnErasureAndAFinishingDownloadDoNotOverlap(t *testing.T) {
 	}
 	m.mu.Lock()
 	if m.pendingCleanups == nil {
-		m.pendingCleanups = make(map[domain.FileID]*pendingCleanup)
+		m.pendingCleanups = make(map[domain.MessageRef]*pendingCleanup)
 	}
-	m.pendingCleanups[fileID] = &pendingCleanup{
-		FileID:        fileID,
+	m.pendingCleanups[ftIncomingRef(m, fileID, domaintest.ID("cleanup-fixture-former-sender"))] = &pendingCleanup{
+		Ref:           ftIncomingRef(m, fileID, domaintest.ID("cleanup-fixture-former-sender")),
 		Downloads:     []pendingDownload{{Path: erased}},
 		NotedAt:       time.Now().Add(-time.Hour),
 		NextAttemptAt: time.Now().Add(-time.Minute),
@@ -448,23 +461,25 @@ func TestADownloadOfDifferentContentDoesNotHoldTheErasure(t *testing.T) {
 
 	m.mu.Lock()
 	if m.pendingCleanups == nil {
-		m.pendingCleanups = make(map[domain.FileID]*pendingCleanup)
+		m.pendingCleanups = make(map[domain.MessageRef]*pendingCleanup)
 	}
-	m.pendingCleanups[deleted] = &pendingCleanup{
-		FileID:        deleted,
+	m.pendingCleanups[ftIncomingRef(m, deleted, domaintest.ID("cleanup-fixture-former-sender"))] = &pendingCleanup{
+		Ref:           ftIncomingRef(m, deleted, domaintest.ID("cleanup-fixture-former-sender")),
 		Downloads:     []pendingDownload{{Path: erased, Hash: hashA}},
 		NotedAt:       time.Now().Add(-time.Hour),
 		NextAttemptAt: time.Now().Add(-time.Minute),
 	}
 	// Another peer is sending a DIFFERENT file that happens to be called the
 	// same thing.
-	m.receiverMaps[unrelated] = &receiverFileMapping{
-		FileID:    unrelated,
-		FileName:  "report.pdf",
-		FileHash:  hashC,
-		Sender:    domaintest.ID("carol"),
-		State:     receiverDownloading,
-		CreatedAt: time.Now(),
+	m.receiverMaps[ftIncomingRef(m, unrelated, domaintest.ID("carol"))] = &receiverFileMapping{
+		Ref:         ftIncomingRef(m, unrelated, domaintest.ID("carol")),
+		PartialPath: partialDownloadPath(m.downloadDir, unrelated),
+		FileID:      unrelated,
+		FileName:    "report.pdf",
+		FileHash:    hashC,
+		Sender:      domaintest.ID("carol"),
+		State:       receiverDownloading,
+		CreatedAt:   time.Now(),
 	}
 	m.mu.Unlock()
 
@@ -474,8 +489,8 @@ func TestADownloadOfDifferentContentDoesNotHoldTheErasure(t *testing.T) {
 		t.Errorf("an unrelated download of the same name kept the deleted attachment on disk: err=%v", err)
 	}
 	m.mu.Lock()
-	_, owed := m.pendingCleanups[deleted]
-	_, transferKept := m.receiverMaps[unrelated]
+	_, owed := m.pendingCleanups[ftIncomingRef(m, deleted, domaintest.ID("cleanup-fixture-former-sender"))]
+	_, transferKept := m.receiverMaps[ftIncomingRef(m, unrelated, domaintest.ID("carol"))]
 	m.mu.Unlock()
 	if owed {
 		t.Error("the erasure is still owed although nothing claims the file")
@@ -549,16 +564,16 @@ func TestOnlyOneAttemptRunsPerErasure(t *testing.T) {
 	}
 	m.mu.Lock()
 	if m.pendingCleanups == nil {
-		m.pendingCleanups = make(map[domain.FileID]*pendingCleanup)
+		m.pendingCleanups = make(map[domain.MessageRef]*pendingCleanup)
 	}
-	m.pendingCleanups[fileID] = &pendingCleanup{
-		FileID:        fileID,
+	m.pendingCleanups[ftIncomingRef(m, fileID, domaintest.ID("cleanup-fixture-former-sender"))] = &pendingCleanup{
+		Ref:           ftIncomingRef(m, fileID, domaintest.ID("cleanup-fixture-former-sender")),
 		Downloads:     []pendingDownload{{Path: path}},
 		NotedAt:       time.Now().Add(-time.Hour),
 		NextAttemptAt: time.Now().Add(-time.Minute),
 	}
 	// An attempt is already in flight for it.
-	claimed := m.claimCleanupLocked(fileID)
+	claimed := m.claimCleanupLocked(ftIncomingRef(m, fileID, domaintest.ID("cleanup-fixture-former-sender")))
 	m.mu.Unlock()
 	if !claimed {
 		t.Fatal("the fixture could not claim the attempt")
@@ -570,8 +585,8 @@ func TestOnlyOneAttemptRunsPerErasure(t *testing.T) {
 		t.Fatalf("the tick ran a second attempt at an erasure already in flight: %v", err)
 	}
 	m.mu.Lock()
-	_, owed := m.pendingCleanups[fileID]
-	m.releaseCleanupLocked(fileID)
+	_, owed := m.pendingCleanups[ftIncomingRef(m, fileID, domaintest.ID("cleanup-fixture-former-sender"))]
+	m.releaseCleanupLocked(ftIncomingRef(m, fileID, domaintest.ID("cleanup-fixture-former-sender")))
 	m.mu.Unlock()
 	if !owed {
 		t.Fatal("the tick settled an intent whose attempt it never ran")
@@ -604,15 +619,15 @@ func TestALateOutcomeDoesNotRetireWorkAddedSinceItStarted(t *testing.T) {
 
 	m.mu.Lock()
 	if m.pendingCleanups == nil {
-		m.pendingCleanups = make(map[domain.FileID]*pendingCleanup)
+		m.pendingCleanups = make(map[domain.MessageRef]*pendingCleanup)
 	}
-	m.noteCleanupLocked(pendingCleanup{FileID: fileID, Downloads: []pendingDownload{{Path: first}}, NotedAt: time.Now()})
-	running := *m.pendingCleanups[fileID]
+	m.noteCleanupLocked(pendingCleanup{Ref: ftIncomingRef(m, fileID, domaintest.ID("cleanup-fixture-former-sender")), Downloads: []pendingDownload{{Path: first}}, NotedAt: time.Now()})
+	running := *m.pendingCleanups[ftIncomingRef(m, fileID, domaintest.ID("cleanup-fixture-former-sender"))]
 	// The attempt starts; meanwhile a second deletion adds another path.
-	m.noteCleanupLocked(pendingCleanup{FileID: fileID, Downloads: []pendingDownload{{Path: second}}, NotedAt: time.Now()})
+	m.noteCleanupLocked(pendingCleanup{Ref: ftIncomingRef(m, fileID, domaintest.ID("cleanup-fixture-former-sender")), Downloads: []pendingDownload{{Path: second}}, NotedAt: time.Now()})
 	// The first attempt reports that everything it knew about is gone.
-	m.settleCleanupLocked(pendingCleanup{FileID: fileID, gen: running.gen, NextAttemptAt: time.Now()}, true)
-	intent, owed := m.pendingCleanups[fileID]
+	m.settleCleanupLocked(pendingCleanup{Ref: ftIncomingRef(m, fileID, domaintest.ID("cleanup-fixture-former-sender")), gen: running.gen, NextAttemptAt: time.Now()}, true)
+	intent, owed := m.pendingCleanups[ftIncomingRef(m, fileID, domaintest.ID("cleanup-fixture-former-sender"))]
 	m.mu.Unlock()
 
 	if !owed {
@@ -639,19 +654,19 @@ func TestAReNotedErasureCarriesItsOwnHash(t *testing.T) {
 	)
 	m.mu.Lock()
 	if m.pendingCleanups == nil {
-		m.pendingCleanups = make(map[domain.FileID]*pendingCleanup)
+		m.pendingCleanups = make(map[domain.MessageRef]*pendingCleanup)
 	}
 	m.noteCleanupLocked(pendingCleanup{
-		FileID:    fileID,
+		Ref:       ftIncomingRef(m, fileID, domaintest.ID("cleanup-fixture-former-sender")),
 		Downloads: []pendingDownload{{Path: filepath.Join(downloadDir, "old.pdf"), Hash: hashA}},
 		NotedAt:   time.Now(),
 	})
 	m.noteCleanupLocked(pendingCleanup{
-		FileID:    fileID,
+		Ref:       ftIncomingRef(m, fileID, domaintest.ID("cleanup-fixture-former-sender")),
 		Downloads: []pendingDownload{{Path: filepath.Join(downloadDir, "new.pdf"), Hash: hashB}},
 		NotedAt:   time.Now(),
 	})
-	intent := *m.pendingCleanups[fileID]
+	intent := *m.pendingCleanups[ftIncomingRef(m, fileID, domaintest.ID("cleanup-fixture-former-sender"))]
 	m.mu.Unlock()
 
 	if len(intent.Downloads) != 2 {
@@ -691,13 +706,15 @@ func TestAFileTheVerifierWroteIsErasedWithoutAPathToNameIt(t *testing.T) {
 	if err := os.WriteFile(written, content, 0o600); err != nil {
 		t.Fatalf("simulate the verifier's rename: %v", err)
 	}
-	m.receiverMaps[fileID] = &receiverFileMapping{
-		FileID:    fileID,
-		FileName:  "invoice.pdf",
-		FileHash:  hash,
-		Sender:    domaintest.ID("bob"),
-		State:     receiverVerifying,
-		CreatedAt: time.Now(),
+	m.receiverMaps[ftIncomingRef(m, fileID, domaintest.ID("bob"))] = &receiverFileMapping{
+		Ref:         ftIncomingRef(m, fileID, domaintest.ID("bob")),
+		PartialPath: partialDownloadPath(m.downloadDir, fileID),
+		FileID:      fileID,
+		FileName:    "invoice.pdf",
+		FileHash:    hash,
+		Sender:      domaintest.ID("bob"),
+		State:       receiverVerifying,
+		CreatedAt:   time.Now(),
 	}
 
 	m.CleanupTransferByMessageID(fileID)
@@ -706,7 +723,7 @@ func TestAFileTheVerifierWroteIsErasedWithoutAPathToNameIt(t *testing.T) {
 		t.Errorf("the file the verifier wrote is still on disk: err=%v", err)
 	}
 	m.mu.Lock()
-	_, owed := m.pendingCleanups[fileID]
+	_, owed := m.pendingCleanups[ftIncomingRef(m, fileID, domaintest.ID("bob"))]
 	m.mu.Unlock()
 	if owed {
 		t.Error("a finished erasure is still owed")
@@ -733,10 +750,10 @@ func TestARestartFindsTheFileByNameAndContent(t *testing.T) {
 
 	m.mu.Lock()
 	if m.pendingCleanups == nil {
-		m.pendingCleanups = make(map[domain.FileID]*pendingCleanup)
+		m.pendingCleanups = make(map[domain.MessageRef]*pendingCleanup)
 	}
-	m.pendingCleanups[fileID] = &pendingCleanup{
-		FileID:        fileID,
+	m.pendingCleanups[ftIncomingRef(m, fileID, domaintest.ID("cleanup-fixture-former-sender"))] = &pendingCleanup{
+		Ref:           ftIncomingRef(m, fileID, domaintest.ID("cleanup-fixture-former-sender")),
 		Downloads:     []pendingDownload{{Name: "statement.pdf", Hash: hash}},
 		NotedAt:       time.Now().Add(-time.Hour),
 		NextAttemptAt: time.Now().Add(-time.Minute),
@@ -749,7 +766,7 @@ func TestARestartFindsTheFileByNameAndContent(t *testing.T) {
 		t.Errorf("the orphaned file was not found by name and content: err=%v", err)
 	}
 	m.mu.Lock()
-	_, owed := m.pendingCleanups[fileID]
+	_, owed := m.pendingCleanups[ftIncomingRef(m, fileID, domaintest.ID("cleanup-fixture-former-sender"))]
 	m.mu.Unlock()
 	if owed {
 		t.Error("the erasure is still owed after the file was removed")
@@ -789,11 +806,11 @@ func TestACancelledVerifierLeavesAnErasureBehindWhenItCannotUnlink(t *testing.T)
 	// Which is what the caller acts on: the file becomes work owed.
 	m.mu.Lock()
 	m.noteCleanupLocked(pendingCleanup{
-		FileID:    fileID,
+		Ref:       ftIncomingRef(m, fileID, domaintest.ID("cleanup-fixture-former-sender")),
 		Downloads: []pendingDownload{{Path: path, Name: "cancelled-late.pdf"}},
 		NotedAt:   time.Now(),
 	})
-	_, owed := m.pendingCleanups[fileID]
+	_, owed := m.pendingCleanups[ftIncomingRef(m, fileID, domaintest.ID("cleanup-fixture-former-sender"))]
 	m.mu.Unlock()
 	if !owed {
 		t.Fatal("nothing was left to finish the erasure")
@@ -802,7 +819,7 @@ func TestACancelledVerifierLeavesAnErasureBehindWhenItCannotUnlink(t *testing.T)
 	// And the retry finishes it once the disk cooperates.
 	syncDirectory = restore
 	m.mu.Lock()
-	m.pendingCleanups[fileID].NextAttemptAt = time.Now().Add(-time.Minute)
+	m.pendingCleanups[ftIncomingRef(m, fileID, domaintest.ID("cleanup-fixture-former-sender"))].NextAttemptAt = time.Now().Add(-time.Minute)
 	m.mu.Unlock()
 	m.tickPendingCleanups()
 
@@ -811,14 +828,14 @@ func TestACancelledVerifierLeavesAnErasureBehindWhenItCannotUnlink(t *testing.T)
 	}
 }
 
-// TestTheIntentFileIsReadableBothWays pins the shape on disk across a version
-// step in either direction.
+// TestTheIntentFileIsReadableBothWays pins the legacy fields on disk and
+// their current-writer roundtrip, without claiming an old loader accepts v2.
 //
 // A file written by an older build names one file of each kind in a field of
 // its own; this build keeps lists. Reading has to fold the old form in, or a
 // deleted message's files come back unowned after an upgrade. Writing has to
-// keep filling the old fields in while there is one of each, or a DOWNGRADE
-// loads the file, finds no work, and leaves those files on disk forever.
+// keep filling the old fields in while there is one of each. These field
+// assertions do not override the old loader's version-1 refusal of a v2 file.
 func TestTheIntentFileIsReadableBothWays(t *testing.T) {
 	m, _, downloadDir := newCleanupIntentManager(t)
 
@@ -842,7 +859,7 @@ func TestTheIntentFileIsReadableBothWays(t *testing.T) {
 
 	const fileID = domain.FileID("99999990-9999-4999-8999-999999999990")
 	m.mu.Lock()
-	intent, ok := m.pendingCleanups[fileID]
+	intent, ok := m.pendingCleanups[domain.MessageRef{Topic: "file-cleanup-legacy", ID: string(fileID)}]
 	m.mu.Unlock()
 	if !ok {
 		t.Fatal("an erasure written by an older build was not read back")
@@ -884,7 +901,7 @@ func TestTheIntentFileIsReadableBothWays(t *testing.T) {
 	m.mu.Unlock()
 	m.loadMappings()
 	m.mu.Lock()
-	reloaded, ok := m.pendingCleanups[fileID]
+	reloaded, ok := m.pendingCleanups[domain.MessageRef{Topic: "file-cleanup-legacy", ID: string(fileID)}]
 	m.mu.Unlock()
 	if !ok {
 		t.Fatal("the erasure did not survive its own round trip")
@@ -904,7 +921,7 @@ func TestAnAttemptReadsItsOwnCopyOfTheWork(t *testing.T) {
 	t.Parallel()
 
 	original := pendingCleanup{
-		FileID:         "cccccccd-cccc-4ccc-8ccc-cccccccccccd",
+		Ref:            domain.MessageRef{Topic: "dm", ID: string("cccccccd-cccc-4ccc-8ccc-cccccccccccd"), Sender: domaintest.ID("cleanup-fixture-former-sender").String(), Recipient: ftFixtureIdentity().Address},
 		TransmitHashes: []string{"hash-a"},
 		Downloads:      []pendingDownload{{Path: "/downloads/one.pdf"}},
 		Partials:       []string{"/downloads/partial/one.part"},
@@ -933,16 +950,16 @@ func TestWorkAddedDuringAnAttemptSurvivesIt(t *testing.T) {
 	const fileID = domain.FileID("aaaaaaab-aaaa-4aaa-8aaa-aaaaaaaaaaab")
 	m.mu.Lock()
 	if m.pendingCleanups == nil {
-		m.pendingCleanups = make(map[domain.FileID]*pendingCleanup)
+		m.pendingCleanups = make(map[domain.MessageRef]*pendingCleanup)
 	}
 	for i := range 8 {
 		m.noteCleanupLocked(pendingCleanup{
-			FileID:    fileID,
+			Ref:       ftIncomingRef(m, fileID, domaintest.ID("cleanup-fixture-former-sender")),
 			Downloads: []pendingDownload{{Path: filepath.Join(downloadDir, fmt.Sprintf("early-%d.pdf", i))}},
 			NotedAt:   time.Now(),
 		})
 	}
-	m.pendingCleanups[fileID].NextAttemptAt = time.Now().Add(-time.Minute)
+	m.pendingCleanups[ftIncomingRef(m, fileID, domaintest.ID("cleanup-fixture-former-sender"))].NextAttemptAt = time.Now().Add(-time.Minute)
 	m.mu.Unlock()
 
 	// The attempt is SLOWED from inside, so its walk over the work it was given
@@ -972,12 +989,12 @@ func TestWorkAddedDuringAnAttemptSurvivesIt(t *testing.T) {
 		// later deletion of the same file can learn the hash the earlier one
 		// did not know, and adding it rewrites that element in place.
 		m.noteCleanupLocked(pendingCleanup{
-			FileID:    fileID,
+			Ref:       ftIncomingRef(m, fileID, domaintest.ID("cleanup-fixture-former-sender")),
 			Downloads: []pendingDownload{{Path: filepath.Join(downloadDir, fmt.Sprintf("added-%d.pdf", i))}},
 			NotedAt:   time.Now(),
 		})
 		m.noteCleanupLocked(pendingCleanup{
-			FileID: fileID,
+			Ref: ftIncomingRef(m, fileID, domaintest.ID("cleanup-fixture-former-sender")),
 			Downloads: []pendingDownload{{
 				Path: filepath.Join(downloadDir, fmt.Sprintf("early-%d.pdf", i%8)),
 				Hash: fmt.Sprintf("%064d", i),
@@ -989,7 +1006,7 @@ func TestWorkAddedDuringAnAttemptSurvivesIt(t *testing.T) {
 	wg.Wait()
 
 	m.mu.Lock()
-	intent, owed := m.pendingCleanups[fileID]
+	intent, owed := m.pendingCleanups[ftIncomingRef(m, fileID, domaintest.ID("cleanup-fixture-former-sender"))]
 	m.mu.Unlock()
 	if !owed {
 		t.Fatal("the work added while the attempt ran was retired with it")
@@ -1014,17 +1031,19 @@ func TestAnAlreadyGonePartialFinishesTheErasure(t *testing.T) {
 
 	m.mu.Lock()
 	if m.pendingCleanups == nil {
-		m.pendingCleanups = make(map[domain.FileID]*pendingCleanup)
+		m.pendingCleanups = make(map[domain.MessageRef]*pendingCleanup)
 	}
-	m.pendingCleanups[fileID] = &pendingCleanup{
-		FileID:        fileID,
+	m.pendingCleanups[ftIncomingRef(m, fileID, domaintest.ID("bob"))] = &pendingCleanup{
+		Ref:           ftIncomingRef(m, fileID, domaintest.ID("bob")),
 		Partials:      []string{partial},
 		NotedAt:       time.Now().Add(-time.Hour),
 		NextAttemptAt: time.Now().Add(-time.Minute),
 	}
 	// The download that took the id since has finished: its .part was renamed
 	// away, and the mapping is still here.
-	m.receiverMaps[fileID] = &receiverFileMapping{
+	m.receiverMaps[ftIncomingRef(m, fileID, domaintest.ID("bob"))] = &receiverFileMapping{
+		Ref:           ftIncomingRef(m, fileID, domaintest.ID("bob")),
+		PartialPath:   partialDownloadPath(m.downloadDir, fileID),
 		FileID:        fileID,
 		FileName:      "again.pdf",
 		Sender:        domaintest.ID("bob"),
@@ -1037,7 +1056,7 @@ func TestAnAlreadyGonePartialFinishesTheErasure(t *testing.T) {
 	m.tickPendingCleanups()
 
 	m.mu.Lock()
-	_, owed := m.pendingCleanups[fileID]
+	_, owed := m.pendingCleanups[ftIncomingRef(m, fileID, domaintest.ID("bob"))]
 	m.mu.Unlock()
 	if owed {
 		t.Error("a note about a deleted message is kept although the file it names is gone")
@@ -1057,39 +1076,43 @@ func TestTheVerifierDoesNotTakeANewAttemptsPartial(t *testing.T) {
 
 	const fileID = domain.FileID("eeeeeeef-eeee-4eee-8eee-eeeeeeeeeeef")
 	mine := &receiverFileMapping{
-		FileID:     fileID,
-		FileName:   "again.pdf",
-		Sender:     domaintest.ID("bob"),
-		State:      receiverVerifying,
-		Generation: 7,
-		CreatedAt:  time.Now(),
+		Ref:         ftIncomingRef(m, fileID, domaintest.ID("bob")),
+		PartialPath: partialDownloadPath(m.downloadDir, fileID),
+		FileID:      fileID,
+		FileName:    "again.pdf",
+		Sender:      domaintest.ID("bob"),
+		State:       receiverVerifying,
+		Generation:  7,
+		CreatedAt:   time.Now(),
 	}
 
 	// Nobody owns the id: the partial was this verifier's and goes with it.
-	if stillOurs, takenOver := m.verifierStandingLocked(fileID, mine, 7); stillOurs || takenOver {
+	if stillOurs, takenOver := m.verifierStandingLocked(ftIncomingRef(m, fileID, domaintest.ID("bob")), mine, 7); stillOurs || takenOver {
 		t.Errorf("with no mapping: stillOurs=%v takenOver=%v, want false/false", stillOurs, takenOver)
 	}
 
 	// A new attempt registered for the same id: its file, not ours.
 	m.mu.Lock()
-	m.receiverMaps[fileID] = &receiverFileMapping{
-		FileID:     fileID,
-		FileName:   "again.pdf",
-		Sender:     domaintest.ID("bob"),
-		State:      receiverDownloading,
-		Generation: 8,
-		CreatedAt:  time.Now(),
+	m.receiverMaps[ftIncomingRef(m, fileID, domaintest.ID("bob"))] = &receiverFileMapping{
+		Ref:         ftIncomingRef(m, fileID, domaintest.ID("bob")),
+		PartialPath: partialDownloadPath(m.downloadDir, fileID),
+		FileID:      fileID,
+		FileName:    "again.pdf",
+		Sender:      domaintest.ID("bob"),
+		State:       receiverDownloading,
+		Generation:  8,
+		CreatedAt:   time.Now(),
 	}
 	m.mu.Unlock()
-	if stillOurs, takenOver := m.verifierStandingLocked(fileID, mine, 7); stillOurs || !takenOver {
+	if stillOurs, takenOver := m.verifierStandingLocked(ftIncomingRef(m, fileID, domaintest.ID("bob")), mine, 7); stillOurs || !takenOver {
 		t.Errorf("after a new attempt: stillOurs=%v takenOver=%v, want false/true", stillOurs, takenOver)
 	}
 
 	// And the verifier that still owns its transfer carries on.
 	m.mu.Lock()
-	m.receiverMaps[fileID] = mine
+	m.receiverMaps[ftIncomingRef(m, fileID, domaintest.ID("bob"))] = mine
 	m.mu.Unlock()
-	if stillOurs, takenOver := m.verifierStandingLocked(fileID, mine, 7); !stillOurs || takenOver {
+	if stillOurs, takenOver := m.verifierStandingLocked(ftIncomingRef(m, fileID, domaintest.ID("bob")), mine, 7); !stillOurs || takenOver {
 		t.Errorf("while it still owns the transfer: stillOurs=%v takenOver=%v, want true/false", stillOurs, takenOver)
 	}
 }
@@ -1118,35 +1141,41 @@ func TestAStaleResumeLeavesTheCurrentAttemptsPartialAlone(t *testing.T) {
 
 	// The transfer that owns the id now, at generation 9.
 	m.mu.Lock()
-	m.receiverMaps[fileID] = &receiverFileMapping{
-		FileID:     fileID,
-		FileName:   "current.pdf",
-		Sender:     domaintest.ID("bob"),
-		State:      receiverDownloading,
-		Generation: 9,
-		CreatedAt:  time.Now(),
+	m.receiverMaps[ftIncomingRef(m, fileID, domaintest.ID("bob"))] = &receiverFileMapping{
+		Ref:         ftIncomingRef(m, fileID, domaintest.ID("bob")),
+		PartialPath: partialDownloadPath(m.downloadDir, fileID),
+		FileID:      fileID,
+		FileName:    "current.pdf",
+		Sender:      domaintest.ID("bob"),
+		State:       receiverDownloading,
+		Generation:  9,
+		CreatedAt:   time.Now(),
 	}
 	m.mu.Unlock()
 
 	// A resume built before that, at generation 8.
-	m.truncatePartialFile(resumeSnapshot{fileID: fileID, truncatePartial: true}, 8)
+	m.truncatePartialFile(resumeSnapshot{
+		partialPath: partialDownloadPath(m.downloadDir, fileID), fileID: ftIncomingRef(m, fileID, domaintest.ID("bob")), truncatePartial: true}, 8)
 	if _, err := os.Stat(partial); err != nil {
 		t.Fatalf("a stale resume deleted the current attempt's partial: %v", err)
 	}
 
 	// And a failure cleanup built before it, likewise.
-	m.removeFailedPartial(receiverTickAction{fileID: fileID, generation: 8})
+	m.removeFailedPartial(receiverTickAction{
+		partialPath: partialDownloadPath(m.downloadDir, fileID), fileID: ftIncomingRef(m, fileID, domaintest.ID("bob")), generation: 8})
 	if _, err := os.Stat(partial); err != nil {
 		t.Fatalf("a stale failure cleanup deleted the current attempt's partial: %v", err)
 	}
 
 	// Both still do their job for the generation they belong to.
-	m.truncatePartialFile(resumeSnapshot{fileID: fileID, truncatePartial: true}, 9)
+	m.truncatePartialFile(resumeSnapshot{
+		partialPath: partialDownloadPath(m.downloadDir, fileID), fileID: ftIncomingRef(m, fileID, domaintest.ID("bob")), truncatePartial: true}, 9)
 	if _, err := os.Stat(partial); !os.IsNotExist(err) {
 		t.Errorf("the resume of the current attempt did not clear its partial: err=%v", err)
 	}
 	write()
-	m.removeFailedPartial(receiverTickAction{fileID: fileID, generation: 9})
+	m.removeFailedPartial(receiverTickAction{
+		partialPath: partialDownloadPath(m.downloadDir, fileID), fileID: ftIncomingRef(m, fileID, domaintest.ID("bob")), generation: 9})
 	if _, err := os.Stat(partial); !os.IsNotExist(err) {
 		t.Errorf("the failure cleanup of the current attempt did not clear its partial: err=%v", err)
 	}
@@ -1170,24 +1199,24 @@ func TestARepeatOfTheSameWorkIsNotARevision(t *testing.T) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.pendingCleanups == nil {
-		m.pendingCleanups = make(map[domain.FileID]*pendingCleanup)
+		m.pendingCleanups = make(map[domain.MessageRef]*pendingCleanup)
 	}
-	m.noteCleanupLocked(pendingCleanup{FileID: fileID, Partials: []string{partial}, NotedAt: time.Now()})
-	first := m.pendingCleanups[fileID].gen
+	m.noteCleanupLocked(pendingCleanup{Ref: ftIncomingRef(m, fileID, domaintest.ID("cleanup-fixture-former-sender")), Partials: []string{partial}, NotedAt: time.Now()})
+	first := m.pendingCleanups[ftIncomingRef(m, fileID, domaintest.ID("cleanup-fixture-former-sender"))].gen
 
 	// The same path again — nothing new is owed.
-	m.noteCleanupLocked(pendingCleanup{FileID: fileID, Partials: []string{partial}, NotedAt: time.Now()})
-	if got := m.pendingCleanups[fileID].gen; got != first {
+	m.noteCleanupLocked(pendingCleanup{Ref: ftIncomingRef(m, fileID, domaintest.ID("cleanup-fixture-former-sender")), Partials: []string{partial}, NotedAt: time.Now()})
+	if got := m.pendingCleanups[ftIncomingRef(m, fileID, domaintest.ID("cleanup-fixture-former-sender"))].gen; got != first {
 		t.Errorf("a repeat of the same work counted as a revision: %d → %d", first, got)
 	}
 
 	// Something genuinely new does count.
 	m.noteCleanupLocked(pendingCleanup{
-		FileID:    fileID,
+		Ref:       ftIncomingRef(m, fileID, domaintest.ID("cleanup-fixture-former-sender")),
 		Downloads: []pendingDownload{{Path: filepath.Join(downloadDir, "other.pdf")}},
 		NotedAt:   time.Now(),
 	})
-	if got := m.pendingCleanups[fileID].gen; got == first {
+	if got := m.pendingCleanups[ftIncomingRef(m, fileID, domaintest.ID("cleanup-fixture-former-sender"))].gen; got == first {
 		t.Error("new work did not count as a revision")
 	}
 }
@@ -1207,17 +1236,19 @@ func TestACancelHoldsTheIdWhileItResets(t *testing.T) {
 		t.Fatalf("prepare the partial: %v", err)
 	}
 	m.mu.Lock()
-	m.receiverMaps[fileID] = &receiverFileMapping{
-		FileID:     fileID,
-		FileName:   "in-flight.pdf",
-		Sender:     domaintest.ID("bob"),
-		State:      receiverDownloading,
-		Generation: 3,
-		CreatedAt:  time.Now(),
+	m.receiverMaps[ftIncomingRef(m, fileID, domaintest.ID("bob"))] = &receiverFileMapping{
+		Ref:         ftIncomingRef(m, fileID, domaintest.ID("bob")),
+		PartialPath: partialDownloadPath(m.downloadDir, fileID),
+		FileID:      fileID,
+		FileName:    "in-flight.pdf",
+		Sender:      domaintest.ID("bob"),
+		State:       receiverDownloading,
+		Generation:  3,
+		CreatedAt:   time.Now(),
 	}
 	m.mu.Unlock()
 
-	release := m.lockPartial(fileID)
+	release := m.lockPartialPath(partialDownloadPath(m.downloadDir, fileID))
 	cancelled := make(chan error, 1)
 	go func() { cancelled <- m.CancelDownload(fileID) }()
 	time.Sleep(20 * time.Millisecond)
@@ -1226,7 +1257,7 @@ func TestACancelHoldsTheIdWhileItResets(t *testing.T) {
 	// yet: a StartDownload here would write into the very file the cancel is
 	// about to remove.
 	m.mu.Lock()
-	state := m.receiverMaps[fileID].State
+	state := m.receiverMaps[ftIncomingRef(m, fileID, domaintest.ID("bob"))].State
 	m.mu.Unlock()
 	if state == receiverAvailable {
 		t.Error("the cancel published `available` before it held the file id")
@@ -1242,7 +1273,7 @@ func TestACancelHoldsTheIdWhileItResets(t *testing.T) {
 		t.Fatal("the cancel never finished")
 	}
 	m.mu.Lock()
-	state = m.receiverMaps[fileID].State
+	state = m.receiverMaps[ftIncomingRef(m, fileID, domaintest.ID("bob"))].State
 	m.mu.Unlock()
 	if state != receiverAvailable {
 		t.Errorf("state after the cancel = %s, want available", state)
@@ -1268,12 +1299,14 @@ func TestAResumeLeavesAChunkThatLandedFirstAlone(t *testing.T) {
 		t.Fatalf("prepare the partial: %v", err)
 	}
 	m.mu.Lock()
-	m.receiverMaps[fileID] = &receiverFileMapping{
-		FileID:     fileID,
-		FileName:   "resuming.pdf",
-		Sender:     domaintest.ID("bob"),
-		State:      receiverDownloading,
-		Generation: 4,
+	m.receiverMaps[ftIncomingRef(m, fileID, domaintest.ID("bob"))] = &receiverFileMapping{
+		Ref:         ftIncomingRef(m, fileID, domaintest.ID("bob")),
+		PartialPath: partialDownloadPath(m.downloadDir, fileID),
+		FileID:      fileID,
+		FileName:    "resuming.pdf",
+		Sender:      domaintest.ID("bob"),
+		State:       receiverDownloading,
+		Generation:  4,
 		// The chunk that arrived after the resume was decided.
 		NextOffset: 65536,
 		CreatedAt:  time.Now(),
@@ -1281,7 +1314,8 @@ func TestAResumeLeavesAChunkThatLandedFirstAlone(t *testing.T) {
 	m.mu.Unlock()
 
 	// The resume was decided when the file was to be restarted from zero.
-	m.truncatePartialFile(resumeSnapshot{fileID: fileID, truncatePartial: true, startOffset: 0}, 4)
+	m.truncatePartialFile(resumeSnapshot{
+		partialPath: partialDownloadPath(m.downloadDir, fileID), fileID: ftIncomingRef(m, fileID, domaintest.ID("bob")), truncatePartial: true, startOffset: 0}, 4)
 
 	if _, err := os.Stat(partial); err != nil {
 		t.Fatalf("the resume erased a chunk the transfer had already accepted: %v", err)
@@ -1290,15 +1324,17 @@ func TestAResumeLeavesAChunkThatLandedFirstAlone(t *testing.T) {
 	// And the resume itself is called off: its request would ask for bytes the
 	// transfer already has, and a failed send would roll the offset back over
 	// them.
-	if m.truncatePartialFile(resumeSnapshot{fileID: fileID, truncatePartial: true, startOffset: 0}, 4) {
+	if m.truncatePartialFile(resumeSnapshot{
+		partialPath: partialDownloadPath(m.downloadDir, fileID), fileID: ftIncomingRef(m, fileID, domaintest.ID("bob")), truncatePartial: true, startOffset: 0}, 4) {
 		t.Error("a resume built before that chunk was allowed to go ahead")
 	}
 
 	// With nothing accepted since, the same resume does clear the stale file.
 	m.mu.Lock()
-	m.receiverMaps[fileID].NextOffset = 0
+	m.receiverMaps[ftIncomingRef(m, fileID, domaintest.ID("bob"))].NextOffset = 0
 	m.mu.Unlock()
-	if !m.truncatePartialFile(resumeSnapshot{fileID: fileID, truncatePartial: true, startOffset: 0}, 4) {
+	if !m.truncatePartialFile(resumeSnapshot{
+		partialPath: partialDownloadPath(m.downloadDir, fileID), fileID: ftIncomingRef(m, fileID, domaintest.ID("bob")), truncatePartial: true, startOffset: 0}, 4) {
 		t.Error("a current resume was called off")
 	}
 	if _, err := os.Stat(partial); !os.IsNotExist(err) {
@@ -1327,17 +1363,17 @@ func TestLearningThePathOfAPathlessErasureMergesAndCounts(t *testing.T) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.pendingCleanups == nil {
-		m.pendingCleanups = make(map[domain.FileID]*pendingCleanup)
+		m.pendingCleanups = make(map[domain.MessageRef]*pendingCleanup)
 	}
 	m.noteCleanupLocked(pendingCleanup{
-		FileID:    fileID,
+		Ref:       ftIncomingRef(m, fileID, domaintest.ID("cleanup-fixture-former-sender")),
 		Downloads: []pendingDownload{{Name: "report.pdf", Hash: hash}},
 		NotedAt:   time.Now(),
 	})
-	before := m.pendingCleanups[fileID].gen
+	before := m.pendingCleanups[ftIncomingRef(m, fileID, domaintest.ID("cleanup-fixture-former-sender"))].gen
 
 	m.noteCleanupLocked(pendingCleanup{
-		FileID: fileID,
+		Ref: ftIncomingRef(m, fileID, domaintest.ID("cleanup-fixture-former-sender")),
 		Downloads: []pendingDownload{{
 			Path: filepath.Join(downloadDir, "report.pdf"),
 			Name: "report.pdf",
@@ -1346,7 +1382,7 @@ func TestLearningThePathOfAPathlessErasureMergesAndCounts(t *testing.T) {
 		NotedAt: time.Now(),
 	})
 
-	intent := m.pendingCleanups[fileID]
+	intent := m.pendingCleanups[ftIncomingRef(m, fileID, domaintest.ID("cleanup-fixture-former-sender"))]
 	if len(intent.Downloads) != 1 {
 		t.Fatalf("the same file is named twice: %+v", intent.Downloads)
 	}
@@ -1360,7 +1396,7 @@ func TestLearningThePathOfAPathlessErasureMergesAndCounts(t *testing.T) {
 	// A DIFFERENT path of the same name and content is a different file — the
 	// store writes the second copy beside the first — and stays its own work.
 	m.noteCleanupLocked(pendingCleanup{
-		FileID: fileID,
+		Ref: ftIncomingRef(m, fileID, domaintest.ID("cleanup-fixture-former-sender")),
 		Downloads: []pendingDownload{{
 			Path: filepath.Join(downloadDir, "report (a1b2c3).pdf"),
 			Name: "report.pdf",
@@ -1368,7 +1404,7 @@ func TestLearningThePathOfAPathlessErasureMergesAndCounts(t *testing.T) {
 		}},
 		NotedAt: time.Now(),
 	})
-	if got := len(m.pendingCleanups[fileID].Downloads); got != 2 {
+	if got := len(m.pendingCleanups[ftIncomingRef(m, fileID, domaintest.ID("cleanup-fixture-former-sender"))].Downloads); got != 2 {
 		t.Errorf("the intent names %d file(s), want both paths", got)
 	}
 }
@@ -1394,10 +1430,10 @@ func TestEveryoneWhoTouchesAPartialTakesTheSameLock(t *testing.T) {
 	}
 	m.mu.Lock()
 	if m.pendingCleanups == nil {
-		m.pendingCleanups = make(map[domain.FileID]*pendingCleanup)
+		m.pendingCleanups = make(map[domain.MessageRef]*pendingCleanup)
 	}
-	m.pendingCleanups[fileID] = &pendingCleanup{
-		FileID:        fileID,
+	m.pendingCleanups[ftIncomingRef(m, fileID, domaintest.ID("cleanup-fixture-former-sender"))] = &pendingCleanup{
+		Ref:           ftIncomingRef(m, fileID, domaintest.ID("cleanup-fixture-former-sender")),
 		Partials:      []string{partial},
 		NotedAt:       time.Now().Add(-time.Hour),
 		NextAttemptAt: time.Now().Add(-time.Minute),
@@ -1406,7 +1442,7 @@ func TestEveryoneWhoTouchesAPartialTakesTheSameLock(t *testing.T) {
 
 	// Somebody is working on that .part — a chunk handler, a verifier, a
 	// cancel: they all hold this.
-	release := m.lockPartial(fileID)
+	release := m.lockPartialPath(partialDownloadPath(m.downloadDir, fileID))
 
 	swept := make(chan struct{})
 	go func() {
@@ -1448,17 +1484,19 @@ func TestACancelWaitsForTheFileIdItIsResetting(t *testing.T) {
 		t.Fatalf("prepare the partial: %v", err)
 	}
 	m.mu.Lock()
-	m.receiverMaps[fileID] = &receiverFileMapping{
-		FileID:     fileID,
-		FileName:   "in-flight.pdf",
-		Sender:     domaintest.ID("bob"),
-		State:      receiverDownloading,
-		Generation: 3,
-		CreatedAt:  time.Now(),
+	m.receiverMaps[ftIncomingRef(m, fileID, domaintest.ID("bob"))] = &receiverFileMapping{
+		Ref:         ftIncomingRef(m, fileID, domaintest.ID("bob")),
+		PartialPath: partialDownloadPath(m.downloadDir, fileID),
+		FileID:      fileID,
+		FileName:    "in-flight.pdf",
+		Sender:      domaintest.ID("bob"),
+		State:       receiverDownloading,
+		Generation:  3,
+		CreatedAt:   time.Now(),
 	}
 	m.mu.Unlock()
 
-	release := m.lockPartial(fileID)
+	release := m.lockPartialPath(partialDownloadPath(m.downloadDir, fileID))
 	cancelled := make(chan error, 1)
 	go func() { cancelled <- m.CancelDownload(fileID) }()
 
@@ -1507,21 +1545,23 @@ func TestAPartialOfATransferThatWroteNothingIsStillOwed(t *testing.T) {
 
 	m.mu.Lock()
 	if m.pendingCleanups == nil {
-		m.pendingCleanups = make(map[domain.FileID]*pendingCleanup)
+		m.pendingCleanups = make(map[domain.MessageRef]*pendingCleanup)
 	}
-	m.pendingCleanups[fileID] = &pendingCleanup{
-		FileID:        fileID,
+	m.pendingCleanups[ftIncomingRef(m, fileID, domaintest.ID("bob"))] = &pendingCleanup{
+		Ref:           ftIncomingRef(m, fileID, domaintest.ID("bob")),
 		Partials:      []string{partial},
 		NotedAt:       time.Now().Add(-time.Hour),
 		NextAttemptAt: time.Now().Add(-time.Minute),
 	}
 	// Announced, nothing downloaded: this mapping has never touched the file.
-	m.receiverMaps[fileID] = &receiverFileMapping{
-		FileID:    fileID,
-		FileName:  "again.pdf",
-		Sender:    domaintest.ID("bob"),
-		State:     receiverAvailable,
-		CreatedAt: time.Now(),
+	m.receiverMaps[ftIncomingRef(m, fileID, domaintest.ID("bob"))] = &receiverFileMapping{
+		Ref:         ftIncomingRef(m, fileID, domaintest.ID("bob")),
+		PartialPath: partialDownloadPath(m.downloadDir, fileID),
+		FileID:      fileID,
+		FileName:    "again.pdf",
+		Sender:      domaintest.ID("bob"),
+		State:       receiverAvailable,
+		CreatedAt:   time.Now(),
 	}
 	m.mu.Unlock()
 
@@ -1531,7 +1571,7 @@ func TestAPartialOfATransferThatWroteNothingIsStillOwed(t *testing.T) {
 		t.Fatalf("the partial was erased under a registered transfer: %v", err)
 	}
 	m.mu.Lock()
-	intent, owed := m.pendingCleanups[fileID]
+	intent, owed := m.pendingCleanups[ftIncomingRef(m, fileID, domaintest.ID("bob"))]
 	m.mu.Unlock()
 	if !owed || len(intent.Partials) != 1 {
 		t.Fatalf("the erasure of the old partial was forgotten: owed=%v intent=%+v", owed, intent)
@@ -1539,8 +1579,8 @@ func TestAPartialOfATransferThatWroteNothingIsStillOwed(t *testing.T) {
 
 	// The new transfer goes away, and the next attempt finishes the job.
 	m.mu.Lock()
-	delete(m.receiverMaps, fileID)
-	m.pendingCleanups[fileID].NextAttemptAt = time.Now().Add(-time.Minute)
+	delete(m.receiverMaps, ftIncomingRef(m, fileID, domaintest.ID("bob")))
+	m.pendingCleanups[ftIncomingRef(m, fileID, domaintest.ID("bob"))].NextAttemptAt = time.Now().Add(-time.Minute)
 	m.mu.Unlock()
 	m.tickPendingCleanups()
 
@@ -1563,7 +1603,9 @@ func TestASecondDeletionDoesNotForgetTheFirstFile(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(stubborn, "blocker"), 0o700); err != nil {
 		t.Fatalf("prepare the undeletable path: %v", err)
 	}
-	m.receiverMaps[fileID] = &receiverFileMapping{
+	m.receiverMaps[ftIncomingRef(m, fileID, domaintest.ID("bob"))] = &receiverFileMapping{
+		Ref:           ftIncomingRef(m, fileID, domaintest.ID("bob")),
+		PartialPath:   partialDownloadPath(m.downloadDir, fileID),
 		FileID:        fileID,
 		FileName:      "stuck.pdf",
 		Sender:        domaintest.ID("bob"),
@@ -1574,7 +1616,7 @@ func TestASecondDeletionDoesNotForgetTheFirstFile(t *testing.T) {
 
 	m.CleanupTransferByMessageID(fileID)
 	m.mu.Lock()
-	_, owed := m.pendingCleanups[fileID]
+	_, owed := m.pendingCleanups[ftIncomingRef(m, fileID, domaintest.ID("bob"))]
 	m.mu.Unlock()
 	if !owed {
 		t.Fatal("the failed unlink left nothing behind")
@@ -1586,7 +1628,9 @@ func TestASecondDeletionDoesNotForgetTheFirstFile(t *testing.T) {
 	if err := os.WriteFile(second, []byte("the second file"), 0o600); err != nil {
 		t.Fatalf("prepare the second download: %v", err)
 	}
-	m.receiverMaps[fileID] = &receiverFileMapping{
+	m.receiverMaps[ftIncomingRef(m, fileID, domaintest.ID("bob"))] = &receiverFileMapping{
+		Ref:           ftIncomingRef(m, fileID, domaintest.ID("bob")),
+		PartialPath:   partialDownloadPath(m.downloadDir, fileID),
 		FileID:        fileID,
 		FileName:      "second.pdf",
 		Sender:        domaintest.ID("bob"),
@@ -1597,7 +1641,7 @@ func TestASecondDeletionDoesNotForgetTheFirstFile(t *testing.T) {
 	m.CleanupTransferByMessageID(fileID)
 
 	m.mu.Lock()
-	intent := *m.pendingCleanups[fileID]
+	intent := *m.pendingCleanups[ftIncomingRef(m, fileID, domaintest.ID("bob"))]
 	m.mu.Unlock()
 	paths := make(map[string]bool, len(intent.Downloads))
 	for _, download := range intent.Downloads {
@@ -1631,22 +1675,24 @@ func TestARetriedErasureLeavesALiveTransfersPartialAlone(t *testing.T) {
 
 	m.mu.Lock()
 	if m.pendingCleanups == nil {
-		m.pendingCleanups = make(map[domain.FileID]*pendingCleanup)
+		m.pendingCleanups = make(map[domain.MessageRef]*pendingCleanup)
 	}
 	// The erasure left over from the deleted message.
-	m.pendingCleanups[fileID] = &pendingCleanup{
-		FileID:        fileID,
+	m.pendingCleanups[ftIncomingRef(m, fileID, domaintest.ID("bob"))] = &pendingCleanup{
+		Ref:           ftIncomingRef(m, fileID, domaintest.ID("bob")),
 		Partials:      []string{partial},
 		NotedAt:       time.Now().Add(-time.Hour),
 		NextAttemptAt: time.Now().Add(-time.Minute),
 	}
 	// And the download registered for the same id since.
-	m.receiverMaps[fileID] = &receiverFileMapping{
-		FileID:    fileID,
-		FileName:  "again.pdf",
-		Sender:    domaintest.ID("bob"),
-		State:     receiverDownloading,
-		CreatedAt: time.Now(),
+	m.receiverMaps[ftIncomingRef(m, fileID, domaintest.ID("bob"))] = &receiverFileMapping{
+		Ref:         ftIncomingRef(m, fileID, domaintest.ID("bob")),
+		PartialPath: partialDownloadPath(m.downloadDir, fileID),
+		FileID:      fileID,
+		FileName:    "again.pdf",
+		Sender:      domaintest.ID("bob"),
+		State:       receiverDownloading,
+		CreatedAt:   time.Now(),
 	}
 	m.mu.Unlock()
 
@@ -1681,16 +1727,18 @@ func TestARetryAsksAgainWhoOwnsTheFile(t *testing.T) {
 	// once so it is still owed when the newcomer appears.
 	m.mu.Lock()
 	if m.pendingCleanups == nil {
-		m.pendingCleanups = make(map[domain.FileID]*pendingCleanup)
+		m.pendingCleanups = make(map[domain.MessageRef]*pendingCleanup)
 	}
-	m.pendingCleanups[deleted] = &pendingCleanup{
-		FileID:        deleted,
+	m.pendingCleanups[ftIncomingRef(m, deleted, domaintest.ID("cleanup-fixture-former-sender"))] = &pendingCleanup{
+		Ref:           ftIncomingRef(m, deleted, domaintest.ID("cleanup-fixture-former-sender")),
 		Downloads:     []pendingDownload{{Path: shared}},
 		NotedAt:       time.Now().Add(-time.Hour),
 		NextAttemptAt: time.Now().Add(-time.Minute),
 	}
 	// A message that arrived since, mapped onto the very same file.
-	m.receiverMaps[arrived] = &receiverFileMapping{
+	m.receiverMaps[ftIncomingRef(m, arrived, domaintest.ID("carol"))] = &receiverFileMapping{
+		Ref:           ftIncomingRef(m, arrived, domaintest.ID("carol")),
+		PartialPath:   partialDownloadPath(m.downloadDir, arrived),
 		FileID:        arrived,
 		FileName:      "slides.pdf",
 		Sender:        domaintest.ID("carol"),
@@ -1706,7 +1754,7 @@ func TestARetryAsksAgainWhoOwnsTheFile(t *testing.T) {
 		t.Fatalf("the retry erased a file that had acquired an owner since: %v", err)
 	}
 	m.mu.Lock()
-	_, stillOwed := m.pendingCleanups[deleted]
+	_, stillOwed := m.pendingCleanups[ftIncomingRef(m, deleted, domaintest.ID("cleanup-fixture-former-sender"))]
 	m.mu.Unlock()
 	if stillOwed {
 		t.Error("the erasure is still owed although the file now belongs to another message")
@@ -1732,7 +1780,9 @@ func TestTheSharedFileOfAnotherChatIsNotErased(t *testing.T) {
 		t.Fatalf("prepare the shared download: %v", err)
 	}
 	for id, peer := range map[domain.FileID]string{fromAlice: "alice", fromCarol: "carol"} {
-		m.receiverMaps[id] = &receiverFileMapping{
+		m.receiverMaps[ftIncomingRef(m, id, domaintest.ID(peer))] = &receiverFileMapping{
+			Ref:           ftIncomingRef(m, id, domaintest.ID(peer)),
+			PartialPath:   partialDownloadPath(m.downloadDir, id),
 			FileID:        id,
 			FileName:      "report.pdf",
 			Sender:        domaintest.ID(peer),
@@ -1749,9 +1799,9 @@ func TestTheSharedFileOfAnotherChatIsNotErased(t *testing.T) {
 		t.Fatalf("the file Carol's message still points at was erased: %v", err)
 	}
 	m.mu.Lock()
-	_, aliceGone := m.receiverMaps[fromAlice]
-	_, carolKept := m.receiverMaps[fromCarol]
-	_, owed := m.pendingCleanups[fromAlice]
+	_, aliceGone := m.receiverMaps[ftIncomingRef(m, fromAlice, domaintest.ID("alice"))]
+	_, carolKept := m.receiverMaps[ftIncomingRef(m, fromCarol, domaintest.ID("carol"))]
+	_, owed := m.pendingCleanups[ftIncomingRef(m, fromAlice, domaintest.ID("alice"))]
 	m.mu.Unlock()
 	if aliceGone {
 		t.Error("the mapping of the deleted message survived")
@@ -1786,7 +1836,9 @@ func TestUnfinishedErasureSurvivesRestart(t *testing.T) {
 		t.Fatalf("prepare undeletable path: %v", err)
 	}
 
-	m.receiverMaps[fileID] = &receiverFileMapping{
+	m.receiverMaps[ftIncomingRef(m, fileID, domaintest.ID("bob"))] = &receiverFileMapping{
+		Ref:           ftIncomingRef(m, fileID, domaintest.ID("bob")),
+		PartialPath:   partialDownloadPath(m.downloadDir, fileID),
 		FileID:        fileID,
 		FileName:      "photo.png",
 		Sender:        domaintest.ID("bob"),
@@ -1798,7 +1850,7 @@ func TestUnfinishedErasureSurvivesRestart(t *testing.T) {
 	m.CleanupTransferByMessageID(fileID)
 
 	m.mu.Lock()
-	_, owed := m.pendingCleanups[fileID]
+	_, owed := m.pendingCleanups[ftIncomingRef(m, fileID, domaintest.ID("bob"))]
 	m.mu.Unlock()
 	if !owed {
 		t.Fatal("a failed unlink left nothing behind; the file is now unreachable and unerasable")
@@ -1806,8 +1858,9 @@ func TestUnfinishedErasureSurvivesRestart(t *testing.T) {
 
 	// A fresh manager over the same file is what the next process sees.
 	restarted := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      m.localID,
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		store:        m.store,
 		downloadDir:  m.downloadDir,
 		mappingsPath: m.mappingsPath,
@@ -1815,7 +1868,7 @@ func TestUnfinishedErasureSurvivesRestart(t *testing.T) {
 	}
 	restarted.loadMappings()
 	restarted.mu.Lock()
-	intent, restored := restarted.pendingCleanups[fileID]
+	intent, restored := restarted.pendingCleanups[ftIncomingRef(restarted, fileID, domaintest.ID("bob"))]
 	restarted.mu.Unlock()
 	if !restored {
 		t.Fatal("the unfinished erasure did not survive the restart")
@@ -1832,7 +1885,7 @@ func TestUnfinishedErasureSurvivesRestart(t *testing.T) {
 	// is written out after each pass, schedule included — so the tick would
 	// otherwise skip it as not yet due. Wound back rather than waited out.
 	restarted.mu.Lock()
-	restarted.pendingCleanups[fileID].NextAttemptAt = time.Now().Add(-time.Second)
+	restarted.pendingCleanups[ftIncomingRef(restarted, fileID, domaintest.ID("bob"))].NextAttemptAt = time.Now().Add(-time.Second)
 	restarted.mu.Unlock()
 	restarted.tickPendingCleanups()
 
@@ -1840,7 +1893,7 @@ func TestUnfinishedErasureSurvivesRestart(t *testing.T) {
 		t.Errorf("the file of a deleted message is still on disk (err=%v)", err)
 	}
 	restarted.mu.Lock()
-	_, stillOwed := restarted.pendingCleanups[fileID]
+	_, stillOwed := restarted.pendingCleanups[ftIncomingRef(restarted, fileID, domaintest.ID("bob"))]
 	restarted.mu.Unlock()
 	if stillOwed {
 		t.Error("the intent outlived the erasure it asked for")
@@ -1851,6 +1904,9 @@ func TestUnfinishedErasureSurvivesRestart(t *testing.T) {
 // the ordinary path into a permanent bookkeeping cost.
 func TestSuccessfulErasureLeavesNoIntent(t *testing.T) {
 	m, transmitDir, downloadDir := newCleanupIntentManager(t)
+	// One self-addressed message can own both transfer roles. Keep the
+	// original single-intent artifact ordering under one exact full ref.
+	m.localID = ftFixtureIdentityFor(domaintest.ID("bob"))
 
 	const (
 		fileID = domain.FileID("22222222-2222-4222-8222-222222222222")
@@ -1868,12 +1924,15 @@ func TestSuccessfulErasureLeavesNoIntent(t *testing.T) {
 	m.store.mu.Lock()
 	m.store.refs[hash] = 1
 	m.store.mu.Unlock()
-	m.senderMaps[fileID] = &senderFileMapping{
+	m.senderMaps[ftOutgoingRef(m, fileID, domaintest.ID("bob"))] = &senderFileMapping{
+		Ref:    ftOutgoingRef(m, fileID, domaintest.ID("bob")),
 		FileID: fileID, FileHash: hash, FileName: "photo.png",
 		Recipient: domaintest.ID("bob"), State: senderAnnounced, CreatedAt: time.Now(),
 	}
-	m.receiverMaps[fileID] = &receiverFileMapping{
-		FileID: fileID, FileName: "photo.png", Sender: domaintest.ID("bob"),
+	m.receiverMaps[ftIncomingRef(m, fileID, domaintest.ID("bob"))] = &receiverFileMapping{
+		Ref:         ftIncomingRef(m, fileID, domaintest.ID("bob")),
+		PartialPath: partialDownloadPath(m.downloadDir, fileID),
+		FileID:      fileID, FileName: "photo.png", Sender: domaintest.ID("bob"),
 		State: receiverCompleted, CompletedPath: completed, CreatedAt: time.Now(),
 	}
 
@@ -1897,8 +1956,9 @@ func TestSuccessfulErasureLeavesNoIntent(t *testing.T) {
 	// deletion, sitting on disk until some later tick happens to rewrite the
 	// file — or for ever, if the user closes the application first.
 	restarted := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      m.localID,
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		store:        m.store,
 		downloadDir:  m.downloadDir,
 		mappingsPath: m.mappingsPath,
@@ -1906,7 +1966,7 @@ func TestSuccessfulErasureLeavesNoIntent(t *testing.T) {
 	}
 	restarted.loadMappings()
 	restarted.mu.Lock()
-	survived, stillThere := restarted.pendingCleanups[fileID]
+	survived, stillThere := restarted.pendingCleanups[ftIncomingRef(restarted, fileID, domaintest.ID("bob"))]
 	restarted.mu.Unlock()
 	if stillThere {
 		t.Errorf("a finished erasure is still recorded on disk after a restart: %+v", survived)
@@ -1961,6 +2021,9 @@ func TestPurgeUnreferencedLeavesASharedBlobAlone(t *testing.T) {
 // first, erase second — can be exercised rather than argued about.
 func TestNothingIsErasedUntilTheRecordIsOnDisk(t *testing.T) {
 	m, transmitDir, downloadDir := newCleanupIntentManager(t)
+	// One self-addressed message can own both transfer roles. Keep the
+	// original single-intent artifact ordering under one exact full ref.
+	m.localID = ftFixtureIdentityFor(domaintest.ID("bob"))
 
 	const (
 		fileID = domain.FileID("33333333-3333-4333-8333-333333333333")
@@ -1977,12 +2040,15 @@ func TestNothingIsErasedUntilTheRecordIsOnDisk(t *testing.T) {
 	m.store.mu.Lock()
 	m.store.refs[hash] = 1
 	m.store.mu.Unlock()
-	m.senderMaps[fileID] = &senderFileMapping{
+	m.senderMaps[ftOutgoingRef(m, fileID, domaintest.ID("bob"))] = &senderFileMapping{
+		Ref:    ftOutgoingRef(m, fileID, domaintest.ID("bob")),
 		FileID: fileID, FileHash: hash, FileName: "photo.png",
 		Recipient: domaintest.ID("bob"), State: senderAnnounced, CreatedAt: time.Now(),
 	}
-	m.receiverMaps[fileID] = &receiverFileMapping{
-		FileID: fileID, FileName: "photo.png", Sender: domaintest.ID("bob"),
+	m.receiverMaps[ftIncomingRef(m, fileID, domaintest.ID("bob"))] = &receiverFileMapping{
+		Ref:         ftIncomingRef(m, fileID, domaintest.ID("bob")),
+		PartialPath: partialDownloadPath(m.downloadDir, fileID),
+		FileID:      fileID, FileName: "photo.png", Sender: domaintest.ID("bob"),
 		State: receiverCompleted, CompletedPath: completed, CreatedAt: time.Now(),
 	}
 
@@ -2000,7 +2066,7 @@ func TestNothingIsErasedUntilTheRecordIsOnDisk(t *testing.T) {
 	}
 	m.mu.Lock()
 	dirty := m.cleanupsDirty
-	_, owed := m.pendingCleanups[fileID]
+	_, owed := m.pendingCleanups[ftIncomingRef(m, fileID, domaintest.ID("bob"))]
 	m.mu.Unlock()
 	if !owed || !dirty {
 		t.Fatalf("intent owed=%v dirty=%v; the erasure was forgotten instead of deferred", owed, dirty)
@@ -2036,15 +2102,17 @@ func TestStuckIntentBacksOff(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(completed, "blocker"), 0o700); err != nil {
 		t.Fatalf("prepare undeletable path: %v", err)
 	}
-	m.receiverMaps[fileID] = &receiverFileMapping{
-		FileID: fileID, FileName: "photo.png", Sender: domaintest.ID("bob"),
+	m.receiverMaps[ftIncomingRef(m, fileID, domaintest.ID("bob"))] = &receiverFileMapping{
+		Ref:         ftIncomingRef(m, fileID, domaintest.ID("bob")),
+		PartialPath: partialDownloadPath(m.downloadDir, fileID),
+		FileID:      fileID, FileName: "photo.png", Sender: domaintest.ID("bob"),
 		State: receiverCompleted, CompletedPath: completed, CreatedAt: time.Now(),
 	}
 
 	m.CleanupTransferByMessageID(fileID)
 
 	m.mu.Lock()
-	intent, owed := m.pendingCleanups[fileID]
+	intent, owed := m.pendingCleanups[ftIncomingRef(m, fileID, domaintest.ID("bob"))]
 	first := *intent
 	m.mu.Unlock()
 	if !owed {
@@ -2060,7 +2128,7 @@ func TestStuckIntentBacksOff(t *testing.T) {
 	// A tick before the intent comes due does nothing at all.
 	m.tickPendingCleanups()
 	m.mu.Lock()
-	unchanged := *m.pendingCleanups[fileID]
+	unchanged := *m.pendingCleanups[ftIncomingRef(m, fileID, domaintest.ID("bob"))]
 	m.mu.Unlock()
 	if unchanged.Attempts != first.Attempts {
 		t.Errorf("attempts = %d after an early tick, want %d", unchanged.Attempts, first.Attempts)
@@ -2068,12 +2136,12 @@ func TestStuckIntentBacksOff(t *testing.T) {
 
 	// Forced due, the retry runs and pushes the schedule further out.
 	m.mu.Lock()
-	m.pendingCleanups[fileID].NextAttemptAt = time.Now().Add(-time.Second)
+	m.pendingCleanups[ftIncomingRef(m, fileID, domaintest.ID("bob"))].NextAttemptAt = time.Now().Add(-time.Second)
 	m.mu.Unlock()
 	m.tickPendingCleanups()
 
 	m.mu.Lock()
-	second := *m.pendingCleanups[fileID]
+	second := *m.pendingCleanups[ftIncomingRef(m, fileID, domaintest.ID("bob"))]
 	m.mu.Unlock()
 	if second.Attempts != 2 {
 		t.Fatalf("attempts = %d, want 2", second.Attempts)
@@ -2093,6 +2161,9 @@ func TestStuckIntentBacksOff(t *testing.T) {
 // something a moment ago, in a file no checkpoint or migration ever touches.
 func TestErasingAnAttachmentWritesNothingToTheLog(t *testing.T) {
 	m, transmitDir, downloadDir := newCleanupIntentManager(t)
+	// One self-addressed message can own both transfer roles. Keep the
+	// original single-intent artifact ordering under one exact full ref.
+	m.localID = ftFixtureIdentityFor(domaintest.ID("bob"))
 
 	captured := captureFileTransferLog(t)
 
@@ -2111,12 +2182,15 @@ func TestErasingAnAttachmentWritesNothingToTheLog(t *testing.T) {
 	m.store.mu.Lock()
 	m.store.refs[hash] = 1
 	m.store.mu.Unlock()
-	m.senderMaps[fileID] = &senderFileMapping{
+	m.senderMaps[ftOutgoingRef(m, fileID, domaintest.ID("bob"))] = &senderFileMapping{
+		Ref:    ftOutgoingRef(m, fileID, domaintest.ID("bob")),
 		FileID: fileID, FileHash: hash, FileName: "holiday.png",
 		Recipient: domaintest.ID("bob"), State: senderAnnounced, CreatedAt: time.Now(),
 	}
-	m.receiverMaps[fileID] = &receiverFileMapping{
-		FileID: fileID, FileName: "holiday.png", Sender: domaintest.ID("bob"),
+	m.receiverMaps[ftIncomingRef(m, fileID, domaintest.ID("bob"))] = &receiverFileMapping{
+		Ref:         ftIncomingRef(m, fileID, domaintest.ID("bob")),
+		PartialPath: partialDownloadPath(m.downloadDir, fileID),
+		FileID:      fileID, FileName: "holiday.png", Sender: domaintest.ID("bob"),
 		State: receiverCompleted, CompletedPath: completed, CreatedAt: time.Now(),
 	}
 

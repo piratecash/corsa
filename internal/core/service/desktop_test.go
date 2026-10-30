@@ -290,10 +290,10 @@ func TestDecryptDirectMessagesMarksLifecycleStatuses(t *testing.T) {
 		{ID: "expired-1", Flag: "sender-delete", Timestamp: mustTime(t, "2026-03-19T10:03:00Z"), Sender: sender.Address, Recipient: recipient.Address, Body: ciphertext},
 		{ID: "sent-1", Flag: "sender-delete", Timestamp: mustTime(t, "2026-03-19T10:04:00Z"), Sender: sender.Address, Recipient: recipient.Address, Body: ciphertext},
 	}, nil, []PendingMessage{
-		{ID: "queued-1", Status: "queued"},
-		{ID: "retrying-1", Status: "retrying", Retries: 2},
-		{ID: "failed-1", Status: "failed", Retries: 5, Error: "max retries exceeded"},
-		{ID: "expired-1", Status: "expired", Error: "pending queue expired"},
+		{ID: "queued-1", Recipient: recipient.Address, Status: "queued"},
+		{ID: "retrying-1", Recipient: recipient.Address, Status: "retrying", Retries: 2},
+		{ID: "failed-1", Recipient: recipient.Address, Status: "failed", Retries: 5, Error: "max retries exceeded"},
+		{ID: "expired-1", Recipient: recipient.Address, Status: "expired", Error: "pending queue expired"},
 	})
 
 	if len(got) != 5 {
@@ -452,7 +452,7 @@ func TestPersistedStatusSurvivesRestart(t *testing.T) {
 			{ID: "msg-adv", Sender: sender.Address, Recipient: recipient.Address, Body: ciphertext, Timestamp: ts, PersistedStatus: "delivered"},
 		}
 		receipts := []DeliveryReceipt{
-			{MessageID: "msg-adv", Sender: domain.PeerIdentityFromWire(sender.Address), Recipient: domain.PeerIdentityFromWire(recipient.Address), Status: "seen", DeliveredAt: time.Now()},
+			{MessageID: "msg-adv", Sender: domain.PeerIdentityFromWire(recipient.Address), Recipient: domain.PeerIdentityFromWire(sender.Address), Status: "seen", DeliveredAt: time.Now()},
 		}
 		got := decryptDirectMessages(recipient, contacts, records, receipts, nil)
 		if got[0].ReceiptStatus != "seen" {
@@ -466,7 +466,7 @@ func TestPersistedStatusSurvivesRestart(t *testing.T) {
 			{ID: "msg-noreg", Sender: sender.Address, Recipient: recipient.Address, Body: ciphertext, Timestamp: ts, PersistedStatus: "seen"},
 		}
 		receipts := []DeliveryReceipt{
-			{MessageID: "msg-noreg", Sender: domain.PeerIdentityFromWire(sender.Address), Recipient: domain.PeerIdentityFromWire(recipient.Address), Status: "delivered", DeliveredAt: time.Now()},
+			{MessageID: "msg-noreg", Sender: domain.PeerIdentityFromWire(recipient.Address), Recipient: domain.PeerIdentityFromWire(sender.Address), Status: "delivered", DeliveredAt: time.Now()},
 		}
 		got := decryptDirectMessages(recipient, contacts, records, receipts, nil)
 		if got[0].ReceiptStatus != "seen" {
@@ -480,7 +480,7 @@ func TestPersistedStatusSurvivesRestart(t *testing.T) {
 			{ID: "msg-out", Sender: sender.Address, Recipient: recipient.Address, Body: ciphertext, Timestamp: ts, PersistedStatus: "delivered"},
 		}
 		pending := []PendingMessage{
-			{ID: "msg-out", Status: "queued"},
+			{ID: "msg-out", Recipient: recipient.Address, Status: "queued"},
 		}
 		got := decryptDirectMessages(sender, contacts, records, nil, pending)
 		if got[0].ReceiptStatus != "delivered" {

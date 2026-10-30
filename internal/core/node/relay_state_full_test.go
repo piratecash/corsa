@@ -35,7 +35,7 @@ func TestFullRelayStateStoreDoesNotUnsendAFrame(t *testing.T) {
 	svc.relayStates = newRelayStateStore()
 	for i := range maxRelayStates {
 		svc.relayStates.store(&relayForwardState{
-			MessageID:    fmt.Sprintf("filler-%d", i),
+			Message:      relayStateFixtureRef(fmt.Sprintf("filler-%d", i)),
 			RemainingTTL: relayStateTTLSeconds,
 		})
 	}
@@ -82,7 +82,7 @@ func TestTableRoutedInboundRelayMarksRoutingTableSelection(t *testing.T) {
 		t.Fatal("nothing reached the peer")
 	}
 
-	_, selection := svc.relayStates.lookupForwardAttempt(string(envelope.ID))
+	_, selection := svc.relayStates.lookupForwardAttempt(envelopeRef(envelope))
 	if selection != relayNextHopRoutingTable {
 		t.Fatalf("NextHopSelection = %s, want %s", selection, relayNextHopRoutingTable)
 	}

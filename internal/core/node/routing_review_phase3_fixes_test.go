@@ -169,7 +169,7 @@ func TestFailoverRelay_GossipFallbackOnNoAlternative(t *testing.T) {
 
 	line := makeRelayFrameLine(t, "msg-gossip-fallback", idTargetX)
 	svc.relayStates.store(&relayForwardState{
-		MessageID:            "msg-gossip-fallback",
+		Message:              relayStateFixtureRef("msg-gossip-fallback"),
 		ForwardedTo:          domain.PeerAddress("addr-A"),
 		Recipient:            idTargetX,
 		HopAckRemainingTicks: 0,
@@ -179,7 +179,7 @@ func TestFailoverRelay_GossipFallbackOnNoAlternative(t *testing.T) {
 	})
 
 	snap := relayForwardState{
-		MessageID:      "msg-gossip-fallback",
+		Message:        relayStateFixtureRef("msg-gossip-fallback"),
 		ForwardedTo:    domain.PeerAddress("addr-A"),
 		Recipient:      idTargetX,
 		HopAckObserved: true,
@@ -217,7 +217,7 @@ func TestFailoverRelay_GossipFallbackOnMaxRetriesExhausted(t *testing.T) {
 
 	line := makeRelayFrameLine(t, "msg-maxed-gossip", idTargetX)
 	svc.relayStates.store(&relayForwardState{
-		MessageID:            "msg-maxed-gossip",
+		Message:              relayStateFixtureRef("msg-maxed-gossip"),
 		ForwardedTo:          domain.PeerAddress("addr-A"),
 		Recipient:            idTargetX,
 		RetryAttempt:         MaxFailoverRetries, // already exhausted
@@ -228,7 +228,7 @@ func TestFailoverRelay_GossipFallbackOnMaxRetriesExhausted(t *testing.T) {
 	})
 
 	snap := relayForwardState{
-		MessageID:      "msg-maxed-gossip",
+		Message:        relayStateFixtureRef("msg-maxed-gossip"),
 		ForwardedTo:    domain.PeerAddress("addr-A"),
 		Recipient:      idTargetX,
 		RetryAttempt:   MaxFailoverRetries,
@@ -265,7 +265,7 @@ func TestFailoverRelay_GossipFallbackSkippedOnEmptyFrameLine(t *testing.T) {
 	gossipCh := installRelayCapableSession(t, svc, domain.PeerAddress("addr-G"), idPeerC)
 
 	snap := relayForwardState{
-		MessageID:      "msg-no-frame",
+		Message:        relayStateFixtureRef("msg-no-frame"),
 		ForwardedTo:    domain.PeerAddress("addr-A"),
 		Recipient:      idTargetX,
 		HopAckObserved: true,
@@ -368,7 +368,7 @@ func TestSendRelayToAddress_InboundOriginStampsHopAckBudgetAndFrameLine(t *testi
 		t.Fatalf("MarshalFrameLine: %v", marshalErr)
 	}
 	stored := svc.relayStates.store(&relayForwardState{
-		MessageID:            string(msg.ID),
+		Message:              envelopeRef(msg),
 		PreviousHop:          "",
 		ReceiptForwardTo:     "",
 		ForwardedTo:          domain.PeerAddress("inbound:10.0.0.5:9090"),
@@ -383,7 +383,7 @@ func TestSendRelayToAddress_InboundOriginStampsHopAckBudgetAndFrameLine(t *testi
 	}
 
 	svc.relayStates.mu.Lock()
-	st := svc.relayStates.states[string(msg.ID)]
+	st := svc.relayStates.states[envelopeRef(msg)]
 	svc.relayStates.mu.Unlock()
 	if st.HopAckRemainingTicks != defaultHopAckBudgetSeconds {
 		t.Fatalf("HopAckRemainingTicks = %d, want %d (Phase 3 budget stamped on inbound origin)", st.HopAckRemainingTicks, defaultHopAckBudgetSeconds)

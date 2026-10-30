@@ -68,7 +68,7 @@ func newJumpHarness(t *testing.T, heights []int) *jumpHarness {
 	// without ScrollToEnd never has to be talked out of the bottom of the
 	// conversation, which is the state every one of these jumps starts from.
 	h.w.chatList.List = layout.List{Axis: layout.Vertical, ScrollToEnd: true}
-	h.w.msgCacheByID = make(map[string]cachedMsg, len(heights))
+	h.w.msgCacheByID = make(map[domain.MessageRef]cachedMsg, len(heights))
 	for i := range heights {
 		h.w.msgCacheByID[msgIDAt(i)] = cachedMsg{Index: i}
 	}
@@ -78,7 +78,7 @@ func newJumpHarness(t *testing.T, heights []int) *jumpHarness {
 	return h
 }
 
-func msgIDAt(index int) string { return "m" + itoa(index) }
+func msgIDAt(index int) domain.MessageRef { return fixtureMessageRef("m" + itoa(index)) }
 
 func itoa(v int) string {
 	if v == 0 {
@@ -261,7 +261,7 @@ func TestAJumpToAMessageThatIsGoneChangesNothing(t *testing.T) {
 	h.frame()
 	before := h.w.chatList.Position
 
-	h.w.chatJump = chatJump{msgID: "no-such-message"}
+	h.w.chatJump = chatJump{msgID: fixtureMessageRef("no-such-message")}
 	h.frame()
 
 	if h.w.chatJump.pending() {
@@ -286,7 +286,7 @@ func TestAJumpFollowsItsMessageWhenTheConversationShifts(t *testing.T) {
 
 	// Drop the first message: everything shifts up by one.
 	h.heights = h.heights[1:]
-	shifted := make(map[string]cachedMsg, len(h.heights))
+	shifted := make(map[domain.MessageRef]cachedMsg, len(h.heights))
 	for i := range h.heights {
 		shifted[msgIDAt(i+1)] = cachedMsg{Index: i}
 	}
@@ -378,7 +378,7 @@ func TestAShiftDuringTheHoldStillMeasuresTheTarget(t *testing.T) {
 	// Drop the first message: the target moves from index 6 to index 5, and
 	// index 6 now holds a message of an entirely different height.
 	h.heights = h.heights[1:]
-	shifted := make(map[string]cachedMsg, len(h.heights))
+	shifted := make(map[domain.MessageRef]cachedMsg, len(h.heights))
 	for i := range h.heights {
 		shifted[msgIDAt(i+1)] = cachedMsg{Index: i}
 	}
@@ -438,8 +438,8 @@ func TestScrollingDuringTheHoldTakesItOver(t *testing.T) {
 	}
 	// The mark stays: what the reader lost was the anchor, not the answer to
 	// which message they were sent to.
-	if h.w.msgHighlight.msgID != "" && h.w.msgHighlight.msgID != msgIDAt(target) {
-		t.Fatalf("the highlight moved to %q", h.w.msgHighlight.msgID)
+	if h.w.msgHighlight.msgID.ID != "" && h.w.msgHighlight.msgID != msgIDAt(target) {
+		t.Fatalf("the highlight moved to %q", h.w.msgHighlight.msgID.ID)
 	}
 }
 
@@ -701,7 +701,7 @@ func TestArmingAJumpAsksForTheFrameThatRunsIt(t *testing.T) {
 		t.Fatal("arming a jump asked for no frame, so nothing will run it")
 	}
 	if h.w.msgHighlight.msgID != msgIDAt(6) {
-		t.Fatalf("the highlight was armed for %q", h.w.msgHighlight.msgID)
+		t.Fatalf("the highlight was armed for %q", h.w.msgHighlight.msgID.ID)
 	}
 }
 
@@ -742,11 +742,11 @@ func TestAJumpNothingCanMeasureStopsAskingForFrames(t *testing.T) {
 func TestTheHighlightRisesHoldsAndGoesOut(t *testing.T) {
 	var h msgHighlight
 	start := time.Unix(0, 0)
-	h.start("m1", start)
+	h.start(fixtureMessageRef("m1"), start)
 
 	at := func(d time.Duration) (float32, bool) {
 		running := h.tick(start.Add(d))
-		return h.levelFor("m1"), running
+		return h.levelFor(fixtureMessageRef("m1")), running
 	}
 
 	if level, running := at(0); !running || level != 0 {
@@ -766,7 +766,7 @@ func TestTheHighlightRisesHoldsAndGoesOut(t *testing.T) {
 		t.Fatal("the highlight is still running after its last step — every frame from " +
 			"here on would ask for another one")
 	}
-	if level := h.levelFor("m1"); level != 0 {
+	if level := h.levelFor(fixtureMessageRef("m1")); level != 0 {
 		t.Fatalf("a finished highlight still reports %v", level)
 	}
 }
@@ -774,16 +774,16 @@ func TestTheHighlightRisesHoldsAndGoesOut(t *testing.T) {
 func TestOnlyTheJumpedMessageIsLit(t *testing.T) {
 	var h msgHighlight
 	start := time.Unix(0, 0)
-	h.start("m1", start)
+	h.start(fixtureMessageRef("m1"), start)
 	h.tick(start.Add(msgHighlightRise + msgHighlightHold/2))
 
-	if got := h.levelFor("m1"); got != 1 {
+	if got := h.levelFor(fixtureMessageRef("m1")); got != 1 {
 		t.Fatalf("the target is lit at %v, want 1", got)
 	}
-	if got := h.levelFor("m2"); got != 0 {
+	if got := h.levelFor(fixtureMessageRef("m2")); got != 0 {
 		t.Fatalf("a neighbour is lit at %v, want 0", got)
 	}
-	if got := h.levelFor(""); got != 0 {
+	if got := h.levelFor(fixtureMessageRef("")); got != 0 {
 		t.Fatalf("a message with no id is lit at %v, want 0", got)
 	}
 }

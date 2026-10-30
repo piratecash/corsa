@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/piratecash/corsa/internal/core/domain"
 )
 
 // recovery.go is the storage half of the §4.10 decrypt-recovery subsystem
@@ -46,13 +48,24 @@ type entryRecoveryMetadata struct {
 
 // EntryRecoveryMarks reads the recovery marks of one row.
 func (s *Store) EntryRecoveryMarks(ctx context.Context, id string) (entryRecoveryMetadata, bool, error) {
+	ref, found, err := uniqueMessageRef(ctx, s.db, id)
+	if err != nil {
+		return entryRecoveryMetadata{}, false, err
+	}
+	if !found {
+		return entryRecoveryMetadata{}, false, nil
+	}
+	return s.EntryRecoveryMarksRef(ctx, ref)
+}
+
+func (s *Store) EntryRecoveryMarksRef(ctx context.Context, ref domain.MessageRef) (entryRecoveryMetadata, bool, error) {
 	var metadata sql.NullString
-	err := s.db.QueryRowContext(ctx, `SELECT metadata FROM messages WHERE id = ?`, id).Scan(&metadata)
+	err := s.db.QueryRowContext(ctx, `SELECT metadata FROM messages WHERE topic=? AND id=? AND sender=? AND recipient=?`, ref.Topic, ref.ID, ref.Sender, ref.Recipient).Scan(&metadata)
 	if err == sql.ErrNoRows {
 		return entryRecoveryMetadata{}, false, nil
 	}
 	if err != nil {
-		return entryRecoveryMetadata{}, false, fmt.Errorf("read metadata %s: %w", id, err)
+		return entryRecoveryMetadata{}, false, fmt.Errorf("read metadata %s: %w", ref.ID, err)
 	}
 	marks, err := decodeRecoveryMarks(metadata.String)
 	if err != nil {
@@ -77,13 +90,24 @@ func decodeRecoveryMarks(metadata string) (entryRecoveryMetadata, error) {
 // mergeMetadata applies changes into the row's metadata JSON, preserving
 // every unknown key.
 func (s *Store) mergeMetadata(ctx context.Context, id string, apply func(map[string]any)) (bool, error) {
+	ref, found, err := uniqueMessageRef(ctx, s.db, id)
+	if err != nil {
+		return false, err
+	}
+	if !found {
+		return false, nil
+	}
+	return s.mergeMetadataRef(ctx, ref, apply)
+}
+
+func (s *Store) mergeMetadataRef(ctx context.Context, ref domain.MessageRef, apply func(map[string]any)) (bool, error) {
 	var metadata sql.NullString
-	err := s.db.QueryRowContext(ctx, `SELECT metadata FROM messages WHERE id = ?`, id).Scan(&metadata)
+	err := s.db.QueryRowContext(ctx, `SELECT metadata FROM messages WHERE topic=? AND id=? AND sender=? AND recipient=?`, ref.Topic, ref.ID, ref.Sender, ref.Recipient).Scan(&metadata)
 	if err == sql.ErrNoRows {
 		return false, nil
 	}
 	if err != nil {
-		return false, fmt.Errorf("read metadata %s: %w", id, err)
+		return false, fmt.Errorf("read metadata %s: %w", ref.ID, err)
 	}
 	fields := map[string]any{}
 	if strings.TrimSpace(metadata.String) != "" {
@@ -97,11 +121,11 @@ func (s *Store) mergeMetadata(ctx context.Context, id string, apply func(map[str
 	apply(fields)
 	encoded, err := json.Marshal(fields)
 	if err != nil {
-		return false, fmt.Errorf("encode metadata %s: %w", id, err)
+		return false, fmt.Errorf("encode metadata %s: %w", ref.ID, err)
 	}
-	if _, err := s.db.ExecContext(ctx, `UPDATE messages SET metadata = ?, updated_at = ? WHERE id = ?`,
-		string(encoded), time.Now().UTC().Format(time.RFC3339Nano), id); err != nil {
-		return false, fmt.Errorf("write metadata %s: %w", id, err)
+	if _, err := s.db.ExecContext(ctx, `UPDATE messages SET metadata = ?, updated_at = ? WHERE topic=? AND id=? AND sender=? AND recipient=?`,
+		string(encoded), time.Now().UTC().Format(time.RFC3339Nano), ref.Topic, ref.ID, ref.Sender, ref.Recipient); err != nil {
+		return false, fmt.Errorf("write metadata %s: %w", ref.ID, err)
 	}
 	return true, nil
 }
@@ -115,6 +139,17 @@ func (s *Store) mergeMetadata(ctx context.Context, id string, apply func(map[str
 // already flagged (the §4.10 idempotency suppressor: UI renders must not
 // multiply jobs) or is already superseded.
 func (s *Store) MarkDecryptFailed(ctx context.Context, id string) (bool, error) {
+	ref, found, err := uniqueMessageRef(ctx, s.db, id)
+	if err != nil {
+		return false, err
+	}
+	if !found {
+		return false, nil
+	}
+	return s.MarkDecryptFailedRef(ctx, ref)
+}
+
+func (s *Store) MarkDecryptFailedRef(ctx context.Context, ref domain.MessageRef) (bool, error) {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	// A metadata blob that is not a JSON OBJECT (empty, invalid, or a
 	// valid array/string/number) is replaced wholesale: json_set on a
@@ -130,17 +165,17 @@ func (s *Store) MarkDecryptFailed(ctx context.Context, id string) (bool, error) 
 			'$.decrypt_state', ?,
 			'$.decrypt_flagged_at', ?),
 		    updated_at = ?
-		WHERE id = ?
+		WHERE topic=? AND id=? AND sender=? AND recipient=?
 		  AND (metadata IS NULL OR NOT json_valid(metadata) OR json_type(metadata) <> 'object'
 		       OR (COALESCE(json_extract(metadata, '$.decrypt_failed'), 0) <> 1
 		           AND COALESCE(json_extract(metadata, '$.superseded_by'), '') = ''))`,
-		DecryptStatePendingNotice, now, now, id)
+		DecryptStatePendingNotice, now, now, ref.Topic, ref.ID, ref.Sender, ref.Recipient)
 	if err != nil {
-		return false, fmt.Errorf("mark decrypt-failed %s: %w", id, err)
+		return false, fmt.Errorf("mark decrypt-failed %s: %w", ref.ID, err)
 	}
 	affected, err := result.RowsAffected()
 	if err != nil {
-		return false, fmt.Errorf("mark decrypt-failed %s: rows affected: %w", id, err)
+		return false, fmt.Errorf("mark decrypt-failed %s: rows affected: %w", ref.ID, err)
 	}
 	return affected > 0, nil
 }
@@ -192,16 +227,14 @@ func (s *Store) SetDecryptState(ctx context.Context, id, state string) error {
 	return err
 }
 
-// mergeMetadataTx is mergeMetadata inside a caller-owned transaction —
-// the building block of multi-row metadata terminals.
-func mergeMetadataTx(ctx context.Context, tx *sql.Tx, id string, apply func(map[string]any)) (bool, error) {
+func mergeMetadataRefTx(ctx context.Context, tx *sql.Tx, ref domain.MessageRef, apply func(map[string]any)) (bool, error) {
 	var metadata sql.NullString
-	err := tx.QueryRowContext(ctx, `SELECT metadata FROM messages WHERE id = ?`, id).Scan(&metadata)
+	err := tx.QueryRowContext(ctx, `SELECT metadata FROM messages WHERE topic=? AND id=? AND sender=? AND recipient=?`, ref.Topic, ref.ID, ref.Sender, ref.Recipient).Scan(&metadata)
 	if err == sql.ErrNoRows {
 		return false, nil
 	}
 	if err != nil {
-		return false, fmt.Errorf("read metadata %s: %w", id, err)
+		return false, fmt.Errorf("read metadata %s: %w", ref.ID, err)
 	}
 	fields := map[string]any{}
 	if strings.TrimSpace(metadata.String) != "" {
@@ -213,11 +246,11 @@ func mergeMetadataTx(ctx context.Context, tx *sql.Tx, id string, apply func(map[
 	apply(fields)
 	encoded, err := json.Marshal(fields)
 	if err != nil {
-		return false, fmt.Errorf("encode metadata %s: %w", id, err)
+		return false, fmt.Errorf("encode metadata %s: %w", ref.ID, err)
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE messages SET metadata = ?, updated_at = ? WHERE id = ?`,
-		string(encoded), time.Now().UTC().Format(time.RFC3339Nano), id); err != nil {
-		return false, fmt.Errorf("write metadata %s: %w", id, err)
+	if _, err := tx.ExecContext(ctx, `UPDATE messages SET metadata = ?, updated_at = ? WHERE topic=? AND id=? AND sender=? AND recipient=?`,
+		string(encoded), time.Now().UTC().Format(time.RFC3339Nano), ref.Topic, ref.ID, ref.Sender, ref.Recipient); err != nil {
+		return false, fmt.Errorf("write metadata %s: %w", ref.ID, err)
 	}
 	return true, nil
 }
@@ -232,11 +265,42 @@ func mergeMetadataTx(ctx context.Context, tx *sql.Tx, id string, apply func(map[
 func (s *Store) MarkResendTerminal(ctx context.Context, originalID, replacementID, rootID string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("begin resend terminal tx: %w", err)
+		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+	original, found, err := uniqueMessageRef(ctx, tx, originalID)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return fmt.Errorf("original not found")
+	}
+	replacement, found, err := uniqueMessageRef(ctx, tx, replacementID)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return fmt.Errorf("replacement not found")
+	}
+	return markResendTerminalTx(ctx, tx, original, replacement, rootID)
+}
 
-	changed, err := mergeMetadataTx(ctx, tx, originalID, func(fields map[string]any) {
+func (s *Store) MarkResendTerminalRefs(ctx context.Context, original, replacement domain.MessageRef, rootID string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	return markResendTerminalTx(ctx, tx, original, replacement, rootID)
+}
+
+func markResendTerminalTx(ctx context.Context, tx *sql.Tx, original, replacement domain.MessageRef, rootID string) error {
+	if original.Topic != "dm" || replacement.Topic != original.Topic || original.Sender != replacement.Sender || original.Recipient != replacement.Recipient {
+		return fmt.Errorf("replacement conversation differs")
+	}
+	originalID, replacementID := original.ID, replacement.ID
+
+	changed, err := mergeMetadataRefTx(ctx, tx, original, func(fields map[string]any) {
 		fields["decrypt_failed"] = false
 		fields["decrypt_state"] = DecryptStateRecovered
 		fields["superseded_by"] = replacementID
@@ -248,7 +312,7 @@ func (s *Store) MarkResendTerminal(ctx context.Context, originalID, replacementI
 	if !changed {
 		return fmt.Errorf("resend terminal: original %s not found", originalID)
 	}
-	changed, err = mergeMetadataTx(ctx, tx, replacementID, func(fields map[string]any) {
+	changed, err = mergeMetadataRefTx(ctx, tx, replacement, func(fields map[string]any) {
 		fields["retry_root_id"] = rootID
 	})
 	if err != nil {
@@ -273,6 +337,24 @@ func (s *Store) MarkResendTerminal(ctx context.Context, originalID, replacementI
 // must not touch the rows. applied=false with a nil error also covers a
 // missing original.
 func (s *Store) MarkSupersededCollapsing(ctx context.Context, originalID, replacementID, rootID string) (bool, error) {
+	original, found, err := uniqueMessageRef(ctx, s.db, originalID)
+	if err != nil || !found {
+		return false, err
+	}
+	// Recovery may reserve the replacement before its row arrives. Its
+	// identity inherits the uniquely resolved original conversation; a row
+	// with this ID elsewhere cannot supply or change those parties.
+	replacement := original
+	replacement.ID = replacementID
+	return s.MarkSupersededCollapsingRefs(ctx, original, replacement, rootID)
+}
+
+func (s *Store) MarkSupersededCollapsingRefs(ctx context.Context, original, replacement domain.MessageRef, rootID string) (bool, error) {
+	if original.Topic != "dm" || replacement.Topic != original.Topic || original.Sender != replacement.Sender || original.Recipient != replacement.Recipient {
+		return false, fmt.Errorf("replacement conversation differs")
+	}
+	originalID, replacementID := original.ID, replacement.ID
+
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return false, fmt.Errorf("begin supersede tx: %w", err)
@@ -280,7 +362,7 @@ func (s *Store) MarkSupersededCollapsing(ctx context.Context, originalID, replac
 	defer func() { _ = tx.Rollback() }()
 
 	var metadata sql.NullString
-	err = tx.QueryRowContext(ctx, `SELECT metadata FROM messages WHERE id = ?`, originalID).Scan(&metadata)
+	err = tx.QueryRowContext(ctx, `SELECT metadata FROM messages WHERE topic=? AND id=? AND sender=? AND recipient=?`, original.Topic, original.ID, original.Sender, original.Recipient).Scan(&metadata)
 	if err == sql.ErrNoRows {
 		return false, nil
 	}
@@ -310,8 +392,8 @@ func (s *Store) MarkSupersededCollapsing(ctx context.Context, originalID, replac
 		return false, fmt.Errorf("encode metadata %s: %w", originalID, err)
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	if _, err := tx.ExecContext(ctx, `UPDATE messages SET metadata = ?, delivery_status = 'seen', updated_at = ? WHERE id = ?`,
-		string(encoded), now, originalID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE messages SET metadata = ?, delivery_status = 'seen', updated_at = ? WHERE topic=? AND id=? AND sender=? AND recipient=?`,
+		string(encoded), now, original.Topic, original.ID, original.Sender, original.Recipient); err != nil {
 		return false, fmt.Errorf("supersede %s: %w", originalID, err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -533,7 +615,7 @@ func (s *Store) AdmitResendIntent(ctx context.Context, intent ResendIntent, perP
 
 	existing, found, err := scanResendIntentRow(tx.QueryRowContext(ctx, `
 		SELECT root, original_id, peer, replacement_id, created_at
-		FROM decrypt_resend_intents WHERE root = ?`, intent.Root))
+		FROM decrypt_resend_intents WHERE root = ? AND peer=?`, intent.Root, intent.Peer))
 	if err != nil {
 		return ResendIntent{}, false, RecoveryEvictionVictim{}, err
 	}
@@ -562,10 +644,16 @@ func (s *Store) AdmitResendIntent(ctx context.Context, intent ResendIntent, perP
 // DeleteResendIntent removes a settled intent (terminal written, or the
 // send conclusively never happened).
 func (s *Store) DeleteResendIntent(ctx context.Context, root string) error {
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM decrypt_resend_intents WHERE root = ?`, root); err != nil {
-		return fmt.Errorf("delete resend intent %s: %w", root, err)
+	intent, found, err := s.ResendIntentByRoot(ctx, root)
+	if err != nil || !found {
+		return err
 	}
-	return nil
+	return s.DeleteResendIntentByPeer(ctx, intent.Peer, root)
+}
+
+func (s *Store) DeleteResendIntentByPeer(ctx context.Context, peer, root string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM decrypt_resend_intents WHERE peer=? AND root=?`, peer, root)
+	return err
 }
 
 // resendIntentScanner abstracts sql.Row / sql.Rows for the shared scan.
@@ -591,9 +679,32 @@ func scanResendIntentRow(row resendIntentScanner) (ResendIntent, bool, error) {
 // tryResend: an intent evicted between activation and the send means the
 // crash insurance is gone, and a replacement must never leave without it.
 func (s *Store) ResendIntentByRoot(ctx context.Context, root string) (ResendIntent, bool, error) {
-	return scanResendIntentRow(s.db.QueryRowContext(ctx, `
-		SELECT root, original_id, peer, replacement_id, created_at
-		FROM decrypt_resend_intents WHERE root = ?`, root))
+	rows, err := s.db.QueryContext(ctx, `SELECT root,original_id,peer,replacement_id,created_at FROM decrypt_resend_intents WHERE root=? LIMIT 2`, root)
+	if err != nil {
+		return ResendIntent{}, false, err
+	}
+	defer func() { _ = rows.Close() }()
+	var found ResendIntent
+	count := 0
+	for rows.Next() {
+		value, _, err := scanResendIntentRow(rows)
+		if err != nil {
+			return ResendIntent{}, false, err
+		}
+		found = value
+		count++
+	}
+	if err := rows.Err(); err != nil {
+		return ResendIntent{}, false, err
+	}
+	if count > 1 {
+		return ResendIntent{}, false, ErrAmbiguousMessage
+	}
+	return found, count == 1, nil
+}
+
+func (s *Store) ResendIntentByPeer(ctx context.Context, peer, root string) (ResendIntent, bool, error) {
+	return scanResendIntentRow(s.db.QueryRowContext(ctx, `SELECT root,original_id,peer,replacement_id,created_at FROM decrypt_resend_intents WHERE peer=? AND root=?`, peer, root))
 }
 
 // ResendIntents lists durable intents, oldest first, bounded.
@@ -653,6 +764,7 @@ func (v RecoveryEvictionVictim) None() bool { return v.Key == "" }
 // from under a running attempt would strand a sent replacement without
 // its crash insurance, or leave a notice updating a deleted job.
 type RecoveryProtectedWork struct {
+	ResendRefs  []domain.MessageRef
 	ResendRoots []string
 	JobPeers    []string
 }
@@ -757,6 +869,14 @@ func evictRecoveryBacklogTx(ctx context.Context, tx *sql.Tx, protected RecoveryP
 			FROM decrypt_resend_intents i
 			LEFT JOIN peer_established e ON e.peer = i.peer
 			WHERE e.peer IS NULL`
+	if len(protected.ResendRefs) > 0 {
+		terms := make([]string, 0, len(protected.ResendRefs))
+		for _, ref := range protected.ResendRefs {
+			terms = append(terms, "(?,?)")
+			args = append(args, ref.Recipient, ref.ID)
+		}
+		query += ` AND (i.peer,i.root) NOT IN (` + strings.Join(terms, ",") + `)`
+	}
 	if len(protected.ResendRoots) > 0 {
 		query += ` AND i.root NOT IN (?` + strings.Repeat(", ?", len(protected.ResendRoots)-1) + `)`
 		for _, root := range protected.ResendRoots {
@@ -778,7 +898,7 @@ func evictRecoveryBacklogTx(ctx context.Context, tx *sql.Tx, protected RecoveryP
 	if victim.Job {
 		_, err = tx.ExecContext(ctx, `DELETE FROM decrypt_recovery_jobs WHERE peer = ?`, key)
 	} else {
-		_, err = tx.ExecContext(ctx, `DELETE FROM decrypt_resend_intents WHERE root = ?`, key)
+		_, err = tx.ExecContext(ctx, `DELETE FROM decrypt_resend_intents WHERE root = ? AND peer=?`, key, peer)
 	}
 	if err != nil {
 		return RecoveryEvictionVictim{}, fmt.Errorf("evict backlog row %s: %w", key, err)
@@ -994,13 +1114,41 @@ func parseOptionalTime(raw string) time.Time {
 // match is on the JSON field itself, not a LIKE substring: a root id
 // appearing inside some other value must not inflate the chain budget.
 func (s *Store) CountRetryChain(ctx context.Context, rootID string) (int, error) {
-	var count int
-	err := s.db.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM messages
-		WHERE json_valid(metadata) AND json_extract(metadata, '$.retry_root_id') = ?`,
-		rootID).Scan(&count)
+	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT topic,sender,recipient FROM messages WHERE topic='dm' AND (id=? OR (json_valid(metadata) AND json_extract(metadata,'$.retry_root_id')=?)) LIMIT 2`, rootID, rootID)
 	if err != nil {
-		return 0, fmt.Errorf("count retry chain %s: %w", rootID, err)
+		return 0, err
 	}
-	return count, nil
+	var root domain.MessageRef
+	count := 0
+	for rows.Next() {
+		root.ID = rootID
+		if err := rows.Scan(&root.Topic, &root.Sender, &root.Recipient); err != nil {
+			_ = rows.Close()
+			return 0, err
+		}
+		count++
+	}
+	err = rows.Err()
+	_ = rows.Close()
+	if err != nil {
+		return 0, err
+	}
+	if count > 1 {
+		return 0, ErrAmbiguousMessage
+	}
+	if count == 0 {
+		return 0, nil
+	}
+	return s.CountRetryChainRef(ctx, root)
+}
+
+func (s *Store) CountRetryChainRef(ctx context.Context, root domain.MessageRef) (int, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM messages WHERE topic=? AND sender=? AND recipient=? AND json_valid(metadata) AND json_extract(metadata,'$.retry_root_id')=?`, root.Topic, root.Sender, root.Recipient, root.ID).Scan(&count)
+	return count, err
+}
+
+func (s *Store) SetDecryptStateRef(ctx context.Context, ref domain.MessageRef, state string) error {
+	_, err := s.mergeMetadataRef(ctx, ref, func(fields map[string]any) { fields["decrypt_state"] = state })
+	return err
 }

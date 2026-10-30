@@ -6,6 +6,28 @@
 
 The desktop UI is built with [Gio](https://gioui.org) — a portable immediate-mode GUI library for Go. The UI layer is thin: it reads state from the `DMRouter` via atomic snapshots and delegates all business logic to the service layer.
 
+### Local message identity
+
+Message metadata, row widgets, reaction chips, remembered image paths,
+viewer selection and jump/highlight state use the full local
+`MessageRef{Topic, ID, Sender, Recipient}`. Direct messages use topic `dm`.
+An incoming and an outgoing message may share an ID in the same chat; one
+row's text selection, menu, image or deletion must not stand in for the
+other. Stale reply/menu checks and deletion pruning compare the exact
+reference. The Files tab carries the transfer's reference across peers and
+through asynchronous download, cancel, restart and local-copy controls.
+
+The wire `reply_to`, delete/reaction selectors and file-command `file_id`
+remain unchanged. An ID-only reply quote resolves only when the active
+conversation contains one distinct reference for that ID; an ambiguous
+quote has no guessed target or jump. The composer retains the selected
+row's exact reference, while send/delete/reaction validation refuses a wire
+selector that cannot unambiguously identify its target. This does not add
+a distinction between conflicting same-reference payloads or a new wire
+protocol. Attachment
+storage/import limits are described in
+[local transfer identity](protocol/file_transfer.md#local-transfer-identity).
+
 ### Component hierarchy
 
 ```
@@ -416,8 +438,8 @@ be a sequence of appends inside one 180-line function, where a fifth part could
 be added in four places and three of them would have looked almost right. A
 slot the caller leaves nil takes its spacer with it, so a message with no
 reactions pays nothing for the slot. What goes IN the slots stays with the
-screen: the quote resolves a message by ID, the body may be a file card, the
-status line reads delivery receipts. Only the border colour and the author
+screen: the quote resolves a unique message reference by ID, the body may be a
+file card, the status line reads delivery receipts. Only the border colour and the author
 colour follow the sender; which side of the chat the bubble sits on is the
 list's business, not the bubble's. The one thing that is not a slot is
 `Highlight`, a level from 0 to 1 that fills the bubble with its own border
@@ -1717,6 +1739,26 @@ The payload contract permits an empty `Address` when the publisher could not res
 
 Desktop UI построен на [Gio](https://gioui.org) — кроссплатформенной immediate-mode GUI библиотеке для Go. UI-слой тонкий: читает состояние из `DMRouter` через атомарные снимки и делегирует всю бизнес-логику в сервисный слой.
 
+### Локальная идентичность сообщения
+
+Metadata сообщений, виджеты строк, чипы реакций, запомненные пути изображений,
+выбор картинки в viewer и состояние jump/highlight используют полный
+локальный `MessageRef{Topic, ID, Sender, Recipient}`. Для DM topic равен `dm`.
+Входящее и исходящее сообщение одной переписки могут иметь одинаковый ID;
+выделение текста, меню, изображение или удаление одной строки не подменяют
+другую. Проверки устаревшего reply/menu и очистка после удаления сравнивают
+точный ref. Вкладка Files передаёт ref трансфера между peer и через
+асинхронные download/cancel/restart/удаление локальной копии.
+
+Wire-поля `reply_to`, селекторы delete/reaction и `file_id` файловых команд
+не меняются. Цитата только с ID разрешается, лишь когда в активной переписке
+есть один различный ref для этого ID; неоднозначная цитата не получает
+угаданную цель или jump. Composer сохраняет точный ref выбранной строки,
+а валидация send/delete/reaction отказывает, если wire-селектор не может
+однозначно назвать цель. Это не добавляет различение конфликтующих payload
+одного ref или новый wire-протокол. Ограничения хранения и импорта вложений описаны в
+[локальной идентичности трансфера](protocol/file_transfer.md#локальная-идентичность-трансфера).
+
 ### Иерархия компонентов
 
 ```
@@ -2121,8 +2163,8 @@ hover: компонент, скопированный на глаз, — это 
 функции на 180 строк, где пятую часть можно было вставить в четыре разных
 места, и три из них выглядели бы почти правильно. Слот, оставленный nil,
 забирает с собой и свой отступ, поэтому сообщение без реакций за слот не
-платит. Что именно лежит В слотах — дело экрана: цитата разрешает сообщение по
-ID, телом может быть карточка файла, строка статуса читает квитанции. От
+платит. Что именно лежит В слотах — дело экрана: цитата разрешает единственный
+ref сообщения по ID, телом может быть карточка файла, строка статуса читает квитанции. От
 отправителя зависят только цвет рамки и цвет автора; на какой стороне чата
 стоит пузырь — дело списка, а не пузыря. Единственное, что не является слотом,
 — `Highlight`, уровень от 0 до 1: он заливает пузырь его же цветом рамки на

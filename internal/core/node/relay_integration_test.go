@@ -370,7 +370,7 @@ func TestRelayFloodDoesNotCauseUnboundedGrowth(t *testing.T) {
 
 	// Pre-fill the store to the per-peer limit (instant, no pipeline).
 	for i := 0; i < maxRelayStatesPerPeer; i++ {
-		svc.relayStates.tryReserve(fmt.Sprintf("prefill-%d", i), floodPeer)
+		svc.relayStates.tryReserve(relayStateFixtureRef(fmt.Sprintf("prefill-%d", i)), floodPeer)
 	}
 
 	// Send a handful of real frames — they must be rejected.
@@ -423,7 +423,7 @@ func TestRelayFloodPerPeerLimitProtectsOtherPeers(t *testing.T) {
 	// Saturate peer1's quota (instant, no pipeline overhead).
 	floodPeer := domain.PeerAddress("10.0.0.1:9000")
 	for i := 0; i < maxRelayStatesPerPeer; i++ {
-		svc.relayStates.tryReserve(fmt.Sprintf("flood-peer1-%d", i), floodPeer)
+		svc.relayStates.tryReserve(relayStateFixtureRef(fmt.Sprintf("flood-peer1-%d", i)), floodPeer)
 	}
 
 	// A different peer should still be able to deliver.

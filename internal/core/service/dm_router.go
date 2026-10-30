@@ -1161,7 +1161,7 @@ func (r *DMRouter) sendFileAnnounceWithBaseline(to domain.PeerIdentity, msg doma
 			// mapping to avoid destroying legitimate transfers for the
 			// same peer in a newer generation.
 			r.mu.Unlock()
-			r.fileBridge.RollbackMapping(result.FileID)
+			r.fileBridge.RollbackMappingRef(result.Ref)
 			// Same ordering invariant as the err != nil branch above:
 			// status + ebus event publish before the callback so a
 			// caller waiting on the callback sees the final visible
@@ -1987,8 +1987,8 @@ func (r *DMRouter) onNewMessage(event protocol.LocalChangeEvent) {
 	if event.MessageID != "" {
 		// Read before writing: what is being decided is whether the sound was
 		// still owed, and the write settles it either way.
-		announce = announce && !r.seenMessageIDs[event.MessageID].announced
-		r.markMessageHandledLocked(event.MessageID)
+		announce = announce && !r.seenMessageIDs[localMessageRef(event).Key()].announced
+		r.markMessageRefHandledLocked(localMessageRef(event))
 	}
 	stampAtEvent := peerStamp{gen: r.peerGen[peerID], epochs: r.backwardsEpoch[peerID]}
 	r.mu.Unlock()
@@ -2024,7 +2024,7 @@ func (r *DMRouter) onNewMessage(event protocol.LocalChangeEvent) {
 					// Nothing was reconciled — a failed read, a contended
 					// peer, or no history at all. Reopen the dedup gate so
 					// the repair path can rediscover the message.
-					r.evictSeenMessages(event.MessageID)
+					r.evictSeenRefs(localMessageRef(event))
 					return
 				}
 				r.mu.Lock()
@@ -2091,7 +2091,7 @@ func (r *DMRouter) onNewMessage(event protocol.LocalChangeEvent) {
 				// Something in this conversation was deleted meanwhile; the
 				// database knows what survived, this goroutine does not.
 				if !r.recoverFromStaleApply(peerID, msg) {
-					r.evictSeenMessages(event.MessageID)
+					r.evictSeenRefs(localMessageRef(event))
 				}
 			case applyPeerGone:
 			}
@@ -2109,7 +2109,7 @@ func (r *DMRouter) onNewMessage(event protocol.LocalChangeEvent) {
 		go func() {
 			defer r.endOp()
 			defer recoverLog("onNewMessage.midSwitch")
-			if !r.reloadAndRefreshPreview(peerID, event.MessageID) {
+			if !r.reloadAndRefreshPreview(peerID, event.MessageID, localMessageRef(event)) {
 				// Full reload failed. If we decrypted the message inline
 				// and the user is still on this peer, seed the cache so
 				// the user sees the message instead of a blank screen.
@@ -2136,7 +2136,7 @@ func (r *DMRouter) onNewMessage(event protocol.LocalChangeEvent) {
 	// Already in the cache means a reload brought it in, and that reload met
 	// the reader with it (loadConversation). It did not announce the first
 	// live event: keep that event's sound even when there is no row to append.
-	if r.cache.HasMessage(event.MessageID) {
+	if r.cache.HasMessageRef(localMessageRef(event)) {
 		if announce {
 			r.notify(UIEventBeep)
 		}
@@ -2157,7 +2157,7 @@ func (r *DMRouter) onNewMessage(event protocol.LocalChangeEvent) {
 			defer recoverLog("onNewMessage.decryptFail")
 			// The reload is what puts the message in front of the reader,
 			// and it asks the reader about it (loadConversation).
-			if !r.reloadAndRefreshPreview(peerID, event.MessageID) {
+			if !r.reloadAndRefreshPreview(peerID, event.MessageID, localMessageRef(event)) {
 				return
 			}
 			r.notify(UIEventMessagesUpdated)
@@ -2219,12 +2219,12 @@ func (r *DMRouter) onReceiptUpdate(event protocol.LocalChangeEvent) {
 
 	deliveredAt := domain.TimeFromNonZero(event.DeliveredAt)
 
-	if r.cache.UpdateStatus(event.MessageID, event.Status, deliveredAt, true) {
+	if r.cache.UpdateStatusRef(statusEventRef(event), event.Status, deliveredAt, true) {
 		r.mu.Lock()
 		r.refreshActiveMessagesLocked()
 		r.mu.Unlock()
 		r.notify(UIEventMessagesUpdated)
-	} else if !r.cache.HasMessage(event.MessageID) {
+	} else if !r.cache.HasMessageRef(statusEventRef(event)) {
 		if !r.beginOp() {
 			return
 		}
@@ -2518,21 +2518,21 @@ func (r *DMRouter) loadConversation(peerAddress domain.PeerIdentity, epochBefore
 //
 // A failed read suppresses nothing, so every header decides for itself: a
 // badge too many is cleared by opening the conversation, a badge lost is not.
-func (r *DMRouter) alreadyReadHeaderIDs(ctx context.Context, headers []DMHeader, me domain.PeerIdentity, seen map[string]struct{}) map[domain.MessageID]struct{} {
+func (r *DMRouter) alreadyReadHeaderIDs(ctx context.Context, headers []DMHeader, me domain.PeerIdentity, seen map[string]struct{}) map[domain.MessageRef]struct{} {
 	reader := r.chatHistory()
 	if reader == nil {
 		return nil
 	}
 
-	candidates := make([]domain.MessageID, 0, len(headers))
+	candidates := make([]domain.MessageRef, 0, len(headers))
 	for _, header := range headers {
-		if _, already := seen[header.ID]; already {
+		if _, already := seen[headerMessageRef(header).Key()]; already {
 			continue
 		}
 		if header.Recipient != me || header.Sender == me {
 			continue
 		}
-		candidates = append(candidates, domain.MessageID(header.ID))
+		candidates = append(candidates, headerMessageRef(header))
 	}
 	if len(candidates) == 0 {
 		return nil
@@ -2540,13 +2540,13 @@ func (r *DMRouter) alreadyReadHeaderIDs(ctx context.Context, headers []DMHeader,
 
 	readCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
-	statuses, err := reader.StoredMessageStatuses(readCtx, candidates)
+	statuses, err := reader.StoredMessageRefStatuses(readCtx, candidates)
 	if err != nil {
 		log.Warn().Err(err).Int("headers", len(candidates)).Msg("first sync: read state unknown, headers badge on their own")
 		return nil
 	}
 
-	read := make(map[domain.MessageID]struct{}, len(statuses))
+	read := make(map[domain.MessageRef]struct{}, len(statuses))
 	for id, status := range statuses {
 		if status == chatlog.StatusSeen {
 			read[id] = struct{}{}
@@ -2634,7 +2634,7 @@ func (r *DMRouter) applyReceiptRepair(activePeer domain.PeerIdentity, receipts [
 			continue
 		}
 
-		if r.cache.UpdateStatus(rc.MessageID, rc.Status, domain.TimeFromNonZero(rc.DeliveredAt), true) {
+		if r.cache.UpdateStatusRef(domain.MessageRef{Topic: "dm", ID: rc.MessageID, Sender: rc.Recipient.String(), Recipient: rc.Sender.String()}, rc.Status, domain.TimeFromNonZero(rc.DeliveredAt), true) {
 			updated = true
 		}
 	}
@@ -3047,7 +3047,7 @@ func (r *DMRouter) applyDecryptedMessageToSidebar(msg *DirectMessage, peerID dom
 			// was being decrypted. Which row that was is not knowable from
 			// here, so the database is asked instead of guessing.
 			if !r.recoverFromStaleApply(peerID, msg) {
-				r.evictSeenMessages(msg.ID)
+				r.evictSeenRefs(directMessageRef(*msg))
 			}
 		}
 		return
@@ -3078,7 +3078,7 @@ func (r *DMRouter) applyDecryptedMessageToSidebar(msg *DirectMessage, peerID dom
 	r.registerFileReceiveForLivePeer(msg, peerID, stamp)
 
 	if outcome == applyPreviewUnplaceable {
-		r.repairPreviewFromStore(peerID, msg.ID)
+		r.repairPreviewFromStore(peerID, msg.ID, directMessageRef(*msg))
 	}
 }
 
@@ -3289,7 +3289,7 @@ func (r *DMRouter) reconcilePeerFromStore(ctx context.Context, peer domain.PeerI
 	if afterDelete {
 		unseen, unseenResolved = r.fetchUnseenIncoming(ctx, reader, peer)
 		if unseenResolved {
-			unseen, unseenResolved = r.keepUnwrittenUnread(ctx, reader, unseen, observed.unreadIDs)
+			unseen, unseenResolved = r.keepUnwrittenUnread(ctx, reader, peer, unseen, observed.unreadIDs)
 		}
 	}
 
@@ -3404,7 +3404,7 @@ type chatHistoryReader interface {
 	// read serves both questions asked of it — "has the user read this
 	// already", which a header cannot answer, and "is this id merely not
 	// written yet", which the delete path must not mistake for "read".
-	StoredMessageStatuses(ctx context.Context, ids []domain.MessageID) (map[domain.MessageID]string, error)
+	StoredMessageRefStatuses(ctx context.Context, refs []domain.MessageRef) (map[domain.MessageRef]string, error)
 	// MessageSeq is where a message landed in the local arrival order, and
 	// whether the store holds it at all. It is what makes a message learned
 	// from the event stream comparable with the row already in the sidebar —
@@ -3720,6 +3720,7 @@ func (r *DMRouter) fetchUnseenIncoming(ctx context.Context, reader chatHistoryRe
 func (r *DMRouter) keepUnwrittenUnread(
 	ctx context.Context,
 	reader chatHistoryReader,
+	peer domain.PeerIdentity,
 	unseen []domain.MessageID,
 	badged map[domain.MessageID]struct{},
 ) ([]domain.MessageID, bool) {
@@ -3742,13 +3743,17 @@ func (r *DMRouter) keepUnwrittenUnread(
 	}
 
 	readCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-	statuses, err := reader.StoredMessageStatuses(readCtx, pending)
+	refs := make([]domain.MessageRef, 0, len(pending))
+	for _, id := range pending {
+		refs = append(refs, domain.MessageRef{Topic: "dm", ID: string(id), Sender: peer.String(), Recipient: r.client.Address().String()})
+	}
+	statuses, err := reader.StoredMessageRefStatuses(readCtx, refs)
 	cancel()
 	if err != nil {
 		return nil, false
 	}
 	for _, id := range pending {
-		if _, stored := statuses[id]; stored {
+		if _, stored := statuses[domain.MessageRef{Topic: "dm", ID: string(id), Sender: peer.String(), Recipient: r.client.Address().String()}]; stored {
 			continue
 		}
 		unseen = append(unseen, id)
@@ -3892,14 +3897,18 @@ func (r *DMRouter) seedOpeningConversation(peer domain.PeerIdentity, stamp peerS
 // On partial success (load OK, preview fail), the message is already in
 // cache so eviction is NOT performed — the dedup gate must stay closed
 // to prevent redundant rediscovery on the next health poll.
-func (r *DMRouter) reloadAndRefreshPreview(peerID domain.PeerIdentity, messageID string) bool {
+func (r *DMRouter) reloadAndRefreshPreview(peerID domain.PeerIdentity, messageID string, refs ...domain.MessageRef) bool {
 	if !r.loadConversation(peerID, r.peerEpochsOf(peerID)) {
 		// Every caller of this helper treats false as "handled elsewhere":
 		// one seeds the cache from the message it decrypted, another simply
 		// ends its goroutine. Neither reads the store again, so the row is
 		// owed one from here.
 		r.queuePreviewRepair(peerID)
-		r.evictSeenMessages(messageID)
+		if len(refs) > 0 {
+			r.evictSeenRefs(refs...)
+		} else {
+			r.evictSeenMessages(messageID)
+		}
 		return false
 	}
 	if !r.updatePreviewFromStore(peerID) {
@@ -3920,6 +3929,7 @@ func (r *DMRouter) reloadAndRefreshPreview(peerID domain.PeerIdentity, messageID
 // messageGate is what this process remembers about one message id. Two facts,
 // because they are reopened by different things.
 type messageGate struct {
+	ref domain.MessageRef
 	// handled — the message has been through onNewMessage or the header
 	// repair and needs no rediscovery. This is the dedup gate, and a failed
 	// apply REOPENS it: the work has to be tried again.
@@ -3938,21 +3948,12 @@ type messageGate struct {
 	announced bool
 }
 
-// markMessageHandledLocked closes the dedup gate for an id AND settles the
-// sound question for it. The two go together: a message this process has dealt
-// with is not news any more, whether it was announced, deliberately silent, or
-// pinned as deleted. Callers hold r.mu.
-func (r *DMRouter) markMessageHandledLocked(id string) {
-	if id == "" {
-		return
-	}
-	r.seenMessageIDs[id] = messageGate{handled: true, announced: true}
-}
-
 // forgetMessageLocked drops everything remembered about an id. Used when the
 // message itself is gone, where even the sound is moot. Callers hold r.mu.
 func (r *DMRouter) forgetMessageLocked(id string) {
-	delete(r.seenMessageIDs, id)
+	if key, unique := r.uniqueSeenKeyLocked(id); unique {
+		delete(r.seenMessageIDs, key)
+	}
 }
 
 // evictSeenMessages reopens the dedup gate so a repair pass can rediscover
@@ -3965,12 +3966,14 @@ func (r *DMRouter) forgetMessageLocked(id string) {
 func (r *DMRouter) evictSeenMessages(ids ...string) {
 	r.mu.Lock()
 	for _, id := range ids {
-		if id == "" {
+		key, unique := r.uniqueSeenKeyLocked(id)
+		if !unique {
 			continue
 		}
+		id = key
 		gate := r.seenMessageIDs[id]
 		gate.handled = false
-		if gate == (messageGate{}) {
+		if !gate.announced {
 			delete(r.seenMessageIDs, id)
 			continue
 		}
@@ -3986,7 +3989,7 @@ func (r *DMRouter) refreshPreviewForPeer(peer domain.PeerIdentity, messageIDs []
 		// eviction is a hint for any later pass over the node's headers,
 		// which is not scheduled by anything.
 		r.queuePreviewRepair(peer)
-		r.evictSeenMessages(messageIDs...)
+		r.evictIncomingSeenRefs(peer, messageIDs...)
 	}
 	r.notify(UIEventSidebarUpdated)
 }
@@ -4060,6 +4063,7 @@ func (r *DMRouter) repairUnreadFromHeaders(status NodeStatus) {
 	// message as visible after the user left it, which skips its badge for
 	// good — its id goes through the dedup gate either way.
 	type headerAction struct {
+		ref           domain.MessageRef
 		peer          domain.PeerIdentity
 		id            string
 		isIncoming    bool
@@ -4069,13 +4073,13 @@ func (r *DMRouter) repairUnreadFromHeaders(status NodeStatus) {
 	}
 	var actions []headerAction
 
-	alreadyRead := map[domain.MessageID]struct{}{}
+	alreadyRead := map[domain.MessageRef]struct{}{}
 	if firstSync {
 		alreadyRead = r.alreadyReadHeaderIDs(r.opContext(), status.DMHeaders, me, seenCopy)
 	}
 
 	for _, header := range status.DMHeaders {
-		if _, ok := seenCopy[header.ID]; ok {
+		if _, ok := seenCopy[headerMessageRef(header).Key()]; ok {
 			continue
 		}
 		var peer domain.PeerIdentity
@@ -4089,14 +4093,15 @@ func (r *DMRouter) repairUnreadFromHeaders(status NodeStatus) {
 			continue
 		}
 
-		_, readInDatabase := alreadyRead[domain.MessageID(header.ID)]
+		_, readInDatabase := alreadyRead[headerMessageRef(header)]
 
 		actions = append(actions, headerAction{
+			ref:           headerMessageRef(header),
 			peer:          peer,
 			id:            header.ID,
 			isIncoming:    isIncoming,
 			readInDB:      readInDatabase,
-			inCache:       r.cache.HasMessage(header.ID),
+			inCache:       r.cache.HasMessageRef(headerMessageRef(header)),
 			firstSyncBeep: firstSync,
 		})
 	}
@@ -4118,7 +4123,7 @@ func (r *DMRouter) repairUnreadFromHeaders(status NodeStatus) {
 	for _, a := range actions {
 		// Re-check under lock: another goroutine may have inserted the
 		// same ID between Phase 1 snapshot and now.
-		if r.seenMessageIDs[a.id].handled {
+		if r.seenMessageIDs[a.ref.Key()].handled {
 			continue
 		}
 		onScreen := a.peer == selected && !selected.IsZero()
@@ -4159,10 +4164,10 @@ func (r *DMRouter) repairUnreadFromHeaders(status NodeStatus) {
 			continue
 		}
 		// Read before the mark, for the same reason as the live path.
-		if triggerBeep && !r.seenMessageIDs[a.id].announced {
+		if triggerBeep && !r.seenMessageIDs[a.ref.Key()].announced {
 			hasNew = true
 		}
-		r.markMessageHandledLocked(a.id)
+		r.markMessageRefHandledLocked(a.ref)
 
 		if incrementUnread {
 			r.markUnreadLocked(a.peer, domain.MessageID(a.id))
@@ -4221,7 +4226,7 @@ func (r *DMRouter) repairUnreadFromHeaders(status NodeStatus) {
 			// Reload failed — the new messages are not in activeMessages.
 			// Evict their IDs from seenMessageIDs so the next repair cycle
 			// re-discovers them and retries the reload.
-			r.evictSeenMessages(reloadMessageIDs...)
+			r.evictIncomingSeenRefs(selected, reloadMessageIDs...)
 		}
 	}
 
@@ -4269,7 +4274,7 @@ func (r *DMRouter) repairBadgeFromStore(peer domain.PeerIdentity) bool {
 		return false
 	}
 
-	unseen, ok := r.keepUnwrittenUnread(r.opContext(), reader, unseen, badgedBefore)
+	unseen, ok := r.keepUnwrittenUnread(r.opContext(), reader, peer, unseen, badgedBefore)
 	if !ok {
 		return false
 	}
@@ -4394,7 +4399,7 @@ func (r *DMRouter) deliverDecryptedMessage(msg *DirectMessage, peerID domain.Pee
 	r.mu.Unlock()
 
 	if unplaceable {
-		r.repairPreviewFromStore(peerID, msg.ID)
+		r.repairPreviewFromStore(peerID, msg.ID, directMessageRef(*msg))
 	}
 	if seen {
 		r.sendSeenReceipts(peerID, []DirectMessage{*msg})
@@ -4428,7 +4433,7 @@ func (r *DMRouter) deliverDecryptedMessage(msg *DirectMessage, peerID domain.Pee
 			recovered = false
 		}
 		if !recovered {
-			r.evictSeenMessages(msg.ID)
+			r.evictSeenRefs(directMessageRef(*msg))
 		}
 		return true
 	}
@@ -4556,11 +4561,11 @@ func (r *DMRouter) applyOwnSentMessage(to domain.PeerIdentity, sent DirectMessag
 	case applyStale:
 		// The conversation moved while the send was in flight. Which row
 		// left is not knowable from here, so the database is asked.
-		r.repairPreviewFromStore(to, sent.ID)
+		r.repairPreviewFromStore(to, sent.ID, directMessageRef(sent))
 	case applyPreviewUnplaceable:
 		// The message went out and was stored, but its place in the order
 		// could not be read. Same answer, different reason.
-		r.repairPreviewFromStore(to, sent.ID)
+		r.repairPreviewFromStore(to, sent.ID, directMessageRef(sent))
 	case applyApplied, applyPeerGone:
 	}
 }
@@ -4578,7 +4583,7 @@ func (r *DMRouter) applyOwnSentMessage(to domain.PeerIdentity, sent DirectMessag
 // path's own budget for the same reason.
 const previewRepairQueueRetries = 12
 
-func (r *DMRouter) repairPreviewFromStore(peer domain.PeerIdentity, messageID string) {
+func (r *DMRouter) repairPreviewFromStore(peer domain.PeerIdentity, messageID string, refs ...domain.MessageRef) {
 	if r.chatHistory() == nil {
 		// No store to ask. A runtime without a chatlog places nothing and can
 		// repair nothing, and queueing work per message would be a treadmill
@@ -4601,7 +4606,11 @@ func (r *DMRouter) repairPreviewFromStore(peer domain.PeerIdentity, messageID st
 		// through the dedup gate, which is a hint for any later pass over the
 		// node's headers, not a retry: nothing schedules another one.
 		r.queuePreviewRepair(peer)
-		r.evictSeenMessages(messageID)
+		if len(refs) > 0 {
+			r.evictSeenRefs(refs...)
+		} else {
+			r.evictSeenMessages(messageID)
+		}
 	}()
 }
 
@@ -4804,13 +4813,13 @@ func (r *DMRouter) messageStillStored(peer domain.PeerIdentity, msg *DirectMessa
 		return false, true
 	}
 	ctx, cancel := context.WithTimeout(r.opContext(), 2*time.Second)
-	statuses, err := reader.StoredMessageStatuses(ctx, []domain.MessageID{domain.MessageID(msg.ID)})
+	statuses, err := reader.StoredMessageRefStatuses(ctx, []domain.MessageRef{directMessageRef(*msg)})
 	cancel()
 	if err != nil {
 		log.Warn().Err(err).Str("peer", peer.String()).Msg("dm_router: could not tell whether the arriving message survived the deletion")
 		return false, false
 	}
-	_, held := statuses[domain.MessageID(msg.ID)]
+	_, held := statuses[directMessageRef(*msg)]
 	return held, true
 }
 
@@ -5365,5 +5374,53 @@ func (r *DMRouter) emitUIEvent(eventType UIEventType) {
 func recoverLog(label string) {
 	if r := recover(); r != nil {
 		log.Error().Interface("panic", r).Str("label", label).Msg("recovered panic in DMRouter")
+	}
+}
+
+func (r *DMRouter) markMessageRefHandledLocked(ref domain.MessageRef) {
+	if ref.ID == "" {
+		return
+	}
+	r.seenMessageIDs[ref.Key()] = messageGate{ref: ref, handled: true, announced: true}
+}
+
+func (r *DMRouter) uniqueSeenKeyLocked(idOrKey string) (string, bool) {
+	key, count := "", 0
+	for candidate, gate := range r.seenMessageIDs {
+		if gate.ref.ID == idOrKey {
+			key = candidate
+			count++
+		}
+	}
+	return key, count == 1
+}
+
+// Header repair names only incoming peer→self messages, so both endpoints
+// are known without resolving a raw ID against unrelated conversations.
+func (r *DMRouter) evictIncomingSeenRefs(peer domain.PeerIdentity, ids ...string) {
+	refs := make([]domain.MessageRef, 0, len(ids))
+	for _, id := range ids {
+		refs = append(refs, domain.MessageRef{Topic: "dm", ID: id, Sender: peer.String(), Recipient: r.client.Address().String()})
+	}
+	r.evictSeenRefs(refs...)
+}
+
+// Exact references and legacy wire ids have separate APIs. An attacker-selected
+// wire id must never be interpreted as an already-encoded key for another row.
+func (r *DMRouter) evictSeenRefs(refs ...domain.MessageRef) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, ref := range refs {
+		key := ref.Key()
+		gate, exists := r.seenMessageIDs[key]
+		if !exists {
+			continue
+		}
+		gate.handled = false
+		if !gate.announced {
+			delete(r.seenMessageIDs, key)
+		} else {
+			r.seenMessageIDs[key] = gate
+		}
 	}
 }

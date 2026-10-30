@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/piratecash/corsa/internal/core/chatlog"
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/node"
@@ -24,14 +25,18 @@ type stubDeleteTaskList struct {
 	owed  []domain.MessageID
 }
 
-func (j *stubDeleteTaskList) OwedDeleteIntentMessageIDs(context.Context) ([]domain.MessageID, error) {
+func (j *stubDeleteTaskList) OwedDeleteIntents(context.Context) ([]chatlog.DeleteIntent, error) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	j.loads++
 	if j.fail {
 		return nil, errors.New("database is locked")
 	}
-	return j.owed, nil
+	var intents []chatlog.DeleteIntent
+	for _, id := range j.owed {
+		intents = append(intents, chatlog.DeleteIntent{MessageID: id})
+	}
+	return intents, nil
 }
 
 func (j *stubDeleteTaskList) loadCount() int {
@@ -425,7 +430,7 @@ func TestLoadingTheOwedDeletionsPrunesWhatExpired(t *testing.T) {
 	set.Hydrate(context.Background(), start.Add(wipeTombstoneTTL+time.Minute))
 
 	set.mu.Lock()
-	_, stillHeld := set.entries["long-gone"]
+	_, stillHeld := set.entries[deletionRefusal{Ref: domain.MessageRef{ID: "long-gone"}}]
 	held := len(set.entries)
 	set.mu.Unlock()
 	if stillHeld {
@@ -599,7 +604,7 @@ func TestOneEnormousWipeIsTrimmedAsItGoes(t *testing.T) {
 // TestAnExpiredRefusalStopsBeingHeldAnywhere pins what "it does not survive the
 // process" is worth if the process keeps it anyway.
 //
-// A queue position holds a PLAIN message id. Moving the head past it does not
+// A queue position holds a message reference and possibly a legacy peer. Moving the head past it does not
 // release the string, and shortening the slice does not release what the slots
 // beyond it point at: both keep the id readable in this process's memory long
 // after its refusal ran out — a quiet node reclaims the prefix never, because
@@ -624,11 +629,11 @@ func TestAnExpiredRefusalStopsBeingHeldAnywhere(t *testing.T) {
 		if inUse {
 			continue
 		}
-		if queued.id != "" {
-			t.Errorf("slot %d still holds the id %q after its refusal expired", i, queued.id)
+		if queued.id != (deletionRefusal{}) {
+			t.Errorf("slot %d still holds the reference %+v after its refusal expired", i, queued.id)
 		}
 	}
-	if _, held := set.entries["gone-one"]; held {
+	if _, held := set.entries[deletionRefusal{Ref: domain.MessageRef{ID: "gone-one"}}]; held {
 		t.Error("an expired refusal is still in the map")
 	}
 }

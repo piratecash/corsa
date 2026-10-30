@@ -29,8 +29,9 @@ func TestHandleChunkResponse_RejectsOversizedChunk(t *testing.T) {
 	chunkSize := uint32(1024) // 1 KB requested
 
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		downloadDir:  downloadDir,
 		sendCommand: func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error {
 			return nil
@@ -38,15 +39,17 @@ func TestHandleChunkResponse_RejectsOversizedChunk(t *testing.T) {
 		stopCh: make(chan struct{}),
 	}
 
-	m.receiverMaps[fileID] = &receiverFileMapping{
-		FileID:    fileID,
-		FileHash:  "somehash",
-		FileName:  "test.bin",
-		FileSize:  1_000_000,
-		Sender:    sender,
-		State:     receiverDownloading,
-		ChunkSize: chunkSize,
-		CreatedAt: time.Now(),
+	m.receiverMaps[ftIncomingRef(m, fileID, sender)] = &receiverFileMapping{
+		Ref:         ftIncomingRef(m, fileID, sender),
+		PartialPath: partialDownloadPath(downloadDir, fileID),
+		FileID:      fileID,
+		FileHash:    "somehash",
+		FileName:    "test.bin",
+		FileSize:    1_000_000,
+		Sender:      sender,
+		State:       receiverDownloading,
+		ChunkSize:   chunkSize,
+		CreatedAt:   time.Now(),
 	}
 
 	// Create a chunk that is 2x the requested size.
@@ -63,7 +66,7 @@ func TestHandleChunkResponse_RejectsOversizedChunk(t *testing.T) {
 	})
 
 	// Mapping should be unchanged — offset not advanced.
-	mapping := m.receiverMaps[fileID]
+	mapping := m.receiverMaps[ftIncomingRef(m, fileID, sender)]
 	if mapping.NextOffset != 0 {
 		t.Errorf("NextOffset should remain 0 after oversized chunk, got %d", mapping.NextOffset)
 	}
@@ -94,8 +97,9 @@ func TestHandleChunkResponse_AcceptsExactSizeChunk(t *testing.T) {
 
 	var nextChunkRequested bool
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		downloadDir:  downloadDir,
 		sendCommand: func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error {
 			nextChunkRequested = true
@@ -104,15 +108,17 @@ func TestHandleChunkResponse_AcceptsExactSizeChunk(t *testing.T) {
 		stopCh: make(chan struct{}),
 	}
 
-	m.receiverMaps[fileID] = &receiverFileMapping{
-		FileID:    fileID,
-		FileHash:  "somehash",
-		FileName:  "test.bin",
-		FileSize:  fileSize,
-		Sender:    sender,
-		State:     receiverDownloading,
-		ChunkSize: chunkSize,
-		CreatedAt: time.Now(),
+	m.receiverMaps[ftIncomingRef(m, fileID, sender)] = &receiverFileMapping{
+		Ref:         ftIncomingRef(m, fileID, sender),
+		PartialPath: partialDownloadPath(downloadDir, fileID),
+		FileID:      fileID,
+		FileHash:    "somehash",
+		FileName:    "test.bin",
+		FileSize:    fileSize,
+		Sender:      sender,
+		State:       receiverDownloading,
+		ChunkSize:   chunkSize,
+		CreatedAt:   time.Now(),
 	}
 
 	// Exact-size chunk.
@@ -125,7 +131,7 @@ func TestHandleChunkResponse_AcceptsExactSizeChunk(t *testing.T) {
 		Data:   encoded,
 	})
 
-	mapping := m.receiverMaps[fileID]
+	mapping := m.receiverMaps[ftIncomingRef(m, fileID, sender)]
 	if mapping.NextOffset != uint64(chunkSize) {
 		t.Errorf("NextOffset should advance to %d, got %d", chunkSize, mapping.NextOffset)
 	}
@@ -153,8 +159,9 @@ func TestHandleChunkResponse_AcceptsSmallerLastChunk(t *testing.T) {
 	fileSize := uint64(100) // entire file smaller than one chunk
 
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		downloadDir:  downloadDir,
 		sendCommand: func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error {
 			return nil
@@ -162,15 +169,17 @@ func TestHandleChunkResponse_AcceptsSmallerLastChunk(t *testing.T) {
 		stopCh: make(chan struct{}),
 	}
 
-	m.receiverMaps[fileID] = &receiverFileMapping{
-		FileID:    fileID,
-		FileHash:  strings.Repeat("a", 64), // placeholder
-		FileName:  "tiny.bin",
-		FileSize:  fileSize,
-		Sender:    sender,
-		State:     receiverDownloading,
-		ChunkSize: chunkSize,
-		CreatedAt: time.Now(),
+	m.receiverMaps[ftIncomingRef(m, fileID, sender)] = &receiverFileMapping{
+		Ref:         ftIncomingRef(m, fileID, sender),
+		PartialPath: partialDownloadPath(downloadDir, fileID),
+		FileID:      fileID,
+		FileHash:    strings.Repeat("a", 64), // placeholder
+		FileName:    "tiny.bin",
+		FileSize:    fileSize,
+		Sender:      sender,
+		State:       receiverDownloading,
+		ChunkSize:   chunkSize,
+		CreatedAt:   time.Now(),
 	}
 
 	smallData := make([]byte, fileSize)
@@ -182,7 +191,7 @@ func TestHandleChunkResponse_AcceptsSmallerLastChunk(t *testing.T) {
 		Data:   encoded,
 	})
 
-	mapping := m.receiverMaps[fileID]
+	mapping := m.receiverMaps[ftIncomingRef(m, fileID, sender)]
 	if mapping.NextOffset != fileSize {
 		t.Errorf("NextOffset should advance to %d, got %d", fileSize, mapping.NextOffset)
 	}
@@ -202,8 +211,9 @@ func TestHandleChunkResponse_RejectsOneByteOverLimit(t *testing.T) {
 	chunkSize := uint32(256)
 
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		downloadDir:  downloadDir,
 		sendCommand: func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error {
 			return nil
@@ -211,15 +221,17 @@ func TestHandleChunkResponse_RejectsOneByteOverLimit(t *testing.T) {
 		stopCh: make(chan struct{}),
 	}
 
-	m.receiverMaps[fileID] = &receiverFileMapping{
-		FileID:    fileID,
-		FileHash:  "somehash",
-		FileName:  "test.bin",
-		FileSize:  1_000_000,
-		Sender:    sender,
-		State:     receiverDownloading,
-		ChunkSize: chunkSize,
-		CreatedAt: time.Now(),
+	m.receiverMaps[ftIncomingRef(m, fileID, sender)] = &receiverFileMapping{
+		Ref:         ftIncomingRef(m, fileID, sender),
+		PartialPath: partialDownloadPath(downloadDir, fileID),
+		FileID:      fileID,
+		FileHash:    "somehash",
+		FileName:    "test.bin",
+		FileSize:    1_000_000,
+		Sender:      sender,
+		State:       receiverDownloading,
+		ChunkSize:   chunkSize,
+		CreatedAt:   time.Now(),
 	}
 
 	// One byte over the limit.
@@ -232,7 +244,7 @@ func TestHandleChunkResponse_RejectsOneByteOverLimit(t *testing.T) {
 		Data:   encoded,
 	})
 
-	mapping := m.receiverMaps[fileID]
+	mapping := m.receiverMaps[ftIncomingRef(m, fileID, sender)]
 	if mapping.NextOffset != 0 {
 		t.Errorf("NextOffset should remain 0 after chunk_size+1 rejection, got %d", mapping.NextOffset)
 	}
@@ -261,8 +273,9 @@ func TestHandleChunkResponse_RejectsEmptyChunkBeforeComplete(t *testing.T) {
 
 	var requestCount int
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		downloadDir:  downloadDir,
 		sendCommand: func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error {
 			requestCount++
@@ -272,7 +285,9 @@ func TestHandleChunkResponse_RejectsEmptyChunkBeforeComplete(t *testing.T) {
 	}
 
 	initialTime := time.Now().Add(-10 * time.Second)
-	m.receiverMaps[fileID] = &receiverFileMapping{
+	m.receiverMaps[ftIncomingRef(m, fileID, sender)] = &receiverFileMapping{
+		Ref:         ftIncomingRef(m, fileID, sender),
+		PartialPath: partialDownloadPath(downloadDir, fileID),
 		FileID:      fileID,
 		FileHash:    "somehash",
 		FileName:    "test.bin",
@@ -291,7 +306,7 @@ func TestHandleChunkResponse_RejectsEmptyChunkBeforeComplete(t *testing.T) {
 		Data:   "", // empty base64 → zero bytes
 	})
 
-	mapping := m.receiverMaps[fileID]
+	mapping := m.receiverMaps[ftIncomingRef(m, fileID, sender)]
 
 	// NextOffset must not advance (was already 0, stays 0).
 	if mapping.NextOffset != 0 {
@@ -332,8 +347,9 @@ func TestHandleChunkResponse_RejectsUndersizedNonFinalChunk(t *testing.T) {
 
 	var requestCount int
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		downloadDir:  downloadDir,
 		sendCommand: func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error {
 			requestCount++
@@ -342,7 +358,9 @@ func TestHandleChunkResponse_RejectsUndersizedNonFinalChunk(t *testing.T) {
 		stopCh: make(chan struct{}),
 	}
 
-	m.receiverMaps[fileID] = &receiverFileMapping{
+	m.receiverMaps[ftIncomingRef(m, fileID, sender)] = &receiverFileMapping{
+		Ref:         ftIncomingRef(m, fileID, sender),
+		PartialPath: partialDownloadPath(downloadDir, fileID),
 		FileID:      fileID,
 		FileHash:    strings.Repeat("b", 64),
 		FileName:    "test.bin",
@@ -365,7 +383,7 @@ func TestHandleChunkResponse_RejectsUndersizedNonFinalChunk(t *testing.T) {
 		Data:   encoded,
 	})
 
-	mapping := m.receiverMaps[fileID]
+	mapping := m.receiverMaps[ftIncomingRef(m, fileID, sender)]
 	if mapping.NextOffset != 0 {
 		t.Errorf("NextOffset should remain 0 (undersized rejected), got %d", mapping.NextOffset)
 	}
@@ -390,8 +408,9 @@ func TestHandleChunkResponse_AcceptsUndersizedFinalChunk(t *testing.T) {
 	fileSize := uint64(500) // entire file is smaller than one chunk
 
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		downloadDir:  downloadDir,
 		sendCommand: func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error {
 			return nil
@@ -399,7 +418,9 @@ func TestHandleChunkResponse_AcceptsUndersizedFinalChunk(t *testing.T) {
 		stopCh: make(chan struct{}),
 	}
 
-	m.receiverMaps[fileID] = &receiverFileMapping{
+	m.receiverMaps[ftIncomingRef(m, fileID, sender)] = &receiverFileMapping{
+		Ref:         ftIncomingRef(m, fileID, sender),
+		PartialPath: partialDownloadPath(downloadDir, fileID),
 		FileID:      fileID,
 		FileHash:    strings.Repeat("c", 64),
 		FileName:    "small.bin",
@@ -421,7 +442,7 @@ func TestHandleChunkResponse_AcceptsUndersizedFinalChunk(t *testing.T) {
 		Data:   encoded,
 	})
 
-	mapping := m.receiverMaps[fileID]
+	mapping := m.receiverMaps[ftIncomingRef(m, fileID, sender)]
 	if mapping.NextOffset != fileSize {
 		t.Errorf("NextOffset should advance to %d (final chunk accepted), got %d", fileSize, mapping.NextOffset)
 	}

@@ -7,6 +7,7 @@ import (
 
 	"github.com/rs/zerolog/log"
 
+	"github.com/piratecash/corsa/internal/core/chatlog"
 	"github.com/piratecash/corsa/internal/core/domain"
 )
 
@@ -167,7 +168,7 @@ type wipeTombstone struct {
 
 // queuedTombstone is one position in the expiry queue.
 type queuedTombstone struct {
-	id  domain.MessageID
+	id  deletionRefusal
 	seq uint64
 }
 
@@ -178,7 +179,7 @@ type wipeTombstoneSet struct {
 	// entries maps a refused id to its refusal. Keyed by the PLAIN id, which it
 	// can be because none of this is persisted: what made the durable half
 	// dangerous was that the list survived the messages.
-	entries map[domain.MessageID]wipeTombstone
+	entries map[deletionRefusal]wipeTombstone
 	// order is the refusals in the sequence they were made, which is also the
 	// sequence they expire in: every refusal gets the same TTL, and a renewal
 	// takes a NEW position at the tail rather than keeping its old one, so the
@@ -207,7 +208,7 @@ type wipeTombstoneSet struct {
 	// accumulation but a mirror of a work queue on disk, so they are reconciled
 	// against it — an id whose peer has confirmed is gone at the next load —
 	// rather than expired on a timer or evicted by a cap. See maxWipeTombstones.
-	owed map[domain.MessageID]struct{}
+	owed map[deletionRefusal]struct{}
 	// tasks resolves the outstanding deletion requests. It is not a journal of
 	// this set — nothing writes to it here — it is the work queue, read for the
 	// ids it happens to name.
@@ -232,7 +233,7 @@ type wipeTombstoneSet struct {
 
 // deleteTaskList is the outstanding-deletion half of the chatlog store.
 type deleteTaskList interface {
-	OwedDeleteIntentMessageIDs(ctx context.Context) ([]domain.MessageID, error)
+	OwedDeleteIntents(ctx context.Context) ([]chatlog.DeleteIntent, error)
 }
 
 // newWipeTombstoneSet builds the set over a RESOLVER, for the reason given on
@@ -240,8 +241,8 @@ type deleteTaskList interface {
 // built.
 func newWipeTombstoneSet(tasks func() deleteTaskList) *wipeTombstoneSet {
 	return &wipeTombstoneSet{
-		entries: make(map[domain.MessageID]wipeTombstone),
-		owed:    make(map[domain.MessageID]struct{}),
+		entries: make(map[deletionRefusal]wipeTombstone),
+		owed:    make(map[deletionRefusal]struct{}),
 		tasks:   tasks,
 	}
 }
@@ -279,7 +280,7 @@ func (s *wipeTombstoneSet) Hydrate(ctx context.Context, now time.Time) {
 	if tasks == nil {
 		return
 	}
-	owed, err := tasks.OwedDeleteIntentMessageIDs(ctx)
+	owed, err := tasks.OwedDeleteIntents(ctx)
 	if err != nil {
 		s.mu.Lock()
 		// A set that was read once keeps what it has: the list on disk did not
@@ -296,12 +297,20 @@ func (s *wipeTombstoneSet) Hydrate(ctx context.Context, now time.Time) {
 			Msg("dm_router: reading the deletions still owed failed; the refusals from the last successful read stand")
 		return
 	}
-	refreshed := make(map[domain.MessageID]struct{}, len(owed))
-	for _, id := range owed {
-		if id == "" {
+	refreshed := make(map[deletionRefusal]struct{}, len(owed))
+	for _, intent := range owed {
+		ref := normalizeRefusalRef(intent.Ref)
+		if ref.ID == "" {
+			ref.ID = string(intent.MessageID)
+		}
+		if ref.ID == "" {
 			continue
 		}
-		refreshed[id] = struct{}{}
+		key := deletionRefusal{Ref: ref}
+		if ref.Sender == "" || ref.Recipient == "" {
+			key.LegacyPeer = intent.Peer.String()
+		}
+		refreshed[key] = struct{}{}
 	}
 	s.mu.Lock()
 	s.owed = refreshed
@@ -344,7 +353,7 @@ func (s *wipeTombstoneSet) Hydrate(ctx context.Context, now time.Time) {
 //
 // A nil receiver is a no-op, so fixtures that do not need refusal behaviour can
 // leave the field unset without nil-panicking production call sites.
-func (s *wipeTombstoneSet) Note(ids []domain.MessageID, now time.Time) {
+func (s *wipeTombstoneSet) NoteRefs(ids []domain.MessageRef, now time.Time) {
 	if s == nil || len(ids) == 0 {
 		return
 	}
@@ -356,7 +365,7 @@ func (s *wipeTombstoneSet) Note(ids []domain.MessageID, now time.Time) {
 	s.dropExpiredLocked(now)
 	dropped := 0
 	for _, id := range ids {
-		s.refuseLocked(id, expiry)
+		s.refuseLocked(deletionRefusal{Ref: normalizeRefusalRef(id)}, expiry)
 		// Per id, not per batch. One wipe names a whole conversation, and a set
 		// that took the batch whole before trimming it would peak at the size of
 		// the batch — the cap would bound what is KEPT while the allocation it
@@ -394,8 +403,8 @@ func (s *wipeTombstoneSet) Note(ids []domain.MessageID, now time.Time) {
 // applied: shortening a refusal is never what a caller means, and it would also
 // put the id out of expiry order in the queue, which is the one property the
 // head of that queue relies on.
-func (s *wipeTombstoneSet) refuseLocked(id domain.MessageID, expiry time.Time) {
-	if id == "" {
+func (s *wipeTombstoneSet) refuseLocked(id deletionRefusal, expiry time.Time) {
+	if id.Ref.ID == "" {
 		return
 	}
 	if current, known := s.entries[id]; known && !expiry.After(current.expiresAt) {
@@ -539,14 +548,14 @@ func (s *wipeTombstoneSet) reclaimConsumedLocked() {
 // Forget lifts the refusal on the given ids. Called when a deletion that
 // pre-refused them rolled back: the rows are alive after all, and a refusal for
 // a live row is a trap that would swallow its next legitimate re-delivery.
-func (s *wipeTombstoneSet) Forget(ids []domain.MessageID) {
+func (s *wipeTombstoneSet) ForgetRefs(ids []domain.MessageRef) {
 	if s == nil || len(ids) == 0 {
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, id := range ids {
-		delete(s.entries, id)
+		delete(s.entries, deletionRefusal{Ref: normalizeRefusalRef(id)})
 	}
 	// The queue keeps each position until it is drained or compacted away:
 	// removing one here means finding it, which is the scan the queue exists to
@@ -621,23 +630,30 @@ func (s *wipeTombstoneSet) hasInMemory(id domain.MessageID, now time.Time) bool 
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	// A deletion this node still owes a peer refuses its message for as long as
-	// the work stands, with no horizon of its own: the request is the reason the
-	// sender may still be re-sending, so the two end together.
-	if _, owed := s.owed[id]; owed {
+	legacy := deletionRefusal{Ref: domain.MessageRef{ID: string(id)}}
+	if _, exists := s.owed[legacy]; exists {
 		return true
 	}
-	entry, ok := s.entries[id]
-	if !ok {
-		return false
+	if entry, exists := s.entries[legacy]; exists {
+		if entry.expiresAt.After(now) {
+			return true
+		}
+		delete(s.entries, legacy)
 	}
-	if !entry.expiresAt.After(now) {
-		// Expired — drop opportunistically and report miss. The queue keeps the
-		// position until it is drained or compacted away; see Forget.
-		delete(s.entries, id)
-		return false
+	for key := range s.owed {
+		if key.Ref.ID == string(id) {
+			return true
+		}
 	}
-	return true
+	for key, entry := range s.entries {
+		if key.Ref.ID == string(id) {
+			if entry.expiresAt.After(now) {
+				return true
+			}
+			delete(s.entries, key)
+		}
+	}
+	return false
 }
 
 // reap drops every entry whose refusal has run out.
@@ -648,6 +664,112 @@ func (s *wipeTombstoneSet) reap(now time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.dropExpiredLocked(now)
+	s.compactQueueIfSlackLocked()
+	s.reclaimConsumedLocked()
+}
+
+func normalizeRefusalRef(ref domain.MessageRef) domain.MessageRef {
+	if ref.Topic != "dm" || ref.Sender == "" || ref.Recipient == "" {
+		return domain.MessageRef{ID: ref.ID}
+	}
+	return ref
+}
+
+// Note/Forget retain ID-only source compatibility without lifting or creating
+// authority for an exact author. New deletion paths use NoteRefs/ForgetRefs.
+func (s *wipeTombstoneSet) Note(ids []domain.MessageID, now time.Time) {
+	refs := make([]domain.MessageRef, 0, len(ids))
+	for _, id := range ids {
+		refs = append(refs, domain.MessageRef{ID: string(id)})
+	}
+	s.NoteRefs(refs, now)
+}
+func (s *wipeTombstoneSet) Forget(ids []domain.MessageID) {
+	refs := make([]domain.MessageRef, 0, len(ids))
+	for _, id := range ids {
+		refs = append(refs, domain.MessageRef{ID: string(id)})
+	}
+	s.ForgetRefs(refs)
+}
+
+// RefusesRef separates exact prior deletion from an unknown legacy ID hold.
+// Only exact=true may support a duplicate receipt for this incoming identity.
+func (s *wipeTombstoneSet) RefusesRef(ref domain.MessageRef, now time.Time) (refused, known, exact bool) {
+	if s == nil {
+		return false, true, false
+	}
+	check := func() (bool, bool) {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		keys := []deletionRefusal{
+			{Ref: ref},
+			{Ref: domain.MessageRef{ID: ref.ID}},
+			{Ref: domain.MessageRef{ID: ref.ID}, LegacyPeer: ref.Sender},
+			{Ref: domain.MessageRef{ID: ref.ID}, LegacyPeer: ref.Recipient},
+		}
+		for _, key := range keys {
+			exact := key.Ref == ref && key.LegacyPeer == "" && ref.Topic == "dm" && ref.Sender != "" && ref.Recipient != ""
+			if _, exists := s.owed[key]; exists {
+				return true, exact
+			}
+			if entry, exists := s.entries[key]; exists {
+				if entry.expiresAt.After(now) {
+					return true, exact
+				}
+				delete(s.entries, key)
+			}
+		}
+		return false, false
+	}
+	if yes, exact := check(); yes {
+		return true, true, exact
+	}
+	if !s.isUnloaded() {
+		return false, true, false
+	}
+	if !s.claimReload(now) {
+		return false, false, false
+	}
+	s.Hydrate(context.Background(), now)
+	if yes, exact := check(); yes {
+		return true, true, exact
+	}
+	return false, !s.isUnloaded(), false
+}
+
+// A legacy task names a peer but does not identify the original direction.
+// This is a hold on that conversation, never a claim of exact delivery.
+type deletionRefusal struct {
+	Ref        domain.MessageRef
+	LegacyPeer string // nonempty means original parties are UNKNOWN; no exact receipt witness
+}
+
+func (s *wipeTombstoneSet) NoteForPeer(peer domain.PeerIdentity, ids []domain.MessageID, now time.Time) {
+	if s == nil || peer.IsZero() {
+		return
+	}
+	expiry := now.Add(wipeTombstoneTTL)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.dropExpiredLocked(now)
+	for _, id := range ids {
+		s.refuseLocked(deletionRefusal{Ref: domain.MessageRef{ID: string(id)}, LegacyPeer: peer.String()}, expiry)
+		s.enforceCapLocked()
+		s.reclaimConsumedLocked()
+	}
+	s.compactQueueIfSlackLocked()
+	s.reclaimConsumedLocked()
+}
+
+func (s *wipeTombstoneSet) ForgetForPeer(peer domain.PeerIdentity, ids []domain.MessageID) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, id := range ids {
+		delete(s.entries, deletionRefusal{Ref: domain.MessageRef{ID: string(id)}, LegacyPeer: peer.String()})
+	}
 	s.compactQueueIfSlackLocked()
 	s.reclaimConsumedLocked()
 }

@@ -17,7 +17,7 @@ import (
 //   - hop budget: absent/0 or above-default wire values collapse to
 //     defaultMessageHopBudget ("treat as if we created it" — legacy
 //     peers and hostile inflation alike); in-range values pass through.
-//   - admission scan: exact-ID dedup against the backlog (the bloom
+//   - admission scan: exact-reference dedup against the backlog (the bloom
 //     forgets after 5–10 min; the backlog does not), transit-only
 //     accounting per recipient and per byte total.
 //   - eviction: per-recipient FIFO cap, global byte budget, local
@@ -73,7 +73,7 @@ func TestScanTopicForAdmission(t *testing.T) {
 		{ID: "local1", Topic: "dm", Sender: "self", Recipient: "bob", Payload: make([]byte, 800)},
 	}
 
-	scan := scanTopicForAdmission(backlog, "t2", "bob", svc.isTransitEnvelope)
+	scan := scanTopicForAdmission(backlog, domain.MessageRef{Topic: "dm", ID: "t2", Sender: "alice", Recipient: "bob"}, svc.isTransitEnvelope)
 	if !scan.duplicate {
 		t.Error("expected duplicate detection for t2")
 	}
@@ -84,7 +84,7 @@ func TestScanTopicForAdmission(t *testing.T) {
 		t.Errorf("totalBytes = %d, want 700 (transit only)", scan.totalBytes)
 	}
 
-	if scanTopicForAdmission(backlog, "fresh", "bob", svc.isTransitEnvelope).duplicate {
+	if scanTopicForAdmission(backlog, domain.MessageRef{Topic: "dm", ID: "fresh", Sender: "alice", Recipient: "bob"}, svc.isTransitEnvelope).duplicate {
 		t.Error("unexpected duplicate for fresh ID")
 	}
 }
@@ -102,10 +102,11 @@ func TestEvictTransitOverflowLocked_PerRecipientFIFO(t *testing.T) {
 	}
 	backlog = append(backlog, transitEnvelope("carol-0", "carol", 10, now))
 
-	scan := scanTopicForAdmission(backlog, "incoming", "bob", svc.isTransitEnvelope)
+	scan := scanTopicForAdmission(backlog, domain.MessageRef{Topic: "dm", ID: "incoming", Sender: "alice", Recipient: "bob"}, svc.isTransitEnvelope)
 	filtered, evicted := evictTransitOverflowLocked(backlog, scan, "bob", 10, svc.isTransitEnvelope)
 
-	if len(evicted) != 1 || evicted[0] != "bob-0" {
+	wantEvicted := messageIdentity{MessageID: "bob-0", Sender: "alice", Recipient: "bob"}
+	if len(evicted) != 1 || evicted[0] != wantEvicted {
 		t.Fatalf("evicted = %v, want exactly [bob-0] (oldest transit for bob)", evicted)
 	}
 	for _, e := range filtered {
@@ -138,14 +139,15 @@ func TestEvictTransitOverflowLocked_GlobalByteBudget(t *testing.T) {
 	// Incoming transit of one more chunk pushes the total over budget:
 	// the globally oldest transit entries must go, regardless of
 	// recipient.
-	scan := scanTopicForAdmission(backlog, "incoming", "frank", svc.isTransitEnvelope)
+	scan := scanTopicForAdmission(backlog, domain.MessageRef{Topic: "dm", ID: "incoming", Sender: "alice", Recipient: "frank"}, svc.isTransitEnvelope)
 	filtered, evicted := evictTransitOverflowLocked(backlog, scan, "frank", chunk, svc.isTransitEnvelope)
 
 	if len(evicted) == 0 {
 		t.Fatal("expected global byte-budget eviction, got none")
 	}
-	if evicted[0] != "t1" {
-		t.Errorf("first evicted = %s, want t1 (globally oldest)", evicted[0])
+	wantFirst := messageIdentity{MessageID: "t1", Sender: "alice", Recipient: "bob"}
+	if evicted[0] != wantFirst {
+		t.Errorf("first evicted = %+v, want t1 (globally oldest)", evicted[0])
 	}
 	remaining := 0
 	for _, e := range filtered {
@@ -164,7 +166,7 @@ func TestEvictTransitOverflowLocked_NoOpUnderLimits(t *testing.T) {
 	backlog := []protocol.Envelope{
 		transitEnvelope("t1", "bob", 10, now),
 	}
-	scan := scanTopicForAdmission(backlog, "incoming", "bob", svc.isTransitEnvelope)
+	scan := scanTopicForAdmission(backlog, domain.MessageRef{Topic: "dm", ID: "incoming", Sender: "alice", Recipient: "bob"}, svc.isTransitEnvelope)
 	filtered, evicted := evictTransitOverflowLocked(backlog, scan, "bob", 10, svc.isTransitEnvelope)
 	if len(evicted) != 0 || len(filtered) != 1 {
 		t.Fatalf("under-limit admission must be a no-op: evicted=%v len=%d", evicted, len(filtered))

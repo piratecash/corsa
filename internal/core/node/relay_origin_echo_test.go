@@ -184,7 +184,7 @@ func TestStoreIncomingMessage_ForwardOnceTransitNotStored(t *testing.T) {
 		t.Errorf("forward-once transit must not enter s.topics, got %d", n)
 	}
 	// No relay-retry entry.
-	if svc.hasRelayRetryEntry("fwd-once-1") {
+	if svc.hasRelayRetryEntry(messageIdentity{MessageID: msg.ID, Sender: msg.Sender, Recipient: msg.Recipient}) {
 		t.Error("forward-once transit must not be tracked for relay-retry")
 	}
 	// But still forwarded on the wire (the single-pass send is not suppressed;
@@ -281,7 +281,7 @@ func TestStoreIncomingMessage_FirstSendToUnreachableIsHeld(t *testing.T) {
 	}
 	// It must be parked in the sender-owned retry set for later delivery.
 	svc.deliveryMu.RLock()
-	_, awaiting := svc.awaitingDelivered["origin-held-1"]
+	_, awaiting := svc.awaitingDelivered[svc.ownMessageIdentity("origin-held-1", recipient.Address)]
 	svc.deliveryMu.RUnlock()
 	if !awaiting {
 		t.Fatal("a held DM must be registered in awaitingDelivered for sender-owned retry")
@@ -313,7 +313,7 @@ func TestKickDeliveryRetriesForReachable(t *testing.T) {
 
 	future := time.Now().UTC().Add(10 * time.Minute)
 	svc.deliveryMu.Lock()
-	svc.awaitingDelivered["held-1"] = &deliveryRetryEntry{
+	svc.awaitingDelivered[svc.ownMessageIdentity("held-1", recipient.Address)] = &deliveryRetryEntry{
 		Envelope:      protocol.Envelope{ID: "held-1", Topic: "dm", Sender: svc.identity.Address, Recipient: recipient.Address},
 		Attempts:      3,
 		NextAttemptAt: future,
@@ -326,7 +326,7 @@ func TestKickDeliveryRetriesForReachable(t *testing.T) {
 	})
 
 	svc.deliveryMu.RLock()
-	entry := svc.awaitingDelivered["held-1"]
+	entry := svc.awaitingDelivered[svc.ownMessageIdentity("held-1", recipient.Address)]
 	svc.deliveryMu.RUnlock()
 	if entry.NextAttemptAt.After(time.Now().UTC()) {
 		t.Fatalf("kick must pull NextAttemptAt forward to now for a REACHABLE recipient, still future: %v", entry.NextAttemptAt)
@@ -353,7 +353,7 @@ func TestKickDeliveryRetriesForUnreachableIsNoop(t *testing.T) {
 
 	future := time.Now().UTC().Add(10 * time.Minute)
 	svc.deliveryMu.Lock()
-	svc.awaitingDelivered["held-2"] = &deliveryRetryEntry{
+	svc.awaitingDelivered[svc.ownMessageIdentity("held-2", recipient.Address)] = &deliveryRetryEntry{
 		Envelope:      protocol.Envelope{ID: "held-2", Topic: "dm", Sender: svc.identity.Address, Recipient: recipient.Address},
 		Attempts:      3,
 		NextAttemptAt: future,
@@ -367,7 +367,7 @@ func TestKickDeliveryRetriesForUnreachableIsNoop(t *testing.T) {
 	})
 
 	svc.deliveryMu.RLock()
-	entry := svc.awaitingDelivered["held-2"]
+	entry := svc.awaitingDelivered[svc.ownMessageIdentity("held-2", recipient.Address)]
 	svc.deliveryMu.RUnlock()
 	if !entry.NextAttemptAt.Equal(future) {
 		t.Fatalf("false kick (unreachable) must NOT re-arm; NextAttemptAt moved to %v", entry.NextAttemptAt)
@@ -402,7 +402,7 @@ func TestKickDeliveryRetriesSkipsAlreadyEmitted(t *testing.T) {
 
 	future := time.Now().UTC().Add(10 * time.Minute)
 	svc.deliveryMu.Lock()
-	svc.awaitingDelivered["emitted-1"] = &deliveryRetryEntry{
+	svc.awaitingDelivered[svc.ownMessageIdentity("emitted-1", recipient.Address)] = &deliveryRetryEntry{
 		Envelope:      protocol.Envelope{ID: "emitted-1", Topic: "dm", Sender: svc.identity.Address, Recipient: recipient.Address},
 		Attempts:      2,
 		NextAttemptAt: future,
@@ -415,7 +415,7 @@ func TestKickDeliveryRetriesSkipsAlreadyEmitted(t *testing.T) {
 	})
 
 	svc.deliveryMu.RLock()
-	entry := svc.awaitingDelivered["emitted-1"]
+	entry := svc.awaitingDelivered[svc.ownMessageIdentity("emitted-1", recipient.Address)]
 	svc.deliveryMu.RUnlock()
 	if !entry.NextAttemptAt.Equal(future) {
 		t.Fatalf("kick must NOT wake an already-emitted (Held=false) entry; NextAttemptAt moved to %v", entry.NextAttemptAt)

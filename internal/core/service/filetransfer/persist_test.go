@@ -15,6 +15,10 @@ import (
 	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 )
 
+// Hand-authored persistedTransferFile fixtures below retain version 1: their
+// absent message_ref is the legacy input being loaded. Save/load roundtrips
+// still exercise the current writer version and full references.
+
 // sha256Hex returns the hex-encoded SHA-256 of data. Used to generate valid
 // 64-char hex hashes that pass domain.ValidateFileHash in test fixtures.
 func sha256Hex(data []byte) string {
@@ -53,6 +57,7 @@ func TestAtomicWriteJSON(t *testing.T) {
 func TestSenderMappingRoundTrip(t *testing.T) {
 	now := time.Now().Truncate(time.Second)
 	original := &senderFileMapping{
+		Ref:          domain.MessageRef{Topic: "dm", ID: string("msg-123"), Sender: ftFixtureIdentity().Address, Recipient: (domaintest.ID("peer-bob")).String()},
 		FileID:       "msg-123",
 		FileHash:     "abc123def456",
 		FileName:     "photo.jpg",
@@ -101,6 +106,8 @@ func TestSenderMappingRoundTrip(t *testing.T) {
 func TestReceiverMappingRoundTrip(t *testing.T) {
 	now := time.Now().Truncate(time.Second)
 	original := &receiverFileMapping{
+		Ref:               domain.MessageRef{Topic: "dm", ID: string("msg-456"), Sender: (domaintest.ID("peer-alice")).String(), Recipient: ftFixtureIdentity().Address},
+		PartialPath:       filepath.Join("partial", string("msg-456")+".part"),
 		FileID:            "msg-456",
 		FileHash:          "xyz789",
 		FileName:          "doc.pdf",
@@ -155,8 +162,9 @@ func TestLoadMappings_NoFile(t *testing.T) {
 	path := filepath.Join(dir, "nonexistent.json")
 
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		mappingsPath: path,
 	}
 
@@ -175,8 +183,9 @@ func TestLoadMappings_InvalidJSON(t *testing.T) {
 	_ = os.WriteFile(path, []byte("not json"), 0o600)
 
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		mappingsPath: path,
 	}
 
@@ -198,12 +207,14 @@ func TestSaveThenLoad(t *testing.T) {
 
 	// Create manager with some mappings.
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		mappingsPath: path,
 	}
 
-	m.senderMaps["file-1"] = &senderFileMapping{
+	m.senderMaps[ftOutgoingRef(m, "file-1", domaintest.ID("bob"))] = &senderFileMapping{
+		Ref:         ftOutgoingRef(m, "file-1", domaintest.ID("bob")),
 		FileID:      "file-1",
 		FileHash:    senderHash,
 		FileName:    "test.txt",
@@ -214,7 +225,9 @@ func TestSaveThenLoad(t *testing.T) {
 		CreatedAt:   now,
 	}
 
-	m.receiverMaps["file-2"] = &receiverFileMapping{
+	m.receiverMaps[ftIncomingRef(m, "file-2", domaintest.ID("alice"))] = &receiverFileMapping{
+		Ref:           ftIncomingRef(m, "file-2", domaintest.ID("alice")),
+		PartialPath:   partialDownloadPath(m.downloadDir, "file-2"),
 		FileID:        "file-2",
 		FileHash:      receiverHash,
 		FileName:      "image.png",
@@ -238,15 +251,16 @@ func TestSaveThenLoad(t *testing.T) {
 
 	// Load into fresh manager.
 	m2 := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		mappingsPath: path,
 	}
 
 	hashes := m2.loadMappings()
 
 	// Verify sender loaded.
-	sm, ok := m2.senderMaps["file-1"]
+	sm, ok := m2.senderMaps[ftOutgoingRef(m2, "file-1", domaintest.ID("bob"))]
 	if !ok {
 		t.Fatal("sender mapping file-1 not loaded")
 	}
@@ -261,7 +275,7 @@ func TestSaveThenLoad(t *testing.T) {
 	}
 
 	// Verify receiver loaded.
-	rm, ok := m2.receiverMaps["file-2"]
+	rm, ok := m2.receiverMaps[ftIncomingRef(m2, "file-2", domaintest.ID("alice"))]
 	if !ok {
 		t.Fatal("receiver mapping file-2 not loaded")
 	}
@@ -294,8 +308,9 @@ func TestLoadMappings_VersionMismatch(t *testing.T) {
 	_ = os.WriteFile(path, data, 0o600)
 
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		mappingsPath: path,
 	}
 
@@ -315,12 +330,14 @@ func TestSaveMappings_CompletedSenderHoldsRefCount(t *testing.T) {
 	doneHash := sha256Hex([]byte("done-content"))
 
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		mappingsPath: path,
 	}
 
-	m.senderMaps["file-done"] = &senderFileMapping{
+	m.senderMaps[ftOutgoingRef(m, "file-done", domaintest.ID("bob"))] = &senderFileMapping{
+		Ref:         ftOutgoingRef(m, "file-done", domaintest.ID("bob")),
 		FileID:      "file-done",
 		FileHash:    doneHash,
 		FileName:    "done.txt",
@@ -336,8 +353,9 @@ func TestSaveMappings_CompletedSenderHoldsRefCount(t *testing.T) {
 
 	// Load and verify completed sender DOES produce a ref count.
 	m2 := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		mappingsPath: path,
 	}
 
@@ -349,8 +367,9 @@ func TestSaveMappings_CompletedSenderHoldsRefCount(t *testing.T) {
 
 func TestSaveMappings_EmptyPath(t *testing.T) {
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		mappingsPath: "",
 	}
 
@@ -436,14 +455,17 @@ func TestReconcileVerifying_CompletedFileExists(t *testing.T) {
 	}
 
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		downloadDir:  downloadDir,
 		stopCh:       make(chan struct{}),
 	}
 
 	fileID := domain.FileID("crash-after-rename")
-	m.receiverMaps[fileID] = &receiverFileMapping{
+	m.receiverMaps[ftIncomingRef(m, fileID, domaintest.ID("sender-identity-1234567890abcd"))] = &receiverFileMapping{
+		Ref:          ftIncomingRef(m, fileID, domaintest.ID("sender-identity-1234567890abcd")),
+		PartialPath:  partialDownloadPath(m.downloadDir, fileID),
 		FileID:       fileID,
 		FileHash:     fileHash,
 		FileName:     fileName,
@@ -456,7 +478,7 @@ func TestReconcileVerifying_CompletedFileExists(t *testing.T) {
 
 	m.reconcileVerifyingOnStartup()
 
-	rm := m.receiverMaps[fileID]
+	rm := m.receiverMaps[ftIncomingRef(m, fileID, domaintest.ID("sender-identity-1234567890abcd"))]
 	if rm.State != receiverWaitingAck {
 		t.Fatalf("state = %s, want waiting_ack", rm.State)
 	}
@@ -492,25 +514,28 @@ func TestReconcileVerifying_PartialFileExists(t *testing.T) {
 	}
 
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		downloadDir:  downloadDir,
 		stopCh:       make(chan struct{}),
 	}
 
-	m.receiverMaps[fileID] = &receiverFileMapping{
-		FileID:    fileID,
-		FileHash:  fileHash,
-		FileName:  "data.bin",
-		FileSize:  100000,
-		Sender:    domaintest.ID("sender-identity-1234567890abcd"),
-		State:     receiverVerifying,
-		CreatedAt: time.Now(),
+	m.receiverMaps[ftIncomingRef(m, fileID, domaintest.ID("sender-identity-1234567890abcd"))] = &receiverFileMapping{
+		Ref:         ftIncomingRef(m, fileID, domaintest.ID("sender-identity-1234567890abcd")),
+		PartialPath: partialDownloadPath(m.downloadDir, fileID),
+		FileID:      fileID,
+		FileHash:    fileHash,
+		FileName:    "data.bin",
+		FileSize:    100000,
+		Sender:      domaintest.ID("sender-identity-1234567890abcd"),
+		State:       receiverVerifying,
+		CreatedAt:   time.Now(),
 	}
 
 	m.reconcileVerifyingOnStartup()
 
-	rm := m.receiverMaps[fileID]
+	rm := m.receiverMaps[ftIncomingRef(m, fileID, domaintest.ID("sender-identity-1234567890abcd"))]
 	if rm.State != receiverWaitingRoute {
 		t.Fatalf("state = %s, want waiting_route", rm.State)
 	}
@@ -530,26 +555,29 @@ func TestReconcileVerifying_NoFilesOnDisk(t *testing.T) {
 	}
 
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		downloadDir:  downloadDir,
 		stopCh:       make(chan struct{}),
 	}
 
 	fileID := domain.FileID("crash-no-files")
-	m.receiverMaps[fileID] = &receiverFileMapping{
-		FileID:    fileID,
-		FileHash:  "c1c2c3c4c5c6c1c2c3c4c5c6c1c2c3c4c5c6c1c2c3c4c5c6c1c2c3c4c5c6c1c2",
-		FileName:  "gone.txt",
-		FileSize:  1024,
-		Sender:    domaintest.ID("sender-identity-1234567890abcd"),
-		State:     receiverVerifying,
-		CreatedAt: time.Now(),
+	m.receiverMaps[ftIncomingRef(m, fileID, domaintest.ID("sender-identity-1234567890abcd"))] = &receiverFileMapping{
+		Ref:         ftIncomingRef(m, fileID, domaintest.ID("sender-identity-1234567890abcd")),
+		PartialPath: partialDownloadPath(m.downloadDir, fileID),
+		FileID:      fileID,
+		FileHash:    "c1c2c3c4c5c6c1c2c3c4c5c6c1c2c3c4c5c6c1c2c3c4c5c6c1c2c3c4c5c6c1c2",
+		FileName:    "gone.txt",
+		FileSize:    1024,
+		Sender:      domaintest.ID("sender-identity-1234567890abcd"),
+		State:       receiverVerifying,
+		CreatedAt:   time.Now(),
 	}
 
 	m.reconcileVerifyingOnStartup()
 
-	rm := m.receiverMaps[fileID]
+	rm := m.receiverMaps[ftIncomingRef(m, fileID, domaintest.ID("sender-identity-1234567890abcd"))]
 	if rm.State != receiverFailed {
 		t.Fatalf("state = %s, want failed", rm.State)
 	}
@@ -592,13 +620,16 @@ func TestReconcileVerifying_PartialFileClearsStaleCompletedPath(t *testing.T) {
 	stalePath := filepath.Join(downloadDir, "some-unrelated-file.bin")
 
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		downloadDir:  downloadDir,
 		stopCh:       make(chan struct{}),
 	}
 
-	m.receiverMaps[fileID] = &receiverFileMapping{
+	m.receiverMaps[ftIncomingRef(m, fileID, domaintest.ID("sender-identity-1234567890abcd"))] = &receiverFileMapping{
+		Ref:           ftIncomingRef(m, fileID, domaintest.ID("sender-identity-1234567890abcd")),
+		PartialPath:   partialDownloadPath(m.downloadDir, fileID),
 		FileID:        fileID,
 		FileHash:      fileHash,
 		FileName:      "data.bin",
@@ -611,7 +642,7 @@ func TestReconcileVerifying_PartialFileClearsStaleCompletedPath(t *testing.T) {
 
 	m.reconcileVerifyingOnStartup()
 
-	rm := m.receiverMaps[fileID]
+	rm := m.receiverMaps[ftIncomingRef(m, fileID, domaintest.ID("sender-identity-1234567890abcd"))]
 	if rm.State != receiverWaitingRoute {
 		t.Fatalf("state = %s, want waiting_route", rm.State)
 	}
@@ -636,14 +667,17 @@ func TestReconcileVerifying_NoFilesClearsStaleCompletedPath(t *testing.T) {
 	stalePath := filepath.Join(downloadDir, "another-unrelated-file.bin")
 
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		downloadDir:  downloadDir,
 		stopCh:       make(chan struct{}),
 	}
 
 	fileID := domain.FileID("crash-stale-path-failed")
-	m.receiverMaps[fileID] = &receiverFileMapping{
+	m.receiverMaps[ftIncomingRef(m, fileID, domaintest.ID("sender-identity-1234567890abcd"))] = &receiverFileMapping{
+		Ref:           ftIncomingRef(m, fileID, domaintest.ID("sender-identity-1234567890abcd")),
+		PartialPath:   partialDownloadPath(m.downloadDir, fileID),
 		FileID:        fileID,
 		FileHash:      "f1f2f3f4f5f6f1f2f3f4f5f6f1f2f3f4f5f6f1f2f3f4f5f6f1f2f3f4f5f6f1f2",
 		FileName:      "gone.txt",
@@ -656,7 +690,7 @@ func TestReconcileVerifying_NoFilesClearsStaleCompletedPath(t *testing.T) {
 
 	m.reconcileVerifyingOnStartup()
 
-	rm := m.receiverMaps[fileID]
+	rm := m.receiverMaps[ftIncomingRef(m, fileID, domaintest.ID("sender-identity-1234567890abcd"))]
 	if rm.State != receiverFailed {
 		t.Fatalf("state = %s, want failed", rm.State)
 	}
@@ -690,25 +724,28 @@ func TestReconcileVerifying_OversizedPartialFileResetsOffset(t *testing.T) {
 	}
 
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		downloadDir:  downloadDir,
 		stopCh:       make(chan struct{}),
 	}
 
-	m.receiverMaps[fileID] = &receiverFileMapping{
-		FileID:    fileID,
-		FileHash:  fileHash,
-		FileName:  "oversized.bin",
-		FileSize:  fileSize,
-		Sender:    domaintest.ID("sender-identity-1234567890abcd"),
-		State:     receiverVerifying,
-		CreatedAt: time.Now(),
+	m.receiverMaps[ftIncomingRef(m, fileID, domaintest.ID("sender-identity-1234567890abcd"))] = &receiverFileMapping{
+		Ref:         ftIncomingRef(m, fileID, domaintest.ID("sender-identity-1234567890abcd")),
+		PartialPath: partialDownloadPath(m.downloadDir, fileID),
+		FileID:      fileID,
+		FileHash:    fileHash,
+		FileName:    "oversized.bin",
+		FileSize:    fileSize,
+		Sender:      domaintest.ID("sender-identity-1234567890abcd"),
+		State:       receiverVerifying,
+		CreatedAt:   time.Now(),
 	}
 
 	m.reconcileVerifyingOnStartup()
 
-	rm := m.receiverMaps[fileID]
+	rm := m.receiverMaps[ftIncomingRef(m, fileID, domaintest.ID("sender-identity-1234567890abcd"))]
 	if rm.State != receiverWaitingRoute {
 		t.Fatalf("state = %s, want waiting_route", rm.State)
 	}
@@ -733,7 +770,7 @@ func TestLoadMappings_RejectsReceiverInvalidHash(t *testing.T) {
 	path := filepath.Join(dir, "transfers.json")
 
 	pf := persistedTransferFile{
-		Version:   persistVersion,
+		Version:   1,
 		UpdatedAt: time.Now(),
 		Transfers: []persistedTransferEntry{
 			{
@@ -751,13 +788,14 @@ func TestLoadMappings_RejectsReceiverInvalidHash(t *testing.T) {
 	_ = os.WriteFile(path, data, 0o600)
 
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		mappingsPath: path,
 	}
 	m.loadMappings()
 
-	if _, exists := m.receiverMaps["bad-hash-recv"]; exists {
+	if _, exists := m.receiverMaps[ftIncomingRef(m, "bad-hash-recv", domaintest.ID("sender-1234567890abcdef"))]; exists {
 		t.Fatal("receiver entry with invalid hash should be skipped")
 	}
 }
@@ -772,7 +810,7 @@ func TestLoadMappings_RejectsReceiverZeroSize(t *testing.T) {
 	validHash := sha256Hex([]byte("zero-size-test"))
 
 	pf := persistedTransferFile{
-		Version:   persistVersion,
+		Version:   1,
 		UpdatedAt: time.Now(),
 		Transfers: []persistedTransferEntry{
 			{
@@ -790,13 +828,14 @@ func TestLoadMappings_RejectsReceiverZeroSize(t *testing.T) {
 	_ = os.WriteFile(path, data, 0o600)
 
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		mappingsPath: path,
 	}
 	m.loadMappings()
 
-	if _, exists := m.receiverMaps["zero-size-recv"]; exists {
+	if _, exists := m.receiverMaps[ftIncomingRef(m, "zero-size-recv", domaintest.ID("sender-1234567890abcdef"))]; exists {
 		t.Fatal("receiver entry with zero file size should be skipped")
 	}
 }
@@ -811,7 +850,7 @@ func TestLoadMappings_RejectsReceiverEmptyName(t *testing.T) {
 	validHash := sha256Hex([]byte("empty-name-test"))
 
 	pf := persistedTransferFile{
-		Version:   persistVersion,
+		Version:   1,
 		UpdatedAt: time.Now(),
 		Transfers: []persistedTransferEntry{
 			{
@@ -829,13 +868,14 @@ func TestLoadMappings_RejectsReceiverEmptyName(t *testing.T) {
 	_ = os.WriteFile(path, data, 0o600)
 
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		mappingsPath: path,
 	}
 	m.loadMappings()
 
-	if _, exists := m.receiverMaps["empty-name-recv"]; exists {
+	if _, exists := m.receiverMaps[ftIncomingRef(m, "empty-name-recv", domaintest.ID("sender-1234567890abcdef"))]; exists {
 		t.Fatal("receiver entry with empty file name should be skipped")
 	}
 }
@@ -848,7 +888,7 @@ func TestLoadMappings_RejectsSenderInvalidHash(t *testing.T) {
 	path := filepath.Join(dir, "transfers.json")
 
 	pf := persistedTransferFile{
-		Version:   persistVersion,
+		Version:   1,
 		UpdatedAt: time.Now(),
 		Transfers: []persistedTransferEntry{
 			{
@@ -866,13 +906,14 @@ func TestLoadMappings_RejectsSenderInvalidHash(t *testing.T) {
 	_ = os.WriteFile(path, data, 0o600)
 
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		mappingsPath: path,
 	}
 	hashes := m.loadMappings()
 
-	if _, exists := m.senderMaps["bad-hash-send"]; exists {
+	if _, exists := m.senderMaps[ftOutgoingRef(m, "bad-hash-send", domaintest.ID("recipient-1234567890abcdef"))]; exists {
 		t.Fatal("sender entry with invalid hash should be skipped")
 	}
 	if len(hashes) != 0 {
@@ -891,7 +932,7 @@ func TestLoadMappings_AcceptsValidEntries(t *testing.T) {
 	rHash := sha256Hex([]byte("valid-receiver"))
 
 	pf := persistedTransferFile{
-		Version:   persistVersion,
+		Version:   1,
 		UpdatedAt: time.Now(),
 		Transfers: []persistedTransferEntry{
 			{
@@ -918,16 +959,17 @@ func TestLoadMappings_AcceptsValidEntries(t *testing.T) {
 	_ = os.WriteFile(path, data, 0o600)
 
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		mappingsPath: path,
 	}
 	hashes := m.loadMappings()
 
-	if _, ok := m.senderMaps["valid-send"]; !ok {
+	if _, ok := m.senderMaps[ftOutgoingRef(m, "valid-send", domaintest.ID("recipient-abc"))]; !ok {
 		t.Error("valid sender entry should be loaded")
 	}
-	if _, ok := m.receiverMaps["valid-recv"]; !ok {
+	if _, ok := m.receiverMaps[ftIncomingRef(m, "valid-recv", domaintest.ID("sender-xyz"))]; !ok {
 		t.Error("valid receiver entry should be loaded")
 	}
 	if count := hashes[sHash]; count != 1 {
@@ -958,7 +1000,7 @@ func TestLoadMappings_SenderPreServeStateRoundTrip(t *testing.T) {
 	stalledAt := time.Now().Add(-2 * senderServingStallTimeout)
 
 	pf := persistedTransferFile{
-		Version:   persistVersion,
+		Version:   1,
 		UpdatedAt: time.Now(),
 		Transfers: []persistedTransferEntry{
 			{
@@ -989,14 +1031,15 @@ func TestLoadMappings_SenderPreServeStateRoundTrip(t *testing.T) {
 	// loadMappings is skipped, so the mapping stays in senderServing
 	// with its persisted PreServeState.
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		mappingsPath: path,
 		stopCh:       make(chan struct{}),
 	}
 	m.loadMappings()
 
-	sm, ok := m.senderMaps["re-dl"]
+	sm, ok := m.senderMaps[ftOutgoingRef(m, "re-dl", domaintest.ID("bob"))]
 	if !ok {
 		t.Fatal("re-download sender mapping not loaded")
 	}
@@ -1012,7 +1055,7 @@ func TestLoadMappings_SenderPreServeStateRoundTrip(t *testing.T) {
 	// senderCompleted, not downgrade to senderAnnounced.
 	m.tickSenderMappings()
 
-	sm = m.senderMaps["re-dl"]
+	sm = m.senderMaps[ftOutgoingRef(m, "re-dl", domaintest.ID("bob"))]
 	if sm == nil {
 		t.Fatal("mapping must not be removed on reclaim")
 	}
@@ -1039,11 +1082,13 @@ func TestSaveLoadSenderPreServeStateOmittedWhenEmpty(t *testing.T) {
 	hash := sha256Hex([]byte("first-dl-persist"))
 
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		mappingsPath: path,
 	}
-	m.senderMaps["first-dl"] = &senderFileMapping{
+	m.senderMaps[ftOutgoingRef(m, "first-dl", domaintest.ID("bob"))] = &senderFileMapping{
+		Ref:          ftOutgoingRef(m, "first-dl", domaintest.ID("bob")),
 		FileID:       "first-dl",
 		FileHash:     hash,
 		FileName:     "first.bin",
@@ -1064,12 +1109,13 @@ func TestSaveLoadSenderPreServeStateOmittedWhenEmpty(t *testing.T) {
 	}
 
 	m2 := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		mappingsPath: path,
 	}
 	m2.loadMappings()
-	sm, ok := m2.senderMaps["first-dl"]
+	sm, ok := m2.senderMaps[ftOutgoingRef(m2, "first-dl", domaintest.ID("bob"))]
 	if !ok {
 		t.Fatal("first-dl sender mapping not loaded")
 	}
@@ -1117,13 +1163,14 @@ func TestLoadMappings_InvalidPreServeStateSanitised(t *testing.T) {
 	}
 
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		mappingsPath: path,
 	}
 	m.loadMappings()
 
-	sm, ok := m.senderMaps["tampered-pre-serve"]
+	sm, ok := m.senderMaps[ftOutgoingRef(m, "tampered-pre-serve", domaintest.ID("bob"))]
 	if !ok {
 		t.Fatal("tampered-pre-serve sender mapping not loaded (should be loaded with cleared PreServeState)")
 	}
@@ -1162,12 +1209,14 @@ func TestSaveLoadServingEpochRoundTrip(t *testing.T) {
 	}
 
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		mappingsPath: path,
 		store:        store,
 	}
-	m.senderMaps["epoch-sender"] = &senderFileMapping{
+	m.senderMaps[ftOutgoingRef(m, "epoch-sender", domaintest.ID("bob"))] = &senderFileMapping{
+		Ref:          ftOutgoingRef(m, "epoch-sender", domaintest.ID("bob")),
 		FileID:       "epoch-sender",
 		FileHash:     hash,
 		FileName:     "x.bin",
@@ -1178,7 +1227,9 @@ func TestSaveLoadServingEpochRoundTrip(t *testing.T) {
 		CreatedAt:    time.Now(),
 		CompletedAt:  time.Now(),
 	}
-	m.receiverMaps["epoch-receiver"] = &receiverFileMapping{
+	m.receiverMaps[ftIncomingRef(m, "epoch-receiver", domaintest.ID("alice"))] = &receiverFileMapping{
+		Ref:          ftIncomingRef(m, "epoch-receiver", domaintest.ID("alice")),
+		PartialPath:  partialDownloadPath(m.downloadDir, "epoch-receiver"),
 		FileID:       "epoch-receiver",
 		FileHash:     hash,
 		FileName:     "x.bin",
@@ -1200,14 +1251,15 @@ func TestSaveLoadServingEpochRoundTrip(t *testing.T) {
 	}
 
 	m2 := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		mappingsPath: path,
 		store:        store,
 	}
 	m2.loadMappings()
 
-	sm, ok := m2.senderMaps["epoch-sender"]
+	sm, ok := m2.senderMaps[ftOutgoingRef(m2, "epoch-sender", domaintest.ID("bob"))]
 	if !ok {
 		t.Fatal("epoch-sender mapping not loaded")
 	}
@@ -1215,7 +1267,7 @@ func TestSaveLoadServingEpochRoundTrip(t *testing.T) {
 		t.Errorf("sender ServingEpoch = %d, want 42", sm.ServingEpoch)
 	}
 
-	rm, ok := m2.receiverMaps["epoch-receiver"]
+	rm, ok := m2.receiverMaps[ftIncomingRef(m2, "epoch-receiver", domaintest.ID("alice"))]
 	if !ok {
 		t.Fatal("epoch-receiver mapping not loaded")
 	}
@@ -1247,12 +1299,14 @@ func TestSaveLoadServingEpochOmittedWhenZero(t *testing.T) {
 	}
 
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		mappingsPath: path,
 		store:        store,
 	}
-	m.senderMaps["never-served"] = &senderFileMapping{
+	m.senderMaps[ftOutgoingRef(m, "never-served", domaintest.ID("bob"))] = &senderFileMapping{
+		Ref:       ftOutgoingRef(m, "never-served", domaintest.ID("bob")),
 		FileID:    "never-served",
 		FileHash:  hash,
 		FileName:  "x.bin",
@@ -1284,7 +1338,7 @@ func TestLoadMappings_RejectsSenderUnknownState(t *testing.T) {
 	validHash := sha256Hex([]byte("sender-unknown-state"))
 
 	pf := persistedTransferFile{
-		Version:   persistVersion,
+		Version:   1,
 		UpdatedAt: time.Now(),
 		Transfers: []persistedTransferEntry{
 			{
@@ -1302,13 +1356,14 @@ func TestLoadMappings_RejectsSenderUnknownState(t *testing.T) {
 	_ = os.WriteFile(path, data, 0o600)
 
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		mappingsPath: path,
 	}
 	hashes := m.loadMappings()
 
-	if _, exists := m.senderMaps["bogus-sender"]; exists {
+	if _, exists := m.senderMaps[ftOutgoingRef(m, "bogus-sender", domaintest.ID("recipient-1234567890abcdef"))]; exists {
 		t.Fatal("sender entry with unknown state should be skipped")
 	}
 	if len(hashes) != 0 {
@@ -1327,7 +1382,7 @@ func TestLoadMappings_RejectsReceiverUnknownState(t *testing.T) {
 	validHash := sha256Hex([]byte("receiver-unknown-state"))
 
 	pf := persistedTransferFile{
-		Version:   persistVersion,
+		Version:   1,
 		UpdatedAt: time.Now(),
 		Transfers: []persistedTransferEntry{
 			{
@@ -1345,13 +1400,14 @@ func TestLoadMappings_RejectsReceiverUnknownState(t *testing.T) {
 	_ = os.WriteFile(path, data, 0o600)
 
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		mappingsPath: path,
 	}
 	m.loadMappings()
 
-	if _, exists := m.receiverMaps["bogus-receiver"]; exists {
+	if _, exists := m.receiverMaps[ftIncomingRef(m, "bogus-receiver", domaintest.ID("sender-1234567890abcdef"))]; exists {
 		t.Fatal("receiver entry with unknown state should be skipped")
 	}
 }
@@ -1377,20 +1433,21 @@ func TestLoadMappings_AcceptsAllKnownSenderStates(t *testing.T) {
 		}
 	}
 
-	pf := persistedTransferFile{Version: persistVersion, UpdatedAt: time.Now(), Transfers: entries}
+	pf := persistedTransferFile{Version: 1, UpdatedAt: time.Now(), Transfers: entries}
 	data, _ := json.Marshal(pf)
 	_ = os.WriteFile(path, data, 0o600)
 
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		mappingsPath: path,
 	}
 	m.loadMappings()
 
 	for _, st := range states {
 		fid := domain.FileID(fmt.Sprintf("sender-%s", st))
-		sm, ok := m.senderMaps[fid]
+		sm, ok := m.senderMaps[ftOutgoingRef(m, fid, domaintest.ID("recipient-1234567890abcdef"))]
 		if !ok {
 			t.Errorf("sender with state %q should be loaded", st)
 			continue
@@ -1429,20 +1486,21 @@ func TestLoadMappings_AcceptsAllKnownReceiverStates(t *testing.T) {
 		}
 	}
 
-	pf := persistedTransferFile{Version: persistVersion, UpdatedAt: time.Now(), Transfers: entries}
+	pf := persistedTransferFile{Version: 1, UpdatedAt: time.Now(), Transfers: entries}
 	data, _ := json.Marshal(pf)
 	_ = os.WriteFile(path, data, 0o600)
 
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		mappingsPath: path,
 	}
 	m.loadMappings()
 
 	for _, st := range states {
 		fid := domain.FileID(fmt.Sprintf("recv-%s", st))
-		rm, ok := m.receiverMaps[fid]
+		rm, ok := m.receiverMaps[ftIncomingRef(m, fid, domaintest.ID("sender-1234567890abcdef"))]
 		if !ok {
 			t.Errorf("receiver with state %q should be loaded (not rejected by state validation)", st)
 			continue
@@ -1466,6 +1524,7 @@ func TestEntryToReceiverMapping_ZeroChunkSizeNormalized(t *testing.T) {
 	t.Parallel()
 
 	entry := persistedTransferEntry{
+		Ref:       &domain.MessageRef{Topic: "dm", ID: string("zero-chunk-file"), Sender: (domaintest.ID("sender-identity-1234567890abcd")).String(), Recipient: ftFixtureIdentity().Address},
 		Role:      "receiver",
 		FileID:    "zero-chunk-file",
 		FileHash:  "a1a2a3a4a5a6a7a8b1b2b3b4b5b6b7b8c1c2c3c4c5c6c7c8d1d2d3d4d5d6d7d8",
@@ -1489,6 +1548,7 @@ func TestEntryToReceiverMapping_NonZeroChunkSizePreserved(t *testing.T) {
 	t.Parallel()
 
 	entry := persistedTransferEntry{
+		Ref:       &domain.MessageRef{Topic: "dm", ID: string("custom-chunk-file"), Sender: (domaintest.ID("sender-identity-1234567890abcd")).String(), Recipient: ftFixtureIdentity().Address},
 		Role:      "receiver",
 		FileID:    "custom-chunk-file",
 		FileHash:  "b1b2b3b4b5b6b7b8c1c2c3c4c5c6c7c8d1d2d3d4d5d6d7d8e1e2e3e4e5e6e7e8",
@@ -1530,7 +1590,7 @@ func TestLoadMappingsTombstonesActiveSenderWithMissingBlob(t *testing.T) {
 	// that prevented the senderCompleted state from being saved.
 	mappingsPath := filepath.Join(dir, "transfers.json")
 	pf := persistedTransferFile{
-		Version:   persistVersion,
+		Version:   1,
 		UpdatedAt: time.Now(),
 		Transfers: []persistedTransferEntry{
 			{
@@ -1553,8 +1613,9 @@ func TestLoadMappingsTombstonesActiveSenderWithMissingBlob(t *testing.T) {
 	// Do NOT create the transmit file — simulating post-Release deletion.
 
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		store:        store,
 		downloadDir:  filepath.Join(dir, "downloads"),
 		mappingsPath: mappingsPath,
@@ -1564,7 +1625,7 @@ func TestLoadMappingsTombstonesActiveSenderWithMissingBlob(t *testing.T) {
 	activeHashes := m.loadMappings()
 
 	// The mapping must be loaded but tombstoned.
-	sm, ok := m.senderMaps["orphaned-sender"]
+	sm, ok := m.senderMaps[ftOutgoingRef(m, "orphaned-sender", domaintest.ID("recipient-identity-1234567890ab"))]
 	if !ok {
 		t.Fatal("sender mapping should be present after loadMappings")
 	}
@@ -1602,7 +1663,7 @@ func TestLoadMappingsResurrectsTombstoneWhenBlobExists(t *testing.T) {
 	// Persist a tombstoned sender mapping.
 	mappingsPath := filepath.Join(dir, "transfers.json")
 	pf := persistedTransferFile{
-		Version:   persistVersion,
+		Version:   1,
 		UpdatedAt: time.Now(),
 		Transfers: []persistedTransferEntry{
 			{
@@ -1624,8 +1685,9 @@ func TestLoadMappingsResurrectsTombstoneWhenBlobExists(t *testing.T) {
 	}
 
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		store:        store,
 		downloadDir:  filepath.Join(dir, "downloads"),
 		mappingsPath: mappingsPath,
@@ -1635,7 +1697,7 @@ func TestLoadMappingsResurrectsTombstoneWhenBlobExists(t *testing.T) {
 	activeHashes := m.loadMappings()
 
 	// The mapping must be resurrected to completed.
-	sm, ok := m.senderMaps["resurrected-sender"]
+	sm, ok := m.senderMaps[ftOutgoingRef(m, "resurrected-sender", domaintest.ID("recipient-identity-1234567890ab"))]
 	if !ok {
 		t.Fatal("sender mapping should be present after loadMappings")
 	}
@@ -1678,7 +1740,7 @@ func TestResurrectedTombstoneResetsCompletedAt(t *testing.T) {
 	oldCompletedAt := time.Now().Add(-60 * 24 * time.Hour)
 	mappingsPath := filepath.Join(dir, "transfers.json")
 	pf := persistedTransferFile{
-		Version:   persistVersion,
+		Version:   1,
 		UpdatedAt: time.Now(),
 		Transfers: []persistedTransferEntry{
 			{
@@ -1700,8 +1762,9 @@ func TestResurrectedTombstoneResetsCompletedAt(t *testing.T) {
 	}
 
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		store:        store,
 		downloadDir:  filepath.Join(dir, "downloads"),
 		mappingsPath: mappingsPath,
@@ -1711,7 +1774,7 @@ func TestResurrectedTombstoneResetsCompletedAt(t *testing.T) {
 	beforeLoad := time.Now()
 	m.loadMappings()
 
-	sm, ok := m.senderMaps["old-tombstone"]
+	sm, ok := m.senderMaps[ftOutgoingRef(m, "old-tombstone", domaintest.ID("peer-identity-abcdef1234567890"))]
 	if !ok {
 		t.Fatal("mapping should be loaded")
 	}
@@ -1756,7 +1819,7 @@ func TestLoadMappingsKeepsActiveSenderWithExistingBlob(t *testing.T) {
 
 	mappingsPath := filepath.Join(dir, "transfers.json")
 	pf := persistedTransferFile{
-		Version:   persistVersion,
+		Version:   1,
 		UpdatedAt: time.Now(),
 		Transfers: []persistedTransferEntry{
 			{
@@ -1777,8 +1840,9 @@ func TestLoadMappingsKeepsActiveSenderWithExistingBlob(t *testing.T) {
 	}
 
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		store:        store,
 		downloadDir:  filepath.Join(dir, "downloads"),
 		mappingsPath: mappingsPath,
@@ -1787,7 +1851,7 @@ func TestLoadMappingsKeepsActiveSenderWithExistingBlob(t *testing.T) {
 
 	activeHashes := m.loadMappings()
 
-	sm, ok := m.senderMaps["healthy-sender"]
+	sm, ok := m.senderMaps[ftOutgoingRef(m, "healthy-sender", domaintest.ID("recipient-identity-1234567890ab"))]
 	if !ok {
 		t.Fatal("sender mapping should be present after loadMappings")
 	}
@@ -1847,15 +1911,18 @@ func TestOnDownloadCompleteProceedsOnPersistFailure(t *testing.T) {
 	}
 
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		downloadDir:  downloadDir,
 		mappingsPath: unwritablePath,
 		sendCommand:  sendFn,
 		stopCh:       make(chan struct{}),
 	}
 
-	m.receiverMaps[fileID] = &receiverFileMapping{
+	m.receiverMaps[ftIncomingRef(m, fileID, sender)] = &receiverFileMapping{
+		Ref:           ftIncomingRef(m, fileID, sender),
+		PartialPath:   partialDownloadPath(m.downloadDir, fileID),
 		FileID:        fileID,
 		FileHash:      expectedHash,
 		FileName:      "test.bin",
@@ -1871,17 +1938,17 @@ func TestOnDownloadCompleteProceedsOnPersistFailure(t *testing.T) {
 	// to satisfy the contract; in this single-goroutine test there is
 	// no actual contention to protect against.
 	m.mu.Lock()
-	rmForLock := m.receiverMaps[fileID]
+	rmForLock := m.receiverMaps[ftIncomingRef(m, fileID, sender)]
 	m.mu.Unlock()
 	rmForLock.writePartialMu.Lock()
 	// Call onDownloadComplete — persist will fail but transfer must proceed.
-	m.onDownloadComplete(fileID, partialPath, expectedHash, sender)
+	m.onDownloadComplete(ftIncomingRef(m, fileID, sender), partialPath, expectedHash, sender)
 	rmForLock.writePartialMu.Unlock()
 
 	// Mapping must be receiverWaitingAck — persist failure is non-fatal
 	// after the completed file is durably renamed.
 	m.mu.Lock()
-	mapping := m.receiverMaps[fileID]
+	mapping := m.receiverMaps[ftIncomingRef(m, fileID, sender)]
 	state := mapping.State
 	completedPath := mapping.CompletedPath
 	m.mu.Unlock()
@@ -1919,7 +1986,7 @@ func TestReconcileVerifyingPersistsToDisk(t *testing.T) {
 	// Write a transfers.json with a receiverVerifying entry (no files on disk
 	// → Case 3 → failed).
 	initial := persistedTransferFile{
-		Version:   persistVersion,
+		Version:   1,
 		UpdatedAt: time.Now(),
 		Transfers: []persistedTransferEntry{{
 			FileID:    fileID,
@@ -1942,8 +2009,9 @@ func TestReconcileVerifyingPersistsToDisk(t *testing.T) {
 
 	// Create a manager and trigger loadMappings (via constructor).
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		downloadDir:  downloadDir,
 		mappingsPath: mappingsPath,
 		stopCh:       make(chan struct{}),
@@ -1951,7 +2019,7 @@ func TestReconcileVerifyingPersistsToDisk(t *testing.T) {
 	m.loadMappings()
 
 	// In-memory state: must be failed.
-	rm := m.receiverMaps[fileID]
+	rm := m.receiverMaps[ftIncomingRef(m, fileID, sender)]
 	if rm == nil {
 		t.Fatal("receiver mapping not loaded")
 	}
@@ -2002,7 +2070,7 @@ func TestSenderTombstonePersistsToDisk(t *testing.T) {
 	// Write a transfers.json with an active sender entry whose blob does not
 	// exist on disk — simulating a crash between store.Release and persist.
 	initial := persistedTransferFile{
-		Version:   persistVersion,
+		Version:   1,
 		UpdatedAt: time.Now(),
 		Transfers: []persistedTransferEntry{{
 			FileID:    fileID,
@@ -2026,8 +2094,9 @@ func TestSenderTombstonePersistsToDisk(t *testing.T) {
 	// Do NOT create the transmit file — blob is missing.
 
 	m := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		store:        store,
 		downloadDir:  filepath.Join(dir, "downloads"),
 		mappingsPath: mappingsPath,
@@ -2036,7 +2105,7 @@ func TestSenderTombstonePersistsToDisk(t *testing.T) {
 	m.loadMappings()
 
 	// In-memory state: must be tombstone.
-	sm := m.senderMaps[fileID]
+	sm := m.senderMaps[ftOutgoingRef(m, fileID, domaintest.ID("recipient-identity-1234567890ab"))]
 	if sm == nil {
 		t.Fatal("sender mapping not loaded")
 	}

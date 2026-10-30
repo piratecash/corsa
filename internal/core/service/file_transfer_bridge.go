@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -25,7 +26,7 @@ type FileTransferBridge struct {
 	// via setRegisterIncomingForTest to drive RegisterIncoming
 	// against an in-process Manager without standing up a full
 	// node.Service.
-	registerIncomingFn func(fileID domain.FileID, fileHash, fileName, contentType string, fileSize uint64, sender domain.PeerIdentity) error
+	registerIncomingFn func(ref domain.MessageRef, fileHash, fileName, contentType string, fileSize uint64, sender domain.PeerIdentity) error
 }
 
 // NewFileTransferBridge creates a bridge backed by the given client.
@@ -41,13 +42,14 @@ func NewFileTransferBridge(client *DesktopClient) *FileTransferBridge {
 // DesktopClient — extracted as a method so the constructor's bound
 // method value remains valid even after tests override
 // registerIncomingFn (the override does not modify the default).
-func (b *FileTransferBridge) defaultRegisterIncoming(fileID domain.FileID, fileHash, fileName, contentType string, fileSize uint64, sender domain.PeerIdentity) error {
-	return b.client.RegisterIncomingFileTransfer(fileID, fileHash, fileName, contentType, fileSize, sender)
+func (b *FileTransferBridge) defaultRegisterIncoming(ref domain.MessageRef, fileHash, fileName, contentType string, fileSize uint64, sender domain.PeerIdentity) error {
+	return b.client.RegisterIncomingFileTransferRef(ref, fileHash, fileName, contentType, fileSize, sender)
 }
 
 // AnnounceResult is returned by PrepareAndSend on success. It contains
 // everything the caller (DMRouter) needs to update its UI state.
 type AnnounceResult struct {
+	Ref    domain.MessageRef
 	Sent   *DirectMessage
 	FileID domain.FileID
 }
@@ -93,7 +95,11 @@ func (b *FileTransferBridge) PrepareAndSend(
 	}
 
 	fileID := domain.FileID(sent.ID)
-	if err := token.Commit(fileID, to); err != nil {
+	ref := directMessageRef(*sent)
+	if err := token.CommitRef(ref, to); err != nil {
+		if !errors.Is(err, filetransfer.ErrSenderMappingPersist) {
+			return nil, fmt.Errorf("commit file announce mapping: %w", err)
+		}
 		// Commit marks committed=true and keeps the in-memory mapping
 		// even when persist fails, so defer Rollback is a no-op and the
 		// mapping remains live for the current session. The DM has
@@ -106,7 +112,7 @@ func (b *FileTransferBridge) PrepareAndSend(
 			Msg("file_transfer_bridge: commit persist failed — mapping live in memory, transfer may not survive restart")
 	}
 
-	return &AnnounceResult{Sent: sent, FileID: fileID}, nil
+	return &AnnounceResult{Sent: sent, FileID: fileID, Ref: ref}, nil
 }
 
 // RollbackMapping removes a single committed sender mapping that became
@@ -150,7 +156,7 @@ func (b *FileTransferBridge) RegisterIncoming(msg DirectMessage) error {
 
 	fileID := domain.FileID(msg.ID)
 	if err := b.registerIncomingFn(
-		fileID, payload.FileHash, payload.FileName, payload.ContentType,
+		directMessageRef(msg), payload.FileHash, payload.FileName, payload.ContentType,
 		payload.FileSize, msg.Sender,
 	); err != nil {
 		log.Warn().Err(err).
@@ -247,3 +253,35 @@ func (b *FileTransferBridge) OnMessageDeleted(messageID domain.MessageID) {
 
 // sendTimeout is the default timeout for sending a file announce DM.
 const sendTimeout = 3 * time.Second
+
+func (b *FileTransferBridge) RollbackMappingRef(ref domain.MessageRef) {
+	if b.client != nil {
+		b.client.RemoveSenderMappingRef(ref)
+	}
+}
+func (b *FileTransferBridge) OnMessageDeletedRef(ref domain.MessageRef) {
+	if b.client != nil {
+		b.client.CleanupTransferByMessageRef(ref)
+	}
+}
+func (b *FileTransferBridge) StartDownloadRef(ref domain.MessageRef) error {
+	return b.client.StartFileDownloadRef(ref)
+}
+func (b *FileTransferBridge) CancelDownloadRef(ref domain.MessageRef) error {
+	return b.client.CancelFileDownloadRef(ref)
+}
+func (b *FileTransferBridge) RestartDownloadRef(ref domain.MessageRef) error {
+	return b.client.RestartFileDownloadRef(ref)
+}
+func (b *FileTransferBridge) ProgressRef(ref domain.MessageRef, isSender bool) (uint64, uint64, string, bool) {
+	return b.client.FileTransferProgressRef(ref, isSender)
+}
+func (b *FileTransferBridge) FilePathRef(ref domain.MessageRef, isSender bool) string {
+	return b.client.FileTransferFilePathRef(ref, isSender)
+}
+func (b *FileTransferBridge) DeleteLocalCopyRef(ref domain.MessageRef) error {
+	if b.client == nil {
+		return errNoLocalNode
+	}
+	return b.client.DeleteLocalFileCopyRef(ref)
+}

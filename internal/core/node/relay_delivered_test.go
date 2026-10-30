@@ -17,17 +17,18 @@ func TestRelayDeliveredRecordSnapshotForget(t *testing.T) {
 	svc := &Service{}
 	a := identHex("a")
 	b := identHex("b")
+	message := messageIdentity{MessageID: "m1", Sender: "alice", Recipient: "bob"}
 
 	// No-ops: empty id, zero identity.
-	svc.recordRelayDeliveredTo("", a)
-	svc.recordRelayDeliveredTo("m1", domain.PeerIdentity{})
-	if svc.relayDeliveredSnapshot("m1") != nil {
+	svc.recordRelayDeliveredTo(messageIdentity{Sender: "alice", Recipient: "bob"}, a)
+	svc.recordRelayDeliveredTo(message, domain.PeerIdentity{})
+	if svc.relayDeliveredSnapshot(message) != nil {
 		t.Fatal("no-op records must leave the set empty")
 	}
 
-	svc.recordRelayDeliveredTo("m1", a)
-	svc.recordRelayDeliveredTo("m1", b)
-	snap := svc.relayDeliveredSnapshot("m1")
+	svc.recordRelayDeliveredTo(message, a)
+	svc.recordRelayDeliveredTo(message, b)
+	snap := svc.relayDeliveredSnapshot(message)
 	if len(snap) != 2 {
 		t.Fatalf("snapshot size = %d, want 2", len(snap))
 	}
@@ -37,12 +38,12 @@ func TestRelayDeliveredRecordSnapshotForget(t *testing.T) {
 
 	// Snapshot is a copy — mutating it must not affect stored state.
 	delete(snap, a)
-	if len(svc.relayDeliveredSnapshot("m1")) != 2 {
+	if len(svc.relayDeliveredSnapshot(message)) != 2 {
 		t.Error("snapshot must be a copy, not the live set")
 	}
 
-	svc.forgetRelayDelivered([]protocol.MessageID{"m1"})
-	if svc.relayDeliveredSnapshot("m1") != nil {
+	svc.forgetRelayDelivered([]messageIdentity{message})
+	if svc.relayDeliveredSnapshot(message) != nil {
 		t.Error("forgetRelayDelivered must drop the set")
 	}
 }
@@ -136,7 +137,7 @@ func TestFilterGossipTargetsExcludesAckedPeer(t *testing.T) {
 		peerIDs: addressIdentities{pA: claimedAddressIdentity(identA), pB: claimedAddressIdentity(identB)},
 	}
 
-	env := protocol.Envelope{ID: "m1", Hops: 5}
+	env := protocol.Envelope{ID: "m1", Topic: "dm", Sender: "alice", Recipient: "bob", Hops: 5}
 
 	// Baseline: nothing acked → both targets pass through unchanged.
 	got := svc.filterGossipTargetsForEnvelope(env, []domain.PeerAddress{pA, pB})
@@ -145,7 +146,7 @@ func TestFilterGossipTargetsExcludesAckedPeer(t *testing.T) {
 	}
 
 	// Peer A acked m1 → excluded from the fan-out, B kept.
-	svc.recordRelayDeliveredTo("m1", identA)
+	svc.recordRelayDeliveredTo(messageIdentityOf(env), identA)
 	got = svc.filterGossipTargetsForEnvelope(env, []domain.PeerAddress{pA, pB})
 	if len(got) != 1 || got[0] != pB {
 		t.Fatalf("after ack from A: targets = %v, want [peerB]", got)

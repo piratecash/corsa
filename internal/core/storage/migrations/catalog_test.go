@@ -384,7 +384,7 @@ func TestDriverContract(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BeginTx: %v", err)
 	}
-	if _, err := tx.ExecContext(context.Background(), `INSERT INTO seen_ack (id) VALUES ('tx-row')`); err != nil {
+	if _, err := tx.ExecContext(context.Background(), `INSERT INTO seen_ack (topic,id,sender,recipient) VALUES ('dm','tx-row','1111111111111111111111111111111111111111','2222222222222222222222222222222222222222')`); err != nil {
 		t.Fatalf("insert in transaction: %v", err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -437,7 +437,21 @@ func tableDump(t *testing.T, executor storage.Executor, tables []string) map[str
 
 	dump := make(map[string]string, len(tables))
 	for _, table := range tables {
-		rows, err := executor.QueryContext(context.Background(), fmt.Sprintf("SELECT * FROM %s", table))
+		query := fmt.Sprintf("SELECT * FROM %s", table)
+		if table == "seen_ack" || table == "delivery_failed" {
+			// Compare every field of the original one-column journal, including
+			// old orphan facts now explicitly quarantined by migration9. The new
+			// active endpoint bindings/rowids have their own transition test.
+			var archived int
+			if err := executor.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name=?`, table+"_legacy_unbound").Scan(&archived); err != nil {
+				t.Fatal(err)
+			}
+			query = "SELECT id FROM " + table
+			if archived == 1 {
+				query += " UNION ALL SELECT id FROM " + table + "_legacy_unbound"
+			}
+		}
+		rows, err := executor.QueryContext(context.Background(), query)
 		if err != nil {
 			t.Fatalf("select from %s: %v", table, err)
 		}

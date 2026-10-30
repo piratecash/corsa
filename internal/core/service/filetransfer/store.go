@@ -425,6 +425,8 @@ func ensureWithinDir(baseDir, resolvedPath string) error {
 	// re-append the remaining suffix so both paths share the same real prefix.
 	if realBase, err := filepath.EvalSymlinks(absBase); err == nil {
 		absBase = realBase
+	} else {
+		absBase = evalSymlinksPartial(absBase)
 	}
 	if realResolved, err := filepath.EvalSymlinks(absResolved); err == nil {
 		absResolved = realResolved

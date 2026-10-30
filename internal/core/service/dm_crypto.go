@@ -148,8 +148,8 @@ func (d *DMCrypto) notePreviewDecryptSuccess(entry *chatlog.Entry, plain *direct
 // ordered" — never "oldest", which would let a lookup failure drop a live
 // message from the sidebar. Bounded so a slow database delays a message rather
 // than holding the decrypt path open.
-func (d *DMCrypto) messageSeq(ctx context.Context, messageID domain.MessageID) int64 {
-	if d.chatlog == nil || d.chatlog.Store() == nil || messageID == "" {
+func (d *DMCrypto) messageSeq(ctx context.Context, ref domain.MessageRef) int64 {
+	if d.chatlog == nil || d.chatlog.Store() == nil || ref.ID == "" {
 		return 0
 	}
 	// The caller's context is deliberately stripped of its cancellation. On
@@ -161,10 +161,10 @@ func (d *DMCrypto) messageSeq(ctx context.Context, messageID domain.MessageID) i
 	// already committed; it gets its own short bound instead.
 	readCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
 	defer cancel()
-	seq, ok, err := d.chatlog.Store().MessageSeq(readCtx, messageID)
+	seq, ok, err := d.chatlog.Store().MessageSeqByRef(readCtx, ref)
 	if err != nil {
 		log.Warn().Err(err).
-			Str("message_id", logid.Of(string(messageID))).
+			Str("message_id", logid.Of(ref.ID)).
 			Msg("dm_crypto: could not read the message's arrival sequence; the sidebar cannot order it")
 		return 0
 	}
@@ -360,7 +360,7 @@ func (d *DMCrypto) sendDirectMessageWithResidence(ctx, residence context.Context
 		// optimistic sidebar update would be unorderable against a message
 		// that arrived while this send was in flight, and a slow send would
 		// put its own text back over a newer one.
-		Seq: d.messageSeq(ctx, domain.MessageID(messageID)),
+		Seq: d.messageSeq(ctx, domain.MessageRef{Topic: "dm", ID: string(messageID), Sender: d.id.Address, Recipient: to.String()}),
 	}, nil
 }
 
@@ -434,10 +434,22 @@ func (d *DMCrypto) CancelMessageDelivery(ctx context.Context, to domain.PeerIden
 // behind the reader's back. The freeze is ended by CancelMessageDelivery,
 // which every route that takes it runs immediately afterwards.
 func (d *DMCrypto) FreezeMessageDelivery(ctx context.Context, messageID domain.MessageID) (bool, error) {
+	return d.freezeMessageDelivery(ctx, domain.PeerIdentity{}, messageID)
+}
+
+func (d *DMCrypto) FreezeMessageDeliveryTo(ctx context.Context, peer domain.PeerIdentity, messageID domain.MessageID) (bool, error) {
+	if peer.IsZero() {
+		return false, fmt.Errorf("freeze delivery requires a recipient")
+	}
+	return d.freezeMessageDelivery(ctx, peer, messageID)
+}
+
+func (d *DMCrypto) freezeMessageDelivery(ctx context.Context, peer domain.PeerIdentity, messageID domain.MessageID) (bool, error) {
 	reply, err := d.rpc.LocalRequestFrameCtx(ctx, protocol.Frame{
-		Type:  "freeze_message_delivery",
-		Topic: "dm",
-		ID:    string(messageID),
+		Type:      "freeze_message_delivery",
+		Topic:     "dm",
+		ID:        string(messageID),
+		Recipient: peer.String(),
 	})
 	if err != nil {
 		return false, fmt.Errorf("freeze delivery of %s: %w", messageID, err)
@@ -698,7 +710,7 @@ func (d *DMCrypto) DecryptIncomingMessage(ctx context.Context, event protocol.Lo
 		// The event says WHAT arrived; only the store can say where it landed
 		// in the local order, and the sidebar needs that to compare this
 		// message with whatever is already on the row.
-		Seq: d.messageSeq(ctx, domain.MessageID(event.MessageID)),
+		Seq: d.messageSeq(ctx, localMessageRef(event)),
 	}
 	d.noteDecryptSuccess(decrypted)
 	return decrypted

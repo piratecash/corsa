@@ -139,7 +139,7 @@ func TestGlobalHoldRepairKeepsUnreachableDMAndControlHeld(t *testing.T) {
 			svc.WaitBackground()
 			svc.deliveryMu.RLock()
 			n := len(svc.pending[target])
-			entry := svc.awaitingDelivered[msg.ID]
+			entry := svc.awaitingDelivered[svc.ownMessageIdentity(msg.ID, msg.Recipient)]
 			svc.deliveryMu.RUnlock()
 			if n != 0 {
 				t.Fatal("unreachable DM/control escaped hold after global fix")

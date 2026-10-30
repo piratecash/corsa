@@ -13,6 +13,7 @@ import (
 // TransferSnapshot is a JSON-serializable snapshot of a single transfer
 // (sender or receiver). Used by the RPC layer for observability.
 type TransferSnapshot struct {
+	Ref         domain.MessageRef   `json:"message_ref"`
 	FileID      domain.FileID       `json:"file_id"`
 	FileHash    string              `json:"file_hash"`
 	FileName    string              `json:"file_name"`
@@ -32,6 +33,7 @@ type TransferSnapshot struct {
 // the JSON field names differ (recipient vs peer, bytes_served vs
 // bytes_transferred) and must remain stable for client compatibility.
 type SenderMappingEntry struct {
+	Ref         domain.MessageRef   `json:"message_ref"`
 	FileID      domain.FileID       `json:"file_id"`
 	FileHash    string              `json:"file_hash"`
 	FileName    string              `json:"file_name"`
@@ -58,6 +60,7 @@ type SenderMappingEntry struct {
 // senderToTransferEntry converts a sender mapping to a TransferSnapshot.
 func senderToTransferEntry(sm *senderFileMapping) TransferSnapshot {
 	e := TransferSnapshot{
+		Ref:         sm.Ref,
 		FileID:      sm.FileID,
 		FileHash:    sm.FileHash,
 		FileName:    sm.FileName,
@@ -78,6 +81,7 @@ func senderToTransferEntry(sm *senderFileMapping) TransferSnapshot {
 // receiverToTransferEntry converts a receiver mapping to a TransferSnapshot.
 func receiverToTransferEntry(rm *receiverFileMapping) TransferSnapshot {
 	e := TransferSnapshot{
+		Ref:         rm.Ref,
 		FileID:      rm.FileID,
 		FileHash:    rm.FileHash,
 		FileName:    rm.FileName,
@@ -98,6 +102,7 @@ func receiverToTransferEntry(rm *receiverFileMapping) TransferSnapshot {
 // senderToMappingEntry converts a sender mapping to a SenderMappingEntry.
 func senderToMappingEntry(sm *senderFileMapping) SenderMappingEntry {
 	e := SenderMappingEntry{
+		Ref:           sm.Ref,
 		FileID:        sm.FileID,
 		FileHash:      sm.FileHash,
 		FileName:      sm.FileName,

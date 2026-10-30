@@ -133,7 +133,7 @@ func newReaderHarness(heights []int) *readerHarness {
 	h.w = &Window{}
 	h.w.chatList.List = layout.List{Axis: layout.Vertical, ScrollToEnd: true}
 	for i := range heights {
-		h.conversation = append(h.conversation, service.DirectMessage{ID: msgIDAt(i)})
+		h.conversation = append(h.conversation, service.DirectMessage{ID: msgIDAt(i).ID})
 	}
 	return h
 }
@@ -177,7 +177,7 @@ func TestAReaderAtTheEndReportsTheNewestMessage(t *testing.T) {
 	if !report {
 		t.Fatal("the first frame of a conversation reported nothing")
 	}
-	want := service.ReaderPosition{NewestSeen: domain.MessageID(msgIDAt(len(unevenHeights) - 1)), AtEnd: true}
+	want := service.ReaderPosition{NewestSeen: domain.MessageID(msgIDAt(len(unevenHeights) - 1).ID), AtEnd: true}
 	if got != want {
 		t.Fatalf("reported %+v, want %+v", got, want)
 	}
@@ -198,7 +198,7 @@ func TestAReaderScrolledUpReportsWhatIsOnScreen(t *testing.T) {
 	}
 	// 60 + 340 = 400: messages 0 and 1 fill the viewport exactly, so 1 ends
 	// on the bottom edge and nothing after it shows.
-	want := service.ReaderPosition{NewestSeen: domain.MessageID(msgIDAt(1)), AtEnd: false}
+	want := service.ReaderPosition{NewestSeen: domain.MessageID(msgIDAt(1).ID), AtEnd: false}
 	if got != want {
 		t.Fatalf("reported %+v, want %+v", got, want)
 	}
@@ -257,7 +257,7 @@ func TestAPartlyVisibleLastMessageIsNotReported(t *testing.T) {
 	if !report {
 		t.Fatal("the scroll was not reported")
 	}
-	want := service.ReaderPosition{NewestSeen: domain.MessageID(msgIDAt(5)), AtEnd: false}
+	want := service.ReaderPosition{NewestSeen: domain.MessageID(msgIDAt(5).ID), AtEnd: false}
 	if got != want {
 		t.Fatalf("reported %+v, want %+v — message 6 only peeks over the edge", got, want)
 	}
@@ -320,7 +320,7 @@ func TestAStuckScrollbarDoesNotSilenceAShortConversation(t *testing.T) {
 	if !report {
 		t.Fatal("a conversation that fits on screen reported nothing")
 	}
-	want := service.ReaderPosition{NewestSeen: domain.MessageID(msgIDAt(2)), AtEnd: true}
+	want := service.ReaderPosition{NewestSeen: domain.MessageID(msgIDAt(2).ID), AtEnd: true}
 	if got != want {
 		t.Fatalf("reported %+v, want %+v", got, want)
 	}

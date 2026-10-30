@@ -28,12 +28,15 @@ func TestDeleteLocalCopyReceiverKeepsTheMapping(t *testing.T) {
 	}
 
 	manager := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		downloadDir:  downloadDir,
 		stopCh:       make(chan struct{}),
 	}
-	manager.receiverMaps["file-1"] = &receiverFileMapping{
+	manager.receiverMaps[ftIncomingRef(manager, "file-1", domaintest.ID("alice"))] = &receiverFileMapping{
+		Ref:           ftIncomingRef(manager, "file-1", domaintest.ID("alice")),
+		PartialPath:   partialDownloadPath(manager.downloadDir, "file-1"),
 		FileID:        "file-1",
 		FileHash:      "hash123",
 		FileName:      "photo.png",
@@ -53,7 +56,7 @@ func TestDeleteLocalCopyReceiverKeepsTheMapping(t *testing.T) {
 	if _, err := os.Stat(completed); !os.IsNotExist(err) {
 		t.Fatalf("the downloaded file is still on disk: %v", err)
 	}
-	mapping, ok := manager.receiverMaps["file-1"]
+	mapping, ok := manager.receiverMaps[ftIncomingRef(manager, "file-1", domaintest.ID("alice"))]
 	if !ok {
 		t.Fatal("the mapping was removed: the message would lose its attachment and could not be downloaded again")
 	}
@@ -85,13 +88,16 @@ func TestDeleteLocalCopyLeavesAnotherMessagesFileAlone(t *testing.T) {
 	}
 
 	manager := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		downloadDir:  downloadDir,
 		stopCh:       make(chan struct{}),
 	}
 	for _, id := range []domain.FileID{"file-1", "file-2"} {
-		manager.receiverMaps[id] = &receiverFileMapping{
+		manager.receiverMaps[ftIncomingRef(manager, id, domaintest.ID("alice"))] = &receiverFileMapping{
+			Ref:           ftIncomingRef(manager, id, domaintest.ID("alice")),
+			PartialPath:   partialDownloadPath(manager.downloadDir, id),
 			FileID:        id,
 			FileHash:      "hash123",
 			FileName:      "photo.png",
@@ -108,10 +114,10 @@ func TestDeleteLocalCopyLeavesAnotherMessagesFileAlone(t *testing.T) {
 	if _, err := os.Stat(shared); err != nil {
 		t.Fatalf("the file another message still shows was erased: %v", err)
 	}
-	if state := manager.receiverMaps["file-1"].State; state != receiverAvailable {
+	if state := manager.receiverMaps[ftIncomingRef(manager, "file-1", domaintest.ID("alice"))].State; state != receiverAvailable {
 		t.Fatalf("state = %s, want %s", state, receiverAvailable)
 	}
-	if state := manager.receiverMaps["file-2"].State; state != receiverCompleted {
+	if state := manager.receiverMaps[ftIncomingRef(manager, "file-2", domaintest.ID("alice"))].State; state != receiverCompleted {
 		t.Fatalf("the other message's mapping moved: %s", state)
 	}
 }
@@ -140,13 +146,15 @@ func TestDeleteLocalCopyRefusesAnOutgoingFile(t *testing.T) {
 	store.mu.Unlock()
 
 	manager := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		store:        store,
 		downloadDir:  filepath.Join(dir, "downloads"),
 		stopCh:       make(chan struct{}),
 	}
-	manager.senderMaps["file-1"] = &senderFileMapping{
+	manager.senderMaps[ftOutgoingRef(manager, "file-1", domaintest.ID("bob"))] = &senderFileMapping{
+		Ref:       ftOutgoingRef(manager, "file-1", domaintest.ID("bob")),
 		FileID:    "file-1",
 		FileHash:  hash,
 		FileName:  "photo.png",
@@ -163,7 +171,7 @@ func TestDeleteLocalCopyRefusesAnOutgoingFile(t *testing.T) {
 	if _, err := os.Stat(blob); err != nil {
 		t.Fatalf("the transmit blob was erased: %v", err)
 	}
-	mapping, ok := manager.senderMaps["file-1"]
+	mapping, ok := manager.senderMaps[ftOutgoingRef(manager, "file-1", domaintest.ID("bob"))]
 	if !ok {
 		t.Fatal("the sender mapping was removed")
 	}
@@ -186,15 +194,18 @@ func TestDeleteLocalCopyRefusesAnOutgoingFile(t *testing.T) {
 // nothing here" and "it is gone now" are the same outcome.
 func TestDeleteLocalCopyWithNothingOnDisk(t *testing.T) {
 	manager := &Manager{
-		senderMaps:   make(map[domain.FileID]*senderFileMapping),
-		receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+		localID:      ftFixtureIdentity(),
+		senderMaps:   make(map[domain.MessageRef]*senderFileMapping),
+		receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 		downloadDir:  t.TempDir(),
 		stopCh:       make(chan struct{}),
 	}
-	manager.receiverMaps["file-1"] = &receiverFileMapping{
-		FileID: "file-1",
-		State:  receiverDownloading,
-		Sender: domaintest.ID("alice"),
+	manager.receiverMaps[ftIncomingRef(manager, "file-1", domaintest.ID("alice"))] = &receiverFileMapping{
+		Ref:         ftIncomingRef(manager, "file-1", domaintest.ID("alice")),
+		PartialPath: partialDownloadPath(manager.downloadDir, "file-1"),
+		FileID:      "file-1",
+		State:       receiverDownloading,
+		Sender:      domaintest.ID("alice"),
 	}
 
 	if err := manager.DeleteLocalCopy("file-1"); !errors.Is(err, ErrNoLocalCopy) {
@@ -203,7 +214,7 @@ func TestDeleteLocalCopyWithNothingOnDisk(t *testing.T) {
 	if err := manager.DeleteLocalCopy("no-such-file"); !errors.Is(err, ErrNoLocalCopy) {
 		t.Fatalf("err = %v, want ErrNoLocalCopy", err)
 	}
-	if state := manager.receiverMaps["file-1"].State; state != receiverDownloading {
+	if state := manager.receiverMaps[ftIncomingRef(manager, "file-1", domaintest.ID("alice"))].State; state != receiverDownloading {
 		t.Fatalf("a download in flight was disturbed: %s", state)
 	}
 }

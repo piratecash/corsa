@@ -829,7 +829,7 @@ func (r *DMRouter) wipeConversationLocally(ctx context.Context, peer domain.Peer
 	// with messages still on screen that nothing will ever send. The freeze is
 	// ended either way — by the cancellation on success, by a thaw on failure.
 	if len(scope.IDs) > 0 {
-		if _, err := r.client.FreezeConversationDelivery(ctx, peer, scope.IDs); err != nil {
+		if _, err := r.client.FreezeConversationDelivery(ctx, peer, scope.OwnIDs(r.client.Address())); err != nil {
 			// The wipe STOPS. A message still queued would go out after the
 			// erasure, and — because the request carries no ids — it would land
 			// on the peer either before their wipe (deleted, fine) or AFTER it,
@@ -856,7 +856,7 @@ func (r *DMRouter) wipeConversationLocally(ctx context.Context, peer domain.Peer
 	// They expire on their own at the sender's reseed horizon. Not lifted when
 	// the peer acknowledges the wipe: an ack is their database, not the relay
 	// buffers and inbox queues that may still hold copies of these envelopes.
-	r.wipeTombstones.Note(scope.IDs, now)
+	r.wipeTombstones.NoteRefs(scope.Refs, now)
 
 	// One transaction for the rows and the request the peer now owes us. Either
 	// the conversation is gone AND somebody is bound to ask the peer, or
@@ -885,7 +885,7 @@ func (r *DMRouter) wipeConversationLocally(ctx context.Context, peer domain.Peer
 		// keeps the values and drops both the deadline and the cancellation.
 		if len(scope.IDs) > 0 {
 			thawCtx, cancelThaw := context.WithTimeout(r.detachedCtx(ctx), conversationCompensationBudget)
-			thawErr := r.client.ThawConversationDelivery(thawCtx, peer, scope.IDs)
+			thawErr := r.client.ThawConversationDelivery(thawCtx, peer, scope.OwnIDs(r.client.Address()))
 			cancelThaw()
 			if thawErr != nil {
 				log.Error().Err(thawErr).
@@ -896,7 +896,7 @@ func (r *DMRouter) wipeConversationLocally(ctx context.Context, peer domain.Peer
 		// The thread is still here, so the ids refused above name rows that are
 		// alive, and a refusal for a live row would swallow its next legitimate
 		// re-delivery.
-		r.wipeTombstones.Forget(scope.IDs)
+		r.wipeTombstones.ForgetRefs(scope.Refs)
 		return 0, false
 	}
 
@@ -910,7 +910,7 @@ func (r *DMRouter) wipeConversationLocally(ctx context.Context, peer domain.Peer
 	// is not dropped either: it is owed, and the delete sweep retries it until
 	// it succeeds.
 	if len(scope.IDs) > 0 {
-		_ = r.withdrawDeletedDeliveries(ctx, peer, scope.IDs)
+		_ = r.withdrawDeletedDeliveries(ctx, peer, wiped.OwnIDs(r.client.Address()))
 	}
 
 	// Under the file barrier: it moves the peer's history counter first, so a
@@ -921,12 +921,12 @@ func (r *DMRouter) wipeConversationLocally(ctx context.Context, peer domain.Peer
 		if r.fileBridge == nil {
 			return
 		}
-		for _, id := range wiped.Removed {
-			r.fileBridge.OnMessageDeleted(id)
+		for _, ref := range wiped.RemovedRefs {
+			r.fileBridge.OnMessageDeletedRef(ref)
 		}
 	})
 
-	r.evictWipedConversationFromUI(peer, wiped.Removed)
+	r.evictWipedConversationFromUI(peer, wiped.Removed, wiped.RemovedRefs)
 	// The chips are drawn from a per-conversation cache the window holds, and
 	// the ONLY thing that reloads it is this event. Evicting the messages is
 	// not enough: a message that survived the wipe — an immutable one — is
@@ -967,7 +967,11 @@ func (r *DMRouter) wipeConversationLocally(ctx context.Context, peer domain.Peer
 // post-sweep chatlog state implies (the helper
 // refreshPreviewAfterDelete computes both). The peer-removal path
 // is a separate user action via RemovePeer / "Delete identity".
-func (r *DMRouter) evictWipedConversationFromUI(peer domain.PeerIdentity, removedIDs []domain.MessageID) {
+func (r *DMRouter) evictWipedConversationFromUI(peer domain.PeerIdentity, removedIDs []domain.MessageID, exactRefs ...[]domain.MessageRef) {
+	var refs []domain.MessageRef
+	if len(exactRefs) == 1 {
+		refs = exactRefs[0]
+	}
 	if r.cache == nil {
 		return
 	}
@@ -985,9 +989,17 @@ func (r *DMRouter) evictWipedConversationFromUI(peer domain.PeerIdentity, remove
 	r.mu.Lock()
 	cacheChanged := false
 	if r.cache.MatchesPeer(peer) {
-		for _, id := range removedIDs {
-			if r.cache.RemoveMessage(string(id)) {
-				cacheChanged = true
+		if len(exactRefs) == 1 {
+			for _, ref := range refs {
+				if r.cache.RemoveMessageRef(ref) {
+					cacheChanged = true
+				}
+			}
+		} else {
+			for _, id := range removedIDs {
+				if r.cache.RemoveMessage(string(id)) {
+					cacheChanged = true
+				}
 			}
 		}
 		if cacheChanged {
@@ -1000,14 +1012,28 @@ func (r *DMRouter) evictWipedConversationFromUI(peer domain.PeerIdentity, remove
 	// keyed by message ID alone — only the IDs we just removed need
 	// to be cleared; entries for surviving rows must stay so the
 	// dedup gate keeps working for them.
-	for _, id := range removedIDs {
-		r.forgetMessageLocked(string(id))
+	if len(exactRefs) == 1 {
+		for _, ref := range refs {
+			delete(r.seenMessageIDs, ref.Key())
+		}
+	} else {
+		for _, id := range removedIDs {
+			r.forgetMessageLocked(string(id))
+		}
 	}
 	// A deleted message is not an unread message. The set is authoritative
 	// for the badge, and the ids are right here — no query needed. The
 	// history move was recorded by the file barrier when the rows went;
 	// one deletion is one move.
-	r.dropUnreadLocked(peer, removedIDs...)
+	if len(exactRefs) == 1 {
+		for _, ref := range refs {
+			if ref.Sender == peer.String() {
+				r.dropUnreadLocked(peer, domain.MessageID(ref.ID))
+			}
+		}
+	} else {
+		r.dropUnreadLocked(peer, removedIDs...)
+	}
 	r.mu.Unlock()
 
 	r.refreshPreviewAfterDelete(peer)
@@ -1070,7 +1096,7 @@ func (r *DMRouter) suppressIfWipeTombstoned(event protocol.LocalChangeEvent) boo
 	id := domain.MessageID(event.MessageID)
 	// An undecidable answer does not suppress: the storage gate refused
 	// the insert in that case, so there is no row here to hide.
-	if refused, _ := r.wipeTombstones.Refuses(id, time.Now().UTC()); !refused {
+	if refused, _, _ := r.wipeTombstones.RefusesRef(localMessageRef(event), time.Now().UTC()); !refused {
 		return false
 	}
 
@@ -1092,7 +1118,7 @@ func (r *DMRouter) suppressIfWipeTombstoned(event protocol.LocalChangeEvent) boo
 	// sender is this node — pausing that would leave the real recipient
 	// unguarded, which is the only one a frame could go to.
 	resumeReactions := r.client.HoldReactionSends(r.peerForMessage(event))
-	removed, err := store.DeleteByID(r.opContext(), id)
+	removed, err := store.DeleteByRef(r.opContext(), localMessageRef(event))
 	resumeReactions()
 	if err != nil {
 		log.Warn().Err(err).
@@ -1123,10 +1149,10 @@ func (r *DMRouter) suppressIfWipeTombstoned(event protocol.LocalChangeEvent) boo
 	wipedPeer := r.peerForMessage(event)
 	r.withFileOps(wipedPeer, removed, func() {
 		if r.fileBridge != nil {
-			r.fileBridge.OnMessageDeleted(id)
+			r.fileBridge.OnMessageDeletedRef(localMessageRef(event))
 		}
 	})
-	r.evictWipedConversationFromUI(wipedPeer, []domain.MessageID{id})
+	r.evictWipedConversationFromUI(wipedPeer, []domain.MessageID{id}, []domain.MessageRef{localMessageRef(event)})
 
 	// Nothing to credit anywhere: a wipe is N ordinary deletions, each
 	// settled by its own ack, so a re-delete here is just this guard
@@ -1144,7 +1170,7 @@ func (r *DMRouter) suppressIfWipeTombstoned(event protocol.LocalChangeEvent) boo
 	// node.s.topics["dm"]); pushing the tombstone gate down into
 	// node admission is a tracked follow-up.
 	r.mu.Lock()
-	r.markMessageHandledLocked(event.MessageID)
+	r.markMessageRefHandledLocked(localMessageRef(event))
 	r.mu.Unlock()
 
 	// Behind the diagnostics gate: "this id was refused because it had been

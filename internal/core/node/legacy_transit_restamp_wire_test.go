@@ -157,7 +157,7 @@ func TestOwnRetryRestampsOnTheWire(t *testing.T) {
 
 	// The sender's own record is untouched: this is the date the user sees.
 	svc.deliveryMu.RLock()
-	kept := svc.awaitingDelivered["own-old-1"].Envelope.CreatedAt
+	kept := svc.awaitingDelivered[messageIdentityOf(envelope)].Envelope.CreatedAt
 	svc.deliveryMu.RUnlock()
 	if !kept.Equal(writtenAt) {
 		t.Errorf("the local envelope was re-dated too: %v, want %v", kept, writtenAt)
@@ -258,7 +258,7 @@ func TestEveryCopyOfOneDispatchCarriesOneDate(t *testing.T) {
 	}
 	// And the local record is untouched — this is the date the user sees.
 	svc.deliveryMu.RLock()
-	kept := svc.awaitingDelivered["one-date-1"].Envelope.CreatedAt
+	kept := svc.awaitingDelivered[messageIdentityOf(envelope)].Envelope.CreatedAt
 	svc.deliveryMu.RUnlock()
 	if !kept.Equal(writtenAt) {
 		t.Errorf("the local envelope was re-dated: %v, want %v", kept, writtenAt)
@@ -370,7 +370,7 @@ func TestFirstSendOfAnOldOwnMessageIsRestamped(t *testing.T) {
 
 	// The retry entry keeps the real date — that is what the user sees.
 	svc.deliveryMu.RLock()
-	entry, awaiting := svc.awaitingDelivered["own-first-send-1"]
+	entry, awaiting := svc.awaitingDelivered[svc.ownMessageIdentity(msg.ID, msg.Recipient)]
 	svc.deliveryMu.RUnlock()
 	if !awaiting {
 		t.Fatal("our own message must be awaiting its receipt")

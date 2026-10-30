@@ -36,7 +36,7 @@ func TestTheBadgeShowsWhenWeLearnedOfDelivery(t *testing.T) {
 	svc := &Service{}
 	svc.initMaps()
 	svc.identity = id
-	svc.sentDMIDs.Add("m-1")
+	svc.sentDMIDs.Add(deliveryMessageRef(svc.ownMessageIdentity("m-1", "some-peer")).Key())
 
 	const lag = time.Minute
 	receipt := laggingPeerReceipt("m-1", id.Address, lag)

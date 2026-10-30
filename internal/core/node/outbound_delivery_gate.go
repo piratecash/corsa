@@ -130,7 +130,7 @@ func (s *Service) deliveryRefForFrame(frame protocol.Frame, now time.Time) deliv
 		return deliveryDispatchRef{}
 	}
 	s.deliveryMu.RLock()
-	if entry, awaiting := s.awaitingDelivered[envelope.ID]; awaiting {
+	if entry, awaiting := s.awaitingDelivered[messageIdentityOf(envelope)]; awaiting {
 		// Prefer the envelope the retry engine is holding: it is the
 		// authoritative one, and the frame's copy is a projection that may
 		// have lost fields on its way through the wire shapes.

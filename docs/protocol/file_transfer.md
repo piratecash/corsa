@@ -12,6 +12,39 @@ Transit nodes see only cleartext routing headers (SRC, DST, TTL,
 MaxTTL, timestamp, nonce, signature). The command type is inside the
 encrypted payload — invisible to relays.
 
+## Local transfer identity
+
+The wire `file_id` remains the original `file_announce` message ID. The
+protocol version, signed fields, file-command payloads and serving epochs do
+not change. Local sender and receiver maps use
+`domain.MessageRef{Topic: "dm", ID, Sender, Recipient}` with the announcement's
+original endpoints; the sender/receiver role selects the map. Two peers, or
+opposite directions in one conversation, can therefore use the same wire ID
+without sharing local progress, download controls or cleanup state.
+
+File-command callbacks derive the local reference from the verified logical
+`frame.SRC`, the local identity, the command role and the unchanged `file_id`.
+The last TLS hop is routing context and never replaces the original source.
+`chunk_request` and `file_downloaded` select a sender mapping whose recipient
+is `frame.SRC`; `chunk_response` and `file_downloaded_ack` select a receiver
+mapping whose sender is `frame.SRC`. Existing authorization, state and epoch
+checks still apply.
+
+Local `*Ref` APIs preserve the selected reference through asynchronous work.
+Legacy ID-only APIs resolve only a unique mapping across peers in their
+requested role: error-returning controls report `domain.ErrAmbiguousMessage`,
+while older bool/path/progress/void surfaces refuse with false, an empty path,
+a missing result or no mutation. They never choose the first match or clean
+up every message sharing an ID. A self-transfer can hold both roles for the
+same full reference; `DeleteLocalCopyRef`, which has no role selector, refuses
+that ambiguity too.
+
+This separates different local references. A repeated announcement with the
+same full reference remains idempotent and keeps its first metadata. It does
+not add signature binding for the original announcement ID, distinguish
+conflicting same-reference payloads, or recover mappings already lost by an
+older build.
+
 ## Channels
 
 | Aspect            | DM channel (`file_announce`)      | File command channel                                |
@@ -880,7 +913,7 @@ sequenceDiagram
     Note over S: User selects file to send
     S->>S: Compute SHA-256 hash (streaming)
     S->>S: Copy to <dataDir>/transmit/<sha256>.<ext>
-    S->>S: Store FileMapping: FileID → TransmitPath
+    S->>S: Store FileMapping: MessageRef → TransmitPath
 
     S->>N: DM (Command=file_announce)<br/>MessageID=FileID, Body=description or "[file]"<br/>Payload={FileName, FileSize, ContentType, FileHash}
 
@@ -980,9 +1013,9 @@ Every `chunk_request` is a `FileCommandFrame` with encrypted payload.
 `FileTransferManager` performs authorization before reading any file data:
 
 1. `file_router` receives FileCommandFrame with DST = self
-2. `file_router` decrypts payload, reads Command
-3. `file_router` dispatches to FileTransferManager
-4. FileTransferManager looks up FileMapping by FileID
+2. `file_router` verifies the signed original SRC and local authorization
+3. The destination node decrypts the payload and dispatches to FileTransferManager
+4. FileTransferManager looks up the sender mapping by (`dm`, FileID, self, verified frame.SRC)
 5. If FileMapping not found → silently ignore
 6. Verify frame.SRC == FileMapping.Recipient
 7. If mismatch → silently ignore (unauthorized requester)
@@ -997,7 +1030,7 @@ stored Recipient.
 
 ## Transfer state machines
 
-### Sender-side states (per FileID)
+### Sender-side states (per local message reference)
 
 ```mermaid
 stateDiagram-v2
@@ -1019,7 +1052,7 @@ stateDiagram-v2
 > **Planned (not yet implemented):** `TemporarilyUnavailable` state with
 > grace period — see [roadmap](../roadmap.md#file-transfer-protocol).
 
-### Receiver-side states (per FileID)
+### Receiver-side states (per local message reference)
 
 ```mermaid
 stateDiagram-v2
@@ -1547,7 +1580,8 @@ wins.
 
 ```
 type FileMapping struct {
-    FileID       MessageID
+    Ref          MessageRef
+    FileID       MessageID // unchanged wire ID
     TransmitPath string
     Recipient    PeerIdentity
     FileSize     uint64
@@ -1637,15 +1671,45 @@ partially completed download, and the sender can continue serving chunks
 for announced files. Multiple node identities on the same machine
 produce separate files without collisions.
 
+**Local format 2 and format 1 import:** version 2 stores the full
+`message_ref` beside the unchanged `file_id`; receiver entries also persist
+`partial_path`. The loader reconstructs version 1 endpoints from the stored
+peer/role and the actual local owner. The next successful full rewrite writes
+version 2. It preserves an imported receiver's existing legacy partial path
+and valid progress without moving or copying its bytes. New partials use
+`<downloadDir>/partial/by-ref/<sha256-of-framed-MessageRef-key>.part`.
+
+Stored paths are canonicalized and checked against the partial directory and
+the reference's recognized new or legacy path. Duplicate entries in the same
+role or conflicting owners of one partial path refuse restoration; valid
+sender and receiver roles of a self-transfer remain separate. Deferred work
+carries the stored physical path and generation, and partial writes, cancel
+and erasure use the stripe for that path. Legacy cleanup records remain owed
+artifact erasures; a matching wire ID does not authorize deleting a live
+mapping's partial. Shared completed files and transmit blobs retain their
+existing ownership/refcount checks.
+
+Version 2 is not a promise that a version-1-only binary can reopen the file.
+Do not relabel it as version 1 to downgrade. An incompatible build requires a
+verified pre-upgrade profile backup with a SQLite-consistent database copy
+and matching mappings and attachment data; the database's existing
+[forward-only policy](../storage.md#forward-only) still applies.
+
 **File format:**
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "updated_at": "2026-04-05T12:00:00Z",
   "transfers": [
     {
       "file_id": "msg-uuid-123",
+      "message_ref": {
+        "Topic": "dm",
+        "ID": "msg-uuid-123",
+        "Sender": "local-identity",
+        "Recipient": "peer-identity-bob"
+      },
       "file_hash": "abc123...",
       "file_name": "photo.jpg",
       "file_size": 1024000,
@@ -1689,9 +1753,10 @@ must not survive into later cleanup paths like `CleanupPeerTransfers`
 where it could be treated as a real completed download and delete an
 unrelated file in the downloads directory.
 
-**Version check:** if the file version does not match the expected
-version, the node starts with empty maps (fresh state). This prevents
-subtle bugs from schema drift.
+**Startup refusal:** an unknown version, unreadable/malformed JSON or invalid
+ownership graph disables restoration of the transfer subsystem and preserves
+the source file. The manager exposes the error through `Err()` and refuses
+writes; it does not replace the rejected file with fresh empty state.
 
 ## Code structure
 
@@ -1807,8 +1872,11 @@ tracks multiple recipients sharing the same physical file. When the
 ref count reaches zero, all files matching `<hash>.*` are removed to
 handle orphaned duplicates from earlier versions.
 
-Receiver partial downloads are stored in
-`<downloadDir>/partial/<file_id>.part`. Completed downloads are moved
+New receiver partial downloads are stored in
+`<downloadDir>/partial/by-ref/<sha256-of-framed-MessageRef-key>.part`.
+Imported version 1 entries keep their existing
+`<downloadDir>/partial/<sanitized-file_id>.part` through stored `partial_path`.
+Completed downloads are moved
 to `<downloadDir>/received/<sha256>.<ext>`.
 
 ## Path traversal and injection protection
@@ -2071,6 +2139,39 @@ exception.
 Транзитные ноды видят только открытые заголовки маршрутизации (SRC, DST,
 TTL, MaxTTL, timestamp, nonce, signature). Тип команды находится внутри
 зашифрованного payload — невидим для ретрансляторов.
+
+## Локальная идентичность трансфера
+
+Wire-поле `file_id` остаётся ID исходного сообщения `file_announce`.
+Версия протокола, подписываемые поля, payload файловых команд и serving epochs
+не меняются. Локальные sender/receiver maps используют
+`domain.MessageRef{Topic: "dm", ID, Sender, Recipient}` с исходными сторонами
+анонса; роль отправителя или получателя выбирает карту. Поэтому одинаковый
+wire ID у разных peer или в противоположных направлениях одной переписки не
+объединяет progress, управление загрузкой и очистку.
+
+Обработчики файловых команд строят локальный ref из проверенного логического
+`frame.SRC`, локальной identity, роли команды и неизменного `file_id`.
+Последний TLS hop остаётся контекстом маршрутизации и не подменяет исходного
+отправителя. `chunk_request` и `file_downloaded` выбирают sender mapping с
+получателем `frame.SRC`; `chunk_response` и `file_downloaded_ack` — receiver
+mapping с отправителем `frame.SRC`. Прежние проверки авторизации, состояния
+и epoch сохраняются.
+
+Локальные `*Ref` API передают выбранный ref через асинхронные операции.
+Legacy API только с ID разрешают лишь единственный mapping среди всех peer
+в запрошенной роли: управление с возвращаемой ошибкой сообщает
+`domain.ErrAmbiguousMessage`, а старые bool/path/progress/void-интерфейсы
+отказывают через false, пустой путь, отсутствие результата или отсутствие
+изменений. Они не выбирают первое совпадение и не очищают все сообщения с
+одним ID. Self-transfer может иметь обе роли для одного полного ref;
+`DeleteLocalCopyRef`, у которого нет селектора роли, также отказывает при
+такой неоднозначности.
+
+Это разделяет разные локальные ref. Повторный анонс с тем же полным ref
+остаётся идемпотентным и сохраняет первые metadata. Изменение не добавляет
+привязку исходного ID анонса к подписи, не различает конфликтующие payload
+одного ref и не восстанавливает mappings, уже потерянные старым binary.
 
 ## Каналы
 
@@ -2709,6 +2810,31 @@ ContentType}`. Колбэк выполняется ПОСЛЕ освобожде
 Несколько identity ноды на одной машине создают отдельные файлы без
 коллизий.
 
+**Локальный формат 2 и импорт формата 1:** версия 2 хранит полный
+`message_ref` рядом с неизменным `file_id`; receiver-записи также сохраняют
+`partial_path`. Для версии 1 loader восстанавливает стороны из сохранённых
+peer/role и фактического локального владельца. Следующая успешная полная
+перезапись сохраняет версию 2. Импортированный receiver сохраняет прежний
+legacy partial path и валидный progress без перемещения или копирования байтов.
+Новые partial-файлы используют
+`<downloadDir>/partial/by-ref/<sha256-of-framed-MessageRef-key>.part`.
+
+Сохранённые пути канонизируются и проверяются на принадлежность partial-каталогу
+и допустимому новому или legacy-пути этого ref. Дубликаты записей в одной роли
+или разные владельцы одного partial path приводят к отказу восстановления;
+валидные sender/receiver роли self-transfer остаются отдельными. Отложенная
+работа несёт сохранённый физический путь и generation; запись partial,
+отмена и удаление используют stripe этого пути. Legacy cleanup-записи
+остаются обязательствами удаления файлов; совпадение wire ID не даёт права
+удалить partial живого mapping. Для общих завершённых файлов и transmit blobs
+сохраняются прежние проверки владельцев/refcount.
+
+Версия 2 не означает, что binary с поддержкой только версии 1 сможет открыть
+этот файл. Нельзя переименовать формат в версию 1 ради downgrade. Для
+несовместимого binary нужна проверенная копия профиля до обновления:
+SQLite-consistent копия базы и соответствующие mappings/данные вложений; прежняя
+[политика БД «только вперёд»](../storage.md#только-вперёд) сохраняется.
+
 **Атомарность:** запись через temp-файл + rename для защиты от
 повреждения при краше mid-write. Файл перезаписывается полностью при
 каждом изменении состояния.
@@ -2738,9 +2864,10 @@ Receiver-маппинги с `ChunkSize == 0` (legacy
 принят за настоящий скачанный файл и удалить постороннее содержимое в
 downloads.
 
-**Проверка версии:** если версия файла не совпадает с ожидаемой, нода
-стартует с пустыми maps (чистое состояние). Это предотвращает баги
-от дрифта схемы.
+**Отказ при запуске:** неизвестная версия, нечитаемый/повреждённый JSON или
+некорректный граф владельцев отключает восстановление transfer-подсистемы и
+сохраняет исходный файл. Manager возвращает ошибку через `Err()` и отказывает
+в записях; отказанный файл не заменяется новым пустым состоянием.
 
 ## Стратегия retry и backoff
 
@@ -3086,7 +3213,10 @@ generation больше не совпадает.
 нескольких получателей одного файла. При достижении нуля удаляются все
 файлы `<hash>.*` для очистки возможных orphan-дубликатов.
 
-Частичные загрузки: `<downloadDir>/partial/<file_id>.part`.
+Новые частичные загрузки:
+`<downloadDir>/partial/by-ref/<sha256-of-framed-MessageRef-key>.part`.
+Импортированные записи версии 1 сохраняют прежний
+`<downloadDir>/partial/<sanitized-file_id>.part` через `partial_path`.
 Завершённые: `<downloadDir>/received/<sha256>.<ext>`.
 
 TransmitPath никогда не раскрывается через RPC или wire protocol.
@@ -3309,7 +3439,7 @@ sequenceDiagram
     Note over S: Пользователь выбирает файл
     S->>S: Вычисление SHA-256 (потоковое)
     S->>S: Копирование в <dataDir>/transmit/<sha256>.<ext>
-    S->>S: Сохранение FileMapping: FileID → TransmitPath
+    S->>S: Сохранение FileMapping: MessageRef → TransmitPath
 
     S->>N: DM (Command=file_announce)<br/>MessageID=FileID, Body=описание или "[file]"<br/>Payload={FileName, FileSize, ContentType, FileHash}
 
@@ -3455,9 +3585,9 @@ gossip fallback») продолжает действовать для всех D
 `FileTransferManager` выполняет авторизацию до чтения любых данных файла:
 
 1. `file_router` получает FileCommandFrame с DST = self
-2. `file_router` расшифровывает payload, читает Command
-3. `file_router` передаёт в FileTransferManager
-4. FileTransferManager ищет FileMapping по FileID
+2. `file_router` проверяет подпись исходного SRC и локальную авторизацию
+3. Конечная нода расшифровывает payload и передаёт в FileTransferManager
+4. FileTransferManager ищет sender mapping по (`dm`, FileID, self, проверенный frame.SRC)
 5. Если FileMapping не найден → молча игнорируется
 6. Проверка: frame.SRC == FileMapping.Recipient
 7. Если несовпадение → молча игнорируется (несанкционированный запрос)

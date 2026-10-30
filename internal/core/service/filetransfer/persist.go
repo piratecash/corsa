@@ -31,6 +31,8 @@ import (
 //   - time.Time fields serialize as RFC 3339 via json.Marshal default behavior.
 //   - time.Duration fields serialize as nanosecond int64 (json.Marshal default).
 type persistedTransferEntry struct {
+	Ref         *domain.MessageRef `json:"message_ref,omitempty"`
+	PartialPath string             `json:"partial_path,omitempty"`
 	// Common fields.
 	FileID      domain.FileID       `json:"file_id"`
 	FileHash    string              `json:"file_hash"`
@@ -78,7 +80,8 @@ type persistedTransferEntry struct {
 // any other arrangement has a window in which the files are unreachable
 // and nothing knows they should be gone.
 type persistedCleanup struct {
-	FileID domain.FileID `json:"file_id"`
+	Ref    *domain.MessageRef `json:"message_ref,omitempty"`
+	FileID domain.FileID      `json:"file_id"`
 	// The singular fields are what files written before an erasure could owe
 	// SEVERAL files carried. They are read and folded into the lists below, and
 	// no longer written: a file id can be given more to erase than it was first
@@ -117,7 +120,7 @@ type persistedTransferFile struct {
 	Cleanups []persistedCleanup `json:"cleanups,omitempty"`
 }
 
-const persistVersion = 1
+const persistVersion = 2
 
 // ---------------------------------------------------------------------------
 // Conversion: in-memory ↔ persisted
@@ -125,6 +128,7 @@ const persistVersion = 1
 
 func senderMappingToEntry(m *senderFileMapping) persistedTransferEntry {
 	return persistedTransferEntry{
+		Ref:           &m.Ref,
 		FileID:        m.FileID,
 		FileHash:      m.FileHash,
 		FileName:      m.FileName,
@@ -146,6 +150,8 @@ func senderMappingToEntry(m *senderFileMapping) persistedTransferEntry {
 
 func receiverMappingToEntry(m *receiverFileMapping) persistedTransferEntry {
 	return persistedTransferEntry{
+		Ref:              &m.Ref,
+		PartialPath:      m.PartialPath,
 		FileID:           m.FileID,
 		FileHash:         m.FileHash,
 		FileName:         m.FileName,
@@ -178,6 +184,7 @@ func entryToSenderMapping(e persistedTransferEntry) *senderFileMapping {
 		}
 	}
 	return &senderFileMapping{
+		Ref:           *e.Ref,
 		FileID:        e.FileID,
 		FileHash:      e.FileHash,
 		FileName:      e.FileName,
@@ -198,6 +205,8 @@ func entryToSenderMapping(e persistedTransferEntry) *senderFileMapping {
 
 func entryToReceiverMapping(e persistedTransferEntry) *receiverFileMapping {
 	rm := &receiverFileMapping{
+		Ref:               *e.Ref,
+		PartialPath:       e.PartialPath,
 		FileID:            e.FileID,
 		FileHash:          e.FileHash,
 		FileName:          e.FileName,
@@ -240,6 +249,9 @@ func (m *Manager) saveMappingsLocked() {
 // failure must be observable so the caller can roll back the in-memory state.
 // Must be called with m.mu held.
 func (m *Manager) saveMappingsLockedErr() error {
+	if m.startupErr != nil {
+		return m.startupErr
+	}
 	if m.mappingsPath == "" {
 		return nil
 	}
@@ -260,7 +272,8 @@ func (m *Manager) saveMappingsLockedErr() error {
 			downloads = append(downloads, persistedDownload(download))
 		}
 		written := persistedCleanup{
-			FileID:         intent.FileID,
+			Ref:            &intent.Ref,
+			FileID:         domain.FileID(intent.Ref.ID),
 			TransmitHashes: intent.TransmitHashes,
 			Downloads:      downloads,
 			Partials:       intent.Partials,
@@ -314,6 +327,7 @@ func (m *Manager) loadMappings() (activeHashes map[string]int) {
 		if os.IsNotExist(err) {
 			return nil
 		}
+		m.startupErr = fmt.Errorf("read file transfer mappings: %w", err)
 		log.Warn().Err(err).Str("path", m.mappingsPath).
 			Msg("file_transfer: read mappings file failed")
 		return nil
@@ -321,20 +335,26 @@ func (m *Manager) loadMappings() (activeHashes map[string]int) {
 
 	var pf persistedTransferFile
 	if err := json.Unmarshal(data, &pf); err != nil {
+		m.startupErr = fmt.Errorf("decode file transfer mappings: %w", err)
 		log.Error().Err(err).Str("path", m.mappingsPath).
-			Msg("file_transfer: unmarshal mappings file failed, starting fresh")
+			Msg("file_transfer: refusing malformed mappings file")
 		return nil
 	}
 
-	if pf.Version != persistVersion {
+	if pf.Version != 1 && pf.Version != persistVersion {
+		m.startupErr = fmt.Errorf("unsupported file transfer mappings version %d", pf.Version)
 		log.Warn().
 			Int("file_version", pf.Version).
 			Int("expected_version", persistVersion).
 			Str("path", m.mappingsPath).
-			Msg("file_transfer: mappings version mismatch, starting fresh")
+			Msg("file_transfer: refusing unsupported mappings version")
 		return nil
 	}
 
+	if err := m.preparePersistedRefs(&pf); err != nil {
+		m.startupErr = err
+		return nil
+	}
 	activeHashes = make(map[string]int)
 	senderRepaired := false
 
@@ -344,10 +364,10 @@ func (m *Manager) loadMappings() (activeHashes map[string]int) {
 	// PurgeUnreferenced then declines to touch.
 	for _, entry := range pf.Cleanups {
 		if m.pendingCleanups == nil {
-			m.pendingCleanups = make(map[domain.FileID]*pendingCleanup, len(pf.Cleanups))
+			m.pendingCleanups = make(map[domain.MessageRef]*pendingCleanup, len(pf.Cleanups))
 		}
 		restored := &pendingCleanup{
-			FileID:         entry.FileID,
+			Ref:            *entry.Ref,
 			TransmitHashes: entry.TransmitHashes,
 			Partials:       entry.Partials,
 			NotedAt:        entry.NotedAt,
@@ -370,7 +390,7 @@ func (m *Manager) loadMappings() (activeHashes map[string]int) {
 				Hash: entry.FileHash,
 			})
 		}
-		m.pendingCleanups[entry.FileID] = restored
+		m.pendingCleanups[*entry.Ref] = restored
 	}
 	if len(pf.Cleanups) > 0 {
 		log.Info().Int("pending", len(pf.Cleanups)).
@@ -481,7 +501,7 @@ func (m *Manager) loadMappings() (activeHashes map[string]int) {
 				continue
 			}
 
-			m.senderMaps[sm.FileID] = sm
+			m.senderMaps[sm.Ref] = sm
 
 		case "receiver":
 			rm := entryToReceiverMapping(entry)
@@ -549,7 +569,7 @@ func (m *Manager) loadMappings() (activeHashes map[string]int) {
 			// a future re-registration of the same fileID.
 			m.nextGeneration++
 			rm.Generation = m.nextGeneration
-			m.receiverMaps[rm.FileID] = rm
+			m.receiverMaps[rm.Ref] = rm
 
 		default:
 			log.Warn().Str("role", entry.Role).Str("file_id", logID(string(entry.FileID))).
@@ -619,7 +639,7 @@ func (m *Manager) reconcileVerifyingOnStartup() bool {
 		// Case 2: the rename did not happen — the .part file may still exist.
 		// Reset to waitingRoute so the retry loop can re-request chunks from
 		// the current offset (or 0 if the partial file is gone/truncated/oversized).
-		partialPath := partialDownloadPath(m.downloadDir, rm.FileID)
+		partialPath := rm.PartialPath
 		if info, err := os.Stat(partialPath); err == nil {
 			partialSize := uint64(info.Size())
 
@@ -802,4 +822,103 @@ func TransfersMappingsPath(dataDir string, identityAddr domain.PeerIdentity, lis
 
 	fileName := fmt.Sprintf("transfers-%s-%s.json", short, port)
 	return filepath.Join(dataDir, fileName)
+}
+
+// preparePersistedRefs validates the complete ownership graph before any map
+// or blob refcount is restored. A malformed duplicate cannot silently replace
+// another owner. Legacy cleanup entries remain artifact erasures, never an
+// ID wildcard over current message mappings.
+func (m *Manager) preparePersistedRefs(pf *persistedTransferFile) error {
+	type persistedOwner struct {
+		Ref  domain.MessageRef
+		Role string
+	}
+	seen := make(map[persistedOwner]struct{}, len(pf.Transfers))
+	paths := make(map[string]domain.MessageRef)
+	for i := range pf.Transfers {
+		e := &pf.Transfers[i]
+		if e.Role != "sender" && e.Role != "receiver" {
+			return fmt.Errorf("invalid persisted transfer role")
+		}
+		if e.FileID == "" || e.Peer.IsZero() || m.ownerAddress() == "" {
+			return fmt.Errorf("persisted transfer lacks its original owner")
+		}
+		expected := m.receiverRef(e.FileID, e.Peer)
+		if e.Role == "sender" {
+			expected = m.senderRef(e.FileID, e.Peer)
+		}
+		if e.Ref == nil {
+			if pf.Version != 1 {
+				return fmt.Errorf("persisted transfer lacks message reference")
+			}
+			e.Ref = &expected
+		}
+		if *e.Ref != expected {
+			return fmt.Errorf("persisted transfer reference disagrees with its endpoints")
+		}
+		owner := persistedOwner{Ref: expected, Role: e.Role}
+		if _, duplicate := seen[owner]; duplicate {
+			return fmt.Errorf("duplicate persisted file message reference in role")
+		}
+		seen[owner] = struct{}{}
+		if e.Role != "receiver" {
+			continue
+		}
+		if e.PartialPath == "" {
+			if pf.Version == 1 {
+				e.PartialPath = partialDownloadPath(m.downloadDir, e.FileID)
+			} else {
+				e.PartialPath = m.partialPath(expected)
+			}
+		}
+		if err := ensureWithinDir(filepath.Join(m.downloadDir, "partial"), e.PartialPath); err != nil {
+			return fmt.Errorf("persisted partial ownership: %w", err)
+		}
+		path := canonicalPartialPath(e.PartialPath)
+		canonical, legacy := m.partialPath(expected), canonicalPartialPath(partialDownloadPath(m.downloadDir, e.FileID))
+		if path != canonical && path != legacy {
+			return fmt.Errorf("persisted partial path does not belong to message reference")
+		}
+		e.PartialPath = path
+		if other, claimed := paths[path]; claimed && other != expected {
+			return fmt.Errorf("ambiguous persisted partial path ownership")
+		}
+		paths[path] = expected
+	}
+	cleanups := make(map[domain.MessageRef]struct{}, len(pf.Cleanups))
+	for i := range pf.Cleanups {
+		e := &pf.Cleanups[i]
+		for j, partial := range e.Partials {
+			if err := ensureWithinDir(filepath.Join(m.downloadDir, "partial"), partial); err != nil {
+				return fmt.Errorf("persisted cleanup partial ownership: %w", err)
+			}
+			e.Partials[j] = canonicalPartialPath(partial)
+		}
+		if e.PartialPath != "" {
+			if err := ensureWithinDir(filepath.Join(m.downloadDir, "partial"), e.PartialPath); err != nil {
+				return fmt.Errorf("persisted cleanup partial ownership: %w", err)
+			}
+			e.PartialPath = canonicalPartialPath(e.PartialPath)
+		}
+		if e.Ref == nil {
+			if pf.Version != 1 {
+				return fmt.Errorf("persisted cleanup lacks message reference")
+			}
+			ref := domain.MessageRef{Topic: "file-cleanup-legacy", ID: string(e.FileID)}
+			e.Ref = &ref
+		}
+		if e.Ref.ID == "" || e.Ref.ID != string(e.FileID) {
+			return fmt.Errorf("invalid persisted cleanup identity")
+		}
+		if e.Ref.Topic != "file-cleanup-legacy" {
+			if e.Ref.Topic != "dm" || (e.Ref.Sender != m.ownerAddress() && e.Ref.Recipient != m.ownerAddress()) || e.Ref.Sender == "" || e.Ref.Recipient == "" {
+				return fmt.Errorf("invalid persisted cleanup owner")
+			}
+		}
+		if _, duplicate := cleanups[*e.Ref]; duplicate {
+			return fmt.Errorf("duplicate persisted cleanup identity")
+		}
+		cleanups[*e.Ref] = struct{}{}
+	}
+	return nil
 }

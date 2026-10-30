@@ -791,7 +791,8 @@ func TestAWarmCacheShownBeforeItsLoadIsStillOpened(t *testing.T) {
 	c.r.mu.Unlock()
 
 	c.r.onReceiptUpdate(protocol.LocalChangeEvent{
-		MessageID: "mine", Sender: c.me.Address, Recipient: c.sender.Address, Status: "delivered",
+		Type: protocol.LocalChangeReceiptUpdate, Topic: "dm",
+		MessageID: "mine", Sender: c.sender.Address, Recipient: c.me.Address, Status: "delivered",
 	})
 	if got := activeCount(c.r); got != 4 {
 		t.Fatalf("the receipt did not put the warm cache on screen (%d messages)", got)

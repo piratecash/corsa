@@ -228,20 +228,23 @@ func TestEnvelopePropagationAged(t *testing.T) {
 
 func TestRelayRetryEntryGatesAckSuppression(t *testing.T) {
 	t.Parallel()
-	svc := &Service{relayRetry: map[string]relayAttempt{}}
+	svc := &Service{relayRetry: map[string]relayAttempt{}, topics: map[string][]protocol.Envelope{}}
 	hop := domain.PeerIdentityFromWire("1111111111111111111111111111111111111111")
 
 	if svc.recordRelayDeliveredWhileRelayed("ghost", hop) {
 		t.Error("an ack_delete for a phantom id must not be recorded")
 	}
-	if relayDeliveredTracked(svc, "ghost") {
+	if svc.relayDeliveredSnapshot(messageIdentity{MessageID: "ghost", Sender: "alice", Recipient: "bob"}) != nil {
 		t.Error("a phantom id must not get a suppression set")
 	}
-	svc.relayRetry[relayMessageKey("real")] = relayAttempt{}
+	message := protocol.Envelope{ID: "real", Topic: "dm", Sender: "alice", Recipient: "bob"}
+	// The legacy ID-only ack resolves the one actual live backlog message.
+	svc.topics["dm"] = []protocol.Envelope{message}
+	svc.relayRetry[relayMessageIdentityKey(messageIdentityOf(message))] = relayAttempt{}
 	if !svc.recordRelayDeliveredWhileRelayed("real", hop) {
 		t.Error("an ack_delete for a relayed id must be recorded")
 	}
-	if _, ok := svc.relayDeliveredSnapshot("real")[hop]; !ok {
+	if _, ok := svc.relayDeliveredSnapshot(messageIdentityOf(message))[hop]; !ok {
 		t.Error("the acking hop must be in the relayed id's suppression set")
 	}
 }

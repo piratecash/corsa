@@ -2380,11 +2380,11 @@ func newTestServiceWithPendingDrain(t *testing.T, localIdentity domain.PeerIdent
 	svc := newTestServiceWithRouting(t, localIdentity)
 	svc.pending = make(map[domain.PeerAddress][]pendingFrame)
 	svc.pendingKeys = make(map[pendingKey]struct{})
-	svc.outbound = make(map[string]outboundDelivery)
+	svc.outbound = make(map[messageIdentity]outboundDelivery)
 	svc.relayRetry = make(map[string]relayAttempt)
-	svc.awaitingDelivered = make(map[protocol.MessageID]*deliveryRetryEntry)
+	svc.awaitingDelivered = make(map[messageIdentity]*deliveryRetryEntry)
 	svc.sentDMIDs = newBoundedKnownIdentities(maxSentDMIDs)
-	svc.awaitingSeenAck = make(map[protocol.MessageID]*seenAckRetryEntry)
+	svc.awaitingSeenAck = make(map[messageIdentity]*seenAckRetryEntry)
 	svc.topics = make(map[string][]protocol.Envelope)
 	svc.receipts = make(map[string][]protocol.DeliveryReceipt)
 	svc.seenReceipts = newRotatingHashDedup(receiptDedupRotation, maxReceiptDedupEntries, nil)
@@ -2773,7 +2773,7 @@ func TestDrainPendingForIdentities_NoRoutePreservesOutboundState(t *testing.T) {
 	svc.deliveryMu.Lock()
 	svc.pending[addrA] = []pendingFrame{{Frame: frame, QueuedAt: now}}
 	svc.pendingKeys[pendingFrameKey(addrA, frame)] = struct{}{}
-	svc.outbound[frame.ID] = outboundDelivery{
+	svc.outbound[messageIdentityOf(frameEnvelope(frame))] = outboundDelivery{
 		MessageID: frame.ID,
 		Recipient: frame.Recipient,
 		Status:    "queued",
@@ -2784,7 +2784,7 @@ func TestDrainPendingForIdentities_NoRoutePreservesOutboundState(t *testing.T) {
 	svc.drainPendingForIdentities(map[domain.PeerIdentity]struct{}{idTargetX: {}})
 
 	svc.deliveryMu.RLock()
-	state := svc.outbound[frame.ID]
+	state := svc.outbound[messageIdentityOf(frameEnvelope(frame))]
 	svc.deliveryMu.RUnlock()
 
 	if state.Status != "queued" {
@@ -3338,11 +3338,11 @@ func TestTTLExpiryExposesBackupAndTriggersDrain(t *testing.T) {
 		done:                  make(chan struct{}),
 		pending:               make(map[domain.PeerAddress][]pendingFrame),
 		pendingKeys:           make(map[pendingKey]struct{}),
-		outbound:              make(map[string]outboundDelivery),
+		outbound:              make(map[messageIdentity]outboundDelivery),
 		relayRetry:            make(map[string]relayAttempt),
-		awaitingDelivered:     make(map[protocol.MessageID]*deliveryRetryEntry),
+		awaitingDelivered:     make(map[messageIdentity]*deliveryRetryEntry),
 		sentDMIDs:             newBoundedKnownIdentities(maxSentDMIDs),
-		awaitingSeenAck:       make(map[protocol.MessageID]*seenAckRetryEntry),
+		awaitingSeenAck:       make(map[messageIdentity]*seenAckRetryEntry),
 		topics:                make(map[string][]protocol.Envelope),
 		receipts:              make(map[string][]protocol.DeliveryReceipt),
 		seenReceipts:          newRotatingHashDedup(receiptDedupRotation, maxReceiptDedupEntries, nil),
@@ -3501,7 +3501,7 @@ func TestTTLExpiryNoBackup_NoDrain(t *testing.T) {
 		done:                  make(chan struct{}),
 		pending:               make(map[domain.PeerAddress][]pendingFrame),
 		pendingKeys:           make(map[pendingKey]struct{}),
-		outbound:              make(map[string]outboundDelivery),
+		outbound:              make(map[messageIdentity]outboundDelivery),
 	}
 	svc.routingTable = routing.NewTable(
 		routing.WithLocalOrigin(idNodeA),

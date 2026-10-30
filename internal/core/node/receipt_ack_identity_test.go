@@ -269,7 +269,7 @@ func TestEveryRelayRetryReceiptKeyComesFromTheIdentity(t *testing.T) {
 		t.Fatalf("read package dir: %v", err)
 	}
 
-	allowed := map[string]bool{"relayReceiptKey": true, "relayMessageKey": true, "retryKey": true, "dedupKey": true}
+	allowed := map[string]bool{"relayReceiptKey": true, "relayMessageIdentityKey": true, "retryKey": true, "dedupKey": true}
 	var offenders []string
 	for _, entry := range entries {
 		name := entry.Name()
@@ -334,6 +334,66 @@ func TestEveryRelayRetryReceiptKeyComesFromTheIdentity(t *testing.T) {
 	if len(offenders) > 0 {
 		t.Errorf("relay-retry keys built outside the identity:\n\t%s", strings.Join(offenders, "\n\t"))
 	}
+
+	// These are syntax-vocabulary controls, not a whole-program alias or
+	// dataflow proof. Current production calls pass the actual typed identity
+	// parameter/range value or derive it from an actual envelope identifier.
+	t.Run("exact-message-key-builder-vocabulary", func(t *testing.T) {
+		for _, tc := range []struct {
+			expression string
+			allowed    bool
+		}{
+			{"relayMessageIdentityKey(message)", true},
+			{"relayMessageIdentityKey(messageIdentityOf(envelope))", true},
+			{"relayReceiptKey(receipt)", true},
+			{"identity.retryKey()", true},
+			{"identity.dedupKey()", true},
+			{"relayMessageKey(id)", false},
+			{"message.Key()", false},
+			{"messageIdentityOf(envelope).Key()", false},
+			{"other.relayMessageIdentityKey(message)", false},
+			{"relayMessageIdentityKey()", false},
+			{"relayMessageIdentityKey(message, other)", false},
+			{"relayMessageIdentityKey(messageIdentity{MessageID: id})", false},
+			{"relayMessageIdentityKey(messageIdentity{MessageID: id, Sender: foreignAuthor, Recipient: recipient})", false},
+			{"relayMessageIdentityKey(foreignIdentityOf(envelope))", false},
+			{"relayMessageIdentityKey(messageIdentityOf(protocol.Envelope{ID: id}))", false},
+			{`"msg|" + string(id)`, false},
+		} {
+			expression, err := parser.ParseExpr(tc.expression)
+			if err != nil {
+				t.Fatal("invalid source-control expression", tc.expression, err)
+			}
+			if got := callsAllowedKeyBuilder(expression, allowed); got != tc.allowed {
+				t.Errorf("complete relay key %s: accepted=%v want=%v", tc.expression, got, tc.allowed)
+			}
+		}
+	})
+	t.Run("same-wire-id-keeps-original-parties-distinct", func(t *testing.T) {
+		messages := []messageIdentity{
+			{MessageID: "same-wire-id", Sender: "alice", Recipient: "bob"},
+			{MessageID: "same-wire-id", Sender: "mallory", Recipient: "bob"},
+			{MessageID: "same-wire-id", Sender: "alice", Recipient: "carol"},
+			{MessageID: "same-wire-id", Sender: "bob", Recipient: "alice"},
+			{MessageID: "different-wire-id", Sender: "alice", Recipient: "bob"},
+			{MessageID: "wire|id:\x00", Sender: "a:b", Recipient: "c"},
+			{MessageID: "wire|id:\x00", Sender: "a", Recipient: "b:c"},
+		}
+		keys := make(map[string]messageIdentity, len(messages))
+		for _, message := range messages {
+			key := relayMessageIdentityKey(message)
+			if !strings.HasPrefix(key, "msg|") {
+				t.Fatalf("message key lost its namespace: %q", key)
+			}
+			if previous, exists := keys[key]; exists && previous != message {
+				t.Fatalf("distinct original messages collapsed: previous=%+v current=%+v", previous, message)
+			}
+			keys[key] = message
+		}
+		if len(keys) != len(messages) {
+			t.Fatalf("message-key cardinality=%d want=%d", len(keys), len(messages))
+		}
+	})
 }
 
 func callsAllowedKeyBuilder(expr ast.Expr, allowed map[string]bool) bool {
@@ -343,8 +403,31 @@ func callsAllowedKeyBuilder(expr ast.Expr, allowed map[string]bool) bool {
 	}
 	switch fun := call.Fun.(type) {
 	case *ast.Ident:
+		if fun.Name == "relayMessageIdentityKey" {
+			// Only the reviewed typed builder accepts message keys. Its real
+			// signature requires messageIdentity; no arbitrary .Key() method,
+			// hand-spelled tuple or raw-ID prefix is a complete map key.
+			if !allowed[fun.Name] || len(call.Args) != 1 {
+				return false
+			}
+			switch argument := call.Args[0].(type) {
+			case *ast.Ident:
+				return argument.Name != "_"
+			case *ast.CallExpr:
+				builder, ok := argument.Fun.(*ast.Ident)
+				if !ok || builder.Name != "messageIdentityOf" || len(argument.Args) != 1 {
+					return false
+				}
+				envelope, ok := argument.Args[0].(*ast.Ident)
+				return ok && envelope.Name != "_"
+			}
+			return false
+		}
 		return allowed[fun.Name]
 	case *ast.SelectorExpr:
+		if fun.Sel.Name == "relayMessageIdentityKey" {
+			return false
+		}
 		return allowed[fun.Sel.Name]
 	}
 	return false

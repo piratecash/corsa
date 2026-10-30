@@ -158,17 +158,17 @@ type transitAdmissionScan struct {
 	totalBytes     int
 }
 
-func scanTopicForAdmission(backlog []protocol.Envelope, id protocol.MessageID, recipient string, isTransit func(protocol.Envelope) bool) transitAdmissionScan {
+func scanTopicForAdmission(backlog []protocol.Envelope, ref domain.MessageRef, isTransit func(protocol.Envelope) bool) transitAdmissionScan {
 	var out transitAdmissionScan
 	for _, e := range backlog {
-		if e.ID == id {
+		if envelopeRef(e) == ref {
 			out.duplicate = true
 		}
 		if !isTransit(e) {
 			continue
 		}
 		out.totalBytes += len(e.Payload)
-		if e.Recipient == recipient {
+		if e.Recipient == ref.Recipient {
 			out.recipientCount++
 		}
 	}
@@ -187,7 +187,7 @@ func scanTopicForAdmission(backlog []protocol.Envelope, id protocol.MessageID, r
 // rebuilds with order preserved), so "first transit match" == oldest.
 //
 // Caller must hold s.gossipMu writer.
-func evictTransitOverflowLocked(backlog []protocol.Envelope, scan transitAdmissionScan, recipient string, payloadLen int, isTransit func(protocol.Envelope) bool) ([]protocol.Envelope, []protocol.MessageID) {
+func evictTransitOverflowLocked(backlog []protocol.Envelope, scan transitAdmissionScan, recipient string, payloadLen int, isTransit func(protocol.Envelope) bool) ([]protocol.Envelope, []messageIdentity) {
 	needRecipientEvictions := 0
 	if scan.recipientCount >= maxTransitPerRecipient {
 		needRecipientEvictions = scan.recipientCount - maxTransitPerRecipient + 1
@@ -198,19 +198,19 @@ func evictTransitOverflowLocked(backlog []protocol.Envelope, scan transitAdmissi
 		return backlog, nil
 	}
 
-	var evicted []protocol.MessageID
+	var evicted []messageIdentity
 	filtered := backlog[:0]
 	for _, e := range backlog {
 		if isTransit(e) {
 			if needRecipientEvictions > 0 && e.Recipient == recipient {
 				needRecipientEvictions--
 				overBytes -= len(e.Payload)
-				evicted = append(evicted, e.ID)
+				evicted = append(evicted, messageIdentityOf(e))
 				continue
 			}
 			if overBytes > 0 {
 				overBytes -= len(e.Payload)
-				evicted = append(evicted, e.ID)
+				evicted = append(evicted, messageIdentityOf(e))
 				continue
 			}
 		}
@@ -248,9 +248,9 @@ func transitExpired(e protocol.Envelope, now time.Time) bool {
 // section rather than after it so that no reader — the ack_delete
 // suppression gate (recordRelayDeliveredWhileRelayed), the retry walk — ever
 // sees an entry whose envelope is already gone.
-func (s *Service) dropRelayRetryEntriesLocked(ids []protocol.MessageID) {
-	for _, id := range ids {
-		delete(s.relayRetry, relayMessageKey(id))
+func (s *Service) dropRelayRetryEntriesLocked(refs []messageIdentity) {
+	for _, ref := range refs {
+		delete(s.relayRetry, relayMessageIdentityKey(ref))
 	}
 }
 
@@ -391,7 +391,7 @@ func (s *Service) filterGossipTargetsForEnvelope(e protocol.Envelope, targets []
 	}
 	// Snapshot the ack_delete suppression set BEFORE taking peerMu so the
 	// leaf relayDeliveredMu never nests under peerMu (relay_delivered.go).
-	delivered := s.relayDeliveredSnapshot(e.ID)
+	delivered := s.relayDeliveredSnapshot(messageIdentityOf(e))
 	if e.Via == "" && len(delivered) == 0 {
 		// No ingress/ack exclusions — still apply the K-of-N fan-out cap.
 		return selectFanoutSubset(targets, s.gossipFanoutLimit(), e.ID)

@@ -180,7 +180,7 @@ type Window struct {
 	recipientButtons     map[domain.PeerIdentity]*widget.Clickable
 	recipientRightClick  map[domain.PeerIdentity]*rightClickState
 	recipientMenuBtns    map[domain.PeerIdentity]*widget.Clickable // per-card "⋯" menu buttons
-	messageSelectables   map[string]*widget.Selectable
+	messageSelectables   map[domain.MessageRef]*widget.Selectable
 	sendStatusSelectable widget.Selectable
 	lastChatPeer         domain.PeerIdentity
 	language             string
@@ -252,14 +252,14 @@ type Window struct {
 	msgCtxReply   widget.Clickable
 	msgCtxCopy    widget.Clickable
 	msgCtxDelete  widget.Clickable
-	msgRightClick map[string]*rightClickState  // keyed by message ID
-	msgMenuBtns   map[string]*widget.Clickable // per-message "⋯" menu buttons
+	msgRightClick map[domain.MessageRef]*rightClickState  // keyed by message ID
+	msgMenuBtns   map[domain.MessageRef]*widget.Clickable // per-message "⋯" menu buttons
 
 	// Reactions: the chip row's widgets per message, the state those chips are
 	// drawn from, and the quick-choice pill that opens with the message menu.
 	// See reactions.go.
-	msgReactionChips map[domain.MessageID]*ui.ReactionChipsState
-	msgReactionState map[domain.MessageID][]domain.Reaction
+	msgReactionChips map[domain.MessageRef]*ui.ReactionChipsState
+	msgReactionState map[domain.MessageRef][]domain.Reaction
 	// reactionsStale is raised by the event-bus goroutine and lowered by the
 	// layout goroutine. It is the ONLY thing that crosses between them for this
 	// feature: msgReactionState above is a map every bubble reads each frame,
@@ -390,8 +390,9 @@ type Window struct {
 	// DM generation changes — this catches every mutation including body
 	// edits, ReplyTo updates, and same-shape conversation reloads that
 	// the old count+first/last heuristic missed.
-	msgCacheByID map[string]cachedMsg
-	msgCacheGen  uint64 // snapshot DMGeneration when cache was built
+	msgCacheByID      map[domain.MessageRef]cachedMsg
+	msgUniqueRefsByID map[string]domain.MessageRef
+	msgCacheGen       uint64 // snapshot DMGeneration when cache was built
 	// prunedMsgGen is the DM generation whose live message set has already
 	// been applied to the per-message state below
 	// (dropStateOfRemovedMessages). Zero is honest as a starting value: at
@@ -408,11 +409,11 @@ type Window struct {
 	// the window sees the message gone, the bridge no longer knows where its
 	// picture was. Without this memory the bitmap of an erased message stays
 	// in thumbCache until the user leaves the chat.
-	msgImagePaths map[string]string
+	msgImagePaths map[domain.MessageRef]string
 
 	// replyQuoteTags maps message IDs to stable pointer event tags for
 	// click-to-scroll behavior on reply quotes.
-	replyQuoteTags map[string]*widget.Clickable
+	replyQuoteTags map[domain.MessageRef]*widget.Clickable
 
 	// chatJump is the pending scroll to a quoted message, and msgHighlight the
 	// fade that marks it once it arrives. Both live in chat_jump.go.
@@ -489,18 +490,18 @@ type Window struct {
 	peerForgetEpoch map[domain.PeerIdentity]uint64
 
 	// File download buttons for incoming file cards (keyed by message ID).
-	fileDownloadBtns       map[string]*widget.Clickable
-	fileCancelDownloadBtns map[string]*widget.Clickable
-	fileRestartBtns        map[string]*widget.Clickable
+	fileDownloadBtns       map[domain.MessageRef]*widget.Clickable
+	fileCancelDownloadBtns map[domain.MessageRef]*widget.Clickable
+	fileRestartBtns        map[domain.MessageRef]*widget.Clickable
 
 	// Image thumbnail cache for file transfer preview in chat bubbles.
 	thumbCache     thumbnailCache
-	thumbClickBtns map[string]*widget.Clickable // keyed by message ID — click to open image
+	thumbClickBtns map[domain.MessageRef]*widget.Clickable // keyed by message ID — click to open image
 
 	// File action buttons for completed transfers (keyed by message ID).
-	fileRevealBtns    map[string]*widget.Clickable // "Show in Folder"
-	fileOpenBtns      map[string]*widget.Clickable // "Open" with system viewer
-	fileRowDeleteBtns map[string]*widget.Clickable // "Delete" inline with Reveal/Open (per-row, separate from msgCtxDelete which is the context-menu single)
+	fileRevealBtns    map[domain.MessageRef]*widget.Clickable // "Show in Folder"
+	fileOpenBtns      map[domain.MessageRef]*widget.Clickable // "Open" with system viewer
+	fileRowDeleteBtns map[domain.MessageRef]*widget.Clickable // "Delete" inline with Reveal/Open (per-row, separate from msgCtxDelete which is the context-menu single)
 
 	// Native file dialog via gioui.org/x/explorer. Initialized once in Run()
 	// together with the app.Window. ChooseFile is blocking and must be called
@@ -768,10 +769,10 @@ func NewWindow(client *service.DesktopClient, router *service.DMRouter, eventBus
 		languageOptions:          make(map[string]*widget.Clickable),
 		recipientButtons:         make(map[domain.PeerIdentity]*widget.Clickable),
 		recipientRightClick:      make(map[domain.PeerIdentity]*rightClickState),
-		messageSelectables:       make(map[string]*widget.Selectable),
-		msgRightClick:            make(map[string]*rightClickState),
-		msgMenuBtns:              make(map[string]*widget.Clickable),
-		msgReactionChips:         make(map[domain.MessageID]*ui.ReactionChipsState),
+		messageSelectables:       make(map[domain.MessageRef]*widget.Selectable),
+		msgRightClick:            make(map[domain.MessageRef]*rightClickState),
+		msgMenuBtns:              make(map[domain.MessageRef]*widget.Clickable),
+		msgReactionChips:         make(map[domain.MessageRef]*ui.ReactionChipsState),
 		recipientMenuBtns:        make(map[domain.PeerIdentity]*widget.Clickable),
 		menuBtnRects:             make(map[*widget.Clickable]image.Rectangle),
 		touchPressPos:            make(map[pointer.ID]image.Point),
@@ -1720,11 +1721,11 @@ func (w *Window) resetConversationStateOnPeerChange() {
 	// rightClickState via event.Op — recreating the map then orphaned
 	// that registered tag, and the first right-click/long-press after a
 	// chat switch was delivered to a state no handler would ever read.
-	w.messageSelectables = make(map[string]*widget.Selectable)
-	w.msgRightClick = make(map[string]*rightClickState)
-	w.replyQuoteTags = make(map[string]*widget.Clickable)
-	w.msgMenuBtns = make(map[string]*widget.Clickable)
-	w.msgReactionChips = make(map[domain.MessageID]*ui.ReactionChipsState)
+	w.messageSelectables = make(map[domain.MessageRef]*widget.Selectable)
+	w.msgRightClick = make(map[domain.MessageRef]*rightClickState)
+	w.replyQuoteTags = make(map[domain.MessageRef]*widget.Clickable)
+	w.msgMenuBtns = make(map[domain.MessageRef]*widget.Clickable)
+	w.msgReactionChips = make(map[domain.MessageRef]*ui.ReactionChipsState)
 	// The buttons of file cards are per MESSAGE too, and were the family
 	// nothing ever emptied: every attachment the process had ever drawn kept
 	// a Clickable each, in every conversation, until it exited. Three of them
@@ -1732,13 +1733,13 @@ func (w *Window) resetConversationStateOnPeerChange() {
 	// transfers — recreated here for the same reason the maps above are, and
 	// at the same point: before any row of this frame has registered a tag
 	// against the old pointer.
-	w.thumbClickBtns = make(map[string]*widget.Clickable)
-	w.fileDownloadBtns = make(map[string]*widget.Clickable)
-	w.fileCancelDownloadBtns = make(map[string]*widget.Clickable)
-	w.fileRestartBtns = make(map[string]*widget.Clickable)
-	w.fileRevealBtns = make(map[string]*widget.Clickable)
-	w.fileOpenBtns = make(map[string]*widget.Clickable)
-	w.fileRowDeleteBtns = make(map[string]*widget.Clickable)
+	w.thumbClickBtns = make(map[domain.MessageRef]*widget.Clickable)
+	w.fileDownloadBtns = make(map[domain.MessageRef]*widget.Clickable)
+	w.fileCancelDownloadBtns = make(map[domain.MessageRef]*widget.Clickable)
+	w.fileRestartBtns = make(map[domain.MessageRef]*widget.Clickable)
+	w.fileRevealBtns = make(map[domain.MessageRef]*widget.Clickable)
+	w.fileOpenBtns = make(map[domain.MessageRef]*widget.Clickable)
+	w.fileRowDeleteBtns = make(map[domain.MessageRef]*widget.Clickable)
 	// And the bitmaps behind those previews, which are the actual weight —
 	// up to 64MB of decoded pixels belonging to a chat that is no longer on
 	// screen. The next conversation decodes its own; nothing here is a
@@ -1758,7 +1759,7 @@ func (w *Window) resetConversationStateOnPeerChange() {
 	w.menuBtnRects = make(map[*widget.Clickable]image.Rectangle)
 	// Nothing left to remember where the previous chat's pictures were: the
 	// bitmaps they name were just given back.
-	w.msgImagePaths = make(map[string]string)
+	w.msgImagePaths = make(map[domain.MessageRef]string)
 	w.lastChatPeer = peer
 }
 
@@ -1863,12 +1864,11 @@ func (w *Window) dropStateOfRemovedMessages() {
 // is not in live. Deleting during a range is defined in Go, so this is one
 // pass over the map and no allocation.
 //
-// Generic over the key because the message id is spelled two ways in this
-// package — string in the widget maps, domain.MessageID in the reaction
-// ones — and one rule about liveness should not be written twice.
-func retainLiveMessages[K ~string, V any](m map[K]V, live map[string]cachedMsg) {
+// Every widget and decoded-image association uses the same exact local
+// message reference as the conversation cache.
+func retainLiveMessages[V any](m map[domain.MessageRef]V, live map[domain.MessageRef]cachedMsg) {
 	for id := range m {
-		if _, ok := live[string(id)]; !ok {
+		if _, ok := live[id]; !ok {
 			delete(m, id)
 		}
 	}
@@ -1893,7 +1893,7 @@ func (w *Window) dropStaleReply() {
 	if w.replyToMsg == nil || !w.snap.CacheReady {
 		return
 	}
-	if _, ok := w.msgCacheByID[w.replyToMsg.ID]; ok {
+	if _, ok := w.msgCacheByID[messageRef(*w.replyToMsg)]; ok {
 		return
 	}
 	w.clearReplyQuiet()
@@ -1929,7 +1929,7 @@ func (w *Window) dropStaleMsgMenu() {
 	if w.msgContextMsg == nil || !w.snap.CacheReady {
 		return
 	}
-	if _, ok := w.msgCacheByID[w.msgContextMsg.ID]; ok {
+	if _, ok := w.msgCacheByID[messageRef(*w.msgContextMsg)]; ok {
 		return
 	}
 	w.msgContextMsg = nil
@@ -4889,8 +4889,8 @@ func (w *Window) layoutFileCard(gtx layout.Context, message service.DirectMessag
 	}
 
 	// Query real transfer progress from FileTransferManager.
-	fileID := domain.FileID(message.ID)
-	bytesTransferred, _, transferState, transferFound := w.router.FileBridge().Progress(fileID, isMine)
+	fileID := messageRef(message)
+	bytesTransferred, _, transferState, transferFound := w.router.FileBridge().ProgressRef(fileID, isMine)
 	percent := 0
 	if payload.FileSize > 0 && bytesTransferred > 0 {
 		percent = int(bytesTransferred * 100 / payload.FileSize)
@@ -4942,14 +4942,14 @@ func (w *Window) layoutFileCard(gtx layout.Context, message service.DirectMessag
 		// click target at all is what made them unreachable.
 		var nameRowButton *widget.Clickable
 		if isImageContentType(payload.ContentType) {
-			filePath := w.router.FileBridge().FilePath(fileID, isMine)
-			w.rememberImagePath(message.ID, filePath)
+			filePath := w.router.FileBridge().FilePathRef(fileID, isMine)
+			w.rememberImagePath(messageRef(message), filePath)
 			// receiverDownloadActive is the "it is on its way" half: the file
 			// is not on disk yet, and the viewer says so rather than
 			// pretending the attachment is not an image.
 			if filePath != "" || receiverDownloadActive {
 				openItem := viewerItem{
-					messageID: domain.MessageID(message.ID),
+					messageID: messageRef(message),
 					peer:      conversationPeer(message, w.snap.MyAddress),
 					path:      filePath,
 					contentID: payload.FileHash,
@@ -4960,12 +4960,12 @@ func (w *Window) layoutFileCard(gtx layout.Context, message service.DirectMessag
 
 				// Ensure clickable widget exists for this message.
 				if w.thumbClickBtns == nil {
-					w.thumbClickBtns = make(map[string]*widget.Clickable)
+					w.thumbClickBtns = make(map[domain.MessageRef]*widget.Clickable)
 				}
-				thumbBtn, ok := w.thumbClickBtns[message.ID]
+				thumbBtn, ok := w.thumbClickBtns[messageRef(message)]
 				if !ok {
 					thumbBtn = new(widget.Clickable)
-					w.thumbClickBtns[message.ID] = thumbBtn
+					w.thumbClickBtns[messageRef(message)] = thumbBtn
 				}
 
 				for thumbBtn.Clicked(gtx) {
@@ -5094,13 +5094,13 @@ func (w *Window) layoutFileCard(gtx layout.Context, message service.DirectMessag
 					return w.layoutFileProgressBar(gtx, progressBg, progressFg, percent)
 				}
 				if receiverDownloadActive {
-					return w.layoutReceiverProgress(gtx, progressBg, progressFg, percent, message.ID)
+					return w.layoutReceiverProgress(gtx, progressBg, progressFg, percent, messageRef(message))
 				}
 				if receiverFailed {
-					return w.layoutFileRestartButton(gtx, message.ID)
+					return w.layoutFileRestartButton(gtx, messageRef(message))
 				}
 				if !isMine && !receiverTerminal && transferFound {
-					return w.layoutFileDownloadButton(gtx, message.ID)
+					return w.layoutFileDownloadButton(gtx, messageRef(message))
 				}
 				return layout.Dimensions{}
 			}),
@@ -5164,7 +5164,7 @@ func (w *Window) layoutFileCard(gtx layout.Context, message service.DirectMessag
 
 		// "Show in Folder" + "Open" + "Delete" action buttons for
 		// completed transfers where the file is available on disk.
-		fileOnDisk := w.router.FileBridge().FilePath(fileID, isMine)
+		fileOnDisk := w.router.FileBridge().FilePathRef(fileID, isMine)
 		if fileOnDisk != "" {
 			revealPath := fileOnDisk
 			msgCopy := message
@@ -5253,9 +5253,9 @@ func (w *Window) layoutFileProgressBar(gtx layout.Context, bg, fg color.NRGBA, p
 // layoutReceiverProgress renders the progress bar with a cancel button (✕)
 // for receiver-side active downloads. The cancel button resets the transfer
 // to available state and deletes the partial file.
-func (w *Window) layoutReceiverProgress(gtx layout.Context, bg, fg color.NRGBA, percent int, messageID string) layout.Dimensions {
+func (w *Window) layoutReceiverProgress(gtx layout.Context, bg, fg color.NRGBA, percent int, messageID domain.MessageRef) layout.Dimensions {
 	if w.fileCancelDownloadBtns == nil {
-		w.fileCancelDownloadBtns = make(map[string]*widget.Clickable)
+		w.fileCancelDownloadBtns = make(map[domain.MessageRef]*widget.Clickable)
 	}
 	cancelBtn, ok := w.fileCancelDownloadBtns[messageID]
 	if !ok {
@@ -5264,14 +5264,14 @@ func (w *Window) layoutReceiverProgress(gtx layout.Context, bg, fg color.NRGBA, 
 	}
 
 	for cancelBtn.Clicked(gtx) {
-		fileID := domain.FileID(messageID)
+		fileID := messageID
 		if !w.beginUIOp() {
 			continue
 		}
 		go func() {
 			defer w.endUIOp()
-			if err := w.router.FileBridge().CancelDownload(fileID); err != nil {
-				log.Error().Err(err).Str("file_id", messageID).
+			if err := w.router.FileBridge().CancelDownloadRef(fileID); err != nil {
+				log.Error().Err(err).Str("file_id", messageID.ID).
 					Msg("file_download: CancelFileDownload failed")
 			}
 		}()
@@ -5299,9 +5299,9 @@ func (w *Window) layoutReceiverProgress(gtx layout.Context, bg, fg color.NRGBA, 
 // layoutFileDownloadButton renders a download button for the receiver side.
 // When clicked, triggers FileTransferManager.StartDownload which sends the
 // first chunk_request and transitions the receiver state to downloading.
-func (w *Window) layoutFileDownloadButton(gtx layout.Context, messageID string) layout.Dimensions {
+func (w *Window) layoutFileDownloadButton(gtx layout.Context, messageID domain.MessageRef) layout.Dimensions {
 	if w.fileDownloadBtns == nil {
-		w.fileDownloadBtns = make(map[string]*widget.Clickable)
+		w.fileDownloadBtns = make(map[domain.MessageRef]*widget.Clickable)
 	}
 	btn, ok := w.fileDownloadBtns[messageID]
 	if !ok {
@@ -5310,14 +5310,14 @@ func (w *Window) layoutFileDownloadButton(gtx layout.Context, messageID string) 
 	}
 
 	for btn.Clicked(gtx) {
-		fileID := domain.FileID(messageID)
+		fileID := messageID
 		if !w.beginUIOp() {
 			continue
 		}
 		go func() {
 			defer w.endUIOp()
-			if err := w.router.FileBridge().StartDownload(fileID); err != nil {
-				log.Error().Err(err).Str("file_id", messageID).
+			if err := w.router.FileBridge().StartDownloadRef(fileID); err != nil {
+				log.Error().Err(err).Str("file_id", messageID.ID).
 					Msg("file_download: StartFileDownload failed")
 			}
 		}()
@@ -5343,9 +5343,9 @@ func (w *Window) layoutFileDownloadButton(gtx layout.Context, messageID string) 
 // layoutFileRestartButton renders a restart button for failed receiver-side
 // downloads. When clicked, resets the receiver mapping to available state
 // (RestartDownload) and immediately initiates a new download (StartDownload).
-func (w *Window) layoutFileRestartButton(gtx layout.Context, messageID string) layout.Dimensions {
+func (w *Window) layoutFileRestartButton(gtx layout.Context, messageID domain.MessageRef) layout.Dimensions {
 	if w.fileRestartBtns == nil {
-		w.fileRestartBtns = make(map[string]*widget.Clickable)
+		w.fileRestartBtns = make(map[domain.MessageRef]*widget.Clickable)
 	}
 	btn, ok := w.fileRestartBtns[messageID]
 	if !ok {
@@ -5354,19 +5354,19 @@ func (w *Window) layoutFileRestartButton(gtx layout.Context, messageID string) l
 	}
 
 	for btn.Clicked(gtx) {
-		fileID := domain.FileID(messageID)
+		fileID := messageID
 		if !w.beginUIOp() {
 			continue
 		}
 		go func() {
 			defer w.endUIOp()
-			if err := w.router.FileBridge().RestartDownload(fileID); err != nil {
-				log.Error().Err(err).Str("file_id", messageID).
+			if err := w.router.FileBridge().RestartDownloadRef(fileID); err != nil {
+				log.Error().Err(err).Str("file_id", messageID.ID).
 					Msg("file_download: RestartFileDownload failed")
 				return
 			}
-			if err := w.router.FileBridge().StartDownload(fileID); err != nil {
-				log.Error().Err(err).Str("file_id", messageID).
+			if err := w.router.FileBridge().StartDownloadRef(fileID); err != nil {
+				log.Error().Err(err).Str("file_id", messageID.ID).
 					Msg("file_download: StartFileDownload after restart failed")
 			}
 		}()
@@ -5412,24 +5412,24 @@ func (w *Window) layoutFileRestartButton(gtx layout.Context, messageID string) l
 func (w *Window) layoutFileActionButtons(gtx layout.Context, msg service.DirectMessage, isMine bool, filePath, exportName string) layout.Dimensions {
 	// Ensure button maps are initialised.
 	if w.fileRevealBtns == nil {
-		w.fileRevealBtns = make(map[string]*widget.Clickable)
+		w.fileRevealBtns = make(map[domain.MessageRef]*widget.Clickable)
 	}
 	if w.fileOpenBtns == nil {
-		w.fileOpenBtns = make(map[string]*widget.Clickable)
+		w.fileOpenBtns = make(map[domain.MessageRef]*widget.Clickable)
 	}
 	if w.fileRowDeleteBtns == nil {
-		w.fileRowDeleteBtns = make(map[string]*widget.Clickable)
+		w.fileRowDeleteBtns = make(map[domain.MessageRef]*widget.Clickable)
 	}
 
-	revealBtn, ok := w.fileRevealBtns[msg.ID]
+	revealBtn, ok := w.fileRevealBtns[messageRef(msg)]
 	if !ok {
 		revealBtn = new(widget.Clickable)
-		w.fileRevealBtns[msg.ID] = revealBtn
+		w.fileRevealBtns[messageRef(msg)] = revealBtn
 	}
-	openBtn, ok := w.fileOpenBtns[msg.ID]
+	openBtn, ok := w.fileOpenBtns[messageRef(msg)]
 	if !ok {
 		openBtn = new(widget.Clickable)
-		w.fileOpenBtns[msg.ID] = openBtn
+		w.fileOpenBtns[messageRef(msg)] = openBtn
 	}
 
 	revealPath := filePath
@@ -5534,13 +5534,13 @@ func (w *Window) layoutFileActionButtons(gtx layout.Context, msg service.DirectM
 func (w *Window) layoutFileCardDeleteButton(gtx layout.Context, msg service.DirectMessage) layout.Dimensions {
 	peer := conversationPeer(msg, w.router.MyAddress())
 
-	btn, ok := w.fileRowDeleteBtns[msg.ID]
+	btn, ok := w.fileRowDeleteBtns[messageRef(msg)]
 	if !ok {
 		btn = new(widget.Clickable)
-		w.fileRowDeleteBtns[msg.ID] = btn
+		w.fileRowDeleteBtns[messageRef(msg)] = btn
 	}
 
-	target := domain.MessageID(msg.ID)
+	target := messageRef(msg)
 	for btn.Clicked(gtx) {
 		w.dispatchMessageDeleteAsync(peer, target)
 	}
@@ -5582,7 +5582,7 @@ func conversationPeer(message service.DirectMessage, me domain.PeerIdentity) dom
 // not be overwritten, a reachable peer is being asked right now, and an
 // unreachable one will be asked when they come back. The route comes
 // from the router rather than being guessed here a second time.
-func (w *Window) dispatchMessageDeleteAsync(peer domain.PeerIdentity, target domain.MessageID) {
+func (w *Window) dispatchMessageDeleteAsync(peer domain.PeerIdentity, target domain.MessageRef) {
 	w.router.SetSendStatus(w.t("status.message_deleting"))
 	if !w.beginUIOp() {
 		return
@@ -5591,7 +5591,7 @@ func (w *Window) dispatchMessageDeleteAsync(peer domain.PeerIdentity, target dom
 		defer w.endUIOp()
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		route, err := w.router.SendMessageDelete(ctx, peer, target)
+		route, err := w.router.SendMessageDeleteRef(ctx, target)
 		if err != nil {
 			w.router.SetSendStatus(w.t("status.message_delete_failed", err.Error()))
 			return
@@ -5690,6 +5690,7 @@ type rightClickState struct {
 
 // cachedMsg holds pre-indexed message metadata for O(1) reply quote rendering.
 type cachedMsg struct {
+	Ref       domain.MessageRef
 	Body      string
 	Sender    domain.PeerIdentity
 	Timestamp time.Time
@@ -6119,7 +6120,7 @@ func (w *Window) menuDotsButton(gtx layout.Context, btn *widget.Clickable, fg co
 // path to the context menu. Long-press works only while the finger stays
 // within Gio's grab threshold (see handleTouchLongPress); the button works
 // always.
-func (w *Window) msgMenuButton(id string) *widget.Clickable {
+func (w *Window) msgMenuButton(id domain.MessageRef) *widget.Clickable {
 	if b, ok := w.msgMenuBtns[id]; ok {
 		return b
 	}
@@ -6138,7 +6139,7 @@ func (w *Window) recipientMenuButton(id domain.PeerIdentity) *widget.Clickable {
 	return b
 }
 
-func (w *Window) msgRightClickState(id string) *rightClickState {
+func (w *Window) msgRightClickState(id domain.MessageRef) *rightClickState {
 	if s, ok := w.msgRightClick[id]; ok {
 		return s
 	}
@@ -6787,14 +6788,14 @@ func (w *Window) layoutChatBubble(gtx layout.Context, recipient domain.PeerIdent
 
 func (w *Window) chatBubbleCard(gtx layout.Context, message service.DirectMessage, isMine bool, author string) layout.Dimensions {
 	// Read right-click / touch long-press events from the previous frame.
-	rc := w.msgRightClickState(message.ID)
+	rc := w.msgRightClickState(messageRef(message))
 	openMsgMenu := func(pos image.Point) {
 		msgCopy := message
 		w.msgContextMsg = &msgCopy
 		w.msgContextPos = pos
 		// Same contract as the identity menu: the menu takes focus, and hands
 		// it back to this bubble's "⋯" button when it closes.
-		w.msgMenuFocus.open(w.msgMenuButton(message.ID))
+		w.msgMenuFocus.open(w.msgMenuButton(messageRef(message)))
 	}
 	slopPx := float32(gtx.Dp(longPressSlop))
 	for {
@@ -6829,7 +6830,7 @@ func (w *Window) chatBubbleCard(gtx layout.Context, message service.DirectMessag
 		Body:      w.bubbleBody(message, isMine),
 		Reactions: w.bubbleReactions(message),
 		Status:    w.bubbleStatus(message, isMine),
-		Highlight: w.msgHighlight.levelFor(message.ID),
+		Highlight: w.msgHighlight.levelFor(messageRef(message)),
 	})
 	bubbleCall := macro.Stop()
 
@@ -6879,7 +6880,7 @@ func (w *Window) bubbleHeader(message service.DirectMessage, author string, isMi
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 				// "⋯" — always-available touch path to the message menu
 				// (long-press is limited by Gio's pointer-grab threshold).
-				btn := w.msgMenuButton(message.ID)
+				btn := w.msgMenuButton(messageRef(message))
 				for btn.Clicked(gtx) {
 					openMenu(w.menuAnchorForClick(btn, gtx))
 				}
@@ -6901,7 +6902,7 @@ func (w *Window) bubbleBody(message service.DirectMessage, isMine bool) layout.W
 		// every build and an English one left to right in the Arabic build.
 		gtx = directedByContent(gtx, message.Body)
 
-		sel := w.messageSelectable(message.ID)
+		sel := w.messageSelectable(messageRef(message))
 		sel.SetText(message.Body)
 		textColor := color.NRGBA{R: 245, G: 247, B: 250, A: 255}
 		selColor := color.NRGBA{R: 72, G: 96, B: 140, A: 180}
@@ -6932,7 +6933,7 @@ func (w *Window) bubbleReactions(message service.DirectMessage) layout.Widget {
 		return nil
 	}
 	return func(gtx layout.Context) layout.Dimensions {
-		chips := w.messageReactionChips(domain.MessageID(message.ID))
+		chips := w.messageReactionChips(messageRef(message))
 		// Drained on the frame they were drawn on, against the set that was
 		// drawn: a chip is a button with a button's semantics, so leaving the
 		// presses unread would announce an action to a screen reader and then
@@ -7011,7 +7012,7 @@ func messageStatusText(message service.DirectMessage, tr func(string, ...any) st
 // (including this one) are reset on conversation change in
 // resetConversationStateOnPeerChange — early in layout, before any bubble
 // registers event tags — to prevent unbounded growth across chat peers.
-func (w *Window) messageSelectable(id string) *widget.Selectable {
+func (w *Window) messageSelectable(id domain.MessageRef) *widget.Selectable {
 	sel := w.messageSelectables[id]
 	if sel == nil {
 		sel = &widget.Selectable{}
@@ -8013,7 +8014,7 @@ func (w *Window) handleMsgContextMenuActions(gtx layout.Context) {
 		msg := *w.msgContextMsg
 		peer := conversationPeer(msg, w.router.MyAddress())
 
-		targetID := domain.MessageID(msg.ID)
+		targetID := messageRef(msg)
 
 		w.msgContextMsg = nil
 
@@ -8693,7 +8694,7 @@ func (w *Window) layoutReplyQuote(gtx layout.Context, replyTo domain.MessageID, 
 	var quotedThumb *thumbnailEntry
 	if cmFound && cm.IsImageFile {
 		var arriving bool
-		quotedThumb, arriving = w.replyThumb(replyToStr, cm.Sender, cm.FileHash)
+		quotedThumb, arriving = w.replyThumb(cm.Ref, cm.Sender, cm.FileHash)
 		if arriving {
 			w.chatImagesArriving = true
 		}
@@ -8709,7 +8710,7 @@ func (w *Window) layoutReplyQuote(gtx layout.Context, replyTo domain.MessageID, 
 	// op.Record is unreliable — its pointer filters may not replay correctly
 	// through the macro. We use the same op.Record/clip.Rect/event.Op pattern
 	// as the right-click handler on the bubble.
-	tag := w.replyQuoteTag(replyToStr) // reuse as stable tag identity
+	tag := w.replyQuoteTag(cm.Ref) // reuse as stable tag identity
 	for {
 		ev, ok := gtx.Event(pointer.Filter{
 			Target: tag,
@@ -8733,7 +8734,7 @@ func (w *Window) layoutReplyQuote(gtx layout.Context, replyTo domain.MessageID, 
 		if !cmFound {
 			continue
 		}
-		w.beginChatJump(gtx, replyToStr)
+		w.beginChatJump(gtx, cm.Ref)
 	}
 
 	// Record content to measure, then create a clip area for pointer events.
@@ -8838,9 +8839,9 @@ func replyBodyForDisplay(body string, isImageFile bool, tr func(string, ...any) 
 // has a height that is not final yet and a jump in flight has to know that
 // (see chat_jump.go). The composer's banner does not — it is not in the list,
 // and its growth moves nothing the jump is aiming at.
-func (w *Window) replyThumb(msgID string, sender domain.PeerIdentity, contentID string) (*thumbnailEntry, bool) {
+func (w *Window) replyThumb(msgID domain.MessageRef, sender domain.PeerIdentity, contentID string) (*thumbnailEntry, bool) {
 	isSender := sender == w.snap.MyAddress
-	path := w.router.FileBridge().FilePath(domain.FileID(msgID), isSender)
+	path := w.router.FileBridge().FilePathRef(msgID, isSender)
 	w.rememberImagePath(msgID, path)
 	if path == "" {
 		return nil, false
@@ -8858,12 +8859,12 @@ func (w *Window) replyThumb(msgID string, sender domain.PeerIdentity, contentID 
 // than a message with no picture, so it retracts nothing: what was
 // remembered while the file WAS there is what the eventual deletion has to
 // forget.
-func (w *Window) rememberImagePath(msgID, path string) {
+func (w *Window) rememberImagePath(msgID domain.MessageRef, path string) {
 	if path == "" {
 		return
 	}
 	if w.msgImagePaths == nil {
-		w.msgImagePaths = make(map[string]string)
+		w.msgImagePaths = make(map[domain.MessageRef]string)
 	}
 	w.msgImagePaths[msgID] = path
 }
@@ -8921,6 +8922,7 @@ func (w *Window) rebuildMsgCache() {
 		w.chatOrder = 0
 		if w.msgCacheByID != nil {
 			w.msgCacheByID = nil
+			w.msgUniqueRefsByID = nil
 			w.msgCacheGen = 0
 		}
 		return
@@ -8930,11 +8932,21 @@ func (w *Window) rebuildMsgCache() {
 		return
 	}
 
-	m := make(map[string]cachedMsg, len(msgs))
+	m := make(map[domain.MessageRef]cachedMsg, len(msgs))
+	unique := make(map[string]domain.MessageRef, len(msgs))
+	ambiguous := make(map[string]bool)
 	order := menuDigestOffset
 	for i := range msgs {
 		fileHash, isImage := imageAnnounce(msgs[i].Command, msgs[i].CommandData)
-		m[msgs[i].ID] = cachedMsg{
+		ref := messageRef(msgs[i])
+		if prior, exists := unique[ref.ID]; exists && prior != ref {
+			delete(unique, ref.ID)
+			ambiguous[ref.ID] = true
+		} else if !ambiguous[ref.ID] {
+			unique[ref.ID] = ref
+		}
+		m[ref] = cachedMsg{
+			Ref:         ref,
 			Body:        msgs[i].Body,
 			Sender:      msgs[i].Sender,
 			Timestamp:   msgs[i].Timestamp,
@@ -8949,14 +8961,15 @@ func (w *Window) rebuildMsgCache() {
 		// wire and nothing on this path promises which bytes it excludes — a
 		// separator would only be unambiguous for IDs that avoid it, whereas a
 		// length is unambiguous for any bytes at all.
-		for _, b := range []byte(msgs[i].ID) {
+		for _, b := range []byte(ref.Key()) {
 			order ^= uint64(b)
 			order *= menuDigestPrime
 		}
-		order ^= uint64(len(msgs[i].ID))
+		order ^= uint64(len(ref.Key()))
 		order *= menuDigestPrime
 	}
 	w.msgCacheByID = m
+	w.msgUniqueRefsByID = unique
 	w.msgCacheGen = gen
 	w.chatOrder = order
 }
@@ -8966,7 +8979,7 @@ func (w *Window) findMessageBody(id string) string {
 	if w.msgCacheByID == nil {
 		return ""
 	}
-	if cm, ok := w.msgCacheByID[id]; ok {
+	if cm, ok := w.msgCacheByID[w.msgUniqueRefsByID[id]]; ok {
 		return cm.Body
 	}
 	return ""
@@ -8977,16 +8990,16 @@ func (w *Window) findCachedMsg(id string) (cachedMsg, bool) {
 	if w.msgCacheByID == nil {
 		return cachedMsg{}, false
 	}
-	cm, ok := w.msgCacheByID[id]
+	cm, ok := w.msgCacheByID[w.msgUniqueRefsByID[id]]
 	return cm, ok
 }
 
 // replyQuoteTag returns a stable pointer event tag for a reply quote,
 // keyed by the referenced message ID. Uses *widget.Clickable as a
 // convenient heap-allocated identity — only its address matters.
-func (w *Window) replyQuoteTag(replyToID string) *widget.Clickable {
+func (w *Window) replyQuoteTag(replyToID domain.MessageRef) *widget.Clickable {
 	if w.replyQuoteTags == nil {
-		w.replyQuoteTags = make(map[string]*widget.Clickable)
+		w.replyQuoteTags = make(map[domain.MessageRef]*widget.Clickable)
 	}
 	if c, ok := w.replyQuoteTags[replyToID]; ok {
 		return c
@@ -9092,14 +9105,14 @@ func (w *Window) layoutReplyPreview(gtx layout.Context) layout.Dimensions {
 	// the announce payload every frame. dropStaleReply guarantees the
 	// quoted ID is present in the cache whenever CacheReady holds; on
 	// the transient not-found frames the banner degrades to text-only.
-	cm, cmFound := w.findCachedMsg(w.replyToMsg.ID)
+	cm, cmFound := w.findCachedMsgRef(messageRef(*w.replyToMsg))
 	replyIsImage := cmFound && cm.IsImageFile
 
 	var replyThumbEntry *thumbnailEntry
 	if replyIsImage {
 		// The banner is not in the list, so its growth moves nothing a jump
 		// is aiming at — the pending half is deliberately dropped here.
-		replyThumbEntry, _ = w.replyThumb(w.replyToMsg.ID, w.replyToMsg.Sender, cm.FileHash)
+		replyThumbEntry, _ = w.replyThumb(messageRef(*w.replyToMsg), w.replyToMsg.Sender, cm.FileHash)
 	}
 
 	quotedBody := ellipsize(replyBodyForDisplay(w.replyToMsg.Body, replyIsImage, w.t), 80)

@@ -247,11 +247,16 @@ func TestCommitChunkProgressLockedOwnershipMatrix(t *testing.T) {
 			t.Parallel()
 
 			m := &Manager{
-				receiverMaps: make(map[domain.FileID]*receiverFileMapping),
+				localID:      ftFixtureIdentity(),
+				receiverMaps: make(map[domain.MessageRef]*receiverFileMapping),
 			}
 
+			sender := domaintest.ID("chunk-ownership-matrix-sender")
+			ref := ftIncomingRef(m, fileID, sender)
 			if tc.setup.presentInMap {
-				m.receiverMaps[fileID] = &receiverFileMapping{
+				m.receiverMaps[ref] = &receiverFileMapping{
+					Ref:        ref,
+					Sender:     sender,
 					FileID:     fileID,
 					Generation: tc.setup.mappingGen,
 					State:      tc.setup.state,
@@ -261,7 +266,7 @@ func TestCommitChunkProgressLockedOwnershipMatrix(t *testing.T) {
 
 			// commitChunkProgressLocked requires caller-held m.mu.
 			m.mu.Lock()
-			_, status := m.commitChunkProgressLocked(fileID, tc.writeOffset, 512, tc.expectedGen)
+			_, status := m.commitChunkProgressLocked(ref, tc.writeOffset, 512, tc.expectedGen)
 			m.mu.Unlock()
 
 			if status != tc.want {
@@ -396,11 +401,11 @@ func TestPostValidationDuplicateRaceDropsLoserWithoutWriting(t *testing.T) {
 		return nil
 	}
 
-	m.receiverMaps[fileID] = testReceiverMapping(
+	m.receiverMaps[ftIncomingRef(m, fileID, sender)] = testReceiverMapping(m,
 		fileID, sender, fileHash, "race.bin",
 		fileSize, chunkSize, receiverDownloading,
 	)
-	rm := m.receiverMaps[fileID]
+	rm := m.receiverMaps[ftIncomingRef(m, fileID, sender)]
 
 	// Pre-lock writePartialMu so neither handler can win the write
 	// race until the test releases it. validateChunkResponseLocked

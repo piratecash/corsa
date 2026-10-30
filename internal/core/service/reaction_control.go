@@ -245,7 +245,14 @@ func (a *ReactionControlAdapter) writeOne(
 	fact domain.ReactionFact,
 	now time.Time,
 ) (bool, error) {
-	refused, known := a.refusesDeletedID(fact.Key.MessageID, now)
+	ref, present, err := store.RefInConversation(ctx, sender, fact.Key.MessageID)
+	if err != nil {
+		return false, fmt.Errorf("cannot resolve reaction target: %w", err)
+	}
+	if !present {
+		ref = domain.MessageRef{Topic: "dm", ID: string(fact.Key.MessageID)}
+	}
+	refused, known := a.refusesDeletedRef(ref, now)
 	switch {
 	case refused:
 		// Dropped, and NOTHING is written down about the id.
@@ -284,7 +291,6 @@ func (a *ReactionControlAdapter) writeOne(
 	// is not here" — and the fact is then dropped rather than applied. This is a
 	// decision point, and a decision made on a swallowed error is the wrong
 	// decision silently.
-	present, err := store.LookupEntryInConversation(ctx, sender, fact.Key.MessageID)
 	if err != nil {
 		return false, fmt.Errorf(
 			"service: cannot tell whether %s is in this conversation: %w", fact.Key.MessageID, err)
@@ -323,18 +329,6 @@ func (a *ReactionControlAdapter) admitWrite(peer domain.PeerIdentity) (func(), b
 	return a.removals.admitWrite(peer)
 }
 
-// refusesDeletedID asks the deletion gate about one message id.
-//
-// A runtime with no deletion subsystem answers "not refused, and that is
-// known": there is nothing that could have deleted a message, so there is
-// nothing to protect.
-func (a *ReactionControlAdapter) refusesDeletedID(id domain.MessageID, now time.Time) (refused, known bool) {
-	if a.refusals == nil {
-		return false, true
-	}
-	return a.refusals.Refuses(id, now)
-}
-
 // publishChange tells the UI to reload one conversation.
 func (a *ReactionControlAdapter) publishChange(peer domain.PeerIdentity) {
 	// Published after the write, never before it: a subscriber reloads the
@@ -348,4 +342,14 @@ func (a *ReactionControlAdapter) store() *chatlog.Store {
 		return nil
 	}
 	return a.chatlog.Store()
+}
+
+// refusesDeletedRef checks the exact locally resolved target. An absent deletion
+// subsystem has no refusal to apply.
+func (a *ReactionControlAdapter) refusesDeletedRef(ref domain.MessageRef, now time.Time) (bool, bool) {
+	if a.refusals == nil {
+		return false, true
+	}
+	refused, known, _ := a.refusals.RefusesRef(ref, now)
+	return refused, known
 }

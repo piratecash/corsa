@@ -25,7 +25,7 @@ type r2aAdmissionProbeRouter struct {
 
 func (r *r2aAdmissionProbeRouter) Route(envelope protocol.Envelope) RoutingDecision {
 	r.service.deliveryMu.RLock()
-	r.observed = r.service.awaitingDelivered[envelope.ID] != nil
+	r.observed = r.service.awaitingDelivered[messageIdentityOf(envelope)] != nil
 	r.service.deliveryMu.RUnlock()
 	if r.beforeReturn != nil {
 		r.beforeReturn(envelope)
@@ -100,7 +100,7 @@ func TestR2aOwnedPayloadAndOrdinaryNoOrigin(t *testing.T) {
 		t.Fatal("mutable StoreMessage payload became authority")
 	}
 	s.deliveryMu.RLock()
-	entry := s.awaitingDelivered[e.ID]
+	entry := s.awaitingDelivered[messageIdentityOf(e)]
 	s.deliveryMu.RUnlock()
 	if !bytes.Equal(entry.Envelope.Payload, original) {
 		t.Fatal("store payload corrupted ordinary delivery bytes")
@@ -113,7 +113,7 @@ func TestR2aOwnedPayloadAndOrdinaryNoOrigin(t *testing.T) {
 		t.Fatal(code)
 	}
 	s.deliveryMu.RLock()
-	ordinary := s.awaitingDelivered[next.ID].outgoingProvenance
+	ordinary := s.awaitingDelivered[messageIdentityOf(next)].outgoingProvenance
 	s.deliveryMu.RUnlock()
 	if ordinary != nil {
 		t.Fatal("generic send minted provenance")
@@ -179,7 +179,7 @@ func TestR2aCancellationAfterStorageRetainsHonestOrdinaryEffect(t *testing.T) {
 		t.Fatalf("wrong applied/canceled axes: %+v %v", result, err)
 	}
 	s.deliveryMu.RLock()
-	entry := s.awaitingDelivered[e.ID]
+	entry := s.awaitingDelivered[messageIdentityOf(e)]
 	s.deliveryMu.RUnlock()
 	if entry == nil || entry.outgoingProvenance != nil {
 		t.Fatal("ordinary committed delivery lost or minted canceled origin")
@@ -271,7 +271,7 @@ func TestR2aCancelAtActualRouteCannotRecreateOriginalOwner(t *testing.T) {
 		t.Fatalf("accept/cancel ordering: %+v %v", result, err)
 	}
 	s.deliveryMu.RLock()
-	entry := s.awaitingDelivered[e.ID]
+	entry := s.awaitingDelivered[messageIdentityOf(e)]
 	s.deliveryMu.RUnlock()
 	if entry != nil {
 		t.Fatal("late normal registration recreated canceled own-message owner")

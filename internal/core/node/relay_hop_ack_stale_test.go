@@ -30,7 +30,7 @@ func TestHandleRelayHopAck_StaleTableRoutedSenderDoesNotSuppressTimer(t *testing
 	// Start through A, then replace it with B using the real upsert path.
 	// The current attempt has a fresh budget and captured B identity.
 	svc.relayStates.store(&relayForwardState{
-		MessageID:            "m-stale-table",
+		Message:              relayStateFixtureRef("m-stale-table"),
 		ForwardedTo:          domain.PeerAddress("addr-A"),
 		Recipient:            idTargetX,
 		NextHopSelection:     relayNextHopRoutingTable,
@@ -40,7 +40,7 @@ func TestHandleRelayHopAck_StaleTableRoutedSenderDoesNotSuppressTimer(t *testing
 	})
 
 	svc.relayStates.store(&relayForwardState{
-		MessageID: "m-stale-table", ForwardedTo: "addr-B",
+		Message: relayStateFixtureRef("m-stale-table"), ForwardedTo: "addr-B",
 		ForwardedVia: sessionRoutingSender(svc.sessions["addr-B"]),
 		Recipient:    idTargetX, NextHopSelection: relayNextHopRoutingTable,
 		HopAckRemainingTicks: 5, FrameLine: "current-wire",
@@ -50,7 +50,7 @@ func TestHandleRelayHopAck_StaleTableRoutedSenderDoesNotSuppressTimer(t *testing
 	svc.handleRelayHopAck(domain.PeerAddress("addr-A"), sessionRoutingSender(svc.sessions["addr-A"]), protocol.Frame{
 		Type: "relay_hop_ack", ID: "m-stale-table", Status: "forwarded",
 	})
-	if observedHopAck(t, svc, "m-stale-table") {
+	if observedHopAck(t, svc, relayStateFixtureRef("m-stale-table")) {
 		t.Fatal("stale table-routed ack from superseded A suppressed the current timer")
 	}
 
@@ -58,7 +58,7 @@ func TestHandleRelayHopAck_StaleTableRoutedSenderDoesNotSuppressTimer(t *testing
 	svc.handleRelayHopAck(domain.PeerAddress("addr-B"), sessionRoutingSender(svc.sessions["addr-B"]), protocol.Frame{
 		Type: "relay_hop_ack", ID: "m-stale-table", Status: "forwarded",
 	})
-	if !observedHopAck(t, svc, "m-stale-table") {
+	if !observedHopAck(t, svc, relayStateFixtureRef("m-stale-table")) {
 		t.Fatal("current ack from B did not mark HopAckObserved")
 	}
 }
@@ -78,7 +78,7 @@ func TestHandleRelayHopAck_StaleGossipFallbackSenderDoesNotSuppressTimer(t *test
 	// Store the actual old sender A, then perform the real upsert to G.
 	// The transition captures A independently of any later address lookup.
 	svc.relayStates.store(&relayForwardState{
-		MessageID:            "m-stale-gossip",
+		Message:              relayStateFixtureRef("m-stale-gossip"),
 		ForwardedTo:          domain.PeerAddress("addr-A"),
 		Recipient:            idTargetX,
 		NextHopSelection:     relayNextHopGossipFanOut,
@@ -88,7 +88,7 @@ func TestHandleRelayHopAck_StaleGossipFallbackSenderDoesNotSuppressTimer(t *test
 	})
 
 	svc.relayStates.store(&relayForwardState{
-		MessageID: "m-stale-gossip", ForwardedTo: "addr-G",
+		Message: relayStateFixtureRef("m-stale-gossip"), ForwardedTo: "addr-G",
 		ForwardedVia: sessionRoutingSender(svc.sessions["addr-G"]),
 		Recipient:    idTargetX, NextHopSelection: relayNextHopGossipFanOut,
 		HopAckRemainingTicks: 5, FrameLine: "current-wire",
@@ -98,7 +98,7 @@ func TestHandleRelayHopAck_StaleGossipFallbackSenderDoesNotSuppressTimer(t *test
 	svc.handleRelayHopAck(domain.PeerAddress("addr-A"), sessionRoutingSender(svc.sessions["addr-A"]), protocol.Frame{
 		Type: "relay_hop_ack", ID: "m-stale-gossip", Status: "forwarded",
 	})
-	if observedHopAck(t, svc, "m-stale-gossip") {
+	if observedHopAck(t, svc, relayStateFixtureRef("m-stale-gossip")) {
 		t.Fatal("stale gossip-fallback ack from abandoned A suppressed the current timer")
 	}
 
@@ -106,20 +106,20 @@ func TestHandleRelayHopAck_StaleGossipFallbackSenderDoesNotSuppressTimer(t *test
 	svc.handleRelayHopAck(domain.PeerAddress("addr-G"), sessionRoutingSender(svc.sessions["addr-G"]), protocol.Frame{
 		Type: "relay_hop_ack", ID: "m-stale-gossip", Status: "forwarded",
 	})
-	if !observedHopAck(t, svc, "m-stale-gossip") {
+	if !observedHopAck(t, svc, relayStateFixtureRef("m-stale-gossip")) {
 		t.Fatal("current ack from gossip target G did not mark HopAckObserved")
 	}
 }
 
 // observedHopAck reads HopAckObserved for a message under the relay state
 // store lock.
-func observedHopAck(t *testing.T, svc *Service, messageID string) bool {
+func observedHopAck(t *testing.T, svc *Service, ref domain.MessageRef) bool {
 	t.Helper()
 	svc.relayStates.mu.Lock()
 	defer svc.relayStates.mu.Unlock()
-	st := svc.relayStates.states[messageID]
+	st := svc.relayStates.states[ref]
 	if st == nil {
-		t.Fatalf("relay state for %q missing", messageID)
+		t.Fatalf("relay state for %+v missing", ref)
 	}
 	return st.HopAckObserved
 }
@@ -137,7 +137,7 @@ func TestHandleRelayHopAck_TableRoutedAttemptIgnoresAckFromAnyOtherIdentity(t *t
 	svc.sessions[domain.PeerAddress("addr-B")] = &peerSession{peerIdentity: idPeerC, address: "addr-B"}
 
 	svc.relayStates.store(&relayForwardState{
-		MessageID:            "m-table-other",
+		Message:              relayStateFixtureRef("m-table-other"),
 		ForwardedVia:         sessionRoutingSender(svc.sessions["addr-B"]),
 		ForwardedTo:          domain.PeerAddress("addr-B"),
 		Recipient:            idTargetX,
@@ -148,7 +148,7 @@ func TestHandleRelayHopAck_TableRoutedAttemptIgnoresAckFromAnyOtherIdentity(t *t
 	svc.handleRelayHopAck(domain.PeerAddress("addr-A"), sessionRoutingSender(svc.sessions["addr-A"]), protocol.Frame{
 		Type: "relay_hop_ack", ID: "m-table-other", Status: "forwarded",
 	})
-	if observedHopAck(t, svc, "m-table-other") {
+	if observedHopAck(t, svc, relayStateFixtureRef("m-table-other")) {
 		t.Fatal("ack from an identity the routing table did not pick suppressed the table-routed timer")
 	}
 }
@@ -165,7 +165,7 @@ func TestHandleRelayHopAck_UntabledAttemptRejectsOnlyAbandonedHops(t *testing.T)
 	svc.sessions[domain.PeerAddress("addr-G")] = &peerSession{peerIdentity: idPeerC, address: "addr-G"}
 
 	svc.relayStates.store(&relayForwardState{
-		MessageID:            "m-gossip-other",
+		Message:              relayStateFixtureRef("m-gossip-other"),
 		ForwardedVia:         sessionRoutingSender(svc.sessions["addr-G"]),
 		ForwardedTo:          domain.PeerAddress("addr-G"),
 		Recipient:            idTargetX,
@@ -176,7 +176,7 @@ func TestHandleRelayHopAck_UntabledAttemptRejectsOnlyAbandonedHops(t *testing.T)
 	svc.handleRelayHopAck(domain.PeerAddress("addr-A"), sessionRoutingSender(svc.sessions["addr-A"]), protocol.Frame{
 		Type: "relay_hop_ack", ID: "m-gossip-other", Status: "forwarded",
 	})
-	if !observedHopAck(t, svc, "m-gossip-other") {
+	if !observedHopAck(t, svc, relayStateFixtureRef("m-gossip-other")) {
 		t.Fatal("ack from a never-abandoned identity was rejected on an attempt the routing table did not pin")
 	}
 }

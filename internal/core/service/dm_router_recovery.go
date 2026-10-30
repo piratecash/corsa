@@ -114,13 +114,13 @@ type recoveryManager struct {
 	// re-send waiting for keys or mid-send. Entries here hold active-pool
 	// slots; a completed send with an unpaid terminal moves to
 	// terminalDebts instead.
-	pendingResends map[string]recoveryResend
+	pendingResends map[domain.MessageRef]recoveryResend
 	// terminalDebts holds re-sends whose replacement already left but
 	// whose terminal transaction has not committed yet: pure local DB
 	// retries, NO network work — they hold no active-pool slot (a peer
 	// whose terminal cannot commit must not shrink the global 20 forever),
 	// while their durable intents stay protected from eviction.
-	terminalDebts map[string]recoveryResend
+	terminalDebts map[domain.MessageRef]recoveryResend
 	// activeNotices marks peers whose receiver-leg notice attempt is
 	// running right now: their jobs are eviction-protected for the span of
 	// the attempt, or a concurrent admission could delete the job under
@@ -199,8 +199,8 @@ func newRecoveryManager(router *DMRouter) *recoveryManager {
 		router:            router,
 		clock:             func() time.Time { return time.Now().UTC() },
 		wake:              make(chan struct{}, 1),
-		pendingResends:    map[string]recoveryResend{},
-		terminalDebts:     map[string]recoveryResend{},
+		pendingResends:    map[domain.MessageRef]recoveryResend{},
+		terminalDebts:     map[domain.MessageRef]recoveryResend{},
 		activeNotices:     map[string]struct{}{},
 		proofs:            map[recoveryProofKey]recoveryProofRequest{},
 		establishedMarked: map[string]struct{}{},
@@ -209,7 +209,7 @@ func newRecoveryManager(router *DMRouter) *recoveryManager {
 
 // claimResend takes the per-root work claim: exactly one tryResend at a
 // time, and no release can strip the root while the claim is held.
-func (m *recoveryManager) claimResend(root string) (recoveryResend, bool) {
+func (m *recoveryManager) claimResend(root domain.MessageRef) (recoveryResend, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	resend, ok := m.pendingResends[root]
@@ -223,7 +223,7 @@ func (m *recoveryManager) claimResend(root string) (recoveryResend, bool) {
 
 // unclaimResend drops the claim and executes a release that arrived while
 // the claim was held.
-func (m *recoveryManager) unclaimResend(store *chatlog.Store, root string) {
+func (m *recoveryManager) unclaimResend(store *chatlog.Store, root domain.MessageRef) {
 	m.mu.Lock()
 	resend, ok := m.pendingResends[root]
 	if ok {
@@ -400,7 +400,7 @@ func (m *recoveryManager) Report(failure DecryptFailure) {
 		if store == nil {
 			return
 		}
-		changed, err := store.MarkDecryptFailed(ctx, failure.MessageID)
+		changed, err := store.MarkDecryptFailedRef(ctx, domain.MessageRef{Topic: "dm", ID: failure.MessageID, Sender: failure.Sender, Recipient: failure.Recipient})
 		if err != nil {
 			log.Warn().Err(err).Str("message_id", failure.MessageID).Msg("decrypt_recovery_flag_failed")
 			return
@@ -548,7 +548,7 @@ func (m *recoveryManager) pass(ctx context.Context) {
 			m.mu.Unlock()
 			continue
 		}
-		root := item.intent.Root
+		root := m.resendRef(item.intent.Peer, item.intent.Root)
 		m.mu.Lock()
 		resend, owned := m.pendingResends[root]
 		if owned {
@@ -561,7 +561,7 @@ func (m *recoveryManager) pass(ctx context.Context) {
 		if !owned {
 			continue
 		}
-		m.requestRecoveryProof(resend.peer, root, resend.originalID)
+		m.requestRecoveryProof(resend.peer, root.ID, resend.originalID)
 		m.tryResend(root)
 	}
 }
@@ -602,8 +602,8 @@ func (m *recoveryManager) selectRecoveryWork(ctx context.Context, store *chatlog
 	senderActive := len(m.pendingResends)
 	waiting := make([]chatlog.ResendIntent, 0, len(intents))
 	for _, intent := range intents {
-		_, active := m.pendingResends[intent.Root]
-		_, indebted := m.terminalDebts[intent.Root]
+		_, active := m.pendingResends[m.resendRef(intent.Peer, intent.Root)]
+		_, indebted := m.terminalDebts[m.resendRef(intent.Peer, intent.Root)]
 		if !active && !indebted {
 			waiting = append(waiting, intent)
 		}
@@ -638,7 +638,7 @@ func (m *recoveryManager) selectRecoveryWork(ctx context.Context, store *chatlog
 		if item.intent == nil {
 			m.activeNotices[item.peer] = struct{}{}
 		} else {
-			m.pendingResends[item.intent.Root] = recoveryResend{
+			m.pendingResends[m.resendRef(item.intent.Peer, item.intent.Root)] = recoveryResend{
 				originalID:    item.intent.OriginalID,
 				peer:          item.intent.Peer,
 				replacementID: item.intent.ReplacementID,
@@ -806,8 +806,8 @@ func (m *recoveryManager) reconcileResendIntents(ctx context.Context, store *cha
 	now := m.clock()
 	for _, intent := range intents {
 		m.mu.Lock()
-		entry, inFlight := m.pendingResends[intent.Root]
-		_, indebted := m.terminalDebts[intent.Root]
+		entry, inFlight := m.pendingResends[m.resendRef(intent.Peer, intent.Root)]
+		_, indebted := m.terminalDebts[m.resendRef(intent.Peer, intent.Root)]
 		sentDebt := indebted || (inFlight && entry.sentReplacementID != "")
 		m.mu.Unlock()
 		if sentDebt {
@@ -817,7 +817,7 @@ func (m *recoveryManager) reconcileResendIntents(ctx context.Context, store *cha
 			// write would strand a transmitted replacement.
 			continue
 		}
-		_, found, err := store.EntryByID(ctx, domain.MessageID(intent.ReplacementID))
+		_, found, err := store.EntryByRef(ctx, m.resendRef(intent.Peer, intent.ReplacementID))
 		if err != nil {
 			log.Warn().Err(err).Str("retry_root", intent.Root).Msg("decrypt_recovery_intent_reconcile_failed")
 			continue // retried next pass
@@ -832,9 +832,9 @@ func (m *recoveryManager) reconcileResendIntents(ctx context.Context, store *cha
 			// like an ordinary waiting intent: re-activated, re-proved and
 			// re-sent under an id that already went out.
 			m.mu.Lock()
-			if _, active := m.pendingResends[intent.Root]; !active {
-				if _, indebted := m.terminalDebts[intent.Root]; !indebted {
-					m.terminalDebts[intent.Root] = recoveryResend{
+			if _, active := m.pendingResends[m.resendRef(intent.Peer, intent.Root)]; !active {
+				if _, indebted := m.terminalDebts[m.resendRef(intent.Peer, intent.Root)]; !indebted {
+					m.terminalDebts[m.resendRef(intent.Peer, intent.Root)] = recoveryResend{
 						originalID:        intent.OriginalID,
 						peer:              intent.Peer,
 						replacementID:     intent.ReplacementID,
@@ -851,7 +851,7 @@ func (m *recoveryManager) reconcileResendIntents(ctx context.Context, store *cha
 		// backlog and proof work forever.
 		if now.Sub(intent.CreatedAt) > recoveryJobLifetime {
 			log.Info().Str("retry_root", intent.Root).Str("peer", intent.Peer).Msg("decrypt_recovery_resend_expired")
-			m.releaseResend(store, intent.Root)
+			m.releaseResend(store, m.resendRef(intent.Peer, intent.Root))
 			continue
 		}
 		// Still live: either this process is driving it (inFlight) or the
@@ -888,7 +888,7 @@ func (m *recoveryManager) sweepProofs(jobs []chatlog.RecoveryJob) {
 		if key.scope == recoveryProofScopeJob {
 			_, owned = jobPeers[key.peer]
 		} else {
-			_, owned = m.pendingResends[key.scope]
+			_, owned = m.pendingResends[m.resendRef(key.peer, key.scope)]
 		}
 		if !owned {
 			delete(m.proofs, key)
@@ -928,13 +928,13 @@ func (m *recoveryManager) pollProofRequests() {
 func (m *recoveryManager) retryStalledResends() {
 	store := m.store()
 	m.mu.Lock()
-	roots := make([]string, 0, len(m.pendingResends))
+	roots := make([]domain.MessageRef, 0, len(m.pendingResends))
 	for root, resend := range m.pendingResends {
 		if !resend.awaitingTurn { // see retryPendingResends: order first
 			roots = append(roots, root)
 		}
 	}
-	debts := make(map[string]recoveryResend, len(m.terminalDebts))
+	debts := make(map[domain.MessageRef]recoveryResend, len(m.terminalDebts))
 	for root, debt := range m.terminalDebts {
 		debts[root] = debt
 	}
@@ -1044,7 +1044,7 @@ func (m *recoveryManager) attemptNotice(ctx context.Context, store *chatlog.Stor
 		job.State = chatlog.DecryptStateWaitingRetry
 		job.WaitUntil = now.Add(recoveryWaitingRetry)
 		for _, entry := range flagged {
-			if err := store.SetDecryptState(ctx, entry.ID, chatlog.DecryptStateWaitingRetry); err != nil {
+			if err := store.SetDecryptStateRef(ctx, domain.MessageRef{Topic: "dm", ID: entry.ID, Sender: entry.Sender, Recipient: entry.Recipient}, chatlog.DecryptStateWaitingRetry); err != nil {
 				log.Warn().Err(err).Str("message_id", entry.ID).Msg("decrypt_recovery_state_update_failed")
 			}
 		}
@@ -1089,7 +1089,7 @@ func (r *DMRouter) handleInboundDecryptFailed(envelopeSender string, payloadJSON
 	if store == nil || r.recovery == nil {
 		return
 	}
-	entry, found, err := store.EntryByID(r.opContext(), payload.MessageID)
+	entry, found, err := store.EntryByRef(r.opContext(), domain.MessageRef{Topic: "dm", ID: string(payload.MessageID), Sender: r.client.id.Address, Recipient: envelopeSender})
 	if err != nil || !found {
 		log.Debug().Err(err).Str("message_id", string(payload.MessageID)).Msg("decrypt_failed_notice_unknown_row")
 		return
@@ -1099,7 +1099,7 @@ func (r *DMRouter) handleInboundDecryptFailed(envelopeSender string, payloadJSON
 		log.Warn().Str("peer", envelopeSender).Str("message_id", entry.ID).Msg("decrypt_failed_notice_row_mismatch")
 		return
 	}
-	marks, _, err := store.EntryRecoveryMarks(r.opContext(), entry.ID)
+	marks, _, err := store.EntryRecoveryMarksRef(r.opContext(), domain.MessageRef{Topic: "dm", ID: entry.ID, Sender: entry.Sender, Recipient: entry.Recipient})
 	if err != nil {
 		log.Warn().Err(err).Str("message_id", entry.ID).Msg("decrypt_failed_notice_marks_read_failed")
 		return
@@ -1112,7 +1112,7 @@ func (r *DMRouter) handleInboundDecryptFailed(envelopeSender string, payloadJSON
 	if root == "" {
 		root = entry.ID
 	}
-	chain, err := store.CountRetryChain(r.opContext(), root)
+	chain, err := store.CountRetryChainRef(r.opContext(), r.recovery.resendRef(envelopeSender, root))
 	if err != nil {
 		log.Warn().Err(err).Str("retry_root", root).Msg("decrypt_failed_chain_count_failed")
 		return
@@ -1170,7 +1170,7 @@ func (m *recoveryManager) admitResendIntent(store *chatlog.Store, intent chatlog
 // whole attempt runs under the per-root CLAIM: a concurrent expiry or
 // eviction cleanup cannot strip the entry or its durable intent between
 // the intent probe and the send.
-func (m *recoveryManager) tryResend(root string) {
+func (m *recoveryManager) tryResend(root domain.MessageRef) {
 	store := m.store()
 	if store == nil || m.router.client == nil || m.router.client.dm == nil {
 		return
@@ -1191,8 +1191,8 @@ func (m *recoveryManager) tryResend(root string) {
 	// moment the grant lands. A missing grant re-arms the request — each
 	// root anchors its own watermark and consumes its own grant, so
 	// several roots of one peer each re-prove the keys they encrypt to.
-	if !m.consumeRecoveryProof(resend.peer, root) {
-		m.requestRecoveryProof(resend.peer, root, resend.originalID)
+	if !m.consumeRecoveryProof(resend.peer, root.ID) {
+		m.requestRecoveryProof(resend.peer, root.ID, resend.originalID)
 		return
 	}
 	// The durable re-check, valid for the rest of the attempt because the
@@ -1203,15 +1203,15 @@ func (m *recoveryManager) tryResend(root string) {
 	// wire from the intent (the ABA case). Either way ONLY the stale
 	// in-memory task retires: the durable state, if any, belongs to the
 	// root's new incarnation and must survive for its own activation.
-	intent, intact, err := store.ResendIntentByRoot(m.opContext(), root)
+	intent, intact, err := store.ResendIntentByPeer(m.opContext(), root.Recipient, root.ID)
 	if err != nil {
-		log.Warn().Err(err).Str("retry_root", root).Msg("decrypt_recovery_intent_probe_failed")
+		log.Warn().Err(err).Str("retry_root", root.ID).Msg("decrypt_recovery_intent_probe_failed")
 		return
 	}
 	if !intact || intent.ReplacementID != resend.replacementID {
 		m.mu.Lock()
 		delete(m.pendingResends, root)
-		delete(m.proofs, recoveryProofKey{peer: resend.peer, scope: root})
+		delete(m.proofs, recoveryProofKey{peer: resend.peer, scope: root.ID})
 		m.mu.Unlock()
 		return
 	}
@@ -1220,7 +1220,7 @@ func (m *recoveryManager) tryResend(root string) {
 	// leaving the durable intent behind would re-activate it every pass
 	// and burn proof lookups forever, while the honest outcome is the
 	// manual "send again" fallback.
-	entry, found, err := store.EntryByID(m.opContext(), domain.MessageID(resend.originalID))
+	entry, found, err := store.EntryByRef(m.opContext(), domain.MessageRef{Topic: "dm", ID: resend.originalID, Sender: root.Sender, Recipient: root.Recipient})
 	if err != nil || !found {
 		m.releaseResendOwned(store, root)
 		return
@@ -1233,7 +1233,7 @@ func (m *recoveryManager) tryResend(root string) {
 		return
 	}
 	if resend.replacementID == "" {
-		log.Error().Str("retry_root", root).Msg("decrypt_recovery_resend_without_replacement_id")
+		log.Error().Str("retry_root", root.ID).Msg("decrypt_recovery_resend_without_replacement_id")
 		m.releaseResendOwned(store, root)
 		return
 	}
@@ -1272,7 +1272,7 @@ func (m *recoveryManager) tryResend(root string) {
 
 // releaseResendOwned is releaseResend for the CLAIM HOLDER: it clears the
 // claim first so the release executes now instead of deferring to itself.
-func (m *recoveryManager) releaseResendOwned(store *chatlog.Store, root string) {
+func (m *recoveryManager) releaseResendOwned(store *chatlog.Store, root domain.MessageRef) {
 	m.mu.Lock()
 	if resend, ok := m.pendingResends[root]; ok {
 		resend.busy = false
@@ -1291,10 +1291,10 @@ func (m *recoveryManager) releaseResendOwned(store *chatlog.Store, root string) 
 // shrink the shared 20 forever) while the durable intent stays protected.
 // An original that no longer exists has nothing left to supersede: the
 // replacement stands as an ordinary message and the debt settles.
-func (m *recoveryManager) finishResendTerminal(store *chatlog.Store, root string, resend recoveryResend) {
-	if err := store.MarkResendTerminal(m.opContext(), resend.originalID, resend.sentReplacementID, root); err != nil {
-		if _, found, lookupErr := store.EntryByID(m.opContext(), domain.MessageID(resend.originalID)); lookupErr == nil && !found {
-			log.Info().Str("retry_root", root).Msg("decrypt_recovery_terminal_moot_original_gone")
+func (m *recoveryManager) finishResendTerminal(store *chatlog.Store, root domain.MessageRef, resend recoveryResend) {
+	if err := store.MarkResendTerminalRefs(m.opContext(), domain.MessageRef{Topic: "dm", ID: resend.originalID, Sender: root.Sender, Recipient: root.Recipient}, domain.MessageRef{Topic: "dm", ID: resend.sentReplacementID, Sender: root.Sender, Recipient: root.Recipient}, root.ID); err != nil {
+		if _, found, lookupErr := store.EntryByRef(m.opContext(), domain.MessageRef{Topic: "dm", ID: resend.originalID, Sender: root.Sender, Recipient: root.Recipient}); lookupErr == nil && !found {
+			log.Info().Str("retry_root", root.ID).Msg("decrypt_recovery_terminal_moot_original_gone")
 			m.releaseResendOwned(store, root)
 			return
 		}
@@ -1333,14 +1333,14 @@ func (m *recoveryManager) protectedWork() chatlog.RecoveryProtectedWork {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	protected := chatlog.RecoveryProtectedWork{
-		ResendRoots: make([]string, 0, len(m.pendingResends)+len(m.terminalDebts)),
-		JobPeers:    make([]string, 0, len(m.activeNotices)),
+		ResendRefs: make([]domain.MessageRef, 0, len(m.pendingResends)+len(m.terminalDebts)),
+		JobPeers:   make([]string, 0, len(m.activeNotices)),
 	}
 	for root := range m.pendingResends {
-		protected.ResendRoots = append(protected.ResendRoots, root)
+		protected.ResendRefs = append(protected.ResendRefs, root)
 	}
 	for root := range m.terminalDebts {
-		protected.ResendRoots = append(protected.ResendRoots, root)
+		protected.ResendRefs = append(protected.ResendRefs, root)
 	}
 	for peer := range m.activeNotices {
 		protected.JobPeers = append(protected.JobPeers, peer)
@@ -1356,7 +1356,7 @@ func (m *recoveryManager) protectedWork() chatlog.RecoveryProtectedWork {
 // stripped: the release is recorded on the entry and executed when the
 // claim drops — expiry and eviction cleanup are mutually exclusive with
 // an in-flight send by construction.
-func (m *recoveryManager) releaseResend(store *chatlog.Store, root string) {
+func (m *recoveryManager) releaseResend(store *chatlog.Store, root domain.MessageRef) {
 	m.mu.Lock()
 	if resend, ok := m.pendingResends[root]; ok && resend.busy {
 		resend.pendingRelease = true
@@ -1371,7 +1371,7 @@ func (m *recoveryManager) releaseResend(store *chatlog.Store, root string) {
 	delete(m.pendingResends, root)
 	delete(m.terminalDebts, root)
 	if owned {
-		delete(m.proofs, recoveryProofKey{peer: resend.peer, scope: root})
+		delete(m.proofs, recoveryProofKey{peer: resend.peer, scope: root.ID})
 	}
 	othersForPeer := false
 	if owned {
@@ -1390,8 +1390,8 @@ func (m *recoveryManager) releaseResend(store *chatlog.Store, root string) {
 	}
 	m.mu.Unlock()
 	if store != nil {
-		if err := store.DeleteResendIntent(m.opContext(), root); err != nil {
-			log.Warn().Err(err).Str("retry_root", root).Msg("decrypt_recovery_intent_delete_failed")
+		if err := store.DeleteResendIntentByPeer(m.opContext(), root.Recipient, root.ID); err != nil {
+			log.Warn().Err(err).Str("retry_root", root.ID).Msg("decrypt_recovery_intent_delete_failed")
 		}
 	}
 	if !owned || othersForPeer {
@@ -1453,7 +1453,7 @@ func (m *recoveryManager) releaseEvictionVictim(store *chatlog.Store, victim cha
 		m.releaseJobResolution(victim.Key)
 		return
 	}
-	m.releaseResend(store, victim.Key)
+	m.releaseResend(store, m.resendRef(victim.Peer, victim.Key))
 	// releaseResend only reaches the reason-cancel for roots it OWNED in
 	// memory; an evicted intent of a crashed predecessor was never
 	// restored, so its peer's lookup reasons are dropped here from the
@@ -1465,7 +1465,7 @@ func (m *recoveryManager) releaseEvictionVictim(store *chatlog.Store, victim cha
 // may unblock queued re-sends of that peer.
 func (m *recoveryManager) retryPendingResends(peer string) {
 	m.mu.Lock()
-	roots := make([]string, 0, len(m.pendingResends))
+	roots := make([]domain.MessageRef, 0, len(m.pendingResends))
 	for root, resend := range m.pendingResends {
 		// An entry still awaiting its computed turn is not event-runnable:
 		// running it now could serve a later (even unknown) item ahead of
@@ -1497,7 +1497,7 @@ func (m *recoveryManager) acceptRetryOf(msg *DirectMessage) {
 	if store == nil {
 		return
 	}
-	original, found, err := store.EntryByID(m.opContext(), msg.RetryOf)
+	original, found, err := store.EntryByRef(m.opContext(), domain.MessageRef{Topic: "dm", ID: string(msg.RetryOf), Sender: msg.Sender.String(), Recipient: m.router.client.id.Address})
 	if err != nil || !found {
 		return
 	}
@@ -1505,7 +1505,7 @@ func (m *recoveryManager) acceptRetryOf(msg *DirectMessage) {
 		log.Warn().Str("peer", msg.Sender.String()).Str("retry_of", string(msg.RetryOf)).Msg("retry_of_row_mismatch")
 		return
 	}
-	marks, _, err := store.EntryRecoveryMarks(m.opContext(), original.ID)
+	marks, _, err := store.EntryRecoveryMarksRef(m.opContext(), domain.MessageRef{Topic: "dm", ID: original.ID, Sender: original.Sender, Recipient: original.Recipient})
 	if err != nil || !marks.DecryptFailed || marks.SupersededBy != "" {
 		return
 	}
@@ -1517,7 +1517,7 @@ func (m *recoveryManager) acceptRetryOf(msg *DirectMessage) {
 	// transaction: two paths decrypting replacements concurrently (live
 	// event vs history load) both reach here, and only the first may
 	// write the link — the loser backs off without touching the rows.
-	applied, err := store.MarkSupersededCollapsing(m.opContext(), original.ID, msg.ID, root)
+	applied, err := store.MarkSupersededCollapsingRefs(m.opContext(), domain.MessageRef{Topic: "dm", ID: original.ID, Sender: original.Sender, Recipient: original.Recipient}, directMessageRef(*msg), root)
 	if err != nil {
 		log.Warn().Err(err).Str("message_id", original.ID).Msg("retry_of_supersede_failed")
 		return
@@ -1590,4 +1590,8 @@ func unmarshalDecryptFailedPayload(payloadJSON string) (domain.DecryptFailedPayl
 		return domain.DecryptFailedPayload{}, errors.New("decrypt_failed payload invalid")
 	}
 	return payload, nil
+}
+
+func (m *recoveryManager) resendRef(peer, root string) domain.MessageRef {
+	return domain.MessageRef{Topic: "dm", ID: root, Sender: m.router.client.Address().String(), Recipient: peer}
 }

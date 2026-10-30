@@ -96,15 +96,15 @@ func NewStore(db storage.Executor, identity domain.PeerIdentity) *Store {
 
 // For DMs the peer is the other party; for global/broadcast use topic "global".
 func (s *Store) Append(ctx context.Context, topic string, selfAddress domain.PeerIdentity, entry Entry) error {
-	inserted, err := s.AppendReportNew(ctx, topic, selfAddress, entry)
-	_ = inserted
+	_ = selfAddress
+	_, err := s.appendEntry(ctx, topic, entry, appendLegacyIgnoreInvalid)
 	return err
 }
 
 // AppendReportNew works like Append but also reports whether the entry was
-// actually inserted (true) or already existed (false). This allows callers
-// to distinguish genuinely new messages from duplicates that were silently
-// ignored by INSERT OR IGNORE, so they can suppress duplicate UI events.
+// actually inserted (true) or its exact reference already existed (false).
+// Unlike the boolless legacy Append, invalid constraints return an error;
+// false,nil must never classify a rejected new entry as a stored duplicate.
 //
 // selfAddress is READ BY NOTHING here any more. It used to decide which
 // conversation the row belongs to, so the insert could lift that conversation's
@@ -115,10 +115,32 @@ func (s *Store) Append(ctx context.Context, topic string, selfAddress domain.Pee
 // something meaningful to it.
 func (s *Store) AppendReportNew(ctx context.Context, topic string, selfAddress domain.PeerIdentity, entry Entry) (bool, error) {
 	_ = selfAddress
+	return s.appendEntry(ctx, topic, entry, appendExactIdentityConflict)
+}
 
+// ErrInvalidEntry is a rejected entry, not a duplicate or a transient write
+// failure. The receipt-producing adapter must leave it with the sender.
+var ErrInvalidEntry = errors.New("chatlog: invalid message entry")
+
+type appendPolicy uint8
+
+const (
+	appendLegacyIgnoreInvalid appendPolicy = iota
+	appendExactIdentityConflict
+)
+
+func (s *Store) appendEntry(ctx context.Context, topic string, entry Entry, policy appendPolicy) (bool, error) {
 	status := entry.DeliveryStatus
 	if status == "" {
 		status = StatusSent
+	}
+	if policy == appendExactIdentityConflict {
+		// Mirror the finite CHECK enums so callers can distinguish rejection
+		// from a transient backend failure without parsing driver errors.
+		validFlag := entry.Flag == FlagNone || entry.Flag == FlagImmutable || entry.Flag == FlagSenderDelete || entry.Flag == FlagAnyDelete || entry.Flag == FlagAutoDeleteTTL
+		if (topic != "dm" && topic != "global") || !validFlag || (status != StatusSent && status != StatusDelivered && status != StatusSeen) {
+			return false, ErrInvalidEntry
+		}
 	}
 
 	// One statement, no transaction: the row is all this writes. It used to
@@ -126,16 +148,23 @@ func (s *Store) AppendReportNew(ctx context.Context, topic string, selfAddress d
 	// — and the two had to commit together. Nothing durable remembers a
 	// deletion any more (see delete_intents.go), so there is nothing here to
 	// undo.
-	res, err := s.db.ExecContext(ctx, `
-		INSERT OR IGNORE INTO messages (id, topic, sender, recipient, body, flag, delivery_status, ttl_seconds, metadata, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	query := `INSERT INTO messages (id, topic, sender, recipient, body, flag, delivery_status, ttl_seconds, metadata, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(topic,id,sender,recipient) DO NOTHING`
+	if policy == appendLegacyIgnoreInvalid {
+		query = `INSERT OR IGNORE INTO messages (id, topic, sender, recipient, body, flag, delivery_status, ttl_seconds, metadata, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	}
+	res, err := s.db.ExecContext(ctx, query,
 		entry.ID, topic, entry.Sender, entry.Recipient, entry.Body,
 		entry.Flag, status, entry.TTLSeconds, entry.Metadata, entry.CreatedAt,
 	)
 	if err != nil {
 		return false, fmt.Errorf("chatlog: insert %s: %w", entry.ID, err)
 	}
-	rows, _ := res.RowsAffected()
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
 	return rows > 0, nil
 }
 
@@ -153,6 +182,16 @@ var statusRank = map[string]int{
 // (e.g. seen → delivered) are silently ignored and return false.
 // Returns true if the message was found and actually updated.
 func (s *Store) UpdateStatus(ctx context.Context, topic string, peerAddress domain.PeerIdentity, messageID domain.MessageID, status string) (bool, error) {
+	query, args := s.peerQuery(topic, peerAddress, `SELECT topic,id,sender,recipient FROM messages WHERE id=? AND `, ` LIMIT 2`)
+	args = append([]interface{}{messageID}, args...)
+	ref, found, err := uniqueMessageRefQuery(ctx, s.db, query, args...)
+	if err != nil || !found {
+		return false, err
+	}
+	return s.UpdateStatusRef(ctx, ref, status)
+}
+
+func (s *Store) UpdateStatusRef(ctx context.Context, ref domain.MessageRef, status string) (bool, error) {
 	newRank, ok := statusRank[status]
 	if !ok {
 		return false, fmt.Errorf("chatlog: invalid status %q", status)
@@ -182,8 +221,8 @@ func (s *Store) UpdateStatus(ctx context.Context, topic string, peerAddress doma
 	// the delivery status of a message sent to somebody else. peerAddress
 	// was already a parameter here and was simply not used.
 	query := `UPDATE messages SET delivery_status = ?, updated_at = ?
-		 WHERE id = ? AND topic = ? AND (sender = ? OR recipient = ?) AND delivery_status IN (`
-	args := []interface{}{status, now, messageID, topic, peerAddress.String(), peerAddress.String()}
+		 WHERE id = ? AND topic = ? AND sender = ? AND recipient = ? AND delivery_status IN (`
+	args := []interface{}{status, now, ref.ID, ref.Topic, ref.Sender, ref.Recipient}
 	for i, prev := range allowedPrev {
 		if i > 0 {
 			query += ","
@@ -195,7 +234,7 @@ func (s *Store) UpdateStatus(ctx context.Context, topic string, peerAddress doma
 
 	res, err := s.db.ExecContext(ctx, query, args...)
 	if err != nil {
-		return false, fmt.Errorf("chatlog: update status %s: %w", messageID, err)
+		return false, fmt.Errorf("chatlog: update status %s: %w", ref.ID, err)
 	}
 	n, _ := res.RowsAffected()
 
@@ -244,7 +283,7 @@ func (s *Store) UnconfirmedSeen(ctx context.Context, self domain.PeerIdentity, s
 		 FROM messages
 		 WHERE topic = 'dm' AND recipient = ? AND delivery_status = ?
 		   AND updated_at >= ?
-		   AND id NOT IN (SELECT id FROM seen_ack)
+		   AND NOT EXISTS (SELECT 1 FROM seen_ack j WHERE j.id=messages.id AND j.topic=messages.topic AND j.sender=messages.sender AND j.recipient=messages.recipient)
 		 ORDER BY updated_at ASC`,
 		self.String(), StatusSeen, since.UTC().Format(time.RFC3339Nano))
 	if err != nil {
@@ -272,49 +311,42 @@ func (s *Store) UnconfirmedSeen(ctx context.Context, self domain.PeerIdentity, s
 // cutoff would reject a genuine one for an older conversation. The caller
 // keeps them in a bounded set and asks for as many as that set holds.
 func (s *Store) SentMessageIDs(ctx context.Context, self domain.PeerIdentity, limit int) ([]domain.MessageID, error) {
-	if limit <= 0 {
-		return nil, nil
-	}
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT id FROM messages
-		 WHERE topic = 'dm' AND sender = ?
-		 ORDER BY created_at DESC
-		 LIMIT ?`,
-		self.String(), limit)
+	refs, err := s.SentMessageRefs(ctx, self, limit)
 	if err != nil {
-		return nil, fmt.Errorf("chatlog: sent message ids: %w", err)
+		return nil, err
 	}
-	defer func() { _ = rows.Close() }()
-
-	var ids []domain.MessageID
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, fmt.Errorf("chatlog: scan sent message id: %w", err)
+	ids := make([]domain.MessageID, 0, len(refs))
+	seen := make(map[string]struct{}, len(refs))
+	for _, ref := range refs {
+		if _, _, err := uniqueMessageRef(ctx, s.db, ref.ID); err != nil {
+			return nil, err
 		}
-		ids = append(ids, domain.MessageID(id))
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("chatlog: sent message ids: %w", err)
+		if _, duplicate := seen[ref.ID]; duplicate {
+			return nil, ErrAmbiguousMessage
+		}
+		seen[ref.ID] = struct{}{}
+		ids = append(ids, domain.MessageID(ref.ID))
 	}
 	return ids, nil
 }
 
 // UndeliveredOutgoing stops reseeding it. Idempotent.
 func (s *Store) MarkDeliveryFailed(ctx context.Context, messageID string) error {
-	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO delivery_failed (id) VALUES (?)`, messageID); err != nil {
-		return fmt.Errorf("chatlog: mark delivery failed %s: %w", messageID, err)
+	ref, found, err := uniqueMessageRef(ctx, s.db, messageID)
+	if err != nil || !found {
+		return err
 	}
-	return nil
+	return s.MarkDeliveryFailedRef(ctx, ref)
 }
 
-// MarkSeenConfirmed durably records that the original sender confirmed the
-// seen receipt for the message (seen_ack arrived). Idempotent.
+// MarkSeenConfirmed is the compatibility ID-only entry point. An ambiguous
+// id is an error, never an acknowledgement of every matching incoming message.
 func (s *Store) MarkSeenConfirmed(ctx context.Context, messageID string) error {
-	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO seen_ack (id) VALUES (?)`, messageID); err != nil {
-		return fmt.Errorf("chatlog: mark seen confirmed %s: %w", messageID, err)
+	ref, found, err := uniqueMessageRef(ctx, s.db, messageID)
+	if err != nil || !found {
+		return err
 	}
-	return nil
+	return s.MarkSeenConfirmedRef(ctx, ref)
 }
 
 // UndeliveredOutgoing returns the DM entries this identity SENT that are
@@ -354,7 +386,7 @@ func (s *Store) UndeliveredOutgoing(ctx context.Context, self domain.PeerIdentit
 		 FROM messages
 		 WHERE topic = 'dm' AND sender = ? AND delivery_status = ?
 		   AND created_at >= ?
-		   AND (id NOT IN (SELECT id FROM delivery_failed)
+		   AND (NOT EXISTS (SELECT 1 FROM delivery_failed j WHERE j.id=messages.id AND j.topic=messages.topic AND j.sender=messages.sender AND j.recipient=messages.recipient)
 		        OR COALESCE(ttl_seconds, 0) <= 0
 		        OR datetime(created_at, '+' || ttl_seconds || ' seconds') > datetime(?))
 		   AND (metadata IS NULL OR NOT json_valid(metadata)
@@ -520,11 +552,17 @@ func (s *Store) StoredMessageStatuses(ctx context.Context, ids []domain.MessageI
 		if err != nil {
 			return nil, fmt.Errorf("chatlog: stored message statuses: %w", err)
 		}
+		seenRows := map[domain.MessageID]struct{}{}
 		for rows.Next() {
 			var id, status string
 			if err := rows.Scan(&id, &status); err != nil {
 				continue
 			}
+			if _, duplicate := seenRows[domain.MessageID(id)]; duplicate {
+				_ = rows.Close()
+				return nil, fmt.Errorf("%w: %s", ErrAmbiguousMessage, id)
+			}
+			seenRows[domain.MessageID(id)] = struct{}{}
 			statuses[domain.MessageID(id)] = status
 		}
 		err = rows.Err()
@@ -783,18 +821,11 @@ func (s *Store) ReadLastEntry(ctx context.Context, topic string, peerAddress dom
 // deleted between the event and this question, and a caller that cannot order
 // its message simply applies it as before.
 func (s *Store) MessageSeq(ctx context.Context, messageID domain.MessageID) (int64, bool, error) {
-	if messageID == "" {
-		return 0, false, nil
+	ref, found, err := uniqueMessageRef(ctx, s.db, string(messageID))
+	if err != nil || !found {
+		return 0, false, err
 	}
-	var seq int64
-	err := s.db.QueryRowContext(ctx, `SELECT rowid FROM messages WHERE id = ?`, string(messageID)).Scan(&seq)
-	if err == sql.ErrNoRows {
-		return 0, false, nil
-	}
-	if err != nil {
-		return 0, false, fmt.Errorf("chatlog: message seq %s: %w", messageID, err)
-	}
-	return seq, true, nil
+	return s.MessageSeqByRef(ctx, ref)
 }
 
 // ReadLastEntryPerPeer returns the last arrived entry of every DM
@@ -880,7 +911,7 @@ func (s *Store) DeleteExpired(ctx context.Context) (int64, error) {
 
 	var n int64
 	for _, id := range expired {
-		gone, err := deleteMessageTx(ctx, tx, id)
+		gone, err := deleteMessageTx(ctx, tx, id, s.identityAddr)
 		if err != nil {
 			return 0, fmt.Errorf("chatlog: delete expired: %w", err)
 		}
@@ -932,25 +963,18 @@ func (s *Store) DeleteByPeer(ctx context.Context, identity domain.PeerIdentity) 
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	const conversationFilter = `
-		SELECT id FROM messages
-		WHERE topic = 'dm'
-		  AND ((sender = ? AND recipient = ?) OR (sender = ? AND recipient = ?))`
-
 	// Each occurrence of the sub-select needs its own copy of the four
 	// conversation parameters, so the argument list is built per statement
 	// rather than shared.
 	conversationArgs := []any{s.identityAddr, id, id, s.identityAddr}
-	twoFilters := append(append([]any{}, conversationArgs...), conversationArgs...)
 
 	journalDeletes := []struct {
 		statement string
 		args      []any
 	}{
-		{`DELETE FROM seen_ack WHERE id IN (` + conversationFilter + `)`, conversationArgs},
-		{`DELETE FROM delivery_failed WHERE id IN (` + conversationFilter + `)`, conversationArgs},
-		{`DELETE FROM decrypt_resend_intents WHERE original_id IN (` + conversationFilter +
-			`) OR replacement_id IN (` + conversationFilter + `)`, twoFilters},
+		{`DELETE FROM seen_ack WHERE topic='dm' AND ((sender=? AND recipient=?) OR (sender=? AND recipient=?))`, conversationArgs},
+		{`DELETE FROM delivery_failed WHERE topic='dm' AND ((sender=? AND recipient=?) OR (sender=? AND recipient=?))`, conversationArgs},
+		{`DELETE FROM decrypt_resend_intents WHERE peer=?`, []any{id}},
 		// Reactions go with the conversation for the reason the per-message
 		// delete gives: they are metadata about messages that are being erased.
 		//
@@ -971,8 +995,8 @@ func (s *Store) DeleteByPeer(ctx context.Context, identity domain.PeerIdentity) 
 	// the conversation — found through the message rows, which are still here,
 	// this statement running before they are removed.
 	if _, err := tx.ExecContext(ctx,
-		`DELETE FROM message_delete_intents WHERE peer = ? OR message_id IN (`+conversationFilter+`)`,
-		append([]any{id}, conversationArgs...)...); err != nil {
+		`DELETE FROM message_delete_intents WHERE peer = ?`,
+		[]any{id}...); err != nil {
 		return 0, fmt.Errorf("chatlog: delete identity deletion rows: %w", err)
 	}
 
@@ -1037,22 +1061,11 @@ func (s *Store) CheckpointWAL(ctx context.Context) error {
 // match either the original Sender or the Recipient (depending on
 // MessageFlag), and an immutable target is rejected outright.
 func (s *Store) EntryByID(ctx context.Context, messageID domain.MessageID) (Entry, bool, error) {
-	row := s.db.QueryRowContext(ctx,
-		`SELECT id, sender, recipient, body, created_at, flag, delivery_status, ttl_seconds, metadata
-		 FROM messages WHERE id = ? LIMIT 1`,
-		messageID,
-	)
-
-	var e Entry
-	err := row.Scan(&e.ID, &e.Sender, &e.Recipient, &e.Body, &e.CreatedAt, &e.Flag, &e.DeliveryStatus, &e.TTLSeconds, &e.Metadata)
-	switch {
-	case err == sql.ErrNoRows:
-		return Entry{}, false, nil
-	case err != nil:
-		return Entry{}, false, fmt.Errorf("chatlog: entry by id %s: %w", messageID, err)
-	default:
-		return e, true, nil
+	ref, found, err := uniqueMessageRef(ctx, s.db, string(messageID))
+	if err != nil || !found {
+		return Entry{}, false, err
 	}
+	return s.EntryByRef(ctx, ref)
 }
 
 // Returns true if a row was deleted.
@@ -1063,7 +1076,7 @@ func (s *Store) DeleteByID(ctx context.Context, messageID domain.MessageID) (boo
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	removed, err := deleteMessageTx(ctx, tx, messageID)
+	removed, err := deleteMessageTx(ctx, tx, messageID, s.identityAddr)
 	if err != nil {
 		return false, err
 	}
@@ -1100,7 +1113,7 @@ func (s *Store) DeleteMessages(ctx context.Context, ids []domain.MessageID) ([]d
 
 	removed := make([]domain.MessageID, 0, len(ids))
 	for _, id := range ids {
-		gone, err := deleteMessageTx(ctx, tx, id)
+		gone, err := deleteMessageTx(ctx, tx, id, s.identityAddr)
 		if err != nil {
 			return nil, err
 		}
@@ -1134,56 +1147,55 @@ func (s *Store) DeleteMessages(ctx context.Context, ids []domain.MessageID) ([]d
 // `decrypt_recovery_cycles`) is deliberately untouched: it describes the
 // conversation, not this message, and survives it by design. The recovery
 // marks of the row itself live in its `metadata` column and go with it.
-func deleteMessageTx(ctx context.Context, db readWriteContext, messageID domain.MessageID) (bool, error) {
-	res, err := db.ExecContext(ctx, `DELETE FROM messages WHERE id = ?`, messageID)
-	if err != nil {
-		return false, fmt.Errorf("chatlog: delete: %w", err)
+func deleteMessageTx(ctx context.Context, db readWriteContext, messageID domain.MessageID, self domain.PeerIdentity) (bool, error) {
+	ref, found, err := uniqueMessageRef(ctx, db, string(messageID))
+	if err != nil || !found {
+		return false, err
 	}
-	n, _ := res.RowsAffected()
+	return deleteMessageRefTx(ctx, db, ref, self)
+}
 
+func deleteMessageRefTx(ctx context.Context, db readWriteContext, ref domain.MessageRef, self domain.PeerIdentity) (bool, error) {
+	res, err := db.ExecContext(ctx, `DELETE FROM messages WHERE topic=? AND id=? AND sender=? AND recipient=?`, ref.Topic, ref.ID, ref.Sender, ref.Recipient)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
 	for _, statement := range []string{
-		`DELETE FROM seen_ack WHERE id = ?`,
-		`DELETE FROM delivery_failed WHERE id = ?`,
+		`DELETE FROM seen_ack WHERE topic=? AND id=? AND sender=? AND recipient=?`,
+		`DELETE FROM delivery_failed WHERE topic=? AND id=? AND sender=? AND recipient=?`,
 	} {
-		if _, err := db.ExecContext(ctx, statement, messageID); err != nil {
-			return false, fmt.Errorf("chatlog: delete journals: %w", err)
+		if _, err := db.ExecContext(ctx, statement, ref.Topic, ref.ID, ref.Sender, ref.Recipient); err != nil {
+			return false, err
 		}
 	}
-
-	// Reactions describe THIS message and are metadata about it in exactly the
-	// sense the paragraph above means: who responded to what, and when. Left
-	// behind they would also resurrect the message on the next reconciliation,
-	// since a fact naming an id is a claim that the id existed.
-	//
-	// By id alone, without the scope ReleaseHeldReactions insists on, and the
-	// asymmetry is deliberate. Releasing makes rows VISIBLE, so it must not
-	// reach a stranger's fact that happens to name the same id; deleting
-	// destroys them, and over-deleting is the safe direction of a collision
-	// that requires a message id to be reused on purpose.
-	//
-	// Nothing is written down about the id whose reactions these were. A row
-	// saying "reactions naming this id are not to be stored" is a record that
-	// the id was deleted here, kept after the deletion settled — which is the
-	// one trace this function exists to remove. The offer that arrives
-	// afterwards is answered in memory while the process lives, and held
-	// invisibly when it does not; see wipe_tombstone_set.go.
-	if _, err := db.ExecContext(ctx,
-		`DELETE FROM message_reactions WHERE message_id = ?`, messageID); err != nil {
-		return false, fmt.Errorf("chatlog: delete journals: %w", err)
+	if ref.Topic == "dm" {
+		if _, err := db.ExecContext(ctx, `DELETE FROM message_reactions WHERE message_id=? AND message_sender=? AND message_recipient=?`, ref.ID, ref.Sender, ref.Recipient); err != nil {
+			return false, err
+		}
 	}
-	if _, err := db.ExecContext(ctx,
-		`DELETE FROM decrypt_resend_intents WHERE original_id = ? OR replacement_id = ?`,
-		messageID, messageID); err != nil {
-		return false, fmt.Errorf("chatlog: delete resend intents: %w", err)
+	if ref.Topic == "dm" && ref.Sender == self.String() {
+		if _, err := db.ExecContext(ctx, `DELETE FROM decrypt_resend_intents WHERE peer=? AND (original_id=? OR replacement_id=?)`, ref.Recipient, ref.ID, ref.ID); err != nil {
+			return false, err
+		}
 	}
-
 	return n > 0, nil
 }
 
-func (s *Store) HasEntryID(ctx context.Context, topic string, peerAddress domain.PeerIdentity, id domain.MessageID) bool {
-	var exists int
-	err := s.db.QueryRowContext(ctx, `SELECT 1 FROM messages WHERE id = ? LIMIT 1`, id).Scan(&exists)
-	return err == nil
+func (s *Store) HasEntryID(ctx context.Context, topic string, peer domain.PeerIdentity, id domain.MessageID) bool {
+	found, err := s.LookupEntryID(ctx, topic, peer, id)
+	return err == nil && found
+}
+
+func (s *Store) LookupEntryID(ctx context.Context, topic string, peer domain.PeerIdentity, id domain.MessageID) (bool, error) {
+	if topic == "dm" {
+		return s.LookupEntryInConversation(ctx, peer, id)
+	}
+	_, found, err := uniqueMessageRefQuery(ctx, s.db, `SELECT topic,id,sender,recipient FROM messages WHERE topic=? AND id=? LIMIT 2`, topic, id)
+	return found, err
 }
 
 // HasEntryInConversation checks whether a message with the given ID exists
@@ -1206,19 +1218,16 @@ func (s *Store) LookupEntryInConversation(ctx context.Context, peerAddress domai
 	if peerAddress.IsZero() || id == "" {
 		return false, nil
 	}
-	query, params := s.peerQuery("dm", peerAddress,
-		`SELECT 1 FROM messages WHERE id = ? AND `, ` LIMIT 1`)
+	query, params := s.peerQuery("dm", peerAddress, `SELECT COUNT(*) FROM messages WHERE id = ? AND `, ``)
 	params = append([]interface{}{id}, params...)
-	var exists int
-	err := s.db.QueryRowContext(ctx, query, params...).Scan(&exists)
-	switch {
-	case err == nil:
-		return true, nil
-	case errors.Is(err, sql.ErrNoRows):
-		return false, nil
-	default:
-		return false, fmt.Errorf("chatlog: lookup entry %s: %w", id, err)
+	var count int
+	if err := s.db.QueryRowContext(ctx, query, params...).Scan(&count); err != nil {
+		return false, err
 	}
+	if count > 1 {
+		return false, fmt.Errorf("%w: %s", ErrAmbiguousMessage, id)
+	}
+	return count == 1, nil
 }
 
 // peerQuery builds a WHERE clause for messages in a specific conversation.

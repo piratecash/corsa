@@ -19,7 +19,7 @@ import (
 type emissionOutbox struct {
 	mu       sync.Mutex
 	rows     []OutboxEntry
-	never    map[protocol.MessageID]struct{}
+	never    map[domain.MessageRef]struct{}
 	clearErr error
 	// marks and clears count DISK WRITES, not state. The contract is not
 	// only "the row ends up right" but "an ordinary send pays for one
@@ -28,14 +28,14 @@ type emissionOutbox struct {
 	marks  int
 	clears int
 	// The second bit, and its own failure switch.
-	onWire        map[protocol.MessageID]struct{}
+	onWire        map[domain.MessageRef]struct{}
 	onWireErr     error
 	onWireGate    chan struct{}
 	onWireEntered chan struct{}
 	stamps        int
-	// alsoSent are ids the chatlog holds as ALREADY delivered — not
+	// alsoSent are full references the chatlog holds as ALREADY delivered — not
 	// reseeded for retry, but still ours.
-	alsoSent []protocol.MessageID
+	alsoSent []domain.MessageRef
 	// order is the sequence of journal entries, which is the only way to
 	// state the lane's contract: not "the clear was fast" but "the clear
 	// went in before the bookkeeping that was already queued".
@@ -43,17 +43,17 @@ type emissionOutbox struct {
 }
 
 func newEmissionOutbox(rows ...OutboxEntry) *emissionOutbox {
-	return &emissionOutbox{rows: rows, never: map[protocol.MessageID]struct{}{}, onWire: map[protocol.MessageID]struct{}{}}
+	return &emissionOutbox{rows: rows, never: map[domain.MessageRef]struct{}{}, onWire: map[domain.MessageRef]struct{}{}}
 }
 
-// SentMessageIDs reports every row this fake knows about, delivered ones
+// SentMessageRefs reports every row this fake knows about, delivered ones
 // included: that is the point of the set it fills.
-func (o *emissionOutbox) SentMessageIDs(limit int) ([]protocol.MessageID, error) {
+func (o *emissionOutbox) SentMessageRefs(limit int) ([]domain.MessageRef, error) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	ids := make([]protocol.MessageID, 0, len(o.rows)+len(o.alsoSent))
+	ids := make([]domain.MessageRef, 0, len(o.rows)+len(o.alsoSent))
 	for _, row := range o.rows {
-		ids = append(ids, row.Envelope.ID)
+		ids = append(ids, envelopeRef(row.Envelope))
 	}
 	ids = append(ids, o.alsoSent...)
 	if limit > 0 && len(ids) > limit {
@@ -67,8 +67,8 @@ func (o *emissionOutbox) UndeliveredOutgoing() ([]OutboxEntry, error) {
 	defer o.mu.Unlock()
 	rows := make([]OutboxEntry, 0, len(o.rows))
 	for _, row := range o.rows {
-		_, marked := o.never[row.Envelope.ID]
-		_, stamped := o.onWire[row.Envelope.ID]
+		_, marked := o.never[envelopeRef(row.Envelope)]
+		_, stamped := o.onWire[envelopeRef(row.Envelope)]
 		// Read SEPARATELY, as the adapter does: two bits, two questions.
 		row.Emitted = !marked
 		row.OnWire = stamped
@@ -80,7 +80,7 @@ func (o *emissionOutbox) UndeliveredOutgoing() ([]OutboxEntry, error) {
 // markNeverEmitted stands in for the INSERT that gives an outgoing row its
 // claim. It is not on the node's journal interface on purpose: the delivery
 // path must not be able to re-set that bit.
-func (o *emissionOutbox) markNeverEmitted(ids ...protocol.MessageID) {
+func (o *emissionOutbox) markNeverEmitted(ids ...domain.MessageRef) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	o.marks++
@@ -122,7 +122,7 @@ func (o *emissionOutbox) blockOnWire() (entered <-chan struct{}, release func())
 	return arrived, func() { close(gate) }
 }
 
-func (o *emissionOutbox) MarkOnWire(ids []protocol.MessageID) error {
+func (o *emissionOutbox) MarkOnWireRefs(ids []domain.MessageRef) error {
 	o.mu.Lock()
 	gate, arrived := o.onWireGate, o.onWireEntered
 	o.onWireEntered = nil
@@ -154,14 +154,14 @@ func (o *emissionOutbox) journalOrder() []string {
 }
 
 // onWireStamped reports whether the row carries the confirmation bit.
-func (o *emissionOutbox) onWireStamped(id protocol.MessageID) bool {
+func (o *emissionOutbox) onWireStamped(id domain.MessageRef) bool {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	_, ok := o.onWire[id]
 	return ok
 }
 
-func (o *emissionOutbox) ClearNeverEmitted(ids []protocol.MessageID) error {
+func (o *emissionOutbox) ClearNeverEmittedRefs(ids []domain.MessageRef) error {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	o.order = append(o.order, "clear")
@@ -176,7 +176,7 @@ func (o *emissionOutbox) ClearNeverEmitted(ids []protocol.MessageID) error {
 }
 
 // markOnDisk gives the row the claim its INSERT would have written.
-func markOnDisk(t *testing.T, o *emissionOutbox, ids ...protocol.MessageID) {
+func markOnDisk(t *testing.T, o *emissionOutbox, ids ...domain.MessageRef) {
 	t.Helper()
 	o.markNeverEmitted(ids...)
 }
@@ -194,7 +194,7 @@ func (o *emissionOutbox) failClears(err error) {
 	o.clearErr = err
 }
 
-func (o *emissionOutbox) marked(id protocol.MessageID) bool {
+func (o *emissionOutbox) marked(id domain.MessageRef) bool {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	_, ok := o.never[id]
@@ -216,16 +216,16 @@ func TestWithheldSendIsRecordedNeverEmitted(t *testing.T) {
 		ID: held, Topic: "dm", Sender: svc.Address(), Recipient: "peer-a",
 	}, time.Now().UTC(), true)
 	svc.deliveryMu.Unlock()
-	markOnDisk(t, outbox, held)
+	markOnDisk(t, outbox, deliveryMessageRef(svc.ownMessageIdentity(held, "peer-a")))
 
-	if !outbox.marked(held) {
+	if !outbox.marked(deliveryMessageRef(svc.ownMessageIdentity(held, "peer-a"))) {
 		t.Fatal("a withheld send left no durable record that it never went out")
 	}
 
 	// And the claim is withdrawn the moment it does go out — before the
 	// frame is written, which is what noteOwnEnvelopesEmitted guarantees.
-	svc.noteOwnEnvelopeEmitted(svc.Address(), held, time.Now().UTC())
-	if outbox.marked(held) {
+	svc.noteOwnEnvelopeEmitted(protocol.Envelope{ID: held, Topic: "dm", Sender: svc.Address(), Recipient: "peer-a"}, time.Now().UTC())
+	if outbox.marked(deliveryMessageRef(svc.ownMessageIdentity(held, "peer-a"))) {
 		t.Fatal("the claim survived the emission that disproved it")
 	}
 }
@@ -252,20 +252,20 @@ func TestRestartKeepsNeverEmittedProof(t *testing.T) {
 			Payload: []byte("y"), CreatedAt: now,
 		}},
 	)
-	outbox.markNeverEmitted(unsent)
+	outbox.markNeverEmitted(deliveryMessageRef(svc.ownMessageIdentity(unsent, "peer-a")))
 
 	svc.RegisterDeliveryOutbox(outbox)
 
 	svc.deliveryMu.RLock()
 	defer svc.deliveryMu.RUnlock()
-	unsentEntry, ok := svc.awaitingDelivered[unsent]
+	unsentEntry, ok := svc.awaitingDelivered[svc.ownMessageIdentity(unsent, "peer-a")]
 	if !ok {
 		t.Fatal("the marked envelope was not reseeded")
 	}
 	if unsentEntry.Emitted {
 		t.Error("a message the outbox proves never went out reads as emitted after restart")
 	}
-	sentEntry, ok := svc.awaitingDelivered[sent]
+	sentEntry, ok := svc.awaitingDelivered[svc.ownMessageIdentity(sent, "peer-a")]
 	if !ok {
 		t.Fatal("the unmarked envelope was not reseeded")
 	}
@@ -286,7 +286,7 @@ func TestUnmarkedRestartStillReadsAsEmitted(t *testing.T) {
 
 	svc.deliveryMu.RLock()
 	defer svc.deliveryMu.RUnlock()
-	entry, ok := svc.awaitingDelivered["legacy-1"]
+	entry, ok := svc.awaitingDelivered[svc.ownMessageIdentity("legacy-1", "peer-a")]
 	if !ok {
 		t.Fatal("legacy envelope was not reseeded")
 	}
@@ -309,21 +309,21 @@ func TestReseedClaimsOnlyTheRowsThatCarryOne(t *testing.T) {
 		gone = protocol.MessageID("reseed-emitted-1")
 		held = protocol.MessageID("reseed-withheld-1")
 	)
+	svc := newTestService(t, config.NodeTypeFull)
 	now := time.Now().UTC()
 	outbox := newEmissionOutbox(
-		OutboxEntry{Envelope: protocol.Envelope{ID: gone, Topic: "dm", Recipient: "peer-a", CreatedAt: now}},
-		OutboxEntry{Envelope: protocol.Envelope{ID: held, Topic: "dm", Recipient: "peer-b", CreatedAt: now}},
+		OutboxEntry{Envelope: protocol.Envelope{ID: gone, Topic: "dm", Sender: svc.Address(), Recipient: "peer-a", CreatedAt: now}},
+		OutboxEntry{Envelope: protocol.Envelope{ID: held, Topic: "dm", Sender: svc.Address(), Recipient: "peer-b", CreatedAt: now}},
 	)
 	// Only the withheld one still carries a claim on disk; the outbox
 	// reports Emitted = !marked.
-	markOnDisk(t, outbox, held)
+	markOnDisk(t, outbox, deliveryMessageRef(svc.ownMessageIdentity(held, "peer-b")))
 
-	svc := newTestService(t, config.NodeTypeFull)
 	svc.RegisterDeliveryOutbox(outbox)
 
 	svc.deliveryMu.RLock()
-	_, claimsEmitted := svc.markedNeverEmitted[gone]
-	_, claimsHeld := svc.markedNeverEmitted[held]
+	_, claimsEmitted := svc.markedNeverEmitted[svc.ownMessageIdentity(gone, "peer-a")]
+	_, claimsHeld := svc.markedNeverEmitted[svc.ownMessageIdentity(held, "peer-b")]
 	svc.deliveryMu.RUnlock()
 
 	if claimsEmitted {
@@ -351,7 +351,7 @@ func TestOrdinarySendWithdrawsItsBirthClaimExactlyOnce(t *testing.T) {
 	const plain = protocol.MessageID("plain-1")
 	// The row is born marked; the node records the standing claim when it
 	// registers the delivery.
-	markOnDisk(t, outbox, plain)
+	markOnDisk(t, outbox, deliveryMessageRef(svc.ownMessageIdentity(plain, "peer-a")))
 	svc.deliveryMu.Lock()
 	svc.registerAwaitingDeliveredLocked(protocol.Envelope{
 		ID: plain, Topic: "dm", Sender: svc.Address(), Recipient: "peer-a",
@@ -359,8 +359,8 @@ func TestOrdinarySendWithdrawsItsBirthClaimExactlyOnce(t *testing.T) {
 	svc.deliveryMu.Unlock()
 	marksBefore, _ := outbox.writes()
 
-	svc.noteOwnEnvelopeEmitted(svc.Address(), plain, time.Now().UTC())
-	if outbox.marked(plain) {
+	svc.noteOwnEnvelopeEmitted(protocol.Envelope{ID: plain, Topic: "dm", Sender: svc.Address(), Recipient: "peer-a"}, time.Now().UTC())
+	if outbox.marked(deliveryMessageRef(svc.ownMessageIdentity(plain, "peer-a"))) {
 		t.Fatal("the first emission did not withdraw the birth claim")
 	}
 	_, clearsAfterFirst := outbox.writes()
@@ -369,8 +369,8 @@ func TestOrdinarySendWithdrawsItsBirthClaimExactlyOnce(t *testing.T) {
 	}
 
 	// Every later emission of the same message is free.
-	svc.noteOwnEnvelopeEmitted(svc.Address(), plain, time.Now().UTC())
-	svc.noteOwnEnvelopeEmitted(svc.Address(), plain, time.Now().UTC())
+	svc.noteOwnEnvelopeEmitted(protocol.Envelope{ID: plain, Topic: "dm", Sender: svc.Address(), Recipient: "peer-a"}, time.Now().UTC())
+	svc.noteOwnEnvelopeEmitted(protocol.Envelope{ID: plain, Topic: "dm", Sender: svc.Address(), Recipient: "peer-a"}, time.Now().UTC())
 
 	marksAfter, clearsAfter := outbox.writes()
 	if clearsAfter != clearsAfterFirst {
@@ -420,7 +420,7 @@ func TestReceiptIsNotHandledUntilItsStatusIsRecorded(t *testing.T) {
 
 			now := time.Now().UTC()
 			for _, id := range []protocol.MessageID{received, withdrawn} {
-				markOnDisk(t, outbox, id)
+				markOnDisk(t, outbox, deliveryMessageRef(svc.ownMessageIdentity(id, recipient)))
 				svc.deliveryMu.Lock()
 				svc.registerAwaitingDeliveredLocked(protocol.Envelope{
 					ID: id, Topic: "dm", Sender: svc.Address(), Recipient: recipient, CreatedAt: now,
@@ -453,7 +453,7 @@ func TestReceiptIsNotHandledUntilItsStatusIsRecorded(t *testing.T) {
 					deduped, tc.statusLands)
 			}
 			svc.deliveryMu.RLock()
-			_, withdrawalLeak := svc.markedNeverEmitted[withdrawn]
+			_, withdrawalLeak := svc.markedNeverEmitted[svc.ownMessageIdentity(withdrawn, recipient)]
 			svc.deliveryMu.RUnlock()
 			if withdrawalLeak {
 				t.Error("a withdrawn message left its claim in the set; the row it belongs to is gone")
@@ -589,7 +589,7 @@ func TestReceiptHandlerDoesNotWaitOnTheJournal(t *testing.T) {
 	recipient := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	const target = protocol.MessageID("receipt-during-a-backlog")
 	now := time.Now().UTC()
-	markOnDisk(t, outbox, target)
+	markOnDisk(t, outbox, deliveryMessageRef(svc.ownMessageIdentity(target, recipient)))
 	svc.deliveryMu.Lock()
 	svc.registerAwaitingDeliveredLocked(protocol.Envelope{
 		ID: target, Topic: "dm", Sender: svc.Address(), Recipient: recipient, CreatedAt: now,
@@ -598,7 +598,7 @@ func TestReceiptHandlerDoesNotWaitOnTheJournal(t *testing.T) {
 
 	// A stamp parks inside the journal, as a contended database makes it.
 	entered, release := outbox.blockOnWire()
-	go func() { svc.markDeliveryOnWire("unrelated-backlog-stamp") }()
+	go func() { svc.markDeliveryOnWire(svc.ownMessageIdentity("unrelated-backlog-stamp", recipient)) }()
 	select {
 	case <-entered:
 	case <-time.After(3 * time.Second):
@@ -730,7 +730,7 @@ func TestDiscardedSessionQueueLeavesTheMessageQueued(t *testing.T) {
 		ID: stranded, Topic: "dm", Sender: svc.Address(), Recipient: "peer-a",
 		CreatedAt: time.Now().UTC(),
 	}
-	markOnDisk(t, outbox, stranded)
+	markOnDisk(t, outbox, deliveryMessageRef(svc.ownMessageIdentity(stranded, "peer-a")))
 	svc.deliveryMu.Lock()
 	svc.registerAwaitingDeliveredLocked(envelope, time.Now().UTC(), false)
 	svc.deliveryMu.Unlock()
@@ -756,10 +756,10 @@ func TestDiscardedSessionQueueLeavesTheMessageQueued(t *testing.T) {
 	// The never-emitted claim stays withdrawn, which is the right answer
 	// for the OTHER reader — the frame was handed to a queue, and a
 	// deletion asking the peer about it costs one unresolved id.
-	if outbox.onWireStamped(stranded) {
+	if outbox.onWireStamped(deliveryMessageRef(svc.ownMessageIdentity(stranded, "peer-a"))) {
 		t.Error("a frame discarded with its queue was stamped as on the wire")
 	}
-	if status := svc.storedMessageStatus(stranded); status != protocol.MessageStatusQueued {
+	if status := svc.storedMessageStatus(envelopeRef(envelope)); status != protocol.MessageStatusQueued {
 		t.Errorf("the stranded message reads as %q, want %q", status, protocol.MessageStatusQueued)
 	}
 }
@@ -781,15 +781,15 @@ func TestFrameIsWithheldWhenTheClaimCannotBeWithdrawn(t *testing.T) {
 		ID: held, Topic: "dm", Sender: svc.Address(), Recipient: "peer-a",
 	}, time.Now().UTC(), true)
 	svc.deliveryMu.Unlock()
-	markOnDisk(t, outbox, held)
+	markOnDisk(t, outbox, deliveryMessageRef(svc.ownMessageIdentity(held, "peer-a")))
 
 	outbox.failClears(errors.New("database is locked"))
-	if svc.noteOwnEnvelopeEmitted(svc.Address(), held, time.Now().UTC()) {
+	if svc.noteOwnEnvelopeEmitted(protocol.Envelope{ID: held, Topic: "dm", Sender: svc.Address(), Recipient: "peer-a"}, time.Now().UTC()) {
 		t.Fatal("the caller was cleared to send a message whose claim is still on disk")
 	}
 
 	svc.deliveryMu.RLock()
-	entry, awaiting := svc.awaitingDelivered[held]
+	entry, awaiting := svc.awaitingDelivered[svc.ownMessageIdentity(held, "peer-a")]
 	svc.deliveryMu.RUnlock()
 	if !awaiting {
 		t.Fatal("the message left the retry engine, so nothing will send it later")
@@ -797,16 +797,16 @@ func TestFrameIsWithheldWhenTheClaimCannotBeWithdrawn(t *testing.T) {
 	if entry.Emitted {
 		t.Error("the entry counts as emitted although nothing went out")
 	}
-	if !outbox.marked(held) {
+	if !outbox.marked(deliveryMessageRef(svc.ownMessageIdentity(held, "peer-a"))) {
 		t.Error("the durable claim was dropped even though the write failed")
 	}
 
 	// The database recovers and the next attempt goes through.
 	outbox.failClears(nil)
-	if !svc.noteOwnEnvelopeEmitted(svc.Address(), held, time.Now().UTC()) {
+	if !svc.noteOwnEnvelopeEmitted(protocol.Envelope{ID: held, Topic: "dm", Sender: svc.Address(), Recipient: "peer-a"}, time.Now().UTC()) {
 		t.Fatal("the retry was still withheld after the journal recovered")
 	}
-	if outbox.marked(held) {
+	if outbox.marked(deliveryMessageRef(svc.ownMessageIdentity(held, "peer-a"))) {
 		t.Error("the claim survived the emission that disproved it")
 	}
 }
@@ -831,15 +831,15 @@ func TestOrdinarySendWithdrawsItsDurableClaim(t *testing.T) {
 	svc.deliveryMu.Unlock()
 	// The row was written with the claim by the store adapter; this is the
 	// same starting state.
-	markOnDisk(t, outbox, plain)
-	if !outbox.marked(plain) {
+	markOnDisk(t, outbox, deliveryMessageRef(svc.ownMessageIdentity(plain, "peer-a")))
+	if !outbox.marked(deliveryMessageRef(svc.ownMessageIdentity(plain, "peer-a"))) {
 		t.Fatal("the row does not carry the claim, so this test proves nothing about withdrawing it")
 	}
 
-	if !svc.noteOwnEnvelopeEmitted(svc.Address(), plain, time.Now().UTC()) {
+	if !svc.noteOwnEnvelopeEmitted(protocol.Envelope{ID: plain, Topic: "dm", Sender: svc.Address(), Recipient: "peer-a"}, time.Now().UTC()) {
 		t.Fatal("the send was withheld")
 	}
-	if outbox.marked(plain) {
+	if outbox.marked(deliveryMessageRef(svc.ownMessageIdentity(plain, "peer-a"))) {
 		t.Fatal("an ordinary send left the durable never-emitted claim on the row")
 	}
 }
@@ -872,16 +872,16 @@ func TestBacklogReplayWithholdsEveryStrandedId(t *testing.T) {
 		ID: plain, Topic: "dm", Sender: svc.Address(), Recipient: "peer-a",
 	}, time.Now().UTC(), false)
 	svc.deliveryMu.Unlock()
-	markOnDisk(t, outbox, held, plain)
+	markOnDisk(t, outbox, deliveryMessageRef(svc.ownMessageIdentity(held, "peer-a")), deliveryMessageRef(svc.ownMessageIdentity(plain, "peer-a")))
 	outbox.failClears(errors.New("database is locked"))
 
-	outcome := svc.noteOwnEnvelopesEmitted([]protocol.MessageID{held, plain}, time.Now().UTC(), nil)
+	outcome := svc.noteOwnEnvelopesEmitted([]messageIdentity{svc.ownMessageIdentity(held, "peer-a"), svc.ownMessageIdentity(plain, "peer-a")}, time.Now().UTC(), nil)
 	for _, id := range []protocol.MessageID{held, plain} {
-		if _, blocked := outcome.Withheld[id]; !blocked {
+		if _, blocked := outcome.Withheld[svc.ownMessageIdentity(id, "peer-a")]; !blocked {
 			t.Errorf("%s was cleared to go out while the disk still claims it never left", id)
 		}
 		svc.deliveryMu.RLock()
-		entry, awaiting := svc.awaitingDelivered[id]
+		entry, awaiting := svc.awaitingDelivered[svc.ownMessageIdentity(id, "peer-a")]
 		svc.deliveryMu.RUnlock()
 		if !awaiting {
 			t.Fatalf("%s left the retry engine, so nothing will send it later", id)
@@ -889,7 +889,7 @@ func TestBacklogReplayWithholdsEveryStrandedId(t *testing.T) {
 		if entry.Emitted {
 			t.Errorf("%s counts as emitted although nothing went out", id)
 		}
-		if !outbox.marked(id) {
+		if !outbox.marked(deliveryMessageRef(svc.ownMessageIdentity(id, "peer-a"))) {
 			t.Errorf("the durable claim on %s was dropped even though the write failed", id)
 		}
 	}
@@ -919,19 +919,21 @@ func TestFrozenDeliveryIsNotEmitted(t *testing.T) {
 		t.Error("the freeze did not report a withheld message as never emitted")
 	}
 
-	if svc.noteOwnEnvelopeEmitted(svc.Address(), target, time.Now().UTC()) {
+	if svc.noteOwnEnvelopeEmitted(protocol.Envelope{ID: target, Topic: "dm", Sender: svc.Address(), Recipient: recipient}, time.Now().UTC()) {
 		t.Fatal("a frozen message was cleared to go out")
 	}
 	svc.deliveryMu.RLock()
-	entry, awaiting := svc.awaitingDelivered[target]
+	entry, awaiting := svc.awaitingDelivered[svc.ownMessageIdentity(target, recipient)]
 	svc.deliveryMu.RUnlock()
 	if !awaiting || entry.Emitted {
 		t.Fatalf("the frozen entry was consumed anyway: awaiting=%v emitted=%v", awaiting, entry != nil && entry.Emitted)
 	}
 
 	// A wipe that could not commit puts it back.
-	svc.ThawOutgoingDeliveries([]protocol.MessageID{target})
-	if !svc.noteOwnEnvelopeEmitted(svc.Address(), target, time.Now().UTC()) {
+	if err := svc.ThawOutgoingDeliveriesTo(domain.PeerIdentityFromWire(recipient), []protocol.MessageID{target}); err != nil {
+		t.Fatal(err)
+	}
+	if !svc.noteOwnEnvelopeEmitted(protocol.Envelope{ID: target, Topic: "dm", Sender: svc.Address(), Recipient: recipient}, time.Now().UTC()) {
 		t.Fatal("the message is still held back after the thaw")
 	}
 }
@@ -952,7 +954,7 @@ func TestFrozenDeliveryIsNotRetried(t *testing.T) {
 		ID: target, Topic: "dm", Sender: svc.Address(), Recipient: recipient,
 		CreatedAt: time.Now().UTC(),
 	}, past, false)
-	svc.awaitingDelivered[target].NextAttemptAt = past
+	svc.awaitingDelivered[svc.ownMessageIdentity(target, recipient)].NextAttemptAt = past
 	svc.deliveryMu.Unlock()
 
 	if _, err := svc.FreezeOutgoingDeliveriesTo(domain.PeerIdentityFromWire(recipient), []protocol.MessageID{target}); err != nil {
@@ -962,7 +964,7 @@ func TestFrozenDeliveryIsNotRetried(t *testing.T) {
 	svc.retryDueDeliveries(time.Now().UTC())
 
 	svc.deliveryMu.RLock()
-	entry, awaiting := svc.awaitingDelivered[target]
+	entry, awaiting := svc.awaitingDelivered[svc.ownMessageIdentity(target, recipient)]
 	svc.deliveryMu.RUnlock()
 	if !awaiting {
 		t.Fatal("the frozen entry was dropped by the retry tick")
@@ -1070,20 +1072,20 @@ func TestBacklogReplayWithdrawsAClaimWithoutARetryEntry(t *testing.T) {
 		ID: target, Topic: "dm", Sender: svc.Address(), Recipient: "peer-a",
 	}, time.Now().UTC(), true)
 	svc.deliveryMu.Unlock()
-	markOnDisk(t, outbox, target)
-	if !outbox.marked(target) {
+	markOnDisk(t, outbox, deliveryMessageRef(svc.ownMessageIdentity(target, "peer-a")))
+	if !outbox.marked(deliveryMessageRef(svc.ownMessageIdentity(target, "peer-a"))) {
 		t.Fatal("the withheld message was not recorded")
 	}
 
 	// The retry engine gives up: the entry is gone, the claim is not.
 	svc.deliveryMu.Lock()
-	delete(svc.awaitingDelivered, target)
+	delete(svc.awaitingDelivered, svc.ownMessageIdentity(target, "peer-a"))
 	svc.deliveryMu.Unlock()
 
-	if !svc.noteOwnEnvelopeEmitted(svc.Address(), target, time.Now().UTC()) {
+	if !svc.noteOwnEnvelopeEmitted(protocol.Envelope{ID: target, Topic: "dm", Sender: svc.Address(), Recipient: "peer-a"}, time.Now().UTC()) {
 		t.Fatal("the backlog replay was blocked for a message with no entry")
 	}
-	if outbox.marked(target) {
+	if outbox.marked(deliveryMessageRef(svc.ownMessageIdentity(target, "peer-a"))) {
 		t.Error("the claim survived an emission that disproved it")
 	}
 }
@@ -1120,7 +1122,7 @@ func TestDeferredOutgoingMessageIsNotRouted(t *testing.T) {
 		t.Error("the message entered the backlog, from which gossip and relay serve it")
 	}
 	svc.deliveryMu.RLock()
-	_, awaiting := svc.awaitingDelivered[target]
+	_, awaiting := svc.awaitingDelivered[svc.ownMessageIdentity(target, recipient.Address)]
 	svc.deliveryMu.RUnlock()
 	if awaiting {
 		t.Error("a sender-side retry was registered for a message the store never kept")
@@ -1186,7 +1188,7 @@ func TestOwnMessageIsNotSentWhenItsRowCannotBeWritten(t *testing.T) {
 		t.Error("the message entered the backlog, from which gossip and relay serve it")
 	}
 	svc.deliveryMu.RLock()
-	_, awaiting := svc.awaitingDelivered[target]
+	_, awaiting := svc.awaitingDelivered[svc.ownMessageIdentity(target, recipient.Address)]
 	svc.deliveryMu.RUnlock()
 	if awaiting {
 		t.Error("a sender-side retry was registered for a message with no row to reseed from")
@@ -1248,7 +1250,7 @@ func TestRetryTickHonoursAFreezeTakenAfterPlanning(t *testing.T) {
 		ID: target, Topic: "dm", Sender: svc.Address(), Recipient: recipient,
 		CreatedAt: time.Now().UTC(),
 	}, past, true)
-	svc.awaitingDelivered[target].NextAttemptAt = past
+	svc.awaitingDelivered[svc.ownMessageIdentity(target, recipient)].NextAttemptAt = past
 	svc.deliveryMu.Unlock()
 
 	// The freeze lands after the entry is due but before the tick runs —
@@ -1259,14 +1261,14 @@ func TestRetryTickHonoursAFreezeTakenAfterPlanning(t *testing.T) {
 	}
 
 	// The claim is what the dispatch consults, and it must refuse.
-	if svc.noteOwnEnvelopeEmitted(svc.Address(), target, time.Now().UTC()) {
+	if svc.noteOwnEnvelopeEmitted(protocol.Envelope{ID: target, Topic: "dm", Sender: svc.Address(), Recipient: recipient}, time.Now().UTC()) {
 		t.Fatal("the last boundary before the wire cleared a frozen message to go out")
 	}
 
 	svc.retryDueDeliveries(time.Now().UTC())
 
 	svc.deliveryMu.RLock()
-	entry, awaiting := svc.awaitingDelivered[target]
+	entry, awaiting := svc.awaitingDelivered[svc.ownMessageIdentity(target, recipient)]
 	svc.deliveryMu.RUnlock()
 	if !awaiting {
 		t.Fatal("the frozen entry was dropped by the tick")
@@ -1298,7 +1300,7 @@ func TestFreezeDuringATickCostsNoAttempt(t *testing.T) {
 		ID: target, Topic: "dm", Sender: svc.Address(), Recipient: recipient,
 		CreatedAt: time.Now().UTC(),
 	}, due, true)
-	entry := svc.awaitingDelivered[target]
+	entry := svc.awaitingDelivered[svc.ownMessageIdentity(target, recipient)]
 	entry.NextAttemptAt = due
 	entry.Attempts = 3
 	svc.deliveryMu.Unlock()
@@ -1316,7 +1318,7 @@ func TestFreezeDuringATickCostsNoAttempt(t *testing.T) {
 	svc.retryDueDeliveries(time.Now().UTC())
 
 	svc.deliveryMu.RLock()
-	entry, awaiting := svc.awaitingDelivered[target]
+	entry, awaiting := svc.awaitingDelivered[svc.ownMessageIdentity(target, recipient)]
 	attempts := 0
 	var nextAttempt time.Time
 	emitted, held := false, false
@@ -1344,8 +1346,10 @@ func TestFreezeDuringATickCostsNoAttempt(t *testing.T) {
 	// After the thaw the very next tick sends it, without having lost
 	// anything to the freeze.
 	svc.retryDispatchBarrier = nil
-	svc.ThawOutgoingDeliveries([]protocol.MessageID{target})
-	if !svc.noteOwnEnvelopeEmitted(svc.Address(), target, time.Now().UTC()) {
+	if err := svc.ThawOutgoingDeliveriesTo(domain.PeerIdentityFromWire(recipient), []protocol.MessageID{target}); err != nil {
+		t.Fatal(err)
+	}
+	if !svc.noteOwnEnvelopeEmitted(protocol.Envelope{ID: target, Topic: "dm", Sender: svc.Address(), Recipient: recipient}, time.Now().UTC()) {
 		t.Fatal("the message is still held back after the thaw")
 	}
 }
@@ -1378,12 +1382,12 @@ func TestBadgeStaysQueuedWhenTheStampCannotBeWritten(t *testing.T) {
 	svc.WaitBackground()
 
 	svc.deliveryMu.RLock()
-	announced := svc.awaitingDelivered[target].Announced
+	announced := svc.awaitingDelivered[svc.ownMessageIdentity(target, "peer-a")].Announced
 	svc.deliveryMu.RUnlock()
 	if announced {
 		t.Error("the sender was told sent over a row that still reads queued; the next reload takes it back and nothing says it again")
 	}
-	if status := svc.storedMessageStatus(target); status != protocol.MessageStatusQueued {
+	if status := svc.storedMessageStatus(envelopeRef(envelope)); status != protocol.MessageStatusQueued {
 		t.Errorf("the reply says %q, want %q", status, protocol.MessageStatusQueued)
 	}
 
@@ -1392,11 +1396,11 @@ func TestBadgeStaysQueuedWhenTheStampCannotBeWritten(t *testing.T) {
 	svc.confirmEnvelopeOnWire(envelope, time.Now().UTC().Add(time.Second))
 	svc.WaitBackground()
 
-	if !outbox.onWireStamped(target) {
+	if !outbox.onWireStamped(deliveryMessageRef(svc.ownMessageIdentity(target, "peer-a"))) {
 		t.Fatal("the retry did not stamp the row")
 	}
 	svc.deliveryMu.RLock()
-	announced = svc.awaitingDelivered[target].Announced
+	announced = svc.awaitingDelivered[svc.ownMessageIdentity(target, "peer-a")].Announced
 	svc.deliveryMu.RUnlock()
 	if !announced {
 		t.Error("the sender was never told, although the row now says sent")
@@ -1433,7 +1437,7 @@ func TestBacklogReplayStampsTheWholeBatchAtOnce(t *testing.T) {
 		t.Errorf("the replay took %d journal writes for %d messages, want 1", wrote, len(batch))
 	}
 	for _, envelope := range batch {
-		if !outbox.onWireStamped(envelope.ID) {
+		if !outbox.onWireStamped(deliveryMessageRef(svc.ownMessageIdentity(envelope.ID, "peer-a"))) {
 			t.Fatalf("%s was left unstamped by the batch", envelope.ID)
 		}
 	}
@@ -1469,7 +1473,7 @@ func TestLocalBookkeepingIsRepairedWithoutResending(t *testing.T) {
 	// The wire took it; the journal would not record it.
 	svc.confirmEnvelopeOnWire(envelope, now)
 	svc.WaitBackground()
-	if outbox.onWireStamped(target) {
+	if outbox.onWireStamped(deliveryMessageRef(svc.ownMessageIdentity(target, "peer-a"))) {
 		t.Fatal("the stamp was supposed to fail, so this test proves nothing")
 	}
 
@@ -1484,11 +1488,11 @@ func TestLocalBookkeepingIsRepairedWithoutResending(t *testing.T) {
 	svc.WaitBackground()
 	svc.runLoopsWg.Wait()
 
-	if !outbox.onWireStamped(target) {
+	if !outbox.onWireStamped(deliveryMessageRef(svc.ownMessageIdentity(target, "peer-a"))) {
 		t.Error("the row was never stamped; only another network send would have repaired it")
 	}
 	svc.deliveryMu.RLock()
-	entry := *svc.awaitingDelivered[target]
+	entry := *svc.awaitingDelivered[svc.ownMessageIdentity(target, "peer-a")]
 	svc.deliveryMu.RUnlock()
 	if !entry.Announced {
 		t.Error("the sender was never told, although the row now says sent")
@@ -1529,7 +1533,7 @@ func TestRepairPassIsCappedPerTick(t *testing.T) {
 
 	stamped := 0
 	for i := range total {
-		if outbox.onWireStamped(protocol.MessageID(fmt.Sprintf("repair-%03d", i))) {
+		if outbox.onWireStamped(deliveryMessageRef(svc.ownMessageIdentity(protocol.MessageID(fmt.Sprintf("repair-%03d", i)), "peer-a"))) {
 			stamped++
 		}
 	}
@@ -1570,7 +1574,7 @@ func TestShedAnnouncementBacksOffAndCostsNoJournalWrite(t *testing.T) {
 
 	// A wedged subscriber: every event is shed.
 	svc.deliveryMu.Lock()
-	svc.awaitingDelivered[target].Stamped = false
+	svc.awaitingDelivered[svc.ownMessageIdentity(target, "peer-a")].Stamped = false
 	svc.deliveryMu.Unlock()
 	svc.repairLocalDeliveryRecord(now)
 	writesAfterFirst := outbox.stampWrites()
@@ -1579,7 +1583,7 @@ func TestShedAnnouncementBacksOffAndCostsNoJournalWrite(t *testing.T) {
 	}
 
 	svc.deliveryMu.Lock()
-	entry := svc.awaitingDelivered[target]
+	entry := svc.awaitingDelivered[svc.ownMessageIdentity(target, "peer-a")]
 	stamped := entry.Stamped
 	// Simulate the bus having shed the announcement.
 	entry.Announced = false
@@ -1596,7 +1600,7 @@ func TestShedAnnouncementBacksOffAndCostsNoJournalWrite(t *testing.T) {
 		t.Errorf("a shed announcement dragged %d extra journal write(s) with it", writes-writesAfterFirst)
 	}
 	svc.deliveryMu.RLock()
-	announced := svc.awaitingDelivered[target].Announced
+	announced := svc.awaitingDelivered[svc.ownMessageIdentity(target, "peer-a")].Announced
 	svc.deliveryMu.RUnlock()
 	if announced {
 		t.Error("the announcement was republished while its backoff was still running")
@@ -1606,7 +1610,7 @@ func TestShedAnnouncementBacksOffAndCostsNoJournalWrite(t *testing.T) {
 	// touching the journal.
 	svc.repairLocalDeliveryRecord(now.Add(deliveryAnnounceRetry + time.Second))
 	svc.deliveryMu.RLock()
-	announced = svc.awaitingDelivered[target].Announced
+	announced = svc.awaitingDelivered[svc.ownMessageIdentity(target, "peer-a")].Announced
 	svc.deliveryMu.RUnlock()
 	if !announced {
 		t.Error("the announcement was never retried after its backoff expired")
@@ -1651,7 +1655,7 @@ func TestPreWireClearGoesAheadOfQueuedBookkeeping(t *testing.T) {
 	}, now, true)
 	svc.deliveryMu.Unlock()
 	svc.confirmEnvelopeInMemory(repaired, now)
-	markOnDisk(t, outbox, urgent)
+	markOnDisk(t, outbox, deliveryMessageRef(svc.ownMessageIdentity(urgent, "peer-b")))
 
 	// A repair pass parks inside the journal, as a contended database
 	// makes it.
@@ -1674,7 +1678,7 @@ func TestPreWireClearGoesAheadOfQueuedBookkeeping(t *testing.T) {
 	for i := range backlog {
 		id := protocol.MessageID(fmt.Sprintf("backlog-stamp-%d", i))
 		go func() {
-			svc.markDeliveryOnWire(id)
+			svc.markDeliveryOnWire(svc.ownMessageIdentity(id, "peer-a"))
 			stamped <- struct{}{}
 		}()
 	}
@@ -1684,7 +1688,7 @@ func TestPreWireClearGoesAheadOfQueuedBookkeeping(t *testing.T) {
 	// backlog was queued first; the clear still goes first.
 	cleared := make(chan bool, 1)
 	go func() {
-		cleared <- svc.noteOwnEnvelopeEmitted(svc.Address(), urgent, time.Now().UTC())
+		cleared <- svc.noteOwnEnvelopeEmitted(protocol.Envelope{ID: urgent, Topic: "dm", Sender: svc.Address(), Recipient: "peer-b"}, time.Now().UTC())
 	}()
 	waitForLane(t, svc, 1, backlog+1)
 
@@ -1709,7 +1713,7 @@ func TestPreWireClearGoesAheadOfQueuedBookkeeping(t *testing.T) {
 	if order[0] != "stamp" || order[1] != "clear" {
 		t.Errorf("journal order was %v; the clear waited behind bookkeeping queued before it", order)
 	}
-	if outbox.marked(urgent) {
+	if outbox.marked(deliveryMessageRef(svc.ownMessageIdentity(urgent, "peer-b"))) {
 		t.Error("the claim was not withdrawn, so the frame cannot go out")
 	}
 }
@@ -1754,11 +1758,12 @@ func TestConcurrentPreWireClearsCostOneJournalCall(t *testing.T) {
 
 	now := time.Now().UTC()
 	const senders = 4
-	ids := make([]protocol.MessageID, 0, senders)
+	ids := make([]messageIdentity, 0, senders)
 	for i := range senders {
 		id := protocol.MessageID(fmt.Sprintf("reconnect-%d", i))
-		ids = append(ids, id)
-		markOnDisk(t, outbox, id)
+		ref := svc.ownMessageIdentity(id, fmt.Sprintf("peer-%d", i))
+		ids = append(ids, ref)
+		markOnDisk(t, outbox, deliveryMessageRef(ref))
 		svc.deliveryMu.Lock()
 		svc.registerAwaitingDeliveredLocked(protocol.Envelope{
 			ID: id, Topic: "dm", Sender: svc.Address(),
@@ -1769,7 +1774,7 @@ func TestConcurrentPreWireClearsCostOneJournalCall(t *testing.T) {
 
 	// Hold the lane with a statement nothing can preempt.
 	entered, release := outbox.blockOnWire()
-	go func() { svc.markDeliveryOnWire("holds-the-lane") }()
+	go func() { svc.markDeliveryOnWire(svc.ownMessageIdentity("holds-the-lane", "peer-a")) }()
 	select {
 	case <-entered:
 	case <-time.After(3 * time.Second):
@@ -1780,7 +1785,9 @@ func TestConcurrentPreWireClearsCostOneJournalCall(t *testing.T) {
 	// Every subscriber's first frame arrives at once.
 	cleared := make(chan bool, senders)
 	for _, id := range ids {
-		go func() { cleared <- svc.noteOwnEnvelopeEmitted(svc.Address(), id, time.Now().UTC()) }()
+		go func() {
+			cleared <- svc.noteOwnEnvelopeEmitted(protocol.Envelope{ID: id.MessageID, Topic: "dm", Sender: id.Sender, Recipient: id.Recipient}, time.Now().UTC())
+		}()
 	}
 	waitForLane(t, svc, senders, 1)
 
@@ -1809,8 +1816,8 @@ func TestConcurrentPreWireClearsCostOneJournalCall(t *testing.T) {
 			senders, clears, order)
 	}
 	for _, id := range ids {
-		if outbox.marked(id) {
-			t.Errorf("%s was left claimed, so its frame cannot go out", id)
+		if outbox.marked(deliveryMessageRef(id)) {
+			t.Errorf("%+v was left claimed, so its frame cannot go out", id)
 		}
 	}
 }
@@ -2122,14 +2129,14 @@ func TestStaleSnapshotDoesNotOverwriteANewerStatus(t *testing.T) {
 	const target = protocol.MessageID("stale-snapshot-1")
 	older := protocol.LocalChangeEvent{
 		Type: protocol.LocalChangeReceiptUpdate, Topic: "dm",
-		MessageID: string(target), Status: protocol.ReceiptStatusDelivered,
+		MessageID: string(target), Sender: "peer-a", Recipient: svc.Address(), Status: protocol.ReceiptStatusDelivered,
 	}
 	newer := older
 	newer.Status = protocol.ReceiptStatusSeen
 
 	svc.keepShedEvent(ebus.TopicReceiptUpdated, older)
 	svc.deliveryMu.RLock()
-	stale := svc.pendingUIEvents[target]
+	stale := svc.pendingUIEvents[localChangeMessageRef(older)]
 	svc.deliveryMu.RUnlock()
 
 	// The newer status arrives while the older copy is in flight.
@@ -2137,9 +2144,9 @@ func TestStaleSnapshotDoesNotOverwriteANewerStatus(t *testing.T) {
 
 	// The in-flight OLDER copy now succeeds. It must not take the newer
 	// one with it.
-	svc.forgetShedEvent(target, stale.seq, older.Status)
+	svc.forgetShedEvent(localChangeMessageRef(older), stale.seq, older.Status)
 	svc.deliveryMu.RLock()
-	kept, present := svc.pendingUIEvents[target]
+	kept, present := svc.pendingUIEvents[localChangeMessageRef(older)]
 	svc.deliveryMu.RUnlock()
 	if !present {
 		t.Fatal("a stale publish deleted the newer status; the badge stops at delivered")
@@ -2151,7 +2158,7 @@ func TestStaleSnapshotDoesNotOverwriteANewerStatus(t *testing.T) {
 	// And a re-shed of the stale copy must not overwrite it either.
 	svc.keepShedEvent(ebus.TopicReceiptUpdated, older)
 	svc.deliveryMu.RLock()
-	kept = svc.pendingUIEvents[target]
+	kept = svc.pendingUIEvents[localChangeMessageRef(older)]
 	svc.deliveryMu.RUnlock()
 	if kept.event.Status != protocol.ReceiptStatusSeen {
 		t.Errorf("a re-shed stale copy moved the badge back to %q", kept.event.Status)
@@ -2159,11 +2166,11 @@ func TestStaleSnapshotDoesNotOverwriteANewerStatus(t *testing.T) {
 
 	// The newer one settling clears the debt.
 	svc.deliveryMu.RLock()
-	current := svc.pendingUIEvents[target]
+	current := svc.pendingUIEvents[localChangeMessageRef(older)]
 	svc.deliveryMu.RUnlock()
-	svc.forgetShedEvent(target, current.seq, newer.Status)
+	svc.forgetShedEvent(localChangeMessageRef(older), current.seq, newer.Status)
 	svc.deliveryMu.RLock()
-	_, stillOwed := svc.pendingUIEvents[target]
+	_, stillOwed := svc.pendingUIEvents[localChangeMessageRef(older)]
 	svc.deliveryMu.RUnlock()
 	if stillOwed {
 		t.Error("the settled debt was not removed")
@@ -2191,7 +2198,8 @@ func TestShedReceiptEventOutlivesTheRetryEntry(t *testing.T) {
 		Type:      protocol.LocalChangeReceiptUpdate,
 		Topic:     "dm",
 		MessageID: string(target),
-		Status:    protocol.ReceiptStatusDelivered,
+		Sender:    "peer-a", Recipient: svc.Address(),
+		Status: protocol.ReceiptStatusDelivered,
 	}
 
 	// A wedged subscriber on a REAL bus: the handler never returns, so the
@@ -2205,7 +2213,7 @@ func TestShedReceiptEventOutlivesTheRetryEntry(t *testing.T) {
 	}
 
 	svc.deliveryMu.RLock()
-	_, kept := svc.pendingUIEvents[target]
+	_, kept := svc.pendingUIEvents[localChangeMessageRef(event)]
 	svc.deliveryMu.RUnlock()
 	if !kept {
 		close(wedge)
@@ -2217,7 +2225,7 @@ func TestShedReceiptEventOutlivesTheRetryEntry(t *testing.T) {
 	now := time.Now().UTC()
 	svc.repairLocalDeliveryRecord(now.Add(deliveryAnnounceRetry + time.Second))
 	svc.deliveryMu.RLock()
-	_, stillKept := svc.pendingUIEvents[target]
+	_, stillKept := svc.pendingUIEvents[localChangeMessageRef(event)]
 	svc.deliveryMu.RUnlock()
 	if !stillKept {
 		close(wedge)
@@ -2230,7 +2238,7 @@ func TestShedReceiptEventOutlivesTheRetryEntry(t *testing.T) {
 	for {
 		svc.repairLocalDeliveryRecord(time.Now().UTC().Add(deliveryAnnounceRetry + time.Second))
 		svc.deliveryMu.RLock()
-		_, owed := svc.pendingUIEvents[target]
+		_, owed := svc.pendingUIEvents[localChangeMessageRef(event)]
 		svc.deliveryMu.RUnlock()
 		if !owed {
 			return

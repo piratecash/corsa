@@ -64,7 +64,7 @@ func TestStoreDeliveryReceipt_AcceptsSolicitedOwnIdentity(t *testing.T) {
 	svc.identity = id
 
 	// Record that we sent the message — now its receipt is solicited.
-	svc.sentDMIDs.Add("real-1")
+	svc.sentDMIDs.Add(deliveryMessageRef(svc.ownMessageIdentity("real-1", "some-peer")).Key())
 	stored := svc.storeDeliveryReceipt(ownIdentityReceipt("real-1", id.Address)).stored
 	if !stored {
 		t.Fatal("solicited own-identity receipt must be stored")
@@ -91,7 +91,7 @@ func TestStoreDeliveryReceipt_OwnBacklogCapped(t *testing.T) {
 	total := maxReceiptBacklogPerRecipient + 500
 	for i := 0; i < total; i++ {
 		mid := fmt.Sprintf("own-%d", i)
-		svc.sentDMIDs.Add(mid)
+		svc.sentDMIDs.Add(deliveryMessageRef(svc.ownMessageIdentity(protocol.MessageID(mid), "some-peer")).Key())
 		svc.storeDeliveryReceipt(ownIdentityReceipt(mid, id.Address))
 	}
 
@@ -126,7 +126,7 @@ func TestStoreDeliveryReceipt_EvictionClearsShadows(t *testing.T) {
 	// it.
 	recipient := id.Address
 	first := ownIdentityReceipt("evict-0", recipient)
-	svc.sentDMIDs.Add("evict-0")
+	svc.sentDMIDs.Add(deliveryMessageRef(madeByMessageRecipient(first)).Key())
 	svc.storeDeliveryReceipt(first)
 
 	// Plant a relayRetry entry under the receipt's key (an own-identity
@@ -143,7 +143,7 @@ func TestStoreDeliveryReceipt_EvictionClearsShadows(t *testing.T) {
 	// Overflow the cap by exactly one so `first` (the oldest) is evicted.
 	for i := 1; i <= maxReceiptBacklogPerRecipient; i++ {
 		mid := fmt.Sprintf("evict-%d", i)
-		svc.sentDMIDs.Add(mid)
+		svc.sentDMIDs.Add(deliveryMessageRef(svc.ownMessageIdentity(protocol.MessageID(mid), "some-peer")).Key())
 		svc.storeDeliveryReceipt(ownIdentityReceipt(mid, recipient))
 	}
 
@@ -258,25 +258,27 @@ func TestStoreDeliveryReceipt_DropsRaceReceiptWithoutTouchingState(t *testing.T)
 	const msgID = "race-msg-1"
 	const recipient = "offline-non-subscriber-identity"
 	svc.deliveryMu.Lock()
-	svc.outbound[msgID] = outboundDelivery{MessageID: msgID, Status: "queued"}
+	live := svc.ownMessageIdentity(msgID, recipient)
+	svc.outbound[live] = outboundDelivery{MessageID: msgID, Recipient: recipient, Status: "queued"}
 	svc.deliveryMu.Unlock()
 
 	// Non-self sender, non-self recipient, no active subscriber: the race where
 	// the recipient's last subscriber disconnected between the handler's
 	// hasSubscriber gate and the store. The receipt must be dropped cleanly.
-	stored := storedReceipt(svc, protocol.DeliveryReceipt{
+	receipt := protocol.DeliveryReceipt{
 		MessageID:   msgID,
 		Sender:      "some-other-peer",
 		Recipient:   recipient,
 		Status:      protocol.ReceiptStatusDelivered,
 		DeliveredAt: time.Now().UTC(),
-	})
+	}
+	stored := storedReceipt(svc, receipt)
 
 	if stored {
 		t.Fatal("a receipt for an offline non-subscriber recipient must report not-stored")
 	}
 	svc.deliveryMu.RLock()
-	_, outboundKept := svc.outbound[msgID]
+	_, outboundKept := svc.outbound[live]
 	_, buffered := svc.receipts[recipient]
 	svc.deliveryMu.RUnlock()
 	if !outboundKept {
@@ -285,7 +287,7 @@ func TestStoreDeliveryReceipt_DropsRaceReceiptWithoutTouchingState(t *testing.T)
 	if buffered {
 		t.Fatal("dropped race receipt must not be buffered")
 	}
-	if svc.seenReceipts.Has(recipient + ":" + msgID + ":delivered") {
+	if svc.seenReceipts.Has(receiptKeyOf(receipt)) {
 		t.Fatal("dropped race receipt must not poison the dedup set")
 	}
 }
