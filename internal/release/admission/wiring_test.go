@@ -401,9 +401,6 @@ func admissionKeyProblems(file, text string) []string {
 const releaseNotesBodyPath = "docs/release-notes/RELEASE-${{ github.ref_name }}.md"
 
 const (
-	releaseTestsRequiredIf         = "github.ref != 'refs/tags/v2.5.71'"
-	releaseTestsDeferredIf         = "github.ref == 'refs/tags/v2.5.71'"
-	releaseTestDeferralCommand     = "echo 'DEFERRED (not PASS): release tests for v2.5.71 by owner decision; ordinary Checks remain separate; S6 is not admitted.'"
 	releaseTestDependenciesCommand = `sudo apt-get update
 sudo apt-get install -y \
   libasound2-dev \
@@ -424,15 +421,15 @@ sudo apt-get install -y \
   libxxf86vm-dev`
 )
 
-// Only the tests job has a tag-specific step policy. Its job and all publishing
-// dependencies still use the ordinary success path; no job-level bypass exists.
+// Every release tag must run the same seven unconditional setup/test steps.
+// No version, environment or notice may replace actual test execution.
 func releaseTestPolicyProblems(file string, job map[string]*yaml.Node) []string {
 	steps := job["steps"]
-	if steps == nil || steps.Kind != yaml.SequenceNode || len(steps.Content) != 8 {
-		return []string{file + ": release test policy must retain checkout, one notice and all six future-release setup/test steps"}
+	if steps == nil || steps.Kind != yaml.SequenceNode || len(steps.Content) != 7 {
+		return []string{file + ": release tests must retain checkout and all six unconditional setup/test steps"}
 	}
 	var problems []string
-	checkout, notice, setupGo, setupPython := 0, 0, 0, 0
+	checkout, setupGo, setupPython := 0, 0, 0
 	allowedCommands := []string{releaseTestDependenciesCommand,
 		"python scripts/test-test-release.py\npython scripts/test-report-candidate-artifacts.py",
 		"make test-release", "make test-cgo"}
@@ -451,38 +448,30 @@ func releaseTestPolicyProblems(file string, job map[string]*yaml.Node) []string 
 		if n := step["run"]; n != nil {
 			run = strings.TrimSpace(n.Value)
 		}
-		condition := releaseTestsRequiredIf
 		switch {
 		case strings.HasPrefix(uses, "actions/checkout@"):
 			checkout++
 			problems = append(problems, unexpectedKeys(where, step, []string{"name", "uses"})...)
 			continue // Exact source checkout is unconditional on every tag.
-		case run == releaseTestDeferralCommand:
-			notice++
-			condition = releaseTestsDeferredIf
-			problems = append(problems, unexpectedKeys(where, step, []string{"name", "run", "if"})...)
 		case strings.HasPrefix(uses, "actions/setup-go@"):
 			setupGo++
-			problems = append(problems, unexpectedKeys(where, step, []string{"name", "uses", "with", "if"})...)
+			problems = append(problems, unexpectedKeys(where, step, []string{"name", "uses", "with"})...)
 			problems = append(problems, exactWith(step, map[string]string{"go-version-file": "go.mod"}, []string{"cache"})...)
 		case strings.HasPrefix(uses, "actions/setup-python@"):
 			setupPython++
-			problems = append(problems, unexpectedKeys(where, step, []string{"name", "uses", "with", "if"})...)
+			problems = append(problems, unexpectedKeys(where, step, []string{"name", "uses", "with"})...)
 			problems = append(problems, exactWith(step, map[string]string{"python-version": "3.12"}, nil)...)
 		case uses == "" && slices.Contains(allowedCommands, run):
-			problems = append(problems, unexpectedKeys(where, step, []string{"name", "run", "shell", "if"})...)
+			problems = append(problems, unexpectedKeys(where, step, []string{"name", "run", "shell"})...)
 			if shell := step["shell"]; shell != nil && (shell.Kind != yaml.ScalarNode || shell.Value != "bash") {
 				problems = append(problems, where+": shell must be the default or bash")
 			}
 		default:
 			problems = append(problems, where+": unexpected setup or command step")
 		}
-		if n := step["if"]; n == nil || n.Kind != yaml.ScalarNode || n.Value != condition {
-			problems = append(problems, fmt.Sprintf("%s: if must be exactly %q", where, condition))
-		}
 	}
-	if checkout != 1 || notice != 1 || setupGo != 1 || setupPython != 1 {
-		problems = append(problems, file+": release test policy must retain one unconditional checkout, one notice and both future-release toolchain setups")
+	if checkout != 1 || setupGo != 1 || setupPython != 1 {
+		problems = append(problems, file+": release tests must retain one unconditional checkout and both toolchain setups")
 	}
 	return problems
 }
@@ -516,8 +505,8 @@ func releaseBodyProblems(file string, w workflow) []string {
 	return problems
 }
 
-// releaseCheckProblems keeps the interim test deferral distinct from passing
-// tests. Future releases still require real tests; lint/build/admission stay gated.
+// releaseCheckProblems requires actual tests on every release tag. Artifacts
+// cannot publish around failed or skipped test, lint or admission jobs.
 func releaseCheckProblems(file, text string, w workflow) []string {
 	var problems []string
 	requireNeeds := func(name string, required ...string) {
@@ -578,7 +567,7 @@ func releaseCheckProblems(file, text string, w workflow) []string {
 		problems = append(problems, releaseTestPolicyProblems(file, job)...)
 	}
 	// Exact commands retain their exit status, default working directory and
-	// real shell. Only tests take the exact inverse of the v2.5.71 notice guard.
+	// real shell. No step condition, env, alternate shell or error masking.
 	requireCommand := func(name, command string) {
 		job, _ := mappingOf(jobs[name])
 		steps := job["steps"]
@@ -591,14 +580,7 @@ func releaseCheckProblems(file, text string, w workflow) []string {
 				}
 				count++
 				where := fmt.Sprintf("%s: job %q command %q", file, name, command)
-				allowed := []string{"name", "run", "shell"}
-				if name == "tests" {
-					allowed = append(allowed, "if")
-					if n := step["if"]; n == nil || n.Kind != yaml.ScalarNode || n.Value != releaseTestsRequiredIf {
-						problems = append(problems, where+": future-release test guard changed")
-					}
-				}
-				problems = append(problems, unexpectedKeys(where, step, allowed)...)
+				problems = append(problems, unexpectedKeys(where, step, []string{"name", "run", "shell"})...)
 				if shell := step["shell"]; shell != nil && (shell.Kind != yaml.ScalarNode || shell.Value != "bash") {
 					problems = append(problems, where+": shell must be the default or bash")
 				}
@@ -900,8 +882,8 @@ func TestReleaseChecksAndPlatformCoverageCannotBeBypassed(t *testing.T) {
 		{"cgo step allows failure", "run: make test-cgo", "run: make test-cgo\n        continue-on-error: true"},
 		{"test step dry run environment", "run: make test-release", "run: make test-release\n        env:\n          MAKEFLAGS: -n"},
 		{"test step false shell", "run: make test-release", "run: make test-release\n        shell: \"true {0}\""},
-		{"tests job dry run environment", "    name: Release test policy\n", "    name: Release test policy\n    env:\n      MAKEFLAGS: -n\n"},
-		{"tests job write token", "    name: Release test policy\n", "    name: Release test policy\n    permissions:\n      contents: write\n"},
+		{"tests job dry run environment", "    name: Release tests\n", "    name: Release tests\n    env:\n      MAKEFLAGS: -n\n"},
+		{"tests job write token", "    name: Release tests\n", "    name: Release tests\n    permissions:\n      contents: write\n"},
 		{"preflight controls skipped", "python scripts/test-test-release.py\n          python scripts/test-report-candidate-artifacts.py", "echo skipped"},
 		{"linux daemon skipped", "make build-node-linux-amd64", "echo skipped"},
 		{"matrix invocation skipped", "run: ${{ matrix.build_cmds }}", "run: echo skipped"},
@@ -928,44 +910,28 @@ func TestReleaseChecksAndPlatformCoverageCannotBeBypassed(t *testing.T) {
 		})
 	}
 	old := jobBlock("tests")
-	guardLine := "        if: " + releaseTestsRequiredIf + "\n"
-	if strings.Count(old, guardLine) != 6 {
-		t.Fatal("release tests must have exactly six future-release setup/test guards")
-	}
-	offset := 0
-	for i := 0; i < 6; i++ {
-		at := strings.Index(old[offset:], guardLine) + offset
-		cases = append(cases, struct{ name, old, replacement string }{
-			fmt.Sprintf("test policy step %d loses tag guard", i), old, old[:at] + old[at+len(guardLine):],
-		})
-		offset = at + len(guardLine)
-	}
 	for _, mutation := range []struct{ name, old, replacement string }{
-		{"test waiver extends to future tags", releaseTestsRequiredIf, "!startsWith(github.ref, 'refs/tags/v2.5.')"},
-		{"future release tests disabled", releaseTestsRequiredIf, "false"},
-		{"tests also run on deferred tag", releaseTestsRequiredIf, "true"},
-		{"test waiver driven by environment", releaseTestsRequiredIf, "env.SKIP_TESTS != '1'"},
-		{"notice not exact tag", releaseTestsDeferredIf, "startsWith(github.ref, 'refs/tags/v2.5.')"},
-		{"notice disabled", releaseTestsDeferredIf, "false"},
-		{"notice claims test pass", releaseTestDeferralCommand, "echo 'tests passed'"},
-		{"notice secretly runs tests", releaseTestDeferralCommand, releaseTestDeferralCommand + "; make test-release"},
-		{"dependency setup poisons future test commands", strings.ReplaceAll(releaseTestDependenciesCommand, "\n", "\n          "), "echo 'MAKEFLAGS=-n' >> \"$GITHUB_ENV\""},
-		{"extra unconditional test step", "    steps:\n", "    steps:\n      - run: make test-cgo\n"},
+		{"retired 2.5.71 test waiver", "run: make test-release", "run: make test-release\n        if: github.ref != 'refs/tags/v2.5.71'"},
+		{"retired 2.5.71 cgo waiver", "run: make test-cgo", "run: make test-cgo\n        if: github.ref != 'refs/tags/v2.5.71'"},
+		{"test waiver driven by environment", "run: make test-release", "run: make test-release\n        if: env.SKIP_TESTS != '1'"},
+		{"dependency setup poisons test commands", strings.ReplaceAll(releaseTestDependenciesCommand, "\n", "\n          "), "echo 'MAKEFLAGS=-n' >> \"$GITHUB_ENV\""},
+		{"extra test notice instead of required steps", "    steps:\n", "    steps:\n      - run: echo 'tests deferred'\n"},
 		{"test checkout conditionally disabled", "      - name: Checkout\n", "      - name: Checkout\n        if: false\n"},
-		{"tests policy job conditional", "    name: Release test policy\n", "    name: Release test policy\n    if: always()\n"},
+		{"test setup conditionally disabled", "      - name: Setup Go\n", "      - name: Setup Go\n        if: false\n"},
+		{"tests job conditional", "    name: Release tests\n", "    name: Release tests\n    if: always()\n"},
 	} {
-		if !strings.Contains(old, mutation.old) {
+		if strings.Count(old, mutation.old) != 1 {
 			t.Fatalf("update test policy mutation %q", mutation.name)
 		}
 		cases = append(cases, struct{ name, old, replacement string }{
-			mutation.name, old, strings.ReplaceAll(old, mutation.old, mutation.replacement),
+			mutation.name, old, strings.Replace(old, mutation.old, mutation.replacement, 1),
 		})
 	}
 	cases = append(cases, struct{ name, old, replacement string }{
 		"tests drops admission", old, strings.Replace(old, "    needs: admission\n", "", 1),
 	})
 	cases = append(cases, struct{ name, old, replacement string }{
-		"tests job failure ignored", old, strings.Replace(old, "    name: Release test policy\n", "    name: Release test policy\n    continue-on-error: true\n", 1),
+		"tests job failure ignored", old, strings.Replace(old, "    name: Release tests\n", "    name: Release tests\n    continue-on-error: true\n", 1),
 	})
 	if problems := workflowProblems(releaseWorkflowFile, original, true); len(problems) != 0 {
 		t.Fatalf("unmodified release checks have problems: %v", problems)

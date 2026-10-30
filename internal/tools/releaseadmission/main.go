@@ -7,8 +7,6 @@
 //
 // -tag is the release tag being published; the workflow passes the pushed
 // tag, and a tag that is not the build's version is refused.
-// Explicit v2.5.71 may instead use its separately committed, content-bound
-// interim publication approval; the report still lists uncompleted S6 work.
 package main
 
 import (
@@ -54,13 +52,6 @@ func run(ctx context.Context, args []string, out io.Writer, manifestPath string,
 	req, err := parseRequest(args)
 	if err != nil {
 		return err
-	}
-	if admission.InterimEligible(req) {
-		if reader, ok := history.(interimReader); ok {
-			if handled, err := runInterim(ctx, req, out, manifestPath, reader); handled {
-				return err
-			}
-		}
 	}
 	verdict, err := admission.Admit(ctx, manifestPath, req, history)
 	if reportErr := reportDeferred(out, verdict); reportErr != nil {

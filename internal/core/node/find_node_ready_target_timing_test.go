@@ -46,8 +46,11 @@ func TestOwnedReadyTargetTimingFourGenuineSources(t *testing.T) {
 	targetReady, target, ninClock := readyTimedTargetForTest(t, arrived, release)
 	targetID := domain.PeerIdentityFromWire(target.identity.Address)
 	var chains [4]*readyThreeNodeChain
+	// Four real reads and relay rounds remain concurrent. Only their target
+	// receipt clock sections are serialized; no receipt or timestamp is supplied.
+	var targetReceiptMu sync.Mutex
 	for i := range chains {
-		x := &readyThreeNodeChain{target: target, targetReady: targetReady, targetID: targetID, answers: make(chan string, 4), forwarded: make(chan protocol.FindNodeRequest, 4), errors: make(chan error, 4), receivedTimes: make(chan int64, 1), targetDispatchDone: make(chan struct{}), gate: &readyChainTargetGate{arrived: make(chan struct{}), release: make(chan struct{})}, clock: new(atomic.Int64)}
+		x := &readyThreeNodeChain{target: target, targetReady: targetReady, targetID: targetID, answers: make(chan string, 4), forwarded: make(chan protocol.FindNodeRequest, 4), errors: make(chan error, 4), receivedTimes: make(chan int64, 1), targetDispatchDone: make(chan struct{}), targetReceiptMu: &targetReceiptMu, gate: &readyChainTargetGate{arrived: make(chan struct{}), release: make(chan struct{})}, clock: new(atomic.Int64)}
 		x.initiator, _, _ = ownedCaptureTestService(t, 8, 8, 16)
 		x.relayReady, x.relay, _ = readyChainBuild(t, true)
 		x.sourceWire = d1InitiatorPair(t, x.initiator, x.relay, true, true)

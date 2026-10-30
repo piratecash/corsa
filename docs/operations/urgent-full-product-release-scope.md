@@ -1,6 +1,6 @@
 # Current DEV: full-product release scope and remaining blockers
 
-> **Superseding decision, 2026-10-30:** Release v2.5.71 runs no product, Python-preflight or CGO tests. Exact admission, lint and five product builds remain required. Ordinary Checks are independent; failed/deferred tests are not PASS. See the [version-specific publication scope](../release.md#interim-2571-publication--2026-10-30). The earlier two-test D1 selector deferral is separate from this full Release-workflow deferral.
+> **After publication, 2026-10-30:** the owner requested removal of the temporary v2.5.71 admission and test exceptions from DEV. Future release attempts return to ordinary S6 admission and mandatory tests; all Node diagnostics run again. The published release is unchanged. Only the separate overlaysim deferral remains. See [current policy](../release.md#current-dev-policy-after-2571--2026-10-30).
 
 
 The owner selected **current DEV plus necessary regression fixes** for the

@@ -42,6 +42,9 @@ type readyThreeNodeChain struct {
 	// Optional close-only testcase observation AFTER original target dispatch
 	// returns; no receipt, clock, result or admission is supplied by this channel.
 	targetDispatchDone chan struct{}
+	// Optional scheduling only for concurrent target receipt tests. The original
+	// bounded read stays outside this lock; the real receive point is sampled once.
+	targetReceiptMu *sync.Mutex
 }
 
 // Like f1PrepareActualCM, this fixture supplies a real accepted socket reader
@@ -71,7 +74,22 @@ func readyChainStartCM(t *testing.T, chain *readyThreeNodeChain, pair f1ProofFix
 		defer close(serverDone)
 		reader := bufio.NewReader(core.Conn())
 		for {
-			line, receipt, claimed, receiveErr, readErr := accepted.readInboundOwnedFindNodeLine(reader, pair.inbound.id, pair.inbound)
+			var line string
+			var receipt ownedFindNodeReceive
+			var claimed bool
+			var receiveErr, readErr error
+			if target && chain.targetReceiptMu != nil {
+				// The same two production read/record operations as the wrapper below,
+				// with only the competing receive-point clock sections ordered.
+				line, readErr = accepted.readInboundCommandLineOwned(reader, pair.inbound.id, pair.inbound)
+				if readErr == nil {
+					chain.targetReceiptMu.Lock()
+					receipt, claimed, receiveErr = accepted.recordOwnedFindNodeLine(pair.inbound, line)
+					chain.targetReceiptMu.Unlock()
+				}
+			} else {
+				line, receipt, claimed, receiveErr, readErr = accepted.readInboundOwnedFindNodeLine(reader, pair.inbound.id, pair.inbound)
+			}
 			if readErr != nil {
 				if accepted.runCtx.Err() == nil {
 					report(fmt.Errorf("original accepted chain read: %w", readErr))

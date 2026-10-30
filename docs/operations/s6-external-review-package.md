@@ -15,15 +15,20 @@ This is a preparation package for `crypto_review` and the Windows part of
 It records review scope and proposed execution inputs. No expert verdict, native Windows run,
 resource authorisation, production deployment or release approval is supplied here.
 
-The current preliminary source input is committed Corsa **v2.5.71**, protocol 31/minimum 28,
-commit **`bf449d1c2505ca40ed78c3483ab125708cdc7793`**, Git tree
-`420a4ddae43b8baeab1d9f5dc47abc0f71e565f4`, using Go 1.27.3. Give the expert this exact
+The current preliminary source input is published Corsa **v2.5.71**, protocol 31/minimum 28,
+commit **`f8139aa949df89e3f51f0a240eaf440b6f171255`**, Git tree
+`ae3c48feb51c8b7ae46ee1601d1545a37aef7a6c`, using Go 1.27.3. Give the expert this exact
 commit rather than a mutable DEV branch. This is not an assertion that a final candidate or
 binary has been admitted. Changes made after it, including this package refresh, belong to a
 later candidate and must be named in the final review or an attributable affected-path addendum.
 The manifest has **17 conditions: 7 done, 2 partial, 7 not_done and 1 deferred**;
 `release_decision` is `null`, `crypto_review` is `not_done` with no evidence and
 `unsafe_pin_store_refusal` is `partial`.
+
+This published input lets the independent expert start now. Its interim publication
+is not crypto acceptance. DEV is removing that temporary admission and repairing
+test fixtures; the eventual S6 commit needs a report or an attributable affected-path
+addendum. Supply the expert the immutable commit and this package, not a moving branch.
 
 The old MAIN2047 snapshot based on `c17a4961689c9e8c33bd5681ea7c7ec577bb53cf`
 (manifest SHA-256 `4dee2cbd54685ac0076afa325e0c65bf0326ffd465f28f71cb7ce069910efb80`)
@@ -159,8 +164,8 @@ to `done`. Final notes and candidate rechecks remain required by the manifest.
 Здесь нет заключения эксперта, настоящего Windows-прогона, разрешения ресурса, deployment или выпуска.
 
 Текущий предварительный исходный срез — закоммиченный Corsa **v2.5.71**, protocol 31/minimum 28,
-commit **`bf449d1c2505ca40ed78c3483ab125708cdc7793`**, Git tree
-`420a4ddae43b8baeab1d9f5dc47abc0f71e565f4`, Go 1.27.3. Эксперту передаётся точный commit,
+commit **`f8139aa949df89e3f51f0a240eaf440b6f171255`**, Git tree
+`ae3c48feb51c8b7ae46ee1601d1545a37aef7a6c`, Go 1.27.3. Эксперту передаётся точный commit,
 а не изменяемая ветка DEV. Это не подтверждает допуск финального кандидата или binary.
 Изменения после него, включая обновление этого пакета, относятся к следующему кандидату;
 окончательный отчёт или атрибутируемое дополнение по затронутым путям должны назвать его.
@@ -173,6 +178,12 @@ commit **`bf449d1c2505ca40ed78c3483ab125708cdc7793`**, Git tree
 
 Принимаемый отчёт называет полный 40-символьный commit кандидата, фактические исходники и
 проверенные binary inputs (явно указать отсутствие binary review при source-only экспертизе).
+Независимую экспертизу этого опубликованного среза можно начать сейчас. Передать
+эксперту полный commit SHA и этот пакет. Промежуточная публикация не является
+криптоэкспертизой. DEV удаляет временный admission и исправляет test fixtures;
+итоговый S6-коммит потребует отдельного отчёта или атрибутируемого дополнения
+по затронутым путям. Не подменять точный коммит меняющейся веткой.
+
 Предварительную проверку этого среза нельзя переименовать в final-candidate acceptance.
 [Гейт выпуска](../release.md) требует всех условий и отдельного решения владельца о конкретной
 версии. После проверенного candidate commit без повторения затронутых проверок разрешены только

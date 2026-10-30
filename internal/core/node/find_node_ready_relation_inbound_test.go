@@ -46,6 +46,27 @@ type readyRelationStrictHold struct {
 
 func (h *readyRelationStrictHold) unblock() { h.once.Do(func() { close(h.release) }) }
 
+// The original socket Write runs with its unchanged production deadline. Only
+// its successful return is held, before NetCore can publish the writer ACK.
+// This is post-wire/pre-writer-completion scheduling, not a network timing bound.
+// The embedded fixture retains its original Close/stopped cleanup behavior.
+type readyRelationWriteReturnConn struct{ *r2aGatedConn }
+
+func (c *readyRelationWriteReturnConn) Write(p []byte) (int, error) {
+	armed := c.gate.armed.Load()
+	n, err := c.Conn.Write(p)
+	if err != nil || !armed {
+		return n, err
+	}
+	c.gate.once.Do(func() { close(c.gate.entered) })
+	select {
+	case <-c.gate.release:
+		return n, nil
+	case <-c.stopped:
+		return n, net.ErrClosed
+	}
+}
+
 func readyRelationBuild(t *testing.T, hold *readyRelationStrictHold) *readyRelationFixture {
 	t.Helper()
 	peer, address, stopPeer := listenerNode(t, withoutOwnDials(nil))
@@ -78,7 +99,7 @@ func readyRelationBuild(t *testing.T, hold *readyRelationStrictHold) *readyRelat
 		if err != nil {
 			return nil, err
 		}
-		return &r2aGatedConn{Conn: c, gate: gate, stopped: make(chan struct{})}, nil
+		return &readyRelationWriteReturnConn{r2aGatedConn: &r2aGatedConn{Conn: c, gate: gate, stopped: make(chan struct{})}}, nil
 	}
 	if hold != nil {
 		original := s.identityResolver.recordAdmission.openFiles
@@ -267,8 +288,8 @@ func readyRelationPreserved(t *testing.T, f *readyRelationFixture, before *ninJo
 
 func TestOwnedReadyRelationInboundActualACKAndStrictCoexist(t *testing.T) {
 	f := readyRelationBuild(t, nil)
-	x, receipt := readyRelationPending(t, f)
 	before := readyRelationMature(t, f)
+	x, receipt := readyRelationPending(t, f)
 	f.dm.wire.unblock()
 	ownDMAdmissionSettled(t, f.dm, 2)
 	select {
@@ -287,8 +308,8 @@ func TestOwnedReadyRelationInboundActualACKAndStrictCoexist(t *testing.T) {
 
 func TestOwnedReadyRelationInboundCancelledBeforeACKPreservesNin(t *testing.T) {
 	f := readyRelationBuild(t, nil)
-	x, receipt := readyRelationPending(t, f)
 	before := readyRelationMature(t, f)
+	x, receipt := readyRelationPending(t, f)
 	stamp := receipt.r2Submission.r2Result.stamp
 	if _, err := f.dm.svc.CancelOutgoingDelivery(stamp.prepared.message.ID, domain.PeerIdentityFromWire(x.Address)); err != nil {
 		t.Fatal(err)
@@ -306,8 +327,8 @@ func TestOwnedReadyRelationInboundCancelledBeforeACKPreservesNin(t *testing.T) {
 func TestOwnedReadyRelationInboundRunJoinsOriginalStrictReturn(t *testing.T) {
 	h := &readyRelationStrictHold{entered: make(chan struct{}), written: make(chan error, 1), release: make(chan struct{}), returned: make(chan struct{})}
 	f := readyRelationBuild(t, h)
-	_, receipt := readyRelationPending(t, f)
 	before := readyRelationMature(t, f)
+	_, receipt := readyRelationPending(t, f)
 	var worker, run uint64
 	t.Cleanup(func() {
 		f.cancel()

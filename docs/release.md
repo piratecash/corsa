@@ -1,92 +1,44 @@
 # Releases
 
+## Current DEV policy after 2.5.71 — 2026-10-30
+
+The interim release [v2.5.71](https://github.com/piratecash/corsa/releases/tag/v2.5.71)
+was published from `f8139aa949df89e3f51f0a240eaf440b6f171255` with an explicit,
+version-specific test deferral. That history is retained in its release notes.
+DEV removes that admission exception, its approval file and every tag-specific
+test skip. All future release attempts use the ordinary 17-condition S6 gate,
+mandatory product tests, Python controls, CGO tests, lint and five platform builds.
+The published tag and its artifacts are unchanged. S6 and D1/G2 remain incomplete.
+
+Checks runs on every push to `dev` and `master`, and on pull requests. Tests runs
+independently of lint. A push checks its final commit, not each intermediate commit
+in a bulk push. `make test-release` runs all Node tests without version or tag
+exceptions. Only `internal/overlaysim` retains its separately approved D1 deferral;
+ordinary `make test` / `make test-all` still include it. No deferred result is PASS.
+
+**Текущая политика DEV после 2.5.71:** опубликованный промежуточный выпуск и его
+артефакты сохранены. Временный admission, его approval-файл и пропуски тестов по
+тегу удаляются из DEV. Будущие выпуски требуют обычный gate из 17 условий S6,
+продуктовые/Python/CGO-тесты, lint и пять платформенных сборок. Все Node-тесты снова
+обязательны; только отдельная отсрочка overlaysim до D1 сохраняется. S6 и D1/G2
+не завершены. Checks выполняется на push в dev/master и PR, Tests независим от lint;
+для bulk push проверяется последний SHA. Пропуск не считается PASS.
+
 ## Interim 2.5.71 publication — 2026-10-30
 
-The owner requested deployment of **2.5.71 before completing S6**. This one
-publication uses the separate, content-bound policy in
-`packaging/interim-release-v2.5.71.json`. It does not complete the ordinary
-17-condition S6 manifest or grant D1/G2 activation. The historical S6 requirements
-below remain the normal policy for subsequent releases and tagless Android builds.
+Historical scope only: the owner approved release without product, Python and
+CGO test execution, while admission, lint and all five builds remained mandatory.
+The successful Release run is [40978571833](https://github.com/piratecash/corsa/actions/runs/40978571833).
+The archived [approval](https://github.com/piratecash/corsa/blob/f8139aa949df89e3f51f0a240eaf440b6f171255/packaging/interim-release-v2.5.71.json)
+is bound to that published tree. It is no longer a DEV publication path. The
+release did not complete S6, independent crypto review, Windows/DACL or Tor checks,
+D1/G2 activation or full-load 512 MB acceptance. Failed and skipped tests remain
+unverified; this publication is not a green product-suite result.
 
-This exception applies only to explicit `RELEASE_TAG=v2.5.71`, release 2.5.71,
-protocol 31, minimum 28 and secure-session activation 31. Its approval lists the
-actual outstanding and deferred conditions; any change to that list refuses.
-Independent cryptographic review, final latency/load measurements, unsafe-store
-final-candidate checks, measured loopback budgets, owner session choices,
-observation plan, final-candidate checks and release-note acceptance remain
-uncompleted S6 obligations. Native Windows/DACL and Tor remain UNVERIFIED.
-TLSv2, pins, downgrade protections and storage schema 8 remain active.
-
-The approval binds the canonical SHA-256 of every tracked path, executable mode
-and raw file body, excluding only the approval file itself to avoid recursive
-hashing. The approval must itself be committed, regular and unchanged. Worktree
-bytes and modes, the index, untracked inputs, HEAD, the peeled tag and GitHub event
-must agree. Only the existing `.gocache/` and `.gomodcache/` caches are excluded
-from the untracked-input check. A changed source or workflow needs a new digest
-and owner review. The tool reports the actual full commit and **S6 admitted: false**.
-
-**Owner's updated scope — Release workflow for 2.5.71 only:** publication requires
-the exact content-bound admission gate, lint and all five daemon + Desktop
-platform builds. This Release workflow runs **no product tests, Python preflight
-tests or CGO SQLite tests**. Ordinary Checks still run independently; their test
-results are not a publication dependency for this version. Subsequent versions
-retain the normal mandatory release tests, Python controls and CGO checks. This
-specific exception supersedes earlier testing requirements below only for the
-2.5.71 Release workflow; skipped tests are not PASS and the full suite is not green.
-
-Checks runs on every push to `dev` and `master`, and on pull requests. Its Tests
-job runs independently of lint, so a lint failure does not prevent the tests from
-starting. Each push checks its final commit; a push containing several commits
-does not create a separate run for each intermediate commit.
-
-The earlier `test-release` selector scope remains unchanged:
-`internal/overlaysim` is deferred to D1, never PASS. For source version
-**2.5.71 only**, exactly two inactive D1 diagnostics are also deferred:
-`TestOwnedReadyTargetTimingFourGenuineSources` and
-`TestOwnedReadyNormalTimedFactoryLoadsOriginalAndSignsWithoutGate`.
-The first failed before its target read gate with a lawful `bridge domain: busy`
-refusal; the second has no separately established passing result in that run.
-Both remain required for D1 repair and acceptance. When invoked outside this
-Release workflow, `test-release` still reports them as DEFERRED, runs every other
-Node test, and passes no skip option to other packages. Other source versions and
-ordinary `make test` / `make test-all` retain both tests. TLSv2, pins and storage
-schema 8 remain active; this publication exception grants no D1/G2 activation.
-Android is separate. These are requirements, not claims that the new commit has
-passed them. The owner-reported file-transfer failure remains unresolved: this
-test exception neither fixes it nor records it as PASS.
-
-The owner reviews and commits the versioned approval with this disclosed scope,
-then explicitly selects that commit for the tag. Re-running an older failed tag
-cannot load newer source. Agents do not move tags or publish the release.
-
-**Промежуточный выпуск 2.5.71:** это отдельный допуск до завершения S6.
-Незавершённые условия не получают PASS; криптоэкспертиза и итоговая ресурсная
-приёмка остаются открытыми. Действующие TLSv2/pins и ограничения отката schema 8
-сохраняются. Владелец подтверждает конкретное содержимое своим коммитом и выбором
-тега после просмотра этого ограничения. Будущие версии возвращаются к обычному
-допуску S6.
-
-По уточнённому решению владельца только workflow **Release для 2.5.71** требует
-точный content-bound admission gate, lint и все пять платформенных сборок
-демона + Desktop, но **не запускает продуктовые тесты, Python preflight-тесты
-или CGO SQLite-тесты**. Обычные Checks продолжают выполняться независимо;
-результаты их тестов не блокируют публикацию этой версии. Для последующих версий
-обязательные release-тесты, Python controls и CGO-проверки сохраняются. Это
-исключение заменяет прежние требования к тестированию ниже только для Release
-2.5.71: пропуск не означает PASS, полный набор тестов не зелёный.
-
-Checks запускается на каждый push в `dev` и `master`, а также для pull requests.
-Задача Tests не зависит от lint: ошибка lint не отменяет запуск тестов. Проверяется
-последний коммит push; несколько коммитов в одном push не создают отдельные
-запуски для каждого промежуточного коммита.
-
-Прежние отсрочки `test-release` до ремонта D1 сохраняются: overlaysim и, только
-для версии исходников 2.5.71, два названных выше inactive D1 diagnostics получают
-DEFERRED, не PASS. При отдельном запуске `test-release` выполняет остальные
-Node-тесты и не передаёт skip другим пакетам; другие версии и обычные `make test`
-/ `make test-all` сохраняют оба теста. Активация D1/G2 не разрешается. Сообщённая
-владельцем ошибка передачи файлов остаётся неисправленной; исключение из тестов
-не устраняет её и не превращает в PASS. Android по-прежнему отдельно.
+Историческая область: владелец разрешил опубликовать 2.5.71 без продуктовых,
+Python и CGO-тестов с сохранением admission, lint и пяти сборок. Этот допуск
+относится к опубликованному срезу, а не к последующей работе DEV; S6, D1/G2 и
+ресурсная приёмка им не закрыты. Отказы и пропуски не переименованы в PASS.
 
 > **Current S6 release scope — 2026-10-29.** The
 > [urgent full-product scope](operations/urgent-full-product-release-scope.md)

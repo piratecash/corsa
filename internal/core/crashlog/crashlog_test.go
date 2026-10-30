@@ -7,6 +7,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 )
 
 func TestRecoverAndLogWritesCrashFile(t *testing.T) {
@@ -81,6 +84,7 @@ func TestCleanOldCrashLogs(t *testing.T) {
 }
 
 func TestSetupLogsStartupEvent(t *testing.T) {
+	preserveCrashlogProcessState(t)
 	dir := t.TempDir()
 	t.Setenv("CORSA_CHATLOG_DIR", dir)
 
@@ -104,6 +108,7 @@ func TestSetupLogsStartupEvent(t *testing.T) {
 }
 
 func TestRedirectStderrCreatesFile(t *testing.T) {
+	preserveCrashlogProcessState(t)
 	dir := t.TempDir()
 
 	f := redirectStderr(dir)
@@ -131,6 +136,7 @@ func TestRedirectStderrCreatesFile(t *testing.T) {
 }
 
 func TestSetupCreatesStderrLog(t *testing.T) {
+	preserveCrashlogProcessState(t)
 	dir := t.TempDir()
 	t.Setenv("CORSA_CHATLOG_DIR", dir)
 
@@ -240,6 +246,7 @@ func TestFileLogFormatDefaultsToConsole(t *testing.T) {
 }
 
 func TestSetupWritesConsoleFormatByDefault(t *testing.T) {
+	preserveCrashlogProcessState(t)
 	dir := t.TempDir()
 	t.Setenv("CORSA_CHATLOG_DIR", dir)
 	t.Setenv(envLogFormat, "")
@@ -260,6 +267,7 @@ func TestSetupWritesConsoleFormatByDefault(t *testing.T) {
 }
 
 func TestSetupWritesJSONWhenRequested(t *testing.T) {
+	preserveCrashlogProcessState(t)
 	dir := t.TempDir()
 	t.Setenv("CORSA_CHATLOG_DIR", dir)
 	t.Setenv(envLogFormat, "json")
@@ -277,6 +285,7 @@ func TestSetupWritesJSONWhenRequested(t *testing.T) {
 }
 
 func TestSetupRemovesLegacyRotatedLogs(t *testing.T) {
+	preserveCrashlogProcessState(t)
 	dir := t.TempDir()
 	t.Setenv("CORSA_CHATLOG_DIR", dir)
 
@@ -291,4 +300,17 @@ func TestSetupRemovesLegacyRotatedLogs(t *testing.T) {
 	if _, err := os.Stat(legacyPath); !os.IsNotExist(err) {
 		t.Fatal("Setup() must remove legacy corsa.log.* copies")
 	}
+}
+
+// Setup and redirectStderr intentionally mutate process-wide logging state.
+// These tests are sequential; restore that state before testing emits the
+// test's terminal event, including when an original assertion calls Fatal.
+func preserveCrashlogProcessState(t *testing.T) {
+	t.Helper()
+	preserveCrashlogStderr(t)
+	logger, level := log.Logger, zerolog.GlobalLevel()
+	t.Cleanup(func() {
+		log.Logger = logger
+		zerolog.SetGlobalLevel(level)
+	})
 }

@@ -75,7 +75,7 @@ jobs:
         run: make lint
 
   tests:
-    name: Release test policy
+    name: Release tests
     runs-on: ubuntu-latest
     needs: admission
     timeout-minutes: 45
@@ -83,26 +83,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Record interim test deferral
-        if: github.ref == 'refs/tags/v2.5.71'
-        run: |
-          echo 'DEFERRED (not PASS): release tests for v2.5.71 by owner decision; ordinary Checks remain separate; S6 is not admitted.'
-
       - name: Setup Go
-        if: github.ref != 'refs/tags/v2.5.71'
         uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
           cache: true
 
       - name: Setup Python for preflight controls
-        if: github.ref != 'refs/tags/v2.5.71'
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
       - name: Install Linux desktop build deps
-        if: github.ref != 'refs/tags/v2.5.71'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -124,17 +116,14 @@ jobs:
             libxxf86vm-dev
 
       - name: Check release test scope and artifact report refusals
-        if: github.ref != 'refs/tags/v2.5.71'
         run: |
           python scripts/test-test-release.py
           python scripts/test-report-candidate-artifacts.py
 
       - name: Run applicable release tests (overlaysim deferred to D1)
-        if: github.ref != 'refs/tags/v2.5.71'
         run: make test-release
 
       - name: Run storage tests against the cgo SQLite driver
-        if: github.ref != 'refs/tags/v2.5.71'
         run: make test-cgo
 
   build-linux:

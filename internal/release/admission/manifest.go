@@ -3,9 +3,7 @@
 // published only once every condition listed in the committed manifest is
 // met, each with evidence, a separate owner decision to release that version
 // is recorded, and the tree is the final candidate plus release inputs.
-// The separate content-bound interim 2.5.71 publication policy is defined in
-// interim.go; it does not mark these conditions complete. A build below the
-// activation the manifest records is refused, so turning the
+// A build below the activation the manifest records is refused, so turning the
 // session off is no way around the conditions. The decision is fail-closed:
 // a missing, unreadable or malformed manifest refuses every build.
 package admission

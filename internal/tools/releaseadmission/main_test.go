@@ -72,6 +72,23 @@ func TestClosedGateExitsNonZeroAndNamesWhatIsMissing(t *testing.T) {
 	}
 }
 
+// An explicit release tag must report the ordinary closed S6 gate.
+func TestExplicitReleaseTagUsesClosedS6Gate(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := execute(context.Background(), []string{"-tag", "v" + config.CorsaVersion},
+		&stdout, &stderr, committedManifest(), unusedHistory(t))
+	if code != 1 {
+		t.Fatalf("explicit release tag bypassed the S6 gate: code=%d; stdout:\n%s\nstderr:\n%s",
+			code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "outstanding condition:") ||
+		!strings.Contains(stdout.String(), "no owner decision to release") ||
+		!strings.Contains(stderr.String(), "release admission refused") {
+		t.Fatalf("explicit release tag did not report the ordinary closed S6 gate; stdout:\n%s\nstderr:\n%s",
+			stdout.String(), stderr.String())
+	}
+}
+
 func TestMalformedTagIsRefused(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := execute(context.Background(), []string{"-tag", "nightly"}, &stdout, &stderr, committedManifest(), unusedHistory(t))

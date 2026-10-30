@@ -527,12 +527,43 @@ func TestVerifyFileIdentityDetectsSwap(t *testing.T) {
 		t.Fatalf("verifyPartialIntegrity: %v", err)
 	}
 
-	// Simulate an attacker replacing the file between verify and rename.
-	if err := os.Remove(partPath); err != nil {
+	// Keep both files present so creating the attacker file cannot reuse the
+	// verified file's identity after removal.
+	attackerPath := filepath.Join(dir, "attacker.part")
+	if err := os.WriteFile(attackerPath, []byte("attacker content"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(partPath, []byte("attacker content"), 0o600); err != nil {
-		t.Fatal(err)
+	originalInfo, err := os.Lstat(partPath)
+	if err != nil {
+		t.Fatalf("lstat verified file before swap: %v", err)
+	}
+	attackerInfo, err := os.Lstat(attackerPath)
+	if err != nil {
+		t.Fatalf("lstat attacker file before swap: %v", err)
+	}
+	if !originalInfo.Mode().IsRegular() || !attackerInfo.Mode().IsRegular() {
+		t.Fatal("swap fixture requires two regular files")
+	}
+	if !os.SameFile(verifiedInfo, originalInfo) {
+		t.Fatal("verified path changed before the fixture swap")
+	}
+	if os.SameFile(originalInfo, attackerInfo) {
+		t.Fatal("attacker file must have a distinct identity before the swap")
+	}
+
+	// Replace the verified path with the already distinct attacker file.
+	if err := os.Rename(attackerPath, partPath); err != nil {
+		t.Fatalf("rename attacker file over verified path: %v", err)
+	}
+	replacementInfo, err := os.Lstat(partPath)
+	if err != nil {
+		t.Fatalf("lstat replacement file: %v", err)
+	}
+	if !replacementInfo.Mode().IsRegular() || !os.SameFile(attackerInfo, replacementInfo) {
+		t.Fatal("verified path must now identify the attacker file")
+	}
+	if os.SameFile(verifiedInfo, replacementInfo) {
+		t.Fatal("fixture swap must replace the verified file's identity")
 	}
 
 	// Identity check must detect the swap.
