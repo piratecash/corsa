@@ -1,6 +1,6 @@
 # Current DEV: full-product release scope and remaining blockers
 
-> **Superseding decision, 2026-10-30:** interim 2.5.71 additionally defers the two exact inactive D1 timing diagnostics named in [Releases](../release.md#interim-2571-publication--2026-10-30). They remain in the full suite; every other product test remains required. DEFERRED is not PASS.
+> **Superseding decision, 2026-10-30:** Release v2.5.71 runs no product, Python-preflight or CGO tests. Exact admission, lint and five product builds remain required. Ordinary Checks are independent; failed/deferred tests are not PASS. See the [version-specific publication scope](../release.md#interim-2571-publication--2026-10-30). The earlier two-test D1 selector deferral is separate from this full Release-workflow deferral.
 
 
 The owner selected **current DEV plus necessary regression fixes** for the

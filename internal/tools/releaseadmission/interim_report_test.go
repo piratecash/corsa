@@ -57,7 +57,7 @@ func TestInterimReportKeepsS6Outstanding(t *testing.T) {
 	if code := execute(context.Background(), []string{"-tag", "v2.5.71"}, &out, &stderr, committedManifest(), history); code != 0 {
 		t.Fatalf("exit %d: %s", code, &stderr)
 	}
-	for _, text := range []string{"INTERIM release admitted: 2.5.71", "S6 admitted: false", strings.Repeat("a", 40), history.digest, "unverified S6 condition: crypto_review", "UNVERIFIED"} {
+	for _, text := range []string{"INTERIM release admitted: 2.5.71", "S6 admitted: false", strings.Repeat("a", 40), history.digest, "unverified S6 condition: crypto_review", "UNVERIFIED", "Release product/Python/CGO tests are DEFERRED", "not PASS", "ordinary Checks remain separate"} {
 		if !strings.Contains(out.String(), text) {
 			t.Errorf("missing %q in %s", text, &out)
 		}

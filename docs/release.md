@@ -25,22 +25,35 @@ must agree. Only the existing `.gocache/` and `.gomodcache/` caches are excluded
 from the untracked-input check. A changed source or workflow needs a new digest
 and owner review. The tool reports the actual full commit and **S6 admitted: false**.
 
-After admission, publication still requires actual `make test-release`,
-`make test-cgo`, lint and all five daemon + Desktop platform builds.
-`internal/overlaysim` remains deferred from the product test selector, never PASS.
-On 2026-10-30 the owner additionally deferred exactly two inactive D1 diagnostics
-for source version **2.5.71 only**:
+**Owner's updated scope — Release workflow for 2.5.71 only:** publication requires
+the exact content-bound admission gate, lint and all five daemon + Desktop
+platform builds. This Release workflow runs **no product tests, Python preflight
+tests or CGO SQLite tests**. Ordinary Checks still run independently; their test
+results are not a publication dependency for this version. Subsequent versions
+retain the normal mandatory release tests, Python controls and CGO checks. This
+specific exception supersedes earlier testing requirements below only for the
+2.5.71 Release workflow; skipped tests are not PASS and the full suite is not green.
+
+Checks runs on every push to `dev` and `master`, and on pull requests. Its Tests
+job runs independently of lint, so a lint failure does not prevent the tests from
+starting. Each push checks its final commit; a push containing several commits
+does not create a separate run for each intermediate commit.
+
+The earlier `test-release` selector scope remains unchanged:
+`internal/overlaysim` is deferred to D1, never PASS. For source version
+**2.5.71 only**, exactly two inactive D1 diagnostics are also deferred:
 `TestOwnedReadyTargetTimingFourGenuineSources` and
 `TestOwnedReadyNormalTimedFactoryLoadsOriginalAndSignsWithoutGate`.
 The first failed before its target read gate with a lawful `bridge domain: busy`
 refusal; the second has no separately established passing result in that run.
-Both remain required for D1 repair and acceptance. `test-release` reports them
-as DEFERRED, runs every other Node test, and passes no skip option to other
-packages. Other source versions and ordinary `make test` / `make test-all` retain
-both tests. TLS, pins, clients, storage, CGO, lint and all platform builds remain
-required; this is not a general test bypass or a green full repository suite.
-Android is separate. These are CI requirements, not claims that those jobs have
-already passed on the new commit.
+Both remain required for D1 repair and acceptance. When invoked outside this
+Release workflow, `test-release` still reports them as DEFERRED, runs every other
+Node test, and passes no skip option to other packages. Other source versions and
+ordinary `make test` / `make test-all` retain both tests. TLSv2, pins and storage
+schema 8 remain active; this publication exception grants no D1/G2 activation.
+Android is separate. These are requirements, not claims that the new commit has
+passed them. The owner-reported file-transfer failure remains unresolved: this
+test exception neither fixes it nor records it as PASS.
 
 The owner reviews and commits the versioned approval with this disclosed scope,
 then explicitly selects that commit for the tag. Re-running an older failed tag
@@ -52,6 +65,28 @@ cannot load newer source. Agents do not move tags or publish the release.
 сохраняются. Владелец подтверждает конкретное содержимое своим коммитом и выбором
 тега после просмотра этого ограничения. Будущие версии возвращаются к обычному
 допуску S6.
+
+По уточнённому решению владельца только workflow **Release для 2.5.71** требует
+точный content-bound admission gate, lint и все пять платформенных сборок
+демона + Desktop, но **не запускает продуктовые тесты, Python preflight-тесты
+или CGO SQLite-тесты**. Обычные Checks продолжают выполняться независимо;
+результаты их тестов не блокируют публикацию этой версии. Для последующих версий
+обязательные release-тесты, Python controls и CGO-проверки сохраняются. Это
+исключение заменяет прежние требования к тестированию ниже только для Release
+2.5.71: пропуск не означает PASS, полный набор тестов не зелёный.
+
+Checks запускается на каждый push в `dev` и `master`, а также для pull requests.
+Задача Tests не зависит от lint: ошибка lint не отменяет запуск тестов. Проверяется
+последний коммит push; несколько коммитов в одном push не создают отдельные
+запуски для каждого промежуточного коммита.
+
+Прежние отсрочки `test-release` до ремонта D1 сохраняются: overlaysim и, только
+для версии исходников 2.5.71, два названных выше inactive D1 diagnostics получают
+DEFERRED, не PASS. При отдельном запуске `test-release` выполняет остальные
+Node-тесты и не передаёт skip другим пакетам; другие версии и обычные `make test`
+/ `make test-all` сохраняют оба теста. Активация D1/G2 не разрешается. Сообщённая
+владельцем ошибка передачи файлов остаётся неисправленной; исключение из тестов
+не устраняет её и не превращает в PASS. Android по-прежнему отдельно.
 
 > **Current S6 release scope — 2026-10-29.** The
 > [urgent full-product scope](operations/urgent-full-product-release-scope.md)
@@ -97,7 +132,7 @@ The [later owner decision](operations/d1-release-decision-proposal.md#measuremen
 |---|---|---|
 | `.github/workflows/release.yml`, on a pushed `v*` tag | binaries for every platform as workflow artifacts, then a GitHub release with them | yes, the `admission` job |
 | `make build-android-release`, `make build-android-aab` | the release-signed APK and App Bundle meant for a store | yes, `release-admission` is a prerequisite |
-| `.github/workflows/ci.yml`, on pull requests | nothing: lint, vulnerability check and tests only | — |
+| `.github/workflows/ci.yml`, on pushes to `dev`/`master` and pull requests | nothing: lint, vulnerability check and tests only | — |
 | `Dockerfile`, `docker-compose.yaml` | nothing: images are built locally, no workflow pushes them | — |
 
 There is no nightly or automatic release from a branch.

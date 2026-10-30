@@ -7,10 +7,18 @@ observation acceptance remain incomplete. TLSv2/protocol 31 and storage schema 8
 are active; this release does not claim completed S6, D1/G2 or a full-load 512 MB
 memory guarantee. Native Windows/DACL and Tor measurements remain UNVERIFIED.
 
+By owner decision, this interim Release workflow skips automated product,
+Python-preflight and CGO tests. Ordinary CI checks remain separate. A reported
+file-transfer test failure remains unresolved; no green product suite is claimed.
+
 Это промежуточный выпуск до завершения S6. Независимая криптоэкспертиза,
 итоговая приёмка задержек, нагрузки, ресурсов и наблюдения ещё не завершены.
 TLSv2/protocol 31 и storage schema 8 активны; завершение S6, D1/G2 и пригодность
 для полной нагрузки в 512 МБ не заявляются. Windows/DACL и Tor — UNVERIFIED.
+
+По решению владельца этот промежуточный Release workflow не запускает продуктовые,
+Python-preflight и CGO-тесты. Обычные CI-проверки независимы. Сообщённый отказ
+теста передачи файлов ещё не разобран; зелёный продуктовый suite не заявляется.
 
 ## Peer Connections Use Secure Session v2
 

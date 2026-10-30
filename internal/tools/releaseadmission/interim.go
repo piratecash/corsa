@@ -278,7 +278,7 @@ func runInterim(ctx context.Context, req admission.Request, out io.Writer, manif
 	if err != nil {
 		return true, err
 	}
-	if _, err := fmt.Fprintf(out, "INTERIM release admitted: 2.5.71; commit %s; source SHA-256 %s\nS6 admitted: false; D1/G2 activation not granted. Publication still requires tests, CGO, lint and all five platform builds.\n", commit, digest); err != nil {
+	if _, err := fmt.Fprintf(out, "INTERIM release admitted: 2.5.71; commit %s; source SHA-256 %s\nS6 admitted: false; D1/G2 activation not granted. Release product/Python/CGO tests are DEFERRED by the owner for v2.5.71 (not PASS). Publication requires lint and all five platform builds; ordinary Checks remain separate.\n", commit, digest); err != nil {
 		return true, err
 	}
 	for _, id := range verdict.Outstanding {

@@ -1,10 +1,10 @@
 {
   "schema": 1,
   "version": "2.5.71",
-  "source_sha": "58a287b6d577a94b67f4df03e363b15656bd01be941153ca19e784d12f94e084",
+  "source_sha": "51c97e52fef8ad5e0955a878c92331c073a7e301571ed7e4ef44ddceeda374b2",
   "decision": {
     "date": "2026-10-30",
-    "authority": "Project owner requested deployment of 2.5.71 before completing S6. The owner reviews and commits this content-bound interim policy and explicitly selects its commit for the release tag. This records interim publication only, not an independent cryptographic verdict or S6 completion; see docs/release.md. On 2026-10-30 the owner additionally deferred only TestOwnedReadyTargetTimingFourGenuineSources and TestOwnedReadyNormalTimedFactoryLoadsOriginalAndSignsWithoutGate from the Node release-test selector for source version 2.5.71. Both inactive D1 diagnostics remain required in the full suite and D1 acceptance; all other product and Node tests remain mandatory. Deferred is not PASS; see docs/release.md."
+    "authority": "Project owner explicitly requested Release v2.5.71 to publish without running any GitHub Release product, Python preflight or CGO SQLite tests after test failures. This source-bound interim publication still requires admission, lint and all five daemon/Desktop builds. Ordinary Checks continue independently and may fail; failed or deferred tests are not PASS. The owner reviews and commits this policy and selects its commit for the release tag. This is not an independent cryptographic verdict or S6 completion. The earlier two D1 diagnostic deferrals remain the separate test-release selector scope outside this Release workflow. See docs/release.md."
   },
   "outstanding_conditions": [
     "crypto_review",
