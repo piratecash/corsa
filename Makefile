@@ -168,7 +168,7 @@ gofmt-changed: fmt
 
 .PHONY: vuln
 vuln:
-	$(GO) run golang.org/x/vuln/cmd/govulncheck@v1.1.4 -show verbose ./...
+	$(GO) run golang.org/x/vuln/cmd/govulncheck@v1.9.0 -show verbose ./...
 
 .PHONY: test
 test:

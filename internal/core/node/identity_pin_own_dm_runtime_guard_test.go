@@ -18,7 +18,7 @@ func ownDMRuntimeSourceErrors(sources map[string][]byte) []string {
 		"node/find_node_ready_construction.go":     "928f01bab660f066126117dee1b756869ad323b493fcdc83a0a53694db53f6c4",
 		"node/service.go":                          "140e304fe12ffdaa532521f80059803ec30bcd54355afb253235504f6760320e",
 		"service/desktop.go":                       "86ca0fbe70740c5210d64fd19dda0d5d87f0c7f89a736afab142038bef076735",
-		"sdk/runtime.go":                           "2a3c1184b8c411bdd034933564fa68a0e0131115660adbcef8cb815b9080fd1f",
+		"sdk/runtime.go":                           "3916f6f435eb601af40ebf40fcec100649562912bc6089804a9024c475482671",
 	}
 	for p, want := range pins {
 		if fmt.Sprintf("%x", sha256.Sum256(sources[p])) != want {
@@ -40,6 +40,8 @@ func TestOwnDMRuntimeRejectsDefaultActivationAndAlternateMint(t *testing.T) {
 		{"node/identity_pin_own_dm_runtime.go", "return s, own.port, newUnstartedRuntimeCleanup(s, ready.originalCancel), nil", "return s, own.port, newUnstartedRuntimeCleanup(s, foreignCancel), nil"},
 		{"node/find_node_ready_construction.go", "*r.ownDMRuntime != r.originalOwnDMRuntime", "false"},
 		{"service/desktop.go", "c.prober = NewNodeProber(c.rpc, c.dm, c.info)", "c.prober = NewNodeProber(c.rpc, NewDMCrypto(c.rpc,c.chatlog,c.id), c.info)"},
+		// The pre-M1 constructor must not regain acceptance after the pin rebind.
+		{"sdk/runtime.go", "\t\tif !internalCfg.RPC.AuthEnabled() {\n\t\t\tabandon()\n\t\t\treturn nil, fmt.Errorf(\"create rpc server: %w\", ErrRPCAuthenticationRequired)\n\t\t}\n", ""},
 	} {
 		copy := map[string][]byte{}
 		for p, b := range baseline {

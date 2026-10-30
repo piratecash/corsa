@@ -1,6 +1,7 @@
 package node
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
@@ -16,6 +17,7 @@ import (
 	"github.com/piratecash/corsa/internal/core/config/configtest"
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/identity"
+	"github.com/piratecash/corsa/internal/core/netcore"
 	"github.com/piratecash/corsa/internal/core/protocol"
 	"github.com/piratecash/corsa/internal/core/routing"
 	"github.com/piratecash/corsa/internal/core/secretfile"
@@ -44,6 +46,165 @@ type ownDMAdmissionFixture struct {
 	clock       *ownDMAdmissionClock
 }
 
+// Hold only a successful original Write's return, before the real NetCore ACK.
+// No network deadline is paused: the exact socket write has already completed.
+func ownDMAdmissionGatedConn(conn net.Conn, gate *r2aWireGate) net.Conn {
+	return &readyRelationWriteReturnConn{r2aGatedConn: &r2aGatedConn{Conn: conn, gate: gate, stopped: make(chan struct{})}}
+}
+
+// Observations are buffered/nonblocking and never change the original deadline
+// or Write result. The real writer and real socket remain the only ACK source.
+type ownDMGateWriteResult struct {
+	n   int
+	err error
+}
+type ownDMGateObservedConn struct {
+	net.Conn
+	deadline chan time.Time
+	result   chan ownDMGateWriteResult
+}
+
+func (c *ownDMGateObservedConn) SetWriteDeadline(deadline time.Time) error {
+	err := c.Conn.SetWriteDeadline(deadline)
+	if !deadline.IsZero() {
+		select {
+		case c.deadline <- deadline:
+		default:
+		}
+	}
+	return err
+}
+func (c *ownDMGateObservedConn) Write(p []byte) (int, error) {
+	n, err := c.Conn.Write(p)
+	select {
+	case c.result <- ownDMGateWriteResult{n: n, err: err}:
+	default:
+	}
+	return n, err
+}
+
+func TestOwnDMAdmissionGateKeepsActualWriterResultPastDeadline(t *testing.T) {
+	for _, afterWrite := range []bool{false, true} {
+		name := "original-pre-write-gate"
+		if afterWrite {
+			name = "post-success-write-gate"
+		}
+		t.Run(name, func(t *testing.T) {
+			server, client := tcpPair(t)
+			observed := &ownDMGateObservedConn{Conn: client, deadline: make(chan time.Time, 1), result: make(chan ownDMGateWriteResult, 1)}
+			gate := &r2aWireGate{entered: make(chan struct{}), release: make(chan struct{})}
+			gate.armed.Store(true)
+			var wire net.Conn = &r2aGatedConn{Conn: observed, gate: gate, stopped: make(chan struct{})}
+			if afterWrite {
+				wire = ownDMAdmissionGatedConn(observed, gate)
+			}
+			// The ordinary Outbound constructor supplies its unchanged 3s
+			// deadline. No bootstrap override, ticket, or manual expiry is used.
+			core := newTestNetCore(t, netcore.ConnID(0), wire, netcore.Outbound, netcore.Options{})
+			t.Cleanup(gate.unblock) // before the existing exact writer Close/join
+			ack := make(chan struct{})
+			frame := protocol.Frame{Type: "ping"}
+			line, err := protocol.MarshalFrameLine(frame)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if status := core.SendTrackedObserved(frame, nil, ack); status != netcore.SendOK {
+				t.Fatal("original writer refused its one frame", status)
+			}
+			select {
+			case <-gate.entered:
+			case <-time.After(3 * time.Second):
+				t.Fatal("original socket wrapper did not enter its gate")
+			}
+			var deadline time.Time
+			select {
+			case deadline = <-observed.deadline:
+			default:
+				t.Fatal("original NetCore did not set its real socket deadline")
+			}
+			var actual ownDMGateWriteResult
+			if afterWrite {
+				select {
+				case actual = <-observed.result:
+				default:
+					t.Fatal("post-write gate entered before the actual Write returned")
+				}
+				if actual.n != len(line) || actual.err != nil {
+					t.Fatalf("original socket Write = (%d,%v), want (%d,nil)", actual.n, actual.err, len(line))
+				}
+				if err := server.SetReadDeadline(deadline); err != nil {
+					t.Fatal(err)
+				}
+				if got, err := bufio.NewReader(server).ReadString('\n'); err != nil || got != line {
+					t.Fatalf("actual peer frame = %q, %v; want %q", got, err, line)
+				}
+			} else {
+				select {
+				case <-observed.result:
+					t.Fatal("pre-write gate already called the original Write")
+				default:
+				}
+			}
+			select {
+			case <-ack:
+				t.Fatal("original NetCore ACK preceded release of the Write return")
+			default:
+			}
+			// Cross the deadline actually chosen by the original writer;
+			// scheduler delay only moves farther past it. No fixed sleep,
+			// retry, altered grace or extra production tolerance is involved.
+			timer := time.NewTimer(time.Until(deadline))
+			defer timer.Stop()
+			select {
+			case <-timer.C:
+			case <-t.Context().Done():
+				t.Fatal("test ended before the original deadline crossed")
+			}
+			if time.Now().Before(deadline) {
+				t.Fatal("deadline control returned early")
+			}
+			select {
+			case <-ack:
+				t.Fatal("original NetCore ACK escaped the held Write return")
+			default:
+			}
+			gate.unblock()
+			if afterWrite {
+				select {
+				case <-ack:
+				case <-time.After(2 * time.Second):
+					t.Fatal("successful original Write was not acknowledged after release")
+				}
+				select {
+				case <-core.WriterDone():
+					t.Fatal("successful post-write hold falsely killed the original writer")
+				default:
+				}
+			} else {
+				select {
+				case <-core.WriterDone():
+				case <-time.After(2 * time.Second):
+					t.Fatal("expired original Write did not end the writer")
+				}
+				select {
+				case actual = <-observed.result:
+				default:
+					t.Fatal("original pre-write control has no actual Write result")
+				}
+				timeout, ok := actual.err.(net.Error)
+				if actual.n != 0 || !ok || !timeout.Timeout() {
+					t.Fatalf("expired original Write = (%d,%v), want zero bytes and timeout", actual.n, actual.err)
+				}
+				select {
+				case <-ack:
+					t.Fatal("failed original Write fabricated an ACK")
+				default:
+				}
+			}
+		})
+	}
+}
+
 func ownDMAdmissionManaged(t *testing.T, setup func(*Service)) ownDMAdmissionFixture {
 	t.Helper()
 	peer, address, stopPeer := listenerNode(t, withoutOwnDials(nil))
@@ -62,7 +223,7 @@ func ownDMAdmissionManaged(t *testing.T, setup func(*Service)) ownDMAdmissionFix
 		if err != nil {
 			return nil, err
 		}
-		return &r2aGatedConn{Conn: conn, gate: gate, stopped: make(chan struct{})}, nil
+		return ownDMAdmissionGatedConn(conn, gate), nil
 	}
 	if setup != nil {
 		setup(s)
