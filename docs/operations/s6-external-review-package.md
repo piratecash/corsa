@@ -1,6 +1,6 @@
 # S6 external review and native Windows evidence / Внешняя проверка S6 и свидетельства Windows
 
-## Current verification scope / Текущая область проверки — 2026-10-29
+## Current verification scope / Текущая область проверки — 2026-11-02
 
 The [accepted current scope](urgent-full-product-release-scope.md) is daemon and Desktop on Linux amd64, macOS arm64/amd64 and Windows amd64/arm64; Android APK/AAB follow separately. Only `internal/overlaysim` is DEFERRED to D1, not PASS; generic `make test-all` is not green. K2/R1b/R2/N-in remain OFF in ordinary constructors, configuration and RPC. D1/G2/FindNode/F1 activation is outside this release; internal source opt-in APIs do not activate shipped products. All other applicable product tests, proxy/no-direct-fallback and authentication protections, independent crypto review and the 17 admission conditions remain required. The [recorded Windows/DACL and real Tor deferral](d1-release-decision-proposal.md#measurement-scope-2026-10-23) remains UNVERIFIED, not PASS; applicable Windows builds and macOS/Linux checks remain required. Tor timing is not inferred from clearnet measurements. The gate is CLOSED: schema 2 has 7 done, 2 partial, 7 not_done and 1 deferred (`tor_phase_measurement`); no release decision or expert verdict is recorded.
 
@@ -12,12 +12,13 @@ The [accepted current scope](urgent-full-product-release-scope.md) is daemon and
 
 This is a preparation package for `crypto_review` and the Windows part of
 `unsafe_pin_store_refusal` in the [release manifest](../../packaging/release-admission.json).
-It records review scope and proposed execution inputs. No expert verdict, native Windows run,
-resource authorisation, production deployment or release approval is supplied here.
+It records review scope and proposed execution inputs. No expert verdict, new native Windows
+execution or complete DACL evidence, resource authorisation, production deployment or release
+approval is supplied here.
 
-The current preliminary source input is published Corsa **v2.5.71**, protocol 31/minimum 28,
-commit **`f8139aa949df89e3f51f0a240eaf440b6f171255`**, Git tree
-`ae3c48feb51c8b7ae46ee1601d1545a37aef7a6c`, using Go 1.27.3. Give the expert this exact
+The current preliminary source input is the **DEV checkpoint**, protocol 31/minimum 28,
+commit **`ac53899e47970217662f6e45fe199196ea184072`**, Git tree
+`b4bd0ac45ab547facf7c8db32fc8d145dddb2b0c`, using Go 1.27.3. Give the expert this exact
 commit rather than a mutable DEV branch. This is not an assertion that a final candidate or
 binary has been admitted. Changes made after it, including this package refresh, belong to a
 later candidate and must be named in the final review or an attributable affected-path addendum.
@@ -25,10 +26,13 @@ The manifest has **17 conditions: 7 done, 2 partial, 7 not_done and 1 deferred**
 `release_decision` is `null`, `crypto_review` is `not_done` with no evidence and
 `unsafe_pin_store_refusal` is `partial`.
 
-This published input lets the independent expert start now. Its interim publication
-is not crypto acceptance. DEV is removing that temporary admission and repairing
-test fixtures; the eventual S6 commit needs a report or an attributable affected-path
-addendum. Supply the expert the immutable commit and this package, not a moving branch.
+This immutable input lets the independent expert start now. The earlier published
+v2.5.71 input (`f8139aa949df89e3f51f0a240eaf440b6f171255`) remains historical;
+its temporary release admission has been removed from this DEV checkpoint.
+The separate-project AI review of `52cdd9af7ea059a69f479fd963698499ca8ec131`
+is preliminary AI evidence, not an independent expert verdict on this candidate.
+The eventual S6 commit needs a report or an attributable affected-path addendum.
+Supply the expert the immutable commit and this package, not a moving branch.
 
 The old MAIN2047 snapshot based on `c17a4961689c9e8c33bd5681ea7c7ec577bb53cf`
 (manifest SHA-256 `4dee2cbd54685ac0076afa325e0c65bf0326ffd465f28f71cb7ce069910efb80`)
@@ -102,6 +106,12 @@ Record unresolved findings and their disposition; do not turn missing coverage i
 
 ### Native Windows execution specification
 
+The [native Windows amd64 filesystem/logging job](https://github.com/piratecash/corsa/actions/runs/41098494028/job/124210372432)
+completed with `success` for the exact `ac53899` commit. The current readback establishes
+that job conclusion, not an independently inspected per-case RUN/PASS/SKIP inventory.
+Its leaf suites are not full release-build startup or Windows arm64 evidence; the composite
+Windows/DACL obligation remains UNVERIFIED. Do not turn capability skips into PASS.
+
 The executor must use an identified real Windows host and native Go toolchain matching the
 candidate (`go.mod` currently requires Go 1.27.3). Record Windows build, architecture, filesystem and
 volume-root security, effective user SID/token/elevation, Developer Mode/symlink capability, Go
@@ -110,7 +120,8 @@ test data and cached dependencies; externally deny and verify nonlocal network a
 execution is required; cross-compilation or POSIX mode checks do not establish DACL behaviour.
 
 The shared `secretfile` suite uses `owner_windows_test.go` helpers to inspect real protected DACLs;
-that file intentionally contains no standalone `Test` functions. The six parents in
+that file also contains `TestOwnerOnlyDescriptorOracleUsesBinarySIDs`, which checks the
+binary-SID descriptor oracle separately from the six audit parents below. The six parents in
 `audit_windows_test.go` set real descriptors and cover a second allow ACE, an allowed deny ACE,
 creation rights on the holding directory, five dangerous ancestor rights, allowed sibling
 directory creation and an actual `cmd /c mklink /J` junction. `audit_acl_test.go` supplies synthetic
@@ -161,11 +172,12 @@ to `done`. Final notes and candidate rechecks remain required by the manifest.
 
 Пакет готовит независимую криптопроверку `crypto_review` и Windows-часть
 `unsafe_pin_store_refusal` в [манифесте выпуска](../../packaging/release-admission.json).
-Здесь нет заключения эксперта, настоящего Windows-прогона, разрешения ресурса, deployment или выпуска.
+Здесь нет заключения эксперта, нового Windows-прогона или полных DACL-свидетельств,
+разрешения ресурса, deployment или выпуска.
 
-Текущий предварительный исходный срез — закоммиченный Corsa **v2.5.71**, protocol 31/minimum 28,
-commit **`f8139aa949df89e3f51f0a240eaf440b6f171255`**, Git tree
-`ae3c48feb51c8b7ae46ee1601d1545a37aef7a6c`, Go 1.27.3. Эксперту передаётся точный commit,
+Текущий предварительный исходный срез — **DEV checkpoint**, protocol 31/minimum 28,
+commit **`ac53899e47970217662f6e45fe199196ea184072`**, Git tree
+`b4bd0ac45ab547facf7c8db32fc8d145dddb2b0c`, Go 1.27.3. Эксперту передаётся точный commit,
 а не изменяемая ветка DEV. Это не подтверждает допуск финального кандидата или binary.
 Изменения после него, включая обновление этого пакета, относятся к следующему кандидату;
 окончательный отчёт или атрибутируемое дополнение по затронутым путям должны назвать его.
@@ -178,11 +190,14 @@ commit **`f8139aa949df89e3f51f0a240eaf440b6f171255`**, Git tree
 
 Принимаемый отчёт называет полный 40-символьный commit кандидата, фактические исходники и
 проверенные binary inputs (явно указать отсутствие binary review при source-only экспертизе).
-Независимую экспертизу этого опубликованного среза можно начать сейчас. Передать
-эксперту полный commit SHA и этот пакет. Промежуточная публикация не является
-криптоэкспертизой. DEV удаляет временный admission и исправляет test fixtures;
-итоговый S6-коммит потребует отдельного отчёта или атрибутируемого дополнения
-по затронутым путям. Не подменять точный коммит меняющейся веткой.
+Независимую экспертизу этого неизменяемого среза можно начать сейчас. Передать
+эксперту полный commit SHA и этот пакет. Прежний опубликованный v2.5.71
+(`f8139aa949df89e3f51f0a240eaf440b6f171255`) остаётся историческим входом;
+временный admission удалён из этого DEV checkpoint. Отчёт другого AI-проекта
+по `52cdd9af7ea059a69f479fd963698499ca8ec131` — предварительное AI-свидетельство,
+а не независимое экспертное заключение по этому кандидату. Итоговый S6-коммит
+потребует отчёта или атрибутируемого дополнения по затронутым путям.
+Не подменять точный коммит меняющейся веткой.
 
 Предварительную проверку этого среза нельзя переименовать в final-candidate acceptance.
 [Гейт выпуска](../release.md) требует всех условий и отдельного решения владельца о конкретной
@@ -225,14 +240,21 @@ source locations, безопасными воспроизводимыми при
 
 ### Настоящий Windows-прогон
 
+[Native Windows amd64 filesystem/logging job](https://github.com/piratecash/corsa/actions/runs/41098494028/job/124210372432)
+завершился `success` для точного `ac53899`. Здесь сверено заключение job,
+а не независимый полный разбор каждого RUN/PASS/SKIP. Leaf suites не доказывают
+полный startup выпускаемых продуктов или Windows arm64; составное условие
+Windows/DACL остаётся UNVERIFIED. Capability SKIP не считается PASS.
+
 Исполнитель предъявляет Windows build/архитектуру, filesystem и security корня тома, SID и token/
 elevation, Developer Mode/возможность symlink, Go version/settings, commit/manifest и SHA бинарников.
 Нужны настоящий Windows, отдельные disposable данные и provisioned dependency cache, внешний
 запрет и проверка nonlocal network. Текущий go.mod требует Go 1.27.3. Cross-compile и POSIX mode
 не подтверждают DACL.
 
-`owner_windows_test.go` предоставляет Windows helpers общим тестам и не содержит самостоятельных
-Test. Шесть родителей `audit_windows_test.go` реально меняют DACL: второй allow ACE, допустимый
+`owner_windows_test.go` предоставляет Windows helpers общим тестам и содержит самостоятельный
+`TestOwnerOnlyDescriptorOracleUsesBinarySIDs`, проверяющий descriptor oracle с binary SID
+отдельно от шести audit-родителей ниже. Шесть родителей `audit_windows_test.go` реально меняют DACL: второй allow ACE, допустимый
 deny ACE, holding-directory до первой записи, пять опасных прав предка, допустимое создание
 соседних каталогов и junction через `mklink /J`. `audit_acl_test.go` — синтетический judgement/
 reparse, его нельзя выдавать за native fixture.
