@@ -6,10 +6,8 @@ import (
 
 	"time"
 
-	"github.com/piratecash/corsa/internal/core/connauth"
 	"github.com/piratecash/corsa/internal/core/directmsg"
 	"github.com/piratecash/corsa/internal/core/domain"
-	"github.com/piratecash/corsa/internal/core/netcore"
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
@@ -40,23 +38,6 @@ var (
 	errDirectDMV2Message  = errors.New("direct DM v2 envelope did not pass admission")
 	errDirectDMV2Pending  = errors.New("direct DM v2 store did not confirm the envelope")
 )
-
-// directDMV2ListenerLocked selects the listener-side authority. The caller
-// holds peerMu.
-func (s *Service) directDMV2ListenerLocked(id domain.ConnID, sender domain.PeerIdentity, capability domain.Capability) (*netcore.NetCore, *connauth.State) {
-	entry := s.connEntryByIDLocked(id)
-	if entry == nil || entry.core == nil || entry.core.Dir() != netcore.Inbound ||
-		!entry.receive.ReceiveReady() || !capsContain(entry.core.CapabilitiesRef(), capability) {
-		return nil, nil
-	}
-	auth := entry.core.Auth()
-	proof, proven := auth.ProvenIdentity()
-	peer, ok := proof.Identity()
-	if !proven || !ok || peer != sender || auth.Hello.PubKey == "" {
-		return nil, nil
-	}
-	return entry.core, auth
-}
 
 // receiveDirectDMV2OnListener is wired by the overlay's opt-in dispatcher.
 // Only the original protected writer may send

@@ -45,16 +45,18 @@ func (s *Service) directDMV2RetryWriterLocked(identity domain.PeerIdentity) *net
 		}
 		selected = core
 	}
-	for id := range s.conns {
+	s.forEachConnIDLocked(func(id domain.ConnID) bool {
 		core, _ := s.directDMV2ListenerLocked(id, identity, domain.CapDirectDMV2)
 		if core == nil || !core.AcceptingFrames() {
-			continue
+			return true
 		}
 		if selected != nil && selected != core {
-			return nil
+			selected = nil
+			return false
 		}
 		selected = core
-	}
+		return true
+	})
 	return selected
 }
 

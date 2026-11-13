@@ -5,6 +5,7 @@ import (
 	"net/netip"
 	"time"
 
+	"github.com/piratecash/corsa/internal/core/connauth"
 	"github.com/piratecash/corsa/internal/core/connbudget"
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/findnodebridge"
@@ -317,6 +318,23 @@ func (s *Service) isInboundTrackedByIDLocked(id domain.ConnID) bool {
 // The caller must hold s.peerMu.
 func (s *Service) connEntryByIDLocked(id domain.ConnID) *connEntry {
 	return s.conns[id]
+}
+
+// directDMV2ListenerLocked selects the listener-side authority. The caller
+// holds peerMu.
+func (s *Service) directDMV2ListenerLocked(id domain.ConnID, sender domain.PeerIdentity, capability domain.Capability) (*netcore.NetCore, *connauth.State) {
+	entry := s.connEntryByIDLocked(id)
+	if entry == nil || entry.core == nil || entry.core.Dir() != netcore.Inbound ||
+		!entry.receive.ReceiveReady() || !capsContain(entry.core.CapabilitiesRef(), capability) {
+		return nil, nil
+	}
+	auth := entry.core.Auth()
+	proof, proven := auth.ProvenIdentity()
+	peer, ok := proof.Identity()
+	if !proven || !ok || peer != sender || auth.Hello.PubKey == "" {
+		return nil, nil
+	}
+	return entry.core, auth
 }
 
 // connInfoByIDLocked returns a value-typed connInfo snapshot for id, or
