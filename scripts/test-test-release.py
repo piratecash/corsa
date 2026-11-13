@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Finite refusal/coverage controls; uses a stub GO, never the real toolchain."""
+"""Exercise release test selection and Checks log binding using stubs."""
 import os
 from pathlib import Path
 import subprocess
@@ -7,6 +7,7 @@ import tempfile
 import unittest
 
 SCRIPT = Path(__file__).resolve().with_name("test-release.sh")
+CHECKS_SCRIPT = SCRIPT.with_name("run-ci-test-step.sh")
 MODULE = "github.com/piratecash/corsa"
 DEFERRED = MODULE + "/internal/overlaysim"
 
@@ -40,7 +41,11 @@ class ReleaseTestScope(unittest.TestCase):
         result, argv = self.run_scope("\n".join(kept[:2] + [DEFERRED] + kept[2:]) + "\n")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(argv, ["test", "-count=1", "-timeout=15m", *kept])
-        self.assertEqual(result.stderr, f"DEFERRED to D1 (not PASS): {DEFERRED}\n")
+        self.assertEqual(result.stderr.splitlines(), [
+            f"DEFERRED to D1 (not PASS): {DEFERRED}",
+            f"Release test scope: {len(kept)} packages selected",
+            *(f"Release test package: {package}" for package in kept),
+        ])
 
     def test_tag_and_skip_flags_cannot_exclude_node_tests(self):
         node = MODULE + "/internal/core/node"
@@ -51,7 +56,7 @@ class ReleaseTestScope(unittest.TestCase):
         })
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(argv, ["test", "-count=1", "-timeout=15m", *kept])
-        self.assertEqual(result.stderr, f"DEFERRED to D1 (not PASS): {DEFERRED}\n")
+        self.assertEqual(result.stderr.splitlines()[0], f"DEFERRED to D1 (not PASS): {DEFERRED}")
 
     def test_failed_inventory_never_runs_partial_scope(self):
         result, argv = self.run_scope(DEFERRED + "\n" + MODULE + "/cmd/corsa-node\n", list_exit=7)
@@ -62,6 +67,22 @@ class ReleaseTestScope(unittest.TestCase):
         result, argv = self.run_scope(DEFERRED + "\n" + MODULE + "/cmd/corsa-node\n", test_exit=9)
         self.assertEqual(result.returncode, 9)
         self.assertIsNotNone(argv)
+
+    def test_refactoring_archives_refuse_before_running_tests(self):
+        for suffix in ["/docs/refactoring", "/docs/refactoring/dht/logs/run/sources/old"]:
+            with self.subTest(suffix=suffix):
+                result, argv = self.run_scope(
+                    "\n".join([DEFERRED, MODULE + "/cmd/corsa-node", MODULE + suffix]) + "\n"
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIsNone(argv)
+                self.assertIn("local refactoring archives", result.stderr)
+
+    def test_archive_refusal_does_not_exclude_other_documentation_packages(self):
+        kept = [MODULE + "/docs/refactoring_extra", MODULE + "/docs/examples"]
+        result, argv = self.run_scope("\n".join([DEFERRED, *kept]) + "\n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(argv, ["test", "-count=1", "-timeout=15m", *kept])
 
     def test_ambiguous_or_empty_inventory_refuses(self):
         peer = MODULE + "/cmd/corsa-node"
@@ -75,6 +96,58 @@ class ReleaseTestScope(unittest.TestCase):
                 result, argv = self.run_scope(inventory)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIsNone(argv)
+
+
+class ChecksTestStep(unittest.TestCase):
+    sha = "a" * 40
+
+    def run_step(self, target, make_exit=0, **overrides):
+        with tempfile.TemporaryDirectory(prefix="corsa-ci-test-step-") as directory:
+            root = Path(directory)
+            stubs = {
+                "git": '#!/bin/sh\n[ "$*" = "rev-parse HEAD" ] || exit 2\nprintf "%s\\n" "$CHECKOUT_SHA"\n',
+                "make": '#!/bin/sh\nprintf "make %s\\n" "$*"\nexit "$MAKE_EXIT"\n',
+            }
+            for name, source in stubs.items():
+                stub = root / name
+                stub.write_text(source)
+                stub.chmod(0o700)
+            env = dict(os.environ, PATH=f"{root}{os.pathsep}{os.environ['PATH']}",
+                       CHECKOUT_SHA=self.sha, GITHUB_SHA=self.sha, GITHUB_RUN_ID="100",
+                       GITHUB_RUN_ATTEMPT="2", MAKE_EXIT=str(make_exit))
+            env.update(overrides)
+            return subprocess.run(["bash", str(CHECKS_SCRIPT), target], cwd=root, env=env,
+                                  capture_output=True, text=True, timeout=5, check=False)
+
+    def test_each_target_binds_its_own_log(self):
+        for target in ("test-release", "test-s6-observation", "test-cgo"):
+            with self.subTest(target=target):
+                result = self.run_step(target)
+                binding = f"{target} {self.sha} 100 2"
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.splitlines(), [
+                    f"S6 test begin {binding}", f"make {target}", f"S6 test end {binding}",
+                ])
+
+    def test_make_failure_has_no_end_marker(self):
+        result = self.run_step("test-release", make_exit=9)
+        self.assertEqual(result.returncode, 9)
+        self.assertEqual(result.stdout.splitlines(), [
+            f"S6 test begin test-release {self.sha} 100 2", "make test-release",
+        ])
+
+    def test_invalid_target_or_attempt_is_refused_before_make(self):
+        for target, overrides in (
+            ("lint", {}),
+            ("test-release", {"GITHUB_SHA": "b" * 40}),
+            ("test-release", {"GITHUB_RUN_ID": "0"}),
+            ("test-release", {"GITHUB_RUN_ATTEMPT": "0"}),
+            ("test-release", {"GITHUB_RUN_ATTEMPT": ""}),
+        ):
+            with self.subTest(target=target, overrides=overrides):
+                result = self.run_step(target, **overrides)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(result.stdout, "")
 
 
 if __name__ == "__main__":

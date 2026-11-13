@@ -23,6 +23,10 @@ while IFS= read -r package; do
         echo 'release tests: malformed package inventory' >&2
         exit 1
     fi
+    if [[ "$package" == "$module/docs/refactoring" || "$package" == "$module/docs/refactoring/"* ]]; then
+        echo 'release tests: local refactoring archives in inventory. Use a source-only checkout.' >&2
+        exit 1
+    fi
     for previous in "${seen[@]+"${seen[@]}"}"; do
         if [[ "$previous" == "$package" ]]; then
             echo 'release tests: duplicate package inventory' >&2
@@ -42,4 +46,6 @@ if [[ "$deferred_count" -ne 1 || "${#packages[@]}" -eq 0 ]]; then
     exit 1
 fi
 printf 'DEFERRED to D1 (not PASS): %s\n' "$deferred" >&2
+printf 'Release test scope: %d packages selected\n' "${#packages[@]}" >&2
+printf 'Release test package: %s\n' "${packages[@]}" >&2
 exec "$go_command" test -count=1 -timeout=15m "${packages[@]}"

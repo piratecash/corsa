@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -145,6 +146,28 @@ func mayWrite(w workflow, job workflowJob) (bool, error) {
 
 func usesAction(step workflowStep, action string) bool {
 	return step.Uses == action || strings.HasPrefix(step.Uses, action+"@")
+}
+
+var actionCommitRef = regexp.MustCompile(`^[0-9a-f]{40}$`)
+
+func workflowActionRefProblems(file string, w workflow) []string {
+	var problems []string
+	for name, job := range w.Jobs {
+		check := func(uses string) {
+			if uses == "" || strings.HasPrefix(uses, "./") {
+				return
+			}
+			_, ref, found := strings.Cut(uses, "@")
+			if !found || !actionCommitRef.MatchString(ref) {
+				problems = append(problems, fmt.Sprintf("%s: job %q: external action %q must be pinned to a full commit SHA", file, name, uses))
+			}
+		}
+		check(job.Uses)
+		for _, step := range job.Steps {
+			check(step.Uses)
+		}
+	}
+	return problems
 }
 
 func stepPublishes(step workflowStep) bool {
@@ -400,7 +423,20 @@ func admissionKeyProblems(file, text string) []string {
 // body: the notes file the gate required for this version.
 const releaseNotesBodyPath = "docs/release-notes/RELEASE-${{ github.ref_name }}.md"
 
+const releaseArchiveCommand = `python scripts/report-candidate-artifacts.py --release-archive --platform %s --source-sha "$GITHUB_SHA"`
+const collectReleaseCommand = `python scripts/report-candidate-artifacts.py --collect-release --source-sha "$GITHUB_SHA"`
+const linuxDesktopCGOCommand = `python scripts/report-linux-desktop-cgo.py --source-sha "$GITHUB_SHA"`
+const linuxReleaseBuildCommand = "make build-node-linux-amd64\nmake build-desktop-linux-amd64"
+const verifiedReleaseAssets = `dist/corsa-linux-amd64.tar.bz2
+dist/corsa-darwin-arm64.tar.bz2
+dist/corsa-darwin-amd64.tar.bz2
+dist/corsa-windows-amd64.zip
+dist/corsa-windows-arm64.zip`
+
 const (
+	releasePreflightCommand = `python scripts/test-test-release.py
+python scripts/test-report-candidate-artifacts.py
+python scripts/test-report-linux-desktop-cgo.py`
 	releaseTestDependenciesCommand = `sudo apt-get update
 sudo apt-get install -y \
   libasound2-dev \
@@ -421,18 +457,17 @@ sudo apt-get install -y \
   libxxf86vm-dev`
 )
 
-// Every release tag must run the same seven unconditional setup/test steps.
+// Every release tag must run the same unconditional setup/test steps.
 // No version, environment or notice may replace actual test execution.
 func releaseTestPolicyProblems(file string, job map[string]*yaml.Node) []string {
 	steps := job["steps"]
-	if steps == nil || steps.Kind != yaml.SequenceNode || len(steps.Content) != 7 {
-		return []string{file + ": release tests must retain checkout and all six unconditional setup/test steps"}
+	if steps == nil || steps.Kind != yaml.SequenceNode || len(steps.Content) != 8 {
+		return []string{file + ": release tests must retain checkout and all seven unconditional setup/test steps"}
 	}
 	var problems []string
 	checkout, setupGo, setupPython := 0, 0, 0
-	allowedCommands := []string{releaseTestDependenciesCommand,
-		"python scripts/test-test-release.py\npython scripts/test-report-candidate-artifacts.py",
-		"make test-release", "make test-cgo"}
+	allowedCommands := []string{releaseTestDependenciesCommand, releasePreflightCommand,
+		"make test-release", "make test-s6-observation", "make test-cgo"}
 	for i, node := range steps.Content {
 		step, ok := mappingOf(node)
 		where := fmt.Sprintf("%s: release test policy step %d", file, i)
@@ -551,6 +586,13 @@ func releaseCheckProblems(file, text string, w workflow) []string {
 		return append(problems, file+": cannot inspect release checks")
 	}
 	root, _ := mappingOf(doc.Content[0])
+	events, _ := mappingOf(root["on"])
+	push, _ := mappingOf(events["push"])
+	var tags []string
+	if len(events) != 1 || len(push) != 1 || push["tags"] == nil ||
+		push["tags"].Decode(&tags) != nil || !slices.Equal(tags, []string{"v*"}) {
+		problems = append(problems, file+": release workflow must only run on v* tag pushes")
+	}
 	jobs, _ := mappingOf(root["jobs"])
 	for _, name := range []string{"lint", "tests"} {
 		job, ok := mappingOf(jobs[name])
@@ -591,11 +633,76 @@ func releaseCheckProblems(file, text string, w workflow) []string {
 		}
 	}
 	requireCommand("lint", "make lint")
-	requireCommand("tests", "python scripts/test-test-release.py\npython scripts/test-report-candidate-artifacts.py")
+	requireCommand("tests", releasePreflightCommand)
 	requireCommand("tests", "make test-release")
+	requireCommand("tests", "make test-s6-observation")
 	requireCommand("tests", "make test-cgo")
-	requireCommand("build-linux", "make build-node-linux-amd64\nmake build-desktop-linux-amd64")
+	requireCommand("build-linux", linuxDesktopCGOCommand)
+	requireCommand("build-linux", linuxReleaseBuildCommand)
+	linuxSteps := w.Jobs["build-linux"].Steps
+	for i, step := range linuxSteps {
+		if strings.TrimSpace(step.Run) == linuxReleaseBuildCommand &&
+			(i == 0 || strings.TrimSpace(linuxSteps[i-1].Run) != linuxDesktopCGOCommand) {
+			problems = append(problems, file+": Linux release build must immediately follow its Desktop CGO preflight")
+		}
+	}
 	requireCommand("build-platforms", "${{ matrix.build_cmds }}")
+	for _, job := range []struct{ name, platform, archive string }{
+		{"build-linux", "linux-amd64", "release/corsa-linux-amd64.tar.bz2\nrelease/corsa-linux-amd64.tar.bz2.json"},
+		{"build-platforms", `"${{ matrix.platform }}"`, "release/corsa-${{ matrix.platform }}.*"},
+	} {
+		command := fmt.Sprintf(releaseArchiveCommand, job.platform)
+		requireCommand(job.name, command)
+		uploads := 0
+		steps := w.Jobs[job.name].Steps
+		for i, step := range steps {
+			if !usesAction(step, "actions/upload-artifact") {
+				continue
+			}
+			uploads++
+			path, _ := step.With["path"].(string)
+			if i == 0 || strings.TrimSpace(steps[i-1].Run) != command || strings.TrimSpace(path) != job.archive ||
+				step.With["if-no-files-found"] != "error" || step.If.Kind != 0 || step.ContinueOnError.Kind != 0 {
+				problems = append(problems, fmt.Sprintf("%s: job %q must upload only its checked release archive", file, job.name))
+			}
+		}
+		if uploads != 1 {
+			problems = append(problems, fmt.Sprintf("%s: job %q must upload exactly one checked archive", file, job.name))
+		}
+	}
+	requireCommand("release", collectReleaseCommand)
+	checkouts, publishers := 0, 0
+	steps := w.Jobs["release"].Steps
+	for i, step := range steps {
+		if usesAction(step, "actions/checkout") {
+			checkouts++
+			if step.With["persist-credentials"] != false || step.If.Kind != 0 || step.ContinueOnError.Kind != 0 {
+				problems = append(problems, file+": release checkout must be unconditional and must not persist credentials")
+			}
+			if len(step.With) != 1 {
+				problems = append(problems, file+": release checkout must use the triggering repository, ref and path")
+			}
+		}
+		if !usesAction(step, "softprops/action-gh-release") {
+			continue
+		}
+		publishers++
+		_, tagOverride := step.With["tag_name"]
+		if tagOverride || step.With["target_commitish"] != "${{ github.sha }}" {
+			problems = append(problems, file+": release must publish the triggering tag and commit")
+		}
+		assets, _ := step.With["files"].(string)
+		if i == 0 || strings.TrimSpace(steps[i-1].Run) != collectReleaseCommand || strings.TrimSpace(assets) != verifiedReleaseAssets ||
+			step.With["fail_on_unmatched_files"] != true || step.If.Kind != 0 || step.ContinueOnError.Kind != 0 {
+			problems = append(problems, file+": release must publish only the verified downloads")
+		}
+	}
+	if checkouts != 1 {
+		problems = append(problems, file+": release must have exactly one checkout")
+	}
+	if publishers != 1 {
+		problems = append(problems, file+": release must have exactly one publisher of verified downloads")
+	}
 
 	var matrixDoc struct {
 		Jobs map[string]struct {
@@ -603,6 +710,7 @@ func releaseCheckProblems(file, text string, w workflow) []string {
 				Matrix struct {
 					Include []struct {
 						Name     string `yaml:"name"`
+						Platform string `yaml:"platform"`
 						Runner   string `yaml:"runs_on"`
 						Commands string `yaml:"build_cmds"`
 					} `yaml:"include"`
@@ -613,16 +721,17 @@ func releaseCheckProblems(file, text string, w workflow) []string {
 	if err := yaml.Unmarshal([]byte(text), &matrixDoc); err != nil {
 		return append(problems, err.Error())
 	}
-	want := map[string][3]string{
-		"macos-arm64":   {"macos-latest", "build-node-macos-arm64", "build-desktop-macos-arm64"},
-		"macos-amd64":   {"macos-15-intel", "build-node-macos-amd64", "build-desktop-macos-amd64"},
-		"windows-amd64": {"windows-latest", "build-node-windows-amd64", "build-desktop-windows-amd64"},
-		"windows-arm64": {"windows-latest", "build-node-windows-arm64", "build-desktop-windows-arm64"},
+	want := map[string][4]string{
+		"macos-arm64":   {"macos-latest", "build-node-macos-arm64", "build-desktop-macos-arm64", "darwin-arm64"},
+		"macos-amd64":   {"macos-15-intel", "build-node-macos-amd64", "build-desktop-macos-amd64", "darwin-amd64"},
+		"windows-amd64": {"windows-latest", "build-node-windows-amd64", "build-desktop-windows-amd64", "windows-amd64"},
+		"windows-arm64": {"windows-latest", "build-node-windows-arm64", "build-desktop-windows-arm64", "windows-arm64"},
 	}
 	seen := map[string]bool{}
 	for _, row := range matrixDoc.Jobs["build-platforms"].Strategy.Matrix.Include {
 		expected, exists := want[row.Name]
-		if !exists || seen[row.Name] || row.Runner != expected[0] || strings.TrimSpace(row.Commands) != fmt.Sprintf("make %s\nmake %s", expected[1], expected[2]) {
+		if !exists || seen[row.Name] || row.Runner != expected[0] || row.Platform != expected[3] ||
+			strings.TrimSpace(row.Commands) != fmt.Sprintf("make %s\nmake %s", expected[1], expected[2]) {
 			problems = append(problems, file+": platform matrix must retain all four daemon/Desktop builds")
 		}
 		seen[row.Name] = true
@@ -651,6 +760,9 @@ func workflowProblems(file, text string, everyJobGated bool) []string {
 		problems = append(problems, releaseBodyProblems(file, w)...)
 		problems = append(problems, releaseCheckProblems(file, text, w)...)
 	}
+	if everyJobGated || file == checksWorkflowFile || file == candidateWorkflowFile {
+		problems = append(problems, workflowActionRefProblems(file, w)...)
+	}
 	for name, job := range w.Jobs {
 		if name == admissionJobName {
 			continue
@@ -676,6 +788,57 @@ func workflowProblems(file, text string, everyJobGated bool) []string {
 func TestReleaseWorkflowRunsNothingBeforeAdmission(t *testing.T) {
 	for _, problem := range workflowProblems(releaseWorkflowFile, readWorkflowText(t, releaseWorkflowFile), true) {
 		t.Error(problem)
+	}
+}
+
+func TestReleaseWorkflowRejectsMutablePublisherRef(t *testing.T) {
+	original := readWorkflowText(t, releaseWorkflowFile)
+	w, err := parseWorkflow(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, step := range w.Jobs["release"].Steps {
+		if !usesAction(step, "softprops/action-gh-release") {
+			continue
+		}
+		mutated := strings.Replace(original, "uses: "+step.Uses, "uses: softprops/action-gh-release@v2", 1)
+		problems := workflowProblems(releaseWorkflowFile, mutated, true)
+		if !slices.ContainsFunc(problems, func(problem string) bool {
+			return strings.Contains(problem, `external action "softprops/action-gh-release@v2" must be pinned`)
+		}) {
+			t.Fatal("release wiring accepted a mutable ref in the publication job")
+		}
+		return
+	}
+	t.Fatal("release publication action not found")
+}
+
+func TestEvidenceWorkflowsRejectMutableCheckoutRefs(t *testing.T) {
+	for _, tc := range []struct{ file, job string }{
+		{checksWorkflowFile, "lint"},
+		{candidateWorkflowFile, "build"},
+	} {
+		t.Run(tc.file, func(t *testing.T) {
+			original := readWorkflowText(t, tc.file)
+			w, err := parseWorkflow(original)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, step := range w.Jobs[tc.job].Steps {
+				if !usesAction(step, "actions/checkout") {
+					continue
+				}
+				mutated := strings.ReplaceAll(original, "uses: "+step.Uses, "uses: actions/checkout@v4")
+				problems := workflowProblems(tc.file, mutated, false)
+				if !slices.ContainsFunc(problems, func(problem string) bool {
+					return strings.Contains(problem, `external action "actions/checkout@v4" must be pinned`)
+				}) {
+					t.Fatal("workflow accepted a mutable checkout ref")
+				}
+				return
+			}
+			t.Fatal("checkout action not found")
+		})
 	}
 }
 
@@ -874,8 +1037,14 @@ func TestReleaseChecksAndPlatformCoverageCannotBeBypassed(t *testing.T) {
 		return original[start:end]
 	}
 	cases := []struct{ name, old, replacement string }{
+		{"release accepts manual dispatch", "on:\n  push:", "on:\n  workflow_dispatch:\n  push:"},
+		{"release accepts dev pushes", "    tags:\n", "    branches: [dev]\n    tags:\n"},
+		{"release accepts other tags", "      - \"v*\"", "      - \"*\""},
 		{"missing tests job", jobBlock("tests"), "\n"},
 		{"default tests skipped", "run: make test-release", "run: echo skipped"},
+		{"tagged S6 tests skipped", "run: make test-s6-observation", "run: echo skipped"},
+		{"tagged S6 failure swallowed", "run: make test-s6-observation", "run: make test-s6-observation || true"},
+		{"tagged S6 step disabled", "run: make test-s6-observation", "run: make test-s6-observation\n        if: false"},
 		{"cgo failure swallowed", "run: make test-cgo", "run: make test-cgo || true"},
 		{"lint failure swallowed", "run: make lint", "run: make lint || true"},
 		{"default test step disabled", "run: make test-release", "run: make test-release\n        if: false"},
@@ -885,7 +1054,23 @@ func TestReleaseChecksAndPlatformCoverageCannotBeBypassed(t *testing.T) {
 		{"tests job dry run environment", "    name: Release tests\n", "    name: Release tests\n    env:\n      MAKEFLAGS: -n\n"},
 		{"tests job write token", "    name: Release tests\n", "    name: Release tests\n    permissions:\n      contents: write\n"},
 		{"preflight controls skipped", "python scripts/test-test-release.py\n          python scripts/test-report-candidate-artifacts.py", "echo skipped"},
+		{"CGO preflight controls skipped", "python scripts/test-report-linux-desktop-cgo.py", "echo skipped"},
+		{"Linux release CGO preflight skipped", "run: " + linuxDesktopCGOCommand, "run: echo skipped"},
+		{"Linux release CGO preflight after build",
+			"run: " + linuxDesktopCGOCommand + "\n\n      - name: Build binaries\n        shell: bash\n        run: |\n          make build-node-linux-amd64\n          make build-desktop-linux-amd64",
+			"run: |\n          make build-node-linux-amd64\n          make build-desktop-linux-amd64\n\n      - name: Late CGO preflight\n        shell: bash\n        run: " + linuxDesktopCGOCommand},
 		{"linux daemon skipped", "make build-node-linux-amd64", "echo skipped"},
+		{"linux archive not verified", "run: " + fmt.Sprintf(releaseArchiveCommand, "linux-amd64"), "run: echo skipped"},
+		{"wrong matrix artifact platform", "platform: darwin-arm64", "platform: darwin-amd64"},
+		{"unchecked upload path", "path: release/corsa-${{ matrix.platform }}.*", "path: dist/*"},
+		{"download verification skipped", "run: " + collectReleaseCommand, "run: echo skipped"},
+		{"publishes files outside verified dist", "            dist/corsa-windows-arm64.zip", "            release-artifacts/**/*"},
+		{"publisher changes the tag", "          fail_on_unmatched_files: true", "          tag_name: v0.0.1\n          fail_on_unmatched_files: true"},
+		{"publisher changes the target commit", "target_commitish: ${{ github.sha }}", "target_commitish: dev"},
+		{"publisher omits the target commit", "          target_commitish: ${{ github.sha }}\n", ""},
+		{"publication ignores verification failure", "      - name: Publish GitHub release\n", "      - name: Publish GitHub release\n        if: always()\n"},
+		{"step between verification and upload", "run: " + fmt.Sprintf(releaseArchiveCommand, "linux-amd64"),
+			"run: " + fmt.Sprintf(releaseArchiveCommand, "linux-amd64") + "\n\n      - name: Alter archive\n        run: echo skipped"},
 		{"matrix invocation skipped", "run: ${{ matrix.build_cmds }}", "run: echo skipped"},
 		{"platform duplicated", "name: windows-arm64", "name: windows-amd64"},
 		{"wrong Desktop architecture", "make build-desktop-windows-arm64", "make build-desktop-windows-amd64"},
@@ -907,6 +1092,18 @@ func TestReleaseChecksAndPlatformCoverageCannotBeBypassed(t *testing.T) {
 		line := "      - " + dependency + "\n"
 		cases = append(cases, struct{ name, old, replacement string }{
 			"release drops " + dependency, old, strings.Replace(old, line, "", 1),
+		})
+	}
+	release := jobBlock("release")
+	checkoutOption := "        with:\n          persist-credentials: false\n"
+	for _, mutation := range []struct{ name, replacement string }{
+		{"release checkout persists credentials by default", ""},
+		{"release checkout explicitly persists credentials", "        with:\n          persist-credentials: true\n"},
+		{"release checkout is conditional", "        if: false\n" + checkoutOption},
+		{"release checkout changes the ref", checkoutOption + "          ref: dev\n"},
+	} {
+		cases = append(cases, struct{ name, old, replacement string }{
+			mutation.name, release, strings.Replace(release, checkoutOption, mutation.replacement, 1),
 		})
 	}
 	old := jobBlock("tests")

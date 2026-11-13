@@ -9,7 +9,10 @@ import (
 	"go.yaml.in/yaml/v3"
 )
 
-const candidateWorkflowFile = "candidate-build.yml"
+const (
+	candidateWorkflowFile = "candidate-build.yml"
+	checksWorkflowFile    = "ci.yml"
+)
 
 // A candidate run supplies build evidence, never externally retrievable binaries.
 // Every publishing job continues to be subject to the original gate tests.
@@ -29,17 +32,28 @@ func candidateBuildProblems(text string) []string {
 			}
 		}
 	}
-	buildCalls, reportCalls := 0, 0
-	for _, step := range w.Jobs["build"].Steps {
+	buildCalls, reportCalls, cgoCalls := 0, 0, 0
+	buildIndex, cgoIndex := -1, -1
+	for index, step := range w.Jobs["build"].Steps {
 		switch strings.TrimSpace(step.Run) {
 		case "${{ matrix.commands }}":
 			buildCalls++
+			buildIndex = index
 		case `python scripts/report-candidate-artifacts.py --platform "${{ matrix.platform }}" --source-sha "$GITHUB_SHA"`:
 			reportCalls++
+		case `python scripts/report-linux-desktop-cgo.py --source-sha "$GITHUB_SHA"`:
+			cgoCalls++
+			cgoIndex = index
+			if step.If.Value != "matrix.platform == 'linux-amd64'" || step.ContinueOnError.Kind != 0 {
+				problems = append(problems, "Desktop CGO receipt must be required on the Linux amd64 candidate only")
+			}
 		}
 	}
 	if buildCalls != 1 || reportCalls != 1 {
 		problems = append(problems, "candidate must execute its build matrix and artifact reporter exactly once")
+	}
+	if cgoCalls != 1 || cgoIndex >= buildIndex {
+		problems = append(problems, "candidate must record the Linux Desktop CGO environment before building")
 	}
 	var doc struct {
 		On          map[string]yaml.Node `yaml:"on"`
@@ -101,7 +115,7 @@ func TestCandidateBuildChecksEveryReleasePlatformWithoutPublishing(t *testing.T)
 }
 
 func TestReleaseCIKeepsTheApprovedTestScopeAndCGOChecks(t *testing.T) {
-	text := readWorkflowText(t, "ci.yml")
+	text := readWorkflowText(t, checksWorkflowFile)
 	w, err := parseWorkflow(text)
 	if err != nil {
 		t.Fatal(err)
@@ -110,18 +124,26 @@ func TestReleaseCIKeepsTheApprovedTestScopeAndCGOChecks(t *testing.T) {
 	if !ok {
 		t.Fatal("release test job is missing")
 	}
-	selected, cgo, controls := 0, 0, 0
-	for _, step := range job.Steps {
+	selected, tagged, cgo, controls := 0, 0, 0, 0
+	controlsIndex, releaseIndex := -1, -1
+	for index, step := range job.Steps {
 		switch strings.TrimSpace(step.Run) {
-		case "make test-release":
+		case "bash scripts/run-ci-test-step.sh test-release":
 			selected++
-		case "make test-cgo":
+			releaseIndex = index
+		case "bash scripts/run-ci-test-step.sh test-s6-observation":
+			tagged++
+		case "bash scripts/run-ci-test-step.sh test-cgo":
 			cgo++
-		case "python scripts/test-test-release.py\npython scripts/test-report-candidate-artifacts.py":
+		case releasePreflightCommand:
 			controls++
+			controlsIndex = index
+			if step.If.Kind != 0 || step.ContinueOnError.Kind != 0 {
+				t.Fatal("CI preflight controls must run unconditionally and fail on errors")
+			}
 		}
 	}
-	if selected != 1 || cgo != 1 || controls != 1 {
+	if selected != 1 || tagged != 1 || cgo != 1 || controls != 1 || controlsIndex >= releaseIndex {
 		t.Fatal("CI must run the approved package selection, tagged CGO suite and preflight refusal controls")
 	}
 	var events struct {
@@ -151,6 +173,9 @@ func TestCandidateBuildRefusesPublishingAndCoverageRegressions(t *testing.T) {
 		{"missing-daemon", "make build-node-linux-amd64", "echo skipped"},
 		{"skipped-build-step", "run: ${{ matrix.commands }}", "run: echo skipped"},
 		{"skipped-report-step", "run: python scripts/report-candidate-artifacts.py", "run: echo scripts/report-candidate-artifacts.py"},
+		{"skipped-cgo-receipt", "run: python scripts/report-linux-desktop-cgo.py", "run: echo scripts/report-linux-desktop-cgo.py"},
+		{"wrong-cgo-platform", "if: matrix.platform == 'linux-amd64'", "if: matrix.platform == 'darwin-arm64'"},
+		{"ignored-cgo-failure", "if: matrix.platform == 'linux-amd64'", "if: matrix.platform == 'linux-amd64'\n        continue-on-error: true"},
 	} {
 		t.Run(mutation.name, func(t *testing.T) {
 			if strings.Count(original, mutation.old) != 1 {

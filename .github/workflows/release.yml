@@ -21,14 +21,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           # Full history: the gate compares the tagged tree with the final
           # candidate commit named in the manifest.
           fetch-depth: 0
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
           cache: true
@@ -42,10 +42,10 @@ jobs:
     needs: admission
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
           cache: true
@@ -81,16 +81,16 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
           cache: true
 
       - name: Setup Python for preflight controls
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
 
@@ -119,9 +119,13 @@ jobs:
         run: |
           python scripts/test-test-release.py
           python scripts/test-report-candidate-artifacts.py
+          python scripts/test-report-linux-desktop-cgo.py
 
       - name: Run applicable release tests (overlaysim deferred to D1)
         run: make test-release
+
+      - name: Run tagged S6 observation entry tests
+        run: make test-s6-observation
 
       - name: Run storage tests against the cgo SQLite driver
         run: make test-cgo
@@ -135,13 +139,18 @@ jobs:
       - tests
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
           cache: true
+
+      - name: Setup Python for artifact verification
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
 
       - name: Install Linux desktop build deps
         run: |
@@ -164,36 +173,27 @@ jobs:
             libxrender-dev \
             libxxf86vm-dev
 
+      - name: Record Linux Desktop CGO environment
+        shell: bash
+        run: python scripts/report-linux-desktop-cgo.py --source-sha "$GITHUB_SHA"
+
       - name: Build binaries
         shell: bash
         run: |
           make build-node-linux-amd64
           make build-desktop-linux-amd64
 
-      - name: Package Linux artifacts
+      - name: Verify and package Linux release archive
         shell: bash
-        run: |
-          package_dir="release/corsa-linux-amd64"
-          install -d \
-            "${package_dir}/bin" \
-            "${package_dir}/share/applications" \
-            "${package_dir}/share/icons/hicolor/256x256/apps"
-          install -m 0755 dist/corsa-node-linux-amd64 \
-            "${package_dir}/bin/corsa-node"
-          install -m 0755 dist/corsa-desktop-linux-amd64 \
-            "${package_dir}/bin/corsa-desktop"
-          install -m 0644 packaging/linux/corsa.desktop \
-            "${package_dir}/share/applications/corsa.desktop"
-          install -m 0644 assets/icons/png/app-icon-256.png \
-            "${package_dir}/share/icons/hicolor/256x256/apps/corsa.png"
-          tar -cjf release/corsa-linux-amd64.tar.bz2 -C release \
-            corsa-linux-amd64
+        run: python scripts/report-candidate-artifacts.py --release-archive --platform linux-amd64 --source-sha "$GITHUB_SHA"
 
       - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: corsa-linux
-          path: release/corsa-linux-amd64.tar.bz2
+          path: |
+            release/corsa-linux-amd64.tar.bz2
+            release/corsa-linux-amd64.tar.bz2.json
           if-no-files-found: error
 
   build-platforms:
@@ -208,21 +208,25 @@ jobs:
       matrix:
         include:
           - name: macos-arm64
+            platform: darwin-arm64
             runs_on: macos-latest
             build_cmds: |
               make build-node-macos-arm64
               make build-desktop-macos-arm64
           - name: macos-amd64
+            platform: darwin-amd64
             runs_on: macos-15-intel
             build_cmds: |
               make build-node-macos-amd64
               make build-desktop-macos-amd64
           - name: windows-amd64
+            platform: windows-amd64
             runs_on: windows-latest
             build_cmds: |
               make build-node-windows-amd64
               make build-desktop-windows-amd64
           - name: windows-arm64
+            platform: windows-arm64
             runs_on: windows-latest
             build_cmds: |
               make build-node-windows-arm64
@@ -230,45 +234,32 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
           cache: true
+
+      - name: Setup Python for artifact verification
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
 
       - name: Build binaries
         shell: bash
         run: ${{ matrix.build_cmds }}
 
-      - name: Package macOS artifacts
-        if: startsWith(matrix.name, 'macos-')
+      - name: Verify and package platform release archive
         shell: bash
-        run: |
-          mkdir -p release
-          if [ "${{ matrix.name }}" = "macos-arm64" ]; then
-            tar -cjf release/corsa-darwin-arm64.tar.bz2 -C dist \
-              corsa-node-darwin-arm64 \
-              Corsa-darwin-arm64.app
-          else
-            tar -cjf release/corsa-darwin-amd64.tar.bz2 -C dist \
-              corsa-node-darwin-amd64 \
-              Corsa-darwin-amd64.app
-          fi
-
-      - name: Package Windows artifacts
-        if: startsWith(matrix.name, 'windows-')
-        shell: bash
-        run: |
-          mkdir -p release
-          powershell -Command "Compress-Archive -Path dist/corsa-node-${{ matrix.name }}.exe,dist/corsa-desktop-${{ matrix.name }}.exe -DestinationPath release/corsa-${{ matrix.name }}.zip"
+        run: python scripts/report-candidate-artifacts.py --release-archive --platform "${{ matrix.platform }}" --source-sha "$GITHUB_SHA"
 
       - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: corsa-${{ matrix.name }}
-          path: release/*
+          path: release/corsa-${{ matrix.platform }}.*
           if-no-files-found: error
 
   release:
@@ -284,17 +275,20 @@ jobs:
       contents: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: release-artifacts
+          merge-multiple: false
 
-      - name: Flatten artifacts
-        run: |
-          mkdir -p dist
-          find release-artifacts -type f -exec cp {} dist/ \;
+      - name: Setup Python for artifact verification
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
 
       # The admission gate required this file, as a regular file, for the
       # build's version, and the tag equals that version; it is the release
@@ -308,8 +302,19 @@ jobs:
             exit 1
           fi
 
+      - name: Verify downloaded release archives
+        shell: bash
+        run: python scripts/report-candidate-artifacts.py --collect-release --source-sha "$GITHUB_SHA"
+
       - name: Publish GitHub release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
-          files: dist/*
+          target_commitish: ${{ github.sha }}
+          files: |
+            dist/corsa-linux-amd64.tar.bz2
+            dist/corsa-darwin-arm64.tar.bz2
+            dist/corsa-darwin-amd64.tar.bz2
+            dist/corsa-windows-amd64.zip
+            dist/corsa-windows-arm64.zip
+          fail_on_unmatched_files: true
           body_path: docs/release-notes/RELEASE-${{ github.ref_name }}.md
