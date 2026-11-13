@@ -16,6 +16,7 @@ import (
 	"time"
 
 	appnode "github.com/piratecash/corsa/internal/app/node"
+	"github.com/piratecash/corsa/internal/core/datagram"
 	"github.com/piratecash/corsa/internal/core/domain"
 	corenode "github.com/piratecash/corsa/internal/core/node"
 	"golang.org/x/sys/unix"
@@ -166,27 +167,29 @@ type observed[T any, K any] struct {
 	Snapshot T      `json:"snapshot"`
 }
 type sourceValues struct {
-	Registered observed[corenode.RegisteredProvenV2ObservationSnapshot, corenode.RegisteredProvenV2ObservationKey]     `json:"registered"`
-	Advertised observed[corenode.AdvertisedConnectionObservationSnapshot, corenode.AdvertisedConnectionObservationKey] `json:"advertised"`
-	Pins       observed[corenode.RawPinMembershipObservationSnapshot, corenode.RawPinMembershipObservationKey]         `json:"pins"`
-	Guard      observed[corenode.GuardObservationSnapshot, corenode.GuardObservationKey]                               `json:"guard"`
-	Terminal   observed[corenode.TerminalObservationSnapshot, corenode.TerminalObservationKey]                         `json:"terminal"`
-	Pending    observed[domain.PendingQueueObservationSnapshot, corenode.PendingObservationKey]                        `json:"pending"`
-	Handshake  observed[corenode.HandshakeObservationSnapshot, corenode.HandshakeObservationKey]                       `json:"handshake"`
-	Total      observed[corenode.ConnectionTotalObservationSnapshot, corenode.ConnectionTotalObservationKey]           `json:"total"`
+	Registered          observed[corenode.RegisteredProvenV2ObservationSnapshot, corenode.RegisteredProvenV2ObservationKey]     `json:"registered"`
+	Advertised          observed[corenode.AdvertisedConnectionObservationSnapshot, corenode.AdvertisedConnectionObservationKey] `json:"advertised"`
+	Pins                observed[corenode.RawPinMembershipObservationSnapshot, corenode.RawPinMembershipObservationKey]         `json:"pins"`
+	Guard               observed[corenode.GuardObservationSnapshot, corenode.GuardObservationKey]                               `json:"guard"`
+	Terminal            observed[corenode.TerminalObservationSnapshot, corenode.TerminalObservationKey]                         `json:"terminal"`
+	Pending             observed[domain.PendingQueueObservationSnapshot, corenode.PendingObservationKey]                        `json:"pending"`
+	DatagramQueueGrowth *observed[datagram.QueueGrowthSnapshot, corenode.PendingObservationKey]                                 `json:"datagram_queue_growth,omitempty"`
+	Handshake           observed[corenode.HandshakeObservationSnapshot, corenode.HandshakeObservationKey]                       `json:"handshake"`
+	Total               observed[corenode.ConnectionTotalObservationSnapshot, corenode.ConnectionTotalObservationKey]           `json:"total"`
 }
 
 // The fixed eight functions are private constructor-bound readers, not a
 // callback source API or collector. OFF leaves all nil and never invokes them.
 type captureReads struct {
-	registered func() observed[corenode.RegisteredProvenV2ObservationSnapshot, corenode.RegisteredProvenV2ObservationKey]
-	advertised func() observed[corenode.AdvertisedConnectionObservationSnapshot, corenode.AdvertisedConnectionObservationKey]
-	pins       func() observed[corenode.RawPinMembershipObservationSnapshot, corenode.RawPinMembershipObservationKey]
-	guard      func() observed[corenode.GuardObservationSnapshot, corenode.GuardObservationKey]
-	terminal   func() observed[corenode.TerminalObservationSnapshot, corenode.TerminalObservationKey]
-	pending    func() observed[domain.PendingQueueObservationSnapshot, corenode.PendingObservationKey]
-	handshake  func() observed[corenode.HandshakeObservationSnapshot, corenode.HandshakeObservationKey]
-	total      func() observed[corenode.ConnectionTotalObservationSnapshot, corenode.ConnectionTotalObservationKey]
+	registered          func() observed[corenode.RegisteredProvenV2ObservationSnapshot, corenode.RegisteredProvenV2ObservationKey]
+	advertised          func() observed[corenode.AdvertisedConnectionObservationSnapshot, corenode.AdvertisedConnectionObservationKey]
+	pins                func() observed[corenode.RawPinMembershipObservationSnapshot, corenode.RawPinMembershipObservationKey]
+	guard               func() observed[corenode.GuardObservationSnapshot, corenode.GuardObservationKey]
+	terminal            func() observed[corenode.TerminalObservationSnapshot, corenode.TerminalObservationKey]
+	pending             func() observed[domain.PendingQueueObservationSnapshot, corenode.PendingObservationKey]
+	datagramQueueGrowth func() observed[datagram.QueueGrowthSnapshot, corenode.PendingObservationKey]
+	handshake           func() observed[corenode.HandshakeObservationSnapshot, corenode.HandshakeObservationKey]
+	total               func() observed[corenode.ConnectionTotalObservationSnapshot, corenode.ConnectionTotalObservationKey]
 }
 
 func readsForApp(a *appnode.App, mode string) (captureReads, error) {
@@ -203,7 +206,7 @@ func readsForApp(a *appnode.App, mode string) (captureReads, error) {
 	if mode != "ON" || r == nil || ad == nil || p == nil || g == nil || t == nil || q == nil || h == nil || b == nil {
 		return captureReads{}, entryError("ON-source-unavailable")
 	}
-	return captureReads{
+	reads := captureReads{
 		registered: func() observed[corenode.RegisteredProvenV2ObservationSnapshot, corenode.RegisteredProvenV2ObservationKey] {
 			return observed[corenode.RegisteredProvenV2ObservationSnapshot, corenode.RegisteredProvenV2ObservationKey]{r.Identity().String(), r.Key(), r.Snapshot()}
 		},
@@ -228,7 +231,13 @@ func readsForApp(a *appnode.App, mode string) (captureReads, error) {
 		total: func() observed[corenode.ConnectionTotalObservationSnapshot, corenode.ConnectionTotalObservationKey] {
 			return observed[corenode.ConnectionTotalObservationSnapshot, corenode.ConnectionTotalObservationKey]{b.Identity().String(), b.Key(), b.Snapshot()}
 		},
-	}, nil
+	}
+	if q.HasDatagramQueueGrowth() {
+		reads.datagramQueueGrowth = func() observed[datagram.QueueGrowthSnapshot, corenode.PendingObservationKey] {
+			return observed[datagram.QueueGrowthSnapshot, corenode.PendingObservationKey]{q.Identity().String(), q.Key(), q.DatagramQueueGrowth()}
+		}
+	}
+	return reads, nil
 }
 func alive(ctx context.Context, returned *atomic.Bool) error {
 	if ctx == nil || returned == nil || returned.Load() || ctx.Err() != nil {
@@ -255,7 +264,7 @@ func (r captureReads) capture(ctx context.Context, returned *atomic.Bool, mode s
 		return nil, 0, err
 	}
 	if mode == "OFF" {
-		if r.registered != nil || r.advertised != nil || r.pins != nil || r.guard != nil || r.terminal != nil || r.pending != nil || r.handshake != nil || r.total != nil {
+		if r.registered != nil || r.advertised != nil || r.pins != nil || r.guard != nil || r.terminal != nil || r.pending != nil || r.datagramQueueGrowth != nil || r.handshake != nil || r.total != nil {
 			return nil, 0, entryError("OFF-reader-installed")
 		}
 		return nil, 0, nil
@@ -289,7 +298,16 @@ func (r captureReads) capture(ctx context.Context, returned *atomic.Bool, mode s
 	if v.Total, err = take(ctx, returned, r.total); err != nil {
 		return nil, 0, err
 	}
-	return &v, 8, nil
+	count := 8
+	if r.datagramQueueGrowth != nil {
+		growth, err := take(ctx, returned, r.datagramQueueGrowth)
+		if err != nil {
+			return nil, 0, err
+		}
+		v.DatagramQueueGrowth = &growth
+		count++
+	}
+	return &v, count, nil
 }
 func canonical(raw []byte, value any) error {
 	decoder := json.NewDecoder(bytes.NewReader(raw))

@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/config"
+	"github.com/piratecash/corsa/internal/core/datagram"
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/ebus"
 	"github.com/piratecash/corsa/internal/core/identity"
@@ -57,11 +58,31 @@ func (o *PendingObservation) Snapshot() domain.PendingQueueObservationSnapshot {
 	return o.service.PendingQueueObservation()
 }
 
+// HasDatagramQueueGrowth reports the diagnostic request even if the transport
+// is disabled. The datagram read has its own mutex, source ID and boundary.
+func (o *PendingObservation) HasDatagramQueueGrowth() bool {
+	return o != nil && o.service != nil && o.service.observeDatagramQueueGrowth
+}
+
+func (o *PendingObservation) DatagramQueueGrowth() datagram.QueueGrowthSnapshot {
+	if !o.HasDatagramQueueGrowth() {
+		return datagram.QueueGrowthSnapshot{UnknownReason: "source_unavailable"}
+	}
+	if layer := o.service.datagramLayer(); layer != nil && layer.queue != nil {
+		return layer.queue.GrowthObservation()
+	}
+	if o.service.datagramStartup.state == domain.DatagramStateConfiguredOff {
+		return datagram.QueueGrowthSnapshot{UnknownReason: "datagram_disabled"}
+	}
+	return datagram.QueueGrowthSnapshot{UnknownReason: "datagram_unavailable"}
+}
+
 type pendingObservationConstruction struct {
-	key      PendingObservationKey
-	identity domain.PeerIdentity
-	clock    func() (time.Duration, error)
-	readout  *PendingObservation
+	key                 PendingObservationKey
+	identity            domain.PeerIdentity
+	clock               func() (time.Duration, error)
+	readout             *PendingObservation
+	datagramQueueGrowth bool
 }
 
 // NewServiceWithPendingObservation explicitly opts into the existing K12 source.
@@ -92,6 +113,7 @@ func (c *pendingObservationConstruction) install(s *Service) {
 	// actual baseline and source attachment share the mutation owner's lock.
 	o := &PendingObservation{service: s, key: c.key, identity: c.identity}
 	c.readout = o
+	s.observeDatagramQueueGrowth = c.datagramQueueGrowth
 	s.deliveryMu.Lock()
 	defer s.deliveryMu.Unlock()
 	var count int64

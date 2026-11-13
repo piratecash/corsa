@@ -24,6 +24,7 @@ import (
 
 	appnode "github.com/piratecash/corsa/internal/app/node"
 	"github.com/piratecash/corsa/internal/core/appdata"
+	"github.com/piratecash/corsa/internal/core/datagram"
 	"github.com/piratecash/corsa/internal/core/domain"
 	corenode "github.com/piratecash/corsa/internal/core/node"
 	"golang.org/x/sys/unix"
@@ -328,6 +329,48 @@ func TestS6ProbeCanonicalSessionAndEightIndependentReads(t *testing.T) {
 		t.Fatal(order)
 	}
 }
+func TestS6ProbeOptInDatagramQueueGrowthOverChannel(t *testing.T) {
+	init := sampleInit()
+	init.Request.DatagramQueueGrowth = true
+	var decoded initFrame
+	if err := canonical(marshal(t, init), &decoded); err != nil || !decoded.Request.DatagramQueueGrowth {
+		t.Fatal("datagram queue growth INIT opt-in was lost", err)
+	}
+	if err := validateInit(decoded, testNonce); err != nil {
+		t.Fatal(err)
+	}
+	f := fixture(t)
+	var order []int
+	var returned atomic.Bool
+	reads := fakeReads(&order)
+	want := observed[datagram.QueueGrowthSnapshot, corenode.PendingObservationKey]{
+		Identity: "local-owner", Key: init.Request.Pending,
+		Snapshot: datagram.QueueGrowthSnapshot{UnknownReason: "datagram_disabled"},
+	}
+	reads.datagramQueueGrowth = func() observed[datagram.QueueGrowthSnapshot, corenode.PendingObservationKey] {
+		order = append(order, 8)
+		return want
+	}
+	done, reader := session(t, f, reads, "ON", &returned)
+	send(t, f, marshal(t, readFrame{1, testNonce, 0, "READ"}))
+	cut := read(t, f, reader)
+	if cut.InvokedSources != 9 || cut.Sources == nil || cut.Sources.DatagramQueueGrowth == nil ||
+		*cut.Sources.DatagramQueueGrowth != want || !cut.IndependentReads || cut.JointAtomicCut || cut.AttributionVerified {
+		t.Fatalf("unexpected opt-in cut: %+v", cut)
+	}
+	send(t, f, marshal(t, readFrame{1, testNonce, 1, "STOP"}))
+	_ = f.request.Close()
+	if stopped := read(t, f, reader); stopped.Kind != "STOP_REQUESTED" {
+		t.Fatal(stopped)
+	}
+	if err := wait(t, done); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(order, []int{0, 1, 2, 3, 4, 5, 6, 7, 8}) {
+		t.Fatal(order)
+	}
+}
+
 func TestS6ProbePreservesUnknownDisabledAndUnverifiedLabels(t *testing.T) {
 	var order []int
 	var returned atomic.Bool

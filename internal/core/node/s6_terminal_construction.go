@@ -28,6 +28,7 @@ type ObservationOptions struct {
 	RawPinMembership      *RawPinMembershipObservationRequest
 	RegisteredProvenV2    *RegisteredProvenV2ObservationRequest
 	Pending               *PendingObservationKey
+	DatagramQueueGrowth   bool
 	Terminal              *TerminalObservationKey
 	Guard                 *GuardObservationKey
 	Handshake             *HandshakeObservationRequest
@@ -145,6 +146,9 @@ func newServiceWithObservations(cfg config.Node, id *identity.Identity, bus *ebu
 	}
 	// Freeze this request before any other observer clock/RNG/build callback.
 	// Public input has only scalars/value tokens; elapsed remains private.
+	if options.DatagramQueueGrowth && options.Pending == nil {
+		return nil, ObservationReadouts{}, errors.New("datagram queue growth: pending observation key required")
+	}
 	var registered *k3RegisteredRequest
 	if options.RegisteredProvenV2 != nil {
 		request := *options.RegisteredProvenV2
@@ -175,7 +179,7 @@ func newServiceWithObservations(cfg config.Node, id *identity.Identity, bus *ebu
 		if !validPendingObservationKey(key) {
 			return nil, ObservationReadouts{}, errors.New("pending observation: invalid key")
 		}
-		pending = &pendingObservationConstruction{key: key, identity: owner, clock: clock}
+		pending = &pendingObservationConstruction{key: key, identity: owner, clock: clock, datagramQueueGrowth: options.DatagramQueueGrowth}
 	}
 	if options.Terminal != nil {
 		key := *options.Terminal

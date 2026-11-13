@@ -498,8 +498,9 @@ type Service struct {
 	pendingKeys map[pendingKey]struct{}
 	// Nil in ordinary roots. The candidate clock and source are fixed before use;
 	// all mutable source state is owned by deliveryMu, like pending itself.
-	pendingObservation *pendingQueueObservation
-	outbound           map[messageIdentity]outboundDelivery
+	pendingObservation         *pendingQueueObservation
+	observeDatagramQueueGrowth bool
+	outbound                   map[messageIdentity]outboundDelivery
 	// lastOutboundTerminalSweep throttles sweepTerminalOutbound (guarded
 	// by deliveryMu like the map it sweeps).
 	lastOutboundTerminalSweep time.Time

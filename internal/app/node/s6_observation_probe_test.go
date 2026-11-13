@@ -241,3 +241,46 @@ func TestAppS6ObservationProbeUnstartedLifecycle(t *testing.T) {
 		t.Fatal("original cleanup replaced a memory source")
 	}
 }
+
+func TestAppS6ObservationProbeDatagramQueueGrowth(t *testing.T) {
+	for _, tc := range []struct {
+		name, datagram string
+		requested      bool
+	}{
+		{"unrequested", "1", false},
+		{"disabled-transport", "0", true},
+		{"enabled-transport", "1", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			isolateTotalApp(t)
+			t.Setenv("CORSA_ENABLE_DATAGRAM_V1", tc.datagram)
+			request := appS6ProbeRequest()
+			request.DatagramQueueGrowth = tc.requested
+			a, err := NewWithS6ObservationProbe(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ownUnstartedGuardApp(t, a, time.Now().Add(10*time.Second))
+			o := a.PendingObservation()
+			if o == nil || o.HasDatagramQueueGrowth() != tc.requested {
+				t.Fatalf("diagnostic request lost: %v", o)
+			}
+			snapshot := o.DatagramQueueGrowth()
+			var reason string
+			switch {
+			case !tc.requested:
+				reason = "source_unavailable"
+			case tc.datagram == "0":
+				reason = "datagram_disabled"
+			default:
+				if _, err := trustedclock.SinceBoot(); err != nil {
+					reason = "duration_read_failed"
+				}
+			}
+			if snapshot.UnknownReason != reason || snapshot.Control.Depth != 0 || snapshot.Bulk.Depth != 0 ||
+				(reason == "" && snapshot.Instance == ([16]byte{})) {
+				t.Fatalf("datagram queue snapshot = %+v, want reason %q", snapshot, reason)
+			}
+		})
+	}
+}

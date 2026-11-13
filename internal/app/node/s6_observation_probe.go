@@ -15,6 +15,7 @@ type S6ObservationProbeRequest struct {
 	Guard                 corenode.GuardObservationKey
 	Terminal              corenode.TerminalObservationKey
 	Pending               corenode.PendingObservationKey
+	DatagramQueueGrowth   bool `json:",omitempty"`
 	Handshake             corenode.HandshakeObservationRequest
 	ConnectionTotal       corenode.ConnectionTotalObservationRequest
 }
@@ -31,6 +32,7 @@ func NewWithS6ObservationProbe(request S6ObservationProbeRequest) (*App, error) 
 		Guard:                 &request.Guard,
 		Terminal:              &request.Terminal,
 		Pending:               &request.Pending,
+		DatagramQueueGrowth:   request.DatagramQueueGrowth,
 		Handshake:             &request.Handshake,
 		ConnectionTotal:       &request.ConnectionTotal,
 	})

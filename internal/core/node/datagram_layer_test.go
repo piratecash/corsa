@@ -273,6 +273,9 @@ func TestDatagramLayerBuiltWithFlagOn(t *testing.T) {
 	if svc.datagramLayer() == nil {
 		t.Fatal("the datagram layer was not constructed with the feature flag on")
 	}
+	if snapshot := svc.datagramLayer().queue.GrowthObservation(); snapshot.UnknownReason != "source_unavailable" || snapshot.Instance != ([16]byte{}) {
+		t.Fatalf("ordinary datagram layer started queue observation: %+v", snapshot)
+	}
 	// BOTH halves are on immediately and neither reads the type registry
 	// (docs/protocol/datagram.md §6): the endpoint name says the envelope is
 	// understood, the transit name says other people's frames will be

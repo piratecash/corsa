@@ -197,10 +197,14 @@ func newDatagramPlaneParts(svc *Service, metrics *datagram.Metrics) (datagramPla
 		return datagramPlaneParts{}, err
 	}
 
+	newQueue := datagram.NewWeightedQueue
+	if svc.observeDatagramQueueGrowth {
+		newQueue = datagram.NewWeightedQueueWithGrowthObservation
+	}
 	return datagramPlaneParts{
 		scheduler:   scheduler,
 		admission:   datagram.NewPeerAdmission(datagram.AdmissionConfig{Clock: clock, Budget: limits.Peer}),
-		queue:       datagram.NewWeightedQueue(datagram.WeightedQueueConfig{Clock: clock, Caps: limits.Queue}),
+		queue:       newQueue(datagram.WeightedQueueConfig{Clock: clock, Caps: limits.Queue}),
 		metrics:     metrics,
 		types:       types,
 		replayCache: datagram.NewBaseReplayCache(limits.BaseReplayCacheConfig(clock)),
