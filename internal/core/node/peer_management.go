@@ -1769,8 +1769,7 @@ func (s *Service) learnWireIdentityKeys(address, pubKey, boxKey, boxSig string) 
 		return
 	}
 	s.addKnownPubKey(address, pubKey)
-	s.addKnownBoxKey(address, boxKey)
-	s.addKnownBoxSig(address, boxSig)
+	s.addKnownBoxPair(address, boxKey, boxSig)
 	s.notifyIdentityKeysImported(address)
 }
 
@@ -3410,9 +3409,8 @@ func (s *Service) importAdvertisedContacts(
 			continue
 		}
 		s.addKnownIdentity(domain.PeerIdentityFromWire(contact.Address))
-		s.addKnownBoxKey(contact.Address, contact.BoxKey)
 		s.addKnownPubKey(contact.Address, contact.PubKey)
-		s.addKnownBoxSig(contact.Address, contact.BoxSig)
+		s.addKnownBoxPair(contact.Address, contact.BoxKey, contact.BoxSig)
 		s.notifyIdentityKeysImported(contact.Address)
 		report.Imported++
 	}

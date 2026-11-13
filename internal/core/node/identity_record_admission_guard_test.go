@@ -219,10 +219,23 @@ func TestRecordAdmissionStrictWriterCapturesNinStampBeforeIO(t *testing.T) {
 	}
 	src := string(raw)
 	capture := strings.Index(src, "ninStamp := file.InboundQuota.stamp()")
-	write := strings.Index(src, "files.WriteMain(ctx, raw)")
+	write := strings.Index(src, "s.writeIdentityPinMain(ctx, files, file, raw)")
+	durable := strings.Index(src, "err != nil || commit != secretfile.DurableCommitted")
 	ack := strings.Index(src, "s.recordNinSnapshotWrittenLocked(ninStamp, true)")
-	if capture < 0 || write <= capture || ack <= write || !strings.Contains(src, "err != nil || commit != secretfile.DurableCommitted") {
+	if capture < 0 || write <= capture || durable <= write || ack <= durable {
 		t.Fatal("strict fixed-stamp ACK ordering changed")
+	}
+
+	raw, err = os.ReadFile("identity_pin_write_observation.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, writer, ok := strings.Cut(string(raw), "func (s *secureSessionStore) writeIdentityPinMain(")
+	writer, _, closed := strings.Cut(writer, "\n}")
+	if !ok || !closed || !strings.Contains(writer, "return files.WriteMain(ctx, raw)") ||
+		!strings.Contains(writer, "commit, err := files.WriteMain(ctx, raw)") ||
+		!strings.Contains(writer, "return commit, err") {
+		t.Fatal("observed writer must forward the original durable write")
 	}
 }
 

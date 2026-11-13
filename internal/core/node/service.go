@@ -6978,27 +6978,20 @@ func (s *Service) contactsFrameForNetwork() protocol.Frame {
 func (s *Service) trustedContactsFrame() protocol.Frame {
 	trusted := s.trust.trustedContacts()
 
-	// Short critical section: read s.pubKeys/s.boxKeys under lock, merge
+	// Short critical section: read signing keys under lock, merge
 	// with trust-store data outside. Prevents writer starvation on
 	// s.knowledgeMu (see peerHealthFrames comment for the same pattern
 	// applied to s.peerMu).
-	type keySnap struct {
-		PubKey string
-		BoxKey string
-	}
 	s.knowledgeMu.RLock()
-	keys := make(map[string]keySnap, len(trusted))
+	keys := make(map[string]string, len(trusted))
 	for address := range trusted {
-		keys[address] = keySnap{
-			PubKey: s.pubKeys[address],
-			BoxKey: s.boxKeys[address],
-		}
+		keys[address] = s.pubKeys[address]
 	}
 	s.knowledgeMu.RUnlock()
 
 	contacts := make([]protocol.ContactFrame, 0, len(trusted))
 	for address, contact := range trusted {
-		pubKey := keys[address].PubKey
+		pubKey := keys[address]
 		if pubKey == "" {
 			pubKey = contact.PubKey
 		}
@@ -7010,11 +7003,10 @@ func (s *Service) trustedContactsFrame() protocol.Frame {
 		if identity.VerifyPublicKeyFingerprint(address, pubKey) != nil {
 			continue
 		}
-		boxKey := keys[address].BoxKey
-		if boxKey == "" {
-			boxKey = contact.BoxKey
-		}
-		boxSig := contact.BoxSignature
+		// The trust row owns the pair. A network advertisement can
+		// update the knowledge cache but cannot replace the trusted key
+		// or combine it with a signature from a different key.
+		boxKey, boxSig := contact.BoxKey, contact.BoxSignature
 		if s.trustedKeysAtLoad.boxPairDropped(address, contact) {
 			boxKey, boxSig = "", ""
 		}
@@ -10418,31 +10410,46 @@ func (s *Service) noteIdentityDiscovered(address string, novel bool) {
 // re-enters s.boxKeys / the trust store and contactsFrame redistributes
 // the key network-wide, silently defeating the contact-plane opt-out
 // established at NewService. Every network-sourced key import funnels
-// through addKnownBoxKey/addKnownBoxSig/trustContact, which all consult
+// through addKnownBoxPair/trustContact, which all consult
 // this predicate.
 func (s *Service) suppressesSelfBoxKey(address string) bool {
 	return s.cfg.DisableDirectMessages && address == s.identity.Address
 }
 
-func (s *Service) addKnownBoxKey(address, boxKey string) {
-	if address == "" || boxKey == "" {
+// addKnownBoxPair publishes one pair under the current record authority.
+// The trust read lock spans the knowledge write so a legacy advertisement
+// cannot race a newer record and leave the older pair in the live cache.
+func (s *Service) addKnownBoxPair(address, boxKey, boxSig string) {
+	if address == "" || s.suppressesSelfBoxKey(address) {
 		return
 	}
-	if s.suppressesSelfBoxKey(address) {
+	authoritative := false
+	if s.trust != nil {
+		s.trust.mu.RLock()
+		if record, ok := s.trust.recordLocked(trustRecordKey{network: networkName, address: address}); ok {
+			boxKey, boxSig = string(record.body.BoxKey), string(record.body.BoxSig)
+			authoritative = true
+		}
+	}
+	if !authoritative && (boxKey == "" || boxSig == "") {
+		if s.trust != nil {
+			s.trust.mu.RUnlock()
+		}
 		return
 	}
-
-	log.Trace().Str("site", "addKnownBoxKey").Str("phase", "lock_wait").Str("address", address).Msg("knowledgeMu_writer")
 	s.knowledgeMu.Lock()
-	log.Trace().Str("site", "addKnownBoxKey").Str("phase", "lock_held").Str("address", address).Msg("knowledgeMu_writer")
-	// Register the RAW address in the bounded known set so the entry
-	// written below is always reachable by the set's eviction hook —
-	// the invariant that keeps s.boxKeys bounded (see NewService).
 	novel := s.known.Add(address)
-	s.boxKeys[address] = boxKey
+	if boxKey == "" || boxSig == "" {
+		delete(s.boxKeys, address)
+		delete(s.boxSigs, address)
+	} else {
+		s.boxKeys[address] = boxKey
+		s.boxSigs[address] = boxSig
+	}
 	s.knowledgeMu.Unlock()
-	log.Trace().Str("site", "addKnownBoxKey").Str("phase", "lock_released").Str("address", address).Msg("knowledgeMu_writer")
-
+	if s.trust != nil {
+		s.trust.mu.RUnlock()
+	}
 	s.noteIdentityDiscovered(address, novel)
 }
 
@@ -10454,52 +10461,13 @@ func (s *Service) addKnownPubKey(address, pubKey string) {
 	log.Trace().Str("site", "addKnownPubKey").Str("phase", "lock_wait").Str("address", address).Msg("knowledgeMu_writer")
 	s.knowledgeMu.Lock()
 	log.Trace().Str("site", "addKnownPubKey").Str("phase", "lock_held").Str("address", address).Msg("knowledgeMu_writer")
-	// Same bounded-set registration as addKnownBoxKey — see NewService.
+	// Same bounded-set registration as addKnownBoxPair — see NewService.
 	novel := s.known.Add(address)
 	s.pubKeys[address] = pubKey
 	s.knowledgeMu.Unlock()
 	log.Trace().Str("site", "addKnownPubKey").Str("phase", "lock_released").Str("address", address).Msg("knowledgeMu_writer")
 
 	s.noteIdentityDiscovered(address, novel)
-}
-
-func (s *Service) addKnownBoxSig(address, boxSig string) {
-	if address == "" || boxSig == "" {
-		return
-	}
-	if s.suppressesSelfBoxKey(address) {
-		return
-	}
-
-	log.Trace().Str("site", "addKnownBoxSig").Str("phase", "lock_wait").Str("address", address).Msg("knowledgeMu_writer")
-	s.knowledgeMu.Lock()
-	log.Trace().Str("site", "addKnownBoxSig").Str("phase", "lock_held").Str("address", address).Msg("knowledgeMu_writer")
-	// Same bounded-set registration as addKnownBoxKey — see NewService.
-	novel := s.known.Add(address)
-	s.boxSigs[address] = boxSig
-	s.knowledgeMu.Unlock()
-	log.Trace().Str("site", "addKnownBoxSig").Str("phase", "lock_released").Str("address", address).Msg("knowledgeMu_writer")
-
-	s.noteIdentityDiscovered(address, novel)
-}
-
-// forgetKnownBoxKey drops the box-key half of an identity's knowledge —
-// the enforcement arm of an authoritative dm:false record: leaving the
-// old key in the maps would let fetch_contacts and the direct-send paths
-// keep encrypting to a key its owner has revoked.
-func (s *Service) forgetKnownBoxKey(address string) {
-	if address == "" {
-		return
-	}
-	log.Trace().Str("site", "forgetKnownBoxKey").Str("phase", "lock_wait").Str("address", address).Msg("knowledgeMu_writer")
-	s.knowledgeMu.Lock()
-	log.Trace().Str("site", "forgetKnownBoxKey").Str("phase", "lock_held").Str("address", address).Msg("knowledgeMu_writer")
-	defer func() {
-		s.knowledgeMu.Unlock()
-		log.Trace().Str("site", "forgetKnownBoxKey").Str("phase", "lock_released").Str("address", address).Msg("knowledgeMu_writer")
-	}()
-	delete(s.boxKeys, address)
-	delete(s.boxSigs, address)
 }
 
 // attachKnownSenderKeys stamps the DM sender's PUBLIC key triple
@@ -10663,8 +10631,7 @@ func (s *Service) importVerifiedSenderKeys(msg incomingMessage) {
 			identity.VerifyBoxKeyBinding(msg.Sender, msg.SenderPubKey, cachedBoxKey, cachedBoxSig) == nil)
 	if !cachedPairHealthy && msg.SenderBoxKey != "" && msg.SenderBoxSig != "" {
 		if attachedBoxPairValid(msg, msg.SenderPubKey) {
-			s.addKnownBoxKey(msg.Sender, msg.SenderBoxKey)
-			s.addKnownBoxSig(msg.Sender, msg.SenderBoxSig)
+			s.addKnownBoxPair(msg.Sender, msg.SenderBoxKey, msg.SenderBoxSig)
 			imported = true
 		} else {
 			log.Warn().
@@ -10817,19 +10784,26 @@ func (s *Service) applyTrustedContactOrigin(ctx context.Context, address, pubKey
 		log.Warn().Err(rememberErr).Str("address", address).Str("source", source).Msg("trust store persist failed; contact trusted in-memory only")
 	}
 
-	s.addKnownBoxKey(address, boxKey)
+	s.addKnownBoxPair(address, boxKey, boxSig)
 	s.addKnownPubKey(address, pubKey)
 	s.notifyIdentityKeysImported(address)
 	if !existed {
 		log.Info().Str("address", address).Str("source", source).Msg("trusted new contact")
 	}
 
-	ebus.PublishContactAdded(s.eventBus, ebus.ContactAddedEvent{
-		Address: identityFingerprint,
-		PubKey:  domain.PeerPublicKey(pubKey),
-		BoxKey:  domain.PeerBoxKey(boxKey),
-		BoxSig:  domain.PeerBoxSignature(boxSig),
-	})
+	// Publish the current trusted row, which may already follow a signed
+	// record. A legacy import can also finish after the contact was removed.
+	s.trust.mu.RLock()
+	contact, stillTrusted := s.trust.contacts[address]
+	s.trust.mu.RUnlock()
+	if stillTrusted {
+		ebus.PublishContactAdded(s.eventBus, ebus.ContactAddedEvent{
+			Address: identityFingerprint,
+			PubKey:  domain.PeerPublicKey(contact.PubKey),
+			BoxKey:  domain.PeerBoxKey(contact.BoxKey),
+			BoxSig:  domain.PeerBoxSignature(contact.BoxSignature),
+		})
+	}
 	return true, rowStamp, rememberErr
 }
 

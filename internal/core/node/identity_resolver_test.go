@@ -655,3 +655,87 @@ func TestResolverExpiredCooldownsAreSwept(t *testing.T) {
 		t.Fatal("a running cooldown was swept")
 	}
 }
+
+func TestTrustedContactKeepsRecordBoxPairAfterLegacyAdvertisement(t *testing.T) {
+	svc := newTestService(t, config.NodeTypeFull)
+	owner, err := identity.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rotatedBox, err := identity.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := protocol.ContactFrame{
+		Address: owner.Address, PubKey: identity.PublicKeyBase64(owner.PublicKey),
+		BoxKey: identity.BoxPublicKeyBase64(owner.BoxPublicKey), BoxSig: identity.SignBoxKeyBinding(owner),
+	}
+	rotated := *owner
+	rotated.BoxPrivateKey, rotated.BoxPublicKey = rotatedBox.BoxPrivateKey, rotatedBox.BoxPublicKey
+	record, body := issueTestRecord(t, &rotated, 3, true)
+	if _, err := svc.importVerifiedIdentityRecord(testRecordStoreNetwork, record, body); err != nil {
+		t.Fatal(err)
+	}
+	svc.eventBus = ebus.New()
+	t.Cleanup(svc.eventBus.Shutdown)
+	var published ebus.ContactAddedEvent
+	svc.eventBus.Subscribe(ebus.TopicContactAdded, func(event ebus.ContactAddedEvent) {
+		published = event
+	}, ebus.WithSync())
+	if stored, err := svc.applyTrustedContact(legacy.Address, legacy.PubKey, legacy.BoxKey, legacy.BoxSig, "fixture"); err != nil || !stored {
+		t.Fatalf("trust contact: stored=%v err=%v", stored, err)
+	}
+	if published.Address.String() != owner.Address || string(published.BoxKey) != string(body.BoxKey) || string(published.BoxSig) != string(body.BoxSig) {
+		t.Fatal("contact event did not publish the authoritative box pair")
+	}
+	listed := func() protocol.ContactFrame {
+		t.Helper()
+		for _, contact := range svc.trustedContactsFrame().Contacts {
+			if contact.Address == owner.Address {
+				return contact
+			}
+		}
+		t.Fatal("trusted contact missing")
+		return protocol.ContactFrame{}
+	}
+	svc.importAdvertisedContacts(&countingContactBudget{grant: 1}, []protocol.ContactFrame{legacy})
+	if key, ok := svc.knownBoxKey(owner.Address); !ok || key != string(body.BoxKey) {
+		t.Fatalf("legacy advertisement replaced the cached key: %q", key)
+	}
+	got := listed()
+	if got.BoxKey != string(body.BoxKey) || got.BoxSig != string(body.BoxSig) {
+		t.Fatalf("trusted pair rolled back or mismatched: %+v", got)
+	}
+
+	revoked, revokedBody := issueTestRecord(t, &rotated, 4, false)
+	if _, err := svc.importVerifiedIdentityRecord(testRecordStoreNetwork, revoked, revokedBody); err != nil {
+		t.Fatal(err)
+	}
+	svc.importAdvertisedContacts(&countingContactBudget{grant: 1}, []protocol.ContactFrame{legacy})
+	if _, ok := svc.knownBoxKey(owner.Address); ok {
+		t.Fatal("legacy advertisement restored a revoked key to the cache")
+	}
+	got = listed()
+	if got.BoxKey != "" || got.BoxSig != "" {
+		t.Fatalf("advertisement resurrected a revoked trusted pair: %+v", got)
+	}
+
+	// Simulate a snapshot from before record precedence at contact import.
+	svc.trust.mu.Lock()
+	row := svc.trust.contacts[owner.Address]
+	row.BoxKey, row.BoxSignature = legacy.BoxKey, legacy.BoxSig
+	svc.trust.contacts[owner.Address] = row
+	svc.trust.mu.Unlock()
+	if err := svc.trust.save(); err != nil {
+		t.Fatal(err)
+	}
+	restarted := NewService(svc.cfg, svc.identity, nil)
+	t.Cleanup(restarted.WaitBackground)
+	if _, ok := restarted.knownBoxKey(owner.Address); ok {
+		t.Fatal("restart restored a revoked key from the legacy contact row")
+	}
+	row = restarted.trust.trustedContacts()[owner.Address]
+	if row.PubKey != legacy.PubKey || row.BoxKey != "" || row.BoxSignature != "" {
+		t.Fatalf("restart did not reconcile the legacy contact row: %+v", row)
+	}
+}

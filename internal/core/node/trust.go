@@ -278,7 +278,7 @@ func loadTrustStoreWithPublisher(path string, self trustedContact, files func() 
 			// are not restored (a session peer re-pushes its record right
 			// after auth, and a lookup recovers any other), and the save
 			// at the end of this load rewrites the file without them. The
-			// contacts themselves are untouched by this migration.
+			// migration does not remove contacts.
 			migrated := 0
 			for _, row := range payload.Records {
 				if _, contact := store.contacts[row.Address]; !contact && row.Address != self.Address {
@@ -294,6 +294,18 @@ func loadTrustStoreWithPublisher(path string, self trustedContact, files func() 
 					continue
 				}
 				store.records[key] = restored
+			}
+			// Older snapshots can carry a valid but stale legacy contact
+			// alongside the authoritative signed record. Reconcile before
+			// callers seed their key caches or expose the contact list.
+			for address, contact := range store.contacts {
+				if address == self.Address {
+					continue
+				}
+				if record, ok := store.records[trustRecordKey{network: networkName, address: address}]; ok {
+					contact.applyRecordKeys(record.body)
+					store.contacts[address] = contact
+				}
 			}
 			if migrated > 0 {
 				log.Info().Int("records", migrated).Msg("trust_store_session_records_not_restored")
@@ -415,6 +427,13 @@ func (s *trustStore) rememberContact(ctx context.Context, contact trustedContact
 	stored, _, err = s.rememberContactOrigin(ctx, contact, contactApplyGeneric)
 	return stored, err
 }
+func (contact *trustedContact) applyRecordKeys(body protocol.IdentityRecordBody) {
+	contact.PubKey = string(body.PubKey)
+	contact.BoxKey = string(body.BoxKey)
+	contact.BoxSignature = string(body.BoxSig)
+	contact.Source = trustContactSourceRecord
+}
+
 func (s *trustStore) rememberContactOrigin(ctx context.Context, contact trustedContact, origin contactApplyOrigin) (stored bool, rowStamp localContactRowStamp, err error) {
 	now := s.clock()
 
@@ -451,6 +470,10 @@ func (s *trustStore) rememberContactOrigin(ctx context.Context, contact trustedC
 		return true, rowStamp, s.saveSnapshot(snapshot)
 	}
 
+	// A verified record can already be cached when this contact is added.
+	if record, ok := s.recordLocked(trustRecordKey{network: networkName, address: contact.Address}); ok {
+		contact.applyRecordKeys(record.body)
+	}
 	contact.localRow = nil
 	rowStamp = s.bindLocalContactRowLocked(&contact, origin)
 	contact.FirstSeenAt = now
@@ -678,7 +701,9 @@ func (s *trustStore) recordLocked(key trustRecordKey) (trustedIdentityRecord, bo
 // box fields: the owner has withdrawn the key, keeping a copy would keep
 // encrypting to a tombstone.
 //
-// Duplicate and stale are silent no-ops. A conflict (same seq, different
+// Durable duplicates and stale records are silent no-ops. A duplicate
+// of a persistent record retries an outstanding snapshot before success.
+// A conflict (same seq, different
 // bytes) keeps the stored record; the caller logs it — the owner is obliged
 // to issue a new seq.
 //
@@ -717,8 +742,14 @@ func (s *trustStore) mergeRecord(network domain.NetworkID, record protocol.Signe
 	}
 	outcome := domain.DecideIdentityRecordMerge(stored, body.Seq, record.Body)
 	if !outcome.Accepted() {
+		_, persistentDuplicate := s.records[key]
 		s.mu.Unlock()
 		s.pinEvidenceMu.Unlock()
+		if outcome == domain.IdentityRecordMergeDuplicate && persistentDuplicate {
+			if err := s.retryRecordSnapshot(key); err != nil {
+				return outcome, fmt.Errorf("persist trust store after duplicate record %s: %w", key.address, err)
+			}
+		}
 		return outcome, nil
 	}
 
@@ -736,10 +767,7 @@ func (s *trustStore) mergeRecord(network domain.NetworkID, record protocol.Signe
 	s.sessionRecords.deleteLocked(key)
 	s.records[key] = accepted
 	if contact, ok := s.contacts[key.address]; ok {
-		contact.PubKey = string(body.PubKey)
-		contact.BoxKey = string(body.BoxKey)
-		contact.BoxSignature = string(body.BoxSig)
-		contact.Source = trustContactSourceRecord
+		contact.applyRecordKeys(body)
 		contact.LastSeenAt = now
 		publication := s.beginTrustPublication()
 		s.contacts[key.address] = contact
@@ -756,6 +784,28 @@ func (s *trustStore) mergeRecord(network domain.NetworkID, record protocol.Signe
 		return outcome, fmt.Errorf("persist trust store after record merge %s: %w", key.address, err)
 	}
 	return outcome, nil
+}
+
+// retryRecordSnapshot does not write an already durable duplicate or a
+// session-cache record. A persistent duplicate can instead refer to a memory
+// mutation whose earlier save failed; persist a current snapshot before
+// reporting that duplicate as successful. The existing saveMu -> mu order
+// keeps concurrent retries from retaining multiple snapshots during I/O.
+func (s *trustStore) retryRecordSnapshot(key trustRecordKey) error {
+	if s.path == "" {
+		return nil
+	}
+	s.saveMu.Lock()
+	defer s.saveMu.Unlock()
+	s.mu.Lock()
+	_, persistent := s.records[key]
+	if !persistent || s.snapshotGen <= s.savedGen {
+		s.mu.Unlock()
+		return nil
+	}
+	snapshot := s.snapshotLocked()
+	s.mu.Unlock()
+	return s.saveSnapshotLocked(snapshot)
 }
 
 // isTrustedContact answers the membership question without copying the whole
@@ -859,6 +909,12 @@ func (s *trustStore) saveSnapshot(snapshot trustSnapshot) error {
 	}
 	s.saveMu.Lock()
 	defer s.saveMu.Unlock()
+	return s.saveSnapshotLocked(snapshot)
+}
+
+// saveSnapshotLocked serializes I/O and generation publication. The caller
+// holds saveMu, without mu or pinEvidenceMu held across the filesystem write.
+func (s *trustStore) saveSnapshotLocked(snapshot trustSnapshot) error {
 	if snapshot.gen <= s.savedGen {
 		return nil
 	}

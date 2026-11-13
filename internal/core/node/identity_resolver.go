@@ -1126,6 +1126,10 @@ func (s *Service) notifyIdentityKeysImported(address string) {
 func (s *Service) importVerifiedIdentityRecord(network domain.NetworkID, record protocol.SignedIdentityRecord, body protocol.IdentityRecordBody) (domain.IdentityRecordMergeOutcome, error) {
 	outcome, err := s.trust.rememberRecord(network, record, body)
 	if err != nil {
+		// The verified record may already be current in memory even though
+		// its snapshot failed. Do not keep encrypting with a superseded key
+		// or clear a newer pair another completed import has published.
+		s.discardSupersededRecordBoxPair(body.Address.String())
 		return outcome, fmt.Errorf("remember identity record: %w", err)
 	}
 	// Duplicate (identical-current) still refills the knowledge maps: the
@@ -1137,17 +1141,23 @@ func (s *Service) importVerifiedIdentityRecord(network domain.NetworkID, record 
 	}
 	address := body.Address.String()
 	s.addKnownPubKey(address, string(body.PubKey))
-	if body.DM {
-		s.addKnownBoxKey(address, string(body.BoxKey))
-		s.addKnownBoxSig(address, string(body.BoxSig))
-	} else {
-		// An authoritative dm:false is a REVOCATION, not an absence: the
-		// owner's own record says it accepts no direct messages, so the
-		// previously known box key must leave the live maps too — keeping
-		// it would let the direct-send and fetch_contacts paths encrypt to
-		// a revoked key against the opt-out.
-		s.forgetKnownBoxKey(address)
-	}
+	// A concurrent merge may already have superseded body. Re-read the
+	// current record under the same lock as legacy box-pair publication.
+	s.addKnownBoxPair(address, "", "")
 	s.notifyIdentityKeysImported(address)
 	return outcome, nil
+}
+
+// discardSupersededRecordBoxPair only removes inconsistent cached material.
+// It publishes no new key and sends no successful-import notification.
+func (s *Service) discardSupersededRecordBoxPair(address string) {
+	s.trust.mu.RLock()
+	defer s.trust.mu.RUnlock()
+	current, ok := s.trust.recordLocked(trustRecordKey{network: networkName, address: address})
+	s.knowledgeMu.Lock()
+	defer s.knowledgeMu.Unlock()
+	if !ok || s.boxKeys[address] != string(current.body.BoxKey) || s.boxSigs[address] != string(current.body.BoxSig) {
+		delete(s.boxKeys, address)
+		delete(s.boxSigs, address)
+	}
 }
