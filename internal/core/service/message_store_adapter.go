@@ -3,12 +3,14 @@ package service
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync/atomic"
 	"time"
 
 	"github.com/rs/zerolog/log"
 
 	"github.com/piratecash/corsa/internal/core/chatlog"
+	"github.com/piratecash/corsa/internal/core/directmsg"
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/ebus"
 	"github.com/piratecash/corsa/internal/core/identity"
@@ -268,6 +270,13 @@ func (a *MessageStoreAdapter) StoreMessage(envelope protocol.Envelope, isOutgoin
 		// rides the insert the row needs anyway.
 		entry.Metadata = chatlog.NeverEmittedMetadata
 	}
+	if envelope.Topic == "dm" && directmsg.HasV2EnvelopePrefix(envelope.Payload) {
+		if entry.Metadata == "" {
+			entry.Metadata = `{"signed_receipt_required":true}`
+		} else {
+			entry.Metadata = strings.TrimSuffix(entry.Metadata, "}") + `,"signed_receipt_required":true}`
+		}
+	}
 	inserted, err := a.chatlog.AppendReportNew(a.opContext(), envelope.Topic, domain.PeerIdentityFromWire(a.id.Address), entry)
 	if err != nil {
 		log.Error().Str("topic", envelope.Topic).Str("id", string(envelope.ID)).Err(err).Msg("chatlog append failed")
@@ -350,6 +359,14 @@ func conversationPeer(self string, envelope protocol.Envelope) domain.PeerIdenti
 	default:
 		return domain.PeerIdentity{}
 	}
+}
+
+// RequiresSignedReceipt exposes the exact persisted message policy to Node.
+func (a *MessageStoreAdapter) RequiresSignedReceipt(ref domain.MessageRef) (bool, error) {
+	if a == nil || a.chatlog == nil || a.chatlog.Store() == nil {
+		return false, errors.New("receipt policy store unavailable")
+	}
+	return a.chatlog.Store().RequiresSignedReceipt(a.opContext(), ref)
 }
 
 // UpdateDeliveryStatus applies a delivery receipt to the persisted record.

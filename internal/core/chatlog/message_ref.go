@@ -3,9 +3,11 @@ package chatlog
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"strings"
 
+	"github.com/piratecash/corsa/internal/core/directmsg"
 	"github.com/piratecash/corsa/internal/core/domain"
 )
 
@@ -62,6 +64,35 @@ func (s *Store) EntryByRef(ctx context.Context, ref domain.MessageRef) (Entry, b
 		return Entry{}, false, nil
 	}
 	return entry, err == nil, err
+}
+
+// RequiresSignedReceipt checks the durable policy and recognizes v2 rows
+// saved before the metadata flag was present. A prefix only requires a
+// signature. It does not authenticate the stored envelope.
+func (s *Store) RequiresSignedReceipt(ctx context.Context, ref domain.MessageRef) (bool, error) {
+	var metadata sql.NullString
+	var prefix string
+	err := s.db.QueryRowContext(ctx, `SELECT metadata, substr(body, 1, ?) FROM messages WHERE topic=? AND id=? AND sender=? AND recipient=?`,
+		len(directmsg.V2EnvelopePrefix), ref.Topic, ref.ID, ref.Sender, ref.Recipient).Scan(&metadata, &prefix)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if ref.Topic == "dm" && prefix == directmsg.V2EnvelopePrefix {
+		return true, nil
+	}
+	if strings.TrimSpace(metadata.String) == "" {
+		return false, nil
+	}
+	var fields struct {
+		SignedReceiptRequired bool `json:"signed_receipt_required"`
+	}
+	if err := json.Unmarshal([]byte(metadata.String), &fields); err != nil {
+		return false, err
+	}
+	return fields.SignedReceiptRequired, nil
 }
 
 func (s *Store) MessageSeqByRef(ctx context.Context, ref domain.MessageRef) (int64, bool, error) {

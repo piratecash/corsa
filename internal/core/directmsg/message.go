@@ -132,7 +132,10 @@ func DecryptForIdentity(id *identity.Identity, senderAddress, senderPublicKeyBas
 	if err != nil {
 		return nil, err
 	}
+	return decryptEnvelope(id, envelope)
+}
 
+func decryptEnvelope(id *identity.Identity, envelope sealedEnvelope) (*PlainMessage, error) {
 	parts := []sealedPart{envelope.Recipient, envelope.Sender}
 	for _, part := range parts {
 		message, err := openPart(id, part)
@@ -144,6 +147,20 @@ func DecryptForIdentity(id *identity.Identity, senderAddress, senderPublicKeyBas
 	// The envelope authenticated above; only the sealed halves refused the
 	// current keys — the typed class the recovery machinery keys on.
 	return nil, ErrSealedUnreadable
+}
+
+// VerifyDataEnvelopeForRecipient rejects known control commands carried as
+// ordinary data. Unreadable copies retain the legacy key recovery path.
+func VerifyDataEnvelopeForRecipient(recipient *identity.Identity, senderAddress, senderPublicKeyBase64, encoded string) error {
+	envelope, err := verifyEnvelope(senderAddress, senderPublicKeyBase64, recipient.Address, encoded)
+	if err != nil {
+		return err
+	}
+	message, err := decryptEnvelope(recipient, envelope)
+	if err == nil && domain.DMCommand(message.Command).IsControl() {
+		return fmt.Errorf("%w: control command in data envelope", ErrEnvelopeAuth)
+	}
+	return nil
 }
 
 func VerifyEnvelope(senderAddress, senderPublicKeyBase64, recipientAddress, encoded string) error {
@@ -232,7 +249,11 @@ func decodeSenderPublicKey(senderAddress, encoded string) (identity.PublicKey, e
 const dmKeyLabel = "corsa-dm-v1"
 
 func sealForPublicKey(publicKey *ecdh.PublicKey, plain []byte) (sealedPart, error) {
-	box, err := ecdhgcm.Seal(publicKey, plain, dmKeyLabel)
+	return sealPart(publicKey, plain, dmKeyLabel)
+}
+
+func sealPart(publicKey *ecdh.PublicKey, plain []byte, label string) (sealedPart, error) {
+	box, err := ecdhgcm.Seal(publicKey, plain, label)
 	if err != nil {
 		return sealedPart{}, err
 	}
@@ -245,6 +266,10 @@ func sealForPublicKey(publicKey *ecdh.PublicKey, plain []byte) (sealedPart, erro
 }
 
 func openPart(id *identity.Identity, part sealedPart) (*PlainMessage, error) {
+	return openLabeledPart(id, part, dmKeyLabel)
+}
+
+func openLabeledPart(id *identity.Identity, part sealedPart, label string) (*PlainMessage, error) {
 	ephemeralBytes, err := base64.RawURLEncoding.DecodeString(part.Ephemeral)
 	if err != nil {
 		return nil, fmt.Errorf("decode ephemeral key: %w", err)
@@ -266,7 +291,7 @@ func openPart(id *identity.Identity, part sealedPart) (*PlainMessage, error) {
 		Ciphertext:   ciphertext,
 	}
 
-	plain, err := ecdhgcm.Open(id.BoxPrivateKey, box, dmKeyLabel)
+	plain, err := ecdhgcm.Open(id.BoxPrivateKey, box, label)
 	if err != nil {
 		return nil, fmt.Errorf("decrypt payload: %w", err)
 	}
