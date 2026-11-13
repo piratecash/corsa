@@ -213,3 +213,22 @@ func TestEmptyPlaintext(t *testing.T) {
 		t.Errorf("expected empty plaintext, got %d bytes", len(got))
 	}
 }
+
+func TestOpenRejectsInvalidNonceLength(t *testing.T) {
+	t.Parallel()
+
+	recipient := generateTestKey(t)
+	const label = "invalid-nonce-test"
+	box, err := Seal(recipient.PublicKey(), []byte("payload"), label)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, nonce := range [][]byte{nil, box.Nonce[:len(box.Nonce)-1], make([]byte, len(box.Nonce)+1)} {
+		malformed := *box
+		malformed.Nonce = nonce
+		if _, err := Open(recipient, &malformed, label); err == nil {
+			t.Errorf("Open accepted a nonce of length %d", len(nonce))
+		}
+	}
+}

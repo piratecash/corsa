@@ -76,6 +76,12 @@ func Open(privKey *ecdh.PrivateKey, box *SealedBox, label string) ([]byte, error
 		return nil, err
 	}
 
+	// GCM panics on an incorrectly sized nonce. A sealed box can carry
+	// untrusted wire data, so reject it before calling Open.
+	if len(box.Nonce) != gcm.NonceSize() {
+		return nil, fmt.Errorf("invalid nonce length: got %d, want %d", len(box.Nonce), gcm.NonceSize())
+	}
+
 	plain, err := gcm.Open(nil, box.Nonce, box.Ciphertext, nil)
 	if err != nil {
 		return nil, fmt.Errorf("decrypt payload: %w", err)
