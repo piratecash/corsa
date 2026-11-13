@@ -156,14 +156,8 @@ func refuseNonWelcome(answer protocol.Frame) error {
 }
 
 // refuseIncompatibleWelcome ends a dial whose responder is below
-// MinimumProtocolVersion and reacts exactly as the session path does
-// (reactToIncompatibleDial): the evidence is the same welcome, so the health
-// record must not depend on which dial happened to read it. evidence says
-// what stands behind the welcome — the intro of a proven v2 session is
-// penalised, a v1 welcome before auth_ok is a claim and only paces the
-// address. Inside a running incompatible-version ban the charge does not
-// accumulate (penalizeOldProtocolPeer), so a dial that keeps meeting the peer
-// cannot slide the ban.
+// MinimumProtocolVersion. The one-shot and connection-manager paths share
+// the endpoint pacing policy in reactToIncompatibleDial.
 //
 // Callers on the connection manager's dial worker must NOT use it: there the
 // reaction runs once in onCMDialFailed from incompatibleProtocolError.

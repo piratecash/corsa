@@ -173,28 +173,6 @@ func assertIncompatibleWelcomeRecordedAsClaim(t *testing.T, svc *Service, addres
 	}
 }
 
-func assertIncompatibleWelcomePenalised(t *testing.T, svc *Service, address domain.PeerAddress) {
-	t.Helper()
-	svc.peerMu.RLock()
-	defer svc.peerMu.RUnlock()
-	health := svc.health[svc.resolveHealthAddress(address)]
-	if health == nil {
-		t.Fatal("no health record: a welcome below the floor was not penalised")
-	}
-	if health.LastErrorCode != protocol.ErrCodeIncompatibleProtocol {
-		t.Fatalf("LastErrorCode = %q, want %q", health.LastErrorCode, protocol.ErrCodeIncompatibleProtocol)
-	}
-	if health.IncompatibleVersionAttempts != 1 {
-		t.Fatalf("IncompatibleVersionAttempts = %d, want 1", health.IncompatibleVersionAttempts)
-	}
-	if want := domain.ProtocolVersion(config.MinimumProtocolVersion - 1); health.ObservedPeerVersion != want {
-		t.Fatalf("ObservedPeerVersion = %d, want %d", health.ObservedPeerVersion, want)
-	}
-	if got := svc.peerVersions[svc.resolveHealthAddress(address)]; got != "0.0.1-below-floor" {
-		t.Fatalf("peerVersions = %q, want the refused welcome's client version", got)
-	}
-}
-
 func syncPeerAgainstWelcome(t *testing.T, welcome func(*identity.Identity) protocol.Frame) (*Service, domain.PeerAddress) {
 	t.Helper()
 	svc := newTestService(t, config.NodeTypeFull)
@@ -272,12 +250,11 @@ func TestAdmitServiceDialWelcome_RefusesWithTypedErrors(t *testing.T) {
 		return frame
 	}
 	cases := []struct {
-		name        string
-		welcome     func(svc *Service) protocol.Frame
-		proven      bool
-		pinned      bool
-		want        func(error) bool
-		wantPenalty bool
+		name    string
+		welcome func(svc *Service) protocol.Frame
+		proven  bool
+		pinned  bool
+		want    func(error) bool
 	}{
 		{
 			name:    "v1 welcome with a challenge is admitted",
@@ -324,9 +301,8 @@ func TestAdmitServiceDialWelcome_RefusesWithTypedErrors(t *testing.T) {
 				intro.Challenge = ""
 				return intro
 			},
-			proven:      true,
-			want:        func(err error) bool { return errors.Is(err, errIncompatibleProtocol) },
-			wantPenalty: true,
+			proven: true,
+			want:   func(err error) bool { return errors.Is(err, errIncompatibleProtocol) },
 		},
 		{
 			name:    "an answer that is not a welcome",
@@ -378,8 +354,8 @@ func TestAdmitServiceDialWelcome_RefusesWithTypedErrors(t *testing.T) {
 			health := svc.health[address]
 			svc.peerMu.RUnlock()
 			penalised := health != nil && health.IncompatibleVersionAttempts > 0
-			if penalised != tc.wantPenalty {
-				t.Fatalf("penalised = %v, want %v", penalised, tc.wantPenalty)
+			if penalised {
+				t.Fatal("welcome refusal charged a previous endpoint owner")
 			}
 		})
 	}
@@ -472,7 +448,7 @@ func assertNotRecordedAsOutboundSuccess(t *testing.T, svc *Service, address doma
 	}
 }
 
-func TestSyncPeer_V2IntroBelowFloor_SendsNothingAndPenalises(t *testing.T) {
+func TestSyncPeer_V2IntroBelowFloor_SendsNothingAndPaces(t *testing.T) {
 	t.Parallel()
 	svc := newTestService(t, config.NodeTypeFull)
 	ln, address := listenForDialWelcome(t)
@@ -484,11 +460,11 @@ func TestSyncPeer_V2IntroBelowFloor_SendsNothingAndPenalises(t *testing.T) {
 		t.Fatalf("syncPeer imported %d contacts from a listener below the floor", imported)
 	}
 	awaitNothingAfterV2Intro(t, done)
-	assertIncompatibleWelcomePenalised(t, svc, address)
+	assertOnlyPaced(t, svc, address)
 	assertNotRecordedAsOutboundSuccess(t, svc, address)
 }
 
-func TestSendNoticeToPeer_V2IntroBelowFloor_WritesNothingAndPenalises(t *testing.T) {
+func TestSendNoticeToPeer_V2IntroBelowFloor_WritesNothingAndPaces(t *testing.T) {
 	t.Parallel()
 	svc := newTestService(t, config.NodeTypeFull)
 	ln, address := listenForDialWelcome(t)
@@ -496,7 +472,7 @@ func TestSendNoticeToPeer_V2IntroBelowFloor_WritesNothingAndPenalises(t *testing
 
 	svc.sendNoticeToPeer(address, time.Minute, "gated-notice-ciphertext")
 	awaitNothingAfterV2Intro(t, done)
-	assertIncompatibleWelcomePenalised(t, svc, address)
+	assertOnlyPaced(t, svc, address)
 	assertNotRecordedAsOutboundSuccess(t, svc, address)
 }
 

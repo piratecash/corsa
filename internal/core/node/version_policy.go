@@ -17,9 +17,8 @@ import (
 // ---------------------------------------------------------------------------
 
 // incompatibleProtocolError wraps errIncompatibleProtocol with the version
-// evidence extracted from the remote welcome/hello frame. This allows callers
-// (e.g. onCMDialFailed) to pass confirmed version evidence to
-// penalizeOldProtocolPeer instead of zero values.
+// evidence extracted from the remote welcome/hello frame. The dial paths
+// use it to choose endpoint retry pacing.
 type incompatibleProtocolError struct {
 	PeerVersion   domain.ProtocolVersion
 	PeerMinimum   domain.ProtocolVersion

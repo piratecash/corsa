@@ -2,7 +2,6 @@ package node
 
 import (
 	"bufio"
-	"fmt"
 	"net"
 	"path/filepath"
 	"strconv"
@@ -214,7 +213,7 @@ func TestPenalizeOldProtocolPeer_BlankClientVersion_KeepsTheKnownOne(t *testing.
 // penalizeOldProtocolPeer resolves (resolveHealthAddress). A dial address that
 // is a fallback alias of another (dialOrigin) must therefore land its version
 // on the primary, or the lockout records no client version at all.
-func TestOnCMDialFailed_FallbackAlias_LockoutCarriesClientVersion(t *testing.T) {
+func TestIncompatiblePenalty_FallbackAlias_LockoutCarriesClientVersion(t *testing.T) {
 	t.Parallel()
 	primary := domain.PeerAddress("10.0.0.1:1234")
 	fallback := domain.PeerAddress("10.0.0.1:64646")
@@ -229,13 +228,7 @@ func TestOnCMDialFailed_FallbackAlias_LockoutCarriesClientVersion(t *testing.T) 
 		dialOrigin:    map[domain.PeerAddress]domain.PeerAddress{fallback: primary},
 	}
 
-	svc.onCMDialFailed(fallback, &incompatibleProtocolError{
-		PeerVersion:   higherMin,
-		PeerMinimum:   higherMin,
-		ClientVersion: "corsa/9.9.9-alias",
-		Cause:         fmt.Errorf("protocol version too old"),
-		Evidence:      versionProven,
-	}, true)
+	svc.penalizeOldProtocolPeer(fallback, higherMin, higherMin, "corsa/9.9.9-alias")
 
 	svc.peerMu.RLock()
 	defer svc.peerMu.RUnlock()

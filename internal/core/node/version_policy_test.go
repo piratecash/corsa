@@ -1708,53 +1708,6 @@ func TestIncompatibleProtocolError_UnwrapsToSentinel(t *testing.T) {
 	}
 }
 
-func TestCMDialFailed_PropagatesVersionEvidence(t *testing.T) {
-	t.Parallel()
-
-	localProto := domain.ProtocolVersion(config.ProtocolVersion)
-	higherMin := localProto + 1
-
-	addr := domain.PeerAddress("10.0.0.1:1234")
-	svc := &Service{
-		persistedMeta: map[domain.PeerAddress]*peerEntry{
-			addr: {Address: addr},
-		},
-		peerIDs:      addressIdentities{addr: claimedAddressIdentity(domaintest.ID("peer-cm-aaa"))},
-		peerBuilds:   make(map[domain.PeerAddress]int),
-		peerVersions: make(map[domain.PeerAddress]string),
-		health:       make(map[domain.PeerAddress]*peerHealth),
-		bannedIPSet:  make(map[string]domain.BannedIPEntry),
-	}
-
-	// Simulate the structured error that openPeerSessionForCM returns.
-	cmErr := &incompatibleProtocolError{
-		PeerVersion: higherMin,
-		PeerMinimum: higherMin,
-		Cause:       fmt.Errorf("protocol version too old"),
-		Evidence:    versionProven,
-	}
-
-	svc.onCMDialFailed(addr, cmErr, true)
-
-	// The version evidence should have reached penalizeOldProtocolPeer,
-	// which means the reporter set should contain the peer identity and
-	// the persisted lockout should be active.
-	svc.peerMu.RLock()
-	defer svc.peerMu.RUnlock()
-
-	if svc.versionPolicy == nil {
-		t.Fatal("versionPolicy must be created by recordIncompatibleObservationLocked")
-	}
-	if _, ok := svc.versionPolicy.incompatibleReporters[domaintest.ID("peer-cm-aaa")]; !ok {
-		t.Error("peer identity must appear in incompatibleReporters")
-	}
-
-	entry := svc.persistedMeta[addr]
-	if !entry.VersionLockout.IsActive() {
-		t.Error("version lockout must be set with confirmed evidence")
-	}
-}
-
 func TestCMDialFailed_ZeroEvidence_NoReporterOrLockout(t *testing.T) {
 	t.Parallel()
 
@@ -1977,47 +1930,6 @@ func TestMaxObservedPeerVersion_ScansAllActiveLockouts(t *testing.T) {
 // ---------------------------------------------------------------------------
 // ObservedClientVersion persisted from CM and legacy failure paths
 // ---------------------------------------------------------------------------
-
-func TestCMDialFailed_PersistsObservedClientVersion(t *testing.T) {
-	t.Parallel()
-
-	localProto := domain.ProtocolVersion(config.ProtocolVersion)
-	higherMin := localProto + 1
-
-	addr := domain.PeerAddress("10.0.0.1:1234")
-	svc := &Service{
-		persistedMeta: map[domain.PeerAddress]*peerEntry{
-			addr: {Address: addr},
-		},
-		peerIDs:      addressIdentities{addr: claimedAddressIdentity(domaintest.ID("peer-cv-aaa"))},
-		peerBuilds:   make(map[domain.PeerAddress]int),
-		peerVersions: make(map[domain.PeerAddress]string),
-		health:       make(map[domain.PeerAddress]*peerHealth),
-		bannedIPSet:  make(map[string]domain.BannedIPEntry),
-	}
-
-	cmErr := &incompatibleProtocolError{
-		PeerVersion:   higherMin,
-		PeerMinimum:   higherMin,
-		ClientVersion: "corsa/1.2.3-beta",
-		Cause:         fmt.Errorf("protocol version too old"),
-		Evidence:      versionProven,
-	}
-
-	svc.onCMDialFailed(addr, cmErr, true)
-
-	svc.peerMu.RLock()
-	defer svc.peerMu.RUnlock()
-
-	entry := svc.persistedMeta[addr]
-	if !entry.VersionLockout.IsActive() {
-		t.Fatal("lockout must be active")
-	}
-	if string(entry.VersionLockout.ObservedClientVersion) != "corsa/1.2.3-beta" {
-		t.Errorf("ObservedClientVersion = %q, want %q",
-			entry.VersionLockout.ObservedClientVersion, "corsa/1.2.3-beta")
-	}
-}
 
 // ---------------------------------------------------------------------------
 // Operator override (add_peer) identity-wide lockout clearing
@@ -2956,7 +2868,7 @@ func TestPenalizeOldProtocol_ClearsStaleLastDisconnectCode(t *testing.T) {
 	}
 }
 
-// TestOutboundIncompatibleReject_HealthSnapshotComplete verifies that
+// TestIncompatiblePenalty_HealthSnapshotComplete verifies that
 // peerHealthFrames() exposes a complete, unambiguous diagnostic snapshot
 // after an outbound incompatible reject. The internal health state is
 // tested by other tests — this test closes the gap between internal
@@ -2964,7 +2876,7 @@ func TestPenalizeOldProtocol_ClearsStaleLastDisconnectCode(t *testing.T) {
 // fields like LastErrorCode, LastDisconnectCode, ClientVersion,
 // ObservedPeerVersion, and VersionLockoutActive are correctly projected
 // into the snapshot returned by fetchPeerHealth.
-func TestOutboundIncompatibleReject_HealthSnapshotComplete(t *testing.T) {
+func TestIncompatiblePenalty_HealthSnapshotComplete(t *testing.T) {
 	t.Parallel()
 
 	localProto := domain.ProtocolVersion(config.ProtocolVersion)
@@ -2992,15 +2904,7 @@ func TestOutboundIncompatibleReject_HealthSnapshotComplete(t *testing.T) {
 	h.LastDisconnectCode = "frame-too-large"
 	svc.peerMu.Unlock()
 
-	// Simulate an outbound incompatible reject through the CM path.
-	cmErr := &incompatibleProtocolError{
-		PeerVersion:   higherMin,
-		PeerMinimum:   higherMin,
-		ClientVersion: "corsa/2.0.0-rc1",
-		Cause:         fmt.Errorf("protocol version too old"),
-		Evidence:      versionProven,
-	}
-	svc.onCMDialFailed(addr, cmErr, true)
+	svc.penalizeOldProtocolPeer(addr, higherMin, higherMin, "corsa/2.0.0-rc1")
 
 	// Prime the peer_health snapshot: the hot RPC path loads it atomically
 	// and never synchronously rebuilds on miss (see peer_health_snapshot.go).
@@ -3346,16 +3250,7 @@ func TestClientVersion_SurvivesRestartViaLockout(t *testing.T) {
 		peers:        []transport.Peer{{Address: addr, Source: domain.PeerSourcePersisted}},
 	}
 
-	// Simulate an outbound incompatible reject through the CM path, which
-	// hands the client version to penalizeOldProtocolPeer.
-	cmErr := &incompatibleProtocolError{
-		PeerVersion:   higherMin,
-		PeerMinimum:   higherMin,
-		ClientVersion: "corsa/2.0.0-rc1",
-		Cause:         fmt.Errorf("protocol version too old"),
-		Evidence:      versionProven,
-	}
-	svc.onCMDialFailed(addr, cmErr, true)
+	svc.penalizeOldProtocolPeer(addr, higherMin, higherMin, "corsa/2.0.0-rc1")
 
 	// Verify pre-flush: peerVersions has the client version.
 	svc.peerMu.RLock()

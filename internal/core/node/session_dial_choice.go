@@ -572,20 +572,16 @@ func (s *Service) dialLegacyTransport(ctx context.Context, address domain.PeerAd
 }
 
 // reactToIncompatibleDial is the one reaction to a dial that ended on an
-// incompatible version, on every dial path. Only a version proven inside a
-// v2 session is penalised (penalizeOldProtocolPeer: score, the ban of the
-// address and its IP, the lockout of its identity, the update_available
-// reporters). A claimed one — the probe's answer, a v1 welcome before
-// auth_ok, or no evidence at all — may have been written by a man in the
-// middle in front of an honest node, so it is recorded for diagnostics and
-// only paces the next attempt to the address.
+// incompatible version, on every dial path. A proven intro identifies the
+// responder, but does not authenticate earlier address bindings or other
+// peers sharing the IP. A below-floor refusal only paces this endpoint.
 func (s *Service) reactToIncompatibleDial(address domain.PeerAddress, err error) {
 	if !errors.Is(err, errIncompatibleProtocol) {
 		return
 	}
 	var incompatible *incompatibleProtocolError
 	if errors.As(err, &incompatible) && incompatible.Evidence == versionProven {
-		s.penalizeOldProtocolPeer(address, incompatible.PeerVersion, incompatible.PeerMinimum, domain.ClientVersion(incompatible.ClientVersion))
+		s.paceAfterIncompatibleVersion(address)
 		return
 	}
 	claim := incompatibleVersionClaim{}
@@ -597,12 +593,12 @@ func (s *Service) reactToIncompatibleDial(address domain.PeerAddress, err error)
 		s.delayEndpointClaimingOldVersion(address, incompatible.PeerVersion)
 		return
 	}
-	s.paceAfterClaimedVersion(address)
+	s.paceAfterIncompatibleVersion(address)
 }
 
-// paceAfterClaimedVersion makes the next attempt to address wait for its v2
+// paceAfterIncompatibleVersion makes the next attempt to address wait for its v2
 // retry backoff, in every mode: the gate reads it whatever the node speaks.
-func (s *Service) paceAfterClaimedVersion(address domain.PeerAddress) {
+func (s *Service) paceAfterIncompatibleVersion(address domain.PeerAddress) {
 	marks := s.dialMarks()
 	if marks == nil {
 		return

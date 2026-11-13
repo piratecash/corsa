@@ -118,34 +118,24 @@ func TestAForgedLowVersionOnAOneShotDialOnlyPacesTheAddress(t *testing.T) {
 	assertOnlyPaced(t, svc, address)
 }
 
-// A v1 welcome read before auth_ok is as unproven as the probe's answer: the
-// connection manager's reaction to its version only paces. The same version
-// inside a v2 session is proven, and keeps the lockout and the reporters.
-func TestOnlyAProvenVersionLocksOutOrReports(t *testing.T) {
+// A version refusal must not charge the endpoint's previous identity or IP,
+// even when the responder proved its own identity over TLSv2.
+func TestIncompatibleDialOnlyPacesTheEndpoint(t *testing.T) {
 	t.Parallel()
-	welcome := protocol.Frame{Type: "welcome", Version: 20, MinimumProtocolVersion: 99}
-
-	t.Run("claimed", func(t *testing.T) {
-		t.Parallel()
-		svc := newDialChoiceService(t)
-		knowVictimAt(svc, dialChoiceAddress)
-		svc.onCMDialFailed(dialChoiceAddress, incompatibleVersionOf(welcome, versionClaimed, errors.New("test")), true)
-		assertOnlyPaced(t, svc, dialChoiceAddress)
-	})
-	t.Run("proven", func(t *testing.T) {
-		t.Parallel()
-		svc := newDialChoiceService(t)
-		knowVictimAt(svc, dialChoiceAddress)
-		svc.onCMDialFailed(dialChoiceAddress, incompatibleVersionOf(welcome, versionProven, errors.New("test")), true)
-		svc.peerMu.RLock()
-		defer svc.peerMu.RUnlock()
-		if !svc.persistedMeta[dialChoiceAddress].VersionLockout.IsActive() {
-			t.Fatal("a proven incompatible version set no lockout")
-		}
-		if _, reported := svc.versionPolicy.incompatibleReporters[victimIdentity]; !reported {
-			t.Fatal("a proven incompatible version did not report")
-		}
-	})
+	for name, evidence := range map[string]versionEvidence{"claimed": versionClaimed, "proven": versionProven} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			svc := newDialChoiceService(t)
+			sibling := domain.PeerAddress("198.51.100.99:64646")
+			knowVictimAt(svc, dialChoiceAddress, sibling)
+			welcome := protocol.Frame{Type: "welcome", Version: 20, MinimumProtocolVersion: 20}
+			for range 5 {
+				svc.onCMDialFailed(dialChoiceAddress, incompatibleVersionOf(welcome, evidence, errors.New("test")), true)
+			}
+			assertOnlyPaced(t, svc, dialChoiceAddress)
+			assertNoVersionHarm(t, svc, sibling)
+		})
+	}
 }
 
 // A claimed version never reaches the text of the error: a client version is
