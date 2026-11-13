@@ -174,10 +174,9 @@ func (l *lane) full(item QueuedFrame) bool {
 // WeightedQueue is the class-fair dispatch order of
 // docs/protocol/datagram.md §5.
 //
-// Locking contract: mu guards the lanes and the round-robin cursor. Nothing
-// external is called while it is held — the queue only decides who is next — so
-// a caller may enqueue from a handler that the pump is at that moment draining
-// for (CLAUDE.md: no callbacks under a lock).
+// Locking contract: mu guards the lanes, the round-robin cursor and optional
+// growth state. No caller callback runs under it. The opt-in growth source
+// reads the platform duration clock under mu to bracket each committed change.
 type WeightedQueue struct {
 	clock func() time.Time
 	ready chan struct{}
@@ -195,6 +194,7 @@ type WeightedQueue struct {
 	passLimit int
 	credited  bool
 	mu        sync.Mutex
+	growth    *queueGrowthObservation
 }
 
 // NewWeightedQueue builds the queue. Control is lane 0 and bulk is lane 1,
@@ -275,7 +275,13 @@ func (q *WeightedQueue) Enqueue(item QueuedFrame) bool {
 		q.refusedFull.Add(1)
 		return false
 	}
-	target.push(item)
+	if q.growth != nil {
+		start, err := q.growth.clock()
+		target.push(item)
+		q.recordGrowthLocked(start, err)
+	} else {
+		target.push(item)
+	}
 	q.mu.Unlock()
 
 	q.enqueued.Add(1)
@@ -300,6 +306,10 @@ func (q *WeightedQueue) Dequeue() (QueuedFrame, bool) {
 func (q *WeightedQueue) takeNext(now time.Time) (item QueuedFrame, served bool, dead []QueuedFrame) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	if q.growth != nil {
+		start, err := q.growth.clock()
+		defer q.recordGrowthLocked(start, err)
+	}
 
 	// Dead frames are removed once: nothing inside the walk can expire a
 	// frame, because the walk runs on a single reading of the clock.
@@ -331,6 +341,10 @@ func (q *WeightedQueue) DropExpired() int {
 func (q *WeightedQueue) takeExpired(now time.Time) []QueuedFrame {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	if q.growth != nil {
+		start, err := q.growth.clock()
+		defer q.recordGrowthLocked(start, err)
+	}
 
 	var dead []QueuedFrame
 	for _, target := range q.lanes {
