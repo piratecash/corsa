@@ -83,7 +83,7 @@ Git hooks:
 - verify with: `make hooks-status`
 - expected value: `./scripts/hooks/`
 
-Build with **Go 1.27.3**, as declared in `go.mod`, to include the `crypto/x509` fix for [GO-2026-6809](https://pkg.go.dev/vuln/GO-2026-6809). CI reads the version from `go.mod`. Historical Go 1.27.2 validation records keep their original toolchain attribution.
+Build with **Go 1.27.4**, as declared in `go.mod`, to include the `crypto/x509` fix for [GO-2026-6809](https://pkg.go.dev/vuln/GO-2026-6809). CI reads the version from `go.mod`. Historical Go 1.27.2 validation records keep their original toolchain attribution.
 
 Run examples:
 
@@ -324,7 +324,7 @@ Git хуки:
 - проверить: `make hooks-status`
 - ожидаемое значение: `./scripts/hooks/`
 
-Для сборки используйте **Go 1.27.3**, указанный в `go.mod`: он включает исправление `crypto/x509` для [GO-2026-6809](https://pkg.go.dev/vuln/GO-2026-6809). CI читает версию из `go.mod`. Прежние результаты проверок Go 1.27.2 сохраняют исходную привязку к toolchain.
+Для сборки используйте **Go 1.27.4**, указанный в `go.mod`: он включает исправление `crypto/x509` для [GO-2026-6809](https://pkg.go.dev/vuln/GO-2026-6809). CI читает версию из `go.mod`. Прежние результаты проверок Go 1.27.2 сохраняют исходную привязку к toolchain.
 
 Примеры запуска:
 
