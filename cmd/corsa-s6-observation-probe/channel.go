@@ -343,6 +343,7 @@ type channel struct {
 	reader  *bufio.Reader
 	nonce   string
 	written int
+	pinBase []byte
 }
 
 func newChannel(p *controlPipes, nonce string) *channel {
@@ -389,17 +390,24 @@ func (c *channel) sendBound(ctx context.Context, returned *atomic.Bool, frame an
 	if err != nil {
 		return entryError("channel-encode")
 	}
-	raw = append(raw, '\n')
+	return c.sendLine(ctx, returned, append(raw, '\n'))
+}
+
+func (c *channel) sendLine(ctx context.Context, returned *atomic.Bool, raw []byte) error {
 	if err := alive(ctx, returned); err != nil {
 		return err
 	}
 	if len(raw) > responseLimit || len(raw) > channelLimit-c.written {
 		return entryError("channel-encoded-limit")
 	}
-	if err = c.pipes.check(); err != nil {
+	if err := c.pipes.check(); err != nil {
 		return err
 	}
-	if err = c.pipes.out.SetWriteDeadline(time.Now().Add(writeBound)); err != nil {
+	deadline := time.Now().Add(writeBound)
+	if end, ok := ctx.Deadline(); ok && end.Before(deadline) {
+		deadline = end
+	}
+	if err := c.pipes.out.SetWriteDeadline(deadline); err != nil {
 		return entryError("channel-write-deadline")
 	}
 	if err := alive(ctx, returned); err != nil {
@@ -420,17 +428,18 @@ func (c *channel) sendBound(ctx context.Context, returned *atomic.Bool, frame an
 }
 
 type valueFrame struct {
-	Version             int           `json:"v"`
-	Nonce               string        `json:"nonce"`
-	Sequence            int           `json:"seq"`
-	Kind                string        `json:"kind"`
-	Mode                string        `json:"mode"`
-	IndependentReads    bool          `json:"independent_reads"`
-	JointAtomicCut      bool          `json:"joint_atomic_cut"`
-	AttributionVerified bool          `json:"attribution_verified"`
-	Provisional         bool          `json:"provisional"`
-	InvokedSources      int           `json:"invoked_sources"`
-	Sources             *sourceValues `json:"sources"`
+	Version             int             `json:"v"`
+	Nonce               string          `json:"nonce"`
+	Sequence            int             `json:"seq"`
+	Kind                string          `json:"kind"`
+	Mode                string          `json:"mode"`
+	IndependentReads    bool            `json:"independent_reads"`
+	JointAtomicCut      bool            `json:"joint_atomic_cut"`
+	AttributionVerified bool            `json:"attribution_verified"`
+	Provisional         bool            `json:"provisional"`
+	InvokedSources      int             `json:"invoked_sources"`
+	Sources             *sourceValues   `json:"sources"`
+	PinPages            *pinPageReceipt `json:"pin_pages,omitempty"`
 }
 
 func (c *channel) serve(ctx context.Context, a *appnode.App, mode string, returned *atomic.Bool) error {
@@ -492,7 +501,7 @@ func (c *channel) serveReads(ctx context.Context, reads captureReads, mode strin
 			return err
 		}
 		frame := valueFrame{Version: 1, Nonce: c.nonce, Sequence: seq, Kind: "CUT", Mode: mode, IndependentReads: true, Provisional: true, InvokedSources: count, Sources: sources}
-		if err = c.sendBound(ctx, returned, frame); err != nil {
+		if err = c.sendCut(ctx, returned, frame); err != nil {
 			return err
 		}
 	}

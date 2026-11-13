@@ -5,12 +5,16 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"compress/gzip"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"go/ast"
 	"go/build/constraint"
 	"go/parser"
 	"go/token"
+	"io"
 	"os"
 	"reflect"
 	"strings"
@@ -490,8 +494,216 @@ func TestS6ProbeEncodingBoundsAndBackpressure(t *testing.T) {
 		t.Fatal("write deadline not pollable")
 	}
 }
+func TestS6ProbePagedPinCut(t *testing.T) {
+	var order []int
+	reads := fakeReads(&order)
+	readPins := reads.pins
+	pins := readPins()
+	if err := json.Unmarshal([]byte(`{"Status":"PAST","DurableWrites":{"Status":"PAST","Events":[{"Kind":"begin"}]}}`), &pins.Snapshot); err != nil {
+		t.Fatal(err)
+	}
+	pins.Snapshot.BaselineIdentities = make([]domain.PeerIdentity, 20_000)
+	for i := range pins.Snapshot.BaselineIdentities {
+		sum := sha256.Sum256([]byte(fmt.Sprint(i)))
+		copy(pins.Snapshot.BaselineIdentities[i][:], sum[:])
+	}
+	pins.Snapshot.DurableWrites.Events[0].Identities = pins.Snapshot.BaselineIdentities[:1000]
+	want := bytes.TrimSuffix(marshal(t, pins), []byte{'\n'})
+	if len(want) <= responseLimit {
+		t.Fatal("fixture does not require paging")
+	}
+	order = nil
+	reads.pins = func() observed[corenode.RawPinMembershipObservationSnapshot, corenode.RawPinMembershipObservationKey] {
+		_ = readPins()
+		return pins
+	}
+	f := fixture(t)
+	done, reader := session(t, f, reads, "ON", &atomic.Bool{})
+	send(t, f, marshal(t, readFrame{1, testNonce, 0, "READ"}))
+	var payload bytes.Buffer
+	var cut valueFrame
+	count := 0
+	for {
+		raw, err := reader.ReadBytes('\n')
+		if err != nil || len(raw) > responseLimit {
+			t.Fatal("pin page exceeded frame bound or was truncated", len(raw), err)
+		}
+		var header struct {
+			Kind string `json:"kind"`
+		}
+		if err := json.Unmarshal(raw, &header); err != nil {
+			t.Fatal(err)
+		}
+		if header.Kind == "CUT" {
+			if err := canonical(raw, &cut); err != nil {
+				t.Fatal(err)
+			}
+			break
+		}
+		var page pinPageFrame
+		if err := canonical(raw, &page); err != nil || page.Kind != "PIN_PAGE" ||
+			page.Version != 1 || page.Nonce != testNonce || page.Sequence != 0 ||
+			page.Index != count || len(page.Data) == 0 || len(page.Data) > pinPagePayloadLimit {
+			t.Fatal("invalid pin page binding", err, page.Index)
+		}
+		count++
+		payload.Write(page.Data)
+	}
+	receipt := cut.PinPages
+	if count < 2 || receipt == nil || receipt.Count != count || receipt.CompressedBytes != payload.Len() ||
+		receipt.UncompressedBytes != len(want) || receipt.SHA256 != fmt.Sprintf("%x", sha256.Sum256(want)) ||
+		cut.Sources == nil || cut.Sources.Pins.Identity != pins.Identity || cut.Sources.Pins.Key != pins.Key ||
+		cut.Sources.Pins.Snapshot.Status != "PAGED" || !cut.Provisional || cut.InvokedSources != 8 {
+		t.Fatal("missing bound receipt or pin locator", receipt, count)
+	}
+	gzipReader, err := gzip.NewReader(&payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := io.ReadAll(io.LimitReader(gzipReader, int64(len(want)+1)))
+	if closeErr := gzipReader.Close(); err != nil || closeErr != nil || !bytes.Equal(got, want) {
+		t.Fatal("pin prefix did not round-trip exactly", err, closeErr)
+	}
+	send(t, f, marshal(t, readFrame{1, testNonce, 1, "STOP"}))
+	_ = f.request.Close()
+	if stop := read(t, f, reader); stop.Kind != "STOP_REQUESTED" {
+		t.Fatal(stop)
+	}
+	if err := wait(t, done); err != nil || !reflect.DeepEqual(order, []int{0, 1, 2, 3, 4, 5, 6, 7}) {
+		t.Fatal("paged read was not a single eight-source capture", err, order)
+	}
+
+	f = fixture(t)
+	c := newChannel(f.pipes, testNonce)
+	c.written = channelLimit - responseLimit
+	cut.Sources = &sourceValues{Pins: pins}
+	if err := c.sendCut(context.Background(), &atomic.Bool{}, cut); err == nil || c.written != channelLimit-responseLimit {
+		t.Fatal("aggregate overflow wrote part of a paged CUT", err, c.written)
+	}
+}
+
+func TestS6ProbeRepeatedPinCutsShareExactPrefixes(t *testing.T) {
+	var order []int
+	reads := fakeReads(&order)
+	pins := reads.pins()
+	pins.Snapshot.BaselineIdentities = make([]domain.PeerIdentity, 20_000)
+	for i := range pins.Snapshot.BaselineIdentities {
+		sum := sha256.Sum256([]byte(fmt.Sprint(i)))
+		copy(pins.Snapshot.BaselineIdentities[i][:], sum[:])
+	}
+	pinSnapshotAt := func(seq int) observed[corenode.RawPinMembershipObservationSnapshot, corenode.RawPinMembershipObservationKey] {
+		value := pins
+		raw := fmt.Sprintf(`{"Status":"PAST","Cut":{"Before":%d,"After":%d},"DurableWrites":{"Status":"PAST","Events":[{"Kind":"begin"}]}}`, seq+1, seq+1)
+		if err := json.Unmarshal([]byte(raw), &value.Snapshot); err != nil {
+			panic(err)
+		}
+		value.Snapshot.DurableWrites.Events[0].Identities = pins.Snapshot.BaselineIdentities[:1000]
+		if seq > 0 {
+			event := value.Snapshot.DurableWrites.Events[0]
+			event.Kind = "confirmed"
+			event.Identities = nil
+			value.Snapshot.DurableWrites.Events = append(value.Snapshot.DurableWrites.Events, event)
+		}
+		return value
+	}
+	next := 0
+	reads.pins = func() observed[corenode.RawPinMembershipObservationSnapshot, corenode.RawPinMembershipObservationKey] {
+		value := pinSnapshotAt(next)
+		next++
+		return value
+	}
+	f := fixture(t)
+	done, reader := session(t, f, reads, "ON", &atomic.Bool{})
+	var base []byte
+	wireBytes := 0
+	for seq := range maxReads {
+		send(t, f, marshal(t, readFrame{1, testNonce, seq, "READ"}))
+		var compressed bytes.Buffer
+		var cut valueFrame
+		count := 0
+		for {
+			raw, err := reader.ReadBytes('\n')
+			if err != nil || len(raw) > responseLimit {
+				t.Fatal("truncated or oversized frame", seq, err)
+			}
+			wireBytes += len(raw)
+			var header struct {
+				Kind string `json:"kind"`
+			}
+			if err := json.Unmarshal(raw, &header); err != nil {
+				t.Fatal(err)
+			}
+			if header.Kind == "CUT" {
+				if err := canonical(raw, &cut); err != nil {
+					t.Fatal(err)
+				}
+				break
+			}
+			var page pinPageFrame
+			if err := canonical(raw, &page); err != nil || page.Kind != "PIN_PAGE" ||
+				page.Sequence != seq || page.Index != count {
+				t.Fatal("invalid pin page", seq, count, err)
+			}
+			count++
+			compressed.Write(page.Data)
+		}
+		receipt := cut.PinPages
+		if receipt == nil || receipt.Count != count || receipt.CompressedBytes != compressed.Len() {
+			t.Fatal("invalid pin receipt", seq, receipt)
+		}
+		zipped, err := gzip.NewReader(&compressed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, err := io.ReadAll(io.LimitReader(zipped, int64(max(receipt.UncompressedBytes, receipt.DeltaBytes))+1))
+		if closeErr := zipped.Close(); err != nil || closeErr != nil {
+			t.Fatal(err, closeErr)
+		}
+		if seq == 0 {
+			if receipt.BaseSHA256 != "" || receipt.DeltaBytes != 0 {
+				t.Fatal("first read depends on a base")
+			}
+		} else {
+			if receipt.BaseSHA256 != pinDigest(base) || len(body) != receipt.DeltaBytes || count != 1 {
+				t.Fatal("read did not use its prior snapshot", seq, receipt)
+			}
+			var delta pinDelta
+			if err := json.Unmarshal(body, &delta); err != nil {
+				t.Fatal(err)
+			}
+			var rebuilt []byte
+			inserted := delta.Insert
+			for _, span := range delta.Copy {
+				start, from, size := span[0], span[1], span[2]
+				gap := start - len(rebuilt)
+				rebuilt = append(rebuilt, inserted[:gap]...)
+				inserted = inserted[gap:]
+				rebuilt = append(rebuilt, base[from:from+size]...)
+			}
+			body = append(rebuilt, inserted...)
+		}
+		want := bytes.TrimSuffix(marshal(t, pinSnapshotAt(seq)), []byte{'\n'})
+		if len(body) != receipt.UncompressedBytes || pinDigest(body) != receipt.SHA256 || !bytes.Equal(body, want) {
+			t.Fatal("reconstructed pin snapshot changed", seq)
+		}
+		base = body
+	}
+	if wireBytes >= channelLimit {
+		t.Fatal("repeated reads exceeded aggregate limit", wireBytes)
+	}
+	t.Logf("four paged CUTs: %d bytes", wireBytes)
+	send(t, f, marshal(t, readFrame{1, testNonce, maxReads, "STOP"}))
+	_ = f.request.Close()
+	if stop := read(t, f, reader); stop.Kind != "STOP_REQUESTED" {
+		t.Fatal(stop)
+	}
+	if err := wait(t, done); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestS6ProbeDefaultAndMixedTagExclusion(t *testing.T) {
-	for _, name := range []string{"main.go", "channel.go", "main_test.go"} {
+	for _, name := range []string{"main.go", "channel.go", "pin_pages.go", "main_test.go"} {
 		raw, err := os.ReadFile(name)
 		if err != nil {
 			t.Fatal(err)
