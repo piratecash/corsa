@@ -149,8 +149,11 @@ the same PrivateKey always produces the same identity address and box key.
 cfg.Node.IdentityPath = "/path/to/identity.json"
 ```
 
-The file must already exist. For development convenience, `sdk.EnsureIdentityFile(path)` 
-creates a new identity file if one does not exist yet.
+The file must already exist in a protected directory. Use mode `0600` on POSIX
+or an owner-only DACL on Windows. A symbolic link in place of the identity file
+is refused. For development convenience, `sdk.EnsureIdentityFile(path)`
+creates an identity when the path is missing. A corrupt identity returns a load
+error and stays on disk for recovery.
 
 If neither `PrivateKey` nor a valid `IdentityPath` is provided, `sdk.New()` returns an error.
 
@@ -280,8 +283,11 @@ X25519 box key пара деривируется детерминистичес�
 cfg.Node.IdentityPath = "/path/to/identity.json"
 ```
 
-Файл должен уже существовать. Для удобства разработки `sdk.EnsureIdentityFile(path)`
-создаёт новый файл identity, если его ещё нет.
+Файл должен уже существовать в защищённом каталоге. Используйте режим `0600`
+на POSIX или DACL только для владельца на Windows. Символическая ссылка
+вместо файла identity отклоняется. Для удобства разработки `sdk.EnsureIdentityFile(path)`
+создаёт identity при отсутствии файла. Если файл повреждён, функция возвращает
+ошибку загрузки и сохраняет файл для восстановления.
 
 Если ни `PrivateKey`, ни валидный `IdentityPath` не указаны, `sdk.New()` возвращает ошибку.
 
