@@ -119,7 +119,7 @@ All four commands support snake_case aliases for console and automation convenie
 
 ### Capture File Format
 
-Each `conn_id` produces a separate `.jsonl` file in `<data_dir>/debug/traffic-captures/<session-timestamp>/`.
+Each `conn_id` produces a separate `.jsonl` file in `<data_dir>/debug/traffic-captures/<session-timestamp>-<random-suffix>/`. A new recording creates a fresh file. On POSIX the file is created with mode `0600` and new directories with `0700`. On macOS, `secretfile` checks extended ACLs on the containing directory and the new file before recording. On Windows the creation code requests a protected DACL granting access to the current user. Native Windows DACL verification remains pending. Each recording file has a 16 MiB limit. An event that would exceed the limit stops that capture and leaves the earlier events in the file. The capture manager budgets up to 512 MiB of file contents and 1024 files in its capture directory. It rescans existing files when starting with no active writers and shares the budget across active writers. At capacity, archive completed captures outside this directory after stopping active captures, then start a new recording. The manager checks available space on the destination filesystem before opening a file and before each event. It reserves 64 MiB for other uses, accounts for writes already admitted by the same manager, and refuses capture if the measurement is unavailable.
 
 File name pattern: `<started_at>__ip=<remote-ip>__conn=<conn-id>__peerdir=<inbound|outbound>.jsonl`
 
@@ -235,7 +235,7 @@ Non-JSON and malformed payloads are recorded as-is with the same timestamp + dir
 
 ### Формат файлов записи
 
-Каждый `conn_id` создаёт отдельный `.jsonl` файл в `<data_dir>/debug/traffic-captures/<session-timestamp>/`.
+Каждый `conn_id` создаёт отдельный `.jsonl` файл в `<data_dir>/debug/traffic-captures/<session-timestamp>-<random-suffix>/`. Повторный запуск создаёт новый файл. На POSIX файл создаётся с режимом `0600`, новые каталоги с `0700`. На macOS `secretfile` проверяет расширенные ACL каталога захвата и нового файла до записи. На Windows код создания запрашивает защищённый DACL с доступом для текущего пользователя. Нативная проверка Windows DACL ещё предстоит. Лимит одного файла — 16 МиБ. Событие, которое превысило бы лимит, останавливает эту запись. Предыдущие события остаются в файле. Менеджер захватов учитывает до 512 МиБ содержимого и 1024 файлов в каталоге захватов. Если открытых файлов захвата нет, при начале записи менеджер заново учитывает сохранённые файлы. Открытые записи делят общий бюджет. При заполнении остановите активные захваты, перенесите завершённые записи за пределы каталога и запустите новую запись. Перед созданием файла и записью каждого события менеджер проверяет свободное место на целевой файловой системе. Он оставляет резерв 64 МиБ, учитывает уже допущенные записи этого менеджера и отказывает, если измерение недоступно.
 
 Шаблон имени файла: `<started_at>__ip=<remote-ip>__conn=<conn-id>__peerdir=<inbound|outbound>.jsonl`
 
