@@ -155,6 +155,26 @@ func TestEnsureIdentityFileCreatesAndReuses(t *testing.T) {
 	}
 }
 
+func TestEnsureIdentityFilePreservesInvalidFile(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "identity.json")
+	const invalid = "{invalid identity"
+	if err := os.WriteFile(path, []byte(invalid), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := EnsureIdentityFile(path); err == nil {
+		t.Fatal("expected an error loading the invalid identity")
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(raw) != invalid {
+		t.Fatal("the invalid identity file was replaced")
+	}
+}
+
 // TestNewReleasesStateDatabaseWhenALaterStepFails covers the composition
 // root's error path: New opens the state database early, so every failure
 // after that point must release it before returning.

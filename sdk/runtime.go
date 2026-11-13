@@ -165,17 +165,8 @@ type shutdownProgress struct {
 // yet. This is a convenience for examples and development — production bots
 // should manage identity keys externally and supply them via NodeConfig.PrivateKey.
 func EnsureIdentityFile(path string) error {
-	if _, err := identity.Load(path); err == nil {
-		return nil
-	}
-	id, err := identity.Generate()
-	if err != nil {
-		return fmt.Errorf("generate identity: %w", err)
-	}
-	if err := identity.Save(path, id); err != nil {
-		return fmt.Errorf("save identity: %w", err)
-	}
-	return nil
+	_, err := identity.LoadOrCreate(path)
+	return err
 }
 
 // resolveIdentity determines the node identity using the SDK resolution
