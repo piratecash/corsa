@@ -338,3 +338,35 @@ func TestAppS6ObservationProbeGossipQueueDepth(t *testing.T) {
 		})
 	}
 }
+
+func TestAppS6ObservationProbeSessionQueueHistory(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		capacity int
+	}{{"default", 0}, {"requested", 64}} {
+		t.Run(tc.name, func(t *testing.T) {
+			isolateTotalApp(t)
+			request := appS6ProbeRequest()
+			request.SessionQueueHistoryCapacity = tc.capacity
+			a, err := NewWithS6ObservationProbe(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ownUnstartedGuardApp(t, a, time.Now().Add(10*time.Second))
+			o := a.PendingObservation()
+			cut := o.SessionQueueHistory()
+			if o.HasSessionQueueHistory() != (tc.capacity > 0) || o.Key() != request.Pending ||
+				o.Identity() != a.TerminalObservation().Identity() {
+				t.Fatal("unexpected source binding")
+			}
+			if tc.capacity == 0 {
+				if cut.UnknownReason != "source_unavailable" || cut.Rows != nil {
+					t.Fatalf("default source: %+v", cut)
+				}
+			} else if cut.UnknownReason != "" || cut.Instance == ([16]byte{}) ||
+				cut.Born != 0 || cut.Pending != 0 || cut.Rows == nil || len(cut.Rows) != 0 {
+				t.Fatalf("empty opted-in source: %+v", cut)
+			}
+		})
+	}
+}

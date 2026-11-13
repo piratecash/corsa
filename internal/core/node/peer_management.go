@@ -2661,6 +2661,12 @@ func (s *Service) readPeerSession(reader *bufio.Reader, session *peerSession) {
 	defer crashlog.DeferRecover()
 	defer session.eligibilityEnded.Store(true)
 	defer session.endProofTransport()
+	if session.inboxObservation != nil {
+		if session.queueLifetime != nil {
+			defer session.endSessionQueueUse()
+		}
+		defer session.finishInboxReader()
+	}
 	for {
 		// The RAW per-neighbour budget is applied AROUND this read, not after
 		// it: readAdmittedSessionLine stops at protocol.MaxFrameLine unless the
@@ -2827,9 +2833,7 @@ func (s *Service) readPeerSession(reader *bufio.Reader, session *peerSession) {
 		// the pending request, and the reader must not outrun that validation.
 		authReplyPending := frame.Type == "auth_ok" && session.readiness != nil && session.admission.awaitsReply("auth_ok")
 
-		select {
-		case session.inboxCh <- frame:
-		default:
+		if !session.offerInbox(frame) {
 			session.endProofTransport()
 			select {
 			case session.errCh <- fmt.Errorf("%w for %s", errPeerSessionInboxOverflow, session.address):
@@ -3110,11 +3114,19 @@ func (s *Service) peerSessionRequest(session *peerSession, frame protocol.Frame,
 	}
 	_ = session.conn.SetReadDeadline(time.Now().Add(readTimeout))
 
+	inboxInput := session.inboxQueueInput()
 	for {
 		select {
 		case err := <-session.errCh:
 			return protocol.Frame{}, err
-		case incoming := <-session.inboxCh:
+		case incoming := <-inboxInput:
+			if session.inboxObservation != nil {
+				var ok bool
+				incoming, ok = session.takeObservedInbox()
+				if !ok {
+					continue
+				}
+			}
 			s.markPeerRead(session.address, incoming)
 			if incoming.Type == protocol.FrameTypeConnectionNotice {
 				// Advertise convergence feedback from the inbound side.

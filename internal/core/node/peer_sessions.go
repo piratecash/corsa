@@ -359,9 +359,15 @@ func (s *Service) openPeerSession(ctx context.Context, address domain.PeerAddres
 		// see the peerSession field doc.
 		contactSyncCh: make(chan chan int),
 	}
+	s.observeSessionQueues(session)
+	if session.queueLifetime != nil {
+		session.beginSessionQueueUse(false)
+		defer session.endSessionQueueUse()
+	}
 	if err := s.attachOutboundNetCore(session); err != nil {
 		return false, err
 	}
+	session.beginSessionQueueUse(true)
 	go s.readPeerSession(transport.reader, session)
 
 	welcome, err := s.peerSessionRequest(session, protocol.Frame{}, "welcome", true)
@@ -560,6 +566,8 @@ func (s *Service) servePeerSession(ctx context.Context, session *peerSession) er
 	if session.netCore != nil {
 		writerDoneCh = session.netCore.WriterDone()
 	}
+	sendInput := session.sendQueueInput()
+	inboxInput := session.inboxQueueInput()
 
 	for {
 		select {
@@ -581,7 +589,14 @@ func (s *Service) servePeerSession(ctx context.Context, session *peerSession) er
 			log.Info().Str("peer", string(session.address)).Str("recipient", s.identity.Address).Err(err).Msg("upstream subscription closed")
 			s.retirePeerSession(session, err)
 			return err
-		case frame := <-session.inboxCh:
+		case frame := <-inboxInput:
+			if session.inboxObservation != nil {
+				var ok bool
+				frame, ok = session.takeObservedInbox()
+				if !ok {
+					continue
+				}
+			}
 			s.markPeerRead(session.address, frame)
 			s.dispatchPeerSessionFrame(session.address, session, frame)
 		case reply := <-session.contactSyncCh:
@@ -622,7 +637,14 @@ func (s *Service) servePeerSession(ctx context.Context, session *peerSession) er
 				return err
 			}
 			pingTimer.Reset(liveness.diallerPingDelay())
-		case item := <-session.sendCh:
+		case item := <-sendInput:
+			if session.sendObservation != nil {
+				var ok bool
+				item, ok = session.takeObservedSend()
+				if !ok {
+					continue
+				}
+			}
 			outbound := item.Frame
 			// A tracked item always takes the managed writer path: it
 			// carries a send deadline and expects no reply, while the
@@ -1306,6 +1328,11 @@ func (s *Service) finishPeerSessionForCM(ctx context.Context, address domain.Pee
 		// see the peerSession field doc.
 		contactSyncCh: make(chan chan int),
 	}
+	s.observeSessionQueues(session)
+	if session.queueLifetime != nil {
+		session.beginSessionQueueUse(false)
+		defer session.endSessionQueueUse()
+	}
 	defer func() {
 		if result == nil {
 			if outcomeErr != nil {
@@ -1352,6 +1379,7 @@ func (s *Service) finishPeerSessionForCM(ctx context.Context, address domain.Pee
 	// the CM closes the sessions of its slots and of the dial results it
 	// discards in its own shutdown, and every error path above closes its own.
 	if transport.proven == nil {
+		session.beginSessionQueueUse(true)
 		s.goRunLoop(func() { s.readPeerSession(reader, session) })
 	}
 
@@ -1435,6 +1463,7 @@ func (s *Service) finishPeerSessionForCM(ctx context.Context, address domain.Pee
 			return nil, err
 		}
 		session.selectedProof = s.captureSelectedProof(transport)
+		session.beginSessionQueueUse(true)
 		s.goRunLoop(func() { s.readPeerSession(reader, session) })
 	} else if err := s.authenticatePeerSession(session, welcome); err != nil {
 		closeOnError()
@@ -1540,7 +1569,13 @@ func (s *Service) onCMSessionEstablished(info SessionInfo) {
 	// from here is legal even while stopRunLifecycle waits: this callback runs
 	// on the CM event loop, which is itself on runLoopsWg, so the counter is
 	// never zero at this Add.
-	s.goRunLoop(func() { s.runCMSession(session, slotAddress, info.SlotGeneration) })
+	session.beginSessionQueueUse(false)
+	s.goRunLoop(func() {
+		if session.queueLifetime != nil {
+			defer session.endSessionQueueUse()
+		}
+		s.runCMSession(session, slotAddress, info.SlotGeneration)
+	})
 }
 
 // cmSessionSetupOutcome is how the application-level setup of a CM session

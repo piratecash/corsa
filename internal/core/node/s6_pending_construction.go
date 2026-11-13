@@ -111,13 +111,16 @@ func (o *PendingObservation) GossipQueues() GossipQueueSnapshot {
 }
 
 type pendingObservationConstruction struct {
-	key                        PendingObservationKey
-	identity                   domain.PeerIdentity
-	clock                      func() (time.Duration, error)
-	readout                    *PendingObservation
-	datagramQueueGrowth        bool
-	writerQueueHistoryCapacity int
-	gossipQueueDepth           bool
+	key                         PendingObservationKey
+	identity                    domain.PeerIdentity
+	clock                       func() (time.Duration, error)
+	readout                     *PendingObservation
+	datagramQueueGrowth         bool
+	writerQueueHistoryCapacity  int
+	gossipQueueDepth            bool
+	sessionSendQueueDepth       bool
+	sessionInboxQueueDepth      bool
+	sessionQueueHistoryCapacity int
 }
 
 // NewServiceWithPendingObservation explicitly opts into the existing K12 source.
@@ -154,6 +157,12 @@ func (c *pendingObservationConstruction) install(s *Service) {
 	}
 	if c.gossipQueueDepth {
 		s.gossipQueueObservation = new(gossipQueueObservation)
+	}
+	capacity := c.sessionQueueHistoryCapacity
+	s.observeSessionSendDepth = c.sessionSendQueueDepth || capacity > 0
+	s.observeSessionInboxDepth = c.sessionInboxQueueDepth || capacity > 0
+	if capacity > 0 {
+		s.sessionQueueHistory = newSessionQueueHistory(capacity)
 	}
 	s.deliveryMu.Lock()
 	defer s.deliveryMu.Unlock()

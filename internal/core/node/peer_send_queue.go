@@ -176,8 +176,22 @@ func (ps *peerSession) offerSend(item peerSendItem) bool {
 	if ps.sendClosed {
 		return false
 	}
+	o := ps.sendObservation
+	var before time.Duration
+	var clockErr error
+	if o != nil {
+		if len(ps.sendCh) == cap(ps.sendCh) {
+			return false
+		}
+		before, clockErr = o.clock()
+	}
 	select {
 	case ps.sendCh <- item:
+		if o != nil {
+			o.recordLocked(&o.state.Enqueued)
+			o.changeLocked(len(ps.sendCh), before, clockErr)
+			o.signalLocked()
+		}
 		return true
 	default:
 		return false
@@ -209,19 +223,46 @@ func (ps *peerSession) closeSendQueue() []deliveryDispatchRef {
 		return nil
 	}
 	ps.sendMu.Lock()
+	if ps.sendObservation != nil {
+		defer ps.sendMu.Unlock()
+		if ps.sendClosed {
+			return nil
+		}
+		ps.sendClosed = true
+		return ps.drainSendQueue()
+	}
 	ps.sendClosed = true
 	ps.sendMu.Unlock()
 
 	// Producers are already refused by the flag above, so nothing can be added
 	// behind the sweep.
+	return ps.drainSendQueue()
+}
+
+// The observed path also excludes the serve loop under sendMu during this
+// sweep. The caller invokes the stranded sink only after the mutex is released.
+func (ps *peerSession) drainSendQueue() []deliveryDispatchRef {
+	o := ps.sendObservation
+	var before time.Duration
+	var clockErr error
+	if o != nil {
+		before, clockErr = o.clock()
+	}
 	var stranded []deliveryDispatchRef
 	for {
 		select {
 		case item := <-ps.sendCh:
+			if o != nil {
+				o.recordLocked(&o.state.Drained)
+			}
 			if item.carriesDelivery() {
 				stranded = append(stranded, item.delivery)
 			}
 		default:
+			if o != nil {
+				o.changeLocked(0, before, clockErr)
+				o.state.Stopped = true
+			}
 			return stranded
 		}
 	}

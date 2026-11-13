@@ -24,19 +24,22 @@ type TerminalObservationKey struct {
 // ObservationOptions is the fixed cross-package construction envelope. Keys
 // are copied before the one original Service builder is invoked. Nil stays off.
 type ObservationOptions struct {
-	AdvertisedConnections      *AdvertisedConnectionObservationRequest
-	RawPinMembership           *RawPinMembershipObservationRequest
-	RegisteredProvenV2         *RegisteredProvenV2ObservationRequest
-	Pending                    *PendingObservationKey
-	DatagramQueueGrowth        bool
-	WriterQueueHistoryCapacity int
-	GossipQueueDepth           bool
-	Terminal                   *TerminalObservationKey
-	Guard                      *GuardObservationKey
-	Handshake                  *HandshakeObservationRequest
-	HandshakeFile              *HandshakeFileObservationRequest
-	ConnectionTotal            *ConnectionTotalObservationRequest
-	ConnectionTotalFile        *ConnectionTotalFileObservationRequest
+	AdvertisedConnections       *AdvertisedConnectionObservationRequest
+	RawPinMembership            *RawPinMembershipObservationRequest
+	RegisteredProvenV2          *RegisteredProvenV2ObservationRequest
+	Pending                     *PendingObservationKey
+	DatagramQueueGrowth         bool
+	WriterQueueHistoryCapacity  int
+	GossipQueueDepth            bool
+	SessionSendQueueDepth       bool
+	SessionInboxQueueDepth      bool
+	SessionQueueHistoryCapacity int
+	Terminal                    *TerminalObservationKey
+	Guard                       *GuardObservationKey
+	Handshake                   *HandshakeObservationRequest
+	HandshakeFile               *HandshakeFileObservationRequest
+	ConnectionTotal             *ConnectionTotalObservationRequest
+	ConnectionTotalFile         *ConnectionTotalFileObservationRequest
 }
 
 type ObservationReadouts struct {
@@ -134,11 +137,23 @@ func NewServiceWithTerminalObservation(cfg config.Node, id *identity.Identity, b
 }
 
 func newServiceWithObservations(cfg config.Node, id *identity.Identity, bus *ebus.Bus, options ObservationOptions, clock func() (time.Duration, error)) (*Service, ObservationReadouts, error) {
+	if options.DatagramQueueGrowth && options.Pending == nil {
+		return nil, ObservationReadouts{}, errors.New("datagram queue growth: pending observation key required")
+	}
 	if options.GossipQueueDepth && options.Pending == nil {
 		return nil, ObservationReadouts{}, errors.New("gossip queue observation: pending observation key required")
 	}
+	if options.SessionSendQueueDepth && options.Pending == nil {
+		return nil, ObservationReadouts{}, errors.New("session send queue observation: pending observation key required")
+	}
+	if options.SessionInboxQueueDepth && options.Pending == nil {
+		return nil, ObservationReadouts{}, errors.New("session inbox observation: pending observation key required")
+	}
 	if capacity := options.WriterQueueHistoryCapacity; capacity < 0 || capacity > MaxWriterQueueHistory || (capacity > 0 && options.Pending == nil) {
 		return nil, ObservationReadouts{}, errors.New("writer queue history: invalid capacity or missing pending observation key")
+	}
+	if capacity := options.SessionQueueHistoryCapacity; capacity < 0 || capacity > MaxSessionQueueHistory || (capacity > 0 && options.Pending == nil) {
+		return nil, ObservationReadouts{}, errors.New("session queue history: invalid capacity or missing pending observation key")
 	}
 	// Freeze the advertised scalar request before ANY observer callback.
 	var advertised *k3AdvertisedRequest
@@ -187,7 +202,10 @@ func newServiceWithObservations(cfg config.Node, id *identity.Identity, bus *ebu
 		if !validPendingObservationKey(key) {
 			return nil, ObservationReadouts{}, errors.New("pending observation: invalid key")
 		}
-		pending = &pendingObservationConstruction{key: key, identity: owner, clock: clock, datagramQueueGrowth: options.DatagramQueueGrowth, writerQueueHistoryCapacity: options.WriterQueueHistoryCapacity, gossipQueueDepth: options.GossipQueueDepth}
+		pending = &pendingObservationConstruction{key: key, identity: owner, clock: clock,
+			datagramQueueGrowth: options.DatagramQueueGrowth, writerQueueHistoryCapacity: options.WriterQueueHistoryCapacity,
+			gossipQueueDepth: options.GossipQueueDepth, sessionSendQueueDepth: options.SessionSendQueueDepth,
+			sessionInboxQueueDepth: options.SessionInboxQueueDepth, sessionQueueHistoryCapacity: options.SessionQueueHistoryCapacity}
 	}
 	if options.Terminal != nil {
 		key := *options.Terminal

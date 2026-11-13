@@ -176,11 +176,12 @@ type sourceValues struct {
 	DatagramQueueGrowth *observed[datagram.QueueGrowthSnapshot, corenode.PendingObservationKey]                                 `json:"datagram_queue_growth,omitempty"`
 	WriterQueueHistory  *observed[corenode.WriterQueueLifecycleSnapshot, corenode.PendingObservationKey]                        `json:"writer_queue_history,omitempty"`
 	GossipQueues        *observed[corenode.GossipQueueSnapshot, corenode.PendingObservationKey]                                 `json:"gossip_queues,omitempty"`
+	SessionQueueHistory *observed[corenode.SessionQueueHistorySnapshot, corenode.PendingObservationKey]                         `json:"session_queue_history,omitempty"`
 	Handshake           observed[corenode.HandshakeObservationSnapshot, corenode.HandshakeObservationKey]                       `json:"handshake"`
 	Total               observed[corenode.ConnectionTotalObservationSnapshot, corenode.ConnectionTotalObservationKey]           `json:"total"`
 }
 
-// The fixed eight functions are private constructor-bound readers, not a
+// These functions are private constructor-bound readers, not a
 // callback source API or collector. OFF leaves all nil and never invokes them.
 type captureReads struct {
 	registered          func() observed[corenode.RegisteredProvenV2ObservationSnapshot, corenode.RegisteredProvenV2ObservationKey]
@@ -192,6 +193,7 @@ type captureReads struct {
 	datagramQueueGrowth func() observed[datagram.QueueGrowthSnapshot, corenode.PendingObservationKey]
 	writerQueueHistory  func() observed[corenode.WriterQueueLifecycleSnapshot, corenode.PendingObservationKey]
 	gossipQueues        func() observed[corenode.GossipQueueSnapshot, corenode.PendingObservationKey]
+	sessionQueueHistory func() observed[corenode.SessionQueueHistorySnapshot, corenode.PendingObservationKey]
 	handshake           func() observed[corenode.HandshakeObservationSnapshot, corenode.HandshakeObservationKey]
 	total               func() observed[corenode.ConnectionTotalObservationSnapshot, corenode.ConnectionTotalObservationKey]
 }
@@ -251,6 +253,11 @@ func readsForApp(a *appnode.App, mode string) (captureReads, error) {
 			return observed[corenode.GossipQueueSnapshot, corenode.PendingObservationKey]{q.Identity().String(), q.Key(), q.GossipQueues()}
 		}
 	}
+	if q.HasSessionQueueHistory() {
+		reads.sessionQueueHistory = func() observed[corenode.SessionQueueHistorySnapshot, corenode.PendingObservationKey] {
+			return observed[corenode.SessionQueueHistorySnapshot, corenode.PendingObservationKey]{q.Identity().String(), q.Key(), q.SessionQueueHistory()}
+		}
+	}
 	return reads, nil
 }
 func alive(ctx context.Context, returned *atomic.Bool) error {
@@ -278,7 +285,9 @@ func (r captureReads) capture(ctx context.Context, returned *atomic.Bool, mode s
 		return nil, 0, err
 	}
 	if mode == "OFF" {
-		if r.registered != nil || r.advertised != nil || r.pins != nil || r.guard != nil || r.terminal != nil || r.pending != nil || r.datagramQueueGrowth != nil || r.writerQueueHistory != nil || r.gossipQueues != nil || r.handshake != nil || r.total != nil {
+		if r.registered != nil || r.advertised != nil || r.pins != nil || r.guard != nil ||
+			r.terminal != nil || r.pending != nil || r.datagramQueueGrowth != nil || r.writerQueueHistory != nil ||
+			r.gossipQueues != nil || r.sessionQueueHistory != nil || r.handshake != nil || r.total != nil {
 			return nil, 0, entryError("OFF-reader-installed")
 		}
 		return nil, 0, nil
@@ -337,6 +346,14 @@ func (r captureReads) capture(ctx context.Context, returned *atomic.Bool, mode s
 		v.GossipQueues = &queues
 		count++
 	}
+	if r.sessionQueueHistory != nil {
+		history, err := take(ctx, returned, r.sessionQueueHistory)
+		if err != nil {
+			return nil, 0, err
+		}
+		v.SessionQueueHistory = &history
+		count++
+	}
 	return &v, count, nil
 }
 func canonical(raw []byte, value any) error {
@@ -376,6 +393,7 @@ func validateInit(v initFrame, nonce string) error {
 		{q.AdvertisedConnections.ConnectionCapacity, 1024}, {q.AdvertisedConnections.SlotCapacity, 1024}, {q.AdvertisedConnections.HistoryCapacity, 4096},
 		{q.RawPinMembership.BaselineCapacity, 20000}, {q.RawPinMembership.HistoryCapacity, 4096}, {q.Handshake.Capacity, 4096}, {q.ConnectionTotal.Capacity, 4096},
 		{q.WriterQueueHistoryCapacity, corenode.MaxWriterQueueHistory},
+		{q.SessionQueueHistoryCapacity, corenode.MaxSessionQueueHistory},
 	}
 	for _, cap := range caps {
 		if cap.value < 0 || cap.value > cap.maximum {

@@ -809,10 +809,13 @@ type Service struct {
 	// writes go through the helpers in conn_registry.go — nothing outside
 	// that file touches this map directly. Lifecycle entry points:
 	// registerInboundConnLocked, attachOutboundCoreLocked, unregisterConnLocked.
-	terminalObservation  *k10TerminalSource    // private immutable pre-registration binding; ordinary nil
-	k3Registered         *k3RegisteredSource   // private pre-publication registered-proof source; ordinary nil
-	writerQueueLifecycle *writerQueueLifecycle // registered writer history, guarded by peerMu; ordinary nil
-	conns                map[netcore.ConnID]*connEntry
+	terminalObservation      *k10TerminalSource    // private immutable pre-registration binding; ordinary nil
+	k3Registered             *k3RegisteredSource   // private pre-publication registered-proof source; ordinary nil
+	writerQueueLifecycle     *writerQueueLifecycle // registered writer history, guarded by peerMu; ordinary nil
+	observeSessionSendDepth  bool                  // immutable diagnostic option
+	observeSessionInboxDepth bool                  // immutable diagnostic option
+	sessionQueueHistory      *sessionQueueHistory  // immutable optional history binding
+	conns                    map[netcore.ConnID]*connEntry
 	// inboundClosed is set under peerMu by closeAllInboundConns at shutdown
 	// and never cleared (Run is single-shot). registerInboundConn refuses
 	// once it is set: a connection still between its first byte and its
@@ -1519,9 +1522,10 @@ type peerSession struct {
 	// queue. The channel is NEVER closed — ownership is expressed through
 	// sendMu / sendClosed instead. See enqueueSend and closeSendQueue in
 	// peer_send_queue.go for the protocol and why closing would be wrong.
-	sendCh     chan peerSendItem
-	sendMu     sync.Mutex
-	sendClosed bool
+	sendCh          chan peerSendItem
+	sendMu          sync.Mutex
+	sendClosed      bool
+	sendObservation *sessionSendObservation // immutable after the queue is published
 	// onStranded answers for the deliveries the queue dies holding. A
 	// discarded frame provably never reached NetCore while its durable
 	// never-emitted claim was already withdrawn, so without this the row
@@ -1529,8 +1533,10 @@ type peerSession struct {
 	// nil only for a session a test built by hand.
 	onStranded func([]deliveryDispatchRef)
 
-	inboxCh chan protocol.Frame
-	errCh   chan error
+	inboxCh          chan protocol.Frame
+	inboxObservation *sessionInboxObservation // immutable after the queue is published
+	queueLifetime    *sessionQueueLifetime    // immutable optional lifetime binding
+	errCh            chan error
 
 	// admission is the response-plane per-neighbour budget, entitlement state
 	// and violation ledger this session's reader applies to every line BEFORE
@@ -1677,17 +1683,14 @@ func (ps *peerSession) closeAs(closer peerSessionCloser) error {
 		ps.discardSendQueue()
 		if ps.netCore != nil {
 			ps.netCore.Close()
-			if ps.onClose != nil {
-				ps.onClose()
-			}
-			return
 		}
 		if ps.onClose != nil {
 			ps.onClose()
 		}
-		if ps.conn != nil {
+		if ps.netCore == nil && ps.conn != nil {
 			ps.closeErr = ps.conn.Close()
 		}
+		ps.closeSessionQueueLifetime()
 	})
 	return ps.closeErr
 }
