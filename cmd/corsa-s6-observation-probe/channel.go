@@ -175,6 +175,7 @@ type sourceValues struct {
 	Pending             observed[domain.PendingQueueObservationSnapshot, corenode.PendingObservationKey]                        `json:"pending"`
 	DatagramQueueGrowth *observed[datagram.QueueGrowthSnapshot, corenode.PendingObservationKey]                                 `json:"datagram_queue_growth,omitempty"`
 	WriterQueueHistory  *observed[corenode.WriterQueueLifecycleSnapshot, corenode.PendingObservationKey]                        `json:"writer_queue_history,omitempty"`
+	GossipQueues        *observed[corenode.GossipQueueSnapshot, corenode.PendingObservationKey]                                 `json:"gossip_queues,omitempty"`
 	Handshake           observed[corenode.HandshakeObservationSnapshot, corenode.HandshakeObservationKey]                       `json:"handshake"`
 	Total               observed[corenode.ConnectionTotalObservationSnapshot, corenode.ConnectionTotalObservationKey]           `json:"total"`
 }
@@ -190,6 +191,7 @@ type captureReads struct {
 	pending             func() observed[domain.PendingQueueObservationSnapshot, corenode.PendingObservationKey]
 	datagramQueueGrowth func() observed[datagram.QueueGrowthSnapshot, corenode.PendingObservationKey]
 	writerQueueHistory  func() observed[corenode.WriterQueueLifecycleSnapshot, corenode.PendingObservationKey]
+	gossipQueues        func() observed[corenode.GossipQueueSnapshot, corenode.PendingObservationKey]
 	handshake           func() observed[corenode.HandshakeObservationSnapshot, corenode.HandshakeObservationKey]
 	total               func() observed[corenode.ConnectionTotalObservationSnapshot, corenode.ConnectionTotalObservationKey]
 }
@@ -244,6 +246,11 @@ func readsForApp(a *appnode.App, mode string) (captureReads, error) {
 			return observed[corenode.WriterQueueLifecycleSnapshot, corenode.PendingObservationKey]{q.Identity().String(), q.Key(), q.WriterQueueHistory()}
 		}
 	}
+	if q.HasGossipQueueDepth() {
+		reads.gossipQueues = func() observed[corenode.GossipQueueSnapshot, corenode.PendingObservationKey] {
+			return observed[corenode.GossipQueueSnapshot, corenode.PendingObservationKey]{q.Identity().String(), q.Key(), q.GossipQueues()}
+		}
+	}
 	return reads, nil
 }
 func alive(ctx context.Context, returned *atomic.Bool) error {
@@ -271,7 +278,7 @@ func (r captureReads) capture(ctx context.Context, returned *atomic.Bool, mode s
 		return nil, 0, err
 	}
 	if mode == "OFF" {
-		if r.registered != nil || r.advertised != nil || r.pins != nil || r.guard != nil || r.terminal != nil || r.pending != nil || r.datagramQueueGrowth != nil || r.writerQueueHistory != nil || r.handshake != nil || r.total != nil {
+		if r.registered != nil || r.advertised != nil || r.pins != nil || r.guard != nil || r.terminal != nil || r.pending != nil || r.datagramQueueGrowth != nil || r.writerQueueHistory != nil || r.gossipQueues != nil || r.handshake != nil || r.total != nil {
 			return nil, 0, entryError("OFF-reader-installed")
 		}
 		return nil, 0, nil
@@ -320,6 +327,14 @@ func (r captureReads) capture(ctx context.Context, returned *atomic.Bool, mode s
 			return nil, 0, err
 		}
 		v.WriterQueueHistory = &history
+		count++
+	}
+	if r.gossipQueues != nil {
+		queues, err := take(ctx, returned, r.gossipQueues)
+		if err != nil {
+			return nil, 0, err
+		}
+		v.GossipQueues = &queues
 		count++
 	}
 	return &v, count, nil

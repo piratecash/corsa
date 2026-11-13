@@ -314,3 +314,27 @@ func TestAppS6ObservationProbeWriterQueueHistory(t *testing.T) {
 		})
 	}
 }
+
+func TestAppS6ObservationProbeGossipQueueDepth(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		enabled bool
+		reason  string
+	}{{"default", false, "source_unavailable"}, {"requested", true, "pool_not_started"}} {
+		t.Run(tc.name, func(t *testing.T) {
+			isolateTotalApp(t)
+			request := appS6ProbeRequest()
+			request.GossipQueueDepth = tc.enabled
+			a, err := NewWithS6ObservationProbe(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ownUnstartedGuardApp(t, a, time.Now().Add(10*time.Second))
+			o := a.PendingObservation()
+			if o.HasGossipQueueDepth() != tc.enabled || o.Key() != request.Pending ||
+				o.Identity() != a.TerminalObservation().Identity() || o.GossipQueues().UnknownReason != tc.reason {
+				t.Fatalf("unexpected gossip source: installed=%v key=%+v snapshot=%+v", o.HasGossipQueueDepth(), o.Key(), o.GossipQueues())
+			}
+		})
+	}
+}

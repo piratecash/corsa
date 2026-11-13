@@ -30,6 +30,7 @@ type ObservationOptions struct {
 	Pending                    *PendingObservationKey
 	DatagramQueueGrowth        bool
 	WriterQueueHistoryCapacity int
+	GossipQueueDepth           bool
 	Terminal                   *TerminalObservationKey
 	Guard                      *GuardObservationKey
 	Handshake                  *HandshakeObservationRequest
@@ -133,6 +134,9 @@ func NewServiceWithTerminalObservation(cfg config.Node, id *identity.Identity, b
 }
 
 func newServiceWithObservations(cfg config.Node, id *identity.Identity, bus *ebus.Bus, options ObservationOptions, clock func() (time.Duration, error)) (*Service, ObservationReadouts, error) {
+	if options.GossipQueueDepth && options.Pending == nil {
+		return nil, ObservationReadouts{}, errors.New("gossip queue observation: pending observation key required")
+	}
 	if capacity := options.WriterQueueHistoryCapacity; capacity < 0 || capacity > MaxWriterQueueHistory || (capacity > 0 && options.Pending == nil) {
 		return nil, ObservationReadouts{}, errors.New("writer queue history: invalid capacity or missing pending observation key")
 	}
@@ -183,7 +187,7 @@ func newServiceWithObservations(cfg config.Node, id *identity.Identity, bus *ebu
 		if !validPendingObservationKey(key) {
 			return nil, ObservationReadouts{}, errors.New("pending observation: invalid key")
 		}
-		pending = &pendingObservationConstruction{key: key, identity: owner, clock: clock, datagramQueueGrowth: options.DatagramQueueGrowth, writerQueueHistoryCapacity: options.WriterQueueHistoryCapacity}
+		pending = &pendingObservationConstruction{key: key, identity: owner, clock: clock, datagramQueueGrowth: options.DatagramQueueGrowth, writerQueueHistoryCapacity: options.WriterQueueHistoryCapacity, gossipQueueDepth: options.GossipQueueDepth}
 	}
 	if options.Terminal != nil {
 		key := *options.Terminal

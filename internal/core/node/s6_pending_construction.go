@@ -90,6 +90,26 @@ func (o *PendingObservation) HasWriterQueueHistory() bool {
 	return o != nil && o.service != nil && o.service.writerQueueLifecycle != nil
 }
 
+// HasGossipQueueDepth reports whether the constructor installed the source.
+func (o *PendingObservation) HasGossipQueueDepth() bool {
+	return o != nil && o.service != nil && o.service.gossipQueueObservation != nil
+}
+
+// GossipQueues reads both lanes of this Service. Each lane has its own cut.
+func (o *PendingObservation) GossipQueues() GossipQueueSnapshot {
+	if !o.HasGossipQueueDepth() {
+		return GossipQueueSnapshot{UnknownReason: "source_unavailable"}
+	}
+	s := o.service
+	if !s.gossipPoolUp.Load() {
+		return GossipQueueSnapshot{UnknownReason: "pool_not_started"}
+	}
+	return GossipQueueSnapshot{
+		Send:   s.gossipQueueObservation.send.snapshot(s.gossipJobs),
+		Notice: s.gossipQueueObservation.notice.snapshot(s.gossipNoticeJobs),
+	}
+}
+
 type pendingObservationConstruction struct {
 	key                        PendingObservationKey
 	identity                   domain.PeerIdentity
@@ -97,6 +117,7 @@ type pendingObservationConstruction struct {
 	readout                    *PendingObservation
 	datagramQueueGrowth        bool
 	writerQueueHistoryCapacity int
+	gossipQueueDepth           bool
 }
 
 // NewServiceWithPendingObservation explicitly opts into the existing K12 source.
@@ -130,6 +151,9 @@ func (c *pendingObservationConstruction) install(s *Service) {
 	s.observeDatagramQueueGrowth = c.datagramQueueGrowth
 	if c.writerQueueHistoryCapacity > 0 {
 		s.writerQueueLifecycle = newWriterQueueLifecycle(c.writerQueueHistoryCapacity)
+	}
+	if c.gossipQueueDepth {
+		s.gossipQueueObservation = new(gossipQueueObservation)
 	}
 	s.deliveryMu.Lock()
 	defer s.deliveryMu.Unlock()

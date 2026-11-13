@@ -17,6 +17,7 @@ type S6ObservationProbeRequest struct {
 	Pending                    corenode.PendingObservationKey
 	DatagramQueueGrowth        bool `json:",omitempty"`
 	WriterQueueHistoryCapacity int  `json:",omitempty"`
+	GossipQueueDepth           bool `json:",omitempty"`
 	Handshake                  corenode.HandshakeObservationRequest
 	ConnectionTotal            corenode.ConnectionTotalObservationRequest
 }
@@ -35,6 +36,7 @@ func NewWithS6ObservationProbe(request S6ObservationProbeRequest) (*App, error) 
 		Pending:                    &request.Pending,
 		DatagramQueueGrowth:        request.DatagramQueueGrowth,
 		WriterQueueHistoryCapacity: request.WriterQueueHistoryCapacity,
+		GossipQueueDepth:           request.GossipQueueDepth,
 		Handshake:                  &request.Handshake,
 		ConnectionTotal:            &request.ConnectionTotal,
 	})

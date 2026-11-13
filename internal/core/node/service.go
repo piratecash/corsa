@@ -885,6 +885,8 @@ type Service struct {
 	// DM/receipt queue — a DM storm could otherwise silently shed
 	// them. See gossip_dispatch.go.
 	gossipNoticeJobs chan func()
+	// Set before Run only by the diagnostic observation constructor.
+	gossipQueueObservation *gossipQueueObservation
 	// gossipPoolMu excludes job enqueues (RLock) from the shutdown
 	// supervisor's flag-flip + queue-drain critical section (Lock), so
 	// no closure can be parked in gossipJobs after the drain. NOT in

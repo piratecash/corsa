@@ -95,8 +95,14 @@ const (
 func (s *Service) startGossipDispatch(ctx context.Context) {
 	s.gossipJobs = make(chan func(), gossipSendQueueCap)
 	s.gossipNoticeJobs = make(chan func(), gossipNoticeQueueCap)
-	s.startGossipWorkers(ctx, gossipSendWorkers, s.gossipJobs)
-	s.startGossipWorkers(ctx, gossipNoticeWorkers, s.gossipNoticeJobs)
+	var send, notice *gossipQueueLane
+	if o := s.gossipQueueObservation; o != nil {
+		send, notice = &o.send, &o.notice
+		send.start()
+		notice.start()
+	}
+	s.startGossipWorkers(ctx, gossipSendWorkers, s.gossipJobs, send)
+	s.startGossipWorkers(ctx, gossipNoticeWorkers, s.gossipNoticeJobs, notice)
 
 	// Shutdown supervisor: flip the pool to "down" so late dispatchers
 	// drop instead of enqueueing, then drain the abandoned closures so
@@ -113,8 +119,13 @@ func (s *Service) startGossipDispatch(ctx context.Context) {
 		s.gossipPoolMu.Lock()
 		defer s.gossipPoolMu.Unlock()
 		s.gossipPoolShutdown.Store(true)
-		drainGossipJobs(s.gossipJobs)
-		drainGossipJobs(s.gossipNoticeJobs)
+		if send == nil {
+			drainGossipJobs(s.gossipJobs)
+			drainGossipJobs(s.gossipNoticeJobs)
+		} else {
+			send.stop(s.gossipJobs)
+			notice.stop(s.gossipNoticeJobs)
+		}
 	})
 
 	// Publish AFTER the channels exist and workers are launched so a
@@ -125,7 +136,7 @@ func (s *Service) startGossipDispatch(ctx context.Context) {
 
 // startGossipWorkers launches n identical workers draining jobs until
 // ctx is cancelled.
-func (s *Service) startGossipWorkers(ctx context.Context, n int, jobs <-chan func()) {
+func (s *Service) startGossipWorkers(ctx context.Context, n int, jobs <-chan func(), observed *gossipQueueLane) {
 	for i := 0; i < n; i++ {
 		s.goRunLoop(func() {
 			for {
@@ -136,26 +147,26 @@ func (s *Service) startGossipWorkers(ctx context.Context, n int, jobs <-chan fun
 				if ctx.Err() != nil {
 					return
 				}
-				select {
-				case <-ctx.Done():
-					return
-				case job := <-jobs:
-					if ctx.Err() != nil {
-						// Drew a job in the same instant the pool was
-						// cancelled: abandon it WITHOUT running.
-						// Gossip is fire-and-forget, and a send can
-						// block up to a dial/handshake timeout
-						// (sendNoticeToPeer), which would hold
-						// WaitBackground hostage at shutdown.
+				var job func()
+				if observed != nil {
+					var ok bool
+					job, ok = observed.take(ctx, jobs)
+					if !ok {
 						return
 					}
-					// No recover wrapper here on purpose: the send
-					// helpers defer crashlog.DeferRecover themselves,
-					// and DeferRecover logs + RE-PANICS (crash-on-
-					// panic policy), exactly as it did when each send
-					// ran on its own goroutine.
-					job()
+				} else {
+					select {
+					case <-ctx.Done():
+						return
+					case job = <-jobs:
+					}
 				}
+				// An item drawn during cancellation is abandoned.
+				if ctx.Err() != nil {
+					return
+				}
+				// Preserve the send helpers' crash-on-panic policy.
+				job()
 			}
 		})
 	}
@@ -222,7 +233,7 @@ func (s *Service) dispatchGossipNoticeSend(job func()) {
 // goBackground fallback when the pool never started (unit tests,
 // partially-wired Services — historical per-send goroutine, tracked on
 // backgroundWg, reported as gossipEnqueued; gossipPoolShutdownDrop once
-// Run has returned and goBackground refuses it). Always non-blocking.
+// Run has returned and goBackground refuses it). Never waits for buffer space.
 //
 // lane is the ADDRESS of the lane field, dereferenced only after
 // gossipPoolUp.Load() returned true. startGossipDispatch assigns the
@@ -249,6 +260,12 @@ func (s *Service) tryEnqueueGossipJob(lane *chan func(), job func()) gossipEnque
 	defer s.gossipPoolMu.RUnlock()
 	if s.gossipPoolShutdown.Load() {
 		return gossipPoolShutdownDrop
+	}
+	if o := s.gossipQueueObservation; o != nil {
+		if lane == &s.gossipJobs {
+			return o.send.offer(*lane, job)
+		}
+		return o.notice.offer(*lane, job)
 	}
 	select {
 	case *lane <- job:
