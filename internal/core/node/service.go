@@ -4743,7 +4743,7 @@ func (s *Service) dispatchNetworkFrameOwned(connID domain.ConnID, wire string, o
 			accepted = false
 			return true
 		}
-		s.handleRouteProbe(connID, s.inboundPeerIdentity(connID), probe)
+		s.handleRouteProbe(connID, s.inboundRoutingSender(connID), probe)
 		return true
 	case "route_probe_ack_v1":
 		// Auth gate enforced above. Same capability gate as the probe
@@ -4777,7 +4777,7 @@ func (s *Service) dispatchNetworkFrameOwned(connID domain.ConnID, wire string, o
 			accepted = false
 			return true
 		}
-		s.handleRouteQuery(connID, s.inboundPeerIdentity(connID), query)
+		s.handleRouteQuery(connID, s.inboundRoutingSender(connID), query)
 		return true
 	case "route_query_response_v1":
 		// Auth gate enforced above. Same capability gate as the

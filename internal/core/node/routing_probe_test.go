@@ -66,7 +66,7 @@ func TestHandleRouteProbe_RespondsReachableWhenRouteExists(t *testing.T) {
 	// sendFrameViaNetwork call inside handleRouteProbe will return
 	// an error that is swallowed by the `_ =` discard. The handler
 	// must not panic and must complete the local Lookup.
-	svc.handleRouteProbe(domain.ConnID(0), idPeerB, probe)
+	svc.handleRouteProbe(domain.ConnID(0), svc.provenRoutingSender(idPeerB), probe)
 }
 
 // TestHandleRouteProbe_RespondsUnreachableWhenNoRoute — mirror case:
@@ -88,7 +88,7 @@ func TestHandleRouteProbe_RespondsUnreachableWhenNoRoute(t *testing.T) {
 	}
 
 	// Handler must complete without panic even when no route exists.
-	svc.handleRouteProbe(domain.ConnID(0), idPeerB, probe)
+	svc.handleRouteProbe(domain.ConnID(0), svc.provenRoutingSender(idPeerB), probe)
 }
 
 // TestHandleRouteProbe_NoForwarding_SingleHopOnly — the probe is
@@ -105,7 +105,7 @@ func TestHandleRouteProbe_NoForwarding_SingleHopOnly(t *testing.T) {
 		TargetIdentity: idTargetX,
 	}
 
-	svc.handleRouteProbe(domain.ConnID(0), idPeerB, probe)
+	svc.handleRouteProbe(domain.ConnID(0), svc.provenRoutingSender(idPeerB), probe)
 
 	// No new routes should appear from a probe — the handler only
 	// reads Lookup, never writes UpdateRoute.

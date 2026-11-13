@@ -4,10 +4,87 @@ import (
 	"testing"
 	"time"
 
+	"github.com/piratecash/corsa/internal/core/config"
+	"github.com/piratecash/corsa/internal/core/connauth"
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/netcore"
 	"github.com/piratecash/corsa/internal/core/protocol"
 	"github.com/piratecash/corsa/internal/core/routing"
 )
+
+func TestRouteSyncUsesOriginalTransportGate(t *testing.T) {
+	for _, direction := range []string{"inbound", "outbound"} {
+		t.Run(direction, func(t *testing.T) {
+			svc := newTestService(t, config.NodeTypeFull)
+			svc.runCtx = t.Context()
+			newTransport := func(id domain.ConnID, address domain.PeerAddress) (*netcore.NetCore, func(protocol.Frame)) {
+				if direction == "inbound" {
+					id, core := newTrackedInboundHealthConn(t, svc, address)
+					core.ApplyOpts(netcore.Options{Address: address, Identity: idPeerB, Caps: []domain.Capability{domain.CapMeshRouteSyncV1}})
+					core.SetAuth(&connauth.State{Verified: true, Hello: protocol.Frame{Address: idPeerB.String()}})
+					return core, func(frame protocol.Frame) { svc.dispatchNetworkFrame(id, frame.RawLine+"\n") }
+				}
+				session := newReceiveOwnerSession(t, svc, id, address)
+				session.capabilities = []domain.Capability{domain.CapMeshRouteSyncV1}
+				return session.netCore, func(frame protocol.Frame) { svc.dispatchPeerSessionFrame(address, session, frame) }
+			}
+			oldCore, dispatchOld := newTransport(5920, "192.0.2.96:64646")
+			_, dispatchLive := newTransport(5921, "192.0.2.97:64646")
+			expires := time.Now().Add(90 * time.Second)
+			if _, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
+				Identity: idTargetX, Origin: idPeerB, NextHop: idPeerB, Hops: 2, SeqNo: 1,
+				Source: routing.RouteSourceAnnouncement, ExpiresAt: expires,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			digest, count := svc.routingTable.SyncDigestFor(idPeerB)
+			if count != 1 {
+				t.Fatalf("expected one route in the fixture, got %d", count)
+			}
+			digestWire, err := protocol.MarshalRouteSyncDigestFrame(protocol.RouteSyncDigestFrame{Digest: digest, KnownIdentitiesCount: count})
+			if err != nil {
+				t.Fatal(err)
+			}
+			digestFrame := protocol.Frame{Type: protocol.RouteSyncDigestFrameType, RawLine: string(digestWire)}
+			summary := func(match bool) protocol.Frame {
+				wire, err := protocol.MarshalRouteSyncSummaryFrame(protocol.RouteSyncSummaryFrame{Digest: digest, Match: match, ExpectFullSync: !match})
+				if err != nil {
+					t.Fatal(err)
+				}
+				return protocol.Frame{Type: protocol.RouteSyncSummaryFrameType, RawLine: string(wire)}
+			}
+			oldCore.ShutSendQueue()
+			if svc.netCoreForID(oldCore.ConnID()) != oldCore {
+				t.Fatal("test must exercise the interval before unregister")
+			}
+			svc.announceLoop.MarkPeerDigestPending(idPeerB, time.Now(), digest)
+			dispatchOld(digestFrame)
+			dispatchOld(summary(true))
+			if routes := svc.routingTable.Lookup(idTargetX); len(routes) != 1 || !routes[0].ExpiresAt.Equal(expires) || svc.digestStats.digestsCompared.Load() != 0 {
+				t.Fatalf("closed transport changed the digest comparison or route expiry: %v", routes)
+			}
+			if svc.digestStats.summaryMatch.Load() != 0 {
+				t.Fatal("closed transport confirmed a pending digest")
+			}
+			dispatchLive(digestFrame)
+			dispatchLive(summary(true))
+			if routes := svc.routingTable.Lookup(idTargetX); len(routes) != 1 || !routes[0].ExpiresAt.After(expires) || svc.digestStats.digestsCompared.Load() != 1 {
+				t.Fatalf("open transport did not refresh the matching route: %v", routes)
+			}
+			if svc.digestStats.summaryMatch.Load() != 1 || !svc.announceLoop.IsDigestSuppressionActiveForTest(idPeerB, time.Now()) {
+				t.Fatal("open transport did not confirm digest suppression")
+			}
+			dispatchOld(summary(false))
+			if !svc.announceLoop.IsDigestSuppressionActiveForTest(idPeerB, time.Now()) {
+				t.Fatal("closed transport cleared active digest suppression")
+			}
+			dispatchLive(summary(false))
+			if svc.announceLoop.IsDigestSuppressionActiveForTest(idPeerB, time.Now()) {
+				t.Fatal("open transport did not clear digest suppression")
+			}
+		})
+	}
+}
 
 // routing_sync_test.go covers Phase 3 PR 12.5 — the
 // route_sync_digest_v1 / route_sync_summary_v1 handler pair.

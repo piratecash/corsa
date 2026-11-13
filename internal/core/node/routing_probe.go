@@ -64,14 +64,17 @@ import (
 // promoted on the strength of the ack. This mirrors the
 // split-horizon rule already enforced by
 // `Table.AnnounceableFor(excludeVia)` on the announce-plane.
-func (s *Service) handleRouteProbe(connID domain.ConnID, senderIdentity domain.PeerIdentity, probe protocol.RouteProbeFrame) {
+func (s *Service) handleRouteProbe(connID domain.ConnID, sender routingSender, probe protocol.RouteProbeFrame) {
+	if !sender.receiveReady() {
+		return
+	}
 	// Local Lookup determines reachable. Lookup returns the post-
 	// Phase-2 CompositeScore-ranked selectable routes; HealthDead
 	// claims are already filtered out. After Lookup we apply
 	// split-horizon: any claim whose NextHop equals the probe
 	// sender would form a routing loop if accepted, so we strip
 	// such claims before deciding reachable.
-	routes := filterSplitHorizon(s.routingTable.Lookup(probe.TargetIdentity), senderIdentity)
+	routes := filterSplitHorizon(s.routingTable.Lookup(probe.TargetIdentity), sender.identity)
 	reachable := len(routes) > 0
 
 	ack := protocol.RouteProbeAckFrame{
@@ -167,6 +170,9 @@ func filterSplitHorizon(routes []routing.RouteEntry, excludeVia domain.PeerIdent
 // This is the receive-side zero-trust guard that prevents one peer
 // from spoofing acks for another peer's probes.
 func (s *Service) handleRouteProbeAck(sender routingSender, ack protocol.RouteProbeAckFrame) {
+	if !sender.receiveReady() {
+		return
+	}
 	senderIdentity := sender.identity
 	if s.probeRegistry == nil {
 		// Service initialised without probe registry (legacy test

@@ -1289,6 +1289,9 @@ func (s *Service) SendRoutePoisonBatch(ctx context.Context, peerAddress domain.P
 // AnnounceProjectionFor only emits own-direct tombstones; transit
 // tombstones from InvalidateUplinkClaim are filtered out.
 func (s *Service) handleRoutePoison(sender routingSender, frame protocol.RoutePoisonFrame) {
+	if !sender.receiveReady() {
+		return
+	}
 	senderIdentity := sender.identity
 	if !identity.IsValidAddress(senderIdentity.String()) {
 		log.Warn().Str("sender", senderIdentity.String()).Msg("route_poison_malformed_sender")
@@ -1436,6 +1439,9 @@ func (s *Service) applyRoutePoisonForIdentity(senderIdentity, target domain.Peer
 // targets are collected and cascaded ONCE via poisonReverseToOtherPeers (which
 // batches per peer), so the propagation hop does not re-explode into singletons.
 func (s *Service) handleRoutePoisonV2(sender routingSender, frame protocol.RoutePoisonV2Frame) {
+	if !sender.receiveReady() {
+		return
+	}
 	senderIdentity := sender.identity
 	if !identity.IsValidAddress(senderIdentity.String()) {
 		log.Warn().Str("sender", senderIdentity.String()).Msg("route_poison_v2_malformed_sender")
@@ -2050,7 +2056,7 @@ func (s *Service) sendConnectTimeFullSync(ctx context.Context, peerIdentity doma
 // against the known-good first-sync snapshot. See docs/routing.md
 // "First-sync wire-frame invariant" for the protocol-level contract.
 func (s *Service) handleAnnounceRoutes(sender routingSender, frame protocol.Frame) {
-	if sender.receive == nil || !sender.receive.ReceiveReady() {
+	if !sender.receiveReady() {
 		return
 	}
 	senderIdentity := sender.identity
@@ -2123,7 +2129,7 @@ func (s *Service) handleAnnounceRoutes(sender routingSender, frame protocol.Fram
 // senderAddress is the peer's routing-key address (outbound session or
 // "inbound:" prefix) used to dispatch the request_resync reply.
 func (s *Service) handleRoutesUpdate(sender routingSender, senderAddress domain.PeerAddress, frame protocol.Frame) {
-	if sender.receive == nil || !sender.receive.ReceiveReady() {
+	if !sender.receiveReady() {
 		return
 	}
 	senderIdentity := sender.identity
@@ -2235,6 +2241,9 @@ func (s *Service) handleRoutesUpdate(sender routingSender, senderAddress domain.
 // triplet. Either way the recovery frame is a self-contained baseline,
 // never a delta.
 func (s *Service) handleRequestResync(sender routingSender) {
+	if !sender.receiveReady() {
+		return
+	}
 	senderIdentity := sender.identity
 	if !identity.IsValidAddress(senderIdentity.String()) {
 		log.Warn().Str("sender", senderIdentity.String()).Msg("request_resync_malformed_sender")
@@ -2389,7 +2398,7 @@ func (s *Service) acceptRequestResyncDebounced(subject penaltySubject, now time.
 // optimisation, not a correctness requirement. kind="full" is
 // self-contained and establishes the baseline.
 func (s *Service) handleRouteAnnounceV3(sender routingSender, senderAddress domain.PeerAddress, frame protocol.RouteAnnounceV3Frame) {
-	if sender.receive == nil || !sender.receive.ReceiveReady() {
+	if !sender.receiveReady() {
 		return
 	}
 	senderIdentity := sender.identity
@@ -2847,7 +2856,7 @@ func (r *announceEntryRefusals) logSummaries(wireType string) {
 // CompositeScore can apply the trust-score bonus at rank time without
 // re-verifying.
 func (s *Service) applyAnnounceEntries(sender routingSender, wireRoutes []protocol.AnnounceRouteFrame, attestedSigs [][]byte, attestedVerified []bool, mode announceReceiveMode) {
-	if sender.receive == nil || !sender.receive.ReceiveReady() {
+	if !sender.receiveReady() {
 		return
 	}
 

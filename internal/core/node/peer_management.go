@@ -4287,17 +4287,13 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *
 		if session == nil {
 			return
 		}
-		// The handler answers via sendFrameViaNetwork with connID,
-		// but on the outbound-session arrival path we do not have a
-		// connID — the session's own writer goroutine takes the
-		// summary via sendCh. Build the summary inline here so the
-		// reply mirrors the digest-handler logic without needing
-		// connID plumbing through the outbound side. The compare,
-		// TTL refresh and digests_compared/compare_match counters are
-		// shared with the inbound path via compareInboundDigest so this
-		// outbound arrival is no longer second-class (it previously
-		// skipped both the receiver-side TTL refresh and the counters).
-		release, admitted := s.admitRoutingInput(sessionRoutingSender(session), protocol.RouteSyncDigestFrameType)
+		sender := sessionRoutingSender(session)
+		if !sender.receiveReady() {
+			return
+		}
+		// Both transports share the TTL refresh and digest counters.
+		// The outbound reply uses this session's writer.
+		release, admitted := s.admitRoutingInput(sender, protocol.RouteSyncDigestFrameType)
 		if !admitted {
 			return
 		}

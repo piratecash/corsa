@@ -9,7 +9,7 @@ func TestAnnounceReceiveStateClosedAndEpochTransitions(t *testing.T) {
 			t.Fatal("absent owner accepted evidence")
 		}
 	}
-	state := NewAnnounceReceiveState()
+	state := NewAnnounceReceiveState(nil)
 	if state.ObserveV3Epoch(1) != V3EpochApply {
 		t.Fatal("first epoch rejected")
 	}

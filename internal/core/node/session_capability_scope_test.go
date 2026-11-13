@@ -264,7 +264,7 @@ func TestAnnounceRoutesJudgedByDeliveringSession(t *testing.T) {
 
 	address := domain.PeerAddress("10.4.4.4:7777")
 	delivering := &peerSession{
-		receive:      routing.NewAnnounceReceiveState(),
+		receive:      routing.NewAnnounceReceiveState(nil),
 		address:      address,
 		peerIdentity: idPeerB,
 		connID:       domain.ConnID(4401),

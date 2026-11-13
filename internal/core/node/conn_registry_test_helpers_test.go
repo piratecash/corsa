@@ -34,7 +34,7 @@ func mustConnIDForTest(s *Service, conn net.Conn) domain.ConnID {
 // test do not collide at ConnID(0).
 func (s *Service) setTestConnEntryLocked(conn net.Conn, entry *connEntry) {
 	if entry != nil && entry.receive == nil {
-		entry.receive = routing.NewAnnounceReceiveState()
+		entry.receive = routing.NewAnnounceReceiveState(nil)
 	}
 	var id netcore.ConnID
 	if entry != nil && entry.core != nil && entry.core.ConnIDNum() != 0 {

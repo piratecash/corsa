@@ -545,7 +545,7 @@ func (s *Service) registerInboundConnLocked(conn net.Conn, core *netcore.NetCore
 	if adTicket != nil {
 		defer s.guardK3AdvertisedPeerLocked(adTicket)
 	}
-	entry := &connEntry{core: core, budget: budget, receive: routing.NewAnnounceReceiveState()}
+	entry := &connEntry{core: core, budget: budget, receive: routing.NewAnnounceReceiveState(core.AcceptingFrames)}
 	if metered != nil {
 		entry.metered = metered
 	}
@@ -589,7 +589,7 @@ func (s *Service) attachOutboundCoreLocked(conn net.Conn, core *netcore.NetCore)
 		defer s.guardK3AdvertisedPeerLocked(adTicket)
 	}
 	id := core.ConnID()
-	entry := &connEntry{core: core, metered: netcore.MeteredOf(conn), receive: routing.NewAnnounceReceiveState()}
+	entry := &connEntry{core: core, metered: netcore.MeteredOf(conn), receive: routing.NewAnnounceReceiveState(core.AcceptingFrames)}
 	if wire, ok := conn.(*peekedConn); ok {
 		s.bindProofTransportLocked(entry, id, wire)
 	}

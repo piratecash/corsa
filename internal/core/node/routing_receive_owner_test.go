@@ -14,6 +14,7 @@ import (
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/netcore"
 	"github.com/piratecash/corsa/internal/core/protocol"
+	"github.com/piratecash/corsa/internal/core/routing"
 )
 
 func newReceiveOwnerSession(t *testing.T, svc *Service, id domain.ConnID, address domain.PeerAddress) *peerSession {
@@ -117,6 +118,96 @@ func TestReceiveCurrentEpochIsPerActualConnection(t *testing.T) {
 		t.Fatal("accepted current full did not enable current delta")
 	}
 }
+
+func TestReceiveOwnerStopsAtOriginalTransportGate(t *testing.T) {
+	for _, direction := range []string{"inbound", "outbound"} {
+		t.Run(direction, func(t *testing.T) {
+			svc := newTestService(t, config.NodeTypeFull)
+			address := domain.PeerAddress("192.0.2.94:64646")
+			var sender routingSender
+			var core *netcore.NetCore
+			if direction == "inbound" {
+				id, inbound := newTrackedInboundHealthConn(t, svc, address)
+				sender = svc.inboundRoutingSender(id)
+				core = inbound
+			} else {
+				session := newReceiveOwnerSession(t, svc, 5903, address)
+				sender = sessionRoutingSender(session)
+				core = session.netCore
+			}
+			svc.handleAnnounceRoutes(sender, legacyBaselineFrame(idPeerB, idTargetX))
+			if !routeLearnedVia(svc, idTargetX, idPeerB) {
+				t.Fatal("open transport did not accept a baseline")
+			}
+			core.ShutSendQueue()
+			if svc.netCoreForID(core.ConnID()) != core {
+				t.Fatal("test must exercise the interval before unregister")
+			}
+			svc.handleAnnounceRoutes(sender, legacyBaselineFrame(idPeerB, idTargetY))
+			if routeLearnedVia(svc, idTargetY, idPeerB) || sender.receive.ReceiveReady() || sender.receive.HasReceivedBaseline() {
+				t.Fatal("closed transport still owns receive evidence")
+			}
+			if got := sender.receive.ObserveV3Epoch(1); got != routing.V3EpochStale {
+				t.Fatalf("closed transport still accepts an epoch: %v", got)
+			}
+		})
+	}
+}
+
+func TestReceiveOwnerGatesPoisonAndResync(t *testing.T) {
+	for _, direction := range []string{"inbound", "outbound"} {
+		t.Run(direction, func(t *testing.T) {
+			svc := newTestService(t, config.NodeTypeFull)
+			newSender := func(id domain.ConnID, address domain.PeerAddress) (routingSender, *netcore.NetCore) {
+				if direction == "inbound" {
+					inboundID, core := newTrackedInboundHealthConn(t, svc, address)
+					return svc.inboundRoutingSender(inboundID), core
+				}
+				session := newReceiveOwnerSession(t, svc, id, address)
+				return sessionRoutingSender(session), session.netCore
+			}
+			old, oldCore := newSender(5910, "192.0.2.94:64646")
+			live, _ := newSender(5911, "192.0.2.95:64646")
+			for _, target := range []domain.PeerIdentity{idTargetX, idTargetY} {
+				svc.handleAnnounceRoutes(old, legacyBaselineFrame(idPeerB, target))
+				if !routeLearnedVia(svc, target, idPeerB) {
+					t.Fatal("open transport did not establish the test route")
+				}
+			}
+			state := svc.announceLoop.StateRegistry().GetOrCreate(idPeerB)
+			state.RecordFullSyncSuccess(0, time.Now())
+			poison := protocol.RoutePoisonFrame{
+				Type: protocol.RoutePoisonFrameType, Identity: idTargetX.String(), Reason: protocol.RoutePoisonReasonUplinkLost,
+			}
+			batch := protocol.RoutePoisonV2Frame{
+				Type: protocol.RoutePoisonV2FrameType, Identities: []string{idTargetY.String()}, Reason: protocol.RoutePoisonReasonUplinkLost,
+			}
+			oldCore.ShutSendQueue()
+			if svc.netCoreForID(oldCore.ConnID()) != oldCore {
+				t.Fatal("test must exercise the interval before unregister")
+			}
+			svc.handleRoutePoison(old, poison)
+			svc.handleRoutePoisonV2(old, batch)
+			svc.handleRequestResync(old)
+			if !routeLearnedVia(svc, idTargetX, idPeerB) || !routeLearnedVia(svc, idTargetY, idPeerB) {
+				t.Fatal("closed transport invalidated a route")
+			}
+			if state.View().NeedsFullResync {
+				t.Fatal("closed transport forced a resync")
+			}
+			svc.handleRoutePoison(live, poison)
+			svc.handleRoutePoisonV2(live, batch)
+			svc.handleRequestResync(live)
+			if routeLearnedVia(svc, idTargetX, idPeerB) || routeLearnedVia(svc, idTargetY, idPeerB) {
+				t.Fatal("open transport failed to apply the route withdrawals")
+			}
+			if !state.View().NeedsFullResync {
+				t.Fatal("open transport failed to request a resync")
+			}
+		})
+	}
+}
+
 func baselineDuringContactsFarEnd(ctx context.Context, peer domain.PeerIdentity) farEndFunc {
 	return func(remote net.Conn, inbox chan<- protocol.Frame, errs chan<- error) {
 		reader := bufio.NewReader(remote)

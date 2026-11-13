@@ -225,6 +225,10 @@ type routingSender struct {
 	penalty  penaltySubject
 }
 
+func (sender routingSender) receiveReady() bool {
+	return sender.receive != nil && sender.receive.ReceiveReady()
+}
+
 // sessionRoutingSender is the sender behind a session this node dialled.
 func sessionRoutingSender(session *peerSession) routingSender {
 	return routingSender{identity: session.peerIdentity, penalty: session.penaltySubject(), receive: session.receive}

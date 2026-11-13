@@ -16,16 +16,26 @@ type AnnounceReceiveEvidence interface {
 // mutex is never held during callbacks, I/O, or acquisition of Service locks.
 // The zero value is closed/uninitialised; only the constructor opens a state.
 type AnnounceReceiveState struct {
-	mu       sync.Mutex
-	active   bool
-	baseline bool
-	epoch    uint64
-	epochSet bool
+	transportOpen func() bool
+	mu            sync.Mutex
+	active        bool
+	baseline      bool
+	epoch         uint64
+	epochSet      bool
 }
 
-func NewAnnounceReceiveState() *AnnounceReceiveState { return &AnnounceReceiveState{active: true} }
+// transportOpen reads the original transport's gate without taking locks.
+// Standalone fixtures can pass nil to use only the receive state's lifecycle.
+func NewAnnounceReceiveState(transportOpen func() bool) *AnnounceReceiveState {
+	return &AnnounceReceiveState{transportOpen: transportOpen, active: true}
+}
+
+func (s *AnnounceReceiveState) mayReceive() bool {
+	return s != nil && (s.transportOpen == nil || s.transportOpen())
+}
+
 func (s *AnnounceReceiveState) ReceiveReady() bool {
-	if s == nil {
+	if !s.mayReceive() {
 		return false
 	}
 	s.mu.Lock()
@@ -33,7 +43,7 @@ func (s *AnnounceReceiveState) ReceiveReady() bool {
 	return s.active
 }
 func (s *AnnounceReceiveState) MarkBaselineReceived() {
-	if s == nil {
+	if !s.mayReceive() {
 		return
 	}
 	s.mu.Lock()
@@ -43,7 +53,7 @@ func (s *AnnounceReceiveState) MarkBaselineReceived() {
 	}
 }
 func (s *AnnounceReceiveState) HasReceivedBaseline() bool {
-	if s == nil {
+	if !s.mayReceive() {
 		return false
 	}
 	s.mu.Lock()
@@ -51,7 +61,7 @@ func (s *AnnounceReceiveState) HasReceivedBaseline() bool {
 	return s.active && s.baseline
 }
 func (s *AnnounceReceiveState) ObserveV3Epoch(incoming uint64) V3EpochVerdict {
-	if s == nil {
+	if !s.mayReceive() {
 		return V3EpochStale
 	}
 	s.mu.Lock()

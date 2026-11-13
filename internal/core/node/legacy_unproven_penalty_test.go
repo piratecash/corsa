@@ -43,7 +43,7 @@ var legacyRoutingCaps = []domain.Capability{
 // identity is the peer's word.
 func legacyOutboundSession(address domain.PeerAddress, claimed domain.PeerIdentity) *peerSession {
 	return &peerSession{
-		receive:      routing.NewAnnounceReceiveState(),
+		receive:      routing.NewAnnounceReceiveState(nil),
 		address:      address,
 		peerIdentity: claimed,
 		authOK:       true,

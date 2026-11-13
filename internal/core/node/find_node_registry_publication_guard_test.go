@@ -18,11 +18,11 @@ import (
 // never expectations learned from the source under test.
 func registryPublicationBodyPins() map[string]string {
 	return map[string]string{
-		"conn_registry.go:attachOutboundCoreLocked":               "1b8d58059d1679bb8b87ede7b97ee4889ab739357b5257bd2d1be69a84476891",
+		"conn_registry.go:attachOutboundCoreLocked":               "ba240faf4624312e21cdd455433344d34bf97d4bb5a358680e9629f811021351",
 		"conn_registry.go:beginRegistryPublication":               "675698828ef2caa20810dd5dd401fbeced398e0c94a7cc5c2530774fc82e059f",
 		"conn_registry.go:bindProofTransportLocked":               "3c9921e6eaff214bcd99da352872622b9e37b1db0778299e42d9767198d362ab",
 		"conn_registry.go:publishAcceptedProofTransport":          "ff1f63812b27b42c384d7e946755bddf2ccf098260a04adcbbc8956df95522a6",
-		"conn_registry.go:registerInboundConnLocked":              "526e559f0e1261cc3c846967efccbe4013b42ff326e4c1941643928b44bbccbb",
+		"conn_registry.go:registerInboundConnLocked":              "6e48ac20102e558a1aa1d06631862046335781484503ad1ba88f50d7f1abbeab",
 		"conn_registry.go:unregisterConnLocked":                   "1cc9ef4f9f2010e56ffa8e714b7b8394294502a1aac3c3597239e1b512b0409d",
 		"connection_manager.go:deactivateSlotLocked":              "26fb7214b4663240a888110d59bcc1261bf63b35be44130fbc6d8298d5257658",
 		"connection_manager.go:handleDialSucceeded":               "0b7f0d2942f6ca4be107a1898bc5b501d6266d643e61f1e9c2112c75b6fe0fbf",

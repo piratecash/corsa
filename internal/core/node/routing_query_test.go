@@ -1,12 +1,108 @@
 package node
 
 import (
+	"bufio"
+	"net"
 	"testing"
+	"time"
 
+	"github.com/piratecash/corsa/internal/core/config"
+	"github.com/piratecash/corsa/internal/core/connauth"
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/netcore"
 	"github.com/piratecash/corsa/internal/core/protocol"
 	"github.com/piratecash/corsa/internal/core/routing"
 )
+
+func TestRouteProbeAndQueryUseOriginalTransportGate(t *testing.T) {
+	svc := newTestService(t, config.NodeTypeFull)
+	svc.runCtx = t.Context()
+	newConnection := func(port int) (domain.ConnID, *netcore.NetCore, net.Conn) {
+		local, remote := net.Pipe()
+		t.Cleanup(func() { _ = remote.Close() })
+		transport := withRemoteAddr(local, &net.TCPAddr{IP: net.ParseIP("192.0.2.96"), Port: port})
+		if err := svc.registerInboundConn(transport, nil); err != nil {
+			_ = local.Close()
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { svc.unregisterInboundConn(transport) })
+		id, ok := svc.connIDFor(transport)
+		if !ok {
+			t.Fatal("missing inbound registration")
+		}
+		core := svc.netCoreForID(id)
+		core.ApplyOpts(netcore.Options{
+			Identity: idPeerB, Address: domain.PeerAddress(transport.RemoteAddr().String()),
+			Caps: []domain.Capability{domain.CapMeshRouteProbeV1, domain.CapMeshRouteQueryV1, domain.CapMeshRoutingV1, domain.CapMeshRelayV1},
+		})
+		core.SetAuth(&connauth.State{Verified: true, Hello: protocol.Frame{Address: idPeerB.String()}})
+		return id, core, remote
+	}
+	oldID, oldCore, _ := newConnection(64501)
+	liveID, _, liveWire := newConnection(64502)
+	if _, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
+		Identity: idTargetX, Origin: idPeerC, NextHop: idPeerC, Hops: 2, SeqNo: 1, Source: routing.RouteSourceAnnouncement,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := liveWire.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	reader := bufio.NewReader(liveWire)
+	probe, err := protocol.MarshalRouteProbeFrame(protocol.RouteProbeFrame{ProbeID: 42, TargetIdentity: idTargetX})
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc.dispatchNetworkFrame(liveID, string(probe)+"\n")
+	line, err := reader.ReadBytes('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	probeReply, err := protocol.UnmarshalRouteProbeAckFrame(line)
+	if err != nil || probeReply.ProbeID != 42 || !probeReply.Reachable {
+		t.Fatalf("open transport probe reply = %+v, err = %v", probeReply, err)
+	}
+	query, err := protocol.MarshalRouteQueryFrame(protocol.RouteQueryFrame{QueryID: 43, TargetIdentity: idTargetX})
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc.dispatchNetworkFrame(liveID, string(query)+"\n")
+	line, err = reader.ReadBytes('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	queryReply, err := protocol.UnmarshalRouteQueryResponseFrame(line)
+	if err != nil || queryReply.QueryID != 43 || !queryReply.Found || queryReply.BestUplink != idPeerC {
+		t.Fatalf("open transport query reply = %+v, err = %v", queryReply, err)
+	}
+
+	probeID := svc.probeRegistry.Register(idTargetX, idPeerB)
+	t.Cleanup(func() { svc.probeRegistry.Cancel(probeID) })
+	ack, err := protocol.MarshalRouteProbeAckFrame(protocol.RouteProbeAckFrame{ProbeID: probeID, Reachable: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := protocol.MarshalRouteQueryResponseFrame(protocol.RouteQueryResponseFrame{
+		QueryID: 44, TargetIdentity: idTargetY, Found: true, BestUplink: idPeerC, BestHops: 1, BestSeqNo: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldCore.ShutSendQueue()
+	if svc.netCoreForID(oldID) != oldCore {
+		t.Fatal("test must exercise the interval before unregister")
+	}
+	svc.dispatchNetworkFrame(oldID, string(ack)+"\n")
+	svc.dispatchNetworkFrame(oldID, string(response)+"\n")
+	if !svc.probeRegistry.HasOutstanding(idTargetX, idPeerB) || routeLearnedVia(svc, idTargetY, idPeerB) {
+		t.Fatal("closed transport consumed a probe or installed a route")
+	}
+	svc.dispatchNetworkFrame(liveID, string(ack)+"\n")
+	svc.dispatchNetworkFrame(liveID, string(response)+"\n")
+	if svc.probeRegistry.HasOutstanding(idTargetX, idPeerB) || !routeLearnedVia(svc, idTargetY, idPeerB) {
+		t.Fatal("open transport did not consume the probe and install the route")
+	}
+}
 
 // routing_query_test.go tests the Phase 2 PR 11.4b receive-side
 // dispatcher hook-ins for route_query_v1 / route_query_response_v1.
@@ -70,7 +166,7 @@ func TestHandleRouteQuery_RespondsFoundWhenRouteExists(t *testing.T) {
 	}
 	// The handler discards the sendFrameViaNetwork error when no
 	// writer is registered; the call must complete without panic.
-	svc.handleRouteQuery(domain.ConnID(0), idPeerC, query)
+	svc.handleRouteQuery(domain.ConnID(0), svc.provenRoutingSender(idPeerC), query)
 }
 
 // TestHandleRouteQuery_RespondsNotFoundWhenNoRoute — mirror case:
@@ -89,7 +185,7 @@ func TestHandleRouteQuery_RespondsNotFoundWhenNoRoute(t *testing.T) {
 		QueryID:        101,
 		TargetIdentity: idTargetX,
 	}
-	svc.handleRouteQuery(domain.ConnID(0), idPeerC, query)
+	svc.handleRouteQuery(domain.ConnID(0), svc.provenRoutingSender(idPeerC), query)
 }
 
 // TestHandleRouteQuery_NoForwarding_SingleHopOnly — query handling
@@ -104,7 +200,7 @@ func TestHandleRouteQuery_NoForwarding_SingleHopOnly(t *testing.T) {
 		QueryID:        7,
 		TargetIdentity: idTargetX,
 	}
-	svc.handleRouteQuery(domain.ConnID(0), idPeerC, query)
+	svc.handleRouteQuery(domain.ConnID(0), svc.provenRoutingSender(idPeerC), query)
 
 	if routes := svc.routingTable.Lookup(idTargetX); len(routes) != 0 {
 		t.Fatalf("handleRouteQuery injected route into table: %v", routes)

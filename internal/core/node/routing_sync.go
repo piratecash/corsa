@@ -309,6 +309,9 @@ func (s *Service) compareInboundDigest(peer domain.PeerIdentity, theirDigest str
 // waiting for the summary and proceed with its normal full sync,
 // which is the safe degradation path.
 func (s *Service) handleRouteSyncDigest(connID domain.ConnID, sender routingSender, frame protocol.RouteSyncDigestFrame) {
+	if !sender.receiveReady() {
+		return
+	}
 	senderIdentity := sender.identity
 	if senderIdentity.IsZero() {
 		// Sender identity not yet resolved (race against auth
@@ -390,6 +393,9 @@ func (s *Service) handleRouteSyncDigest(connID domain.ConnID, sender routingSend
 // transferred through this exchange — the announce plane
 // remains the source of truth for routing state.
 func (s *Service) handleRouteSyncSummary(sender routingSender, frame protocol.RouteSyncSummaryFrame) {
+	if !sender.receiveReady() {
+		return
+	}
 	senderIdentity := sender.identity
 	if senderIdentity.IsZero() {
 		log.Debug().

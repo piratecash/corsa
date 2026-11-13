@@ -71,7 +71,10 @@ import (
 // a fresh RouteSourceAnnouncement. This mirrors the existing
 // split-horizon rule on the announce-plane
 // (`Table.AnnounceableFor(excludeVia)`).
-func (s *Service) handleRouteQuery(connID domain.ConnID, senderIdentity domain.PeerIdentity, query protocol.RouteQueryFrame) {
+func (s *Service) handleRouteQuery(connID domain.ConnID, sender routingSender, query protocol.RouteQueryFrame) {
+	if !sender.receiveReady() {
+		return
+	}
 	resp := protocol.RouteQueryResponseFrame{
 		Type:           protocol.RouteQueryResponseFrameType,
 		QueryID:        query.QueryID,
@@ -97,7 +100,7 @@ func (s *Service) handleRouteQuery(connID domain.ConnID, senderIdentity domain.P
 	// as the uplink) and the Dead filter with Direct exemption
 	// internally, so the previous filterSplitHorizon call is no
 	// longer needed.
-	entry, bestUplink, ok := s.routingTable.AnnounceTargetFor(query.TargetIdentity, senderIdentity)
+	entry, bestUplink, ok := s.routingTable.AnnounceTargetFor(query.TargetIdentity, sender.identity)
 	if ok {
 		resp.Found = true
 		resp.BestUplink = bestUplink
@@ -165,6 +168,9 @@ func (s *Service) handleRouteQuery(connID domain.ConnID, senderIdentity domain.P
 //     by UpdateRoute, which is the correct semantic for a hops=15
 //     transit query — no special case needed.
 func (s *Service) handleRouteQueryResponse(sender routingSender, resp protocol.RouteQueryResponseFrame) {
+	if !sender.receiveReady() {
+		return
+	}
 	senderIdentity := sender.identity
 	release, admitted := s.admitRoutingInput(sender, protocol.RouteQueryResponseFrameType)
 	if !admitted {

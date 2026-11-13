@@ -30,7 +30,7 @@ func attachTestNetCore(t *testing.T, session *peerSession) {
 	if session == nil || session.conn == nil || session.netCore != nil {
 		return
 	}
-	session.receive = routing.NewAnnounceReceiveState()
+	session.receive = routing.NewAnnounceReceiveState(nil)
 	session.netCore = newTestNetCore(t, netcore.ConnID(1), session.conn, netcore.Outbound, netcore.Options{})
 }
 

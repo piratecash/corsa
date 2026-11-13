@@ -55,18 +55,10 @@ func TestDispatchPeerSessionFrame_RouteSyncSummary_ArmsSuppression(t *testing.T)
 	// only in force once the handshake completed
 	// (sessionHasCapability).
 	address := domain.PeerAddress("outbound-addr-A")
-	session := &peerSession{
-		peerIdentity: idPeerA,
-		address:      address,
-		capabilities: []domain.Capability{
-			domain.CapMeshRelayV1,
-			domain.CapMeshRoutingV1,
-			domain.CapMeshRouteSyncV1,
-		},
-		authOK: true,
-	}
-	svc.sessions[address] = session
+	session := newReceiveOwnerSession(t, svc, 6306, address)
 	svc.peerMu.Lock()
+	session.peerIdentity = idPeerA
+	session.capabilities = []domain.Capability{domain.CapMeshRelayV1, domain.CapMeshRoutingV1, domain.CapMeshRouteSyncV1}
 	if svc.health == nil {
 		svc.health = make(map[domain.PeerAddress]*peerHealth)
 	}
@@ -95,8 +87,8 @@ func TestDispatchPeerSessionFrame_RouteSyncSummary_ArmsSuppression(t *testing.T)
 	}
 	svc.dispatchPeerSessionFrame(address, session, frame)
 
-	if !svc.announceLoop.IsDigestSuppressionActiveForTest(idPeerA, time.Now().UTC()) {
-		t.Fatal("dispatch path dropped route_sync_summary_v1; suppression not armed for peer-A")
+	if svc.digestStats.summaryMatch.Load() != 1 {
+		t.Fatal("dispatch path did not confirm pending digest for peer-A")
 	}
 }
 
@@ -112,19 +104,12 @@ func TestDispatchPeerSessionFrame_RouteSyncSummary_CapabilityGate(t *testing.T) 
 	)
 
 	address := domain.PeerAddress("outbound-addr-A")
-	session := &peerSession{
-		peerIdentity: idPeerA,
-		address:      address,
-		// Deliberately missing CapMeshRouteSyncV1. The handshake IS
-		// complete, so the refusal below can only come from the
-		// missing capability and not from the handshake gate.
-		capabilities: []domain.Capability{
-			domain.CapMeshRelayV1,
-			domain.CapMeshRoutingV1,
-		},
-		authOK: true,
-	}
-	svc.sessions[address] = session
+	session := newReceiveOwnerSession(t, svc, 6307, address)
+	svc.peerMu.Lock()
+	session.peerIdentity = idPeerA
+	session.capabilities = []domain.Capability{domain.CapMeshRelayV1, domain.CapMeshRoutingV1}
+	svc.peerMu.Unlock()
+	svc.announceLoop.MarkPeerDigestPending(idPeerA, time.Now().UTC(), "abcd")
 
 	summary := protocol.RouteSyncSummaryFrame{
 		Type:   protocol.RouteSyncSummaryFrameType,
@@ -138,8 +123,8 @@ func TestDispatchPeerSessionFrame_RouteSyncSummary_CapabilityGate(t *testing.T) 
 	}
 	svc.dispatchPeerSessionFrame(address, session, frame)
 
-	if svc.announceLoop.IsDigestSuppressionActiveForTest(idPeerA, time.Now().UTC()) {
-		t.Fatal("capability-gated summary armed suppression; gate broken")
+	if svc.digestStats.summaryMatch.Load() != 0 {
+		t.Fatal("capability-gated summary confirmed pending digest")
 	}
 }
 
