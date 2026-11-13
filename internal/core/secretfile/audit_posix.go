@@ -22,13 +22,7 @@ import (
 // lead. macOS reaches every temp and data directory through /var ->
 // private/var, so a link on the way is not a violation by itself.
 //
-// Known limit: only owner and mode bits are judged. macOS (and Linux with
-// POSIX ACLs) can grant others access through an extended ACL — read on the
-// file, add_file or delete_child on a directory — that the mode does not
-// show, and this audit does not read ACLs: on darwin there is no way to read
-// one without cgo (getattrlist is not exposed by x/sys, and the ACL's
-// extended attribute is refused to user space). A location that passes is
-// therefore safe as far as its mode bits go, not proven free of ACL grants.
+// On macOS extended ACLs are checked separately through open descriptors.
 
 // rootUID is root's uid: a component root owns is one only root can change,
 // which is not a violation by itself.
@@ -83,14 +77,15 @@ func auditLocation(abs string) error {
 	if err != nil {
 		return err
 	}
-	if resolved.missingLevels > 0 {
-		return unsafeOrNil(judgeChain(entries, euid()))
+	var file fs.FileInfo
+	filePath := filepath.Join(resolved.deepest, filepath.Base(abs))
+	if resolved.missingLevels == 0 {
+		file, _, err = inspectFile(filePath)
+		if err != nil {
+			return err
+		}
 	}
-	file, present, err := inspectFile(filepath.Join(resolved.deepest, filepath.Base(abs)))
-	if err != nil {
-		return err
-	}
-	if present {
+	if file != nil {
 		owner, err := uidOf(file)
 		if err != nil {
 			return err
@@ -102,7 +97,21 @@ func auditLocation(abs string) error {
 			parentShared: sharedSticky(resolved.deepestInfo),
 		})
 	}
-	return unsafeOrNil(judgeChain(entries, euid()))
+	if failure := judgeChain(entries, euid()); failure != nil {
+		return failure
+	}
+	if file != nil {
+		if err := auditPathACL(filePath, file, fileComponent()); err != nil {
+			return err
+		}
+	}
+	for i := len(resolved.steps) - 1; i >= 0; i-- {
+		step := resolved.steps[i]
+		if err := auditPathACL(step.path, step.info, entries[i].component); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // resolveRoute walks dir from the root the way the kernel does, Lstat-ing
@@ -225,6 +234,22 @@ func judgeFile(entry chainEntry, euid uint32) (LocationViolation, bool) {
 	return "", false
 }
 
+func (d *Dir) openAuditedFile(name string) (*os.File, error) {
+	return d.OpenFileForRead(name)
+}
+
+func auditOpenedFile(file *os.File, info fs.FileInfo) error {
+	owner, err := uidOf(info)
+	if err != nil {
+		return err
+	}
+	entry := chainEntry{owner: owner, mode: info.Mode()}
+	if violation, found := judgeFile(entry, euid()); found {
+		return &UnsafeLocationError{Component: fileComponent(), Violation: violation, Owner: uidName(owner), Mode: info.Mode()}
+	}
+	return auditDescriptorACL(file, info, fileComponent())
+}
+
 func writableByOthers(mode fs.FileMode) bool { return mode.Perm()&0o022 != 0 }
 
 // sharedSticky reports a directory that others may write but that protects
@@ -293,15 +318,6 @@ func describeDirectory(dir *Dir) string {
 		owner = "not reported"
 	}
 	return fmt.Sprintf("owner %s, mode %s, process euid %d", owner, info.Mode(), os.Geteuid())
-}
-
-// unsafeOrNil turns a judgement into an error without the typed-nil trap: a
-// nil *UnsafeLocationError returned as error is not a nil error.
-func unsafeOrNil(found *UnsafeLocationError) error {
-	if found == nil {
-		return nil
-	}
-	return found
 }
 
 // inspectFile reads the file at path without following it. present is false

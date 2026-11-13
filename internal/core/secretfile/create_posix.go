@@ -10,11 +10,8 @@ import "os"
 // separate permission step and therefore no window between creation and
 // protection.
 //
-// Mode bits are not the whole answer on macOS: inheritable entries of the
-// directory's extended ACL are applied to the new file regardless of the
-// mode, so there the file is owner-only only if the directory carries no such
-// entries. That is a known, unfixed limit of this writer (see the package
-// comment).
+// On macOS check the directory's ACL and the ACL actually inherited by the
+// new file before any caller writes secret bytes.
 //
 // The Windows half needs the NT API to get the same guarantee — see
 // create_windows.go.
@@ -26,7 +23,23 @@ import "os"
 // The call resolves name through the pinned directory handle, so nothing
 // outside dir can be reached and the directory cannot be swapped underneath.
 func createExclusive(dir *Dir, name string) (*os.File, error) {
-	return dir.root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err := auditCreationDirectoryACL(dir); err != nil {
+		return nil, err
+	}
+	file, err := dir.root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	err = auditNewFileACL(file)
+	if err == nil {
+		return file, nil
+	}
+	info, infoErr := file.Stat()
+	_ = file.Close()
+	if current, statErr := dir.root.Lstat(name); statErr == nil && infoErr == nil && os.SameFile(info, current) {
+		_ = dir.root.Remove(name)
+	}
+	return nil, err
 }
 
 // restrictDirectory makes the directory owner-only through the pinned handle.

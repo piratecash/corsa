@@ -23,11 +23,8 @@
 // refers to, owner-only as far as its mode bits (POSIX) or its DACL (Windows)
 // go, and appear at the target through an atomic rename.
 //
-// Known limit, macOS: a file created 0600 still inherits the extended ACL
-// entries of its directory (an "everyone allow read,file_inherit" entry
-// survives O_EXCL|0600), and nothing here reads or clears ACLs, so on such a
-// directory the file is NOT owner-only from its creation. AuditLocation does
-// not see ACLs either (audit_posix.go).
+// On macOS creation may inherit an extended ACL. The open file is checked
+// before it receives any secret bytes.
 package secretfile
 
 import (
@@ -128,6 +125,15 @@ func (d *Dir) Sub(name string) (*Dir, error) {
 // Close releases the pinned handle.
 func (d *Dir) Close() error { return d.root.Close() }
 
+// CreateExclusive opens a fresh file for streaming writes with the same
+// creation-time protection as Write. The caller owns the returned file.
+func (d *Dir) CreateExclusive(name string) (*os.File, error) {
+	if err := checkSingleName(name); err != nil {
+		return nil, err
+	}
+	return createExclusive(d, name)
+}
+
 // Write lands payload at name: a fresh owner-only temp file, then an atomic
 // rename onto the target.
 //
@@ -136,6 +142,15 @@ func (d *Dir) Close() error { return d.root.Close() }
 // restricted inode whatever the old file's mode or type was — including when
 // the target is a symlink, which is replaced rather than written through.
 func (d *Dir) Write(name string, payload []byte) error {
+	return d.write(name, payload, true)
+}
+
+// WriteNew publishes a complete secret only if the destination is absent.
+func (d *Dir) WriteNew(name string, payload []byte) error {
+	return d.write(name, payload, false)
+}
+
+func (d *Dir) write(name string, payload []byte, replace bool) error {
 	if err := checkSingleName(name); err != nil {
 		return err
 	}
@@ -172,6 +187,14 @@ func (d *Dir) Write(name string, payload []byte) error {
 	if err := file.Close(); err != nil {
 		_ = d.root.Remove(tmp)
 		return fmt.Errorf("secretfile: close: %w", stripPath(err))
+	}
+	if !replace {
+		err := d.root.Link(tmp, name)
+		_ = d.root.Remove(tmp)
+		if err != nil {
+			return fmt.Errorf("secretfile: publish new %q: %w", name, stripPath(err))
+		}
+		return nil
 	}
 	if err := d.root.Rename(tmp, name); err != nil {
 		_ = d.root.Remove(tmp)

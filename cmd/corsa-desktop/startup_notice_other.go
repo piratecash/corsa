@@ -1,8 +1,6 @@
-//go:build !windows
+//go:build !windows && (!darwin || !cgo)
 
 package main
 
-// showStartupNotice shows nothing outside Windows: a launch from a terminal
-// already has the log line, and a console-less GUI start is the
-// -H windowsgui case only.
+// Platforms without a startup dialog report the error through the log.
 func showStartupNotice(string) error { return nil }

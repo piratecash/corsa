@@ -57,6 +57,8 @@ const (
 	// creates — on POSIX mode 0600, on Windows a DACL that grants nobody
 	// but the current user.
 	ViolationFileNotOwnerOnly LocationViolation = "file_not_owner_only"
+	// ViolationExtendedACL grants access outside the trusted principals.
+	ViolationExtendedACL LocationViolation = "extended_acl_grant"
 	// ViolationForeignOwner: owned by a user other than this process's. The
 	// file must be this user's; a directory may also be root's. On Windows
 	// the file may also be SYSTEM's or Administrators', a directory also

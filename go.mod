@@ -7,6 +7,7 @@ require (
 	gioui.org/x v0.10.3
 	git.wow.st/gmp/jni v0.0.0-20260821030830-2b2c1e0034f1
 	github.com/ebitengine/oto/v3 v3.5.1
+	github.com/ebitengine/purego v0.11.3
 	github.com/go-text/typesetting v0.3.5
 	github.com/gofiber/fiber/v3 v3.7.0
 	github.com/hajimehoshi/go-mp3 v0.3.4
@@ -27,7 +28,6 @@ require (
 	gioui.org/shader v1.0.9 // indirect
 	github.com/akavel/rsrc v0.10.2 // indirect
 	github.com/dustin/go-humanize v1.1.0 // indirect
-	github.com/ebitengine/purego v0.11.3 // indirect
 	github.com/go-ole/go-ole v1.3.0 // indirect
 	github.com/godbus/dbus/v5 v5.2.4 // indirect
 	github.com/gofiber/schema v1.9.4 // indirect

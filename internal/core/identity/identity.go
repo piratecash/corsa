@@ -8,7 +8,10 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -65,19 +68,35 @@ type storedIdentity struct {
 // Load reads an existing identity file at path. Unlike LoadOrCreate, it
 // never generates a new key pair — returns an error when the file is missing.
 func Load(path string) (*Identity, error) {
-	data, err := os.ReadFile(path)
+	id, _, err := load(path)
+	return id, err
+}
+
+func load(path string) (*Identity, bool, error) {
+	dir, file, err := secretfile.OpenAuditedRead(path)
 	if err != nil {
-		return nil, fmt.Errorf("read identity %s: %w", path, err)
+		return nil, errors.Is(err, fs.ErrNotExist), fmt.Errorf("open identity %s: %w", path, err)
 	}
-	id, err := decodeIdentity(data)
+	defer func() { _ = dir.Close() }()
+	data, err := io.ReadAll(file)
+	_ = file.Close()
 	if err != nil {
-		return nil, err
+		return nil, false, fmt.Errorf("read identity %s: %w", path, err)
 	}
-	// Re-save to upgrade the format (e.g. add box key if missing).
-	if err := save(path, id); err != nil {
-		return nil, err
+	id, upgrade, err := decodeIdentity(data)
+	if err != nil {
+		return nil, false, err
 	}
-	return id, nil
+	if upgrade {
+		payload, err := encodeIdentity(id)
+		if err != nil {
+			return nil, false, err
+		}
+		if err := dir.Write(filepath.Base(path), payload); err != nil {
+			return nil, false, fmt.Errorf("upgrade identity: %w", err)
+		}
+	}
+	return id, false, nil
 }
 
 // FromPrivateKeyBase64 restores an Identity from a base64-encoded Ed25519
@@ -127,28 +146,19 @@ func deriveBoxKeyPair(seed []byte) (*ecdh.PrivateKey, []byte, error) {
 }
 
 func LoadOrCreate(path string) (*Identity, error) {
-	if data, err := os.ReadFile(path); err == nil {
-		id, err := decodeIdentity(data)
-		if err != nil {
-			return nil, err
-		}
-		if err := save(path, id); err != nil {
-			return nil, err
-		}
-		return id, nil
-	} else if !os.IsNotExist(err) {
-		return nil, fmt.Errorf("read identity %s: %w", path, err)
+	id, missing, err := load(path)
+	if !missing {
+		return id, err
 	}
-
-	id, err := Generate()
+	id, err = Generate()
 	if err != nil {
 		return nil, err
 	}
-
-	if err := save(path, id); err != nil {
+	if err := saveNew(path, id); errors.Is(err, fs.ErrExist) {
+		return Load(path)
+	} else if err != nil {
 		return nil, err
 	}
-
 	return id, nil
 }
 
@@ -289,13 +299,9 @@ func save(path string, id *Identity) error {
 		return fmt.Errorf("create identity directory: %w", err)
 	}
 
-	payload, err := json.MarshalIndent(storedIdentity{
-		PrivateKey:     base64.StdEncoding.EncodeToString(id.PrivateKey),
-		BoxPrivateKey:  base64.StdEncoding.EncodeToString(id.BoxPrivateKey.Bytes()),
-		RecordSeqFloor: id.RecordSeqFloor,
-	}, "", "  ")
+	payload, err := encodeIdentity(id)
 	if err != nil {
-		return fmt.Errorf("marshal identity: %w", err)
+		return err
 	}
 
 	// Write-temp-then-rename through the shared secret writer: a crash or a
@@ -315,19 +321,50 @@ func save(path string, id *Identity) error {
 	return nil
 }
 
-func decodeIdentity(data []byte) (*Identity, error) {
+func saveNew(path string, id *Identity) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("create identity directory: %w", err)
+	}
+	dir, err := secretfile.OpenAuditedDestination(path)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = dir.Close() }()
+	payload, err := encodeIdentity(id)
+	if err != nil {
+		return err
+	}
+	if err := dir.WriteNew(filepath.Base(path), payload); err != nil {
+		return fmt.Errorf("write identity: %w", err)
+	}
+	return nil
+}
+
+func encodeIdentity(id *Identity) ([]byte, error) {
+	payload, err := json.MarshalIndent(storedIdentity{
+		PrivateKey:     base64.StdEncoding.EncodeToString(id.PrivateKey),
+		BoxPrivateKey:  base64.StdEncoding.EncodeToString(id.BoxPrivateKey.Bytes()),
+		RecordSeqFloor: id.RecordSeqFloor,
+	}, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("marshal identity: %w", err)
+	}
+	return payload, nil
+}
+
+func decodeIdentity(data []byte) (*Identity, bool, error) {
 	var stored storedIdentity
 	if err := json.Unmarshal(data, &stored); err != nil {
-		return nil, fmt.Errorf("decode identity json: %w", err)
+		return nil, false, fmt.Errorf("decode identity json: %w", err)
 	}
 
 	privateKey, err := base64.StdEncoding.DecodeString(stored.PrivateKey)
 	if err != nil {
-		return nil, fmt.Errorf("decode private key: %w", err)
+		return nil, false, fmt.Errorf("decode private key: %w", err)
 	}
 
 	if len(privateKey) != ed25519.PrivateKeySize {
-		return nil, fmt.Errorf("invalid private key size: %d", len(privateKey))
+		return nil, false, fmt.Errorf("invalid private key size: %d", len(privateKey))
 	}
 
 	pub := ed25519.PrivateKey(privateKey).Public().(ed25519.PublicKey)
@@ -337,20 +374,22 @@ func decodeIdentity(data []byte) (*Identity, error) {
 	if stored.BoxPrivateKey != "" {
 		boxBytes, err := base64.StdEncoding.DecodeString(stored.BoxPrivateKey)
 		if err != nil {
-			return nil, fmt.Errorf("decode box private key: %w", err)
+			return nil, false, fmt.Errorf("decode box private key: %w", err)
 		}
 
 		curve := ecdh.X25519()
 		boxPrivate, err = curve.NewPrivateKey(boxBytes)
 		if err != nil {
-			return nil, fmt.Errorf("restore box private key: %w", err)
+			return nil, false, fmt.Errorf("restore box private key: %w", err)
 		}
 		boxPublic = boxPrivate.PublicKey().Bytes()
 	} else {
 		var err error
-		boxPrivate, boxPublic, err = generateBoxKeyPair()
+		// Independent readers of the same legacy file must agree on the key
+		// they publish. Use the same derivation as a seed-only restore.
+		boxPrivate, boxPublic, err = deriveBoxKeyPair(ed25519.PrivateKey(privateKey).Seed())
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 	}
 
@@ -361,7 +400,7 @@ func decodeIdentity(data []byte) (*Identity, error) {
 		BoxPublicKey:   boxPublic,
 		Address:        Fingerprint(pub),
 		RecordSeqFloor: stored.RecordSeqFloor,
-	}, nil
+	}, stored.BoxPrivateKey == "", nil
 }
 
 func generateBoxKeyPair() (*ecdh.PrivateKey, []byte, error) {

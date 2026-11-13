@@ -93,6 +93,9 @@ var unsafeLocationFixes = map[secretfile.LocationViolation]func(account string) 
 	secretfile.ViolationStickyChildNotOwned: func(account string) string {
 		return fmt.Sprintf("inside a sticky shared directory such as /tmp, the next directory must belong to the node's user: create one owned by %s with mode 0700 and keep the node's files there", account)
 	},
+	secretfile.ViolationExtendedACL: func(account string) string {
+		return fmt.Sprintf("remove the extended ACL grants to other users or groups from the named file or directory, leaving access restricted to the node's user, %s, and trusted system principals", account)
+	},
 }
 
 func refuseUnsafeLocation(role pinStoreFileRole, file string, unsafe *secretfile.UnsafeLocationError) *PinStoreRefusalError {

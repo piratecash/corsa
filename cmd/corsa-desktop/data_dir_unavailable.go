@@ -13,8 +13,7 @@ const (
 )
 
 // reportDataDirUnavailable tells the user why the app is not starting. The
-// log line reaches a terminal; a GUI launch on Windows has no console at
-// all, so the platform notice is the only thing the user ever sees there.
+// log line reaches a terminal; a GUI launch can also show the platform notice.
 func reportDataDirUnavailable(cause error) {
 	log.Error().Err(cause).Msg("corsa-desktop refusing to start: data directory unavailable")
 	if err := showStartupNotice(dataDirUnavailableHint + "\n\n" + cause.Error()); err != nil {

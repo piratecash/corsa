@@ -84,6 +84,15 @@ func Run() error {
 	if deepLinkDelivered {
 		return nil
 	}
+	defer func() {
+		// A startup error must release the socket before another launch can
+		// mistake this instance for a Desktop that will deliver links.
+		if !uiOwnsShutdown && deepLinkSocket != nil {
+			if err := deepLinkSocket.Close(); err != nil {
+				log.Warn().Err(err).Msg("deep link socket close failed")
+			}
+		}
+	}()
 
 	// Wipe attachment staging copies from previous runs before any UI
 	// (and thus any new pick) exists — the one moment no draft or

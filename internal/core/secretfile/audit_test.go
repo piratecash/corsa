@@ -105,6 +105,26 @@ func TestAuditReportsAFileOthersCanRead(t *testing.T) {
 	assertNoPath(t, err, dir)
 }
 
+func TestOpenAuditedReadChecksBeforeReturningAFile(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "identity.json")
+	if err := WriteFile(path, []byte("{}")); err != nil {
+		t.Fatal(err)
+	}
+	dir, file, err := OpenAuditedRead(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = file.Close()
+	_ = dir.Close()
+
+	grantOthersRead(t, path)
+	dir, file, err = OpenAuditedRead(path)
+	if dir != nil || file != nil || !errors.Is(err, ErrUnsafeLocation) {
+		t.Fatalf("unsafe entry returned a handle or unexpected error: %v", err)
+	}
+}
+
 // A directory the process cannot write into is a configuration problem the
 // operator must be able to read off the error: which directory (by role),
 // who owns it and with what mode — not a bare "permission denied".

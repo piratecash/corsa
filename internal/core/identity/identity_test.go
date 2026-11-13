@@ -3,9 +3,14 @@ package identity
 import (
 	"crypto/ed25519"
 	"encoding/base64"
+	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/piratecash/corsa/internal/core/secretfile"
+	"github.com/piratecash/corsa/internal/testutil/fsprobe"
 )
 
 func TestLoadOrCreatePersistsAddress(t *testing.T) {
@@ -32,6 +37,108 @@ func TestLoadOrCreatePersistsAddress(t *testing.T) {
 
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("expected identity file to exist: %v", err)
+	}
+}
+
+func TestConcurrentIdentityCreationReusesPublishedKeys(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "nested", "identity.json")
+	const callers = 8
+	start := make(chan struct{})
+	type result struct {
+		id  *Identity
+		err error
+	}
+	results := make(chan result, callers)
+	for range callers {
+		go func() {
+			<-start
+			id, err := LoadOrCreate(path)
+			results <- result{id, err}
+		}()
+	}
+	close(start)
+	var first *Identity
+	for range callers {
+		got := <-results
+		if got.err != nil {
+			t.Fatal(got.err)
+		}
+		if first == nil {
+			first = got.id
+		}
+		if got.id.Address != first.Address || !got.id.BoxPrivateKey.Equal(first.BoxPrivateKey) {
+			t.Fatal("callers returned different identities")
+		}
+	}
+	entries, err := os.ReadDir(filepath.Dir(path))
+	if err != nil || len(entries) != 1 || entries[0].Name() != "identity.json" {
+		t.Fatalf("expected one published identity, got %v (%v)", entries, err)
+	}
+}
+
+func TestLoadUpgradesLegacyIdentityAndPreservesFloor(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "identity.json")
+	id, err := Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(storedIdentity{
+		PrivateKey: base64.StdEncoding.EncodeToString(id.PrivateKey), RecordSeqFloor: 17,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := secretfile.WriteFile(path, raw); err != nil {
+		t.Fatal(err)
+	}
+	first, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Address != id.Address || second.Address != id.Address || second.RecordSeqFloor != 17 ||
+		!first.BoxPrivateKey.Equal(second.BoxPrivateKey) {
+		t.Fatal("legacy upgrade lost the identity, persisted box key or sequence floor")
+	}
+	// A second reader may already have read the original legacy bytes before
+	// the first publishes its upgrade. The two upgrades must agree.
+	otherPath := filepath.Join(t.TempDir(), "identity.json")
+	if err := secretfile.WriteFile(otherPath, raw); err != nil {
+		t.Fatal(err)
+	}
+	other, err := Load(otherPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored, err := FromPrivateKeyBase64(base64.StdEncoding.EncodeToString(id.PrivateKey))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !first.BoxPrivateKey.Equal(other.BoxPrivateKey) || !first.BoxPrivateKey.Equal(restored.BoxPrivateKey) {
+		t.Fatal("independent legacy upgrades and seed-only restore derived different box keys")
+	}
+}
+
+func TestLoadOrCreatePreservesAnUnusableLink(t *testing.T) {
+	t.Parallel()
+	fsprobe.RequireSymlinks(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "identity.json")
+	target := filepath.Join(dir, "absent.json")
+	if err := os.Symlink(target, path); err != nil {
+		t.Fatal(err)
+	}
+	id, err := LoadOrCreate(path)
+	if id != nil || !errors.Is(err, secretfile.ErrUnsafeLocation) {
+		t.Fatalf("unusable identity path was not refused: %v", err)
+	}
+	if got, err := os.Readlink(path); err != nil || got != target {
+		t.Fatalf("identity link changed: %v", err)
 	}
 }
 

@@ -190,6 +190,40 @@ func readObjectSecurity(path string) (objectSecurity, error) {
 	if err != nil {
 		return objectSecurity{}, fmt.Errorf("secretfile: audit: read a security descriptor: %w", err)
 	}
+	return securityFromDescriptor(descriptor)
+}
+
+func (d *Dir) openAuditedFile(name string) (*os.File, error) {
+	// The caller verifies that the handle matches the regular named entry
+	// and audits the resolved handle before reading it.
+	if err := checkSingleName(name); err != nil {
+		return nil, err
+	}
+	file, err := d.root.Open(name)
+	return file, stripPath(err)
+}
+
+func auditOpenedFile(file *os.File, _ fs.FileInfo) error {
+	user, err := processUserSID()
+	if err != nil {
+		return err
+	}
+	descriptor, err := windows.GetSecurityInfo(windows.Handle(file.Fd()), windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return fmt.Errorf("secretfile: audit: read an open security descriptor: %w", err)
+	}
+	security, err := securityFromDescriptor(descriptor)
+	if err != nil {
+		return err
+	}
+	if violation, found := judgeObjectSecurity(security, aclRoleFile, user); found {
+		return &UnsafeLocationError{Component: fileComponent(), Violation: violation, Owner: security.owner}
+	}
+	return nil
+}
+
+func securityFromDescriptor(descriptor *windows.SECURITY_DESCRIPTOR) (objectSecurity, error) {
 	owner, _, err := descriptor.Owner()
 	if err != nil || owner == nil {
 		return objectSecurity{}, fmt.Errorf("secretfile: audit: read an owner: %w", err)
