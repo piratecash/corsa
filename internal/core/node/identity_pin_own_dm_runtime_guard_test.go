@@ -16,9 +16,9 @@ func ownDMRuntimeSourceErrors(sources map[string][]byte) []string {
 		"node/identity_record_admission_own_dm.go": "8037b80af62d390fef07e9601362c653c7c4bf1e3eed8bffaf801e10fd19805b",
 		"node/identity_pin_own_dm_runtime.go":      "39b178ddcdeb0ee8979a264484dd2f5eea37e3f9a869e9568a768a965a194abb",
 		"node/find_node_ready_construction.go":     "928f01bab660f066126117dee1b756869ad323b493fcdc83a0a53694db53f6c4",
-		"node/service.go":                          "1de4f9d12201bfe12d10f0f431b810a3d1c333e369a8b1254e55975af69b2d2e",
+		"node/service.go":                          "a10bd3be0f2bb449f2596be9d9c2dc542b2659d0ea45bab478154bb996bcfe69",
 		"service/desktop.go":                       "37c9aee24a9d25282b6a41023ee3bb841577575ce1151727fe0c2ae3739ce565",
-		"sdk/runtime.go":                           "3916f6f435eb601af40ebf40fcec100649562912bc6089804a9024c475482671",
+		"sdk/runtime.go":                           "df0829fb9248f843952cda8ce21b9ae42d330d5a8cee4b01da5c5c6123aea5a5",
 	}
 	for p, want := range pins {
 		if fmt.Sprintf("%x", sha256.Sum256(sources[p])) != want {

@@ -25,7 +25,7 @@ Publishes an encrypted notice to the network with a specified TTL.
 | Field | Type | Description |
 |-------|------|-------------|
 | `type` | string | Fixed value: `"publish_notice"` |
-| `ttl_seconds` | integer | Time-to-live in seconds (e.g., 30-3600) |
+| `ttl_seconds` | integer | Time-to-live in seconds, 1–3600 inclusive |
 | `ciphertext` | string | Encrypted notice content, opaque base64url blob (see encryption.md for encryption scheme) |
 
 **Response Format (Success - New Notice):**
@@ -57,7 +57,7 @@ Publishes an encrypted notice to the network with a specified TTL.
 - Notice receives a unique ID based on its content hash
 - `expires_at` is calculated as `current_time + ttl_seconds`
 - If the same notice (same ciphertext) is published again, returns `"notice_known"` instead of creating duplicate
-- Notice is immediately stored locally and enqueued for gossip relay to peers
+- An accepted notice is stored locally. Forwarding nodes enqueue it for gossip relay.
 - The client receives immediate confirmation before network propagation completes
 
 ### fetch_notices
@@ -173,13 +173,13 @@ stateDiagram-v2
 
 1. **ID Generation**: Notice ID is the first 16 bytes of SHA-256(ciphertext), base64url-encoded, ensuring deterministic, duplicate-proof IDs
 
-2. **TTL Validation**: Typical valid ranges are 30-3600 seconds; excessively long TTLs may be rejected or capped by network policy
+2. **Admission limits.** Local publication and peer gossip share a budget of 512 notices and 1 MiB of ciphertext per node. The ciphertext of an individual notice is capped at 128 KiB, and a wire frame is subject to its own size limit. Invalid local input returns `invalid-publish-notice`. A full store returns `store-deferred` to the local publisher and drops new gossip. Duplicates keep their original expiry.
 
-3. **Expiration Check**: Background task runs periodically to purge expired notices; `fetch_notices` filters based on `expires_at <= current_time`
+3. **Expiration.** The node removes expired entries in deadline order during periodic cleanup, admission, and `fetch_notices`.
 
 4. **Gossip Deduplication**: Notices identified by ID are only relayed once per peer; the `"notice_known"` response prevents redundant transmission
 
-5. **Storage**: Active notices are held in memory with periodic persistence to survive node restarts
+5. **Storage.** Active notices live in memory and are cleared on restart.
 
 6. **Bandwidth**: Large ciphertexts increase network gossip overhead; applications should optimize payload size
 
@@ -214,7 +214,7 @@ stateDiagram-v2
 | Поле | Тип | Описание |
 |------|-----|---------|
 | `type` | строка | Фиксированное значение: `"publish_notice"` |
-| `ttl_seconds` | целое число | Время жизни в секундах (например, 30-3600) |
+| `ttl_seconds` | целое число | Время жизни в секундах, от 1 до 3600 включительно |
 | `ciphertext` | строка | Зашифрованное содержимое уведомления, непрозрачный base64url blob (см. encryption.md для схемы шифрования) |
 
 **Формат ответа (Успешно - новое уведомление):**
@@ -246,7 +246,7 @@ stateDiagram-v2
 - Уведомление получает уникальный ID на основе хеша его содержимого
 - `expires_at` вычисляется как `current_time + ttl_seconds`
 - Если то же уведомление (тот же шифротекст) опубликовано снова, возвращает `"notice_known"` вместо создания дубликата
-- Уведомление немедленно сохраняется локально и ставится в очередь для передачи слухов коллегам
+- Принятое уведомление сохраняется локально. Узлы с пересылкой ставят его в очередь для gossip.
 - Клиент получает немедленное подтверждение до завершения распространения по сети
 
 ### fetch_notices
@@ -362,13 +362,13 @@ stateDiagram-v2
 
 1. **Генерация ID**: Идентификатор уведомления — первые 16 байт SHA-256(ciphertext), закодированные в base64url, обеспечивая детерминированные, защищённые от дублирования ID
 
-2. **Валидация TTL**: Типичные допустимые диапазоны 30-3600 секунд; чрезмерно длинные TTL могут быть отклонены или ограничены политикой сети
+2. **Лимиты допуска.** Локальные публикации и входящий gossip делят лимит 512 уведомлений и 1 МиБ шифротекста на узел. Шифротекст одного уведомления ограничен 128 КиБ. Для сетевого кадра также действует его собственный лимит размера. Неверный локальный запрос получает `invalid-publish-notice`. При заполнении локальная публикация получает `store-deferred`, новый входящий gossip отбрасывается. Дубликаты сохраняют прежний срок.
 
-3. **Проверка истечения**: Фоновая задача периодически запускается для очистки истекших уведомлений; `fetch_notices` фильтры на основе `expires_at <= current_time`
+3. **Истечение срока.** Узел удаляет истёкшие записи в порядке срока при фоновой очистке, допуске и `fetch_notices`.
 
 4. **Дедупликация слухов**: Уведомления, определенные по ID, передаются только один раз на одноранговой узел; ответ `"notice_known"` предотвращает избыточную передачу
 
-5. **Хранилище**: Активные уведомления хранятся в памяти с периодической сохраняемостью для выживания после перезагрузки узла
+5. **Хранилище.** Активные уведомления находятся в памяти и очищаются при перезапуске.
 
 6. **Пропускная способность**: Большие шифротексты увеличивают накладные расходы на распространение слухов в сети; приложения должны оптимизировать размер полезной нагрузки
 

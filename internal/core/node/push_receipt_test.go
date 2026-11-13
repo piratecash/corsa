@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/domain"
-	"github.com/piratecash/corsa/internal/core/gazeta"
 	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/netcore"
 	"github.com/piratecash/corsa/internal/core/protocol"
@@ -46,7 +45,6 @@ func (s *Service) initMaps() {
 	s.sessions = make(map[domain.PeerAddress]*peerSession)
 	s.subs = make(map[string]map[string]*subscriber)
 	s.receipts = make(map[string][]protocol.DeliveryReceipt)
-	s.notices = make(map[string]gazeta.Notice)
 	s.conns = make(map[netcore.ConnID]*connEntry)
 	s.connIDByNetConn = make(map[net.Conn]netcore.ConnID)
 	s.pending = make(map[domain.PeerAddress][]pendingFrame)

@@ -29,7 +29,6 @@ import (
 	"github.com/piratecash/corsa/internal/core/crashlog"
 	"github.com/piratecash/corsa/internal/core/datagram"
 	"github.com/piratecash/corsa/internal/core/directmsg"
-	"github.com/piratecash/corsa/internal/core/gazeta"
 	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/netcore"
 	"github.com/piratecash/corsa/internal/core/protocol"
@@ -724,7 +723,7 @@ type Service struct {
 	topics   map[string][]protocol.Envelope
 	seen     *rotatingBloomDedup
 	subs     map[string]map[string]*subscriber
-	notices  map[string]gazeta.Notice
+	notices  noticeStore
 	events   map[chan protocol.LocalChangeEvent]struct{}
 	// lastExpiredCleanup is the timestamp of the last successful
 	// cleanupExpiredMessages run. Used to throttle inline callers
@@ -2318,7 +2317,6 @@ func newServiceWithConstruction(cfg config.Node, id *identity.Identity, eventBus
 		boxSigs:           boxSigs,
 		topics:            topics,
 		receipts:          receipts,
-		notices:           make(map[string]gazeta.Notice),
 		emissionLane:      newEmissionLane(),
 		// Buffered to ONE: the local-record repair pass is single-flight.
 		repairSlot:               make(chan struct{}, 1),
@@ -10186,53 +10184,21 @@ func (s *Service) pushBacklogToSubscriber(sub *subscriber) {
 }
 
 func (s *Service) publishNoticeFrame(frame protocol.Frame) protocol.Frame {
-	ttl := time.Duration(frame.TTLSeconds) * time.Second
-	if ttl <= 0 || strings.TrimSpace(frame.Ciphertext) == "" {
-		return protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidPublishNotice}
-	}
-
-	s.cleanupExpiredNotices()
-
-	id := gazeta.ID(frame.Ciphertext)
-	expiresAt := time.Now().UTC().Add(ttl)
-
-	log.Trace().Str("site", "publishNoticeFrame").Str("phase", "lock_wait").Str("notice_id", id).Msg("gossipMu_writer")
-	s.gossipMu.Lock()
-	log.Trace().Str("site", "publishNoticeFrame").Str("phase", "lock_held").Str("notice_id", id).Msg("gossipMu_writer")
-	if existing, ok := s.notices[id]; ok && existing.ExpiresAt.After(time.Now().UTC()) {
-		s.gossipMu.Unlock()
-		log.Trace().Str("site", "publishNoticeFrame").Str("phase", "lock_released_dup").Str("notice_id", id).Msg("gossipMu_writer")
-		return protocol.Frame{Type: "notice_known", ID: id, ExpiresAt: existing.ExpiresAt.Unix()}
-	}
-
-	s.notices[id] = gazeta.Notice{
-		ID:         id,
-		Ciphertext: frame.Ciphertext,
-		ExpiresAt:  expiresAt,
-	}
-	s.gossipMu.Unlock()
-	log.Trace().Str("site", "publishNoticeFrame").Str("phase", "lock_released").Str("notice_id", id).Msg("gossipMu_writer")
-
-	if s.CanForward() {
-		s.goBackground(func() { s.gossipNotice(ttl, frame.Ciphertext) })
-	}
-
-	return protocol.Frame{Type: "notice_stored", ID: id, ExpiresAt: expiresAt.Unix()}
+	return s.acceptNotice(frame)
 }
 
 func (s *Service) fetchNoticesFrame() protocol.Frame {
-	s.cleanupExpiredNotices()
-
-	s.gossipMu.RLock()
-	items := make([]protocol.NoticeFrame, 0, len(s.notices))
-	for _, notice := range s.notices {
+	s.gossipMu.Lock()
+	s.notices.expire(time.Now())
+	items := make([]protocol.NoticeFrame, 0, len(s.notices.byID))
+	for _, notice := range s.notices.byID {
 		items = append(items, protocol.NoticeFrame{
 			ID:         notice.ID,
 			ExpiresAt:  notice.ExpiresAt.Unix(),
 			Ciphertext: notice.Ciphertext,
 		})
 	}
-	s.gossipMu.RUnlock()
+	s.gossipMu.Unlock()
 
 	return protocol.Frame{Type: "notices", Count: len(items), Notices: items}
 }
@@ -11209,35 +11175,7 @@ func (s *Service) handleInboundRelayDeliveryReceipt(connID domain.ConnID, frame 
 // own routing targets if new. Deduplication via notice ID prevents infinite
 // loops.
 func (s *Service) handleInboundPushNotice(frame protocol.Frame) {
-	ttl := time.Duration(frame.TTLSeconds) * time.Second
-	if ttl <= 0 || strings.TrimSpace(frame.Ciphertext) == "" {
-		return
-	}
-
-	s.cleanupExpiredNotices()
-
-	id := gazeta.ID(frame.Ciphertext)
-	expiresAt := time.Now().UTC().Add(ttl)
-
-	log.Trace().Str("site", "handleInboundPushNotice").Str("phase", "lock_wait").Str("notice_id", id).Msg("gossipMu_writer")
-	s.gossipMu.Lock()
-	log.Trace().Str("site", "handleInboundPushNotice").Str("phase", "lock_held").Str("notice_id", id).Msg("gossipMu_writer")
-	if existing, ok := s.notices[id]; ok && existing.ExpiresAt.After(time.Now().UTC()) {
-		s.gossipMu.Unlock()
-		log.Trace().Str("site", "handleInboundPushNotice").Str("phase", "lock_released_dup").Str("notice_id", id).Msg("gossipMu_writer")
-		return
-	}
-	s.notices[id] = gazeta.Notice{
-		ID:         id,
-		Ciphertext: frame.Ciphertext,
-		ExpiresAt:  expiresAt,
-	}
-	s.gossipMu.Unlock()
-	log.Trace().Str("site", "handleInboundPushNotice").Str("phase", "lock_released").Str("notice_id", id).Msg("gossipMu_writer")
-
-	if s.CanForward() {
-		s.goBackground(func() { s.gossipNotice(ttl, frame.Ciphertext) })
-	}
+	s.acceptNotice(frame)
 }
 
 func expectedReplyType(requestType string) string {
@@ -11510,21 +11448,9 @@ func (s *Service) removeSubscriberByID(recipient, id string) {
 }
 
 func (s *Service) cleanupExpiredNotices() {
-	now := time.Now().UTC()
-
-	log.Trace().Str("site", "cleanupExpiredNotices").Str("phase", "lock_wait").Msg("gossipMu_writer")
 	s.gossipMu.Lock()
-	log.Trace().Str("site", "cleanupExpiredNotices").Str("phase", "lock_held").Msg("gossipMu_writer")
-	defer func() {
-		s.gossipMu.Unlock()
-		log.Trace().Str("site", "cleanupExpiredNotices").Str("phase", "lock_released").Msg("gossipMu_writer")
-	}()
-
-	for id, notice := range s.notices {
-		if !notice.ExpiresAt.After(now) {
-			delete(s.notices, id)
-		}
-	}
+	s.notices.expire(time.Now())
+	s.gossipMu.Unlock()
 }
 
 // expiredCleanupThrottle is the minimum interval between full-scan cleanup

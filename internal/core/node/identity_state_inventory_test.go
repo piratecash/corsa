@@ -32,8 +32,8 @@ import (
 //     the package (embedded ones too, under the type's name), and
 //     instantiations of its generic types with such a type argument
 //     (tokenBucketSet[penaltySubject]);
-//   - the maps outside Service known to key an identity by a string, listed
-//     by hand in stringKeyedIdentityFields.
+//   - explicitly tracked maps outside Service, including maps known to key an
+//     identity by a string and maps moved into named storage types.
 //
 // identity_state_inventory_probe_test.go feeds each of these shapes to the
 // finder as a synthetic source.
@@ -90,11 +90,9 @@ type identityStateEntry struct {
 	reason string
 }
 
-// stringKeyedIdentityFields are maps outside Service keyed by an identity
-// spelled as a string, which no syntactic rule tells from any other string.
-// They are listed by hand: the finder reports each while it still holds a
-// map, so each is classified like the rest, and a renamed one turns stale.
-var stringKeyedIdentityFields = map[string]bool{
+// explicitMapInventoryFields keeps maps outside Service that need review even
+// when their type does not expose identity. A renamed entry becomes stale.
+var explicitMapInventoryFields = map[string]bool{
 	"nonDMKeySyncLimiter.hops":      true,
 	"boundedKnownIdentities.nodes":  true,
 	"boundedKnownIdentities.pinned": true,
@@ -102,6 +100,7 @@ var stringKeyedIdentityFields = map[string]bool{
 	"trustStore.conflicts":          true,
 	"trustStore.records":            true,
 	"sessionRecordCache.entries":    true,
+	"noticeStore.byID":              true,
 }
 
 // identityStateInventory is the classification, by Type.field (a field of an
@@ -165,7 +164,6 @@ var identityStateInventory = map[string]identityStateEntry{
 	"Service.lastTrafficSnap":         {identityNotApplicable, "address → byte counters"},
 	"Service.markedNeverEmitted":      {identityNamedLocally, "full own-message references carrying a local durable withdrawal claim; recipient is this node's chosen addressee"},
 	"Service.metaOrphanFirstSeen":     {identityNotApplicable, "address → time"},
-	"Service.notices":                 {identityNotApplicable, "ciphertext id → notice"},
 	"Service.observedIPHistoryByPeer": {identityNotApplicable, "address → observed IPs"},
 	"Service.outbound":                {identityNamedLocally, "full own-message reference → delivery state; the recipient is this node's chosen addressee, not session proof"},
 	"Service.peerBuilds":              {identityNotApplicable, "address → build"},
@@ -181,6 +179,7 @@ var identityStateInventory = map[string]identityStateEntry{
 	"Service.remoteIPBanOffenders":    {identityNotApplicable, "IP → offending addresses"},
 	"Service.topics":                  {identityNotApplicable, "topic name → envelopes"},
 	"Service.upstream":                {identityNotApplicable, "address set"},
+	"noticeStore.byID":                {identityNotApplicable, "ciphertext ID → encrypted notice with an expiry; no separate identity in key or value"},
 
 	// The v2 store: proven identities only.
 	"secureSessionStore.identities":       {identitySelfAuthenticated, "genuine session publication or historical own file; inactive record-only constructor additionally verifies the signed subject and exact target proof, with no live producer"},
@@ -323,7 +322,7 @@ type identityTypeIndex struct {
 }
 
 // findIdentityStateFields returns the fields of files the rules find, plus the
-// fields of stringKeyedIdentityFields that still hold a map.
+// fields of explicitMapInventoryFields that still hold a map.
 func findIdentityStateFields(files []*ast.File) map[string]bool {
 	index := indexPackageTypes(files)
 	found := make(map[string]bool)
@@ -335,7 +334,7 @@ func findIdentityStateFields(files []*ast.File) map[string]bool {
 		walkStructFields(typeName, st, func(path string, fieldType ast.Expr) {
 			holdsIdentityMap := index.mapsIdentity(fieldType, declared.domainNames, map[string]bool{})
 			holdsAnyMap := index.holdsMap(fieldType, map[string]bool{})
-			if holdsIdentityMap || (typeName == "Service" && holdsAnyMap) || (stringKeyedIdentityFields[path] && holdsAnyMap) {
+			if holdsIdentityMap || (typeName == "Service" && holdsAnyMap) || (explicitMapInventoryFields[path] && holdsAnyMap) {
 				found[path] = true
 			}
 		})
