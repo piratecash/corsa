@@ -1100,6 +1100,12 @@ func (pc *NetCore) WriterExited() <-chan struct{} {
 	return pc.writerExited
 }
 
+// AcceptingFrames reports whether the send gate is still open. It does
+// not reserve a queue slot or wait for transport teardown.
+func (pc *NetCore) AcceptingFrames() bool {
+	return pc.gateStatus() == SendOK
+}
+
 // WriterQueue reports the writer queue's occupancy and capacity. The
 // capacity is what the connection allocated up front (a buffered channel
 // holds all its slots from construction), the occupancy is what is

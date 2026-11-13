@@ -735,8 +735,8 @@ func (s *Service) dispatchSessionDatagramLine(session *peerSession, line string)
 	}
 	ctx := sessionTransportArrivalContext(s.runCtx, s, session)
 	address := session.address
-	s.markPeerRead(address, protocol.Frame{Type: protocol.DatagramFrameType})
-	s.markPeerUsefulReceive(address)
+	s.markSessionRead(session, protocol.Frame{Type: protocol.DatagramFrameType})
+	s.markSessionUsefulReceive(session)
 	neighbour := s.sessionDatagramNeighbour(session)
 	result := s.handleDatagramFrame(ctx, line, neighbour)
 	if result.BanWorthy() {

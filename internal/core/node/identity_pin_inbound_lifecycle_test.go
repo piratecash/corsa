@@ -1065,7 +1065,10 @@ func TestInboundN1JoinedHeartbeatRetiresOnlyConnectedNoPong(t *testing.T) {
 			if !f.service.publishInboundLifetime(f.owner) {
 				t.Fatal("publish failed")
 			}
-			addr := domain.PeerAddress("192.0.2.41:7654")
+			addr := f.service.trackedInboundPeerAddress(f.owner.id)
+			if addr == "" {
+				t.Fatal("real accepted connection has no tracked address")
+			}
 			f.service.peerMu.Lock()
 			f.service.health[addr] = &peerHealth{Address: addr, Connected: kind == "connected-no-pong"}
 			f.service.peerMu.Unlock()

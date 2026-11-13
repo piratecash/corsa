@@ -563,23 +563,15 @@ func TestComputePeerStateHealthyAfterInboundConnect(t *testing.T) {
 }
 
 // TestInboundPingUpdatesHealth verifies that receiving a ping from an inbound
-// peer (handled by markPeerRead) updates LastUsefulReceiveAt and keeps the
+// peer (recorded by markInboundPeerRead) updates LastUsefulReceiveAt and keeps the
 // peer in healthy state.
 func TestInboundPingUpdatesHealth(t *testing.T) {
 	t.Parallel()
 
-	address := freeAddress(t)
-	svc, stop := startTestNodeWithoutDials(t, config.Node{
-		ListenAddress:  address,
-		BootstrapPeers: []string{},
-	})
-	defer stop()
-
+	svc := newTestService(t, config.NodeTypeFull)
 	peerAddr := domain.PeerAddress("10.0.0.1:64646")
-	svc.markPeerConnected(peerAddr, peerDirectionInbound)
-
-	// Simulate receiving a ping from the inbound peer.
-	svc.markPeerRead(peerAddr, protocol.Frame{Type: "ping"})
+	id, core := newTrackedInboundHealthConn(t, svc, peerAddr)
+	svc.markInboundPeerRead(id, core, "ping")
 
 	svc.peerMu.RLock()
 	health := svc.health[peerAddr]
@@ -600,21 +592,15 @@ func TestInboundPingUpdatesHealth(t *testing.T) {
 func TestInboundPongUpdatesHealth(t *testing.T) {
 	t.Parallel()
 
-	address := freeAddress(t)
-	svc, stop := startTestNodeWithoutDials(t, config.Node{
-		ListenAddress:  address,
-		BootstrapPeers: []string{},
-	})
-	defer stop()
-
+	svc := newTestService(t, config.NodeTypeFull)
 	peerAddr := domain.PeerAddress("10.0.0.1:64646")
-	svc.markPeerConnected(peerAddr, peerDirectionInbound)
+	id, core := newTrackedInboundHealthConn(t, svc, peerAddr)
 
 	// Simulate our heartbeat sending a ping.
-	svc.markPeerWrite(peerAddr, protocol.Frame{Type: "ping"})
+	svc.markInboundPeerWrite(id, core, "ping")
 
 	// Simulate receiving a pong response.
-	svc.markPeerRead(peerAddr, protocol.Frame{Type: "pong"})
+	svc.markInboundPeerRead(id, core, "pong")
 
 	svc.peerMu.RLock()
 	health := svc.health[peerAddr]

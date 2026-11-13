@@ -1,6 +1,8 @@
 package node
 
 import (
+	"time"
+
 	"github.com/piratecash/corsa/internal/core/connbudget"
 	"github.com/piratecash/corsa/internal/core/netcore"
 	"github.com/piratecash/corsa/internal/core/routing"
@@ -37,6 +39,8 @@ type connEntry struct {
 	core    *netcore.NetCore
 	metered *netcore.MeteredConn
 	tracked bool
+	// Monotonic receive time for this inbound connection's heartbeat, under peerMu.
+	lastPongAt time.Time
 
 	// budget is this connection's unit of the shared connection ceiling,
 	// taken at accept — before any expensive state exists and before the

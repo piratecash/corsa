@@ -86,7 +86,7 @@ func TestFireAndForgetBufferFullDropsFrameKeepsSession(t *testing.T) {
 		t.Fatal("peer must stay connected after a best-effort frame drop")
 	}
 	// A dropped frame never reached the writer queue, so it must NOT be
-	// accounted as a useful send (markPeerWrite runs only on SendOK) —
+	// accounted as a useful send (session write activity is recorded only on SendOK) —
 	// otherwise backpressure would keep a stalled peer looking healthy
 	// and protocol_trace would report accepted sends that never left.
 	if !health.LastUsefulSendAt.IsZero() {

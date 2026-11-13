@@ -912,7 +912,7 @@ func TestFindNodeOutboundCapturedArrivalKeepsAWhileCurrentKeyBecomesB(t *testing
 		gid <- relationGateCurrentGID()
 		f.dialer.dispatchSessionDatagramLine(p, wire)
 	}()
-	// Exact target waiter: capture already completed, markPeerRead is the first
+	// Exact target waiter: capture already completed, markPeerReceive is the first
 	// actual peer-domain wait. No new production hook/queue/callback is added.
 	var actualGID uint64
 	handoffFailure := ""
@@ -928,7 +928,7 @@ func TestFindNodeOutboundCapturedArrivalKeepsAWhileCurrentKeyBecomesB(t *testing
 	if handoffFailure != "" {
 		t.Fatal(handoffFailure) // registered cleanup unlocks peerMu, then joins owner
 	}
-	n1WaitMutexFrame(t, actualGID, "node.(*Service).markPeerRead")
+	n1WaitMutexFrame(t, actualGID, "node.(*Service).markPeerReceive")
 	old := f.dialer.conns[p.connID]
 	shadow := &connEntry{core: old.core, metered: old.metered, common: replacement.common, receive: old.receive}
 	replacement.common.entry = shadow

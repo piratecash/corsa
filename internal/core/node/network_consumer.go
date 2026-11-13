@@ -617,6 +617,9 @@ func (s *Service) sendSessionFrameViaNetwork(ctx context.Context, session *peerS
 	netErr := s.Network().SendFrame(ctx, session.connID, data)
 	if netErr == nil {
 		emitProtocolTrace(addr, frame, enqueueSent)
+		if marshalErr == nil && frame.Type == "pong" {
+			s.noteSessionWrite(session, frame.Type)
+		}
 		return nil
 	}
 
@@ -628,6 +631,9 @@ func (s *Service) sendSessionFrameViaNetwork(ctx context.Context, session *peerS
 	if errors.Is(netErr, netcore.ErrUnknownConn) {
 		res := s.enqueueSessionFrame(session, data)
 		emitProtocolTrace(addr, frame, res)
+		if res == enqueueSent && marshalErr == nil && frame.Type == "pong" {
+			s.noteSessionWrite(session, frame.Type)
+		}
 		if res == enqueueUnregistered {
 			origin := "sendSessionFrameViaNetwork.carveout"
 			if marshalErr != nil {

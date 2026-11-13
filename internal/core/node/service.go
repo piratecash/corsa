@@ -1122,7 +1122,7 @@ type Service struct {
 	remoteIPBanOffenders map[string]map[domain.PeerAddress]time.Time
 
 	// peerActivityNanos is an atomic per-peer tracker that lives outside
-	// s.peerMu so markPeerWrite/markPeerRead can skip s.peerMu.Lock() entirely
+	// s.peerMu so transport activity tracking can skip s.peerMu.Lock() entirely
 	// on the fast path. Each entry stores the UnixNano timestamp of the
 	// last full state recompute for that peer. When less than
 	// markPeerStateInterval has elapsed, the hot path returns
@@ -1137,7 +1137,7 @@ type Service struct {
 	// ephemeral ports mint a fresh entry per reconnect and no peer-domain
 	// sweep ever sees them — evictStalePeerActivity (bootstrapLoop tick)
 	// is the ONLY reclaim path. Deleting a live entry is harmless: the
-	// next markPeerWrite/markPeerRead re-creates it via LoadOrStore at
+	// next transport activity tracking re-creates it via LoadOrStore at
 	// the cost of one early recompute.
 	peerActivityNanos sync.Map
 
@@ -4124,6 +4124,8 @@ func (s *Service) dispatchNetworkFrameOwned(connID domain.ConnID, wire string, o
 		return false
 	}
 
+	core := s.netCoreForID(connID)
+
 	// A DATAGRAM NEVER REACHES protocol.ParseFrameLine.
 	// docs/protocol/datagram.md §4.1 step 1 charges the neighbour's byte and
 	// frame budget "before any decoding", and the universal parser is decoding:
@@ -4205,9 +4207,7 @@ func (s *Service) dispatchNetworkFrameOwned(connID domain.ConnID, wire string, o
 	// --- Handshake commands (no auth required) ---
 	switch frame.Type {
 	case "ping":
-		if addr := s.trackedInboundPeerAddress(connID); addr != "" {
-			s.markPeerRead(addr, frame)
-		}
+		s.markInboundPeerRead(connID, core, frame.Type)
 		pongFrame := protocol.Frame{Type: "pong", Node: nodeName, Network: networkName}
 		// All async reply-writes inside dispatchNetworkFrame go through
 		// sendFrameViaNetwork so the injected netcore.Network (live
@@ -4215,15 +4215,12 @@ func (s *Service) dispatchNetworkFrameOwned(connID domain.ConnID, wire string, o
 		// observes them. s.runCtx is the Service-lifecycle context,
 		// pre-initialised to context.Background() in the constructor so
 		// this is safe even in unit tests that never call Run().
-		_ = s.sendFrameViaNetwork(s.runCtx, connID, pongFrame)
-		if addr := s.trackedInboundPeerAddress(connID); addr != "" {
-			s.markPeerWrite(addr, pongFrame)
+		if err := s.sendFrameViaNetwork(s.runCtx, connID, pongFrame); err == nil {
+			s.markInboundPeerWrite(connID, core, pongFrame.Type)
 		}
 		return true
 	case "pong":
-		if addr := s.trackedInboundPeerAddress(connID); addr != "" {
-			s.markPeerRead(addr, frame)
-		}
+		s.markInboundPeerRead(connID, core, frame.Type)
 		return true
 	case "hello":
 		// Reject re-hello once auth has been initiated (challenge issued)

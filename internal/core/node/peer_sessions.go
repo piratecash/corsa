@@ -597,7 +597,7 @@ func (s *Service) servePeerSession(ctx context.Context, session *peerSession) er
 					continue
 				}
 			}
-			s.markPeerRead(session.address, frame)
+			s.markSessionRead(session, frame)
 			s.dispatchPeerSessionFrame(session.address, session, frame)
 		case reply := <-session.contactSyncCh:
 			// Owner-serialised contact sync (sender-key recovery,
@@ -679,7 +679,7 @@ func (s *Service) servePeerSession(ctx context.Context, session *peerSession) er
 					// LastUsefulSendAt before Send would keep a
 					// backpressured peer looking healthy and falsify
 					// protocol_trace under sustained drops.
-					s.markPeerWrite(session.address, outbound)
+					s.markSessionWrite(session, outbound.Type)
 					// This — not the session's own sendCh — is where a
 					// frame stops being ours. sendCh is an in-process
 					// queue whose remainder is discarded when the session

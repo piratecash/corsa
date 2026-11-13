@@ -2815,8 +2815,8 @@ func (s *Service) readPeerSession(reader *bufio.Reader, session *peerSession) {
 		// SAME name (sessionFileCommandIsAdmissible): a line exempted there and
 		// not dispatched here would be metered by nobody.
 		if frame.Type == protocol.FileCommandFrameType {
-			s.markPeerRead(session.address, frame)
-			s.markPeerUsefulReceive(session.address)
+			s.markSessionRead(session, frame)
+			s.markSessionUsefulReceive(session)
 			if s.sessionHasCapability(session, domain.CapFileTransferV1) {
 				// Outbound session carries the peer identity directly;
 				// pass it so the file router can split-horizon forward
@@ -3080,9 +3080,10 @@ func (s *Service) peerSessionRequest(session *peerSession, frame protocol.Frame,
 		defer session.admission.expectReply(expectedType)()
 	}
 	var payload []byte
+	writtenType := frame.Type
 	if hello {
 		payload = []byte(s.nodeHelloJSONLine())
-		s.markPeerWrite(session.address, protocol.Frame{Type: "hello"})
+		writtenType = "hello"
 	} else {
 		// Peer-session write: receiver dispatches through readPeerSession
 		// bound by maxResponseLineBytes (8 MiB) — wider than the inbound
@@ -3095,7 +3096,6 @@ func (s *Service) peerSessionRequest(session *peerSession, frame protocol.Frame,
 			return protocol.Frame{}, fmt.Errorf("peerSessionRequest: %w", err)
 		}
 		payload = []byte(line)
-		s.markPeerWrite(session.address, frame)
 	}
 	// Outbound control-plane: block on full queue rather than fast-fail,
 	// so relay traffic backlog cannot starve handshake /
@@ -3104,6 +3104,7 @@ func (s *Service) peerSessionRequest(session *peerSession, frame protocol.Frame,
 	if st := session.netCore.SendRawSyncBlocking(payload); st != netcore.SendOK {
 		return protocol.Frame{}, fmt.Errorf("peerSessionRequest: send failed: %s", st.String())
 	}
+	s.markSessionWrite(session, writtenType)
 
 	// Use a longer read deadline for ping so that the heartbeat's pong
 	// stall bound governs stall detection instead of the generic
@@ -3127,7 +3128,7 @@ func (s *Service) peerSessionRequest(session *peerSession, frame protocol.Frame,
 					continue
 				}
 			}
-			s.markPeerRead(session.address, incoming)
+			s.markSessionRead(session, incoming)
 			if incoming.Type == protocol.FrameTypeConnectionNotice {
 				// Advertise convergence feedback from the inbound side.
 				// The peer is closing the connection immediately after
@@ -3164,7 +3165,6 @@ func (s *Service) peerSessionRequest(session *peerSession, frame protocol.Frame,
 				// writerLoop applies its own per-write deadline based on
 				// Direction, so no manual SetWriteDeadline is needed.
 				_ = s.sendSessionFrameViaNetwork(s.runCtx, session, pongFrame)
-				s.markPeerWrite(session.address, pongFrame)
 				continue
 			}
 			// Unsolicited traffic FIRST — before the reply match. The
@@ -3973,12 +3973,11 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *
 			// out without a spurious unregistered_write log. writerLoop
 			// owns the per-direction write deadline.
 			_ = s.sendSessionFrameViaNetwork(s.runCtx, session, pongFrame)
-			s.markPeerWrite(address, pongFrame)
 		}
 		return
 	}
 
-	s.markPeerUsefulReceive(address)
+	s.markSessionUsefulReceive(session)
 	switch frame.Type {
 	case "push_message":
 		if frame.Item == nil {
@@ -4904,7 +4903,7 @@ func (s *Service) accumulateIncompatiblePenaltyLocked(address domain.PeerAddress
 
 // markPeerStateInterval is the minimum interval between full state
 // recomputes (computePeerStateAtLocked + possible ebus emit +
-// aggregate refresh) for the same peer in markPeerWrite / markPeerRead.
+// aggregate refresh) for the same peer in transport activity tracking.
 //
 // The throttle is enforced via peerActivityNanos (sync.Map of
 // *atomic.Int64) which lives entirely outside s.peerMu. On the fast path
@@ -4925,12 +4924,9 @@ const markPeerStateInterval = time.Second
 // The interval defaults to markPeerStateInterval (1 s). Tests can set
 // markPeerStateIntervalTest to -1 to disable throttling entirely.
 func (s *Service) peerActivityNeedsRecompute(address domain.PeerAddress, nowNano int64) bool {
-	interval := int64(markPeerStateInterval)
-	if s.markPeerStateIntervalTest < 0 {
+	interval := s.peerActivityInterval()
+	if interval < 0 {
 		return true // test mode: always recompute
-	}
-	if s.markPeerStateIntervalTest > 0 {
-		interval = int64(s.markPeerStateIntervalTest)
 	}
 
 	v, _ := s.peerActivityNanos.LoadOrStore(address, &atomic.Int64{})
@@ -4940,6 +4936,21 @@ func (s *Service) peerActivityNeedsRecompute(address domain.PeerAddress, nowNano
 		return false
 	}
 	return last.CompareAndSwap(prev, nowNano)
+}
+
+func (s *Service) peerActivityInterval() int64 {
+	if s.markPeerStateIntervalTest != 0 {
+		return int64(s.markPeerStateIntervalTest)
+	}
+	return int64(markPeerStateInterval)
+}
+
+// A cheap read-only precheck. A rejected transport must not claim the
+// address's throttle interval before its ownership is checked under peerMu.
+func (s *Service) peerActivityMayRecompute(address domain.PeerAddress, nowNano int64) bool {
+	interval := s.peerActivityInterval()
+	last, ok := s.peerActivityNanos.Load(address)
+	return interval < 0 || !ok || nowNano-last.(*atomic.Int64).Load() >= interval
 }
 
 // peerActivityEvictInterval / peerActivityEvictWindow drive
@@ -4976,47 +4987,57 @@ func (s *Service) evictStalePeerActivity(nowNano int64) {
 	})
 }
 
-func (s *Service) markPeerWrite(address domain.PeerAddress, frame protocol.Frame) {
+func (s *Service) markSessionWrite(session *peerSession, frameType string) {
 	log.Debug().
 		Str("protocol", "json/tcp").
-		Str("addr", string(address)).
+		Str("addr", string(session.address)).
 		Str("direction", "send").
-		Str("command", frame.Type).
+		Str("command", frameType).
 		Bool("accepted", true).
 		Msg("protocol_trace")
+	s.noteSessionWrite(session, frameType)
+}
 
+func (s *Service) noteSessionWrite(session *peerSession, frameType string) {
+	address := session.address
 	now := time.Now().UTC()
-	// Ping/pong frames bypass the throttle — they are low-frequency
-	// (~30 s) and critical for health: suppressing LastPingAt updates
-	// makes computePeerStateAtLocked see a stale timestamp, degrading
-	// the peer and eventually killing the connection.
-	if frame.Type != "ping" && !s.peerActivityNeedsRecompute(address, now.UnixNano()) {
+	// Sending ping bypasses the throttle, so a fresh heartbeat never uses
+	// an old LastPingAt just because useful traffic was recorded recently.
+	if frameType != "ping" && !s.peerActivityMayRecompute(address, now.UnixNano()) {
 		return
 	}
 
-	log.Trace().Str("site", "markPeerWrite").Str("phase", "lock_wait").Str("address", string(address)).Str("frame_type", frame.Type).Msg("peer_mu_writer")
+	log.Trace().Str("site", "markSessionWrite").Str("phase", "lock_wait").Str("address", string(address)).Str("frame_type", frameType).Msg("peer_mu_writer")
 	s.peerMu.Lock()
-	log.Trace().Str("site", "markPeerWrite").Str("phase", "lock_held").Str("address", string(address)).Str("frame_type", frame.Type).Msg("peer_mu_writer")
+	log.Trace().Str("site", "markSessionWrite").Str("phase", "lock_held").Str("address", string(address)).Str("frame_type", frameType).Msg("peer_mu_writer")
 	defer func() {
 		s.peerMu.Unlock()
-		log.Trace().Str("site", "markPeerWrite").Str("phase", "lock_released").Str("address", string(address)).Str("frame_type", frame.Type).Msg("peer_mu_writer")
+		log.Trace().Str("site", "markSessionWrite").Str("phase", "lock_released").Str("address", string(address)).Str("frame_type", frameType).Msg("peer_mu_writer")
 	}()
 
+	if !s.sessionOwnsPeerActivityLocked(session) ||
+		(frameType != "ping" && !s.peerActivityNeedsRecompute(address, now.UnixNano())) {
+		return
+	}
+	s.applyPeerWriteLocked(address, frameType, now)
+}
+
+func (s *Service) applyPeerWriteLocked(address domain.PeerAddress, frameType string, now time.Time) {
 	address = s.resolveHealthAddress(address)
 	health := s.ensurePeerHealthLocked(address)
-	if frame.Type == "ping" {
+	if frameType == "ping" {
 		health.LastPingAt = now
-	} else if frame.Type != "" {
+	} else if frameType != "" {
 		health.LastUsefulSendAt = now
 	}
 	s.updatePeerStateLocked(health, s.computePeerStateAtLocked(health, now))
 }
 
-func (s *Service) markPeerRead(address domain.PeerAddress, frame protocol.Frame) {
+func (s *Service) markSessionRead(session *peerSession, frame protocol.Frame) {
 	accepted := frame.Type != "error"
 	ev := log.Debug().
 		Str("protocol", "json/tcp").
-		Str("addr", string(address)).
+		Str("addr", string(session.address)).
 		Str("direction", "recv").
 		Str("command", frame.Type).
 		Bool("accepted", accepted)
@@ -5025,51 +5046,109 @@ func (s *Service) markPeerRead(address domain.PeerAddress, frame protocol.Frame)
 	}
 	ev.Msg("protocol_trace")
 
+	s.markPeerReceive(session, frame.Type == "pong", frame.Type != "")
+}
+
+func (s *Service) markSessionUsefulReceive(session *peerSession) {
+	if session != nil {
+		s.markPeerReceive(session, false, true)
+	}
+}
+
+func (s *Service) markPeerReceive(session *peerSession, pong, useful bool) {
+	address := session.address
 	now := time.Now().UTC()
 	// Pong frames bypass the throttle — they are low-frequency (~30 s)
 	// and critical for health: suppressing LastPongAt updates makes
 	// computePeerStateAtLocked see a stale timestamp, degrading the
 	// peer and eventually killing the connection.
-	if frame.Type != "pong" && !s.peerActivityNeedsRecompute(address, now.UnixNano()) {
+	if !pong && !s.peerActivityMayRecompute(address, now.UnixNano()) {
 		return
 	}
 
-	log.Trace().Str("site", "markPeerRead").Str("phase", "lock_wait").Str("address", string(address)).Str("frame_type", frame.Type).Msg("peer_mu_writer")
+	log.Trace().Str("site", "markPeerReceive").Str("phase", "lock_wait").Str("address", string(address)).Msg("peer_mu_writer")
 	s.peerMu.Lock()
-	log.Trace().Str("site", "markPeerRead").Str("phase", "lock_held").Str("address", string(address)).Str("frame_type", frame.Type).Msg("peer_mu_writer")
+	log.Trace().Str("site", "markPeerReceive").Str("phase", "lock_held").Str("address", string(address)).Msg("peer_mu_writer")
 	defer func() {
 		s.peerMu.Unlock()
-		log.Trace().Str("site", "markPeerRead").Str("phase", "lock_released").Str("address", string(address)).Str("frame_type", frame.Type).Msg("peer_mu_writer")
+		log.Trace().Str("site", "markPeerReceive").Str("phase", "lock_released").Str("address", string(address)).Msg("peer_mu_writer")
 	}()
+	if !s.sessionOwnsPeerActivityLocked(session) {
+		return
+	}
+	if !pong && !s.peerActivityNeedsRecompute(address, now.UnixNano()) {
+		return
+	}
 
+	s.applyPeerReceiveLocked(address, pong, useful, now)
+}
+
+// sessionOwnsPeerActivityLocked admits a live original transport, including
+// setup before publication. Callers hold peerMu through the state update.
+func (s *Service) sessionOwnsPeerActivityLocked(session *peerSession) bool {
+	active := s.sessions[session.address]
+	return (active == nil || active == session) && !session.eligibilityEnded.Load() &&
+		session.netCore != nil && s.coreForIDLocked(session.connID) == session.netCore &&
+		session.netCore.AcceptingFrames()
+}
+
+func (s *Service) applyPeerReceiveLocked(address domain.PeerAddress, pong, useful bool, now time.Time) {
 	address = s.resolveHealthAddress(address)
 	health := s.ensurePeerHealthLocked(address)
-	if frame.Type == "pong" {
+	if pong {
 		health.LastPongAt = now
-	} else if frame.Type != "" {
+	} else if useful {
 		health.LastUsefulReceiveAt = now
 	}
 	s.updatePeerStateLocked(health, s.computePeerStateAtLocked(health, now))
 }
 
-func (s *Service) markPeerUsefulReceive(address domain.PeerAddress) {
-	now := time.Now().UTC()
-	if !s.peerActivityNeedsRecompute(address, now.UnixNano()) {
+func (s *Service) liveInboundAddressLocked(id domain.ConnID, core *netcore.NetCore) domain.PeerAddress {
+	if core == nil || s.coreForIDLocked(id) != core || !core.AcceptingFrames() {
+		return ""
+	}
+	return s.trackedInboundAddressByIDLocked(id)
+}
+
+func (s *Service) markInboundPeerRead(id domain.ConnID, core *netcore.NetCore, frameType string) {
+	s.peerMu.Lock()
+	defer s.peerMu.Unlock()
+	address := s.liveInboundAddressLocked(id, core)
+	if address == "" {
 		return
 	}
+	now := time.Now()
+	pong := frameType == "pong"
+	if pong {
+		s.conns[id].lastPongAt = now
+	} else if !s.peerActivityNeedsRecompute(address, now.UnixNano()) {
+		return
+	}
+	s.applyPeerReceiveLocked(address, pong, frameType != "", now.UTC())
+}
 
-	log.Trace().Str("site", "markPeerUsefulReceive").Str("phase", "lock_wait").Str("address", string(address)).Msg("peer_mu_writer")
+func (s *Service) markInboundPeerWrite(id domain.ConnID, core *netcore.NetCore, frameType string) {
 	s.peerMu.Lock()
-	log.Trace().Str("site", "markPeerUsefulReceive").Str("phase", "lock_held").Str("address", string(address)).Msg("peer_mu_writer")
-	defer func() {
-		s.peerMu.Unlock()
-		log.Trace().Str("site", "markPeerUsefulReceive").Str("phase", "lock_released").Str("address", string(address)).Msg("peer_mu_writer")
-	}()
+	defer s.peerMu.Unlock()
+	address := s.liveInboundAddressLocked(id, core)
+	if address == "" {
+		return
+	}
+	now := time.Now().UTC()
+	if frameType == "ping" || s.peerActivityNeedsRecompute(address, now.UnixNano()) {
+		s.applyPeerWriteLocked(address, frameType, now)
+	}
+}
 
-	address = s.resolveHealthAddress(address)
-	health := s.ensurePeerHealthLocked(address)
-	health.LastUsefulReceiveAt = now
-	s.updatePeerStateLocked(health, s.computePeerStateAtLocked(health, now))
+func (s *Service) inboundHeartbeatStatus(id domain.ConnID, core *netcore.NetCore, sentAt time.Time) (live, pongReceived bool) {
+	s.peerMu.RLock()
+	defer s.peerMu.RUnlock()
+	address := s.liveInboundAddressLocked(id, core)
+	if address == "" {
+		return false, false
+	}
+	health := s.health[s.resolveHealthAddress(address)]
+	return health != nil && health.Connected, s.conns[id].lastPongAt.After(sentAt)
 }
 
 // nextConnIDLocked returns a monotonically increasing connection ID.
@@ -6336,7 +6415,7 @@ func (s *Service) activePeerSession(address domain.PeerAddress) (*peerSession, b
 }
 
 // inboundHeartbeat periodically pings an inbound peer to independently verify
-// liveness. The pong reply is handled by handleCommand which calls markPeerRead.
+// liveness. The pong reply is recorded against the original inbound core.
 // If the peer does not respond within pongStallTimeout after a ping, the
 // connection is closed — same semantics as outbound session heartbeats.
 func (s *Service) inboundHeartbeat(id domain.ConnID, address domain.PeerAddress, stop <-chan struct{}) {
@@ -6344,6 +6423,7 @@ func (s *Service) inboundHeartbeat(id domain.ConnID, address domain.PeerAddress,
 }
 func (s *Service) inboundHeartbeatOwned(id domain.ConnID, address domain.PeerAddress, stop <-chan struct{}, owner *proofTransportOwner) {
 	defer crashlog.DeferRecover()
+	core := s.netCoreForID(id)
 	liveness := s.sessionLiveness()
 	timer := time.NewTimer(liveness.listenerPingDelay())
 	defer timer.Stop()
@@ -6353,6 +6433,11 @@ func (s *Service) inboundHeartbeatOwned(id domain.ConnID, address domain.PeerAdd
 		case <-stop:
 			return
 		case <-timer.C:
+			select {
+			case <-stop:
+				return
+			default:
+			}
 			pingFrame := protocol.Frame{Type: "ping", Node: nodeName, Network: networkName}
 			// inboundHeartbeat is a long-lived goroutine: loop
 			// termination is driven by <-stop, so the ctx handed to the
@@ -6360,13 +6445,13 @@ func (s *Service) inboundHeartbeatOwned(id domain.ConnID, address domain.PeerAdd
 			// a per-iteration value. The ctx is only a cancellation
 			// boundary for the underlying SendFrame call — it must not
 			// double as the loop-exit signal.
-			_ = s.sendFrameViaNetwork(s.runCtx, id, pingFrame)
-			s.markPeerWrite(address, pingFrame)
-
-			// Record the time we sent the ping and wait for the pong stall bound.
-			// If LastPongAt has not advanced past our ping time by then,
-			// the peer is unresponsive — close the connection.
-			sentAt := time.Now().UTC()
+			// Capture the boundary before enqueue so an immediate pong is
+			// visible. A failed enqueue starts no heartbeat wait.
+			sentAt := time.Now()
+			if err := s.sendFrameViaNetwork(s.runCtx, id, pingFrame); err != nil {
+				return
+			}
+			s.markInboundPeerWrite(id, core, pingFrame.Type)
 
 			select {
 			case <-stop:
@@ -6374,16 +6459,17 @@ func (s *Service) inboundHeartbeatOwned(id domain.ConnID, address domain.PeerAdd
 			case <-time.After(liveness.pongStall):
 			}
 
-			s.peerMu.RLock()
-			health := s.health[s.resolveHealthAddress(address)]
-			pongReceived := health != nil && !health.LastPongAt.IsZero() && health.LastPongAt.After(sentAt)
-			connected := health != nil && health.Connected
-			s.peerMu.RUnlock()
+			connected, pongReceived := s.inboundHeartbeatStatus(id, core, sentAt)
 
 			if !connected {
 				return
 			}
 			if !pongReceived {
+				select {
+				case <-stop:
+					return
+				default:
+				}
 				owner.end()
 				log.Warn().Str("peer", string(address)).Msg("inbound heartbeat failed, peer stalled — closing connection")
 				// Force-disconnect via netcore.Network so the registry
