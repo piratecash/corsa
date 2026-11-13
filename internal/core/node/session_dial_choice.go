@@ -418,7 +418,7 @@ func (s *Service) dialLegacyByProbe(ctx context.Context, address domain.PeerAddr
 	if err != nil {
 		return nil, err
 	}
-	answer, err := probeLegacy(ctx, transport.metered, s.secureSessions.dialTimeouts.forAddress(address).probe)
+	answer, err := probeLegacyOnTransport(ctx, transport, s.secureSessions.dialTimeouts.forAddress(address).probe)
 	switch answer.outcome {
 	case legacyProbeOutcomeLegacyAllowed:
 		return s.admitProbedLegacy(address, intent, transport, answer)

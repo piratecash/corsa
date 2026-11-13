@@ -1478,8 +1478,9 @@ type subscriber struct {
 }
 
 type peerSession struct {
-	terminal   *k10TerminalCapsule // same original attachment across setup -> CM -> serve
-	r2OwnDMHop *r2aPublishedHop    // original transport binding; pointer immutable before readers
+	firstContact firstContactAttempt
+	terminal     *k10TerminalCapsule // same original attachment across setup -> CM -> serve
+	r2OwnDMHop   *r2aPublishedHop    // original transport binding; pointer immutable before readers
 	// Original transport alias established before reader/background tasks start.
 	common          *proofTransportLifetime
 	findNodeReceipt *findNodeCMReceipt // peerMu, only CM acceptance callback mints

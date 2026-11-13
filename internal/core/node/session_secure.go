@@ -600,22 +600,26 @@ type transportDial func(ctx context.Context) (*dialledTransport, error)
 // transportDialer meters each socket dialRaw opens to address.
 func (s *Service) transportDialer(address domain.PeerAddress, dialRaw rawDialer) transportDial {
 	return func(ctx context.Context) (*dialledTransport, error) {
-		raw, err := dialRaw(ctx)
+		raw, timing, err := openFirstContactSocket(ctx, dialRaw)
 		if err != nil {
+			timing.record(0, "dial_failed")
 			return nil, err
 		}
 		metered, err := netcore.NewMeteredConn(raw, &s.transportTotals)
 		if err != nil {
+			timing.record(0, "meter_failed")
 			_ = raw.Close()
 			return nil, fmt.Errorf("meter peer session socket %s: %w", address, err)
 		}
-		return &dialledTransport{
+		transport := &dialledTransport{
 			connID:  s.allocateConnID("dialPeerTransport", address),
 			raw:     raw,
 			metered: metered,
 			wire:    metered,
 			reader:  bufio.NewReader(metered),
-		}, nil
+		}
+		timing.record(transport.connID, "opened")
+		return transport, nil
 	}
 }
 
@@ -695,7 +699,7 @@ func (s *Service) dialV2(ctx context.Context, address domain.PeerAddress, intent
 		transport.proofRaw = &peekedConn{Conn: transport.metered, reader: transport.metered}
 		proofWire = transport.proofRaw
 	}
-	session, err := sessionv2.Dial(ctx, proofWire, s.secureSessions.local, intro, expectedPeerOf(intent), s.secureSessions.dialTimeouts.forAddress(address).tls)
+	session, err := dialSessionV2(ctx, transport.connID, proofWire, s.secureSessions.local, intro, expectedPeerOf(intent), s.secureSessions.dialTimeouts.forAddress(address).tls)
 	if err != nil {
 		attempt := failedV2Attempt{address: address, intent: intent, connID: transport.connID, plan: plan, err: err}
 		return s.afterFailedV2Attempt(ctx, attempt, dial)

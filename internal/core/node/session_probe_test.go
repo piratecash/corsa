@@ -349,6 +349,8 @@ func TestProbeLegacyTimesOutOnTheConfiguredDeadline(t *testing.T) {
 
 		opts := defaultLegacyProbeOptions()
 		opts.timeout = 7 * time.Second
+		var timing legacyProbeTiming
+		opts.timing = &timing
 		start := time.Now()
 		answer, err := probeLegacy(context.Background(), local, opts)
 		elapsed := time.Since(start)
@@ -363,6 +365,9 @@ func TestProbeLegacyTimesOutOnTheConfiguredDeadline(t *testing.T) {
 		}
 		if elapsed != opts.timeout {
 			t.Fatalf("probe gave up after %v, want exactly the configured %v", elapsed, opts.timeout)
+		}
+		if !timing.started || timing.elapsed != elapsed {
+			t.Fatalf("recorded timing = %+v, want a measured %v", timing, elapsed)
 		}
 	})
 }

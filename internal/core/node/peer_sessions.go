@@ -1224,15 +1224,19 @@ func (s *Service) publishPeerDisconnected(address domain.PeerAddress, charge pee
 // ensures a stale dial (generation mismatch) is discarded with zero
 // externally visible mutations.
 func (s *Service) openPeerSessionForCM(ctx context.Context, address domain.PeerAddress) (*peerSession, error) {
+	ctx = beginFirstContactAttempt(ctx)
 	// TLS first; v1 only on the connection of a probe that allowed it
 	// (session_dial_choice.go). A transport error
 	// comes back wrapped in errPeerDialTransport, so rollout telemetry still
 	// separates "never reached them" from a handshake refusal by type.
 	transport, err := s.dialPeerTransportForCM(ctx, address)
 	if err != nil {
+		recordFirstContactSetup(ctx, 0, err)
 		return nil, err
 	}
-	return s.finishPeerSessionForCM(ctx, address, transport)
+	session, err := s.finishPeerSessionForCM(ctx, address, transport)
+	recordFirstContactSetup(ctx, transport.connID, err)
+	return session, err
 }
 
 func (s *Service) finishPeerSessionForCM(ctx context.Context, address domain.PeerAddress, transport *dialledTransport) (result *peerSession, outcomeErr error) {
@@ -1285,6 +1289,7 @@ func (s *Service) finishPeerSessionForCM(ctx context.Context, address domain.Pee
 	// what the listener sent behind the probe's answer.
 	reader := transport.reader
 	session := &peerSession{
+		firstContact: firstContactFromContext(ctx),
 		r2OwnDMHop:   outgoing.sealed,
 		common:       transport.common,
 		readiness:    readiness,
@@ -1603,8 +1608,10 @@ func (s *Service) runCMSession(session *peerSession, slotAddress domain.PeerAddr
 
 	switch classifyCMSessionSetup(session, initErr) {
 	case cmSessionSetupAbortedByLocalEviction:
+		session.firstContact.recordPublication(session.connID, "evicted_before_publication", 0, false)
 		s.abortLocallyEvictedCMSession(session, slotAddress, initErr)
 	case cmSessionSetupFailed:
+		session.firstContact.recordPublication(session.connID, "initialization_failed", 0, false)
 		s.failCMSessionSetup(session, slotAddress, slotGeneration, initErr)
 	case cmSessionSetupSucceeded:
 		s.publishAndServeCMSession(session, slotAddress, slotGeneration)
@@ -1844,6 +1851,7 @@ func (s *Service) publishAndServeCMSession(session *peerSession, slotAddress dom
 	// the session becomes visible to routingTargets, enqueuePeerFrame,
 	// connectedHostsLocked, and other lookups.
 	if !s.registerCMSession(session, slotAddress) {
+		session.firstContact.recordPublication(session.connID, "registration_refused", 0, false)
 		s.abortLocallyEvictedCMSession(session, slotAddress, nil)
 		return
 	}
@@ -1858,6 +1866,7 @@ func (s *Service) publishAndServeCMSession(session *peerSession, slotAddress dom
 	_, proven := session.provenIdentity()
 	if !proven {
 		if err := s.refuseLegacyWelcome(dialAddress, session.peerIdentity); err != nil {
+			session.firstContact.recordPublication(session.connID, "pin_refused", 0, false)
 			log.Warn().Err(err).Str("peer", string(dialAddress)).Msg("outbound_v1_refused_identity_proved_v2_during_setup")
 			s.recordAddressDialFailure(slotAddress)
 			s.withdrawRefusedCMSession(session, slotAddress, slotGeneration, err)
@@ -1893,6 +1902,7 @@ func (s *Service) publishAndServeCMSession(session *peerSession, slotAddress dom
 	s.publishR2OwnDMHop(session)
 
 	s.markPeerConnected(dialAddress, peerDirectionOutbound)
+	session.firstContact.recordPublication(session.connID, "published", session.version, proven)
 	if s.selectedPins != nil {
 		s.selectedPins.notify()
 	}

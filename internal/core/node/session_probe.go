@@ -105,6 +105,13 @@ type legacyProbeOptions struct {
 	timeout time.Duration
 	// systemNow is the clock the absolute deadline is computed from.
 	systemNow legacyProbeSystemClock
+	// timing is supplied only by the first-contact diagnostic build.
+	timing *legacyProbeTiming
+}
+
+type legacyProbeTiming struct {
+	elapsed time.Duration
+	started bool
 }
 
 // legacyProbeLineLimit bounds the answer line. The answer is unauthenticated,
@@ -173,11 +180,21 @@ func probeLegacy(ctx context.Context, conn net.Conn, opts legacyProbeOptions) (l
 	if err != nil {
 		return refused, err
 	}
+	var startedAt time.Time
+	if opts.timing != nil {
+		startedAt = time.Now()
+	}
 	release, err := armLegacyProbeDeadline(ctx, conn, opts)
 	if err != nil {
 		return refused, err
 	}
 	defer release()
+	if opts.timing != nil {
+		defer func() {
+			opts.timing.elapsed = time.Since(startedAt)
+			opts.timing.started = true
+		}()
+	}
 
 	if _, err := conn.Write(probe); err != nil {
 		return refused, legacyProbeIOError(ctx, err, errLegacyProbeWrite)

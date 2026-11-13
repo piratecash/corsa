@@ -32,7 +32,7 @@ func registryPublicationBodyPins() map[string]string {
 		"find_node_connection.go:publishFindNodeLocked":           "7320628cd8080ffb5cb220eeaf6ee7e8e207209ac77d2d68177e138d551f251b",
 		"find_node_degree_terminal_bridge.go:endBridgeLocked":     "9041c5822dd74678779831771eb89168f94faf027e30f1c822bc5ab5936c94aa",
 		"peer_management.go:ensurePeerSessions":                   "bc785affa049c15148cbfc010f6326e09c64abaafc7cf84f11878be02fb7b657",
-		"peer_sessions.go:finishPeerSessionForCM":                 "63652fc54b1e8131853b504289e1756f2c217bf32c9ddb6b55c44fd1b0a8fd77",
+		"peer_sessions.go:finishPeerSessionForCM":                 "587a6bc02068155bd7b450a7d08b395f11769f500dd2dc082c5a129bf0110a34",
 		"peer_sessions.go:markSessionHandshakeComplete":           "e2b420d83dd3323649516ee3a96811b7d1104b7a86b9dc008ed0e45c073544db",
 		"peer_sessions.go:onCMSessionEstablished":                 "53c9fe71b8dadf30d172e76bb1ffc6037f76ddf82f4ed4b530fb4f0e37bd7dc7",
 		"peer_sessions.go:onCMSessionTeardown":                    "487df410ce5eeb7858e9e3c9c65ff4d481624086d11356b26f4732fcb5e8633c",
