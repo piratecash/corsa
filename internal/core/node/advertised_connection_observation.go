@@ -39,6 +39,16 @@ type k3AdvertisedPeerFact struct {
 	MetadataIdentity                       domain.PeerIdentity
 	ClaimConflict                          bool
 	HealthPresent, Connected, ContextKnown bool
+	// SessionPublished records an outbound owner in the session registry.
+	SessionPublished bool
+	// InboundMeteredTrusted is this owner's contribution to the
+	// address-level live-traffic fallback used by the health snapshot.
+	InboundMeteredTrusted bool
+	// Inbound IDs are indexed by raw address. Live traffic is grouped by
+	// resolved health address. Keep both sides of that join distinct.
+	InboundRawHealthPresent, InboundRawHealthConnected bool
+	OutboundMeteredPublished                           bool
+	DirectoryIdentity                                  domain.PeerIdentity
 }
 
 type k3AdvertisedSlotFact struct {
@@ -794,7 +804,7 @@ func (s *Service) collectK3AdvertisedPeersLocked(o *k3AdvertisedSource) (map[k3A
 	values := make(map[k3AdvertisedPeerKey]k3AdvertisedPeerFact)
 	// Mutation-local validation only, never retained in Source/history.
 	cores := make(map[domain.ConnID]*netcore.NetCore)
-	add := func(key k3AdvertisedPeerKey, core *netcore.NetCore, address domain.PeerAddress) bool {
+	add := func(key k3AdvertisedPeerKey, core *netcore.NetCore, address domain.PeerAddress, published bool) bool {
 		if len(values) >= o.connectionCapacity || key.ConnID == 0 || len(address) > k3AdvertisedMaxAddressBytes {
 			return false
 		}
@@ -819,7 +829,34 @@ func (s *Service) collectK3AdvertisedPeersLocked(o *k3AdvertisedSource) (map[k3A
 			connected = true
 		}
 		metadataIdentity := core.Identity()
-		values[key] = k3AdvertisedPeerFact{Direction: key.Direction, Address: domain.PeerAddress(strings.Clone(string(address))), ConnID: key.ConnID, Generation: generation, ClaimSeen: claim.Seen, Identity: claim.Identity, Version: claim.Version, RawAddress: domain.PeerAddress(strings.Clone(string(claim.Address))), MetadataIdentity: metadataIdentity, ClaimConflict: claim.Conflict || (claim.Seen && claim.Identity != metadataIdentity), HealthAddress: domain.PeerAddress(strings.Clone(string(healthAddress))), HealthPresent: present, Connected: connected, ContextKnown: address != ""}
+		rawHealth := s.health[address]
+		inbound := key.Direction == "inbound"
+		directoryAddress := healthAddress
+		if inbound {
+			directoryAddress = address
+		}
+		values[key] = k3AdvertisedPeerFact{
+			Direction:        key.Direction,
+			Address:          domain.PeerAddress(strings.Clone(string(address))),
+			ConnID:           key.ConnID,
+			Generation:       generation,
+			ClaimSeen:        claim.Seen,
+			Identity:         claim.Identity,
+			Version:          claim.Version,
+			RawAddress:       domain.PeerAddress(strings.Clone(string(claim.Address))),
+			MetadataIdentity: metadataIdentity,
+			ClaimConflict:    claim.Conflict || (claim.Seen && claim.Identity != metadataIdentity),
+			HealthAddress:    domain.PeerAddress(strings.Clone(string(healthAddress))),
+			HealthPresent:    present,
+			Connected:        connected,
+			ContextKnown:     address != "",
+			SessionPublished: published,
+			InboundMeteredTrusted: inbound && address != "" &&
+				s.meteredForIDLocked(key.ConnID) != nil && s.isConnTrafficTrustedByIDLocked(key.ConnID),
+			InboundRawHealthPresent:   inbound && rawHealth != nil,
+			InboundRawHealthConnected: inbound && rawHealth != nil && rawHealth.Connected,
+			DirectoryIdentity:         s.peerIDs.identityOf(directoryAddress),
+		}
 		cores[key.ConnID] = core
 		return true
 	}
@@ -835,7 +872,7 @@ func (s *Service) collectK3AdvertisedPeersLocked(o *k3AdvertisedSource) (map[k3A
 		if direction == "outbound" {
 			address = s.k3AdvertisedClaims[id].DialAddress
 		}
-		if !add(k3AdvertisedPeerKey{Direction: direction, ConnID: id}, entry.core, address) {
+		if !add(k3AdvertisedPeerKey{Direction: direction, ConnID: id}, entry.core, address, false) {
 			return nil, false
 		}
 	}
@@ -851,6 +888,9 @@ func (s *Service) collectK3AdvertisedPeersLocked(o *k3AdvertisedSource) (map[k3A
 			if cores[session.connID] != session.netCore || !previous.ContextKnown || s.resolveHealthAddress(address) != previous.HealthAddress || s.resolveHealthAddress(session.address) != previous.HealthAddress {
 				return nil, false
 			}
+			previous.SessionPublished = true
+			previous.OutboundMeteredPublished = session.metered != nil
+			values[key] = previous
 			continue // SAME actual Core+ConnID; never dedup merely by claim/address.
 		}
 		if _, conflict := cores[session.connID]; conflict {
@@ -859,9 +899,12 @@ func (s *Service) collectK3AdvertisedPeersLocked(o *k3AdvertisedSource) (map[k3A
 		if s.resolveHealthAddress(address) != s.resolveHealthAddress(session.address) {
 			return nil, false
 		}
-		if !add(key, session.netCore, s.k3AdvertisedClaims[session.connID].DialAddress) {
+		if !add(key, session.netCore, s.k3AdvertisedClaims[session.connID].DialAddress, true) {
 			return nil, false
 		}
+		fact := values[key]
+		fact.OutboundMeteredPublished = session.metered != nil
+		values[key] = fact
 	}
 	return values, true
 }

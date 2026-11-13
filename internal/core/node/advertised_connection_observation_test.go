@@ -214,6 +214,38 @@ func advertisedOwnedTasks(t *testing.T) (func(func()) <-chan struct{}, func(<-ch
 	return run, wait, release
 }
 
+func TestK3AdvertisedRecordsSessionPublication(t *testing.T) {
+	clock := newK3ActualClock()
+	request := advertisedActualRequest(clock.read, 32, 8, 256)
+	dialer := advertisedActualService(t, &request)
+	peer := advertisedActualService(t, nil)
+	session := advertisedActualPair(t, peer, dialer).outbound
+	dialer.markPeerConnected(session.address, domain.PeerDirectionOutbound)
+
+	before := advertisedActualSnapshot(t, dialer)
+	fact := advertisedFactFor(t, before, session.connID, "outbound")
+	if !fact.Connected || !fact.ContextKnown || !fact.ClaimSeen || fact.SessionPublished {
+		t.Fatal("expected connected owner with a claim before publication", fact)
+	}
+
+	k3Publish(t, dialer, session)
+	after := advertisedActualSnapshot(t, dialer)
+	fact.SessionPublished = true
+	fact.OutboundMeteredPublished = session.metered != nil
+	if after.CoveredSequence != before.CoveredSequence+1 ||
+		after.PeerOwnersAtCut != before.PeerOwnersAtCut ||
+		advertisedFactFor(t, after, session.connID, "outbound") != fact {
+		t.Fatal("publication did not update the existing owner exactly once", after)
+	}
+
+	k3Withdraw(dialer, session)
+	withdrawn := advertisedActualSnapshot(t, dialer)
+	if withdrawn.CoveredSequence <= after.CoveredSequence ||
+		advertisedFactFor(t, withdrawn, session.connID, "outbound").SessionPublished {
+		t.Fatal("withdrawal did not clear publication on the existing owner", withdrawn)
+	}
+}
+
 func TestK3AdvertisedActualOwners(t *testing.T) {
 	t.Run("constructor-same-Service-CM-empty-baseline-copy-and-default-dark", func(t *testing.T) {
 		clock := newK3ActualClock()

@@ -607,6 +607,10 @@ func (s *Service) evictOrphanedPeerMetadata() {
 	// markPeerDisconnected.
 	var evictIdentities []domain.PeerIdentity
 	evicted := 0
+	adTicket := s.beginK3AdvertisedPeerLocked()
+	if adTicket != nil {
+		defer s.guardK3AdvertisedPeerLocked(adTicket)
+	}
 	for addr := range candidates {
 		anchored := false
 		if _, ok := peerAddrs[addr]; ok {
@@ -643,6 +647,7 @@ func (s *Service) evictOrphanedPeerMetadata() {
 		evictObserved = append(evictObserved, addr)
 		evicted++
 	}
+	s.finishK3AdvertisedPeerLocked(adTicket)
 	if len(evictObserved) > 0 {
 		// Keep votes for identities that still resolve through another
 		// (surviving) address — only fully orphaned identities lose theirs.

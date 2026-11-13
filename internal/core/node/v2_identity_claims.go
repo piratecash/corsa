@@ -256,7 +256,13 @@ func (s *Service) recordAddressIdentityLocked(address domain.PeerAddress, record
 	if recorded.origin != domain.PeerIdentityProvenV2 && s.identityPinnedV2(recorded.identity) {
 		return false
 	}
-	return s.peerIDs.record(address, recorded)
+	ticket := s.beginK3AdvertisedPeerLocked()
+	if ticket != nil {
+		defer s.guardK3AdvertisedPeerLocked(ticket)
+	}
+	changed := s.peerIDs.record(address, recorded)
+	s.finishK3AdvertisedPeerLocked(ticket)
+	return changed
 }
 
 // identityPinnedV2 reports whether id proved itself over v2 to this node — its
@@ -270,6 +276,10 @@ func (s *Service) identityPinnedV2(id domain.PeerIdentity) bool {
 // bound and returns how many addresses it changed. Caller holds peerMu
 // (write).
 func (s *Service) forgetClaimedAddressesLocked(id domain.PeerIdentity, bound endpointsOfIdentity) int {
+	ticket := s.beginK3AdvertisedPeerLocked()
+	if ticket != nil {
+		defer s.guardK3AdvertisedPeerLocked(ticket)
+	}
 	claimedOnly := func(address domain.PeerAddress, recorded addressIdentity) bool {
 		return recorded.identity == id && recorded.origin != domain.PeerIdentityProvenV2 && !bound.covers(address)
 	}
@@ -286,6 +296,7 @@ func (s *Service) forgetClaimedAddressesLocked(id domain.PeerIdentity, bound end
 			forgotten[address] = struct{}{}
 		}
 	}
+	s.finishK3AdvertisedPeerLocked(ticket)
 	return len(forgotten)
 }
 

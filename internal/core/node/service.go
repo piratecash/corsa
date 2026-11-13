@@ -6055,13 +6055,18 @@ func (s *Service) authenticatedAddressForConn(id domain.ConnID) (protocol.Frame,
 func (s *Service) clearConnAuth(id domain.ConnID) {
 	// Enabled observation linearizes the ORIGINAL Auth write with registry
 	// membership. The nil branch below retains its original lock/read path.
-	if s.k3Registered != nil {
+	if s.k3Registered != nil || s.k3Advertised != nil {
 		s.peerMu.Lock()
 		defer s.peerMu.Unlock()
 		if entry := s.connEntryByIDLocked(id); entry != nil && entry.core != nil {
+			advertised := s.beginK3AdvertisedPeerLocked()
+			if advertised != nil {
+				defer s.guardK3AdvertisedPeerLocked(advertised)
+			}
 			k3 := s.k3BeginRegistryLocked(id)
 			entry.core.ClearAuth()
 			s.k3FinishRegistryLocked(k3)
+			s.finishK3AdvertisedPeerLocked(advertised)
 		}
 		return
 	}
@@ -6088,13 +6093,18 @@ func (s *Service) connAuthStateByID(id domain.ConnID) *connauth.State {
 func (s *Service) setConnAuthStateByID(id domain.ConnID, state *connauth.State) {
 	// Enabled observation linearizes the ORIGINAL Auth write with registry
 	// membership. The nil branch below retains its original lock/read path.
-	if s.k3Registered != nil {
+	if s.k3Registered != nil || s.k3Advertised != nil {
 		s.peerMu.Lock()
 		defer s.peerMu.Unlock()
 		if entry := s.connEntryByIDLocked(id); entry != nil && entry.core != nil {
+			advertised := s.beginK3AdvertisedPeerLocked()
+			if advertised != nil {
+				defer s.guardK3AdvertisedPeerLocked(advertised)
+			}
 			k3 := s.k3BeginRegistryLocked(id)
 			entry.core.SetAuth(state)
 			s.k3FinishRegistryLocked(k3)
+			s.finishK3AdvertisedPeerLocked(advertised)
 		}
 		return
 	}
