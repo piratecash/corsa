@@ -1711,10 +1711,7 @@ func (s *Service) learnPeerFromFrame(observedAddr string, frame protocol.Frame, 
 		if advertised := synthesiseAdvertisedFromObserved(observedAddr, frame.AdvertisePort); advertised != "" {
 			if normalizedAddr, ok := s.normalizePeerAddress(domain.PeerAddress(observedAddr), domain.PeerAddress(advertised)); ok {
 				s.promotePeerAddress(normalizedAddr)
-				s.rememberPeerType(normalizedAddr, frame.NodeType)
-				s.addPeerID(normalizedAddr, addressIdentity{identity: domain.PeerIdentityFromWire(frame.Address), origin: origin})
-				s.addPeerVersion(normalizedAddr, frame.ClientVersion)
-				s.addPeerBuild(normalizedAddr, frame.ClientBuild)
+				s.recordInboundPeer(normalizedAddr, frame, origin)
 			}
 		}
 	}
@@ -2554,17 +2551,48 @@ func (s *Service) findKnownPeerByIPLocked(address domain.PeerAddress) (domain.Pe
 // addPeerID records the identity of address with its origin. A claim never
 // replaces what v2 recorded (addressIdentities.record).
 func (s *Service) addPeerID(address domain.PeerAddress, recorded addressIdentity) {
+	s.recordPeerID(address, recorded, nil)
+}
+
+// An inbound proof certifies the identity on the connection. The advertised
+// listener port is only a claim, even if the observed source host matches.
+func (s *Service) recordInboundPeer(address domain.PeerAddress, frame protocol.Frame, origin domain.PeerIdentityOrigin) bool {
+	recorded := addressIdentity{identity: domain.PeerIdentityFromWire(frame.Address), origin: origin}
+	return s.recordPeerID(address, recorded, &frame)
+}
+
+func (s *Service) recordPeerID(address domain.PeerAddress, recorded addressIdentity, inbound *protocol.Frame) bool {
 	if address == "" || recorded.identity.IsZero() {
-		return
+		return false
 	}
 	log.Trace().Str("site", "addPeerID").Str("phase", "lock_wait").Str("address", string(address)).Msg("peer_mu_writer")
 	s.peerMu.Lock()
+	defer func() {
+		s.peerMu.Unlock()
+		log.Trace().Str("site", "addPeerID").Str("phase", "lock_released").Str("address", string(address)).Msg("peer_mu_writer")
+	}()
 	log.Trace().Str("site", "addPeerID").Str("phase", "lock_held").Str("address", string(address)).Msg("peer_mu_writer")
-	if s.recordAddressIdentityLocked(address, recorded) {
+	current := s.peerIDs[address]
+	conflictingInbound := inbound != nil && current.origin == domain.PeerIdentityProvenV2 && current.identity != recorded.identity
+	if !conflictingInbound && s.recordAddressIdentityLocked(address, recorded) {
 		s.notePersistedIdentityLocked(address)
 	}
-	s.peerMu.Unlock()
-	log.Trace().Str("site", "addPeerID").Str("phase", "lock_released").Str("address", string(address)).Msg("peer_mu_writer")
+	accepted := !conflictingInbound && s.peerIDs[address] == recorded
+	if recorded.origin != domain.PeerIdentityProvenV2 && s.identityPinnedV2(recorded.identity) {
+		accepted = false
+	}
+	if inbound != nil && accepted {
+		if version := strings.TrimSpace(inbound.ClientVersion); version != "" {
+			s.peerVersions[address] = version
+		}
+		if inbound.ClientBuild != 0 {
+			s.peerBuilds[address] = inbound.ClientBuild
+		}
+		if peerType, ok := domain.ParseNodeType(inbound.NodeType); ok {
+			s.peerTypes[address] = peerType
+		}
+	}
+	return accepted
 }
 
 // notePersistedIdentityLocked copies the identity recorded for address into its

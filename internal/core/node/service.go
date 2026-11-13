@@ -5943,18 +5943,21 @@ func (s *Service) completeInboundAuth(id domain.ConnID, verified *connauth.State
 			log.Info().Str("peer", string(addr)).Msg("duplicate_inbound_auth_session_allowed")
 		}
 		_, proven := verified.ProvenIdentity()
-		s.addPeerID(addr, addressIdentity{identity: domain.PeerIdentityFromWire(verified.Hello.Address), origin: identityOriginOf(proven)})
+		if !s.recordInboundPeer(addr, verified.Hello, identityOriginOf(proven)) {
+			// The advertised endpoint belongs to another proven identity.
+			// Keep this connection's health and teardown under its own key.
+			addr = domain.PeerAddress("inbound:" + remoteAddr)
+			s.recordInboundPeer(addr, verified.Hello, identityOriginOf(proven))
+		}
 		log.Trace().Uint64("conn_id", uint64(id)).Str("inbound_addr", string(addr)).Msg("handle_auth_session_track_begin")
 		fullSync = s.trackInboundConnect(id, addr, domain.PeerIdentityFromWire(verified.Hello.Address))
 		log.Trace().Uint64("conn_id", uint64(id)).Str("inbound_addr", string(addr)).Msg("handle_auth_session_track_end")
-		s.addPeerVersion(addr, verified.Hello.ClientVersion)
-		s.addPeerBuild(addr, verified.Hello.ClientBuild)
 
 		// Mirror identity/address onto the NetCore so that by-conn readers
 		// (trackInboundDisconnect) can derive identity from transport state
 		// instead of re-reading the address-keyed persistence cache.
-		// Invariant: every live-conn update of peerIDs must also update the
-		// NetCore mirror so the two sources cannot diverge mid-session.
+		// The mirror tracks this connection even if the advertised endpoint
+		// retains a different previously proven identity.
 		// Precedence of NetCore over peerIDs is pinned by
 		// TestTrackInboundDisconnect_PrefersNetCoreIdentity and the peerIDs
 		// fallback branch by TestTrackInboundDisconnect_FallsBackToPeerIDsMap.
