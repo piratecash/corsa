@@ -46,11 +46,13 @@ var ErrReplyToNotFound = errors.New("reply_to message not found in conversation"
 // identity for key material. No direct reach into config, filetransfer,
 // or chat persistence writes.
 type DMCrypto struct {
-	ownDMPort     node.OwnDMProvenancePort   // private candidate constructor only
-	ownDMObserver func(node.OwnDMSubmission) // synchronous, outside node locks; no default observer
-	rpc           *LocalRPCClient
-	chatlog       *ChatlogGateway
-	id            *identity.Identity
+	dmV2SendTTL     time.Duration              // fixture-selected lifetime
+	dmV2ReadNetwork string                     // test-only opt-in in the overlay
+	ownDMPort       node.OwnDMProvenancePort   // private candidate constructor only
+	ownDMObserver   func(node.OwnDMSubmission) // synchronous, outside node locks; no default observer
+	rpc             *LocalRPCClient
+	chatlog         *ChatlogGateway
+	id              *identity.Identity
 	// onDecryptFailure is the §4.10 single entry point: every decrypt path
 	// (live, previews, batch) reports through it. Optional — nil means no
 	// recovery subsystem is wired (SDK consumers). Set once at wiring time
@@ -273,11 +275,6 @@ func (d *DMCrypto) sendDirectMessageWithResidence(ctx, residence context.Context
 		BoxKeyBase64: contact.BoxKey,
 	}
 
-	ciphertext, err := directmsg.EncryptForParticipants(d.id, recipient, msg)
-	if err != nil {
-		return nil, err
-	}
-
 	messageID := protocol.MessageID(msg.PresetID)
 	if messageID == "" {
 		messageID, err = protocol.NewMessageID()
@@ -297,6 +294,27 @@ func (d *DMCrypto) sendDirectMessageWithResidence(ctx, residence context.Context
 	// than formatting twice is what makes the two provably the same value.
 	now := time.Now().UTC().Truncate(time.Second)
 	createdAt := now.Format(time.RFC3339)
+
+	var ciphertext string
+	ttlSeconds := 0
+	if d.dmV2SendTTL > 0 {
+		ttlSeconds = int(d.dmV2SendTTL / time.Second)
+		ciphertext, err = directmsg.SealV2(d.id, recipient, directmsg.V2Metadata{
+			V2Binding: directmsg.V2Binding{
+				Network: d.dmV2ReadNetwork, Topic: "dm", ID: string(messageID),
+				Sender: d.id.Address, Recipient: to.String(), Flag: string(defaultOutgoingMessageFlag),
+			},
+			CreatedAt: now.Unix(), ExpiresAt: now.Add(d.dmV2SendTTL).Unix(),
+		}, directmsg.PlainMessage{
+			Body: msg.Body, CreatedAt: now, ReplyTo: string(msg.ReplyTo),
+			Command: string(msg.Command), CommandData: msg.CommandData, RetryOf: string(msg.RetryOf),
+		})
+	} else {
+		ciphertext, err = directmsg.EncryptForParticipants(d.id, recipient, msg)
+	}
+	if err != nil {
+		return nil, err
+	}
 
 	frame := protocol.Frame{
 		Type:      "send_message",
@@ -325,7 +343,7 @@ func (d *DMCrypto) sendDirectMessageWithResidence(ctx, residence context.Context
 		// remains a local act.
 		Flag:       string(defaultOutgoingMessageFlag),
 		CreatedAt:  createdAt,
-		TTLSeconds: 0,
+		TTLSeconds: ttlSeconds,
 		Body:       ciphertext,
 	}
 	reply, err := d.submitOwnDM(ctx, residence, frame, now)
@@ -631,7 +649,8 @@ func (d *DMCrypto) DecryptIncomingMessage(ctx context.Context, event protocol.Lo
 		return nil
 	}
 
-	msg, err := directmsg.DecryptForIdentity(d.id, event.Sender, senderPubKey, event.Recipient, event.Body)
+	ts, parseErr := parseTimestamp(event.CreatedAt)
+	msg, err := openApplicationDM(d.id, d.dmV2ReadNetwork, localMessageRef(event), senderPubKey, event.Body, ts, &event.Flag)
 	if err != nil {
 		if errors.Is(err, directmsg.ErrSealedUnreadable) {
 			// The CONFIRMED crypto-fail class: envelope authenticated, keys
@@ -641,7 +660,6 @@ func (d *DMCrypto) DecryptIncomingMessage(ctx context.Context, event protocol.Lo
 		return nil
 	}
 
-	ts, parseErr := parseTimestamp(event.CreatedAt)
 	if parseErr != nil {
 		// The row's own time is unreadable, so this one is invented — and an
 		// invented moment must still be a moment the chatlog could hold.
@@ -788,7 +806,7 @@ func (d *DMCrypto) FetchConversation(ctx context.Context, peerAddress domain.Pee
 		})
 	}
 
-	messages := decryptDirectMessagesReporting(d.id, decryptContacts, records, deliveryReceipts, pendingMessages, d.onDecryptFailure, d.onDecryptSuccess)
+	messages := decryptDirectMessagesForNetwork(d.id, d.dmV2ReadNetwork, decryptContacts, records, deliveryReceipts, pendingMessages, d.onDecryptFailure, d.onDecryptSuccess)
 	// A failed reply lookup fails the READ. Returning the messages anyway
 	// handed the caller history with quotes silently removed and called it a
 	// success.
@@ -887,7 +905,7 @@ func (d *DMCrypto) FetchConversationPreviews(ctx context.Context) ([]Conversatio
 			senderPubKey = contact.PubKey
 		}
 
-		message, decryptErr := directmsg.DecryptForIdentity(d.id, senderRaw, senderPubKey, entry.Recipient, entry.Body)
+		message, decryptErr := d.openPreviewDM(&entry, senderPubKey)
 		if decryptErr != nil {
 			if errors.Is(decryptErr, directmsg.ErrSealedUnreadable) {
 				d.noteDecryptFailure(DecryptFailureSealedUnreadable, entry.ID, entry.Sender, entry.Recipient)
@@ -966,7 +984,7 @@ func (d *DMCrypto) FetchSinglePreview(ctx context.Context, peerAddress domain.Pe
 
 	ts := previewTimestamp(entry)
 
-	message, decryptErr := directmsg.DecryptForIdentity(d.id, senderRaw, senderPubKey, entry.Recipient, entry.Body)
+	message, decryptErr := d.openPreviewDM(entry, senderPubKey)
 	if decryptErr != nil {
 		if errors.Is(decryptErr, directmsg.ErrSealedUnreadable) {
 			d.noteDecryptFailure(DecryptFailureSealedUnreadable, entry.ID, entry.Sender, entry.Recipient)

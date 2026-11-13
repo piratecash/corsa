@@ -56,6 +56,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/piratecash/corsa/internal/core/crashlog"
+	"github.com/piratecash/corsa/internal/core/directmsg"
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/ebus"
 	"github.com/piratecash/corsa/internal/core/protocol"
@@ -292,6 +293,7 @@ const (
 // deliveryRetryEntry tracks one locally-sent DM awaiting its delivered/seen
 // receipt. Owned by s.deliveryMu.
 type deliveryRetryEntry struct {
+	directWakeSeq uint64 // deliveryMu
 	// outgoingProvenance is nil on every ordinary/reseed path; deliveryMu owns it.
 	outgoingProvenance *r2aOwnSendStamp
 	Envelope           protocol.Envelope
@@ -552,8 +554,10 @@ func (e *emissionSender) wouldCollide(entry *deliveryRetryEntry, id messageIdent
 //
 // A zero value undoes nothing, for the paths that never claimed.
 type emissionClaimRollback struct {
-	wrote   time.Time
-	restore time.Time
+	checkDirectWake bool
+	directWakeSeq   uint64
+	wrote           time.Time
+	restore         time.Time
 }
 
 func (r emissionClaimRollback) undo(entry *deliveryRetryEntry) {
@@ -1369,13 +1373,20 @@ func (s *Service) RegisterDeliveryOutbox(outbox DeliveryOutbox) {
 	if len(receipts) == 0 {
 		return
 	}
-	s.deliveryMu.Lock()
+	eligibleReceipts := make([]protocol.DeliveryReceipt, 0, len(receipts))
 	for _, receipt := range receipts {
+		receipt, ok := s.prepareOwnDeliveryReceipt(receipt, false)
+		if ok {
+			eligibleReceipts = append(eligibleReceipts, receipt)
+		}
+	}
+	s.deliveryMu.Lock()
+	for _, receipt := range eligibleReceipts {
 		s.registerAwaitingSeenAckLocked(receipt, now)
 	}
 	seenCount := len(s.awaitingSeenAck)
 	s.deliveryMu.Unlock()
-	log.Info().Int("reseeded", len(receipts)).Int("awaiting_seen_ack", seenCount).Msg("seen_ack_journal_reseeded")
+	log.Info().Int("reseeded", len(eligibleReceipts)).Int("awaiting_seen_ack", seenCount).Msg("seen_ack_journal_reseeded")
 }
 
 // abandonedDelivery is a message the tick gave up on, carried out of the
@@ -1407,8 +1418,9 @@ type dueCandidate struct {
 // sink, and must come back from the thaw due exactly when it was, not a
 // poll interval later for a decision its recipient had no part in.
 type dueDispatch struct {
-	env      protocol.Envelope
-	parkedAt time.Time
+	directWakeSeq uint64
+	env           protocol.Envelope
+	parkedAt      time.Time
 	// wokenBefore is the wake-up mark the arm displaced, carried for the
 	// same reason as parkedAt: a dispatch that never reaches the wire has
 	// to give back everything the arm spent on it, and the mark is part of
@@ -1449,6 +1461,10 @@ func (s *Service) retryDueDeliveries(now time.Time) {
 	// on an answer nobody asked for. See finishRecipientReading for why
 	// the commit is not inside the plan.
 	s.finishRecipientReading(reachable, candidates)
+	s.measureMissingDirectDMV2(reachable, candidates)
+	if s.directDMV2BeforeArmTest != nil {
+		s.directDMV2BeforeArmTest()
+	}
 
 	dueMessages := s.armDueDeliveries(candidates, reachable, now)
 
@@ -1478,6 +1494,7 @@ func (s *Service) retryDueDeliveries(now time.Time) {
 		log.Info().Str("message_id", string(receipt.MessageID)).Str("recipient", receipt.Recipient).Str("status", receipt.Status).Msg("seen_receipt_retry_resend")
 		s.distributeReceipt(receipt)
 	}
+	s.retryDueDirectDMV2Seen(now)
 }
 
 // measureRecipientReachability answers, once per tick and once per
@@ -1502,13 +1519,18 @@ func (s *Service) retryDueDeliveries(now time.Time) {
 // recipient answers "reachable": nothing is ever held, which is the legacy
 // unconditional behaviour byte for byte.
 func (s *Service) measureRecipientReachability() recipientReachability {
-	if !s.cfg.HoldDMUntilReachable {
+	gateOff := !s.cfg.HoldDMUntilReachable
+	if gateOff && s.directDMV2WriteSlots == nil {
 		return recipientReachability{gateOff: true}
 	}
 	probes := make(map[string]struct{})
+	direct := make(map[string]bool)
 	s.deliveryMu.RLock()
 	for _, entry := range s.awaitingDelivered {
 		probes[entry.Envelope.Recipient] = struct{}{}
+		if directmsg.HasV2EnvelopePrefix(entry.Envelope.Payload) {
+			direct[entry.Envelope.Recipient] = false
+		}
 	}
 	// Everything registered up to here is what this reading is about.
 	// Deliveries written after it may share a recipient with one of these
@@ -1521,14 +1543,20 @@ func (s *Service) measureRecipientReachability() recipientReachability {
 	for recipient := range probes {
 		presence[recipient] = s.recipientPassState[recipient].presence
 	}
+	wakeSeq := s.directDMV2WakeSeq
 	s.deliveryMu.RUnlock()
 	measured := make(map[string]bool, len(probes))
 	departures := make(map[string]uint64, len(probes))
 	for recipient := range probes {
-		measured[recipient] = s.recipientHasPath(recipient)
-		departures[recipient] = s.presenceDeparturesFor(domain.PeerIdentityFromWire(recipient))
+		if !gateOff {
+			measured[recipient] = s.recipientHasPath(recipient)
+			departures[recipient] = s.presenceDeparturesFor(domain.PeerIdentityFromWire(recipient))
+		}
 	}
-	return recipientReachability{measured: measured, seenUpTo: seenUpTo, presence: presence, departures: departures}
+	for recipient := range direct {
+		direct[recipient] = s.directDMV2RetryWriter(recipient) != nil
+	}
+	return recipientReachability{measured: measured, directDMV2: direct, directWakeSeq: wakeSeq, seenUpTo: seenUpTo, presence: presence, departures: departures, gateOff: gateOff}
 }
 
 // recipientHasPath is the reachability question asked WITHOUT sending
@@ -1618,7 +1646,9 @@ type recipientPassRecord struct {
 // missing key in a bare map reads as false, which would hold every message
 // on a node that has the gate turned off.
 type recipientReachability struct {
-	measured map[string]bool
+	directWakeSeq uint64
+	directDMV2    map[string]bool
+	measured      map[string]bool
 	// seenUpTo is the last registration order in the awaiting set when
 	// this reading was taken. A delivery above it did not exist yet, so
 	// this reading says nothing about it — its recipient's answer belongs
@@ -1744,7 +1774,7 @@ func (s *Service) wakeOverdueForReturningPeer(peer domain.PeerIdentity, now time
 	// those spends behind in the visit it is about to close.
 	s.noteRecipientHereLocked(wire)
 	for _, entry := range s.awaitingDelivered {
-		if entry.Envelope.Recipient != wire {
+		if entry.Envelope.Recipient != wire || directmsg.HasV2EnvelopePrefix(entry.Envelope.Payload) {
 			continue
 		}
 		// A message emitted moments ago needs no special case: the floor
@@ -2075,6 +2105,9 @@ func (s *Service) currentVisitLocked(recipient string) uint64 {
 //
 // Caller MUST hold s.deliveryMu.Lock.
 func (s *Service) applyReachabilityReturnLocked(entry *deliveryRetryEntry, reachable recipientReachability, now time.Time) {
+	if directmsg.HasV2EnvelopePrefix(entry.Envelope.Payload) {
+		return
+	}
 	canReach, known := reachable.canReach(entry.Envelope.Recipient)
 	if !known || !canReach {
 		return // nobody asked, or there is still no way to reach them
@@ -2262,7 +2295,7 @@ func (s *Service) planDueSeenAcks(now time.Time) []protocol.DeliveryReceipt {
 	var due []protocol.DeliveryReceipt
 	s.deliveryMu.Lock()
 	for id, entry := range s.awaitingSeenAck {
-		if entry.NextAttemptAt.After(now) {
+		if entry.NextAttemptAt.After(now) || s.isDirectDMV2OwnSeen(entry.Receipt) {
 			continue
 		}
 		if entry.Attempts >= maxAttempts {
@@ -2329,7 +2362,12 @@ func (s *Service) armDueDeliveries(candidates []dueCandidate, reachable recipien
 			// as well as for one that has finished — see emissionInFlight.
 			continue
 		}
-		if canSend, _ := reachable.canReach(c.env.Recipient); canSend {
+		canSend, _ := reachable.canReach(c.env.Recipient)
+		isDirect := directmsg.HasV2EnvelopePrefix(c.env.Payload)
+		if isDirect {
+			canSend = reachable.directDMV2[c.env.Recipient]
+		}
+		if canSend {
 			s.resetBackoffOnReturn(entry, c.id)
 			// Attempted, not confirmed. The hold is only cleared by a sink
 			// reporting that it took the frame (confirmEnvelopeOnWire), so
@@ -2352,12 +2390,13 @@ func (s *Service) armDueDeliveries(candidates []dueCandidate, reachable recipien
 			// refused. The displaced value travels with the dispatch so
 			// the cancel paths can take the claim back.
 			entry.WokenSinceLastDispatch = false
-			due = append(due, dueDispatch{env: entry.Envelope, parkedAt: parkedAt, wokenBefore: wokenBefore, claimedAt: entry.ClaimedAt})
+			due = append(due, dueDispatch{env: entry.Envelope, parkedAt: parkedAt, wokenBefore: wokenBefore, claimedAt: entry.ClaimedAt, directWakeSeq: entry.directWakeSeq})
 			continue
 		}
 		entry.Hold = holdUnreachable
 		entry.NextAttemptAt = now.Add(deliveryHoldPollInterval)
-		if !s.lastReachabilityKickAt.Before(now) {
+		if (isDirect && entry.directWakeSeq > reachable.directWakeSeq) ||
+			(!isDirect && !s.lastReachabilityKickAt.Before(now)) {
 			// A reachability kick landed while this pass was deciding, so
 			// the "unreachable" answer it is acting on may already be out
 			// of date — and the entry was not yet held when the kick
@@ -2454,7 +2493,8 @@ func (s *Service) emitDueDelivery(due dueDispatch, now time.Time) {
 		// The claim this dispatch took goes back with the schedule: no
 		// frame was written, so nothing is in flight.
 		s.holdDeliveryRetry(messageIdentityOf(envelope), now, holdUnreachable, due.wokenBefore,
-			emissionClaimRollback{wrote: wroteClaim, restore: due.claimedAt})
+			emissionClaimRollback{wrote: wroteClaim, restore: due.claimedAt,
+				checkDirectWake: directmsg.HasV2EnvelopePrefix(envelope.Payload), directWakeSeq: due.directWakeSeq})
 		return
 	}
 	// Nothing is charged, cleared or announced here. The sinks answer on
@@ -3017,7 +3057,7 @@ func (s *Service) holdDeliveryRetry(id messageIdentity, from time.Time, reason d
 		if wokenBefore {
 			entry.WokenSinceLastDispatch = true
 		}
-		if s.deliveryFrozenLocked(id) {
+		if s.deliveryFrozenLocked(id) || (claim.checkDirectWake && entry.directWakeSeq > claim.directWakeSeq) {
 			entry.NextAttemptAt = from
 		} else {
 			entry.NextAttemptAt = from.Add(deliveryHoldPollInterval)
@@ -3212,7 +3252,7 @@ func (s *Service) kickDeliveryRetriesForReachable(identities map[domain.PeerIden
 		// woken by the measurement in planDueDeliveries instead — it asks
 		// the same question of the same authority, without this call site
 		// having to know what changed. See applyPathReturnLocked.
-		if entry.Hold != holdUnreachable {
+		if entry.Hold != holdUnreachable || directmsg.HasV2EnvelopePrefix(entry.Envelope.Payload) {
 			continue
 		}
 		if _, ok := identities[domain.PeerIdentityFromWire(entry.Envelope.Recipient)]; ok {
@@ -3353,7 +3393,7 @@ func (s *Service) failDelivery(envelope protocol.Envelope, status, reason string
 // loop stops. No local retry state is kept for the ack itself: every
 // (re)arrival of the seen receipt re-triggers it, mirroring the
 // duplicate-DM → delivered re-send contract.
-func (s *Service) sendSeenAck(seen protocol.DeliveryReceipt) {
+func (s *Service) sendSeenAckVia(seen protocol.DeliveryReceipt, directReply func(protocol.DeliveryReceipt)) {
 	defer crashlog.DeferRecover()
 	ack := protocol.DeliveryReceipt{
 		MessageID:   seen.MessageID,
@@ -3362,7 +3402,15 @@ func (s *Service) sendSeenAck(seen protocol.DeliveryReceipt) {
 		Status:      protocol.ReceiptStatusSeenAck,
 		DeliveredAt: time.Now().UTC(),
 	}
+	ack, ok := s.prepareOwnDeliveryReceipt(ack, seen.Signature != "")
+	if !ok {
+		return
+	}
 	log.Info().Str("message_id", string(ack.MessageID)).Str("recipient", ack.Recipient).Msg("seen_ack_send")
+	if directReply != nil {
+		directReply(ack)
+		return
+	}
 	s.distributeReceipt(ack)
 }
 
@@ -3384,6 +3432,9 @@ func (s *Service) sendSeenAck(seen protocol.DeliveryReceipt) {
 // dispatchedAt identifies this attempt to the confirmations, which arrive
 // on their own schedules.
 func (s *Service) dispatchEnvelopeRetry(envelope protocol.Envelope, dispatchedAt time.Time) (attempted bool) {
+	if directmsg.HasV2EnvelopePrefix(envelope.Payload) {
+		return s.dispatchDirectDMV2Retry(envelope, dispatchedAt)
+	}
 	// TODO(transit-age-restamp-removal): the legacy-ceiling date, decided
 	// ONCE for this dispatch so every copy it produces — the push, the
 	// directed relay, the gossip fan-out — carries the same one. See

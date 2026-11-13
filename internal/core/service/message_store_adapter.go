@@ -588,7 +588,7 @@ func (a *MessageStoreAdapter) MarkDeliveryFailedRef(ref domain.MessageRef) error
 }
 func (a *MessageStoreAdapter) MarkSeenConfirmedRef(ref domain.MessageRef) error {
 	if a == nil || a.chatlog == nil || a.chatlog.Store() == nil {
-		return nil
+		return errors.New("seen confirmation store unavailable")
 	}
 	return a.chatlog.Store().MarkSeenConfirmedRef(a.opContext(), ref)
 }

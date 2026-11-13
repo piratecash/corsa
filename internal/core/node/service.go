@@ -90,8 +90,16 @@ type MessageStore interface {
 	UpdateDeliveryStatus(receipt protocol.DeliveryReceipt) bool
 }
 
+type receiptSignaturePolicy interface {
+	RequiresSignedReceipt(domain.MessageRef) (bool, error)
+}
+
 type Service struct {
-	r2OwnDMOwner *ownDMProvenanceOwner // immutable before candidate constructor returns; ordinary nil
+	directDMV2WakeSeq       uint64                // deliveryMu
+	directDMV2BeforeArmTest func()                // installed by the overlay test
+	directDMV2WriteSlots    chan struct{}         // bounded overlay writer jobs
+	directDMV2ListenerTest  bool                  // overlay activation only
+	r2OwnDMOwner            *ownDMProvenanceOwner // immutable before candidate constructor returns; ordinary nil
 	// Immutable constructor/private-factory composition; no ordinary activation.
 	proofToken     *proofTransportServiceToken
 	findNode       *findNodeAdapter
@@ -6013,6 +6021,7 @@ func (s *Service) startInboundSessionDeliveryOwned(connID domain.ConnID, backlog
 	// Self-checked inside the kick, so an inbound peer that is not a
 	// usable delivery target is a no-op.
 	if kickPeer := s.authenticatedInboundPeerIdentity(connID); !kickPeer.IsZero() {
+		s.wakeDirectDMV2Inbound(connID, kickPeer)
 		s.goBackground(func() {
 			s.kickDeliveryRetriesForReachable(map[domain.PeerIdentity]struct{}{kickPeer: {}})
 			s.wakeOverdueForReturningPeer(kickPeer, time.Now().UTC())
@@ -7477,6 +7486,10 @@ func (s *Service) storeMessageFrame(frame protocol.Frame) protocol.Frame {
 		return protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidSendMessage}
 	}
 
+	if frame.Type == "send_message" && strings.HasPrefix(msg.Body, directmsg.V2EnvelopePrefix) {
+		return s.storeLocalDirectDMV2(msg)
+	}
+
 	stored, count, errCode := s.storeIncomingMessage(msg, true)
 	if errCode != "" {
 		return protocol.Frame{Type: "error", Code: errCode}
@@ -7559,6 +7572,10 @@ func (s *Service) storeDeliveryReceiptFrame(frame protocol.Frame) protocol.Frame
 		return protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidSendDeliveryReceipt}
 	}
 
+	receipt, ok := s.prepareOwnDeliveryReceipt(receipt, false)
+	if !ok {
+		return protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidSendDeliveryReceipt}
+	}
 	outcome := s.storeDeliveryReceipt(receipt)
 	if !outcome.ackable {
 		// The chatlog refused the status. Reporting success here would
@@ -8895,11 +8912,17 @@ func (s *Service) finishReceipt(key string, receipt protocol.DeliveryReceipt, en
 	aggregate = s.aggregateStatus
 	s.statusMu.Unlock()
 
+	if receipt.Status == protocol.ReceiptStatusSeen && receipt.Sender == s.identity.Address {
+		s.registerAwaitingSeenAckLocked(receipt, now)
+	}
+	if receipt.Status == protocol.ReceiptStatusSeenAck && receipt.Recipient == s.identity.Address {
+		delete(s.awaitingSeenAck, madeByMessageAuthor(receipt))
+	}
 	s.seenReceipts.Add(key)
 	// seen_ack is scheduler plumbing, not a deliverable artefact: dedupe it
 	// via seenReceipts but never store it in s.receipts, so it cannot leak
 	// through fetch_delivery_receipts or the auth-time backlog replay.
-	if receipt.Status != protocol.ReceiptStatusSeenAck {
+	if receipt.Status != protocol.ReceiptStatusSeenAck && !s.isDirectDMV2OwnSeen(receipt) {
 		list := append(s.receipts[receipt.Recipient], receipt)
 		// Hard-cap every recipient's backlog. Own-identity receipts are never
 		// drained by ack_delete (that only fires for relay/forward recipients),
@@ -8980,6 +9003,23 @@ type receiptOutcome struct {
 // INNER), released before the statusMu window; see the offline-recipient early
 // return.
 func (s *Service) storeDeliveryReceipt(receipt protocol.DeliveryReceipt) receiptOutcome {
+	return s.storeDeliveryReceiptWithSeenReply(receipt, nil)
+}
+
+func (s *Service) storeDeliveryReceiptWithSeenReply(receipt protocol.DeliveryReceipt, directReply func(protocol.DeliveryReceipt)) receiptOutcome {
+	if !s.authenticateReceiptSignature(receipt) {
+		return receiptOutcome{}
+	}
+	if receipt.Signature == "" && receipt.Recipient == s.identity.Address {
+		policy, hasPolicy := s.messageStore.(receiptSignaturePolicy)
+		id, confirms := confirmedMessageOf(receipt)
+		if hasPolicy && confirms {
+			required, err := policy.RequiresSignedReceipt(deliveryMessageRef(id))
+			if err != nil || required {
+				return receiptOutcome{}
+			}
+		}
+	}
 	// Stamped here because this is the one door: every receipt that gets
 	// stored, deduped, backlogged or announced comes through it, whether it
 	// arrived over the wire, over the relay, or was raised by this node
@@ -9009,7 +9049,7 @@ func (s *Service) storeDeliveryReceipt(receipt protocol.DeliveryReceipt) receipt
 		// likely never received our seen_ack and is retrying — answer it
 		// again, mirroring the duplicate-DM → delivered re-send contract.
 		if receipt.Status == protocol.ReceiptStatusSeen && receipt.Recipient == s.identity.Address {
-			s.goBackground(func() { s.sendSeenAck(receipt) })
+			s.goBackground(func() { s.sendSeenAckVia(receipt, directReply) })
 		}
 		return receiptOutcome{count: count, ackable: true}
 	}
@@ -9128,7 +9168,6 @@ func (s *Service) storeDeliveryReceipt(receipt protocol.DeliveryReceipt) receipt
 			return receiptOutcome{count: count, ackable: true}
 		}
 	}
-	now := time.Now().UTC()
 	// Decided inside the lock stack, ACTED ON after the durable write —
 	// see the commit step below for why the order matters.
 	endsRetry := false
@@ -9152,13 +9191,6 @@ func (s *Service) storeDeliveryReceipt(receipt protocol.DeliveryReceipt) receipt
 		if _, awaiting := s.awaitingDelivered[madeByMessageRecipient(receipt)]; awaiting {
 			endsRetry = true
 		}
-	case receipt.Recipient == s.identity.Address && receipt.Status == protocol.ReceiptStatusSeenAck:
-		// The original sender confirmed our seen receipt — stop retrying it.
-		delete(s.awaitingSeenAck, madeByMessageAuthor(receipt))
-	case receipt.Sender == s.identity.Address && receipt.Status == protocol.ReceiptStatusSeen:
-		// Our own outgoing seen receipt — retry it until the original
-		// sender's seen_ack arrives (etap 3.3 contract).
-		s.registerAwaitingSeenAckLocked(receipt, now)
 	}
 	count := len(s.receipts[receipt.Recipient])
 	s.deliveryMu.Unlock()
@@ -9176,6 +9208,12 @@ func (s *Service) storeDeliveryReceipt(receipt protocol.DeliveryReceipt) receipt
 	if s.messageStore != nil && receipt.Status != protocol.ReceiptStatusSeenAck {
 		receiptStoreOK = s.messageStore.UpdateDeliveryStatus(receipt)
 	}
+	if receipt.Status == protocol.ReceiptStatusSeenAck && receipt.Recipient == s.identity.Address && s.seenAckJournal != nil {
+		if err := s.seenAckJournal.MarkSeenConfirmedRef(deliveryMessageRef(madeByMessageAuthor(receipt))); err != nil {
+			log.Warn().Str("message_id", string(receipt.MessageID)).Err(err).Msg("seen_ack_journal_write_failed")
+			return receiptOutcome{count: count}
+		}
+	}
 	// COMMIT. Everything that means "this receipt is finished with" waits
 	// for the write above and is applied here, together: the retry entry
 	// whose deletion stops the sender, the dedup key that suppresses the
@@ -9190,11 +9228,9 @@ func (s *Service) storeDeliveryReceipt(receipt protocol.DeliveryReceipt) receipt
 	// which is capped, expires after three minutes and does not survive
 	// their restart. What it costs is one re-sent message, which the
 	// recipient discards as a duplicate.
-	// committed and receiptStoreOK are NOT the same question, and conflating
-	// them cost the seen_ack path an ack it was owed: a seen_ack writes no
-	// delivery status, so it is finished with on arrival, while
-	// receiptStoreOK goes on to mean "publish the badge update", which a
-	// seen_ack must not do.
+	// A seen_ack writes its journal instead of a delivery status.
+	// Neither a failed status update nor a failed journal write can
+	// clear the corresponding retry or claim the dedup key.
 	committed := receiptStoreOK
 	result := committedFirst
 	if committed {
@@ -9253,20 +9289,9 @@ func (s *Service) storeDeliveryReceipt(receipt protocol.DeliveryReceipt) receipt
 		// their restart nothing re-sends this receipt. Acking a seen we
 		// failed to record leaves the message unread here for good.
 		if receipt.Status == protocol.ReceiptStatusSeen && receiptStoreOK {
-			s.goBackground(func() { s.sendSeenAck(receipt) })
+			s.goBackground(func() { s.sendSeenAckVia(receipt, directReply) })
 		}
-		// Persist the confirmation so the seen retry does not resurrect
-		// after a restart (the journal is chatlog-backed; SQLite I/O runs
-		// outside every domain mutex on the background pool).
-		if receipt.Status == protocol.ReceiptStatusSeenAck && s.seenAckJournal != nil {
-			journal := s.seenAckJournal
-			id := receipt.MessageID
-			s.goBackground(func() {
-				if err := journal.MarkSeenConfirmedRef(deliveryMessageRef(madeByMessageAuthor(receipt))); err != nil {
-					log.Warn().Str("message_id", string(id)).Err(err).Msg("seen_ack_journal_write_failed")
-				}
-			})
-		}
+
 		return receiptOutcome{stored: true, count: count, ackable: committed}
 	}
 
@@ -10938,6 +10963,12 @@ func (s *Service) handleInboundPushMessage(connID domain.ConnID, frame protocol.
 		return
 	}
 
+	if s.directDMV2ListenerEnabled() && msg.Topic == "dm" && strings.HasPrefix(msg.Body, directmsg.V2EnvelopePrefix) {
+		store := s.messageStore.(directDMV2ListenerStore)
+		_ = s.receiveDirectDMV2OnListener(s.runCtx, connID, domain.CapDirectDMV2, msg, store.StoreDirectDMV2ForReceipt)
+		return
+	}
+
 	peerAddr := s.inboundPeerAddress(connID)
 	peerIdentity := s.inboundPeerIdentity(connID)
 	// Ingress link for hop accounting + echo suppression
@@ -11032,6 +11063,10 @@ func (s *Service) handleInboundPushDeliveryReceipt(connID domain.ConnID, frame p
 	}
 	receipt, err := receiptFromReceiptFrame(*frame.Receipt)
 	if err != nil {
+		return
+	}
+
+	if s.handleDirectDMV2ListenerSeen(connID, receipt) {
 		return
 	}
 

@@ -479,6 +479,10 @@ func decryptDirectMessages(id *identity.Identity, contacts map[string]Contact, m
 // failure hook: history loads are one of the three entry points that must
 // start recovery for rows they cannot open.
 func decryptDirectMessagesReporting(id *identity.Identity, contacts map[string]Contact, messages []MessageRecord, receipts []DeliveryReceipt, pendingItems []PendingMessage, report func(DecryptFailure), reportSuccess func(*DirectMessage)) []DirectMessage {
+	return decryptDirectMessagesForNetwork(id, "", contacts, messages, receipts, pendingItems, report, reportSuccess)
+}
+
+func decryptDirectMessagesForNetwork(id *identity.Identity, network string, contacts map[string]Contact, messages []MessageRecord, receipts []DeliveryReceipt, pendingItems []PendingMessage, report func(DecryptFailure), reportSuccess func(*DirectMessage)) []DirectMessage {
 	note := func(class DecryptFailureClass, messageID, sender, recipient string) {
 		if report == nil || messageID == "" || recipient != id.Address || sender == id.Address {
 			return
@@ -533,7 +537,8 @@ func decryptDirectMessagesReporting(id *identity.Identity, contacts map[string]C
 			senderPubKey = contact.PubKey
 		}
 
-		message, err := directmsg.DecryptForIdentity(id, sender, senderPubKey, recipient, ciphertext)
+		ref := domain.MessageRef{Topic: "dm", ID: item.ID, Sender: sender, Recipient: recipient}
+		message, err := openApplicationDM(id, network, ref, senderPubKey, ciphertext, item.Timestamp, nil)
 		if err != nil {
 			if errors.Is(err, directmsg.ErrSealedUnreadable) {
 				note(DecryptFailureSealedUnreadable, item.ID, sender, recipient)

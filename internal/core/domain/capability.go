@@ -14,6 +14,9 @@ const (
 	// Reserved overlay capabilities are parsed but remain inactive and unadvertised.
 	CapOverlayFindNodeV1  Capability = "overlay_find_node_v1"
 	CapOverlayResponderV1 Capability = "overlay_responder_v1"
+	// CapSignedReceiptAckV1 is reserved for acknowledging an exact signed receipt.
+	CapSignedReceiptAckV1 Capability = "signed_receipt_ack_v1"
+	CapDirectDMV2         Capability = "direct_dm_v2" // inactive overlay proposal
 
 	// CapMeshRelayV1 gates hop-by-hop relay (relay_message frames).
 	CapMeshRelayV1 Capability = "mesh_relay_v1"
@@ -264,7 +267,7 @@ func (c Capability) String() string { return string(c) }
 func ParseCapability(s string) (Capability, bool) {
 	c := Capability(strings.ToLower(s))
 	switch c {
-	case CapOverlayFindNodeV1, CapOverlayResponderV1, CapMeshRelayV1, CapMeshRoutingV1, CapMeshRoutingV2, CapFileTransferV1, CapMeshRouteProbeV1, CapMeshRouteQueryV1, CapMeshRouteSyncV1, CapMeshRoutingV3, CapMeshAttestedLinksV1, CapMeshPoisonReverseV1, CapMeshPoisonReverseV2, CapMeshDatagramV1, CapMeshDatagramTransitV1:
+	case CapOverlayFindNodeV1, CapOverlayResponderV1, CapSignedReceiptAckV1, CapDirectDMV2, CapMeshRelayV1, CapMeshRoutingV1, CapMeshRoutingV2, CapFileTransferV1, CapMeshRouteProbeV1, CapMeshRouteQueryV1, CapMeshRouteSyncV1, CapMeshRoutingV3, CapMeshAttestedLinksV1, CapMeshPoisonReverseV1, CapMeshPoisonReverseV2, CapMeshDatagramV1, CapMeshDatagramTransitV1:
 		return c, true
 	default:
 		return "", false

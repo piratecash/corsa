@@ -145,13 +145,17 @@ func VerifyStoredV2(expected V2Binding, senderPublicKeyBase64, encoded string) (
 	if !strings.HasPrefix(encoded, V2EnvelopePrefix) {
 		return V2Metadata{}, false, nil
 	}
+	payload, err := verifyV2WithStoredFlag(expected, senderPublicKeyBase64, encoded)
+	return payload.Metadata, true, err
+}
+
+func verifyV2WithStoredFlag(expected V2Binding, senderPublicKeyBase64, encoded string) (v2Payload, error) {
 	envelope, err := decodeV2(encoded)
 	if err != nil {
-		return V2Metadata{}, true, err
+		return v2Payload{}, err
 	}
 	expected.Flag = envelope.Payload.Metadata.Flag
-	payload, err := authenticateV2(expected, senderPublicKeyBase64, envelope)
-	return payload.Metadata, true, err
+	return authenticateV2(expected, senderPublicKeyBase64, envelope)
 }
 
 func decodeV2(encoded string) (v2Envelope, error) {
@@ -202,6 +206,21 @@ func OpenV2(id *identity.Identity, expected V2Binding, senderPublicKeyBase64, en
 	if err != nil {
 		return nil, err
 	}
+	return openVerifiedV2(id, payload)
+}
+
+// OpenStoredV2 authenticates a stored envelope using its signed author flag.
+// A caller supplies all other binding fields from the exact row reference.
+func OpenStoredV2(id *identity.Identity, expected V2Binding, senderPublicKeyBase64, encoded string) (*PlainMessage, error) {
+	payload, err := verifyV2WithStoredFlag(expected, senderPublicKeyBase64, encoded)
+	if err != nil {
+		return nil, err
+	}
+	return openVerifiedV2(id, payload)
+}
+
+func openVerifiedV2(id *identity.Identity, payload v2Payload) (*PlainMessage, error) {
+	expected := payload.Metadata.V2Binding
 	var role string
 	var part sealedPart
 	switch id.Address {

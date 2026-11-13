@@ -110,8 +110,19 @@ func (s *Store) MarkDeliveryFailedRef(ctx context.Context, ref domain.MessageRef
 }
 
 func (s *Store) MarkSeenConfirmedRef(ctx context.Context, ref domain.MessageRef) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO seen_ack(topic,id,sender,recipient) SELECT topic,id,sender,recipient FROM messages WHERE topic=? AND id=? AND sender=? AND recipient=? ON CONFLICT(topic,id,sender,recipient) DO NOTHING`, ref.Topic, ref.ID, ref.Sender, ref.Recipient)
-	return err
+	result, err := s.db.ExecContext(ctx, `INSERT INTO seen_ack(topic,id,sender,recipient) SELECT topic,id,sender,recipient FROM messages WHERE topic=? AND id=? AND sender=? AND recipient=? ON CONFLICT(topic,id,sender,recipient) DO NOTHING`, ref.Topic, ref.ID, ref.Sender, ref.Recipient)
+	if err != nil {
+		return err
+	}
+	written, err := result.RowsAffected()
+	if err != nil || written > 0 {
+		return err
+	}
+	// A zero-row insert can be an idempotent confirmation or a missing
+	// message. Only the first is a durable success for the retry owner.
+	var exists int
+	return s.db.QueryRowContext(ctx, `SELECT 1 FROM seen_ack JOIN messages USING(topic,id,sender,recipient) WHERE topic=? AND id=? AND sender=? AND recipient=?`,
+		ref.Topic, ref.ID, ref.Sender, ref.Recipient).Scan(&exists)
 }
 
 // SentMessageRefs seeds the bounded solicited-receipt set without merging

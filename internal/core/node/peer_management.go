@@ -4070,6 +4070,10 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *
 		if err != nil {
 			return
 		}
+		if s.handleDirectDMV2DialerSeen(session, receipt) {
+			return
+		}
+
 		// Identity gate: the pushed receipt's Recipient must match our own
 		// identity or an identity we actively subscribe to (full-node relay).
 		// Without this check a peer could push a receipt with arbitrary

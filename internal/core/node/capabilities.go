@@ -145,6 +145,9 @@ func (s *Service) localHandshakeCapabilities() []domain.Capability {
 	if s.ownedFindNodeAdvertiseTest {
 		caps = append(caps, domain.CapOverlayFindNodeV1)
 	}
+	if s.directDMV2ListenerEnabled() {
+		caps = append(caps, domain.CapDirectDMV2)
+	}
 	return caps
 }
 

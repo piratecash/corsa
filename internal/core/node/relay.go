@@ -2657,6 +2657,10 @@ func (s *Service) resendDeliveryReceipt(msg incomingMessage) {
 // storeDeliveryReceipt and is shared by the duplicate re-send paths and
 // the delivery retry scheduler.
 func (s *Service) distributeReceipt(receipt protocol.DeliveryReceipt) {
+	if s.isDirectDMV2OwnSeen(receipt) {
+		s.tryDirectDMV2OwnSeen(receipt)
+		return
+	}
 	if !s.handleRelayReceipt(receipt) {
 		s.goBackground(func() { s.gossipReceipt(receipt) })
 	}
@@ -2677,11 +2681,13 @@ func deliveredReceiptFor(localAddress string, msg incomingMessage) protocol.Deli
 
 func receiptFrame(receipt protocol.DeliveryReceipt) protocol.ReceiptFrame {
 	return protocol.ReceiptFrame{
-		MessageID:   string(receipt.MessageID),
-		Sender:      receipt.Sender,
-		Recipient:   receipt.Recipient,
-		Status:      receipt.Status,
-		DeliveredAt: receipt.DeliveredAt.UTC().Format(time.RFC3339),
+		Signature:       receipt.Signature,
+		SignerPublicKey: receipt.SignerPublicKey,
+		MessageID:       string(receipt.MessageID),
+		Sender:          receipt.Sender,
+		Recipient:       receipt.Recipient,
+		Status:          receipt.Status,
+		DeliveredAt:     receipt.DeliveredAt.UTC().Format(time.RFC3339),
 	}
 }
 
@@ -2725,11 +2731,13 @@ func receiptFromFrame(frame protocol.Frame) (protocol.DeliveryReceipt, error) {
 	}
 
 	return protocol.DeliveryReceipt{
-		MessageID:   protocol.MessageID(frame.ID),
-		Sender:      frame.Address,
-		Recipient:   frame.Recipient,
-		Status:      frame.Status,
-		DeliveredAt: deliveredAt.UTC(),
+		MessageID:       protocol.MessageID(frame.ID),
+		Signature:       frame.Signature,
+		SignerPublicKey: frame.PubKey,
+		Sender:          frame.Address,
+		Recipient:       frame.Recipient,
+		Status:          frame.Status,
+		DeliveredAt:     deliveredAt.UTC(),
 	}, nil
 }
 
@@ -2742,10 +2750,12 @@ func receiptFromReceiptFrame(frame protocol.ReceiptFrame) (protocol.DeliveryRece
 		return protocol.DeliveryReceipt{}, err
 	}
 	return protocol.DeliveryReceipt{
-		MessageID:   protocol.MessageID(frame.MessageID),
-		Sender:      frame.Sender,
-		Recipient:   frame.Recipient,
-		Status:      frame.Status,
-		DeliveredAt: deliveredAt.UTC(),
+		MessageID:       protocol.MessageID(frame.MessageID),
+		Signature:       frame.Signature,
+		SignerPublicKey: frame.SignerPublicKey,
+		Sender:          frame.Sender,
+		Recipient:       frame.Recipient,
+		Status:          frame.Status,
+		DeliveredAt:     deliveredAt.UTC(),
 	}, nil
 }

@@ -1859,6 +1859,10 @@ func (s *Service) registerCMSession(session *peerSession, slotAddress domain.Pee
 	if s.k3Registered != nil {
 		s.k3FinishSessionLocked(k3)
 	}
+	if s.directDMV2WriteSlots != nil && session.netCore != nil && capsContain(session.capabilities, domain.CapDirectDMV2) {
+		s.wakeDirectDMV2Locked(session.peerIdentity, session.netCore)
+	}
+
 	adDeliveryLocked = false
 	s.deliveryMu.Unlock()
 	log.Trace().Str("site", "registerCMSession").Str("phase", "lock_released").Str("address", string(dialAddress)).Msg("delivery_mu_writer")
