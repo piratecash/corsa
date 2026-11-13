@@ -3,12 +3,20 @@ package capture
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"sync"
 
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/secretfile"
 )
+
+const maxCaptureFileBytes int64 = 16 << 20
+
+var errCaptureFileLimit = errors.New("capture file size limit reached")
 
 // Writer is the interface for the destination of capture events.
 // Production code writes to an *os.File; tests inject an in-memory buffer.
@@ -23,18 +31,75 @@ type Writer interface {
 // Production code opens a file; tests inject an in-memory buffer factory.
 type WriterFactory func(path string) (Writer, error)
 
-// DefaultWriterFactory opens a regular file for writing.
+// DefaultWriterFactory creates a new protected file for writing.
 func DefaultWriterFactory(path string) (Writer, error) {
-	f, err := os.Create(path)
+	w, err := openCaptureFile(path)
 	if err != nil {
 		return nil, err
 	}
-	return &fileWriter{File: f}, nil
+	return w, nil
 }
 
-type fileWriter struct{ *os.File }
+func openCaptureFile(path string) (*fileWriter, error) {
+	dir, err := secretfile.Open(filepath.Dir(path))
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = dir.Close() }()
+	f, err := dir.CreateExclusive(filepath.Base(path))
+	if err != nil {
+		return nil, err
+	}
+	return &fileWriter{file: f, dir: filepath.Dir(path), remaining: maxCaptureFileBytes}, nil
+}
 
-func (fw *fileWriter) Sync() error { return fw.File.Sync() }
+type fileWriter struct {
+	file      *os.File
+	dir       string
+	mu        sync.Mutex
+	remaining int64
+	storage   *captureStorage
+	closed    bool
+}
+
+func (fw *fileWriter) Sync() error { return fw.file.Sync() }
+
+func (fw *fileWriter) Close() error {
+	fw.mu.Lock()
+	defer fw.mu.Unlock()
+	if fw.closed {
+		return os.ErrClosed
+	}
+	fw.closed = true
+	err := fw.file.Close()
+	if fw.storage != nil {
+		fw.storage.writerClosed()
+	}
+	return err
+}
+
+func (fw *fileWriter) Write(p []byte) (int, error) {
+	fw.mu.Lock()
+	defer fw.mu.Unlock()
+	if fw.closed {
+		return 0, os.ErrClosed
+	}
+	size := int64(len(p))
+	if size > fw.remaining {
+		return 0, errCaptureFileLimit
+	}
+	if fw.storage != nil {
+		if err := fw.storage.reserve(fw.dir, size); err != nil {
+			return 0, err
+		}
+	}
+	n, err := fw.file.Write(p)
+	fw.remaining -= int64(n)
+	if fw.storage != nil {
+		fw.storage.finish(size, int64(n))
+	}
+	return n, err
+}
 
 // ---------------------------------------------------------------------------
 // Rendering — compact and pretty format (plan §6.3)
@@ -75,10 +140,9 @@ func renderCompactLine(w io.Writer, ev Event) error {
 //
 // Adjacent events are separated by an empty line.
 func renderPrettyLine(w io.Writer, ev Event, needSeparator bool) error {
+	separator := ""
 	if needSeparator {
-		if _, err := fmt.Fprintln(w); err != nil {
-			return err
-		}
+		separator = "\n"
 	}
 
 	ts := ev.Ts.UTC().Format("2006-01-02T15:04:05.000Z")
@@ -90,19 +154,16 @@ func renderPrettyLine(w io.Writer, ev Event, needSeparator bool) error {
 		header = fmt.Sprintf("%s %s:", ts, ev.WireDir)
 	}
 
-	if _, err := fmt.Fprintln(w, header); err != nil {
-		return err
-	}
-
+	payload := ev.Raw
 	if ev.Kind == domain.PayloadKindJSON {
 		var pretty bytes.Buffer
 		if json.Indent(&pretty, []byte(ev.Raw), "", "  ") == nil {
-			_, err := fmt.Fprintln(w, pretty.String())
-			return err
+			payload = pretty.String()
 		}
 	}
 
-	// Fallback: raw payload (non-JSON, invalid JSON, malformed).
-	_, err := fmt.Fprintln(w, ev.Raw)
+	// Commit the header and payload together so quota refusal leaves no
+	// partial event, including the preceding separator.
+	_, err := fmt.Fprintf(w, "%s%s\n%s\n", separator, header, payload)
 	return err
 }

@@ -2,6 +2,7 @@ package capture
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
 	"net/netip"
 	"os"
@@ -58,7 +59,7 @@ type ManagerOpts struct {
 	ConnResolver ConnResolver
 
 	// Factory creates a Writer for the given path.
-	// If nil, DefaultWriterFactory is used.
+	// If nil, the manager opens protected files within its storage budget.
 	Factory WriterFactory
 
 	// OnSessionEvicted, when non-nil, is called for every session the
@@ -112,7 +113,15 @@ func NewManager(ctx context.Context, opts ManagerOpts) *Manager {
 	derived, cancel := context.WithCancel(ctx)
 	factory := opts.Factory
 	if factory == nil {
-		factory = DefaultWriterFactory
+		storage := &captureStorage{baseDir: opts.BaseDir, free: captureFreeBytes}
+		factory = storage.create
+	} else {
+		factory = func(path string) (Writer, error) {
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				return nil, fmt.Errorf("capture directory: %w", err)
+			}
+			return opts.Factory(path)
+		}
 	}
 	return &Manager{
 		ctx:       derived,
@@ -441,16 +450,6 @@ func (m *Manager) OnNewConnection(info ConnInfo) {
 	// teardown themselves) — publishing Stopped then would mark the LIVE
 	// replacement session inactive, since status consumers key by ConnID.
 	go func() {
-		if err := os.MkdirAll(sessionDir, 0o755); err != nil {
-			log.Error().Err(err).Str("dir", sessionDir).Msg("capture: mkdir failed for auto-start")
-			removed := m.removeSessionIfOwner(info.ConnID, s)
-			s.initiateStop()
-			if removed {
-				m.notifyEvicted(s, err)
-			}
-			return
-		}
-
 		w, err := m.factory(filePath)
 		if err != nil {
 			log.Error().Err(err).Str("path", filePath).Msg("capture: open writer failed for auto-start")
@@ -702,11 +701,6 @@ func (m *Manager) startSessionForConn(
 	fileName := buildFileName(now, info.RemoteIP, info.ConnID, info.PeerDir)
 	filePath := filepath.Join(sessionDir, fileName)
 
-	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
-		log.Error().Err(err).Str("dir", sessionDir).Msg("capture: mkdir failed")
-		return StartEntry{FilePath: err.Error()}, startError
-	}
-
 	w, err := m.factory(filePath)
 	if err != nil {
 		log.Error().Err(err).Str("path", filePath).Msg("capture: open writer failed")
@@ -759,7 +753,7 @@ func (m *Manager) startSessionForConn(
 
 func (m *Manager) newSessionDir() string {
 	ts := m.clock().UTC().Format("2006-01-02T15-04-05Z")
-	return filepath.Join(m.baseDir, ts)
+	return filepath.Join(m.baseDir, ts+"-"+rand.Text())
 }
 
 // buildFileName constructs a filesystem-safe capture file name (plan §6.2).

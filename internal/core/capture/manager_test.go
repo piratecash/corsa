@@ -3,8 +3,12 @@ package capture_test
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net/netip"
+	"os"
+	"path/filepath"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -377,6 +381,61 @@ func TestManager_Enqueue_WritesToFile(t *testing.T) {
 	}
 	if len(content) < 10 {
 		t.Fatalf("content too short: %q", content)
+	}
+}
+
+func TestManager_RestartCapturePreservesPrivateFile(t *testing.T) {
+	const id domain.ConnID = 42
+	resolver, _ := testResolver(t, capture.ConnInfo{ConnID: id, RemoteIP: testIP, PeerDir: domain.PeerDirectionOutbound})
+	baseDir := filepath.Join(t.TempDir(), "traffic-captures")
+	m := capture.NewManager(context.Background(), capture.ManagerOpts{
+		BaseDir:      baseDir,
+		Clock:        func() time.Time { return time.Date(2026, 4, 14, 12, 44, 3, 0, time.UTC) },
+		ConnResolver: resolver,
+	})
+	t.Cleanup(m.Close)
+
+	record := func(raw string) string {
+		t.Helper()
+		started := m.StartByConnIDs([]domain.ConnID{id}, domain.CaptureFormatCompact)
+		if len(started.Started) != 1 {
+			t.Fatalf("expected capture to start: %+v", started)
+		}
+		m.EnqueueRecv(id, raw, domain.PayloadKindJSON)
+		if stopped := m.StopByConnIDs([]domain.ConnID{id}); len(stopped.Stopped) != 1 {
+			t.Fatalf("expected capture to stop: %+v", stopped)
+		}
+		return started.Started[0].FilePath
+	}
+
+	first := record(`{"type":"first"}`)
+	second := record(`{"type":"second"}`)
+	if first == second {
+		t.Fatal("capture restart reused the first path with the same clock")
+	}
+	if w, err := capture.DefaultWriterFactory(first); !errors.Is(err, os.ErrExist) {
+		if w != nil {
+			_ = w.Close()
+		}
+		t.Fatalf("expected exclusive creation to refuse an existing path, got %v", err)
+	}
+	for _, captured := range []struct{ path, event string }{{first, `{"type":"first"}`}, {second, `{"type":"second"}`}} {
+		data, err := os.ReadFile(captured.path)
+		if err != nil || !bytes.Contains(data, []byte(captured.event)) {
+			t.Fatalf("expected the recorded event in %s, read error: %v", captured.path, err)
+		}
+		if runtime.GOOS == "windows" {
+			continue // POSIX mode bits cannot verify a Windows DACL.
+		}
+		for _, path := range []string{captured.path, filepath.Dir(captured.path), baseDir} {
+			info, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if info.Mode().Perm()&0o077 != 0 {
+				t.Errorf("capture path %s has group or other permissions: %v", path, info.Mode())
+			}
+		}
 	}
 }
 

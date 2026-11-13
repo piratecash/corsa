@@ -2,12 +2,63 @@ package capture
 
 import (
 	"bytes"
+	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/domain"
 )
+
+func TestFileWriterRefusesWritesBeyondBudget(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "capture.jsonl")
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = f.Close() })
+	w := &fileWriter{file: f, remaining: 4}
+	if n, err := w.Write([]byte("1234")); n != 4 || err != nil {
+		t.Fatalf("write at the exact limit: %d, %v", n, err)
+	}
+	if n, err := w.Write([]byte("5")); n != 0 || !errors.Is(err, errCaptureFileLimit) {
+		t.Fatalf("write over the limit: %d, %v", n, err)
+	}
+	if info, err := f.Stat(); err != nil || info.Size() != 4 {
+		t.Fatalf("unexpected file size after refusal: %v, %v", info, err)
+	}
+}
+
+func TestFileWriterRefusesWholePrettyEvent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "capture.jsonl")
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = f.Close() })
+	w := &fileWriter{file: f, remaining: maxCaptureFileBytes}
+	event := Event{Ts: time.Now(), WireDir: domain.WireDirectionIn, Kind: domain.PayloadKindJSON, Raw: `{"type":"ping"}`}
+	if err := renderPrettyLine(w, event, false); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.remaining = 2 // Enough for the separator but not for the whole event.
+	if err := renderPrettyLine(w, event, true); !errors.Is(err, errCaptureFileLimit) {
+		t.Fatalf("expected budget refusal, got %v", err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) || w.remaining != 2 {
+		t.Fatal("budget refusal wrote part of an event or charged bytes")
+	}
+}
 
 func TestRenderCompactLine(t *testing.T) {
 	ts := time.Date(2026, 4, 14, 12, 44, 3, 412_000_000, time.UTC)
