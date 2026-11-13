@@ -41,7 +41,7 @@ func (attempt firstContactAttempt) event(connID domain.ConnID) *zerolog.Event {
 }
 
 type firstContactSocketTiming struct {
-	attempt firstContactAttempt
+	contact firstContactAttempt
 	elapsed time.Duration
 	err     error
 }
@@ -58,7 +58,7 @@ func openFirstContactSocket(ctx context.Context, dial rawDialer) (net.Conn, firs
 }
 
 func (timing firstContactSocketTiming) record(connID domain.ConnID, outcome string) {
-	if timing.attempt.id == 0 {
+	if timing.contact.id == 0 {
 		return
 	}
 	switch {
@@ -67,7 +67,7 @@ func (timing firstContactSocketTiming) record(connID domain.ConnID, outcome stri
 	case errors.Is(timing.err, os.ErrDeadlineExceeded):
 		outcome = "timeout"
 	}
-	timing.attempt.event(connID).Int64("elapsed_ns", timing.elapsed.Nanoseconds()).
+	timing.contact.event(connID).Int64("elapsed_ns", timing.elapsed.Nanoseconds()).
 		Str("outcome", outcome).Msg("s6_first_contact_transport")
 }
 
