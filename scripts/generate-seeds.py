@@ -3,6 +3,7 @@
 import argparse
 import ipaddress
 import json
+import os
 import socket
 import sys
 import urllib.error
@@ -28,8 +29,16 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_RPC_URL,
         help=f"RPC base URL (default: {DEFAULT_RPC_URL})",
     )
-    parser.add_argument("--rpc-user", required=True, help="RPC basic auth username")
-    parser.add_argument("--rpc-password", required=True, help="RPC basic auth password")
+    parser.add_argument(
+        "--rpc-user",
+        default=os.getenv("CORSA_RPC_USERNAME"),
+        help="RPC username (env: CORSA_RPC_USERNAME)",
+    )
+    parser.add_argument(
+        "--rpc-password",
+        default=os.getenv("CORSA_RPC_PASSWORD"),
+        help="RPC password (prefer CORSA_RPC_PASSWORD to keep the password out of command arguments)",
+    )
     parser.add_argument(
         "--output",
         default=DEFAULT_OUTPUT,
@@ -46,7 +55,10 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_LIMIT,
         help=f"Maximum number of peers to emit (default: {DEFAULT_LIMIT})",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if not args.rpc_user or not args.rpc_password:
+        parser.error("RPC credentials are required. Set CORSA_RPC_USERNAME and CORSA_RPC_PASSWORD.")
+    return args
 
 
 def parse_host_port(value: str):

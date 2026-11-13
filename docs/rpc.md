@@ -50,7 +50,7 @@ graph TB
         CT["CommandTable<br/>(in-process dispatch)"]
 
         subgraph HTTP["HTTP Wrapper — Fiber v3<br/>127.0.0.1:46464"]
-            AUTH["Auth Middleware<br/>HTTP Basic Auth (optional)"]
+            AUTH["Auth Middleware<br/>HTTP Basic Auth"]
             EXEC["POST /rpc/v1/exec<br/>(universal dispatch)"]
             FRAME["POST /rpc/v1/frame<br/>(frame dispatch, registered only)"]
             LEGACY["Legacy Routes<br/>/system/* /network/* ..."]
@@ -137,7 +137,7 @@ sequenceDiagram
 ```
 *Diagram 2 — Request processing flow.*
 
-Desktop UI calls CommandTable directly without HTTP. External clients (corsa-cli, third-party tools) go through Fiber HTTP server with optional Basic Auth, then delegate to the same CommandTable.
+Desktop UI calls CommandTable directly without HTTP. External clients (corsa-cli, third-party tools) reach the same CommandTable through the enabled HTTP RPC listener with Basic authentication.
 
 #### Operating Modes: Desktop and Node
 
@@ -235,7 +235,7 @@ Commands marked with `*` are mode-gated: when their provider is nil (standalone 
 | `CORSA_RPC_USERNAME` | _(empty)_ | HTTP Basic Auth username |
 | `CORSA_RPC_PASSWORD` | _(empty)_ | HTTP Basic Auth password |
 
-If `CORSA_RPC_USERNAME` and `CORSA_RPC_PASSWORD` are not set — access without authentication. Setting only one of them is a configuration error — `NewServer` returns an error before Fiber is created, so no port is ever bound. When auth is enabled, all 401 responses include a `WWW-Authenticate: Basic realm="corsa-rpc"` header per RFC 7235, so clients can discover the required auth scheme programmatically.
+The standalone node and Desktop start an HTTP RPC listener only when both credentials are configured. Setting only one is a configuration error. The SDK requires both credentials when HTTP RPC is enabled. HTTP RPC uses Basic authentication over plaintext HTTP. Keep the listener on loopback and use an SSH tunnel for remote administration. Authentication failures return `401` with `WWW-Authenticate: Basic realm="corsa-rpc"`.
 
 ### Architecture
 
@@ -400,11 +400,13 @@ corsa-cli sendDm '{"to": "peer-addr", "body": "hello world"}'
 # With -named flag (explicit key=value mode)
 corsa-cli -named fetchInbox topic=dm recipient=peer-addr
 
-# Authentication
-corsa-cli --username admin --password secret getPeers
+# With CORSA_RPC_USERNAME and CORSA_RPC_PASSWORD already set
+corsa-cli getPeers
 
-# Remote host
-corsa-cli --host 192.168.1.100 --port 46464 getPeers
+# Remote node listening on its own loopback. Run this in a separate terminal.
+ssh -N -L 127.0.0.1:46465:127.0.0.1:46464 admin@node.example
+# With the tunnel open, invoke the client from your local terminal.
+corsa-cli --host 127.0.0.1 --port 46465 getPeers
 ```
 
 #### Flags
@@ -418,6 +420,8 @@ corsa-cli --host 192.168.1.100 --port 46464 getPeers
 | `--named` | _(none)_ | `false` | Interpret arguments as key=value pairs |
 
 Each connection flag falls back to the matching `CORSA_RPC_*` environment variable — the same variables the node reads in `internal/core/config`. This is what makes `corsa-cli` work out of the box inside the docker image: the node container exports `CORSA_RPC_USERNAME`/`CORSA_RPC_PASSWORD` for the server, and `corsa-cli` invocations from inside the same container inherit them automatically. Explicit flags always win over the environment.
+
+Provide the password through a protected process environment. A literal passed to `--password` can appear in the process list and shell history. `scripts/generate-seeds.py` accepts the same credential environment variables.
 
 ### Integration
 
@@ -553,7 +557,7 @@ graph TB
         CT["CommandTable<br/>(внутрипроцессная диспетчеризация)"]
 
         subgraph HTTP["HTTP-обёртка — Fiber v3<br/>127.0.0.1:46464"]
-            AUTH["Авторизация<br/>HTTP Basic Auth (опционально)"]
+            AUTH["Авторизация<br/>HTTP Basic Auth"]
             EXEC["POST /rpc/v1/exec<br/>(универсальная диспетчеризация)"]
             FRAME["POST /rpc/v1/frame<br/>(только зарегистрированные фреймы)"]
             LEGACY["Legacy-маршруты<br/>/system/* /network/* ..."]
@@ -640,7 +644,7 @@ sequenceDiagram
 ```
 *Диаграмма 2 — Поток обработки запроса.*
 
-Desktop UI вызывает CommandTable напрямую без HTTP. Внешние клиенты (corsa-cli, сторонние инструменты) проходят через Fiber HTTP сервер с опциональной Basic Auth, затем делегируют в тот же CommandTable.
+Desktop UI вызывает CommandTable напрямую без HTTP. Внешние клиенты (corsa-cli, сторонние инструменты) обращаются к тому же CommandTable через включённый HTTP RPC с Basic-аутентификацией.
 
 #### Режимы работы: Desktop и Node
 
@@ -738,7 +742,7 @@ graph TD
 | `CORSA_RPC_USERNAME` | _(пусто)_ | Имя пользователя для HTTP Basic Auth |
 | `CORSA_RPC_PASSWORD` | _(пусто)_ | Пароль для HTTP Basic Auth |
 
-Если `CORSA_RPC_USERNAME` и `CORSA_RPC_PASSWORD` не указаны — доступ без авторизации. Указание только одного из них — ошибка конфигурации: `NewServer` возвращает ошибку до создания Fiber, порт не занимается. Когда авторизация включена, все 401-ответы содержат заголовок `WWW-Authenticate: Basic realm="corsa-rpc"` по RFC 7235, позволяя клиентам программно определить требуемую схему авторизации.
+Standalone-нода и Desktop запускают HTTP RPC только при наличии обеих учётных данных. Указание только одной из них — ошибка конфигурации. SDK требует обе при включении HTTP RPC. HTTP RPC использует Basic-аутентификацию поверх незашифрованного HTTP. Оставляйте слушатель на loopback и используйте SSH-туннель для удалённого администрирования. При ошибке аутентификации сервер возвращает `401` с заголовком `WWW-Authenticate: Basic realm="corsa-rpc"`.
 
 ### Архитектура
 
@@ -903,11 +907,13 @@ corsa-cli sendDm '{"to": "peer-addr", "body": "hello world"}'
 # С флагом -named (явный режим key=value)
 corsa-cli -named fetchInbox topic=dm recipient=peer-addr
 
-# Авторизация
-corsa-cli --username admin --password secret getPeers
+# С заданными CORSA_RPC_USERNAME и CORSA_RPC_PASSWORD
+corsa-cli getPeers
 
-# Удалённый хост
-corsa-cli --host 192.168.1.100 --port 46464 getPeers
+# Удалённая нода слушает на своём loopback. Откройте туннель в отдельном терминале.
+ssh -N -L 127.0.0.1:46465:127.0.0.1:46464 admin@node.example
+# После открытия туннеля вызовите клиент в локальном терминале.
+corsa-cli --host 127.0.0.1 --port 46465 getPeers
 ```
 
 #### Флаги
@@ -921,6 +927,8 @@ corsa-cli --host 192.168.1.100 --port 46464 getPeers
 | `--named` | _(нет)_ | `false` | Интерпретировать аргументы как key=value пары |
 
 Каждый флаг подключения подхватывает значение из соответствующей переменной окружения `CORSA_RPC_*` — той же, что читает нода в `internal/core/config`. Это позволяет `corsa-cli` работать «из коробки» внутри docker-образа: контейнер ноды экспортирует `CORSA_RPC_USERNAME`/`CORSA_RPC_PASSWORD` для сервера, и вызовы `corsa-cli` из того же контейнера автоматически их наследуют. Явный флаг всегда побеждает значение из окружения.
+
+Передавайте пароль через защищённое окружение процесса. Пароль, указанный через `--password`, может попасть в список процессов и историю оболочки. `scripts/generate-seeds.py` принимает те же переменные окружения для учётных данных.
 
 ### Интеграция
 
