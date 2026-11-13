@@ -914,9 +914,9 @@ func RegisterNetworkCommands(t *CommandTable, node NodeProvider) {
 	t.Register(
 		CommandInfo{
 			Name:        "identityRestore",
-			Description: "Restore the identity file from a named backup in the node's backup directory (versioned JSON or legacy Ed25519 key); requires an app restart to take effect",
+			Description: "Restore a named identity backup, optionally using a named signed self-record as sequence evidence; requires an app restart",
 			Category:    "identity",
-			Usage:       "<name>",
+			Usage:       "<name> [prior-record-name]",
 			Transport:   TransportLoopbackOnly,
 		},
 		func(req CommandRequest) CommandResponse {
@@ -927,7 +927,17 @@ func RegisterNetworkCommands(t *CommandTable, node NodeProvider) {
 			if strings.TrimSpace(name) == "" {
 				return validationError(fmt.Errorf("backup name is required"))
 			}
-			return frameResponse(node.HandleLocalFrame(protocol.Frame{Type: "identity_restore", BackupName: strings.TrimSpace(name)}))
+			var priorName string
+			if value, supplied := req.Args["prior_record_name"]; supplied {
+				var ok bool
+				priorName, ok = value.(string)
+				if !ok || strings.TrimSpace(priorName) == "" {
+					return validationError(fmt.Errorf("prior record name must be a non-empty string"))
+				}
+			}
+			return frameResponse(node.HandleLocalFrame(protocol.Frame{
+				Type: "identity_restore", BackupName: strings.TrimSpace(name), PriorRecordName: strings.TrimSpace(priorName),
+			}))
 		},
 	)
 

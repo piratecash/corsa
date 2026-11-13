@@ -4,6 +4,23 @@ import (
 	"testing"
 )
 
+func TestParseConsoleInputIdentityRestoreWithPriorRecord(t *testing.T) {
+	for _, input := range []string{
+		"identityRestore backup.json prior.json",
+		"identity_restore backup_name=backup.json prior_record_name=prior.json",
+		`{"type":"identity_restore","backup_name":"backup.json","prior_record_name":"prior.json"}`,
+	} {
+		got, err := ParseConsoleInput(input)
+		if err != nil || got.Name != "identityRestore" || got.Args["backup_name"] != "backup.json" ||
+			got.Args["prior_record_name"] != "prior.json" {
+			t.Fatalf("parse %q = %+v, %v", input, got, err)
+		}
+	}
+	if _, err := ParseConsoleInput("identityRestore backup.json prior.json extra"); err == nil {
+		t.Fatal("restore accepted an extra positional argument")
+	}
+}
+
 func TestParseConsoleInputEmptyInput(t *testing.T) {
 	_, err := ParseConsoleInput("")
 	if err == nil {

@@ -1,7 +1,9 @@
 package node
 
 import (
+	"bytes"
 	"fmt"
+	"math"
 	"strings"
 
 	"github.com/rs/zerolog/log"
@@ -36,6 +38,8 @@ import (
 // obliged to surface: the address survives, the encryption key does not.
 const backupWarningBoxKeyDerived = "box key was DERIVED from the Ed25519 seed: the address is preserved, but the encryption key differs from the original — peers must obtain the new key before direct messages recover"
 
+const backupWarningPriorRecordUnavailable = "no prior signed record was supplied for the restored identity. If peers reject the restored sequence, obtain a newer signed record or backup."
+
 // identityBackupFrame serves identity_backup: export the running identity
 // with its current record seq into a 0600 file named frame.BackupName inside
 // the node's backup directory.
@@ -47,11 +51,7 @@ func (s *Service) identityBackupFrame(frame protocol.Frame) protocol.Frame {
 	// The exported seq is the FLOOR a restore starts above: the issued
 	// self-record seq when one exists, the identity's own floor otherwise
 	// (records may be disabled while the floor still must survive).
-	seq := s.identity.RecordSeqFloor
-	_, selfBody := s.SelfIdentityRecord()
-	if uint64(selfBody.Seq) > seq {
-		seq = uint64(selfBody.Seq)
-	}
+	seq := s.runningIdentityRecordFloor()
 	payload, err := identity.ExportBackup(s.identity, seq)
 	if err != nil {
 		return protocol.Frame{Type: "error", Code: protocol.ErrCodeProtocol, Error: "identity_backup: " + err.Error()}
@@ -82,6 +82,11 @@ func (s *Service) identityBackupFrame(frame protocol.Frame) protocol.Frame {
 	}}
 }
 
+func (s *Service) runningIdentityRecordFloor() uint64 {
+	_, selfBody := s.SelfIdentityRecord()
+	return max(s.identity.RecordSeqFloor, uint64(selfBody.Seq))
+}
+
 // identityRestoreFrame serves identity_restore: replace the identity FILE
 // from the backup named frame.BackupName in the node's backup directory. The
 // running node keeps its current in-memory identity — swapping keys under
@@ -100,6 +105,9 @@ func (s *Service) identityRestoreFrame(frame protocol.Frame) protocol.Frame {
 	if s.cfg.IdentityPath == "" {
 		return protocol.Frame{Type: "error", Code: protocol.ErrCodeProtocol, Error: "identity_restore: node has no identity file (in-memory identity)"}
 	}
+	// Capture the running self-record before taking the file mutex, which
+	// must stay a leaf outside the domain mutexes.
+	runningFloor := s.runningIdentityRecordFloor()
 	// Two concurrent restores could interleave the write-then-rename steps in
 	// identity.Save and acknowledge an identity other than the one that
 	// actually survived on disk. Serialized (together with identity_backup —
@@ -132,6 +140,24 @@ func (s *Service) identityRestoreFrame(frame protocol.Frame) protocol.Frame {
 	if err != nil {
 		return protocol.Frame{Type: "error", Code: protocol.ErrCodeProtocol, Error: "identity_restore: " + err.Error()}
 	}
+	sameRunningSigner := restored.Identity.Address == s.identity.Address &&
+		bytes.Equal(restored.Identity.PublicKey, s.identity.PublicKey)
+	if sameRunningSigner {
+		restored.Identity.RecordSeqFloor = max(restored.Identity.RecordSeqFloor, runningFloor)
+	}
+	// An earlier restore may already have installed a higher floor without
+	// changing the running identity. Read it while still holding the same
+	// mutex that serialises these file replacements.
+	restored.Identity.RecordSeqFloor = max(restored.Identity.RecordSeqFloor,
+		identity.StoredRecordSeqFloor(s.cfg.IdentityPath, restored.Identity))
+	if frame.PriorRecordName != "" {
+		if err := applyPriorIdentityRecord(backupDir, strings.TrimSpace(frame.PriorRecordName), restored.Identity); err != nil {
+			return protocol.Frame{Type: "error", Code: protocol.ErrCodeProtocol, Error: "identity_restore: " + err.Error()}
+		}
+	}
+	if restored.Identity.RecordSeqFloor == math.MaxUint64 {
+		return protocol.Frame{Type: "error", Code: protocol.ErrCodeProtocol, Error: "identity_restore: restored identity record sequence is exhausted"}
+	}
 	if err := identity.Save(s.cfg.IdentityPath, restored.Identity); err != nil {
 		return protocol.Frame{
 			Type:  "error",
@@ -139,9 +165,12 @@ func (s *Service) identityRestoreFrame(frame protocol.Frame) protocol.Frame {
 			Error: "identity_restore: persist identity: " + secretfile.StripPath(err).Error(),
 		}
 	}
-	warning := ""
+	var warnings []string
 	if restored.BoxKeyDerived {
-		warning = backupWarningBoxKeyDerived
+		warnings = append(warnings, backupWarningBoxKeyDerived)
+	}
+	if !sameRunningSigner && frame.PriorRecordName == "" {
+		warnings = append(warnings, backupWarningPriorRecordUnavailable)
 	}
 	log.Info().
 		Str("backup", name).
@@ -151,10 +180,10 @@ func (s *Service) identityRestoreFrame(frame protocol.Frame) protocol.Frame {
 	return protocol.Frame{Type: "identity_restore", IdentityBackup: &protocol.IdentityBackupFrame{
 		Name:            name,
 		Address:         restored.Identity.Address,
-		RecordSeq:       restored.RecordSeq,
+		RecordSeq:       restored.Identity.RecordSeqFloor,
 		BoxKeyDerived:   restored.BoxKeyDerived,
 		RestartRequired: true,
-		Warning:         warning,
+		Warning:         strings.Join(warnings, "\n"),
 	}}
 }
 

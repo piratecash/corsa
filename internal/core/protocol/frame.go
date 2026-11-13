@@ -192,8 +192,9 @@ type Frame struct {
 	// a caller-supplied path would let an RPC client write a file anywhere
 	// the node process can write, and read anything it can read. Local RPC
 	// surface only — never dispatched on the P2P wire.
-	BackupName     string               `json:"backup_name,omitempty"`
-	IdentityBackup *IdentityBackupFrame `json:"identity_backup,omitempty"`
+	BackupName      string               `json:"backup_name,omitempty"`
+	PriorRecordName string               `json:"prior_record_name,omitempty"` // optional local restore evidence
+	IdentityBackup  *IdentityBackupFrame `json:"identity_backup,omitempty"`
 
 	// Relay fields (Iteration 1 — hop-by-hop relay)
 	HopCount    int    `json:"hop_count,omitempty"`

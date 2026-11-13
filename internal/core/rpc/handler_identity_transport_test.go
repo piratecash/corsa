@@ -1,13 +1,67 @@
 package rpc_test
 
 import (
+	"encoding/json"
 	"net"
 	"testing"
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/config"
+	"github.com/piratecash/corsa/internal/core/protocol"
 	"github.com/piratecash/corsa/internal/core/rpc"
 )
+
+func TestIdentityRestoreForwardsOptionalPriorRecordName(t *testing.T) {
+	table := rpc.NewCommandTable()
+	var frames []protocol.Frame
+	node := newNodeProviderWithHandler(t, func(frame protocol.Frame) protocol.Frame {
+		frames = append(frames, frame)
+		return protocol.Frame{Type: "identity_restore"}
+	})
+	rpc.RegisterAllCommands(table, node, nil, nil, nil)
+	for _, value := range []any{42, " ", nil} {
+		reply := table.Execute(rpc.CommandRequest{Name: "identityRestore",
+			Args: map[string]any{"backup_name": "backup.json", "prior_record_name": value}})
+		if reply.Error == nil {
+			t.Fatalf("invalid prior record name accepted: %v", value)
+		}
+	}
+	reply := table.Execute(rpc.CommandRequest{Name: "identity_restore",
+		Args: map[string]any{"backup_name": " backup.json ", "prior_record_name": " prior.json "}})
+	if reply.Error != nil || len(frames) != 1 || frames[0].Type != "identity_restore" ||
+		frames[0].BackupName != "backup.json" || frames[0].PriorRecordName != "prior.json" {
+		t.Fatalf("dispatch reply=%+v, frames=%+v", reply, frames)
+	}
+}
+
+func TestIdentityRestorePreservesWarningWithoutPriorRecord(t *testing.T) {
+	table := rpc.NewCommandTable()
+	const warning = "peers may hold a newer sequence"
+	node := newNodeProviderWithHandler(t, func(frame protocol.Frame) protocol.Frame {
+		if frame.PriorRecordName != "" {
+			t.Fatal("one-argument restore unexpectedly supplied prior record evidence")
+		}
+		return protocol.Frame{Type: "identity_restore", IdentityBackup: &protocol.IdentityBackupFrame{
+			Name: frame.BackupName, RestartRequired: true, Warning: warning,
+		}}
+	})
+	rpc.RegisterAllCommands(table, node, nil, nil, nil)
+	req, err := rpc.ParseConsoleInput("identityRestore backup.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reply := table.Execute(req)
+	if reply.Error != nil {
+		t.Fatal(reply.Error)
+	}
+	var frame protocol.Frame
+	if err := json.Unmarshal(reply.Data, &frame); err != nil {
+		t.Fatal(err)
+	}
+	if frame.IdentityBackup == nil || frame.IdentityBackup.Warning != warning || !frame.IdentityBackup.RestartRequired {
+		t.Fatalf("restore response: %+v", frame.IdentityBackup)
+	}
+}
 
 // TestClientFetchCommandsDecodesTransportPolicy walks the whole loop the
 // transport field newly participates in: the real help handler encodes every

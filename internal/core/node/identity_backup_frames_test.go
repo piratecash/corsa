@@ -1,7 +1,9 @@
 package node
 
 import (
+	"bytes"
 	"encoding/base64"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -87,6 +89,104 @@ func TestIdentityBackupRestoreRoundtrip(t *testing.T) {
 	}
 	if identity.BoxPublicKeyBase64(restored.BoxPublicKey) != identity.BoxPublicKeyBase64(id.BoxPublicKey) {
 		t.Fatal("the box key did not survive the versioned backup roundtrip")
+	}
+}
+
+func TestIdentityRestoreRejectsExhaustedBackupBeforeReplacingIdentity(t *testing.T) {
+	t.Parallel()
+	svc, owner, _ := newBackupTestService(t)
+	if err := identity.Save(svc.cfg.IdentityPath, owner); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(svc.cfg.IdentityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := backupDir(t, svc)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	payload, err := identity.ExportBackup(owner, math.MaxUint64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const name = "exhausted.json"
+	if err := os.WriteFile(filepath.Join(dir, name), payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reply := svc.HandleLocalFrame(protocol.Frame{Type: "identity_restore", BackupName: name})
+	if reply.Type != "error" || reply.Code != protocol.ErrCodeProtocol || reply.IdentityBackup != nil ||
+		!strings.Contains(reply.Error, "record sequence is exhausted") {
+		t.Fatalf("restore reply = %+v, want sequence exhaustion refusal", reply)
+	}
+	after, err := os.ReadFile(svc.cfg.IdentityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatal("refused restore changed the identity file")
+	}
+}
+
+func TestIdentityRestoreKeepsKnownRecordFloorForSameSigner(t *testing.T) {
+	t.Parallel()
+	svc, owner, _ := newBackupTestService(t)
+	_, own := svc.SelfIdentityRecord()
+	floor := uint64(own.Seq)
+	if floor == 0 {
+		t.Fatal("expected an issued self-record")
+	}
+	other, err := identity.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, scenario := range []struct {
+		name   string
+		signer *identity.Identity
+		backup uint64
+		want   uint64
+	}{
+		{name: "same-old", signer: owner, want: floor},
+		{name: "other", signer: other},
+		{name: "other-newer", signer: other, backup: floor + 7, want: floor + 7},
+		{name: "other-repeat-before-restart", signer: other, want: floor + 7},
+		{name: "same-newer", signer: owner, backup: floor + 5, want: floor + 5},
+		{name: "same-repeat-before-restart", signer: owner, want: floor + 5},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			dir := backupDir(t, svc)
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			payload, err := identity.ExportBackup(scenario.signer, scenario.backup)
+			if err != nil {
+				t.Fatal(err)
+			}
+			name := scenario.name + ".json"
+			if err := os.WriteFile(filepath.Join(dir, name), payload, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			reply := svc.HandleLocalFrame(protocol.Frame{Type: "identity_restore", BackupName: name})
+			if reply.Type != "identity_restore" || reply.IdentityBackup == nil ||
+				reply.IdentityBackup.RecordSeq != scenario.want || !reply.IdentityBackup.RestartRequired {
+				t.Fatalf("restore result: %+v, want floor %d and restart", reply, scenario.want)
+			}
+			wantWarning := ""
+			if scenario.signer == other {
+				wantWarning = backupWarningPriorRecordUnavailable
+			}
+			if reply.IdentityBackup.Warning != wantWarning {
+				t.Fatalf("restore warning = %q, want %q", reply.IdentityBackup.Warning, wantWarning)
+			}
+			saved, err := identity.Load(svc.cfg.IdentityPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if saved.Address != scenario.signer.Address || saved.RecordSeqFloor != scenario.want {
+				t.Fatalf("saved identity %s with floor %d, want %s with floor %d",
+					saved.Address, saved.RecordSeqFloor, scenario.signer.Address, scenario.want)
+			}
+		})
 	}
 }
 
@@ -501,6 +601,9 @@ func TestIdentityRestoreLegacyKeyWarns(t *testing.T) {
 	}
 	if !frame.BoxKeyDerived || frame.Warning == "" || !frame.RestartRequired {
 		t.Fatalf("legacy caveats missing from the frame: %+v", frame)
+	}
+	if frame.Warning != backupWarningBoxKeyDerived+"\n"+backupWarningPriorRecordUnavailable {
+		t.Fatalf("legacy restore did not report both caveats: %q", frame.Warning)
 	}
 }
 

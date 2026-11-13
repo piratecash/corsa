@@ -438,10 +438,14 @@ func mapPositionalArgs(command string, args []string) (map[string]interface{}, e
 		return map[string]interface{}{"backup_name": args[0]}, nil
 
 	case "identityrestore", "identity_restore":
-		if len(args) < 1 {
-			return nil, fmt.Errorf("identityRestore requires a backup name argument")
+		if len(args) < 1 || len(args) > 2 {
+			return nil, fmt.Errorf("identityRestore takes a backup name and an optional prior record name")
 		}
-		return map[string]interface{}{"backup_name": args[0]}, nil
+		params := map[string]interface{}{"backup_name": args[0]}
+		if len(args) == 2 {
+			params["prior_record_name"] = args[1]
+		}
+		return params, nil
 
 	case "connectonly", "connect_only":
 		// Optional single argument: an address pins egress to that peer; no
