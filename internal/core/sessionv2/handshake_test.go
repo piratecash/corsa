@@ -325,6 +325,27 @@ func dialScripted(t *testing.T, x node, expect ExpectedPeer, script func(*tls.Co
 	return (<-dialAsync(context.Background(), xSide, x, expect)).err
 }
 
+func TestDialRejectsInconsistentVersionRange(t *testing.T) {
+	dialer, listener := newNode(t), newNode(t)
+	clientConn, serverConn := net.Pipe()
+	t.Cleanup(func() {
+		_ = clientConn.Close()
+		_ = serverConn.Close()
+	})
+	welcome := welcomeOf(t, listener)
+	welcome.Version = 20
+	welcome.MinimumProtocolVersion = 99
+	line := frameLine(t, welcome)
+	fakeListener(t, serverConn, listener.certs, func(conn *tls.Conn, exporter []byte) {
+		writeLines(conn, line, proofLine(t, listener.id.PrivateKey, RoleListener, exporter))
+	})
+
+	result := <-dialAsync(context.Background(), clientConn, dialer, AnyPeer())
+	if !errors.Is(result.err, ErrIntro) || result.session != (ProvenSession{}) {
+		t.Fatalf("Dial = %v, session present = %v; want ErrIntro and no session", result.err, result.session != (ProvenSession{}))
+	}
+}
+
 func TestTheDialerRefusesWhatTheContractRefuses(t *testing.T) {
 	x, b := newNode(t), newNode(t)
 	// The neutral point with R = neutral, S = 0 verifies for EVERY message

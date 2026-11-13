@@ -194,10 +194,21 @@ const (
 	phaseSettled
 )
 
-// handshakeHooks are test-only observation points; production passes none.
+// Ordinary callers pass no handshake hooks.
 type handshakeHooks struct {
 	phase     func(handshakePhase)
 	cancelRan func()
+	timing    func(string, time.Duration, error)
+}
+
+// measure starts immediately before arming the phase deadline. A nil hook
+// keeps the ordinary handshake free of additional clock reads.
+func (h handshakeHooks) measure(phase string) func(error) {
+	if h.timing == nil {
+		return nil
+	}
+	start := time.Now()
+	return func(err error) { h.timing(phase, time.Since(start), err) }
 }
 
 func (h handshakeHooks) at(p handshakePhase) {
@@ -336,11 +347,26 @@ func establish(ctx context.Context, conn *tls.Conn, local Local, intro protocol.
 	return session, nil
 }
 
-func runHandshake(ctx context.Context, conn *tls.Conn, deadlines *handshakeDeadlines, local Local, intro protocol.Frame, role Role, expect ExpectedPeer, timeouts Timeouts, hooks handshakeHooks) (ProvenSession, error) {
+func runHandshake(ctx context.Context, conn *tls.Conn, deadlines *handshakeDeadlines, local Local, intro protocol.Frame, role Role, expect ExpectedPeer, timeouts Timeouts, hooks handshakeHooks) (_ ProvenSession, handshakeErr error) {
+	endPhase := hooks.measure("tls")
+	var tlsErr error
+	if endPhase != nil {
+		defer func() {
+			if endPhase != nil {
+				if tlsErr != nil {
+					endPhase(tlsErr)
+				} else {
+					endPhase(handshakeErr)
+				}
+			}
+		}()
+	}
 	if err := deadlines.set(time.Now().Add(timeouts.TLS)); err != nil {
 		return ProvenSession{}, err
 	}
 	if err := conn.HandshakeContext(ctx); err != nil {
+		// Preserve the transport cause for timing without changing the dial error.
+		tlsErr = err
 		return ProvenSession{}, fmt.Errorf("%w: %v", ErrNotV2, err)
 	}
 	state := conn.ConnectionState()
@@ -351,7 +377,11 @@ func runHandshake(ctx context.Context, conn *tls.Conn, deadlines *handshakeDeadl
 	if err != nil {
 		return ProvenSession{}, fmt.Errorf("%w: exporter: %v", ErrNotV2, err)
 	}
+	if endPhase != nil {
+		endPhase(nil)
+	}
 	hooks.at(phaseTLSDone)
+	endPhase = hooks.measure("proof")
 	if err := deadlines.set(time.Now().Add(timeouts.Proof)); err != nil {
 		return ProvenSession{}, err
 	}
@@ -372,6 +402,10 @@ func runHandshake(ctx context.Context, conn *tls.Conn, deadlines *handshakeDeadl
 		if err := sendIntroAndProof(sconn, local, intro, role, exporter); err != nil {
 			return ProvenSession{}, err
 		}
+	}
+	if endPhase != nil {
+		endPhase(nil)
+		endPhase = nil
 	}
 	hooks.at(phaseProven)
 	if err := deadlines.settle(); err != nil {
@@ -495,7 +529,7 @@ func receiveProvenPeer(conn *tls.Conn, local Local, role Role, expect ExpectedPe
 // checkIntro verifies the v2 intro on its own: the right frame type, no v1
 // challenge machinery, every identity field present, the key one this node
 // accepts (identity.ParsePublicKey) and certifying the address, the box key
-// bound to it, and the network this node is on.
+// bound to it, the network this node is on, and a consistent version range.
 func checkIntro(intro protocol.Frame, wantType string, network domain.NetworkID) (identity.PublicKey, domain.PeerIdentity, error) {
 	switch {
 	case intro.Type != wantType:
@@ -504,6 +538,8 @@ func checkIntro(intro protocol.Frame, wantType string, network domain.NetworkID)
 		return identity.PublicKey{}, domain.PeerIdentity{}, fmt.Errorf("%w: v1 challenge fields in a v2 intro", ErrIntro)
 	case intro.Address == "" || intro.PubKey == "" || intro.BoxKey == "" || intro.BoxSig == "":
 		return identity.PublicKey{}, domain.PeerIdentity{}, fmt.Errorf("%w: identity fields missing", ErrIntro)
+	case intro.MinimumProtocolVersion > intro.Version:
+		return identity.PublicKey{}, domain.PeerIdentity{}, fmt.Errorf("%w: minimum version %d exceeds version %d", ErrIntro, intro.MinimumProtocolVersion, intro.Version)
 	case intro.Network != network.String():
 		return identity.PublicKey{}, domain.PeerIdentity{}, fmt.Errorf("%w: network %q", ErrIntro, intro.Network)
 	}
