@@ -48,6 +48,7 @@ type Frame struct {
 	// covered by the signature and an older verifier computes the
 	// payload without it.
 	ReceiptSender string          `json:"receipt_sender,omitempty"`
+	ReceiptProof  string          `json:"receipt_proof,omitempty"` // exact signature of the acknowledged receipt
 	PubKey        string          `json:"pubkey,omitempty"`
 	BoxKey        string          `json:"boxkey,omitempty"`
 	BoxSig        string          `json:"boxsig,omitempty"`
@@ -247,11 +248,13 @@ type MessageFrame struct {
 }
 
 type ReceiptFrame struct {
-	MessageID   string `json:"message_id"`
-	Sender      string `json:"sender"`
-	Recipient   string `json:"recipient"`
-	Status      string `json:"status"`
-	DeliveredAt string `json:"delivered_at"`
+	SignerPublicKey string `json:"pubkey,omitempty"`
+	Signature       string `json:"signature,omitempty"`
+	MessageID       string `json:"message_id"`
+	Sender          string `json:"sender"`
+	Recipient       string `json:"recipient"`
+	Status          string `json:"status"`
+	DeliveredAt     string `json:"delivered_at"`
 	// ObservedAt is the receiving node's own admission time, and it is
 	// written by ONE builder — the local fetch_delivery_receipts reply —
 	// so that a client reading the backlog sees the same time the live

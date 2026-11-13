@@ -65,10 +65,13 @@ type Envelope struct {
 }
 
 type DeliveryReceipt struct {
-	MessageID MessageID
-	Sender    string
-	Recipient string
-	Status    string
+	// Signature is the receipt author’s optional end-to-end proof.
+	Signature       string
+	SignerPublicKey string
+	MessageID       MessageID
+	Sender          string
+	Recipient       string
+	Status          string
 	// DeliveredAt is the REMOTE node's claim about when it took delivery,
 	// printed by its clock. It is forwarded verbatim and never rewritten:
 	// it is somebody else's statement, and relaying an altered copy would
