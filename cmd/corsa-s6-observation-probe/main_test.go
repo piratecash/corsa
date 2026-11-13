@@ -854,7 +854,7 @@ func TestS6ProbeRepeatedPinCutsShareExactPrefixes(t *testing.T) {
 }
 
 func TestS6ProbeDefaultAndMixedTagExclusion(t *testing.T) {
-	for _, name := range []string{"main.go", "channel.go", "pin_pages.go", "main_test.go"} {
+	for _, name := range []string{"main.go", "channel.go", "pin_pages.go", "terminal_lifecycle.go", "terminal_lifecycle_test.go", "main_test.go"} {
 		raw, err := os.ReadFile(name)
 		if err != nil {
 			t.Fatal(err)

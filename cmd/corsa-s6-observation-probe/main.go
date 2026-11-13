@@ -81,6 +81,9 @@ func construct(init initFrame) (*appnode.App, error) {
 	if init.Mode == "OFF" {
 		return appnode.New(), nil
 	}
+	if init.Mode == "K10" {
+		return appnode.NewWithTerminalObservation(init.Request.Terminal)
+	}
 	return appnode.NewWithS6ObservationProbe(init.Request)
 }
 
@@ -146,6 +149,19 @@ func run(args []string) int {
 	// exit and the future parent's owned reap remain the cleanup boundary.
 	if err = entryRunAllowed(ctx, end, time.Now()); err != nil {
 		return fail("construction-deadline-or-cancel")
+	}
+	if init.Mode == "K10" {
+		source := app.TerminalObservation()
+		if source == nil {
+			return fail("K10-source")
+		}
+		read := func() terminalBoundary {
+			return terminalBoundary{Identity: source.Identity().String(), Key: source.Key(), Snapshot: source.Snapshot()}
+		}
+		if err = channel.serveTerminalLifecycle(ctx, read, app.RunWithS6TerminalDrain); err != nil {
+			return fail("K10-lifecycle")
+		}
+		return 0
 	}
 	var returned atomic.Bool
 	done := make(chan error, 1)

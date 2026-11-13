@@ -372,7 +372,16 @@ func canonical(raw []byte, value any) error {
 	return nil
 }
 func validateInit(v initFrame, nonce string) error {
-	if v.Version != 1 || v.Nonce != nonce || (v.Mode != "ON" && v.Mode != "OFF") {
+	if v.Nonce != nonce {
+		return entryError("INIT-binding")
+	}
+	if v.Version == 2 && v.Mode == "K10" {
+		if v.Request.Terminal == (corenode.TerminalObservationKey{}) || v.Request != (appnode.S6ObservationProbeRequest{Terminal: v.Request.Terminal}) {
+			return entryError("INIT-K10-terminal-only")
+		}
+		return nil // The original terminal constructor validates the key.
+	}
+	if v.Version != 1 || (v.Mode != "ON" && v.Mode != "OFF") {
 		return entryError("INIT-binding")
 	}
 	q := v.Request
