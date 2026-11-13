@@ -18,6 +18,7 @@ const pinMembershipMaxHistory = 4096
 type pinMembershipRequest struct {
 	Instance                          [16]byte
 	BaselineCapacity, HistoryCapacity int
+	durableWrites                     bool
 	elapsed                           func() (time.Duration, error)
 }
 
@@ -53,6 +54,7 @@ type pinMembershipSnapshot struct {
 	CountAtCut                 int
 	Transitions                []pinMembershipTransition
 	PointOnly                  pinMembershipPointOnly
+	DurableWrites              *pinWriteObservationSnapshot `json:",omitempty"`
 }
 
 // Owned by the original store.mu. There is no shadow membership map. All
@@ -70,6 +72,7 @@ type pinMembershipSource struct {
 	sequence      uint64
 	countAtCut    int
 	fault         string
+	writes        *pinWriteObservation
 }
 
 // Only a bounded mutation-local value: no pin entry, transport or store graph.
@@ -120,7 +123,7 @@ func (o *pinMembershipSource) readClock() (time.Duration, bool) {
 // Called only after all ORIGINAL marker/load/refusal/guard initialization,
 // before openSecureSessionStore exposes this store. Loaded identities are a
 // baseline, not new session proofs or coverage dating back to pinnedAt.
-func (s *secureSessionStore) initializePinMembership(request pinMembershipRequest) {
+func (s *secureSessionStore) initializePinMembership(request pinMembershipRequest, startupConfirmed bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	o := &pinMembershipSource{instance: request.Instance, clock: request.elapsed}
@@ -146,11 +149,11 @@ func (s *secureSessionStore) initializePinMembership(request pinMembershipReques
 			o.fail("initial-baseline-incomplete")
 		}
 	}()
-	s.initializePinMembershipBaseline(o, request)
+	s.initializePinMembershipBaseline(o, request, startupConfirmed)
 	returned = true
 }
 
-func (s *secureSessionStore) initializePinMembershipBaseline(o *pinMembershipSource, request pinMembershipRequest) {
+func (s *secureSessionStore) initializePinMembershipBaseline(o *pinMembershipSource, request pinMembershipRequest, startupConfirmed bool) {
 	before, valid := o.readClock()
 	if !valid {
 		return
@@ -175,6 +178,12 @@ func (s *secureSessionStore) initializePinMembershipBaseline(o *pinMembershipSou
 	o.cut = o.baseline
 	o.countAtCut = len(ids)
 	o.history = make([]pinMembershipTransition, request.HistoryCapacity)
+	if request.durableWrites {
+		o.writes = newPinWriteObservation(request.HistoryCapacity, startupConfirmed)
+		if s.pinRecovery != nil || s.pinOfflineRecovery || s.removalEpoch != 0 {
+			o.writes.guard = pinWriteGuardCoverage{Gap: true, From: after}
+		}
+	}
 }
 
 // Existing leaf owns store.mu. A nil source returns before any observer clock,
@@ -259,6 +268,7 @@ func (s *secureSessionStore) pinMembershipSnapshot() pinMembershipSnapshot {
 	}
 	var ids []domain.PeerIdentity
 	var prefix []pinMembershipTransition
+	var writes []pinWriteObservationEvent
 	func() {
 		s.mu.Lock()
 		defer s.mu.Unlock()
@@ -286,6 +296,9 @@ func (s *secureSessionStore) pinMembershipSnapshot() pinMembershipSnapshot {
 		}
 		ids = o.identities[:len(o.identities):len(o.identities)]
 		prefix = o.history[:o.length:o.length]
+		if w := o.writes; w != nil {
+			out.DurableWrites, writes = w.capture(o.fault)
+		}
 	}()
 	if out.Status == "OFF" {
 		return out
@@ -294,5 +307,8 @@ func (s *secureSessionStore) pinMembershipSnapshot() pinMembershipSnapshot {
 	copy(out.BaselineIdentities, ids)
 	out.Transitions = make([]pinMembershipTransition, len(prefix))
 	copy(out.Transitions, prefix)
+	if out.DurableWrites != nil {
+		out.DurableWrites.Events = copyPinWriteEvents(writes)
+	}
 	return out
 }

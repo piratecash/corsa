@@ -137,6 +137,7 @@ func (s *secureSessionStore) recoverIdentityPinProtection(ctx context.Context, p
 		return domain.IdentityPinReceipt{}, err
 	}
 	s.mu.Lock()
+	s.markK3PinGuardGapLocked()
 	if _, found := s.identities[permit.Binding.Identity]; !found {
 		if len(s.identities) >= maxPinnedIdentities {
 			s.mu.Unlock()
@@ -165,7 +166,7 @@ func (s *secureSessionStore) recoverIdentityPinProtection(ctx context.Context, p
 	file, covers := s.identityPinSnapshot(permit, identityPinAuditProtectionRestored)
 	encoded, digest, err := encodeIdentityPinSnapshot(file)
 	if err == nil {
-		err = confirmedIdentityPinWrite(files.WriteMain(work, encoded))
+		err = confirmedIdentityPinWrite(s.writeIdentityPinMain(work, files, file, encoded))
 	}
 	if err != nil {
 		return domain.IdentityPinReceipt{}, err
@@ -236,6 +237,7 @@ func (s *Service) RecoverIdentityPinProtection(ctx context.Context, permit domai
 		store.mu.Unlock()
 		return domain.IdentityPinReceipt{}, domain.ErrIdentityPinRecoveryOfflineOnly
 	}
+	store.markK3PinGuardGapLocked()
 	store.pinOfflineRecovery = true
 	store.mu.Unlock()
 	files, err := store.openIdentityPinFiles()

@@ -54,7 +54,7 @@ func (s *secureSessionStore) confirmContactRecordCoverage(ctx context.Context, o
 	if err := ctx.Err(); err != nil {
 		return contactRecordCoverReceipt{}, err
 	}
-	commit, err := files.WriteMain(ctx, raw)
+	commit, err := s.writeIdentityPinMain(ctx, files, file, raw)
 	if err != nil || commit != secretfile.DurableCommitted {
 		return contactRecordCoverReceipt{}, errors.Join(errPinMetadataCommitUnconfirmed, err)
 	}

@@ -141,7 +141,7 @@ func newServiceWithObservations(cfg config.Node, id *identity.Identity, bus *ebu
 	var membership *pinMembershipRequest
 	if options.RawPinMembership != nil {
 		request := *options.RawPinMembership
-		membership = &pinMembershipRequest{BaselineCapacity: request.BaselineCapacity, HistoryCapacity: request.HistoryCapacity, Instance: request.Instance, elapsed: clock}
+		membership = &pinMembershipRequest{BaselineCapacity: request.BaselineCapacity, HistoryCapacity: request.HistoryCapacity, Instance: request.Instance, durableWrites: request.DurableWrites, elapsed: clock}
 	}
 	// Freeze this request before any other observer clock/RNG/build callback.
 	// Public input has only scalars/value tokens; elapsed remains private.

@@ -531,7 +531,7 @@ func openSecureSessionStore(opts secureSessionStoreOptions) *secureSessionStore 
 			store.refuse(refuseStoreNotConfigured(opts.markerPath, marker.store))
 		}
 		if membershipRequest != nil {
-			store.initializePinMembership(*membershipRequest)
+			store.initializePinMembership(*membershipRequest, false)
 		}
 		return store
 	}
@@ -545,7 +545,10 @@ func openSecureSessionStore(opts secureSessionStoreOptions) *secureSessionStore 
 	}
 	store.inspectIdentityPinGuard()
 	if membershipRequest != nil {
-		store.initializePinMembership(*membershipRequest)
+		// An accepted loaded main passed the original startup confirmation
+		// and required marker. The observation source checks backend support.
+		confirmed := store.refusal == nil && store.pinMainLoaded && store.markerWritten && store.pinRecovery == nil
+		store.initializePinMembership(*membershipRequest, confirmed)
 	}
 	return store
 }
@@ -2333,6 +2336,17 @@ func (s *secureSessionStore) writeSnapshot(file secureSessionFile) error {
 		failure.causeCode = domain.EndpointBindingCauseValidationRefused
 		return failure
 	}
+	ticket := s.beginPinWriteObservation(file.Identities)
+	if ticket == nil {
+		return s.writeEncodedPinSnapshot(raw)
+	}
+	defer ticket.abort(s)
+	err = s.writeEncodedPinSnapshot(raw)
+	ticket.finish(s, pinSnapshotObservationOutcome(err))
+	return err
+}
+
+func (s *secureSessionStore) writeEncodedPinSnapshot(raw []byte) error {
 	if err := s.writeFile(raw); err != nil {
 		s.logger.Error().Err(err).Str("store", s.name).Msg(writeFailureMessage(err))
 		outcome := domain.EndpointBindingActionIndeterminate

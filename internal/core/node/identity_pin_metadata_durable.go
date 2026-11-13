@@ -77,7 +77,7 @@ func (s *secureSessionStore) confirmPinMetadata(ctx context.Context, files ident
 	if err != nil {
 		return identityPinMetadataCommit{}, err
 	}
-	commit, err := files.WriteMain(ctx, raw)
+	commit, err := s.writeIdentityPinMain(ctx, files, file, raw)
 	if err != nil || commit != secretfile.DurableCommitted {
 		return identityPinMetadataCommit{}, errors.Join(errPinMetadataCommitUnconfirmed, err)
 	}

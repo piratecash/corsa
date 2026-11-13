@@ -98,7 +98,7 @@ func (s *secureSessionStore) confirmRelationRecordCoverage(ctx context.Context, 
 	if err := ctx.Err(); err != nil {
 		return relationRecordCoverReceipt{}, err
 	}
-	commit, err := files.WriteMain(ctx, raw)
+	commit, err := s.writeIdentityPinMain(ctx, files, file, raw)
 	if err != nil || commit != secretfile.DurableCommitted {
 		return relationRecordCoverReceipt{}, errors.Join(errPinMetadataCommitUnconfirmed, err)
 	}

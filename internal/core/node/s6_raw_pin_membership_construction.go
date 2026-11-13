@@ -14,6 +14,7 @@ import (
 type RawPinMembershipObservationRequest struct {
 	BaselineCapacity, HistoryCapacity int
 	Instance                          [16]byte
+	DurableWrites                     bool `json:",omitempty"`
 }
 
 type RawPinMembershipObservationKey struct{ Instance [16]byte }

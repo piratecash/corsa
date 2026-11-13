@@ -93,6 +93,7 @@ func (s *secureSessionStore) advancePinRemovalEpochLocked() error {
 	if s.removalEpoch == math.MaxUint64 {
 		return domain.ErrIdentityPinRevisionExhausted
 	}
+	s.markK3PinGuardGapLocked()
 	s.removalEpoch++
 	return nil
 }

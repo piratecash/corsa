@@ -222,7 +222,7 @@ func (s *secureSessionStore) commitIdentityPinRemoval(ctx context.Context, permi
 	file, covers := s.identityPinSnapshot(permit, identityPinAuditRemovalWritten)
 	raw, digest, err := encodeIdentityPinSnapshot(file)
 	if err == nil {
-		err = confirmedIdentityPinWrite(files.WriteMain(ctx, raw))
+		err = confirmedIdentityPinWrite(s.writeIdentityPinMain(ctx, files, file, raw))
 	}
 	if err != nil {
 		return s.rollbackIdentityPinRemoval(ctx, permit, fence, files, err)
@@ -263,7 +263,7 @@ func (s *secureSessionStore) rollbackIdentityPinRemoval(ctx context.Context, per
 	file, covers := s.identityPinSnapshot(permit, identityPinAuditProtectionRestored)
 	raw, digest, err := encodeIdentityPinSnapshot(file)
 	if err == nil {
-		err = confirmedIdentityPinWrite(files.WriteMain(ctx, raw))
+		err = confirmedIdentityPinWrite(s.writeIdentityPinMain(ctx, files, file, raw))
 	}
 	if err != nil {
 		failure := errors.Join(domain.ErrIdentityPinRecoveryRequired, cause, err)
