@@ -66,17 +66,17 @@ authorizes no piratecashd launch or live-instance change.
 |---|---|
 | Full candidate and products | Complete applicable unfiltered default/tagged tests for emitted products, routing, TLS and pins; overlaysim alone is DEFERRED to D1, not PASS, so generic make test-all is not green. Build daemon/Desktop for all five selected platforms and complete applicable startup checks, preserving the recorded Windows runtime/DACL deferral; active-path review; exact final source, version and artifact SHA-256s. Validate [storage migration 8](delete-intent-time-order-migration.md), its cost/refusal/backup/rollback limits on applicable client/SDK paths. Focused default/CGO passes do not close every deployment database. |
 | Compatibility and resources | Real interoperability with older Corsa peers on protocols 28/29/30; final-candidate load/memory, first-contact clearnet timing and loopback acceptance with agreed boundaries. Compilation, logical counts or a Corsa-only measurement do not establish safe host coexistence. |
-| Independent security | An attributable external crypto review of the exact implementation/candidate and vectors; resolve blocking findings. Developer/AI review is not the required independent verdict. |
+| Cryptographic security review | Per the owner decision of 2026-11-02, separately attributed Codex security and Claude Fable reports on the same full candidate SHA, active consumers and vectors; reconcile findings and re-review affected fixes with both models. Human review is outside this plan. The received source-only Fable report leaves MSG-1/2/3 and TRUST-1 open; it is not final admission. |
 | Observation | Approve complete criteria, sources, thresholds, gaps/restarts and budgets. Preserve the recorded **seven-day baseline before the tag**; the 28-day post-tag observation is not an additional pre-tag wait or already completed evidence. |
 | Final admission | Distinct release version, accurate notes/migration/default-off disclosures, final candidate checks and the version-specific release decision. Release admission remains CLOSED until the required evidence and owner decision are accepted; a proposal or historical pass is not admission. |
 
-The owner's remaining participation is to obtain the external crypto
-expert/report, approve measurement criteria and finally approve the tag and
-publication. Necessary engineering tests continue within their reviewed
+The owner's remaining participation is to coordinate the Claude Fable report
+and re-review on the agreed SHA, approve measurement criteria and finally
+approve the tag and publication. A human expert is not required by the current plan. Necessary engineering tests continue within their reviewed
 bounds; those permissions do not imply criteria waivers or release approval.
 
 See [existing DEV scope](intermediate-corsa-deployment-2026-10-29.md),
-[external review](s6-external-review-package.md),
+[two-model review package](s6-external-review-package.md),
 [observation plan](s6-observation-plan-proposal.md),
 [recorded measurement decision](d1-release-decision-proposal.md#measurement-scope-2026-10-23),
 the [admission manifest](../../packaging/release-admission.json) and
