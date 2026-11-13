@@ -18,12 +18,12 @@ import (
 // never expectations learned from the source under test.
 func registryPublicationBodyPins() map[string]string {
 	return map[string]string{
-		"conn_registry.go:attachOutboundCoreLocked":               "f6896ff8421a950391b57733369523a12b27cd042e9ce216822d166c8c4128d2",
+		"conn_registry.go:attachOutboundCoreLocked":               "1b8d58059d1679bb8b87ede7b97ee4889ab739357b5257bd2d1be69a84476891",
 		"conn_registry.go:beginRegistryPublication":               "675698828ef2caa20810dd5dd401fbeced398e0c94a7cc5c2530774fc82e059f",
 		"conn_registry.go:bindProofTransportLocked":               "3c9921e6eaff214bcd99da352872622b9e37b1db0778299e42d9767198d362ab",
 		"conn_registry.go:publishAcceptedProofTransport":          "ff1f63812b27b42c384d7e946755bddf2ccf098260a04adcbbc8956df95522a6",
-		"conn_registry.go:registerInboundConnLocked":              "68628eedbf2b825a37b83f4f3ec30b288421763eed7730e8e3f7e50b166e8c88",
-		"conn_registry.go:unregisterConnLocked":                   "f59796f1bcdbf93cd9792866515aa24e381f95a00b394dcbdbcf0aad525e3e8c",
+		"conn_registry.go:registerInboundConnLocked":              "526e559f0e1261cc3c846967efccbe4013b42ff326e4c1941643928b44bbccbb",
+		"conn_registry.go:unregisterConnLocked":                   "1cc9ef4f9f2010e56ffa8e714b7b8394294502a1aac3c3597239e1b512b0409d",
 		"connection_manager.go:deactivateSlotLocked":              "26fb7214b4663240a888110d59bcc1261bf63b35be44130fbc6d8298d5257658",
 		"connection_manager.go:handleDialSucceeded":               "0b7f0d2942f6ca4be107a1898bc5b501d6266d643e61f1e9c2112c75b6fe0fbf",
 		"connection_manager.go:tearDownSession":                   "610654b3b56e7214b2cb5bee40ea6d7c55fce5a2fbc58649e63dac1eab42d6f6",
@@ -42,7 +42,7 @@ func registryPublicationBodyPins() map[string]string {
 		"peer_sessions.go:withdrawRefusedCMSession":               "b878d1d7b3f47cc573ba9c8b90543d8270380b834a44b599578788172a78da73",
 		"peer_sessions.go:withdrawServedCMSession":                "59af33c360eb9a66a93ba86820e316b5df675149a7e4303882a374b0e9aaaef8",
 		"proof_transport_lifetime.go:proofTransportLifetime.end":  "d7a35159e88915a2454b8abcbead4d94577b49621981d24ec42866f71ef5891d",
-		"service.go:attachOutboundNetCore":                        "ca7fb7dd5fed1a2f81619f93051a9f830022c107f8f6e622f13b74d41db741fe",
+		"service.go:attachOutboundNetCore":                        "5c6b8140938f2bd8db47ce87ec2a4047156763989c3161110c50c27524541a89",
 		"service.go:closeRegisteredInboundCore":                   "7400f110299be697ca96fccab8ed58d490179da64796c4689f50bf73147fc780",
 		"service.go:unregisterInboundConn":                        "cad625a150d7661cce8404fb84de56c1244b2d768eb5646cd5f6f1e257dece5e",
 	}

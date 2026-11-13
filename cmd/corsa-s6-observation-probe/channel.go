@@ -174,6 +174,7 @@ type sourceValues struct {
 	Terminal            observed[corenode.TerminalObservationSnapshot, corenode.TerminalObservationKey]                         `json:"terminal"`
 	Pending             observed[domain.PendingQueueObservationSnapshot, corenode.PendingObservationKey]                        `json:"pending"`
 	DatagramQueueGrowth *observed[datagram.QueueGrowthSnapshot, corenode.PendingObservationKey]                                 `json:"datagram_queue_growth,omitempty"`
+	WriterQueueHistory  *observed[corenode.WriterQueueLifecycleSnapshot, corenode.PendingObservationKey]                        `json:"writer_queue_history,omitempty"`
 	Handshake           observed[corenode.HandshakeObservationSnapshot, corenode.HandshakeObservationKey]                       `json:"handshake"`
 	Total               observed[corenode.ConnectionTotalObservationSnapshot, corenode.ConnectionTotalObservationKey]           `json:"total"`
 }
@@ -188,6 +189,7 @@ type captureReads struct {
 	terminal            func() observed[corenode.TerminalObservationSnapshot, corenode.TerminalObservationKey]
 	pending             func() observed[domain.PendingQueueObservationSnapshot, corenode.PendingObservationKey]
 	datagramQueueGrowth func() observed[datagram.QueueGrowthSnapshot, corenode.PendingObservationKey]
+	writerQueueHistory  func() observed[corenode.WriterQueueLifecycleSnapshot, corenode.PendingObservationKey]
 	handshake           func() observed[corenode.HandshakeObservationSnapshot, corenode.HandshakeObservationKey]
 	total               func() observed[corenode.ConnectionTotalObservationSnapshot, corenode.ConnectionTotalObservationKey]
 }
@@ -237,6 +239,11 @@ func readsForApp(a *appnode.App, mode string) (captureReads, error) {
 			return observed[datagram.QueueGrowthSnapshot, corenode.PendingObservationKey]{q.Identity().String(), q.Key(), q.DatagramQueueGrowth()}
 		}
 	}
+	if q.HasWriterQueueHistory() {
+		reads.writerQueueHistory = func() observed[corenode.WriterQueueLifecycleSnapshot, corenode.PendingObservationKey] {
+			return observed[corenode.WriterQueueLifecycleSnapshot, corenode.PendingObservationKey]{q.Identity().String(), q.Key(), q.WriterQueueHistory()}
+		}
+	}
 	return reads, nil
 }
 func alive(ctx context.Context, returned *atomic.Bool) error {
@@ -264,7 +271,7 @@ func (r captureReads) capture(ctx context.Context, returned *atomic.Bool, mode s
 		return nil, 0, err
 	}
 	if mode == "OFF" {
-		if r.registered != nil || r.advertised != nil || r.pins != nil || r.guard != nil || r.terminal != nil || r.pending != nil || r.datagramQueueGrowth != nil || r.handshake != nil || r.total != nil {
+		if r.registered != nil || r.advertised != nil || r.pins != nil || r.guard != nil || r.terminal != nil || r.pending != nil || r.datagramQueueGrowth != nil || r.writerQueueHistory != nil || r.handshake != nil || r.total != nil {
 			return nil, 0, entryError("OFF-reader-installed")
 		}
 		return nil, 0, nil
@@ -307,6 +314,14 @@ func (r captureReads) capture(ctx context.Context, returned *atomic.Bool, mode s
 		v.DatagramQueueGrowth = &growth
 		count++
 	}
+	if r.writerQueueHistory != nil {
+		history, err := take(ctx, returned, r.writerQueueHistory)
+		if err != nil {
+			return nil, 0, err
+		}
+		v.WriterQueueHistory = &history
+		count++
+	}
 	return &v, count, nil
 }
 func canonical(raw []byte, value any) error {
@@ -345,6 +360,7 @@ func validateInit(v initFrame, nonce string) error {
 		{q.RegisteredProvenV2.OwnerCapacity, 1024}, {q.RegisteredProvenV2.HistoryCapacity, 4096},
 		{q.AdvertisedConnections.ConnectionCapacity, 1024}, {q.AdvertisedConnections.SlotCapacity, 1024}, {q.AdvertisedConnections.HistoryCapacity, 4096},
 		{q.RawPinMembership.BaselineCapacity, 20000}, {q.RawPinMembership.HistoryCapacity, 4096}, {q.Handshake.Capacity, 4096}, {q.ConnectionTotal.Capacity, 4096},
+		{q.WriterQueueHistoryCapacity, corenode.MaxWriterQueueHistory},
 	}
 	for _, cap := range caps {
 		if cap.value < 0 || cap.value > cap.maximum {

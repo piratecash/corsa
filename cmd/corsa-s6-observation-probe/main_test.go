@@ -371,6 +371,62 @@ func TestS6ProbeOptInDatagramQueueGrowthOverChannel(t *testing.T) {
 	}
 }
 
+func TestS6ProbeOptInWriterQueueHistoryOverChannel(t *testing.T) {
+	for _, withDatagram := range []bool{false, true} {
+		t.Run(fmt.Sprintf("datagram=%t", withDatagram), func(t *testing.T) {
+			init := sampleInit()
+			init.Request.WriterQueueHistoryCapacity = corenode.MaxWriterQueueHistory
+			init.Request.DatagramQueueGrowth = withDatagram
+			var decoded initFrame
+			if err := canonical(marshal(t, init), &decoded); err != nil || decoded.Request.WriterQueueHistoryCapacity != corenode.MaxWriterQueueHistory {
+				t.Fatal("writer INIT request was lost", err)
+			}
+			if err := validateInit(decoded, testNonce); err != nil {
+				t.Fatal(err)
+			}
+			decoded.Request.WriterQueueHistoryCapacity++
+			if validateInit(decoded, testNonce) == nil {
+				t.Fatal("accepted a capacity above the diagnostic ceiling")
+			}
+			f := fixture(t)
+			var order []int
+			var returned atomic.Bool
+			reads := fakeReads(&order)
+			if withDatagram {
+				reads.datagramQueueGrowth = func() observed[datagram.QueueGrowthSnapshot, corenode.PendingObservationKey] {
+					return observed[datagram.QueueGrowthSnapshot, corenode.PendingObservationKey]{}
+				}
+			}
+			reads.writerQueueHistory = func() observed[corenode.WriterQueueLifecycleSnapshot, corenode.PendingObservationKey] {
+				return observed[corenode.WriterQueueLifecycleSnapshot, corenode.PendingObservationKey]{
+					Identity: "local-owner", Key: init.Request.Pending,
+					Snapshot: corenode.WriterQueueLifecycleSnapshot{Instance: [16]byte{1}, Rows: []corenode.WriterQueueLifecycleRow{}},
+				}
+			}
+			done, reader := session(t, f, reads, "ON", &returned)
+			send(t, f, marshal(t, readFrame{1, testNonce, 0, "READ"}))
+			cut := read(t, f, reader)
+			count := 9
+			if withDatagram {
+				count++
+			}
+			if cut.Sources == nil || cut.Sources.WriterQueueHistory == nil || cut.InvokedSources != count ||
+				cut.Sources.WriterQueueHistory.Snapshot.Rows == nil || (cut.Sources.DatagramQueueGrowth != nil) != withDatagram ||
+				cut.JointAtomicCut || cut.AttributionVerified {
+				t.Fatalf("writer CUT = %+v", cut)
+			}
+			send(t, f, marshal(t, readFrame{1, testNonce, 1, "STOP"}))
+			_ = f.request.Close()
+			if stopped := read(t, f, reader); stopped.Kind != "STOP_REQUESTED" {
+				t.Fatal(stopped)
+			}
+			if err := wait(t, done); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 func TestS6ProbePreservesUnknownDisabledAndUnverifiedLabels(t *testing.T) {
 	var order []int
 	var returned atomic.Bool

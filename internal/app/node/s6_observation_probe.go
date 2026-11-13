@@ -9,15 +9,16 @@ import corenode "github.com/piratecash/corsa/internal/core/node"
 // and capacities remain caller assertions, not deployment or run qualification.
 // No file source, clock, callback, configuration or resource owner is supplied.
 type S6ObservationProbeRequest struct {
-	RegisteredProvenV2    corenode.RegisteredProvenV2ObservationRequest
-	AdvertisedConnections corenode.AdvertisedConnectionObservationRequest
-	RawPinMembership      corenode.RawPinMembershipObservationRequest
-	Guard                 corenode.GuardObservationKey
-	Terminal              corenode.TerminalObservationKey
-	Pending               corenode.PendingObservationKey
-	DatagramQueueGrowth   bool `json:",omitempty"`
-	Handshake             corenode.HandshakeObservationRequest
-	ConnectionTotal       corenode.ConnectionTotalObservationRequest
+	RegisteredProvenV2         corenode.RegisteredProvenV2ObservationRequest
+	AdvertisedConnections      corenode.AdvertisedConnectionObservationRequest
+	RawPinMembership           corenode.RawPinMembershipObservationRequest
+	Guard                      corenode.GuardObservationKey
+	Terminal                   corenode.TerminalObservationKey
+	Pending                    corenode.PendingObservationKey
+	DatagramQueueGrowth        bool `json:",omitempty"`
+	WriterQueueHistoryCapacity int  `json:",omitempty"`
+	Handshake                  corenode.HandshakeObservationRequest
+	ConnectionTotal            corenode.ConnectionTotalObservationRequest
 }
 
 // NewWithS6ObservationProbe uses the original App constructor once. It neither
@@ -26,14 +27,15 @@ type S6ObservationProbeRequest struct {
 // invalid/UNKNOWN states and the original App lifetime remain unchanged.
 func NewWithS6ObservationProbe(request S6ObservationProbeRequest) (*App, error) {
 	return newAppWithObservations(corenode.ObservationOptions{
-		RegisteredProvenV2:    &request.RegisteredProvenV2,
-		AdvertisedConnections: &request.AdvertisedConnections,
-		RawPinMembership:      &request.RawPinMembership,
-		Guard:                 &request.Guard,
-		Terminal:              &request.Terminal,
-		Pending:               &request.Pending,
-		DatagramQueueGrowth:   request.DatagramQueueGrowth,
-		Handshake:             &request.Handshake,
-		ConnectionTotal:       &request.ConnectionTotal,
+		RegisteredProvenV2:         &request.RegisteredProvenV2,
+		AdvertisedConnections:      &request.AdvertisedConnections,
+		RawPinMembership:           &request.RawPinMembership,
+		Guard:                      &request.Guard,
+		Terminal:                   &request.Terminal,
+		Pending:                    &request.Pending,
+		DatagramQueueGrowth:        request.DatagramQueueGrowth,
+		WriterQueueHistoryCapacity: request.WriterQueueHistoryCapacity,
+		Handshake:                  &request.Handshake,
+		ConnectionTotal:            &request.ConnectionTotal,
 	})
 }

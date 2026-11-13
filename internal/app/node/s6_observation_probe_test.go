@@ -284,3 +284,33 @@ func TestAppS6ObservationProbeDatagramQueueGrowth(t *testing.T) {
 		})
 	}
 }
+
+func TestAppS6ObservationProbeWriterQueueHistory(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		capacity int
+	}{{"default", 0}, {"requested", 2}} {
+		t.Run(tc.name, func(t *testing.T) {
+			isolateTotalApp(t)
+			request := appS6ProbeRequest()
+			request.WriterQueueHistoryCapacity = tc.capacity
+			a, err := NewWithS6ObservationProbe(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ownUnstartedGuardApp(t, a, time.Now().Add(10*time.Second))
+			o := a.PendingObservation()
+			if o.HasWriterQueueHistory() != (tc.capacity > 0) {
+				t.Fatal("request was lost or enabled by default")
+			}
+			s := o.WriterQueueHistory()
+			if tc.capacity == 0 {
+				if s.UnknownReason != "source_unavailable" || s.Rows != nil {
+					t.Fatalf("default writer snapshot: %+v", s)
+				}
+			} else if s.UnknownReason != "" || s.Instance == ([16]byte{}) || s.Registered != 0 || s.Rows == nil || len(s.Rows) != 0 {
+				t.Fatalf("empty registered population: %+v", s)
+			}
+		})
+	}
+}

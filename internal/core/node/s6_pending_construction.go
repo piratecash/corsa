@@ -77,12 +77,26 @@ func (o *PendingObservation) DatagramQueueGrowth() datagram.QueueGrowthSnapshot 
 	return datagram.QueueGrowthSnapshot{UnknownReason: "datagram_unavailable"}
 }
 
+// WriterQueueHistory exposes the registered writer population of this Service.
+func (o *PendingObservation) WriterQueueHistory() WriterQueueLifecycleSnapshot {
+	if !o.HasWriterQueueHistory() {
+		return WriterQueueLifecycleSnapshot{UnknownReason: "source_unavailable"}
+	}
+	return o.service.writerQueueLifecycleSnapshot()
+}
+
+// HasWriterQueueHistory reports whether the constructor installed the source.
+func (o *PendingObservation) HasWriterQueueHistory() bool {
+	return o != nil && o.service != nil && o.service.writerQueueLifecycle != nil
+}
+
 type pendingObservationConstruction struct {
-	key                 PendingObservationKey
-	identity            domain.PeerIdentity
-	clock               func() (time.Duration, error)
-	readout             *PendingObservation
-	datagramQueueGrowth bool
+	key                        PendingObservationKey
+	identity                   domain.PeerIdentity
+	clock                      func() (time.Duration, error)
+	readout                    *PendingObservation
+	datagramQueueGrowth        bool
+	writerQueueHistoryCapacity int
 }
 
 // NewServiceWithPendingObservation explicitly opts into the existing K12 source.
@@ -114,6 +128,9 @@ func (c *pendingObservationConstruction) install(s *Service) {
 	o := &PendingObservation{service: s, key: c.key, identity: c.identity}
 	c.readout = o
 	s.observeDatagramQueueGrowth = c.datagramQueueGrowth
+	if c.writerQueueHistoryCapacity > 0 {
+		s.writerQueueLifecycle = newWriterQueueLifecycle(c.writerQueueHistoryCapacity)
+	}
 	s.deliveryMu.Lock()
 	defer s.deliveryMu.Unlock()
 	var count int64

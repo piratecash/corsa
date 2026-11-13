@@ -554,6 +554,11 @@ func (s *Service) registerInboundConnLocked(conn net.Conn, core *netcore.NetCore
 		s.bindProofTransportLocked(entry, id, wire)
 	}
 	s.k10RegisterLocked(conn, entry)
+	if s.writerQueueLifecycle != nil {
+		_, byID := s.conns[id]
+		_, byConn := s.connIDByNetConn[conn]
+		s.recordWriterQueueBirthLocked(entry, byID || byConn)
+	}
 	var k3 k3RegisteredTicket
 	if s.k3Registered != nil {
 		k3 = s.k3BeginRegistryLocked(id)
@@ -589,6 +594,11 @@ func (s *Service) attachOutboundCoreLocked(conn net.Conn, core *netcore.NetCore)
 		s.bindProofTransportLocked(entry, id, wire)
 	}
 	s.k10RegisterLocked(conn, entry)
+	if s.writerQueueLifecycle != nil {
+		_, byID := s.conns[id]
+		_, byConn := s.connIDByNetConn[conn]
+		s.recordWriterQueueBirthLocked(entry, byID || byConn)
+	}
 	var k3 k3RegisteredTicket
 	if s.k3Registered != nil {
 		k3 = s.k3BeginRegistryLocked(id)
@@ -643,6 +653,9 @@ func (s *Service) unregisterConnLocked(conn net.Conn) {
 		}
 		entry.budget.Release()
 		entry.terminal.remove(entry)
+		s.recordWriterQueueRetirementLocked(id, entry)
+	} else {
+		s.writerQueueLifecycle.fail("registry_coverage_mismatch")
 	}
 	var k3 k3RegisteredTicket
 	if s.k3Registered != nil {

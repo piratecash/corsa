@@ -24,17 +24,18 @@ type TerminalObservationKey struct {
 // ObservationOptions is the fixed cross-package construction envelope. Keys
 // are copied before the one original Service builder is invoked. Nil stays off.
 type ObservationOptions struct {
-	AdvertisedConnections *AdvertisedConnectionObservationRequest
-	RawPinMembership      *RawPinMembershipObservationRequest
-	RegisteredProvenV2    *RegisteredProvenV2ObservationRequest
-	Pending               *PendingObservationKey
-	DatagramQueueGrowth   bool
-	Terminal              *TerminalObservationKey
-	Guard                 *GuardObservationKey
-	Handshake             *HandshakeObservationRequest
-	HandshakeFile         *HandshakeFileObservationRequest
-	ConnectionTotal       *ConnectionTotalObservationRequest
-	ConnectionTotalFile   *ConnectionTotalFileObservationRequest
+	AdvertisedConnections      *AdvertisedConnectionObservationRequest
+	RawPinMembership           *RawPinMembershipObservationRequest
+	RegisteredProvenV2         *RegisteredProvenV2ObservationRequest
+	Pending                    *PendingObservationKey
+	DatagramQueueGrowth        bool
+	WriterQueueHistoryCapacity int
+	Terminal                   *TerminalObservationKey
+	Guard                      *GuardObservationKey
+	Handshake                  *HandshakeObservationRequest
+	HandshakeFile              *HandshakeFileObservationRequest
+	ConnectionTotal            *ConnectionTotalObservationRequest
+	ConnectionTotalFile        *ConnectionTotalFileObservationRequest
 }
 
 type ObservationReadouts struct {
@@ -132,6 +133,9 @@ func NewServiceWithTerminalObservation(cfg config.Node, id *identity.Identity, b
 }
 
 func newServiceWithObservations(cfg config.Node, id *identity.Identity, bus *ebus.Bus, options ObservationOptions, clock func() (time.Duration, error)) (*Service, ObservationReadouts, error) {
+	if capacity := options.WriterQueueHistoryCapacity; capacity < 0 || capacity > MaxWriterQueueHistory || (capacity > 0 && options.Pending == nil) {
+		return nil, ObservationReadouts{}, errors.New("writer queue history: invalid capacity or missing pending observation key")
+	}
 	// Freeze the advertised scalar request before ANY observer callback.
 	var advertised *k3AdvertisedRequest
 	if options.AdvertisedConnections != nil {
@@ -179,7 +183,7 @@ func newServiceWithObservations(cfg config.Node, id *identity.Identity, bus *ebu
 		if !validPendingObservationKey(key) {
 			return nil, ObservationReadouts{}, errors.New("pending observation: invalid key")
 		}
-		pending = &pendingObservationConstruction{key: key, identity: owner, clock: clock, datagramQueueGrowth: options.DatagramQueueGrowth}
+		pending = &pendingObservationConstruction{key: key, identity: owner, clock: clock, datagramQueueGrowth: options.DatagramQueueGrowth, writerQueueHistoryCapacity: options.WriterQueueHistoryCapacity}
 	}
 	if options.Terminal != nil {
 		key := *options.Terminal

@@ -809,9 +809,10 @@ type Service struct {
 	// writes go through the helpers in conn_registry.go — nothing outside
 	// that file touches this map directly. Lifecycle entry points:
 	// registerInboundConnLocked, attachOutboundCoreLocked, unregisterConnLocked.
-	terminalObservation *k10TerminalSource  // private immutable pre-registration binding; ordinary nil
-	k3Registered        *k3RegisteredSource // private pre-publication registered-proof source; ordinary nil
-	conns               map[netcore.ConnID]*connEntry
+	terminalObservation  *k10TerminalSource    // private immutable pre-registration binding; ordinary nil
+	k3Registered         *k3RegisteredSource   // private pre-publication registered-proof source; ordinary nil
+	writerQueueLifecycle *writerQueueLifecycle // registered writer history, guarded by peerMu; ordinary nil
+	conns                map[netcore.ConnID]*connEntry
 	// inboundClosed is set under peerMu by closeAllInboundConns at shutdown
 	// and never cleared (Run is single-shot). registerInboundConn refuses
 	// once it is set: a connection still between its first byte and its
@@ -9709,7 +9710,7 @@ func (s *Service) registerInboundConn(conn net.Conn, reservation *connbudget.Res
 	}
 	var pc *netcore.NetCore
 	birthCompleted := false
-	if s.k3Registered != nil || s.k3Advertised != nil {
+	if s.k3Registered != nil || s.k3Advertised != nil || s.writerQueueLifecycle != nil {
 		defer func() {
 			if pc == nil || birthCompleted {
 				return
@@ -9722,6 +9723,7 @@ func (s *Service) registerInboundConn(conn net.Conn, reservation *connbudget.Res
 			}
 			s.k3Advertised.fail("registry-birth-incomplete")
 			s.terminalObservation.fail("registry-birth-incomplete")
+			s.writerQueueLifecycle.fail("registry_birth_incomplete")
 			s.peerMu.Unlock()
 			// Original Close closes the socket and joins the actual writer.
 			// Keep it outside peerMu, as in unregisterInboundConn.
@@ -9755,7 +9757,7 @@ func (s *Service) registerInboundConn(conn net.Conn, reservation *connbudget.Res
 	k10Previous := s.connIDCounter
 	s.connIDCounter++
 	s.k10IssuedLocked(domain.ConnID(k10Previous), domain.ConnID(s.connIDCounter))
-	pc = netcore.New(netcore.ConnID(s.connIDCounter), conn, netcore.Inbound, netcore.Options{})
+	pc = netcore.New(netcore.ConnID(s.connIDCounter), conn, netcore.Inbound, netcore.Options{ObserveWriterQueue: s.writerQueueLifecycle != nil})
 	if addr, ok := conn.RemoteAddr().(*net.TCPAddr); ok && addr.IP.IsLoopback() {
 		pc.SetLocal(true)
 	}
@@ -9791,9 +9793,9 @@ func (s *Service) attachOutboundNetCore(session *peerSession) error {
 	if err := s.refuseRealConnectionUnderNetworkOverride(); err != nil {
 		return fmt.Errorf("attach outbound conn %d: %w", session.connID, err)
 	}
-	pc := netcore.New(session.connID, session.conn, netcore.Outbound, netcore.Options{})
+	pc := netcore.New(session.connID, session.conn, netcore.Outbound, netcore.Options{ObserveWriterQueue: s.writerQueueLifecycle != nil})
 	birthCompleted := false
-	if s.k3Registered != nil || s.k3Advertised != nil {
+	if s.k3Registered != nil || s.k3Advertised != nil || s.writerQueueLifecycle != nil {
 		defer func() {
 			if pc == nil || birthCompleted {
 				return
@@ -9806,6 +9808,7 @@ func (s *Service) attachOutboundNetCore(session *peerSession) error {
 			}
 			s.k3Advertised.fail("registry-birth-incomplete")
 			s.terminalObservation.fail("registry-birth-incomplete")
+			s.writerQueueLifecycle.fail("registry_birth_incomplete")
 			s.peerMu.Unlock()
 			// Original Close closes the socket and joins the actual writer.
 			// Keep it outside peerMu, as in unregisterInboundConn.
@@ -9822,7 +9825,7 @@ func (s *Service) attachOutboundNetCore(session *peerSession) error {
 	s.peerMu.Lock()
 	var adTicket *k3AdvertisedTicket
 	adLocked := true
-	if s.k3Advertised != nil || s.k3Registered != nil {
+	if s.k3Advertised != nil || s.k3Registered != nil || s.writerQueueLifecycle != nil {
 		defer func() {
 			if adLocked {
 				s.guardK3AdvertisedPeerLocked(adTicket)
