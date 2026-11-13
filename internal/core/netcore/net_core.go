@@ -150,12 +150,13 @@ type NetCore struct {
 	// queue the drain has already walked past. See queueFrame and
 	// settleEnqueuedFrame for why the second read closes that window instead
 	// of narrowing it.
-	sendCh        chan sendItem
-	closing       chan struct{}
-	writerDone    chan struct{}
-	writerDoneOne sync.Once
-	writerExited  chan struct{}
-	gate          atomic.Int32
+	sendCh                 chan sendItem
+	writerQueueObservation *writerQueueObservation
+	closing                chan struct{}
+	writerDone             chan struct{}
+	writerDoneOne          sync.Once
+	writerExited           chan struct{}
+	gate                   atomic.Int32
 
 	// enqueueBarrier, when non-nil, runs inside every producer between the
 	// pre-offer gate check and the channel offer. Production never
@@ -265,6 +266,8 @@ type Options struct {
 	Networks        map[domain.NetGroup]struct{}
 	LastActivity    time.Time
 	ProtocolVersion domain.ProtocolVersion
+	// ObserveWriterQueue selects the diagnostic queue for this connection.
+	ObserveWriterQueue bool
 
 	// Declarations carries the raw handshake self-description. It is a
 	// POINTER, unlike every other field here, because both of its slices
@@ -373,6 +376,9 @@ func New(id ConnID, rawConn net.Conn, dir Direction, opts Options) *NetCore {
 	if opts.Declarations != nil {
 		pc.declarations = opts.Declarations.Clone()
 	}
+	if opts.ObserveWriterQueue {
+		pc.writerQueueObservation = newWriterQueueObservation()
+	}
 	go pc.writerLoop()
 	return pc
 }
@@ -439,36 +445,35 @@ func (pc *NetCore) writerLoop() {
 	defer pc.signalWriterDone()
 
 	for {
-		select {
-		case <-pc.closing:
+		item, ok := pc.nextWriterItem()
+		if !ok {
 			pc.drainQueued()
 			return
-		case item := <-pc.sendCh:
-			// The gate is the single source of truth for "this queue is
-			// finished": producers read it on both sides of their offer, the
-			// loop reads it here.
-			if pc.gateStatus() != SendOK {
-				if item.owned != nil {
-					item.owned.discardOwnedItem()
-				}
-				continue
-			}
-			if pc.writeItem(item) {
-				continue
-			}
-			// Shut the door BEFORE draining: the drain frees queue slots, and
-			// a producer that slipped in between would be told SendOK for a
-			// frame this loop can now only discard. This ordering is also what
-			// makes the producers' post-offer check sufficient — a producer
-			// that still reads gateOpen is provably ahead of the drain that
-			// follows. CompareAndSwap rather than Store so a concurrent
-			// Close() is not downgraded to a socket failure.
-			pc.gate.CompareAndSwap(int32(gateOpen), int32(gateSocketFailed))
-			// Everything already queued behind the failed frame is released in
-			// the same instant the link breaks, rather than held until Close().
-			pc.drainQueued()
-			pc.signalWriterDone()
 		}
+		// The gate is the single source of truth for "this queue is
+		// finished": producers read it on both sides of their offer, the
+		// loop reads it here.
+		if pc.gateStatus() != SendOK {
+			if item.owned != nil {
+				item.owned.discardOwnedItem()
+			}
+			continue
+		}
+		if pc.writeItem(item) {
+			continue
+		}
+		// Shut the door BEFORE draining: the drain frees queue slots, and
+		// a producer that slipped in between would be told SendOK for a
+		// frame this loop can now only discard. This ordering is also what
+		// makes the producers' post-offer check sufficient — a producer
+		// that still reads gateOpen is provably ahead of the drain that
+		// follows. CompareAndSwap rather than Store so a concurrent
+		// Close() is not downgraded to a socket failure.
+		pc.gate.CompareAndSwap(int32(gateOpen), int32(gateSocketFailed))
+		// Everything already queued behind the failed frame is released in
+		// the same instant the link breaks, rather than held until Close().
+		pc.drainQueued()
+		pc.signalWriterDone()
 	}
 }
 
@@ -528,6 +533,17 @@ func (pc *NetCore) writeItem(item sendItem) bool {
 // before any drain starts, and the frame it may still deposit is answered
 // SendWriterDone / SendChanClosed and released with the buffer itself.
 func (pc *NetCore) drainQueued() {
+	if pc.writerQueueObservation != nil {
+		for {
+			item, ok, _ := pc.takeObservedWriterItem(true)
+			if !ok {
+				return
+			}
+			if item.owned != nil {
+				item.owned.discardOwnedItem()
+			}
+		}
+	}
 	for {
 		select {
 		case item := <-pc.sendCh:
@@ -676,13 +692,18 @@ func (pc *NetCore) queueFrame(item sendItem) SendStatus {
 		return st
 	}
 	pc.runEnqueueBarrier()
-
-	select {
-	case pc.sendCh <- item:
-		offered = true // consumer or terminal producer must win the private item claim
-	default:
-		return SendBufferFull
+	if pc.writerQueueObservation != nil {
+		if status, _ := pc.offerObservedWriterItem(item, false); status != SendOK {
+			return status
+		}
+	} else {
+		select {
+		case pc.sendCh <- item:
+		default:
+			return SendBufferFull
+		}
 	}
+	offered = true // consumer or terminal producer must win the private item claim
 	status := pc.settleEnqueuedFrame(item)
 	if status != SendOK && item.owned != nil {
 		item.owned.retireUnclaimedOwnedItem()
@@ -710,6 +731,12 @@ func (pc *NetCore) queueFrameBlocking(item sendItem, cancel <-chan struct{}, dea
 		return st
 	}
 	pc.runEnqueueBarrier()
+	if pc.writerQueueObservation != nil {
+		if status := pc.waitObservedWriterOffer(item, cancel, deadline); status != SendOK {
+			return status
+		}
+		return pc.settleEnqueuedFrame(item)
+	}
 
 	select {
 	case pc.sendCh <- item:
