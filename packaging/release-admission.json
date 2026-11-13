@@ -5,9 +5,9 @@
   "conditions": [
     {
       "id": "crypto_review",
-      "condition": "Independent cryptographic review of the secure session: the identity proof over the TLS exporter, the exporter label and context, domain separation, role binding and the published test vectors.",
-      "executor": "external_expert",
-      "check": "The reviewer examines the commit to be released, not a design draft, and reports findings by severity; every critical finding is fixed and re-reviewed.",
+      "condition": "Cryptographic security review of the secure session and its active consumers by Codex and Claude Fable. Cover the TLS exporter identity proof, label and context, domain separation, role binding, published vectors, and the active message and persistent trust paths.",
+      "executor": "developer",
+      "check": "The developer coordinates two separately attributed reports by Codex and Claude Fable on the same full release candidate commit. Record scope, findings by severity, reproductions and limitations. Reconcile differences against source and tests, fix every Critical finding, record the disposition of each High finding, and have both models re-review affected paths after fixes. Evidence names the checked candidate commit and references both reports and the disposition record.",
       "evidence": null,
       "status": "not_done"
     },

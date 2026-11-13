@@ -76,6 +76,24 @@ The [later owner decision](operations/d1-release-decision-proposal.md#measuremen
 
 [Последнее решение владельца](operations/d1-release-decision-proposal.md#measurement-scope-2026-10-23) переносит реальные Windows/DACL и Tor замеры; работа идёт на macOS/Linux. Прежние безусловные требования Windows/Tor ниже заменены только в этой области, исторические результаты сохранены. Фактический статус — UNVERIFIED/UNKNOWN, не PASS. Schema 2 сохраняет 17 условий: 7 done, 2 partial, 7 not_done и 1 deferred (`tor_phase_measurement`). Условие небезопасного хранилища остаётся partial; clearnet/настоящие старые выпуски, замеры первого контакта и вывод timeout остаются обязательными. Proxy/no-direct-fallback, аутентификация, независимая криптоэкспертиза, остальные проверки, G2 и отдельные решения о выпуске сохраняются. Gate закрыт. Tor-роль наблюдения отложена; данные macOS/Linux не доказывают пороги или гарантии Tor.
 
+### Cryptographic reviewers / Участники крипторевью — 2026-11-02
+
+The owner assigned `crypto_review` to Codex in the security reviewer role and
+Claude Fable, with separate reports on the same full candidate SHA and re-review
+of affected fixes by both models. A human expert is outside the current plan.
+This supersedes earlier reviewer assignments below without turning any open
+finding or missing coverage into PASS. The received source-only report on
+`2c5262a14510e26b18688d5c06821af4fe2e81d3` leaves MSG-1/2/3 and TRUST-1 open;
+`crypto_review` remains `not_done`. See the [current review package](operations/s6-external-review-package.md).
+
+Владелец поручил `crypto_review` двум моделям: Codex в роли специалиста по
+безопасности и Claude Fable. Нужны отдельные отчёты на одном полном SHA кандидата
+и повторная проверка затронутых исправлений обеими моделями. Человеческая
+экспертиза исключена из текущего плана; это заменяет прежнее назначение ревьюеров
+ниже, сохраняя открытые находки и пробелы покрытия. Source-only отчёт по
+`2c5262a14510e26b18688d5c06821af4fe2e81d3` оставляет MSG-1/2/3 и TRUST-1 открытыми;
+`crypto_review` остаётся `not_done`. [Действующий пакет ревью](operations/s6-external-review-package.md).
+
 ## English
 
 ### What publishes a release
@@ -118,6 +136,8 @@ separately, to release that version. The gate is code, not a checklist:
   and the test that pins the manifest may differ. Recording evidence and the decision after the
   checks therefore needs no re-run; any other change does. Evidence names the commit of the report,
   not the tag, for the same reason.
+- The `crypto_review` evidence must name the same commit as `final_candidate_checks`.
+  Both reports and their dispositions are checked during review.
 - The comparison does not trust local git settings: global and system config, `GIT_*` variables,
   excludes files and replace refs are ignored; an index entry marked assume-unchanged or
   skip-worktree refuses; every untracked or ignored file counts as a change except the build caches
@@ -165,8 +185,12 @@ check, and fail on each known way around it:
   compared whole. So no `if`, `continue-on-error`, `shell` (`"true {0}"` would skip the command),
   `working-directory`, `env`, `defaults`, `container` or write token, and no `env` or `defaults` at
   workflow level either;
-- the GitHub release publishes `body_path: docs/release-notes/RELEASE-${{ github.ref_name }}.md`
-  and never generated notes;
+- release runs only on pushes of `v*` tags. The publication job checks out that event's source
+  with credential persistence disabled. It uses the triggering tag, passes `github.sha` as
+  `target_commitish`, and publishes `body_path: docs/release-notes/RELEASE-${{ github.ref_name }}.md`;
+- the archive verification step re-reads the remote tag immediately before handing off to
+  publication and requires it to resolve to the checked commit. The tag ruleset also covers the
+  interval between that check and publication;
 - the signed Android targets depend on `release-admission`.
 
 A test also pins the committed manifest to its current state, so opening the gate is a reviewed
@@ -185,28 +209,22 @@ criteria, then consider the overlay responder release (D1). D1 also requires the
 wire contract and a load run on its final candidate against the approved resource budget. Passing
 local tests or completing the secure-session implementation does not replace any of these steps.
 
-The gate is **closed**. The build activates the secure session. Decided: the secure session ships in
-a release of its own, and the overlay role follows in a later release. Confirmed on the commit their
-evidence names: a pin store marker that turns a lost or moved store into an explicit error; push
-notices and every dial through the common path with SOCKS/Tor and no direct fallback, the raw legacy
-dial removed; compatibility tests against all five real releases with protocol 28–30 in both
-directions (a message sent by the old node itself cannot be tested, the headless release has no
-sending command; old-to-new delivery is proven through an old relay); the identity-less probe after a
-failed TLS attempt, with per-endpoint back-off; the manual TLS-first switch; the minimum session
-version in the node's own record.
+The gate is **closed**. The [admission manifest](../packaging/release-admission.json)
+records nine conditions with evidence, two partial conditions, five open conditions,
+and the Tor measurement deferral as UNVERIFIED as of 2026-11-12.
+`release_decision` is `null`.
 
-Implemented, with checks still missing (a condition counts only when every check passes on the commit
-it names): refusal to start, before listening, on an unsafe pin store, directory or marker (the
-real Windows/DACL tests are deferred by the owner; their behaviour remains UNVERIFIED); a loopback inbound class (its budgets are not
-measured yet).
+The load evidence covers the matched Common32 and pin-write component runs on their
+named source. The loopback evidence covers the Linux arm64 Node component and its
+admission limits. Changes affecting either result require reassessment on the final
+candidate. The approved scope keeps K2/R1b/R2/N-in off. The conformance of the
+shipped entry points and operator restrictions remains partial. Pin-store startup
+refusal is also partial, with native Windows/DACL still UNVERIFIED.
 
-Outstanding: an independent cryptographic review; clearnet first-connection latency on real old releases
-that sets the TLS probe timeout; measured loopback
-budgets; a load run on the final candidate; implementation and verification of the owner's
-[operator pin-removal decision](design/identity-pin-removal-decision.md), including the external
-startup fence and confirmed recovery; an approved plan for observing the release in the
-network; all checks on the final candidate; release notes. No release decision is recorded. The list
-with checks and evidence is in `packaging/release-admission.json`.
+The five open conditions are the two-model cryptographic review on the candidate,
+clearnet first-contact latency, the complete observation plan, final candidate
+checks, and approval of the versioned release notes. The approved observation
+calendar and spread thresholds are part of the observation plan.
 
 ## Русский
 
@@ -250,6 +268,8 @@ with checks and evidence is in `packaging/release-admission.json`.
   `docs/release-notes/RELEASE-v<версия>.md` и тест, закрепляющий манифест. Поэтому внесение
   подтверждений и решения после проверок перепрогона не требует, а любое другое изменение — требует.
   По той же причине подтверждение ссылается на коммит отчёта, а не на тег.
+- Подтверждение `crypto_review` должно указывать тот же коммит, что и
+  `final_candidate_checks`. Оба отчёта и решения по находкам сверяются при ревью.
 - Сравнение не доверяет локальным настройкам git: глобальный и системный конфиг, переменные `GIT_*`,
   файлы исключений и replace-ссылки игнорируются; запись индекса с флагом assume-unchanged или
   skip-worktree — отказ; любой неотслеживаемый или игнорируемый файл считается изменением, кроме
@@ -297,8 +317,11 @@ with checks and evidence is in `packaging/release-admission.json`.
   сравниваемый целиком. То есть никаких `if`, `continue-on-error`, `shell` (`"true {0}"` пропустил бы
   команду), `working-directory`, `env`, `defaults`, `container` и токена на запись, а на уровне
   workflow — никаких `env` и `defaults`;
-- GitHub-выпуск публикует `body_path: docs/release-notes/RELEASE-${{ github.ref_name }}.md` и никогда
-  не сгенерированный текст;
+- выпуск запускается только при отправке тега `v*`. Джоба публикации читает исходники этого
+  события с отключённым сохранением токена. Она использует тег события, передаёт `github.sha`
+  как `target_commitish` и публикует `body_path: docs/release-notes/RELEASE-${{ github.ref_name }}.md`;
+- перед передачей архивов на публикацию проверка повторно читает тег на сервере и сверяет
+  его с проверенным коммитом. Ruleset защищает тег и в промежутке до публикации;
 - подписанные Android-цели зависят от `release-admission`.
 
 Ещё один тест закрепляет текущее состояние закоммиченного манифеста: открыть гейт можно только
@@ -317,24 +340,19 @@ with checks and evidence is in `packaging/release-admission.json`.
 и wire-контракт и нагрузочный прогон финального кандидата по утверждённому ресурсному бюджету.
 Успешные локальные тесты и завершённая реализация защищённой сессии эти этапы не заменяют.
 
-Гейт **закрыт**. Сборка включает защищённую сессию. Решено: защищённая сессия выходит отдельным
-выпуском, overlay-роль — в одном из следующих. Подтверждено на коммите, названном в подтверждении:
-маркер хранилища pin, превращающий потерю или перенос хранилища в явную ошибку; push-уведомления и все
-дозвоны через общий путь с SOCKS/Tor без прямого обхода, сырой legacy-дозвон удалён; тесты совместимости
-со всеми пятью настоящими выпусками протокола 28–30 в обе стороны (отправку сообщения самим старым узлом
-проверить нельзя — в headless-выпуске нет команды отправки; доставка «старый → новый» доказана через
-старый узел-ретранслятор); проба без identity после неудачной TLS-попытки, с отступом повторов по
-endpoint; ручной выключатель «TLS-первым»; минимальная версия сессии в собственной записи узла.
+Гейт **закрыт**. На 12 ноября 2026 года [манифест допуска](../packaging/release-admission.json)
+содержит девять условий со свидетельствами, два частичных, пять открытых и
+отсрочку замера Tor со статусом UNVERIFIED. `release_decision` имеет значение `null`.
 
-Реализовано, но проверок ещё не хватает (условие засчитывается, только когда все проверки проходят на
-названном коммите): отказ старта до открытия слушателей при небезопасных хранилище pin,
-каталоге или маркере (настоящие Windows/DACL тесты отложены владельцем, статус UNVERIFIED); отдельный класс
-loopback-входа (бюджеты пока не измерены).
+Свидетельства нагрузки относятся к сопоставимым прогонам Common32 и компонента
+записи pins на указанных исходниках. Свидетельства loopback относятся к компоненту
+Node на Linux arm64 и его лимитам допуска. Изменения, затрагивающие эти результаты,
+требуют повторной оценки на финальном кандидате. По утверждённой области K2/R1b/R2/N-in
+выключены. Сверка выпускаемых точек входа и операторских ограничений остаётся
+частичной. Проверка отказа старта с небезопасным хранилищем pins также частичная,
+реальные Windows/DACL остаются UNVERIFIED.
 
-Не выполнено: независимая криптографическая экспертиза; замер задержки первого подключения clearnet
-на настоящих старых выпусках, по которому выбирается таймаут TLS-пробы; измеренные бюджеты
-loopback-класса; нагрузочный прогон финального кандидата; реализация и проверка принятого
-[решения владельца о снятии pin оператором](design/identity-pin-removal-decision.md), включая внешний
-запрет перезапуска и подтверждённое восстановление; утверждённый план наблюдения выпуска в сети;
-все проверки на финальном кандидате; описание выпуска. Решения о выпуске нет. Список с проверками и
-подтверждениями — `packaging/release-admission.json`.
+Пять открытых условий охватывают крипторевью двумя моделями на кандидате,
+задержку первого соединения clearnet, полный план наблюдения, проверки финального
+кандидата и утверждение описания выпуска для его версии. Утверждённые календарь и
+пороги распространения входят в план наблюдения.

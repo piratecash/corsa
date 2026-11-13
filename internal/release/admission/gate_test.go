@@ -408,6 +408,19 @@ func TestReleaseNotesOfTheVersionMustBeARegularFile(t *testing.T) {
 	}
 }
 
+func TestCryptoReviewMustNameFinalCandidate(t *testing.T) {
+	doc := validManifestDoc().markAllDone().withReleaseDecision()
+	review := doc.conditionByID(t, cryptoReviewCondition)
+	review["evidence"] = map[string]any{
+		"report": "reports from the previous candidate",
+		"commit": "1111111111111111111111111111111111111111",
+	}
+	_, err := Evaluate(context.Background(), activeRequest(), decodeDoc(t, doc), NewMockReleaseTree(t))
+	if !errors.Is(err, ErrCandidateUnverified) || !strings.Contains(err.Error(), string(cryptoReviewCondition)) {
+		t.Fatalf("Evaluate(review from a different candidate) error = %v, want crypto_review refusal", err)
+	}
+}
+
 // TestOwnerConditionMayBeDoneWithoutACommit: an owner decision is not a
 // check of code, so it carries no commit; developer and expert work does.
 func TestOwnerConditionMayBeDoneWithoutACommit(t *testing.T) {

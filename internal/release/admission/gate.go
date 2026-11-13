@@ -16,11 +16,13 @@ import (
 // every check ran on; the tree being released is compared with it.
 const finalCandidateCondition ConditionID = "final_candidate_checks"
 
+const cryptoReviewCondition ConditionID = "crypto_review"
+
 // requiredConditions are the conditions a release that activates the
 // secure session must meet; refusals report them in this order. Removing
 // one is a code change on purpose: the manifest alone cannot lower the bar.
 var requiredConditions = []ConditionID{
-	"crypto_review",
+	cryptoReviewCondition,
 	"tor_phase_measurement",
 	"first_contact_latency",
 	"compat_real_releases",
@@ -232,6 +234,12 @@ func verifyFinalCandidate(ctx context.Context, conditions []Condition, version d
 	commit, err := finalCandidateCommit(conditions)
 	if err != nil {
 		return err
+	}
+	for _, condition := range conditions {
+		if condition.ID == cryptoReviewCondition &&
+			(condition.Evidence == nil || condition.Evidence.Commit == nil || *condition.Evidence.Commit != commit) {
+			return fmt.Errorf("%w: %s must name the final candidate commit %s", ErrCandidateUnverified, cryptoReviewCondition, commit)
+		}
 	}
 	if history == nil {
 		return fmt.Errorf("%w: no history source", ErrCandidateUnverified)
