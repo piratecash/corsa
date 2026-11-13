@@ -72,3 +72,20 @@ entry	internal/core/node/advertised_connection_observation.go | func (s *Service
 entry	internal/core/node/find_node_membership_checkpoint.go | func (r *D1FindNodeResourceReadout) CheckpointForService(expected *Service) D1FindNodeCheckpoint | if l.outbound || l.role != sessionv2.RoleListener || l.token != r.token || l.bridgeTerminal != r.terminal || l.id != id || id == 0 || l.entry != entry || entry.common != l || entry.core == nil || entry.core.ConnID() != id {
 entry	internal/core/node/service.go | func (s *Service) clearConnAuth(id domain.ConnID) | entry.core.ClearAuth()
 entry	internal/core/node/service.go | func (s *Service) setConnAuthStateByID(id domain.ConnID, state *connauth.State) | entry.core.SetAuth(state)
+
+# S6 heartbeat, writer queue observation and first-contact timing.
+registry	internal/core/node/peer_management.go | func (s *Service) inboundHeartbeatStatus(id domain.ConnID, core *netcore.NetCore, sentAt time.Time) (live, pongReceived bool) | return health != nil && health.Connected, s.conns[id].lastPongAt.After(sentAt)
+registry	internal/core/node/peer_management.go | func (s *Service) markInboundPeerRead(id domain.ConnID, core *netcore.NetCore, frameType string) | s.conns[id].lastPongAt = now
+registry	internal/core/node/s6_writer_queue_lifecycle.go | func (s *Service) writerQueueLifecycleSnapshot() WriterQueueLifecycleSnapshot | for id, entry := range s.conns {
+registry	internal/core/node/s6_writer_queue_lifecycle.go | func (s *Service) writerQueueLifecycleSnapshot() WriterQueueLifecycleSnapshot | if o.reason == "" && len(s.conns)+len(o.retired) != o.registered {
+conn	internal/core/node/session_v2_timing.go | func dialSessionV2(ctx context.Context, id domain.ConnID, wire net.Conn, local sessionv2.Local, intro protocol.Frame, expect sessionv2.ExpectedPeer, timeouts sessionv2.Timeouts) (sessionv2.ProvenSession, error)
+conn	internal/core/node/session_v2_timing_disabled.go | func dialSessionV2(ctx context.Context, _ domain.ConnID, wire net.Conn, local sessionv2.Local, intro protocol.Frame, expect sessionv2.ExpectedPeer, timeouts sessionv2.Timeouts) (sessionv2.ProvenSession, error)
+entry	internal/core/node/s6_writer_queue_lifecycle.go | func (s *Service) recordWriterQueueBirthLocked(entry *connEntry, registryCollision bool) | cut := entry.core.WriterQueueObservation()
+entry	internal/core/node/s6_writer_queue_lifecycle.go | func (s *Service) recordWriterQueueBirthLocked(entry *connEntry, registryCollision bool) | if registryCollision || entry.core.ConnID() == 0 {
+entry	internal/core/node/s6_writer_queue_lifecycle.go | func writerQueueLifecycleRow(id domain.ConnID, entry *connEntry) (WriterQueueLifecycleRow, bool) | cut := entry.core.WriterQueueObservation()
+entry	internal/core/node/s6_writer_queue_lifecycle.go | func writerQueueLifecycleRow(id domain.ConnID, entry *connEntry) (WriterQueueLifecycleRow, bool) | if entry == nil || entry.core == nil || entry.writerQueueBirth == nil || entry.core.ConnID() != id {
+entry	internal/core/node/s6_writer_queue_lifecycle.go | func writerQueueLifecycleRow(id domain.ConnID, entry *connEntry) (WriterQueueLifecycleRow, bool) | return WriterQueueLifecycleRow{ConnID: id, Direction: coreToPeerDirection(entry.core.Dir()), BirthAt: birth.at, Queue: cut}, true
+legacy_import	internal/core/node/first_contact_attempt.go | "net"
+legacy_import	internal/core/node/first_contact_attempt_disabled.go | "net"
+legacy_import	internal/core/node/session_v2_timing.go | "net"
+legacy_import	internal/core/node/session_v2_timing_disabled.go | "net"
