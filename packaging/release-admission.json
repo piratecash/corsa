@@ -46,8 +46,11 @@
       "condition": "Load run on the final candidate: handshake CPU under churn, pin store write cost and memory, compared with the same bench on the previous release.",
       "executor": "developer",
       "check": "The run follows the agreed bench profile and is separately authorised; baseline and candidate share the bench configuration; the report names versions, commits and figures.",
-      "evidence": null,
-      "status": "not_done"
+      "evidence": {
+        "report": "Accepted separately owner-authorized matched Common32 and pin-write pairs on 2026-11-02: docs/operations/s6-common32-baseline-dev-2026-11-02.ru.md and docs/operations/s6-pin-write-baseline-dev-2026-11-02.ru.md. Baseline is rebuilt v2.5.71 (f8139aa949df89e3f51f0a240eaf440b6f171255), not the published K11 baseline. Common32 executes actual corsad with 32-to-16-to-32-to-0 TLSv2 sessions, 48 identities and 224 completed sequences on each side; inclusive service-cgroup CPU is an upper envelope containing node-side handshake work under churn, not isolated per-handshake CPU. Pin-write executes the original writers with 8 API operations, 3 main writes and 1 marker write at 0, 48 and 19,999 starting pins, full-store refusal and reload. Reports give absolute CPU, kernel charged group peaks and write spans, exact inputs, owner grants and independent tester/reviewer acceptance. Both use the same agreed bench configuration per pair. One pair establishes neither a statistical regression verdict nor full standalone corsad 512 MB, observation-source, S6 or D1 acceptance. Evidence applies to the named source; final_candidate_checks must reassess any affected production/module/toolchain/flags/profile change before carrying it to a final candidate.",
+        "commit": "ac53899e47970217662f6e45fe199196ea184072"
+      },
+      "status": "done"
     },
     {
       "id": "probe_per_contract",
@@ -109,8 +112,11 @@
       "condition": "Loopback inbound connections (IPv4 and IPv6; classified by listener when Tor has a dedicated one) form a class of their own for both the secure session and legacy: outside the per-IP limit and IP bans, with explicit numeric budgets for active connections, new connections per interval and concurrent handshakes, under the node-wide limits. Loopback is not trusted: authentication, pins and the downgrade ban apply; before proof violations count against the connection, after proof against the proved identity, never against a claimed legacy identity.",
       "executor": "developer",
       "check": "Tests: one offender does not ban other localhost peers; reconnects do not bypass the class budgets; close and cancellation free the slots. The numeric budgets are stated and checked by measurement before the release.",
-      "evidence": null,
-      "status": "not_done"
+      "evidence": {
+        "report": "Accepted separately owner-authorized Linux arm64 loopback Node component run on2026-11-02, exact code ac53899e47970217662f6e45fe199196ea184072 and testELF8344d237. docs/operations/s6-loopback-cli-checks-2026-11-02.md publishes the retained Source/owner/RAW/closure joins and the exact prior source/CI coverage; its separate CLI section remains INCOMPLETE. Nine actual Service tests passed without FAIL/SKIP:64 held connections then65th refusal and slotreturn;100 reconnect admissions then101st refusal within10seconds;16 genuine TLSv2 ClientHello handshakes then17th refusal under the node64 handshake bound; IPv4/sharedIPv6 classification and genuine::1; legacy offender isolated without IP/claimed-identity penalty; proved-v2 offender charged by proved identity while honest localhost peer survives; close/shutdown/cancellation release. These measured finite production defaults join prior source/unit/compatibility and fullNode CI coverage for configured class-share/node-wide budget layering, normal authentication/pins/downgrade protection and IP-ban exemption. Recorded Tor phase deferral remains separate; there is no Tor transport, all-gates-combined, per-testCPU, standalone512MB or fullS6 claim. Group peak49569792B and inclusiveCPU256848us are component resource observations only. Main production/source changes affecting these paths require reassessment under final_candidate_checks.",
+        "commit": "ac53899e47970217662f6e45fe199196ea184072"
+      },
+      "status": "done"
     },
     {
       "id": "self_record_min_session",

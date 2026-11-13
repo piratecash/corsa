@@ -6,6 +6,44 @@ The [later owner decision](../operations/d1-release-decision-proposal.md#measure
 
 [Последнее решение владельца](../operations/d1-release-decision-proposal.md#measurement-scope-2026-10-23) переносит реальные Windows/DACL и Tor замеры; работа идёт на macOS/Linux. Прежние безусловные требования Windows/Tor ниже заменены только в этой области, исторические результаты сохранены. Фактический статус — UNVERIFIED/UNKNOWN, не PASS. Schema 2 сохраняет 17 условий: 7 done, 2 partial, 7 not_done и 1 deferred (`tor_phase_measurement`). Условие небезопасного хранилища остаётся partial; clearnet/настоящие старые выпуски, замеры первого контакта и вывод timeout остаются обязательными. Proxy/no-direct-fallback, аутентификация, независимая криптоэкспертиза, остальные проверки, G2 и отдельные решения о выпуске сохраняются. Gate закрыт. Tor-роль наблюдения отложена; данные macOS/Linux не доказывают пороги или гарантии Tor.
 
+## Current implementation delta / Изменение реализации — 2026-11-02
+
+The table below records the 10/23 inspection and remains historical. Its
+missing-source statements for K3/K5/K9/K10/K12 are superseded by the
+[current strong-A source audit](s6-strong-observation-implementation-scope.md#current-source-audit--актуальная-сверка-источников--2026-11-02)
+and implementation sections 10–39; they are not instructions to rebuild those
+sources. This update supplies source inspection, not new runtime evidence.
+
+Таблица ниже сохраняет состояние сверки 10/23. Теперь реализованы восемь
+неактивных typed readout: K3 registered-proven/advertised/raw-membership,
+K5 handshake-node/connection-total, K9 guard duration, K10 registered terminal
+и K12 pending. Их exact-prefix, source-specific UNKNOWN, bounded-history и
+ограничения population сохраняются. `NewWithS6ObservationProbe` выбирает их
+только при диагностическом tag; ordinary daemon/Desktop/SDK остаются OFF.
+
+The finite FD consumer now has source/ordinary QA evidence in [section 39](s6-strong-observation-implementation-scope.md#39-closed-s6-diagnostic-fd-entry-2026-11-02): 73 native RUN/PASS, two scoped tagged lints and Linux test compile-only. Parent FD inheritance, standalone artifact and actual enabled-source cost still require qualification. / Конечный FD-consumer реализован и проверен обычным QA; настоящий parent/артефакт и стоимость ON остаются открытыми.
+
+Remaining / Осталось: parent FD launcher/standalone CLI cost artifact; independently
+verified run/artifact/boot/clock binding and UTC/retention/gap handling;
+configured capacities/cadence and actual OFF/ON cost; K3 cross-anchor continuous
+predicate and current-pin qualification; K5 independent benign-load/UTC issuers;
+K11 candidate/unchanged-Desktop FIRST and K16 old-event capability. Neither local
+COMPLETE nor caller labels establish these facts. Counts/polling B do not replace
+selected A. K10 coarse CodeStatus, K5 Total 0 DISABLED and raw pin-membership's
+non-durability qualification must survive every future transport unchanged.
+
+No thresholds, gate statuses, fleet permissions, resource admission or release
+choices change here. / Пороги, статусы17условий, разрешения и решение выпуска
+не меняются; пропуски остаются UNKNOWN.
+
+**Separate measurement acceptance, 2026-11-02:** the agreed [Common32](s6-common32-baseline-dev-2026-11-02.ru.md) and [pin-write](s6-pin-write-baseline-dev-2026-11-02.ru.md) pairs close only the finite `load_run_on_candidate` condition. The manifest now records 8 done, 2 partial, 6 not_done and 1 deferred; the release decision is still null. Enabled-source cost, first-contact, loopback and other S6 obligations remain separate. This does not establish full standalone 512 MB suitability or statistical regression bounds.
+
+**Отдельное принятие измерений, 2026-11-02:** Common32 и pin-write закрывают только выбранное конечное условие `load_run_on_candidate`. Теперь в манифесте 8 done, 2 partial, 6 not_done и 1 deferred; решение о выпуске — null. Стоимость включённых источников, first-contact, loopback и остальные обязательства S6 остаются отдельными. Полная пригодность standalone corsad в 512 МБ и статистические границы регрессии не доказаны.
+
+**Subsequent loopback acceptance, 2026-11-02:** the [component report](s6-loopback-cli-checks-2026-11-02.md) joins nine measured default-bound/offender checks with the earlier policy and compatibility evidence, closing only `loopback_inbound_class`. The manifest now records 9 done, 2 partial, 5 not_done and 1 deferred; `release_decision` remains null. The same report preserves the actual CLI matrix as INCOMPLETE and the diagnostic S6 ELF as BUILT_NOT_EXECUTED. Enabled-source OFF/ON cost and full A observation remain unverified.
+
+**Последующее принятие loopback, 2026-11-02:** [компонентный отчёт](s6-loopback-cli-checks-2026-11-02.md) связывает девять измеренных проверок границ/нарушителей с прежними свидетельствами политики и совместимости, закрывая только `loopback_inbound_class`. В манифесте теперь 9 done, 2 partial, 5 not_done и 1 deferred; `release_decision=null`. В том же отчёте actual CLI остаётся INCOMPLETE, diagnostic S6 ELF — BUILT_NOT_EXECUTED. Стоимость OFF/ON и полное наблюдение A не подтверждены.
+
 Source audit / Сверка исходников: **2026-10-23**. Status / Статус: **draft source matrix; full observation plan incomplete / проект матрицы источников; полный план наблюдения не завершён**.
 
 ## English

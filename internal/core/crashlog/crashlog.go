@@ -135,7 +135,7 @@ func Setup() func() {
 	// the warn default dropped the banner entirely — TestSetupLogsStartupEvent
 	// read an empty corsa.log.)
 	zerolog.SetGlobalLevel(zerolog.InfoLevel)
-	log.Info().Str("path", logPath).Str("level", level.String()).Str("format", string(fileFormat)).Msg("logging initialised")
+	log.Info().Str("path", logPath).Str("configured_level", level.String()).Str("format", string(fileFormat)).Msg("logging initialised")
 	if stderrFile != nil {
 		log.Info().Str("stderr_path", filepath.Join(dir, stderrFileName)).Msg("stderr redirected to file")
 	}

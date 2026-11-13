@@ -180,6 +180,11 @@ test:
 test-release:
 	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) GO="$(GO)" bash scripts/test-release.sh
 
+# Tagged S6 diagnostic entry: own pipes and App package checks, defaults stay off.
+.PHONY: test-s6-observation
+test-s6-observation:
+	CGO_ENABLED=0 GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) $(GO) test -count=1 -tags=s6_observation_probe -timeout=2m ./cmd/corsa-s6-observation-probe ./internal/app/node
+
 # The storage tests against the cgo SQLite driver. That driver ships on Android
 # only, and no CI runner runs Android, so without this target its DSN handling,
 # WAL behaviour and transaction semantics were never exercised — a divergence

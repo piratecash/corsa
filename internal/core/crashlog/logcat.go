@@ -44,7 +44,7 @@ func setupLogcat() func() {
 	// Same banner contract as Setup: emit the startup line with the gate
 	// forced open, then apply the steady-state level.
 	zerolog.SetGlobalLevel(zerolog.InfoLevel)
-	log.Info().Str("level", level.String()).Msg("logging to logcat (android)")
+	log.Info().Str("configured_level", level.String()).Msg("logging to logcat (android)")
 	zerolog.SetGlobalLevel(level)
 
 	dir := logDir()

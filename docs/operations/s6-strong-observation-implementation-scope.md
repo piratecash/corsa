@@ -4,6 +4,56 @@
 
 **Объём реализации и первые неактивные срезы K12, K9, K5 и K10; deployment и фактических наблюдений в этом пакете нет.** Владелец выбрал A для K3, K5, K9, K10, K12, K16 и p95 K11; B допустим только для диагностики. Ниже — конкретные источники и тесты для A, без выбора остальных порогов, состава узлов, нагрузки, хранения, ресурсов, G2 или выпуска. Windows — UNVERIFIED, crypto — OPEN; утверждённые календарь и числа spread прежние. Выбранное правило длительности K5 ниже — явное численное исключение; точка доставки K11 теперь выбрана. Ссылочные документы сохраняют свои исторические предложения; новую запись выбора A следует читать отдельно от старой фразы «не выбрано».
 
+## Current source audit / Актуальная сверка источников — 2026-11-02
+
+The original proposal in sections 1–5 and the 10/23 source matrix are historical
+frontiers. The later implementation sections 10–39 and current code supersede
+statements that all strong sources are still missing. Production/test/module
+code at `ac53899e47970217662f6e45fe199196ea184072` is unchanged at the docs-only
+checkpoint `2c5262a14510e26b18688d5c06821af4fe2e81d3`. This is source inspection
+and evidence carry, not a new execution, deployment or A verdict.
+
+Исходные предложения§ 1–5 и матрица 10/23 сохраняют историческую границу. Код и
+последующие§ 10–39 уже содержат восемь неактивных typed readout. Указанные SHA
+отличаются только четырьмя Markdown-документами. Новых запусков эта сверка не
+добавляет; ordinary constructors/config/RPC остаются OFF.
+
+**Separate measurement acceptance, 2026-11-02:** the agreed [Common32](s6-common32-baseline-dev-2026-11-02.ru.md) and [pin-write](s6-pin-write-baseline-dev-2026-11-02.ru.md) pairs close only the finite `load_run_on_candidate` condition. The manifest now records 8 done, 2 partial, 6 not_done and 1 deferred; the release decision is still null. Enabled-source cost, first-contact, loopback and other S6 obligations remain separate. This does not establish full standalone 512 MB suitability or statistical regression bounds.
+
+**Отдельное принятие измерений, 2026-11-02:** Common32 и pin-write закрывают только выбранное конечное условие `load_run_on_candidate`. Теперь в манифесте 8 done, 2 partial, 6 not_done и 1 deferred; решение о выпуске — null. Стоимость включённых источников, first-contact, loopback и остальные обязательства S6 остаются отдельными. Полная пригодность standalone corsad в 512 МБ и статистические границы регрессии не доказаны.
+
+| Strong A | Implemented / Реализовано | Exact remaining limit / Фактический остаток |
+|---|---|---|
+| K3 | RegisteredProvenV2 owner/proof changes, advertised connection/CM facts and raw pin-membership history; typed Core/App bridges (§ 32–37). / Изменения настоящих владельцев, claims и membership уже доступны. | Raw pins are not durable/current-pin qualification. Local bounded prefixes do not establish cross-anchor UTC simultaneity, continuous three-day union, restart/overflow retention or verified artifact/boot/process attribution. / Нужны внешний join, часы и непрерывность; claims не являются proof. |
+| K5 | Separate original handshake-node and connection-total fullness transitions, typed bridges; file issuers/readers; private UTC union/intersection reducer (§ 12, 14, 18–28). / Источники разных gate уже есть. | UTC mapper and independently observed permitted benign actions are not implemented by the reducer. Its current key accepts handshake-node only; it must not consume connection-total rows by relabelling them. Total 0 remains DISABLED. / Нельзя заменять общий бюджет handshake-счётчиком или включать B ради доказательства. |
+| K9 | Evaluated guard-state entry/exit, fresh cuts and duration bounds in `trustedclock/guard_duration.go`; typed App bridge (§ 11, 17). / Длительности реального состояния guard реализованы. | This is evaluated guard state, not unseen physical wall-clock history. Real provider/domain, epoch/gap coverage, startup/supervisor evidence and UTC attribution remain unqualified. / Логи отказа старта не заменяются успешным RPC. |
+| K10 | Once-only registered-transport terminal join and direction/kind/code histogram; typed App bridge (§ 13, 16). / Terminal owner+removal учитываются однократно. | Restricted RegisteredTransportInstance population; pending/coarse outcomes preserve UNKNOWN CodeStatus. Not every TCP attempt or physical first cause is covered; no UTC-day event join or old-artifact source is supplied. / Сохранённый health code не превращается в событие. |
+| K11 | The selected final-recipient durable application-message endpoint is known: original MessageStoreAdapter/AppendReportNew; receipt/decrypt points are separate. / Точка выбрана, но это не готовый наблюдатель. | Exact first-success commit/attempt correlation and clock/error bounds are not yet qualified on candidate and unchanged published Desktop. Old receipt or a later DB row alone does not prove FIRST; retain UNKNOWN and the specific capability investigation. |
+| K12 | Atomic committed `Service.pending` frame-slot count, hidden decrease detection and monotonic-run bounds; typed App bridge (§ 10, 15). / История pending уже есть. | It covers only this queue and its baseline-to-cut epoch, not all transport/datagram queues or arbitrary later UTC windows. Qualified duration/domain and external gap/retention accounting remain required. |
+| K16 | Historical old-release interoperability and available point APIs. / Совместимость не заменяет strong sources. | No equivalent unchanged-old-artifact exact delivery/disconnect-event coverage is established. K11 bounds and no-new-events capability remain criterion-specific UNKNOWN, not candidate-source carry. |
+
+The tag-only `s6_observation_probe && !d1_resource_probe` constructor (§ 38)
+selects all eight existing in-memory sources in the same App/Service. It adds
+no standalone CLI, FD consumer, collector, file mode or verified provenance.
+A locally COMPLETE snapshot or syntactically valid key never sets
+`AttributionBound`/`Qualification` to verified deployment evidence.
+
+The closed bounded FD consumer is implemented and verified by the source/QA
+reported in [section 39](#39-closed-s6-diagnostic-fd-entry-2026-11-02). It keeps
+separate source cuts and UNKNOWN, with no cadence/history/collector or ordinary
+activation. The next technical work is the actual parent FD launcher,
+standalone artifact and qualified process/clock attachment, then a separately
+admitted OFF/ON cost profile. Actual enabled-source cost under 512 000 000 bytes
+remains unmeasured; existing engines do not need to be rebuilt for this adapter.
+
+Закрытый bounded FD-consumer реализован и прошёл source/QA из
+[§39](#39-closed-s6-diagnostic-fd-entry-2026-11-02). Сохраняются раздельные срезы
+и UNKNOWN; cadence/history/collector и обычная активация не добавлены. Следующий
+технический шаг — настоящий parent FD launcher, standalone artifact и проверка
+process/clock attachment, затем отдельный согласованный ON/OFF cost-profile.
+Стоимость включённых источников в 512 000 000 байт ещё не измерена; переписывать
+существующие source engines ради adapter не требуется.
+
 ## 1. First implementable slice / Первый реализуемый срез
 
 Start with **candidate-side K12 exact pending-queue history**, using the existing delivery owner and readout. Proposed production frontier: `internal/core/node/aggregate_status.go`, `peer_management.go`, `routing_drain.go`, `service.go`, plus the relevant delivery-cancellation/peer-removal callers and the existing typed aggregate response. Audit every mutation of `s.pending` before freezing the final file list. Do not introduce a collector, worker, queue backend or a second delivery owner. Add local functional tests against real enqueue/drain/merge/cancel/eviction paths, then independently reviewed causal mutations. This is a proposed next implementation unit, not authorization to modify production in this document.
@@ -761,3 +811,127 @@ There is no standalone CLI artifact or FD consumer selecting this probe yet. Mea
 Darwin arm64 CGO1 QA:55 выполнений RUN/PASS — default App3, tagged App21 (18 новых и3 прежних), Node guards31;0FAIL/SKIP. Настоящие GoFiles подтвердили исключение по умолчанию, включение только S6 и исключение при обоих diagnostic tags. Два scoped App lint дали0issues. Это пересекающиеся режимы, не55 новых уникальных тестов. Fixtures используют собственные временные identity/файлы, unstarted App, настоящий empty-queue cancellation commit и ограниченное ожидание background cleanup; App.Run, listeners и нагрузка не запускались. Linux-компиляция test ELF — отдельная compile-only проверка, не Linux execution.
 
 Standalone CLI-артефакт и FD-consumer, выбирающий этот probe, ещё не подготовлены. Capacities/cadence измерения, process/artifact/clock-квалификация, реальная стоимость включённых источников в512000000байт и file-backed I/O остаются открытыми. Подготовка конструктора/readout не закрывает A/S6/D1, G2, активацию или выпуск; ресурсная контрольная точка §37 сохраняется.
+
+## 39. Closed S6 diagnostic FD entry (2026-11-02)
+
+### EN
+
+The tag-only [`corsa-s6-observation-probe`](../../cmd/corsa-s6-observation-probe/main.go)
+now supplies the missing finite transport for the eight existing App readouts.
+One original App is constructed: OFF keeps all handles nil; ON reads each
+original Snapshot once per request in a fixed sequence. Separate cuts, source
+UNKNOWN/qualification flags and connection-total DISABLED are preserved.
+Inherited request/response pipes have checked ownership, direction, identity,
+nonblock/deadline support and CLOEXEC; parent creation/attachment provenance
+still requires an actual reviewed launcher. CONSTRUCTED is a construction
+acknowledgement. CUT frames remain provisional until the whole control-session
+and process verdict; they establish neither a joint atomic cut nor continuous
+App liveness or verified clock/artifact attribution.
+
+Bounds: INIT 4096 bytes, requests 256 bytes, at most four READs, response 256 KiB
+and aggregate output 1 MiB. Standard JSON may allocate a temporary buffer before
+the encoded-size refusal; these are output bounds, not a physical heap cap.
+The entry keeps the original 120-second software deadline and refuses late
+construction before App.Run. Default builds and mixed S6/D1 tags exclude it.
+
+Corrected source QA: Darwin arm64 CGO0, **73 RUN/PASS, 0 FAIL/SKIP**: seven FD
+roots/17 events and the full tagged App package, 26 roots/56 events. Existing App
+checks include own Service.Run/TLS fixtures and an early-refusal App.Run; the
+diagnostic main and a successful standalone daemon were not executed. Actual
+GoFiles confirm default/S6/mixed-tag selection. Scoped configured lint sees the
+S6 tag on Darwin and Linux: zero issues each. The initial test-only unchecked
+Close lint failure is retained; only equivalent deferred cleanup was changed.
+
+The corrected Linux arm64 CGO0 test ELF is compile-only, SHA-256
+`774ebddcd25867da4d5446bf6dfd89f8cd44da1b7dfe739382ca67c9900c17fb`,
+19,050,799 bytes; static AArch64, Go 1.27.3 and 23 BuildInfo dependencies matched
+to go.sum. The existing App test ELF `e1488ba0…` remains earlier compile evidence.
+Local evidence: `docs/_internal/d1-artifacts/2026-11-02/s6-observation-fd-goqa-v2/`
+and `s6-observation-fd-lint-v2/`; independent tester/reviewer accepted the data.
+`make test-s6-observation` adds these tagged packages to ordinary DEV CI while
+retaining the existing release-test scope (overlaysim remains DEFERRED to D1)
+and CGO checks. Publication is unchanged.
+
+Remaining: an actual parent pass_fds launcher, standalone diagnostic artifact,
+process/clock qualification and a separately admitted OFF/ON cost profile.
+File-backed observation/retention, K11/K16 capabilities, full A coverage and S6
+release admission remain open. This source/QA work grants no resource run.
+
+### RU
+
+Закрытый [`corsa-s6-observation-probe`](../../cmd/corsa-s6-observation-probe/main.go)
+добавляет конечный FD-транспорт восьми существующих App readout. Создаётся один
+исходный App: OFF оставляет handles nil, ON вызывает каждый исходный Snapshot
+ровно один раз за запрос. Раздельные срезы, UNKNOWN/qualification и DISABLED
+общего бюджета сохраняются. Проверяются owner/direction/identity pipe,
+nonblock/deadlines и CLOEXEC; происхождение и передачу FD ещё должен подтвердить
+настоящий parent launcher. CONSTRUCTED подтверждает только конструирование;
+CUT предварителен до итогового verdict control-session/process. Одновременный
+срез, непрерывная liveness и достоверная привязка часов/артефакта не заявляются.
+
+INIT ограничен 4096 байтами, запрос — 256, READ — четырьмя, ответ — 256 KiB,
+вывод — 1 MiB. Буфер стандартного JSON может выделиться до отказа по размеру;
+это граница вывода, не физический предел heap. Исходный software deadline 120 с
+не продлевается, позднее конструирование запрещает переход к App.Run. Обычный
+build и одновременные S6/D1 tags исключают этот command.
+
+Исправленный native QA: **73 RUN/PASS, 0 FAIL/SKIP** — 17 FD и 56 полного
+tagged App. В App-наборе есть собственные Service.Run/TLS fixtures и ранний
+refusal App.Run; diagnostic main/успешный standalone daemon не запускались.
+Проверены настоящие GoFiles трёх режимов. Оба scoped tagged lint — 0 issues.
+Первоначальный lint FAIL одного unchecked Close сохранён; исправлена только
+эквивалентная очистка теста. Linux ELF с указанным полным SHA, ABI и 23 h1
+скомпилирован, не исполнен. Предыдущий App ELF сохранён отдельно как carry.
+CI получает target test-s6-observation; прежние release tests/CGO и публикация
+не меняются. DATA приняты тестером и ревьювером.
+
+Остались actual pass_fds launcher, standalone artifact, process/clock
+qualification и отдельный допуск ON/OFF cost. File I/O/retention, K11/K16,
+полная A/S6-приёмка и выпуск открыты; этот код/QA ресурсный запуск не разрешают.
+
+## 40. Parent FD attachment: unit evidence (2026-11-02)
+
+### EN
+
+The private parent helper now creates two anonymous pipes and passes exactly
+their two child ends through `pass_fds`; the original owned-child termination
+path remains in use. Independent review found two cleanup defects: failed
+Session construction leaked its pipes, and failed finish could later succeed
+after the child status changed. Successor source `493ad126…` fixes both with
+sticky refusal and closure of owned pipe ends. The original source and findings
+are retained. Tester and reviewer independently passed 12 pure checks, including
+causal checks for both defects. The INIT codec and Go source were unchanged.
+
+One native Go ABI test accepted the exact Python ON/OFF INIT bytes through the
+original Go `canonical` and `validateInit`: 3 RUN/PASS, no FAIL/SKIP. It constructs
+no App and starts no daemon. A separate ordinary Python fake-peer smoke passed
+four READs, STOP, request half-close, response EOF and normal child reap; it
+does not execute the Go diagnostic entry. Its 1,330 response bytes prove only
+the finite OFF control census, not source observation or useful node work.
+
+Evidence: `docs/_internal/d1-artifacts/2026-10-28/s6-observation-fd-launcher-source-v2/`,
+`docs/_internal/d1-artifacts/2026-11-02/s6-observation-parent-abi-goqa-v1/`
+and `s6-observation-parent-python-smoke-v1/`. Actual attachment to the exact
+standalone Go artifact, readiness/process/clock qualification and OFF/ON cost
+remain pending. This unit evidence supplies no resource-run or release consent.
+
+### RU
+
+Private parent создаёт две anonymous pipe и передаёт ровно два дочерних конца
+через `pass_fds`, сохраняя исходное завершение owned child. Независимое ревью
+нашло две ошибки: утечку pipe при отказе конструктора Session и возможность
+успешного повторного finish после смены статуса child. Source `493ad126…`
+исправляет обе: отказ необратим, собственные pipe закрываются. Предыдущий
+source и замечания сохранены. Тестер и ревьювер независимо подтвердили 12 pure
+проверок с причинными сценариями обеих ошибок. INIT codec и Go не менялись.
+
+Native Go ABI unit принял точные Python ON/OFF INIT через исходные `canonical`
+и `validateInit`: 3 RUN/PASS, без FAIL/SKIP, без создания App и запуска daemon.
+Отдельный обычный Python fake-peer smoke подтвердил четыре READ, STOP,
+half-close запроса, EOF ответа и штатный reap child. Go entry не исполнялся;
+1 330 байт ответа подтверждают только конечный OFF control census, не работу
+узла или источников. Пути свидетельств приведены выше.
+
+Следующий шаг — подключение к точному standalone Go artifact, проверка
+готовности/process/clock и стоимость OFF/ON. Эти unit-результаты не разрешают
+ресурсный запуск или выпуск и не закрывают S6.
