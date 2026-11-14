@@ -114,6 +114,7 @@ var identityStateInventory = map[string]identityStateEntry{
 
 	// Service: what a session names, proven or not.
 	"Service.sessions":              {identityUnprovenClaim, "dialled session's peerIdentity comes from the welcome, unproven on v1; closeLegacyClaimsOf closes it at the proof and teardown removes it"},
+	"sessionQueueHistory.sessions":  {identityUnprovenClaim, "diagnostic history holds a session by ConnID, including its unproven v1 peerIdentity, until Close and queue users drain; retired rows keep queue metrics and ConnID without peerIdentity"},
 	"Service.conns":                 {identityUnprovenClaim, "the NetCore of an accepted v1 conn carries the hello identity; closed by closeLegacyClaimsOf at the proof, unregistered on teardown"},
 	"Service.identitySessions":      {identityUnprovenClaim, "counted from session.peerIdentity on v1 and v2 alike; decremented at the teardown closeLegacyClaimsOf causes"},
 	"Service.identityRelaySessions": {identityUnprovenClaim, "as identitySessions, for relay-capable sessions"},

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -142,6 +143,10 @@ func TestEveryInboundWriteGoesThroughTheDeliveryGate(t *testing.T) {
 				if _, raw := rawSenders[sel.Sel.Name]; !raw {
 					return true
 				}
+				if name == "dmv2_outbox_test_harness.go" && fn.Name.Name == "SendBarrier" &&
+					sel.Sel.Name == "sendSessionFrameViaNetwork" && isDeliveryGatePingBarrier(call) {
+					return true
+				}
 				if _, allowed := permitted[fn.Name.Name]; !allowed {
 					offenders[fn.Name.Name] = fmt.Sprintf("%s:%d (%s)", name, fset.Position(call.Pos()).Line, sel.Sel.Name)
 				}
@@ -162,6 +167,62 @@ func TestEveryInboundWriteGoesThroughTheDeliveryGate(t *testing.T) {
 		"reaches a writer without clearedToWrite can be handed to the recipient after its author recalled\n"+
 		"it, and the deletion will schedule no peer-side delete. If it provably cannot carry one, add it to\n"+
 		"the permitted map in this test with the reason.", strings.Join(names, "\n  "))
+}
+
+// Only a literal ping with no other fields can order the test's writes without
+// passing a user message to the writer.
+func isDeliveryGatePingBarrier(call *ast.CallExpr) bool {
+	if len(call.Args) != 3 {
+		return false
+	}
+	frame, ok := call.Args[2].(*ast.CompositeLit)
+	if !ok || len(frame.Elts) != 1 {
+		return false
+	}
+	typ, ok := frame.Type.(*ast.SelectorExpr)
+	if !ok || typ.Sel.Name != "Frame" {
+		return false
+	}
+	pkg, ok := typ.X.(*ast.Ident)
+	if !ok || pkg.Name != "protocol" {
+		return false
+	}
+	field, ok := frame.Elts[0].(*ast.KeyValueExpr)
+	if !ok {
+		return false
+	}
+	key, ok := field.Key.(*ast.Ident)
+	if !ok || key.Name != "Type" {
+		return false
+	}
+	value, ok := field.Value.(*ast.BasicLit)
+	if !ok || value.Kind != token.STRING {
+		return false
+	}
+	kind, err := strconv.Unquote(value.Value)
+	return err == nil && kind == "ping"
+}
+
+func TestDeliveryGatePingBarrierRequiresAControlOnlyFrame(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		args string
+		want bool
+	}{
+		{`ctx, session, protocol.Frame{Type: "ping"}`, true},
+		{`ctx, session, protocol.Frame{Type: "ping", Topic: topic}`, false},
+		{`ctx, session, protocol.Frame{Type: kind}`, false},
+		{`ctx, session, frame`, false},
+		{`ctx, session, other.Frame{Type: "ping"}`, false},
+	} {
+		expr, err := parser.ParseExpr("send(" + tc.args + ")")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := isDeliveryGatePingBarrier(expr.(*ast.CallExpr)); got != tc.want {
+			t.Errorf("barrier %s: got %v, want %v", tc.args, got, tc.want)
+		}
+	}
 }
 
 // TestFrameEnvelopeReadsBothWireShapes: the identity of a message lives in

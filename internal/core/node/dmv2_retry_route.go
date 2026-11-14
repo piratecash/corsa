@@ -80,7 +80,9 @@ func (s *Service) dispatchDirectDMV2Retry(envelope protocol.Envelope, dispatched
 	default:
 		return false
 	}
-	if !s.goBackground(func() {
+	// Run cancels and joins the writer wait before tearing down its services.
+	// Any durable confirmation is scheduled separately by confirmEnvelopeOnWire.
+	if !s.goOwnedRunWorker(s.runCtx.Done(), func() {
 		defer func() { <-s.directDMV2WriteSlots }()
 		if s.directDMV2RetryWriter(envelope.Recipient) != core {
 			return

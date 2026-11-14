@@ -449,7 +449,7 @@ func bareV2PilotSourceErrors(sources map[string][]byte) []string {
 				if site == "datagram_integration.go:localHandshakeCapabilityNames" && fmt.Sprintf("%x", sha256.Sum256(raw[int(fn.Pos())-1:int(fn.End())-1])) != "af61e48321ba810c4904c8cd4f9f0dd32c84af30cfb0d37828734a6ccb06df54" {
 					failures = append(failures, "pilot advertisement projection changed")
 				}
-				if site == "capabilities.go:localHandshakeCapabilities" && fmt.Sprintf("%x", sha256.Sum256(raw[int(fn.Pos())-1:int(fn.End())-1])) != "250f5a5f371b5c3db05e0c1f488c56e3c0308533bca5b194fe0c09d7378815b6" {
+				if site == "capabilities.go:localHandshakeCapabilities" && fmt.Sprintf("%x", sha256.Sum256(raw[int(fn.Pos())-1:int(fn.End())-1])) != "ed77ed51ced2fd688200608afbd59e82131a605a75b60dee6a17c8f6315b72cd" {
 					failures = append(failures, "pilot typed selection changed")
 				}
 				if site == "find_node_capability_selection_test.go:TestOwnedFindNodeHandshakeCapabilitySelection" && fmt.Sprintf("%x", sha256.Sum256(raw[int(fn.Pos())-1:int(fn.End())-1])) != "b176d545f234f948050560c9ed689e83a8671c7410d8d25b52f43a8900683e11" {

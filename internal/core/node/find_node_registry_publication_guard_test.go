@@ -37,7 +37,7 @@ func registryPublicationBodyPins() map[string]string {
 		"peer_sessions.go:onCMSessionEstablished":                 "bf77a927642553c989c7cdddb3cb42be10aabb196a7b30277a12abe350f582b9",
 		"peer_sessions.go:onCMSessionTeardown":                    "487df410ce5eeb7858e9e3c9c65ff4d481624086d11356b26f4732fcb5e8633c",
 		"peer_sessions.go:openPeerSession":                        "996c9442f8ab060f2ba71ec1d3eb81fe6d1986db6a1c22e498a2a0820b45d7b6",
-		"peer_sessions.go:registerCMSession":                      "905777b846ef5540fea57708bbc5edda1787d6f9866343aa7cd6d89f641dc8a4",
+		"peer_sessions.go:registerCMSession":                      "299c41502519700efa77d362b57ebd54607eabd001d998d93589f628d404d2b2",
 		"peer_sessions.go:runPeerSession":                         "762ad659056e3e91e65766494ca206f8b65c09e1f60c3a7c2f4d64e75aaafb85",
 		"peer_sessions.go:withdrawRefusedCMSession":               "b878d1d7b3f47cc573ba9c8b90543d8270380b834a44b599578788172a78da73",
 		"peer_sessions.go:withdrawServedCMSession":                "59af33c360eb9a66a93ba86820e316b5df675149a7e4303882a374b0e9aaaef8",

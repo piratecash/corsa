@@ -74,9 +74,9 @@ func captureBaselineClock(ctx context.Context) baselineClockReport {
 	}
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
-	domain, err := readBaselineClockDomain()
-	if err != nil {
-		return unavailable("clock_domain_or_chrony_socket_unavailable")
+	domain, reason := readBaselineClockDomain()
+	if reason != "" {
+		return unavailable(reason)
 	}
 	digest, err := baselineChronycDigest()
 	if err != nil {
@@ -103,8 +103,8 @@ func captureBaselineClock(ctx context.Context) baselineClockReport {
 	if err != nil {
 		return unavailable("clock_read_failed")
 	}
-	domainAfter, err := readBaselineClockDomain()
-	if err != nil || domainAfter != domain {
+	domainAfter, reason := readBaselineClockDomain()
+	if reason != "" || domainAfter != domain {
 		return unavailable("clock_domain_changed")
 	}
 	digestAfter, err := baselineChronycDigest()
@@ -152,24 +152,27 @@ func baselineChronycDigest() (string, error) {
 	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
-func readBaselineClockDomain() (baselineClockDomain, error) {
+func readBaselineClockDomain() (baselineClockDomain, string) {
 	boot, err := os.ReadFile("/proc/sys/kernel/random/boot_id")
 	if err != nil {
-		return baselineClockDomain{}, err
+		return baselineClockDomain{}, "boot_id_unavailable"
 	}
 	namespace, err := os.Readlink("/proc/thread-self/ns/time")
 	if err != nil {
-		return baselineClockDomain{}, err
+		return baselineClockDomain{}, "time_namespace_unavailable"
 	}
 	info, err := os.Lstat(baselineSocket)
+	if errors.Is(err, os.ErrNotExist) {
+		return baselineClockDomain{}, "chrony_socket_missing"
+	}
 	if err != nil {
-		return baselineClockDomain{}, err
+		return baselineClockDomain{}, "chrony_socket_unavailable"
 	}
 	if info.Mode()&os.ModeSocket == 0 {
-		return baselineClockDomain{}, errors.New("chrony endpoint is not a socket")
+		return baselineClockDomain{}, "chrony_endpoint_not_socket"
 	}
 	stat := info.Sys().(*syscall.Stat_t)
-	return baselineClockDomain{strings.TrimSpace(string(boot)), namespace, uint64(stat.Dev), stat.Ino, stat.Uid}, nil
+	return baselineClockDomain{strings.TrimSpace(string(boot)), namespace, uint64(stat.Dev), stat.Ino, stat.Uid}, ""
 }
 
 func readBaselineClockMark() (baselineClockMark, error) {

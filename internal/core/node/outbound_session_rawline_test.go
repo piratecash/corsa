@@ -224,15 +224,9 @@ func TestOutboundSessionReader_PopulatesRawLineForPoison(t *testing.T) {
 	}
 
 	senderAddr := domain.PeerAddress("addr-peerB-poison")
-	sendCh := make(chan peerSendItem, 4)
+	session := newReceiveOwnerSession(t, svc, 6305, senderAddr)
 	svc.peerMu.Lock()
-	svc.sessions[senderAddr] = &peerSession{
-		address:      senderAddr,
-		peerIdentity: idPeerB,
-		capabilities: []domain.Capability{domain.CapMeshRoutingV1, domain.CapMeshPoisonReverseV1, domain.CapMeshRelayV1},
-		sendCh:       sendCh,
-		authOK:       true,
-	}
+	session.capabilities = []domain.Capability{domain.CapMeshRoutingV1, domain.CapMeshPoisonReverseV1, domain.CapMeshRelayV1}
 	svc.health = map[domain.PeerAddress]*peerHealth{senderAddr: {Connected: true}}
 	svc.peerMu.Unlock()
 
@@ -260,7 +254,7 @@ func TestOutboundSessionReader_PopulatesRawLineForPoison(t *testing.T) {
 		t.Fatalf("RawLine must be populated for %s", frame.Type)
 	}
 
-	svc.dispatchPeerSessionFrame(senderAddr, svc.sessions[senderAddr], frame)
+	svc.dispatchPeerSessionFrame(senderAddr, session, frame)
 
 	// Lookup filters withdrawn entries — the poisoned claim must
 	// disappear from the result.
@@ -376,16 +370,10 @@ func TestDispatchPeerSessionFrame_RequestResync_CmdLimited(t *testing.T) {
 
 	senderAddr := domain.PeerAddress("addr-peerB")
 	const connID = domain.ConnID(424242)
+	session := newReceiveOwnerSession(t, svc, connID, senderAddr)
 
 	svc.peerMu.Lock()
-	svc.sessions[senderAddr] = &peerSession{
-		address:      senderAddr,
-		peerIdentity: idPeerB,
-		connID:       connID,
-		capabilities: []domain.Capability{domain.CapMeshRoutingV1, domain.CapMeshRoutingV2, domain.CapMeshRelayV1},
-		sendCh:       make(chan peerSendItem, 4),
-		authOK:       true,
-	}
+	session.capabilities = []domain.Capability{domain.CapMeshRoutingV1, domain.CapMeshRoutingV2, domain.CapMeshRelayV1}
 	svc.health = map[domain.PeerAddress]*peerHealth{senderAddr: {Connected: true}}
 	svc.peerMu.Unlock()
 
@@ -407,7 +395,7 @@ func TestDispatchPeerSessionFrame_RequestResync_CmdLimited(t *testing.T) {
 	}
 
 	// Dispatch request_resync — should be silently dropped.
-	svc.dispatchPeerSessionFrame(senderAddr, svc.sessions[senderAddr], protocol.Frame{
+	svc.dispatchPeerSessionFrame(senderAddr, session, protocol.Frame{
 		Type: "request_resync",
 	})
 
@@ -452,15 +440,10 @@ func TestDispatchPeerSessionFrame_RoutePoison_CmdLimited(t *testing.T) {
 
 	const connID = domain.ConnID(727272)
 	senderAddr := domain.PeerAddress(peer.Address)
+	session := newReceiveOwnerSession(t, svc, connID, senderAddr)
 	svc.peerMu.Lock()
-	svc.sessions[senderAddr] = &peerSession{
-		address:      senderAddr,
-		peerIdentity: domain.PeerIdentityFromWire(peer.Address),
-		connID:       connID,
-		capabilities: []domain.Capability{domain.CapMeshRoutingV1, domain.CapMeshPoisonReverseV1, domain.CapMeshRelayV1},
-		sendCh:       make(chan peerSendItem, 4),
-		authOK:       true,
-	}
+	session.peerIdentity = domain.PeerIdentityFromWire(peer.Address)
+	session.capabilities = []domain.Capability{domain.CapMeshRoutingV1, domain.CapMeshPoisonReverseV1, domain.CapMeshRelayV1}
 	if svc.health == nil {
 		svc.health = map[domain.PeerAddress]*peerHealth{}
 	}
@@ -492,7 +475,7 @@ func TestDispatchPeerSessionFrame_RoutePoison_CmdLimited(t *testing.T) {
 		svc.cmdLimiter.allowCommand(key)
 	}
 
-	svc.dispatchPeerSessionFrame(senderAddr, svc.sessions[senderAddr], frame)
+	svc.dispatchPeerSessionFrame(senderAddr, session, frame)
 
 	// The claim must still be live — gate fired before
 	// InvalidateUplinkClaim ran.

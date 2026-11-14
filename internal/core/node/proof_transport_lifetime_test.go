@@ -177,10 +177,9 @@ func TestProofTransportPublicationElapsedAfterCommonWait(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("publication owner did not start")
 	}
-	// Exact original publisher/common-mutex callsite in this frozen source.
-	// Mutex waits are NOT durable synctest blocking; use an actual GID/stack
-	// barrier and the existing immutable real-clock origin, without fake time.
-	n1WaitMutexFrame(t, publisherGID, "conn_registry.go:767")
+	// Witness the original publisher blocked on the common mutex using its
+	// goroutine and stack. Mutex waits are not durable synctest blocking.
+	n1WaitMutexFrame(t, publisherGID, "node.(*Service).publishAcceptedProofTransport(")
 	releaseBoundary := findnode.Instant(time.Since(f.accepted.findNode.origin))
 	l.mu.Unlock()
 	held = false

@@ -2992,10 +2992,14 @@ func (s *Service) goRunLoop(fn func()) {
 	}()
 }
 
-// goOwnedFindNodeLoop admits a lazy worker under the same leaf admission
+func (s *Service) goOwnedFindNodeLoop(done <-chan struct{}, fn func()) bool {
+	return s.goOwnedRunWorker(done, fn)
+}
+
+// goOwnedRunWorker admits a lazy worker under the same leaf admission
 // mutex used by background jobs, but gives it a separate, Run-joined lifetime.
 // Never join backgroundWg inside Run: its jobs may depend on Run's teardown.
-func (s *Service) goOwnedFindNodeLoop(done <-chan struct{}, fn func()) bool {
+func (s *Service) goOwnedRunWorker(done <-chan struct{}, fn func()) bool {
 	// The join cancels s.runCtx. Admit only that same original construction
 	// lifetime, never a caller-selected loop that cancellation cannot release.
 	if s.runCtx == nil || s.runCancel == nil || done == nil || done != s.runCtx.Done() {
@@ -3023,7 +3027,7 @@ func (s *Service) goOwnedFindNodeLoop(done <-chan struct{}, fn func()) bool {
 	return true
 }
 
-// stopOwnedFindNodeLoops fences every registration before the Wait. The
+// stopOwnedFindNodeLoops fences every owned worker registration before the Wait. The
 // caller cancels the original Service context first; no lock is held while
 // workers release their original queue slots and pending obligations.
 func (s *Service) stopOwnedFindNodeLoops() {

@@ -3,7 +3,6 @@ package node
 import (
 	"context"
 	"errors"
-
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/directmsg"
@@ -109,6 +108,7 @@ func (s *Service) receiveDirectDMV2OnListener(ctx context.Context, id domain.Con
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	_, err = (inboundSendSelection{core: core}).sendCapturedInbound(ctx, data, true)
-	return err
+	// Use the verified writer directly. This receipt does not carry N1
+	// publication authority and must not look up a replacement by ConnID.
+	return ctxSendStatusToError(ctx, core.SendRawSyncCtx(ctx, data))
 }

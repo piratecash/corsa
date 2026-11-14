@@ -24,7 +24,7 @@ func TestLinuxAdversarialManagedControlStream(t *testing.T) {
 // Qualify the actual original helper→sampler mutex frames on the current Go.
 // The sampler remains uninitialised: after release it refuses BEFORE opening
 // any process/proc source, never supplies a synthetic process observation.
-func TestLinuxAdversarialGo1273OriginalBlockedSampleStack(t *testing.T) {
+func TestLinuxAdversarialOriginalBlockedSampleStack(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 	caller, work := linuxTestPacketPair(t)
