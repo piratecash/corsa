@@ -145,6 +145,7 @@ jobs:
           python scripts/test-report-linux-desktop-cgo.py
 
       - name: Record release test package inventories
+        id: release-inventory
         shell: bash
         run: |
           test "$(git rev-parse HEAD)" = "${GITHUB_SHA:?}"
@@ -158,7 +159,9 @@ jobs:
         run: bash scripts/run-ci-test-step.sh test-release
 
       - name: Run tagged S6 observation entry tests
+        if: ${{ !cancelled() && steps.release-inventory.outcome == 'success' }}
         run: bash scripts/run-ci-test-step.sh test-s6-observation
 
       - name: Run storage tests against the cgo SQLite driver
+        if: ${{ !cancelled() && steps.release-inventory.outcome == 'success' }}
         run: bash scripts/run-ci-test-step.sh test-cgo
