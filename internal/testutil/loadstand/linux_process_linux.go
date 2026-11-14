@@ -73,16 +73,18 @@ type linuxMemberBindDiagnostic struct {
 }
 
 type linuxSampleExchange struct {
-	receiptLimit   int
-	receiptsResult chan linuxMemberReceiptsOutcome
-	bindMember     bool
-	memberResult   chan linuxMemberStartOutcome
-	initialize     bool
-	observe        bool
-	runtimeResult  chan linuxRuntimeOutcome
-	ctx            context.Context
-	id             LinuxRequestID
-	result         chan linuxSampleOutcome
+	wireCensusClock  RouteWireClockDomain
+	wireCensusResult chan linuxRouteWireCensusOutcome
+	receiptLimit     int
+	receiptsResult   chan linuxMemberReceiptsOutcome
+	bindMember       bool
+	memberResult     chan linuxMemberStartOutcome
+	initialize       bool
+	observe          bool
+	runtimeResult    chan linuxRuntimeOutcome
+	ctx              context.Context
+	id               LinuxRequestID
+	result           chan linuxSampleOutcome
 }
 type linuxSampleOutcome struct {
 	sample LinuxProcessSample
@@ -95,6 +97,7 @@ type linuxSampleOutcome struct {
 type LinuxFixture struct {
 	plannedReleased, plannedConsumed                              bool
 	memberFinal                                                   *linuxMemberFinal
+	routeWireStop                                                 *RouteWireCommitment
 	mu                                                            sync.Mutex
 	stopSubmitMu                                                  sync.Mutex
 	initializationOnce, resolvedOnce, waitOnce                    sync.Once
@@ -580,6 +583,10 @@ func (o *LinuxFixture) runWork() {
 				o.receiptsOnWorkOwner(exchange)
 				continue
 			}
+			if exchange.wireCensusResult != nil {
+				o.routeWireCensusOnWorkOwner(exchange)
+				continue
+			}
 			if exchange.bindMember {
 				o.bindMemberOnWorkOwner(exchange)
 				continue
@@ -704,6 +711,7 @@ func (o *LinuxFixture) requestStop(budget time.Duration) error {
 		}
 	}
 	o.correlation.stopID = id
+	routeWire := o.routeWireStop
 	o.mu.Unlock()
 	if neverStarted {
 		o.resolveNeverStarted()
@@ -715,7 +723,7 @@ func (o *LinuxFixture) requestStop(budget time.Duration) error {
 	}
 	closeErr := o.work.close() // poller-managed Close independently evicts work
 	o.rpc.Close()
-	packet, encodeErr := encodeLinuxPacket(linuxStop, id, 1, linuxStopRequest{Nonce: o.correlation.nonce, BudgetNanos: int64(budget)})
+	packet, encodeErr := encodeLinuxPacket(linuxStop, id, 1, linuxStopRequest{Nonce: o.correlation.nonce, BudgetNanos: int64(budget), RouteWire: routeWire})
 	delivery := LinuxStopUnknown
 	var sendErr error
 	if alreadyJoined {

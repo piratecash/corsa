@@ -1,0 +1,33 @@
+{
+  "Plan": {
+    "Seed": 13,
+    "FullNodes": 2,
+    "Hubs": 2,
+    "EdgeUplinks": 1,
+    "Duration": 390000000000,
+    "SampleInterval": 15000000000,
+    "Churn": {"Profile": "quiet"}
+  },
+  "Limits": {
+    "RouteReady": 35000000000,
+    "Readiness": 30000000000,
+    "Action": 8000000000,
+    "Cleanup": 20000000000,
+    "ReceiptDrain": 8000000000,
+    "AllowedLateness": 8000000000,
+    "MaxActions": 128,
+    "MaxSamples": 96,
+    "MaxTraceBytes": 4194304
+  },
+  "Timeout": 540000000000,
+  "StartupLead": 90000000000,
+  "Begin": 120000000000,
+  "End": 360000000000,
+  "MaxEndpoints": 4,
+  "FullReceiptRouteBudget": 10000,
+  "RequiredFullRoutes": 10000,
+  "SeedFullRoutes": true,
+  "RequiredFullSource": "periodic",
+  "SingleInitiator": true,
+  "JournalDir": "/profiles/o1a-periodic-journal"
+}

@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 )
 
@@ -391,10 +392,45 @@ func TestAnnounceLoop_ReconcileEvictsOrphanWithoutMarkDisconnected(t *testing.T)
 		WithStateRegistry(registry),
 	)
 
-	loop.announceToAllPeers(context.Background())
+	loop.announceToAllPeers(context.Background(), domain.RouteWireFullPeriodic)
 
 	if registry.Get(domaintest.ID("peer-A")) != nil {
 		t.Fatal("orphan state must be reclaimed by reconcile even without MarkDisconnected")
+	}
+}
+
+type fullSourceSender struct {
+	PeerSender
+	source domain.RouteWireFullSource
+}
+
+func (s *fullSourceSender) SendRouteAnnounceV3Full(_ context.Context, _ PeerAddress, _ uint64, _ []AnnounceEntry, source domain.RouteWireFullSource) bool {
+	s.source = source
+	return true
+}
+
+func TestAnnounceLoopV3FullPreservesCycleSource(t *testing.T) {
+	for _, source := range []domain.RouteWireFullSource{domain.RouteWireFullPeriodic, domain.RouteWireFullTriggered} {
+		t.Run(string(source), func(t *testing.T) {
+			local, peer, route := domaintest.ID("local"), domaintest.ID("peer"), domaintest.ID("route")
+			table := NewTable(WithLocalOrigin(local))
+			if _, err := table.AddDirectPeer(route); err != nil {
+				t.Fatal(err)
+			}
+			caps := []PeerCapability{domain.CapMeshRoutingV1, domain.CapMeshRoutingV3, domain.CapMeshRelayV1}
+			sender := &fullSourceSender{}
+			loop := NewAnnounceLoop(table, sender, func() []AnnounceTarget {
+				return []AnnounceTarget{{Address: "peer", Identity: peer, Capabilities: caps}}
+			}, WithLocalCapabilities(func() []PeerCapability { return caps }))
+			if source == domain.RouteWireFullTriggered {
+				loop.announceTriggeredCycle(t.Context())
+			} else {
+				loop.announceToAllPeers(t.Context(), domain.RouteWireFullPeriodic)
+			}
+			if sender.source != source {
+				t.Fatalf("full pass source = %q, want %q", sender.source, source)
+			}
+		})
 	}
 }
 

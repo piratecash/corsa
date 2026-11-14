@@ -77,7 +77,11 @@ func (a *launchArtifacts) close() error {
 	}
 	return err
 }
-func (a *launchArtifacts) read(ctx context.Context) (out []byte, err error) {
+func (a *launchArtifacts) read(ctx context.Context) ([]byte, error) {
+	return a.readBounded(ctx, FinalReportLimit)
+}
+
+func (a *launchArtifacts) readBounded(ctx context.Context, limit ArtifactReadLimit) (out []byte, err error) {
 	if a == nil || a.root == nil || a.pin == nil {
 		return nil, ErrFinalAccountingUnavailable
 	}
@@ -109,7 +113,7 @@ func (a *launchArtifacts) read(ctx context.Context) (out []byte, err error) {
 		return nil, err
 	}
 	defer func() { err = errors.Join(err, file.Close()) }()
-	out, err = readPrivateFinalFD(ctx, file, FinalReportLimit)
+	out, err = readPrivateFinalFD(ctx, file, limit)
 	if err != nil {
 		return nil, err
 	}

@@ -2679,6 +2679,15 @@ func (s *Service) peerIsClientNode(address domain.PeerAddress) bool {
 }
 
 func (s *Service) readPeerSession(reader *bufio.Reader, session *peerSession) {
+	wireObserver := s.routeWireObserver()
+	var wireReader *routeWireReader
+	if wireObserver != nil {
+		defer wireObserver.finish(session.connID, routeWireRead)
+		if session.proven != nil {
+			wireReader = wireObserver.trackPlaintextReader(reader, session.conn)
+			defer wireReader.finish()
+		}
+	}
 	var ownedReceiveOwner *proofTransportOwner
 	if s.bridgeCapture != nil && s.bridgeCapture.intake != (findnode.DormantIntake{}) && session != nil && session.common != nil {
 		session.common.mu.Lock()
@@ -2710,14 +2719,18 @@ func (s *Service) readPeerSession(reader *bufio.Reader, session *peerSession) {
 		// budgets replace each other rather than stack, so a datagram stream
 		// cannot empty the bucket the other planes on this session are paying
 		// from.
+		wireReader.beginFrame(reader)
 		line, ownedReceive, ownedClaimed, ownedReceiveErr, err := s.readOutboundOwnedFindNodeLine(reader, session, ownedReceiveOwner)
+		firstRead, hasBytes := wireReader.endFrame()
 		if errors.Is(err, errPeerSessionLineRefused) {
+			wireObserver.fail()
 			// One line consumed and dropped on admission grounds. The violation
 			// is already recorded and logged; the session survives, because a
 			// single violation must cost the peer a frame and not a reconnect.
 			continue
 		}
 		if err != nil {
+			wireObserver.readError(line, err, hasBytes)
 			session.endProofTransport()
 			session.eligibilityEnded.Store(true)
 			if err == io.EOF {
@@ -2742,6 +2755,7 @@ func (s *Service) readPeerSession(reader *bufio.Reader, session *peerSession) {
 		// Capture tap: record raw outbound-session recv line before
 		// parsing (plan §7.2). Strip only the transport newline — leading
 		// whitespace is part of the wire payload for diagnostics.
+		wireObserver.observe(session.connID, routeWireRead, line, true, firstRead)
 		s.captureOutboundRecv(session.connID, strings.TrimRight(line, "\r\n"))
 
 		// ADMISSION FIRST (docs/protocol/datagram.md §4.1 step 1). The line is
@@ -3089,12 +3103,17 @@ func isUnsolicitedSessionFrame(frameType string) bool {
 }
 
 func (s *Service) peerSessionRequest(session *peerSession, frame protocol.Frame, expectedType string, hello bool) (protocol.Frame, error) {
+	return s.peerSessionRequestAt(session, frame, expectedType, hello, nil, 0)
+}
+
+func (s *Service) peerSessionRequestAt(session *peerSession, frame protocol.Frame, expectedType string, hello bool, wireQueue *routeWireSendQueue, first time.Duration) (protocol.Frame, error) {
 	// All outbound writes route through the managed single-writer path on
 	// NetCore so that deadline, back-pressure and ordering match inbound.
 	// SendRawSyncBlocking blocks until the writer goroutine flushes the
 	// bytes to the socket, preserving the "write completed before we wait
 	// for reply" contract the request loop relies on.
 	if session.netCore == nil {
+		wireQueue.retire(first, true, false)
 		return protocol.Frame{}, fmt.Errorf("peerSessionRequest: outbound session missing NetCore")
 	}
 	if expectedType != "" {
@@ -3120,6 +3139,7 @@ func (s *Service) peerSessionRequest(session *peerSession, frame protocol.Frame,
 		// while still rejecting genuinely oversize frames as a self-bug.
 		line, err := protocol.MarshalFrameLineWithLimit(frame, protocol.MaxResponseLine)
 		if err != nil {
+			wireQueue.retire(first, true, false)
 			return protocol.Frame{}, fmt.Errorf("peerSessionRequest: %w", err)
 		}
 		payload = []byte(line)
@@ -3128,7 +3148,9 @@ func (s *Service) peerSessionRequest(session *peerSession, frame protocol.Frame,
 	// so relay traffic backlog cannot starve handshake /
 	// heartbeat writes. Inbound error paths keep the fast-fail sendRawSync
 	// contract via enqueueFrameSync.
-	if st := session.netCore.SendRawSyncBlocking(payload); st != netcore.SendOK {
+	st := session.netCore.SendLoadstandRawSyncBlocking(payload, first)
+	wireQueue.retire(first, true, st == netcore.SendOK)
+	if st != netcore.SendOK {
 		return protocol.Frame{}, fmt.Errorf("peerSessionRequest: send failed: %s", st.String())
 	}
 	s.markSessionWrite(session, writtenType)

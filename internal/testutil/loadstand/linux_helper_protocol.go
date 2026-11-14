@@ -40,6 +40,8 @@ const (
 	linuxMemberBindResult
 	linuxMemberReceipts
 	linuxMemberReceiptsResult
+	linuxRouteWireCensus
+	linuxRouteWireCensusResult
 )
 
 type LinuxRequestID uint64
@@ -55,6 +57,13 @@ const (
 
 type linuxResultCode uint8
 
+const (
+	linuxResultReady linuxResultCode = iota + 1
+	linuxResultUnsupported
+	_ // Reserved wire result 3; no producer emits it.
+	linuxResultUnavailable
+)
+
 type linuxPacket struct {
 	kind    linuxPacketKind
 	id      LinuxRequestID
@@ -65,6 +74,34 @@ type linuxPacket struct {
 type linuxSampleRequest struct {
 	Nonce       LaunchNonce
 	BudgetNanos int64
+}
+
+type linuxStopRequest struct {
+	Nonce       LaunchNonce
+	BudgetNanos int64
+	RouteWire   *RouteWireCommitment `json:",omitempty"`
+}
+
+type linuxRouteWireCensusReply struct {
+	Nonce  LaunchNonce
+	Code   linuxResultCode
+	Census *RouteWireCommitment  `json:",omitempty"`
+	Clock  *RouteWireClockDomain `json:",omitempty"`
+}
+
+func decodeLinuxRouteWireCensusReply(packet linuxPacket, id LinuxRequestID, nonce LaunchNonce, plan *PlannedRouteWireObservation, clock RouteWireClockDomain) (RouteWireCommitment, error) {
+	reply, err := decodeLinuxBody[linuxRouteWireCensusReply](packet)
+	if err != nil || packet.kind != linuxRouteWireCensusResult || packet.id != id || packet.ordinal != 1 || reply.Nonce != nonce {
+		return RouteWireCommitment{}, ErrLinuxOwnerProtocol
+	}
+	if reply.Code == linuxResultUnavailable && reply.Census == nil && reply.Clock == nil {
+		return RouteWireCommitment{}, ErrFinalAccountingUnavailable
+	}
+	if reply.Code != linuxResultReady || reply.Census == nil || reply.Clock == nil || !clock.valid() || *reply.Clock != clock ||
+		!reply.Census.Bounds.valid() || !acceptsRouteWireCommitment(plan, *reply.Census) {
+		return RouteWireCommitment{}, ErrLinuxOwnerProtocol
+	}
+	return *reply.Census, nil
 }
 
 // This closed helper statement is not an RPC-server PID attestation. The
@@ -91,7 +128,7 @@ type linuxTerminal struct {
 }
 
 func encodeLinuxPacket(kind linuxPacketKind, id LinuxRequestID, ordinal LinuxLaunchOrdinal, body any) ([]byte, error) {
-	if kind < linuxInitPublic || kind > linuxMemberReceiptsResult || ordinal == 0 {
+	if kind < linuxInitPublic || kind > linuxRouteWireCensusResult || ordinal == 0 {
 		return nil, ErrLinuxOwnerProtocol
 	}
 	raw, err := json.Marshal(body)
@@ -114,7 +151,7 @@ func decodeLinuxPacket(raw []byte) (linuxPacket, error) {
 	}
 	kind := linuxPacketKind(binary.BigEndian.Uint16(raw[6:8]))
 	ordinal := LinuxLaunchOrdinal(binary.BigEndian.Uint64(raw[24:32]))
-	if kind < linuxInitPublic || kind > linuxMemberReceiptsResult || ordinal == 0 {
+	if kind < linuxInitPublic || kind > linuxRouteWireCensusResult || ordinal == 0 {
 		return linuxPacket{}, ErrLinuxOwnerProtocol
 	}
 	return linuxPacket{kind: kind, id: LinuxRequestID(binary.BigEndian.Uint64(raw[16:24])), ordinal: ordinal, body: append(json.RawMessage(nil), raw[linuxHeaderSize:]...)}, nil
@@ -193,7 +230,8 @@ func canonicalLinuxObject(raw []byte, typ reflect.Type) bool {
 		return false
 	}
 	for name, field := range fields {
-		if !seen[name] && !strings.Contains(field.Tag.Get("json"), ",omitempty") {
+		tag := field.Tag.Get("json")
+		if !seen[name] && !strings.Contains(tag, ",omitempty") && !strings.Contains(tag, ",omitzero") {
 			return false
 		}
 	}
@@ -240,4 +278,5 @@ type linuxMemberFinal struct {
 	PeersKnown       bool
 	PeerCount        int
 	MembershipSHA256 string
+	RouteWire        *RouteWireFinalSeal `json:",omitempty"`
 }

@@ -20,13 +20,6 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-const (
-	linuxResultReady linuxResultCode = iota + 1
-	linuxResultUnsupported
-	_ // Reserved wire result 3; no producer emits it.
-	linuxResultUnavailable
-)
-
 type linuxInit struct {
 	Planned      *linuxPlannedInit `json:",omitempty"`
 	Nonce        LaunchNonce
@@ -55,11 +48,6 @@ type linuxSampleReply struct {
 	Sample LinuxProcessSample
 }
 
-type linuxStopRequest struct {
-	Nonce       LaunchNonce
-	BudgetNanos int64
-}
-
 func (s *linuxStartClaim) markDefect() {
 	s.mu.Lock()
 	s.state.defect = true
@@ -69,6 +57,7 @@ func (s *linuxStartClaim) markDefect() {
 type linuxHelperRuntime struct {
 	membership                     *linuxMemberMembershipView
 	memberBinding                  *CompletedStartBinding
+	wireCensus                     *RouteWireCommitment
 	memberFinal                    *linuxMemberFinal
 	mu                             sync.Mutex
 	readerJoinOnce                 sync.Once
@@ -471,7 +460,19 @@ func (r *linuxHelperRuntime) readLifecycle() {
 			r.requestStop(0, 5*time.Second, true)
 			return
 		}
-		r.requestStop(packet.id, time.Duration(body.BudgetNanos), false)
+		budget := time.Duration(body.BudgetNanos)
+		if body.RouteWire != nil {
+			deadline := time.Now().Add(budget)
+			ctx, cancel := context.WithDeadline(r.workCtx, deadline)
+			err := r.bindRouteWireStop(ctx, *body.RouteWire)
+			cancel()
+			budget = max(time.Until(deadline), time.Nanosecond)
+			if err != nil {
+				r.requestStop(packet.id, budget, true)
+				return
+			}
+		}
+		r.requestStop(packet.id, budget, false)
 	}
 }
 func (r *linuxHelperRuntime) sampleWork() {
@@ -518,12 +519,21 @@ func (r *linuxHelperRuntime) sampleWork() {
 			continue
 		}
 		body, err := decodeLinuxBody[linuxSampleRequest](packet)
-		if err != nil || (packet.kind != linuxSample && packet.kind != linuxObserveRuntime && packet.kind != linuxMemberBind) || packet.ordinal != 1 || packet.id <= lastID || body.Nonce != r.init.Nonce || body.BudgetNanos <= 0 {
+		if err != nil || (packet.kind != linuxSample && packet.kind != linuxObserveRuntime && packet.kind != linuxRouteWireCensus) || packet.ordinal != 1 || packet.id <= lastID || body.Nonce != r.init.Nonce || body.BudgetNanos <= 0 {
 			r.requestStop(0, 5*time.Second, true)
 			return
 		}
 		lastID = packet.id
 		ctx, cancel := context.WithTimeout(r.workCtx, time.Duration(body.BudgetNanos))
+		if packet.kind == linuxRouteWireCensus {
+			writeErr := r.writeRouteWireCensus(ctx, packet.id)
+			cancel()
+			if writeErr != nil {
+				r.requestStop(0, 5*time.Second, true)
+				return
+			}
+			continue
+		}
 		if packet.kind == linuxObserveRuntime {
 			encodeErr := r.writeRuntimeObservation(ctx, packet)
 			cancel()

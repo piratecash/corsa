@@ -179,21 +179,32 @@ func (ps *peerSession) offerSend(item peerSendItem) bool {
 	o := ps.sendObservation
 	var before time.Duration
 	var clockErr error
+	var first time.Duration
 	if o != nil {
 		if len(ps.sendCh) == cap(ps.sendCh) {
 			return false
 		}
-		before, clockErr = o.clock()
+		if o.clock != nil {
+			before, clockErr = o.clock()
+		}
+		first = o.routeWire.beforeOffer(item.Frame)
 	}
 	select {
 	case ps.sendCh <- item:
 		if o != nil {
-			o.recordLocked(&o.state.Enqueued)
-			o.changeLocked(len(ps.sendCh), before, clockErr)
+			depth := len(ps.sendCh)
+			o.routeWire.push(first, depth)
+			if o.clock != nil {
+				o.recordLocked(&o.state.Enqueued)
+				o.changeLocked(depth, before, clockErr)
+			}
 			o.signalLocked()
 		}
 		return true
 	default:
+		if o != nil {
+			o.routeWire.retire(first, false, false)
+		}
 		return false
 	}
 }
@@ -245,7 +256,7 @@ func (ps *peerSession) drainSendQueue() []deliveryDispatchRef {
 	o := ps.sendObservation
 	var before time.Duration
 	var clockErr error
-	if o != nil {
+	if o != nil && o.clock != nil {
 		before, clockErr = o.clock()
 	}
 	var stranded []deliveryDispatchRef
@@ -253,13 +264,16 @@ func (ps *peerSession) drainSendQueue() []deliveryDispatchRef {
 		select {
 		case item := <-ps.sendCh:
 			if o != nil {
-				o.recordLocked(&o.state.Drained)
+				o.routeWire.retire(o.routeWire.pop(), true, false)
+				if o.clock != nil {
+					o.recordLocked(&o.state.Drained)
+				}
 			}
 			if item.carriesDelivery() {
 				stranded = append(stranded, item.delivery)
 			}
 		default:
-			if o != nil {
+			if o != nil && o.clock != nil {
 				o.changeLocked(0, before, clockErr)
 				o.state.Stopped = true
 			}

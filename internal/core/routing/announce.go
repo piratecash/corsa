@@ -1130,7 +1130,7 @@ func (a *AnnounceLoop) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			a.announceToAllPeers(ctx)
+			a.announceToAllPeers(ctx, domain.RouteWireFullPeriodic)
 		case <-a.triggerCh:
 			if a.triggerMinSpacing <= 0 {
 				// Pacing disabled — legacy immediate path.
@@ -1169,7 +1169,7 @@ func (a *AnnounceLoop) Run(ctx context.Context) {
 // and the change must go out now, not wait for the next delta slot.
 func (a *AnnounceLoop) announceTriggeredCycle(ctx context.Context) {
 	a.lastDeltaCycleAt = time.Time{}
-	a.announceToAllPeers(ctx)
+	a.announceToAllPeers(ctx, domain.RouteWireFullTriggered)
 }
 
 // TriggerUpdate requests an announcement cycle. Safe to call from any
@@ -1230,7 +1230,7 @@ func (a *AnnounceLoop) PendingTrigger() bool {
 // are unaffected — they always use SendAnnounceRoutes regardless of
 // capability (see sendFullAnnounce / sendLegacyFull / docs/routing.md
 // "First-sync wire-frame invariant").
-func (a *AnnounceLoop) announceToAllPeers(ctx context.Context) {
+func (a *AnnounceLoop) announceToAllPeers(ctx context.Context, source domain.RouteWireFullSource) {
 	cycleID := a.cycleCounter.Add(1)
 
 	// Refresh TTL of own-origin direct routes unconditionally.
@@ -1573,7 +1573,7 @@ func (a *AnnounceLoop) announceToAllPeers(ctx context.Context) {
 				// snapHead (journal head atomic with this full snapshot) is
 				// committed with the baseline mark inside RecordFullSyncSuccess on
 				// success; a failed full sync leaves both put.
-				a.sendFullAnnounce(ctx, cycleID, peer, peerState, snapshot, snapHead, now)
+				a.sendFullAnnounce(ctx, cycleID, peer, peerState, snapshot, snapHead, now, source)
 				forcedFull.Add(1)
 				return
 			}
@@ -1958,6 +1958,7 @@ func (a *AnnounceLoop) sendFullAnnounce(
 	snapshot *AnnounceSnapshot,
 	changeHead uint64,
 	now time.Time,
+	source domain.RouteWireFullSource,
 ) bool {
 	state.RecordFullSyncAttempt(now)
 
@@ -1982,7 +1983,7 @@ func (a *AnnounceLoop) sendFullAnnounce(
 	a.modeSelection.Record(AnnounceOperationFullSync, fullMode, fullReason)
 
 	if fullMode == AnnounceModeV3 {
-		if !a.sendV3Full(ctx, peer, snapshot) {
+		if !a.sendV3Full(ctx, peer, snapshot, source) {
 			log.Debug().
 				Uint64("announce_cycle_id", cycleID).
 				Str("peer_identity", peer.Identity.String()).
@@ -2031,8 +2032,15 @@ func (a *AnnounceLoop) sendV3Full(
 	ctx context.Context,
 	peer AnnounceTarget,
 	snapshot *AnnounceSnapshot,
+	source domain.RouteWireFullSource,
 ) bool {
-	return a.sender.SendRouteAnnounceV3(ctx, peer.Address, routeAnnounceV3KindFull, a.table.Epoch(), snapshot.Entries)
+	epoch := a.table.Epoch()
+	if sender, ok := a.sender.(interface {
+		SendRouteAnnounceV3Full(context.Context, PeerAddress, uint64, []AnnounceEntry, domain.RouteWireFullSource) bool
+	}); ok {
+		return sender.SendRouteAnnounceV3Full(ctx, peer.Address, epoch, snapshot.Entries, source)
+	}
+	return a.sender.SendRouteAnnounceV3(ctx, peer.Address, routeAnnounceV3KindFull, epoch, snapshot.Entries)
 }
 
 // sendLegacyFull sends a full snapshot via the legacy announce_routes wire

@@ -253,7 +253,9 @@ func (r *linuxHelperRuntime) writeMemberBind(ctx context.Context, packet linuxPa
 				diagnostic.BindingKnown, diagnostic.BindingEqual = true, binding.launch == (launchBinding{nonce: r.init.Planned.FinalNonce, fingerprint: r.init.Planned.FinalFingerprint})
 			}
 			if err == nil && binding.launch == (launchBinding{nonce: r.init.Planned.FinalNonce, fingerprint: r.init.Planned.FinalFingerprint}) {
+				r.mu.Lock()
 				r.memberBinding = &binding
+				r.mu.Unlock()
 				reply.Code = linuxResultReady
 				reply.Receipt = receipt
 				reply.Provenance = facts.Provenance
@@ -301,9 +303,24 @@ func (r *linuxHelperRuntime) reduceMemberFinal(ctx context.Context) error {
 	}
 	ctx, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
-	final, err := r.process.FinalAccounting(ctx, binding, prior)
+	var final FinalAccountingResult
+	var seal *RouteWireFinalSeal
+	var err error
+	if r.init.Planned.Plan.RouteWire == nil {
+		final, err = r.process.FinalAccounting(ctx, binding, prior)
+	} else {
+		var route FinalRouteWireResult
+		route, err = r.process.FinalRouteWireAccounting(ctx, binding, prior)
+		final = route.FinalAccountingResult
+		if err != nil && final.Finality != FinalExact {
+			final = FinalAccountingResult{Finality: FinalUnavailable, Reason: FinalReportRejected}
+		}
+		if err == nil && final.Finality == FinalExact {
+			seal = &route.Seal
+		}
+	}
 	peerCount, peerErr := r.memberPeerState(ctx)
-	r.memberFinal = &linuxMemberFinal{Receipt: binding.Receipt(), Finality: final.Finality, Traffic: final.Traffic, Reason: final.Reason, PeersKnown: peerErr == nil, PeerCount: peerCount, MembershipSHA256: r.membership.descriptor.SHA256}
+	r.memberFinal = &linuxMemberFinal{Receipt: binding.Receipt(), Finality: final.Finality, Traffic: final.Traffic, Reason: final.Reason, PeersKnown: peerErr == nil, PeerCount: peerCount, MembershipSHA256: r.membership.descriptor.SHA256, RouteWire: seal}
 	return errors.Join(err, peerErr)
 }
 func (o *LinuxFixture) plannedMemberFinal(receipt StartReceipt, prior TransportHighWater) (FinalAccountingResult, error) {
@@ -319,6 +336,9 @@ func (o *LinuxFixture) plannedMemberFinal(receipt StartReceipt, prior TransportH
 			return FinalAccountingResult{}, ErrFinalReportInvalid
 		}
 	case FinalUnavailable:
+		if final.RouteWire != nil {
+			return FinalAccountingResult{}, ErrFinalReportInvalid
+		}
 		switch final.Reason {
 		case FinalExitUnclean, FinalReportRejected, FinalCapabilityCloseFailed, FinalArtifactsReleased:
 		default:
@@ -336,6 +356,11 @@ func (o *LinuxFixture) plannedMemberFinal(receipt StartReceipt, prior TransportH
 		}
 		if o.correlation.poisoned || !o.targetExit.Clean() || !o.helperWait.Clean() {
 			return FinalAccountingResult{}, errors.Join(ErrFinalAccountingUnavailable, ErrLinuxOwnerPoisoned)
+		}
+		expectsRouteWire := o.spec.planned != nil && o.spec.planned.plan.RouteWire != nil
+		if (!expectsRouteWire && final.RouteWire != nil) ||
+			(expectsRouteWire && (o.routeWireStop == nil || final.RouteWire == nil || !final.RouteWire.validFor(*o.routeWireStop))) {
+			return FinalAccountingResult{}, ErrFinalReportInvalid
 		}
 	}
 	return FinalAccountingResult{Finality: final.Finality, Traffic: final.Traffic, Reason: final.Reason}, nil

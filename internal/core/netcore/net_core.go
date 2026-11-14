@@ -44,8 +44,9 @@ import (
 // which queue on each death path.
 
 type NetCore struct {
-	id        ConnID
-	direction Direction
+	id                 ConnID
+	direction          Direction
+	loadstandSessionID *[32]byte
 
 	// mu protects mutable peer state below. Getters take RLock,
 	// setters take Lock. Immutable fields (id, direction, connIDNum,
@@ -268,6 +269,8 @@ type Options struct {
 	ProtocolVersion domain.ProtocolVersion
 	// ObserveWriterQueue selects the diagnostic queue for this connection.
 	ObserveWriterQueue bool
+	// LoadstandSessionID is optional fixture evidence, immutable after New.
+	LoadstandSessionID [32]byte
 
 	// Declarations carries the raw handshake self-description. It is a
 	// POINTER, unlike every other field here, because both of its slices
@@ -379,8 +382,19 @@ func New(id ConnID, rawConn net.Conn, dir Direction, opts Options) *NetCore {
 	if opts.ObserveWriterQueue {
 		pc.writerQueueObservation = newWriterQueueObservation()
 	}
+	if opts.LoadstandSessionID != ([32]byte{}) {
+		id := opts.LoadstandSessionID
+		pc.loadstandSessionID = &id
+	}
 	go pc.writerLoop()
 	return pc
+}
+
+func (pc *NetCore) LoadstandSessionID() [32]byte {
+	if pc.loadstandSessionID == nil {
+		return [32]byte{}
+	}
+	return *pc.loadstandSessionID
 }
 
 // NewBootstrap wraps a one-shot outbound dial (e.g., syncPeer and other
@@ -454,6 +468,7 @@ func (pc *NetCore) writerLoop() {
 		// finished": producers read it on both sides of their offer, the
 		// loop reads it here.
 		if pc.gateStatus() != SendOK {
+			pc.discardLoadstandQueue(item)
 			if item.owned != nil {
 				item.owned.discardOwnedItem()
 			}
@@ -491,10 +506,16 @@ func (pc *NetCore) writeItem(item sendItem) bool {
 	}
 	now := time.Now()
 	if item.ticket.expiredAt(now) {
+		pc.discardLoadstandQueue(item)
 		return true
 	}
 
 	_ = pc.rawConn.SetWriteDeadline(item.ticket.writeDeadlineAt(now, pc.writeDeadline))
+	if pc.loadstandSessionID != nil {
+		if sink, ok := pc.loadCaptureSink().(loadstandWriteStartSink); ok {
+			sink.OnLoadstandWriteStart(item.data)
+		}
+	}
 	_, err := pc.rawConn.Write(item.data)
 	writeOK := err == nil
 
@@ -539,6 +560,7 @@ func (pc *NetCore) drainQueued() {
 			if !ok {
 				return
 			}
+			pc.discardLoadstandQueue(item)
 			if item.owned != nil {
 				item.owned.discardOwnedItem()
 			}
@@ -547,6 +569,7 @@ func (pc *NetCore) drainQueued() {
 	for {
 		select {
 		case item := <-pc.sendCh:
+			pc.discardLoadstandQueue(item)
 			if item.owned != nil {
 				item.owned.discardOwnedItem()
 			}
@@ -679,6 +702,10 @@ func (pc *NetCore) teardownStatus() SendStatus {
 // failure: the frame never entered the queue, and what back-pressure means is
 // the caller's policy.
 func (pc *NetCore) queueFrame(item sendItem) SendStatus {
+	return pc.queueFrameAt(item, 0)
+}
+
+func (pc *NetCore) queueFrameAt(item sendItem, first time.Duration) SendStatus {
 	offered := false
 	if item.owned != nil {
 		item.owned.holdOwnedResources(pc)
@@ -692,6 +719,14 @@ func (pc *NetCore) queueFrame(item sendItem) SendStatus {
 		return st
 	}
 	pc.runEnqueueBarrier()
+	if sink := pc.prepareLoadstandQueue(&item, first); sink != nil {
+		defer func() {
+			if !offered {
+				sink.DiscardLoadstandQueue(item.data, false)
+			}
+		}()
+	}
+
 	if pc.writerQueueObservation != nil {
 		if status, _ := pc.offerObservedWriterItem(item, false); status != SendOK {
 			return status
@@ -726,20 +761,30 @@ func (pc *NetCore) queueFrame(item sendItem) SendStatus {
 // woke on: a producer waiting for a slot when the OWNER closes the connection
 // is owed SendChanClosed, and writerDone alone cannot tell that apart from a
 // socket that died under the writer.
-func (pc *NetCore) queueFrameBlocking(item sendItem, cancel <-chan struct{}, deadline <-chan time.Time) SendStatus {
+func (pc *NetCore) queueFrameBlocking(item sendItem, cancel <-chan struct{}, deadline <-chan time.Time, first time.Duration) SendStatus {
 	if st := pc.gateStatus(); st != SendOK {
 		return st
 	}
 	pc.runEnqueueBarrier()
+	offered := false
+	if sink := pc.prepareLoadstandQueue(&item, first); sink != nil {
+		defer func() {
+			if !offered {
+				sink.DiscardLoadstandQueue(item.data, false)
+			}
+		}()
+	}
 	if pc.writerQueueObservation != nil {
 		if status := pc.waitObservedWriterOffer(item, cancel, deadline); status != SendOK {
 			return status
 		}
+		offered = true
 		return pc.settleEnqueuedFrame(item)
 	}
 
 	select {
 	case pc.sendCh <- item:
+		offered = true
 	case <-pc.writerDone:
 		return pc.teardownStatus()
 	case <-cancel:
@@ -950,11 +995,17 @@ func (pc *NetCore) SendRawTracked(data []byte, ticket *WriteTicket) SendStatus {
 // statement that the bytes left, and a caller closing it would be asserting a
 // write that did not happen. A nil ack makes this identical to SendTracked.
 func (pc *NetCore) SendTrackedObserved(frame protocol.Frame, ticket *WriteTicket, ack chan struct{}) SendStatus {
+	return pc.SendLoadstandTrackedObserved(frame, ticket, ack, 0)
+}
+
+// SendLoadstandTrackedObserved passes the original session queue timestamp
+// to the fixture sink without changing the writer queue element.
+func (pc *NetCore) SendLoadstandTrackedObserved(frame protocol.Frame, ticket *WriteTicket, ack chan struct{}, first time.Duration) SendStatus {
 	line, err := protocol.MarshalFrameLine(frame)
 	if err != nil {
 		return SendMarshalError
 	}
-	return pc.queueFrame(sendItem{data: []byte(line), ack: ack, ticket: ticket})
+	return pc.queueFrameAt(sendItem{data: []byte(line), ack: ack, ticket: ticket}, first)
 }
 
 // SendSync enqueues a frame and blocks until the writer goroutine flushes
@@ -1030,6 +1081,12 @@ func (pc *NetCore) SendRawSyncCtx(ctx context.Context, data []byte) SendStatus {
 // queue is reserved for the fire-and-forget Send / SendRaw path, which
 // uses SendBufferFull as the slow-peer eviction signal.
 func (pc *NetCore) SendRawSyncBlocking(data []byte) SendStatus {
+	return pc.SendLoadstandRawSyncBlocking(data, 0)
+}
+
+// SendLoadstandRawSyncBlocking retains the original session queue timestamp
+// during the blocking writer offer and flush.
+func (pc *NetCore) SendLoadstandRawSyncBlocking(data []byte, first time.Duration) SendStatus {
 	ack := make(chan struct{})
 
 	// Bound the entire operation (enqueue + flush) by a single deadline so
@@ -1041,7 +1098,7 @@ func (pc *NetCore) SendRawSyncBlocking(data []byte) SendStatus {
 	deadline := time.NewTimer(syncFlushTimeout)
 	defer deadline.Stop()
 
-	if st := pc.queueFrameBlocking(sendItem{data: data, ack: ack}, nil, deadline.C); st != SendOK {
+	if st := pc.queueFrameBlocking(sendItem{data: data, ack: ack}, nil, deadline.C, first); st != SendOK {
 		return st
 	}
 	return pc.awaitFlush(ack, nil, deadline.C)
@@ -1070,7 +1127,7 @@ func (pc *NetCore) SendRawBlockingCtx(ctx context.Context, data []byte) SendStat
 	if err := ctx.Err(); err != nil {
 		return SendCtxCancelled
 	}
-	return pc.queueFrameBlocking(sendItem{data: data}, ctx.Done(), nil)
+	return pc.queueFrameBlocking(sendItem{data: data}, ctx.Done(), nil, 0)
 }
 
 // WriterDone returns a channel that is closed as soon as the writer stops

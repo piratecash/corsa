@@ -24,21 +24,23 @@ type LinuxMemberSpec struct {
 	Parent      *AuditedProfileParent
 	UID         ProcessUID
 	GID         uint32
+	RouteWire   *PlannedRouteWireObservation
 }
 type LinuxMemberBinaries struct {
 	Helper, Full, SDK, NFT             string
 	HelperSHA, FullSHA, SDKSHA, NFTSHA ExecutableSHA256
 }
 type LinuxMemberGroup struct {
-	membership  *linuxMemberMembership
-	plan        plannedNetworkPlan
-	binaries    LinuxMemberBinaries
-	setupCalled bool
-	probes      LinuxIsolationProbes
-	network     *plannedNetwork
-	backend     *linuxPlannedNetworkBackend
-	members     []Member
-	owners      []*linuxMember
+	routeWireClock RouteWireClockDomain
+	membership     *linuxMemberMembership
+	plan           plannedNetworkPlan
+	binaries       LinuxMemberBinaries
+	setupCalled    bool
+	probes         LinuxIsolationProbes
+	network        *plannedNetwork
+	backend        *linuxPlannedNetworkBackend
+	members        []Member
+	owners         []*linuxMember
 }
 type linuxMember struct {
 	id                          MemberID
@@ -58,6 +60,7 @@ type linuxMember struct {
 	current                     *StartReceipt
 	previous                    PublicIdentity
 	ended                       []EndedIncarnation
+	routeWireFinalOrdinal       IncarnationOrdinal
 	highWater                   TransportHighWater
 	profileDevice, profileInode uint64
 	stopWatch                   chan struct{}
@@ -93,7 +96,7 @@ func PrepareLinuxMemberGroup(ctx context.Context, prefix netip.Prefix, binaries 
 				return nil, ErrInvalidConfiguration
 			}
 		}
-		p := PlannedChildConfig{ID: spec.ID, Role: spec.Role, Prefix: prefix, Peers: []PlannedChildPeer{{ID: spec.ID, Role: spec.Role, Endpoint: domain.PeerAddress(spec.Config.Listen)}}}
+		p := PlannedChildConfig{ID: spec.ID, Role: spec.Role, Prefix: prefix, RouteWire: spec.RouteWire, Peers: []PlannedChildPeer{{ID: spec.ID, Role: spec.Role, Endpoint: domain.PeerAddress(spec.Config.Listen)}}}
 		for _, seed := range spec.Config.Bootstrap {
 			found := false
 			for _, candidate := range specs {
@@ -111,6 +114,7 @@ func PrepareLinuxMemberGroup(ctx context.Context, prefix netip.Prefix, binaries 
 			return nil, e
 		}
 		spec.Config = config
+		spec.RouteWire = p.RouteWire
 		copied[i] = spec
 		projected[i] = p
 		plan.members = append(plan.members, plannedNetworkMember{id: spec.ID, role: spec.Role, endpoint: domain.PeerAddress(spec.Config.Listen), hostLink: "h" + fmtMemberIndex(i), peerLink: "p" + fmtMemberIndex(i), address: address.Addr()})
@@ -122,6 +126,12 @@ func PrepareLinuxMemberGroup(ctx context.Context, prefix netip.Prefix, binaries 
 	}
 	group := &LinuxMemberGroup{plan: plan, binaries: binaries, probes: probes}
 	for i, spec := range copied {
+		if spec.RouteWire != nil && spec.RouteWire.Bounds.valid() && !group.routeWireClock.valid() {
+			group.routeWireClock, err = ReadLinuxRouteWireClockDomain()
+			if err != nil {
+				return nil, err
+			}
+		}
 		target, hash := binaries.SDK, binaries.SDKSHA
 		if spec.Role == MemberFull {
 			target, hash = binaries.Full, binaries.FullSHA
@@ -451,6 +461,9 @@ func (m *linuxMember) Stop(ctx context.Context) (StopReceipt, error) {
 	m.attempted = false
 	m.current = nil
 	if ended != nil {
+		if m.planned.RouteWire != nil && stopErr == nil && finalErr == nil && postErr == nil && ended.Finality == FinalExact {
+			m.routeWireFinalOrdinal = ended.Incarnation.Ordinal
+		}
 		m.ended = append(m.ended, ended.Clone())
 		copy := ended.Clone()
 		return StopReceipt{Terminated: true, Ended: &copy}, errors.Join(stopErr, finalErr, postErr)

@@ -175,7 +175,7 @@ func newServiceWithObservations(cfg config.Node, id *identity.Identity, bus *ebu
 	var registered *k3RegisteredRequest
 	if options.RegisteredProvenV2 != nil {
 		request := *options.RegisteredProvenV2
-		registered = &k3RegisteredRequest{OwnerCapacity: request.OwnerCapacity, HistoryCapacity: request.HistoryCapacity, Instance: request.Instance, elapsed: clock}
+		registered = &k3RegisteredRequest{OwnerCapacity: request.OwnerCapacity, HistoryCapacity: request.HistoryCapacity, Instance: request.Instance, elapsed: clock, routeWireScope: request.routeWireScope}
 	}
 	if advertised == nil && membership == nil && registered == nil && options.Pending == nil && options.Terminal == nil && options.Guard == nil && options.Handshake == nil && options.HandshakeFile == nil && options.ConnectionTotal == nil && options.ConnectionTotalFile == nil {
 		return NewService(cfg, id, bus), ObservationReadouts{}, nil

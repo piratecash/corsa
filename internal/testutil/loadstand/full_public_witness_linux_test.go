@@ -202,7 +202,7 @@ func TestPlannedFullPublicWitnessSourceWiring(t *testing.T) {
 	want := []string{
 		`cfg.DisableDirectMessages = true`,
 		`own, err := identity.LoadOrCreate(cfg.IdentityPath)`,
-		`service, unstartedCleanup := node.NewServiceForRuntime(cfg, own, ebus.New())`,
+		`if bounds == (loadstand.RouteWireWindowBounds{}) { service, unstartedCleanup = node.NewServiceForRuntime(cfg, own, ebus.New()) } else { service, census, unstartedCleanup, err = node.NewLoadstandFullNodeWithRouteWireCensus(cfg, own, ebus.New(), plan.RouteWire.MaxEndpoints, [32]byte(plan.RouteWire.Window), plan.RouteWire.SeedRoutes, plan.RouteWire.DialRole) if err != nil { return err } }`,
 		`public := fullwitness.PublicIdentity{Identity: domain.PeerIdentityFromWire(own.Address), PublicKey: identity.PublicKeyBase64(own.PublicKey), BoxPublicKey: identity.BoxPublicKeyBase64(own.BoxPublicKey), BoxSignature: identity.SignBoxKeyBinding(own)}`,
 		`if err = fullwitness.RegisterPlannedFullPublicIdentity(table, public); err != nil { return err }`,
 		`server, err := rpc.NewServer(rpcConfig, table, service)`,

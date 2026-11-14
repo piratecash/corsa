@@ -7,22 +7,37 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"math"
 	"net/netip"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/trustedclock"
 	"github.com/piratecash/corsa/internal/testutil/loadstand"
 	"github.com/piratecash/corsa/internal/testutil/runjournal"
 )
 
 // This is the existing executor's Linux composition, not a second scheduler.
 // The complete plan/address/Member map is compiled before network setup.
-func prepareLoadStandLinuxExecutor(ctx context.Context, plan loadStandPlan, binaries loadstand.LinuxMemberBinaries, specs []loadstand.LinuxMemberSpec, probes loadstand.LinuxIsolationProbes, wall runjournal.Clock, schedule func() loadstand.ScheduleClock, limits loadStandExecutionLimits) (*loadStandExecutor, *loadstand.LinuxMemberGroup, error) {
+func prepareLoadStandLinuxExecutor(ctx context.Context, plan loadStandPlan, binaries loadstand.LinuxMemberBinaries, specs []loadstand.LinuxMemberSpec, probes loadstand.LinuxIsolationProbes, wall runjournal.Clock, schedule func() loadstand.ScheduleClock, limits loadStandExecutionLimits, launch *loadStandRouteWireLaunch) (*loadStandExecutor, *loadstand.LinuxMemberGroup, error) {
 	if err := validateLoadStandLinuxSpecs(plan, specs); err != nil {
 		return nil, nil, err
+	}
+	specs, window, err := bindLoadStandLinuxRouteWire(plan, specs, launch)
+	if err != nil {
+		return nil, nil, err
+	}
+	if window != nil {
+		if err := window.checkBoundary(false); err != nil {
+			return nil, nil, err
+		}
+		schedule = func() loadstand.ScheduleClock {
+			return &loadStandRouteWireSchedule{origin: window.origin, readBoot: window.readBoot}
+		}
 	}
 	group, err := loadstand.PrepareLinuxMemberGroup(ctx, netip.MustParsePrefix("240.0.0.0/4"), binaries, specs, limits.Cleanup, probes)
 	if err != nil {
@@ -32,7 +47,10 @@ func prepareLoadStandLinuxExecutor(ctx context.Context, plan loadStandPlan, bina
 	for id, member := range group.Members() {
 		members[loadStandNodeID(id)] = member
 	}
-	executor := &loadStandExecutor{plan: plan, members: members, wall: wall, schedule: schedule, limits: limits}
+	if window != nil {
+		window.port = group
+	}
+	executor := &loadStandExecutor{plan: plan, members: members, wall: wall, schedule: schedule, limits: limits, routeWire: window}
 	if _, err = executor.compile(); err != nil {
 		return nil, group, err
 	}
@@ -40,6 +58,56 @@ func prepareLoadStandLinuxExecutor(ctx context.Context, plan loadStandPlan, bina
 		return nil, group, err
 	}
 	return executor, group, nil
+}
+
+func bindLoadStandLinuxRouteWire(plan loadStandPlan, specs []loadstand.LinuxMemberSpec, launch *loadStandRouteWireLaunch) ([]loadstand.LinuxMemberSpec, *loadStandRouteWireWindow, error) {
+	for _, spec := range specs {
+		selection := spec.RouteWire
+		if selection != nil && (launch != nil || selection.Bounds != (loadstand.RouteWireWindowBounds{})) {
+			return nil, nil, loadstand.ErrUnsupportedPlan
+		}
+	}
+	if launch == nil {
+		return specs, nil, nil
+	}
+	selection, err := launch.selection(plan)
+	if err != nil {
+		return nil, nil, err
+	}
+	window := &loadStandRouteWireWindow{
+		nonce: selection.Window, bounds: selection.Bounds, origin: launch.Origin, readBoot: trustedclock.SinceBoot,
+		fullReceiptRouteBudget: selection.FullReceiptRouteBudget, requiredFullRoutes: launch.RequiredFullRoutes,
+		requiredFullSource: launch.RequiredFullSource,
+		requireReconnect:   launch.RequireReconnect,
+	}
+	if launch.SeedFullRoutes {
+		window.seedSender = loadstand.MemberID(plan.nodes[0].id)
+		window.seedSHA256 = loadstandRouteWireSeedDigest(launch.RequiredFullRoutes)
+	}
+	if launch.SingleInitiator {
+		window.dialer = loadstand.MemberID(plan.nodes[0].id)
+	}
+	if launch.RequireReconnect {
+		window.disconnectAt = launch.Origin + launch.DisconnectAt
+	}
+	bound := slices.Clone(specs)
+	for i := range bound {
+		copyOfSelection := selection
+		if bound[i].ID == window.seedSender {
+			copyOfSelection.SeedRoutes = launch.RequiredFullRoutes
+		}
+		if window.dialer != "" {
+			copyOfSelection.DialRole = domain.RouteWireListener
+			if bound[i].ID == window.dialer {
+				copyOfSelection.DialRole = domain.RouteWireDialer
+				copyOfSelection.DisconnectAt = window.disconnectAt
+			}
+		}
+		bound[i].RouteWire = &copyOfSelection
+		window.members = append(window.members, loadStandRouteWireMember{id: loadStandNodeID(bound[i].ID), limit: selection.MaxEndpoints})
+	}
+	slices.SortFunc(window.members, func(a, b loadStandRouteWireMember) int { return strings.Compare(string(a.id), string(b.id)) })
+	return bound, window, nil
 }
 func validateLoadStandLinuxSpecs(plan loadStandPlan, specs []loadstand.LinuxMemberSpec) error {
 	candidates := make([]loadStandPlannedAddress, 0, len(specs))
@@ -65,11 +133,11 @@ func validateLoadStandLinuxSpecs(plan loadStandPlan, specs []loadstand.LinuxMemb
 	}
 	return nil
 }
-func runLoadStandLinuxPlan(ctx context.Context, plan loadStandPlan, binaries loadstand.LinuxMemberBinaries, specs []loadstand.LinuxMemberSpec, probes loadstand.LinuxIsolationProbes, journal *runjournal.Journal, wall runjournal.Clock, schedule func() loadstand.ScheduleClock, limits loadStandExecutionLimits) (report loadStandExecutionReport, result error) {
+func runLoadStandLinuxPlan(ctx context.Context, plan loadStandPlan, binaries loadstand.LinuxMemberBinaries, specs []loadstand.LinuxMemberSpec, probes loadstand.LinuxIsolationProbes, journal *runjournal.Journal, wall runjournal.Clock, schedule func() loadstand.ScheduleClock, limits loadStandExecutionLimits, launch *loadStandRouteWireLaunch) (report loadStandExecutionReport, result error) {
 	if journal == nil {
 		return report, loadstand.ErrInvalidConfiguration
 	}
-	executor, group, err := prepareLoadStandLinuxExecutor(ctx, plan, binaries, specs, probes, wall, schedule, limits)
+	executor, group, err := prepareLoadStandLinuxExecutor(ctx, plan, binaries, specs, probes, wall, schedule, limits, launch)
 	// Even failed setup may own exact partial resources; always use a fresh
 	// caller-bounded cleanup context and retain any failure in the run result.
 	if group != nil {
@@ -370,19 +438,8 @@ func loadStandLinuxRetainedFailureSummary(report loadStandExecutionReport) strin
 	return finish(text)
 }
 
-// This is an explicitly admitted native entry. Ordinary/short tests never
-// create namespaces, alter links, launch targets or send isolation probes.
-func TestLoadStandLinuxPlannedFullSDKTimelineNative(t *testing.T) {
-	if os.Getenv("LOADSTAND_LINUX_NATIVE") != "1" || testing.Short() {
-		t.Skip("requires separately admitted own-container planned Linux fixture")
-	}
-	ctx, cancel := context.WithTimeout(t.Context(), 70*time.Second)
-	defer cancel()
-	opts := loadStandPlanOpts{Seed: 1, FullNodes: 2, Hubs: 2, EdgeNodes: 2, EdgeUplinks: 2, Contacts: 1, Duration: 4500 * time.Millisecond, Settle: 200 * time.Millisecond, SampleInterval: 500 * time.Millisecond, Churn: loadStandChurnOpts{Profile: loadStandChurnFlap, Flap: &loadStandFlapOpts{Percent: 50, Up: 4 * time.Second, Down: 500 * time.Millisecond}}, Traffic: loadStandTrafficOpts{DirectMessages: &loadStandDMOpts{MeanInterval: 500 * time.Millisecond}, Gossip: &loadStandGossipOpts{Interval: time.Second}}}
-	plan, err := buildLoadStandPlan(opts)
-	if err != nil {
-		t.Fatal(err)
-	}
+func loadStandLinuxNativeInputs(t *testing.T, ctx context.Context, plan loadStandPlan) (loadstand.LinuxMemberBinaries, []loadstand.LinuxMemberSpec, loadstand.LinuxIsolationProbes) {
+	t.Helper()
 	binaries := loadstand.LinuxMemberBinaries{Helper: os.Getenv("LOADSTAND_NATIVE_HELPER"), HelperSHA: loadstand.ExecutableSHA256(os.Getenv("LOADSTAND_NATIVE_HELPER_SHA")), SDK: os.Getenv("LOADSTAND_NATIVE_TARGET"), SDKSHA: loadstand.ExecutableSHA256(os.Getenv("LOADSTAND_NATIVE_TARGET_SHA")), Full: os.Getenv("LOADSTAND_NATIVE_FULL"), FullSHA: loadstand.ExecutableSHA256(os.Getenv("LOADSTAND_NATIVE_FULL_SHA")), NFT: os.Getenv("LOADSTAND_NATIVE_NFT"), NFTSHA: loadstand.ExecutableSHA256(os.Getenv("LOADSTAND_NATIVE_NFT_SHA"))}
 	var probes loadstand.LinuxIsolationProbes
 	for key, dst := range map[string]*netip.AddrPort{"LOADSTAND_NATIVE_PRODUCTION_PROBE": &probes.ProductionBootstrap, "LOADSTAND_NATIVE_FALLBACK_PROBE": &probes.FallbackPublic, "LOADSTAND_NATIVE_IPV6_PROBE": &probes.PublicIPv6} {
@@ -400,18 +457,18 @@ func TestLoadStandLinuxPlannedFullSDKTimelineNative(t *testing.T) {
 	specs := make([]loadstand.LinuxMemberSpec, 0, len(nodes))
 	for _, node := range nodes {
 		var nonce loadstand.LaunchNonce
-		if _, err = rand.Read(nonce[:]); err != nil {
+		if _, err := rand.Read(nonce[:]); err != nil {
 			t.Fatal(err)
 		}
 		parent, createErr := loadstand.CreateAuditedProfileParent(ctx, "/profiles", nonce)
 		if createErr != nil {
 			t.Fatal("original profile parent refused", createErr)
 		}
-		defer func() {
+		t.Cleanup(func() {
 			if closeErr := parent.Close(); closeErr != nil {
 				t.Error("original profile descriptor close failed", closeErr)
 			}
-		}()
+		})
 		credentials, credentialErr := loadstand.NewCredentials()
 		if credentialErr != nil {
 			t.Fatal(credentialErr)
@@ -426,7 +483,20 @@ func TestLoadStandLinuxPlannedFullSDKTimelineNative(t *testing.T) {
 		}
 		specs = append(specs, loadstand.LinuxMemberSpec{ID: loadstand.MemberID(node.id), Role: role, Parent: parent, Credentials: credentials, UID: 65532, GID: 65532, Config: loadstand.ChildConfig{DataDir: parent.MemberDirectory(), Listen: domain.ListenAddress(endpoints[node.id]), RPC: "127.0.0.1:42051", Bootstrap: bootstrap, Listener: role == loadstand.MemberFull, Procs: 1}})
 	}
-	report, err := runLoadStandLinuxPlan(ctx, plan, binaries, specs, probes, loadStandExecutorJournal(t, ctx), runjournal.SystemClock{}, func() loadstand.ScheduleClock { return loadstand.NewMonotonicSchedule() }, loadStandFunctionalLimits())
+	return binaries, specs, probes
+}
+
+// Both native entries require explicit admission before constructing fixtures.
+func TestLoadStandLinuxPlannedFullSDKTimelineNative(t *testing.T) {
+	if os.Getenv("LOADSTAND_LINUX_NATIVE") != "1" || testing.Short() {
+		t.Skip("requires separately admitted own-container planned Linux fixture")
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 70*time.Second)
+	defer cancel()
+	opts := loadStandPlanOpts{Seed: 1, FullNodes: 2, Hubs: 2, EdgeNodes: 2, EdgeUplinks: 2, Contacts: 1, Duration: 4500 * time.Millisecond, Settle: 200 * time.Millisecond, SampleInterval: 500 * time.Millisecond, Churn: loadStandChurnOpts{Profile: loadStandChurnFlap, Flap: &loadStandFlapOpts{Percent: 50, Up: 4 * time.Second, Down: 500 * time.Millisecond}}, Traffic: loadStandTrafficOpts{DirectMessages: &loadStandDMOpts{MeanInterval: 500 * time.Millisecond}, Gossip: &loadStandGossipOpts{Interval: time.Second}}}
+	plan := mustBuildLoadStandPlan(t, opts)
+	binaries, specs, probes := loadStandLinuxNativeInputs(t, ctx, plan)
+	report, err := runLoadStandLinuxPlan(ctx, plan, binaries, specs, probes, loadStandExecutorJournal(t, ctx), runjournal.SystemClock{}, func() loadstand.ScheduleClock { return loadstand.NewMonotonicSchedule() }, loadStandFunctionalLimits(), nil)
 	if err != nil {
 		t.Fatalf("actual planned Full/SDK executor failed %v; %s", err, loadStandLinuxRetainedFailureSummary(report))
 	}
@@ -476,6 +546,49 @@ func TestLoadStandLinuxPlannedFullSDKTimelineNative(t *testing.T) {
 	// kernel identity; process restart does not create a new network namespace.
 
 }
+
+// The ordinary native fixture keeps its own plan. This entry requires the
+// explicitly selected route-wire topology, time budget and journal.
+func TestLoadStandLinuxRouteWireNative(t *testing.T) {
+	raw := os.Getenv("LOADSTAND_NATIVE_ROUTE_WIRE_PROFILE")
+	if os.Getenv("LOADSTAND_LINUX_NATIVE") != "1" || raw == "" || testing.Short() {
+		t.Skip("requires separately admitted native route-wire profile")
+	}
+	profile, err := decodeLoadStandRouteWireNativeProfile(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var nonce loadstand.LaunchNonce
+	if _, err := rand.Read(nonce[:]); err != nil {
+		t.Fatal(err)
+	}
+	plan, launch, err := profile.prepare(nonce)
+	if err != nil {
+		t.Fatal("invalid route-wire topology or window", err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), profile.Timeout)
+	defer cancel()
+	binaries, specs, probes := loadStandLinuxNativeInputs(t, ctx, plan)
+	journal := loadStandExecutorJournalIn(t, ctx, profile.JournalDir)
+	boot, err := trustedclock.SinceBoot()
+	deadline, _ := ctx.Deadline()
+	if err != nil || boot < 0 || boot > math.MaxInt64-profile.StartupLead ||
+		time.Until(deadline) <= profile.StartupLead+plan.Duration() {
+		t.Fatal("cannot fit route-wire epoch in the remaining budget", err)
+	}
+	launch.Origin = boot + profile.StartupLead
+	report, err := runLoadStandLinuxPlan(ctx, plan, binaries, specs, probes, journal, runjournal.SystemClock{}, nil, profile.Limits, &launch)
+	if err != nil {
+		t.Fatalf("native route-wire run failed %v; %s", err, loadStandLinuxRetainedFailureSummary(report))
+	}
+	if !report.FunctionalLifecycleComplete || !report.FullSampleAvailable || report.RouteWirePairs == 0 || len(report.RouteWire) != len(specs) ||
+		report.RouteWireRates == nil || len(report.RouteWireRates.Nodes) != len(specs) ||
+		len(report.RouteWireRates.Sessions) != report.RouteWirePairs || report.RouteWireRates.WindowNS != profile.End-profile.Begin {
+		t.Fatal("missing reciprocal route-wire report or original samples")
+	}
+	t.Logf("route-wire measured_members=%d reciprocal_sessions=%d", len(report.RouteWire), report.RouteWirePairs)
+}
+
 func TestLoadStandLinuxCompositionValidatesOriginalAddressesBeforeEffects(t *testing.T) {
 	plan, err := buildLoadStandPlan(loadStandFullOnlyOptions())
 	if err != nil {
@@ -497,6 +610,41 @@ func TestLoadStandLinuxCompositionValidatesOriginalAddressesBeforeEffects(t *tes
 	}
 	if err = validateLoadStandLinuxSpecs(plan, specs); err != nil {
 		t.Fatal("exact pure plan refused", err)
+	}
+	launch := loadStandRouteWireLaunch{
+		Nonce: loadstand.LaunchNonce{1}, Origin: time.Second,
+		Begin: 25 * time.Millisecond, End: 150 * time.Millisecond, MaxEndpoints: 8,
+		FullReceiptRouteBudget: 10_000, RequiredFullRoutes: 10_000, SeedFullRoutes: true,
+		RequiredFullSource: domain.RouteWireFullConnect, RequireReconnect: true, DisconnectAt: 100 * time.Millisecond, SingleInitiator: true,
+	}
+	bound, window, err := bindLoadStandLinuxRouteWire(plan, specs, &launch)
+	if err != nil || len(bound) != len(specs) || window == nil || len(window.members) != len(specs) {
+		t.Fatalf("binding original specification: %+v, %v", window, err)
+	}
+	for i, spec := range bound {
+		seedRoutes := 0
+		var disconnectAt time.Duration
+		role := domain.RouteWireListener
+		if i == 0 {
+			seedRoutes = launch.RequiredFullRoutes
+			disconnectAt = launch.Origin + launch.DisconnectAt
+			role = domain.RouteWireDialer
+		}
+		if specs[i].RouteWire != nil || spec.RouteWire == nil || spec.RouteWire.Window != launch.Nonce ||
+			spec.RouteWire.Bounds != window.bounds || spec.RouteWire.MaxEndpoints != launch.MaxEndpoints ||
+			spec.RouteWire.SeedRoutes != seedRoutes || spec.RouteWire.DisconnectAt != disconnectAt || spec.RouteWire.DialRole != role {
+			t.Fatalf("member %d lost the original window", i)
+		}
+	}
+	if window.seedSender != specs[0].ID || window.seedSHA256 != loadstandRouteWireSeedDigest(launch.RequiredFullRoutes) {
+		t.Fatal("controller lost the original fixture sender or identity digest")
+	}
+	bound[0].RouteWire.MaxEndpoints++
+	if bound[1].RouteWire.MaxEndpoints != launch.MaxEndpoints {
+		t.Fatal("two member specs alias a mutable selection")
+	}
+	if _, _, err = bindLoadStandLinuxRouteWire(plan, bound, &launch); !errors.Is(err, loadstand.ErrUnsupportedPlan) {
+		t.Fatal("conflicting per-member route-wire selection accepted", err)
 	}
 	specs[1].Config.Listen = "240.0.0.2:64646"
 	if err = validateLoadStandLinuxSpecs(plan, specs); err == nil {

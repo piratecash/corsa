@@ -13,6 +13,7 @@ import (
 type RegisteredProvenV2ObservationRequest struct {
 	OwnerCapacity, HistoryCapacity int
 	Instance                       [16]byte
+	routeWireScope                 [32]byte
 }
 
 // Instance is a copied caller label, never process/boot/artifact attribution.

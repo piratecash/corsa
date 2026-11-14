@@ -94,3 +94,8 @@ legacy_import	internal/core/node/session_v2_timing_disabled.go | "net"
 conn	internal/core/node/dmv2_listener_receipt_qa.go | func (s *Service) HandleDirectDMV2InboundWakeTest(conn net.Conn)
 conn	internal/core/node/dmv2_listener_receipt_qa.go | func (s *Service) ServeDirectDMV2ListenerTestPipe(conn net.Conn)
 legacy_import	internal/core/node/dmv2_listener_receipt_qa.go | "net"
+
+# D1 RouteWire transport observation.
+conn	internal/core/node/registered_proven_v2_observation.go | func (s *Service) loadstandRouteWireSession(conn net.Conn) [32]byte
+legacy_import	internal/core/node/loadstand_route_wire.go | "net"
+legacy_import	internal/core/node/registered_proven_v2_observation.go | "net"

@@ -638,12 +638,15 @@ func (s *Service) servePeerSession(ctx context.Context, session *peerSession) er
 			}
 			pingTimer.Reset(liveness.diallerPingDelay())
 		case item := <-sendInput:
+			var first time.Duration
+			var wireQueue *routeWireSendQueue
 			if session.sendObservation != nil {
 				var ok bool
-				item, ok = session.takeObservedSend()
+				item, first, ok = session.takeObservedSend()
 				if !ok {
 					continue
 				}
+				wireQueue = session.sendObservation.routeWire
 			}
 			outbound := item.Frame
 			// A tracked item always takes the managed writer path: it
@@ -656,6 +659,7 @@ func (s *Service) servePeerSession(ctx context.Context, session *peerSession) er
 				// Buffer-full drops the frame and keeps the session — see
 				// the SendBufferFull case below for the contract.
 				if session.netCore == nil {
+					wireQueue.retire(first, true, false)
 					session.endProofTransport()
 					return fmt.Errorf("fire_and_forget: outbound session missing NetCore")
 				}
@@ -666,12 +670,15 @@ func (s *Service) servePeerSession(ctx context.Context, session *peerSession) er
 				// withdrawn. The gate also withdraws the durable
 				// never-emitted claim, which has to land BEFORE the write.
 				if !s.clearedToWrite(item.delivery, time.Now().UTC()) {
+					wireQueue.retire(first, true, false)
 					log.Info().Str("peer", string(session.address)).
 						Str("message_id", string(item.delivery.Envelope.ID)).
 						Msg("fire_and_forget_withheld_by_delivery_gate")
 					continue
 				}
-				switch st := session.netCore.SendTrackedObserved(outbound, item.ticket, item.writeAck); st {
+				st := session.netCore.SendLoadstandTrackedObserved(outbound, item.ticket, item.writeAck, first)
+				wireQueue.retire(first, true, st == netcore.SendOK)
+				switch st {
 				case netcore.SendOK:
 					// Enqueued. Account the write only now: a frame
 					// rejected by the queue never reaches the wire, so
@@ -732,7 +739,7 @@ func (s *Service) servePeerSession(ctx context.Context, session *peerSession) er
 					s.retirePeerSession(session, writeErr)
 					return writeErr
 				}
-			} else if _, err := s.peerSessionRequest(session, outbound, expectedReplyType(outbound.Type), false); err != nil {
+			} else if _, err := s.peerSessionRequestAt(session, outbound, expectedReplyType(outbound.Type), false, wireQueue, first); err != nil {
 				if errors.Is(err, protocol.ErrFrameTooLarge) {
 					// Self-bug: our outbound frame exceeded the wire size budget.
 					// Disconnecting the peer would treat it as a flap and drag
@@ -810,6 +817,17 @@ func (s *Service) authenticatePeerSession(session *peerSession, welcome protocol
 func (s *Service) completeOutboundAuth(session *peerSession) error {
 	if err := s.markSessionHandshakeComplete(session); err != nil {
 		return err
+	}
+	if observer := s.routeWireObserver(); observer != nil {
+		if proof, ok := session.provenIdentity(); ok {
+			if peer, ok := proof.Identity(); ok {
+				var sessionID [32]byte
+				if session.netCore != nil {
+					sessionID = session.netCore.LoadstandSessionID()
+				}
+				observer.bind(session.connID, peer, domain.PeerDirectionOutbound, sessionID)
+			}
+		}
 	}
 	// Registry attach has consumed the original P/T/R/W tuple. Auth is now
 	// committed and seed/group facts are already owned; retain no full TLS proof

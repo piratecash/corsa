@@ -3,6 +3,7 @@ package loadstand
 import (
 	"net/netip"
 	"testing"
+	"time"
 
 	"github.com/piratecash/corsa/internal/core/domain"
 )
@@ -74,5 +75,95 @@ func TestPlannedSDKIsOriginalNoListenerRole(t *testing.T) {
 	c.Listener = true
 	if _, _, err := copyPlannedChild(c, p); err == nil {
 		t.Fatal("plannedSDK listener enabled")
+	}
+}
+
+func TestPlannedRouteWireRequiresExplicitBoundFullNode(t *testing.T) {
+	c, p := plannedChildTestConfig()
+	p.RouteWire = &PlannedRouteWireObservation{Window: LaunchNonce{1}, MaxEndpoints: 3, Bounds: RouteWireWindowBounds{Begin: 100, End: 200}}
+	_, copied, err := copyPlannedChild(c, p)
+	if err != nil || copied.RouteWire == nil || !samePlannedChild(copied, p) {
+		t.Fatalf("valid FullNode observation refused: %v", err)
+	}
+	p.RouteWire.Bounds.End = p.RouteWire.Bounds.Begin
+	if _, _, err := copyPlannedChild(c, p); err == nil || samePlannedChild(copied, p) {
+		t.Fatal("nonpositive duration or changed bounds were accepted")
+	}
+	p.RouteWire.Bounds = copied.RouteWire.Bounds
+	p.RouteWire.MaxEndpoints = 0
+	if copied.RouteWire.MaxEndpoints != 3 || samePlannedChild(copied, p) {
+		t.Fatal("caller mutation escaped into the selected observation")
+	}
+	if _, _, err := copyPlannedChild(c, p); err == nil {
+		t.Fatal("observation without endpoint budget was accepted")
+	}
+	p.RouteWire = &PlannedRouteWireObservation{MaxEndpoints: 3}
+	if _, _, err := copyPlannedChild(c, p); err == nil {
+		t.Fatal("observation without a window nonce was accepted")
+	}
+	p.RouteWire.Window = LaunchNonce{1}
+	c.Listen, c.Listener = "240.70.3.2:20333", false
+	p.ID, p.Role = "sdk-c", MemberSDK
+	if _, _, err := copyPlannedChild(c, p); err == nil {
+		t.Fatal("FullNode observation was accepted for SDK")
+	}
+}
+
+func TestPlannedRouteWireFullReceiptBudget(t *testing.T) {
+	c, p := plannedChildTestConfig()
+	p.RouteWire = &PlannedRouteWireObservation{
+		Window: LaunchNonce{1}, MaxEndpoints: 2, Bounds: RouteWireWindowBounds{Begin: 100, End: 200},
+		FullReceiptRouteBudget: 20_000,
+	}
+	_, copied, err := copyPlannedChild(c, p)
+	if err != nil || !samePlannedChild(copied, p) {
+		t.Fatal("bounded receipt plan refused", err)
+	}
+	p.RouteWire.FullReceiptRouteBudget++
+	if _, _, err := copyPlannedChild(c, p); err == nil || samePlannedChild(copied, p) {
+		t.Fatal("receipt budget escaped the endpoint bound or immutable copy")
+	}
+	p.RouteWire.FullReceiptRouteBudget = 10_000
+	p.RouteWire.Bounds = RouteWireWindowBounds{}
+	if _, _, err := copyPlannedChild(c, p); err == nil {
+		t.Fatal("receipt plan admitted without a timed window")
+	}
+}
+
+func TestPlannedRouteWireSeedRequiresBoundedTwoFullMemberPlan(t *testing.T) {
+	c, p := plannedChildTestConfig()
+	p.RouteWire = &PlannedRouteWireObservation{
+		Window: LaunchNonce{1}, MaxEndpoints: 2, Bounds: RouteWireWindowBounds{Begin: 100, End: 200},
+		FullReceiptRouteBudget: 10_000, SeedRoutes: 10_000, DisconnectAt: 150, DialRole: domain.RouteWireDialer,
+	}
+	if _, _, err := copyPlannedChild(c, p); err == nil {
+		t.Fatal("fixture was accepted with a third participant")
+	}
+	p.Peers = p.Peers[:2]
+	_, copied, err := copyPlannedChild(c, p)
+	if err != nil || !samePlannedChild(copied, p) {
+		t.Fatal("two-member fixture was rejected", err)
+	}
+	for _, invalid := range []int{-1, 10_001} {
+		p.RouteWire.SeedRoutes = invalid
+		if _, _, err := copyPlannedChild(c, p); err == nil || samePlannedChild(copied, p) {
+			t.Fatalf("accepted invalid size or mutated original plan: %d", invalid)
+		}
+	}
+	p.RouteWire.SeedRoutes = 10_000
+	for _, at := range []time.Duration{99, 100, 200} {
+		p.RouteWire.DisconnectAt = at
+		if _, _, err := copyPlannedChild(c, p); err == nil || samePlannedChild(copied, p) {
+			t.Fatalf("accepted disconnect outside window or mutated original plan: %d", at)
+		}
+	}
+	p.RouteWire.DisconnectAt = 150
+	p.RouteWire.DialRole = domain.RouteWireListener
+	if _, _, err := copyPlannedChild(c, p); err == nil {
+		t.Fatal("listener accepted the initiator's disconnect action")
+	}
+	p.RouteWire.DisconnectAt = 0
+	if _, _, err := copyPlannedChild(c, p); err != nil {
+		t.Fatal("listener without a disconnect action was refused", err)
 	}
 }

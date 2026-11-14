@@ -1,12 +1,14 @@
 package node
 
 import (
+	"net"
 	"strings"
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/connauth"
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/netcore"
+	"github.com/piratecash/corsa/internal/core/sessionv2"
 	"github.com/piratecash/corsa/internal/core/trustedclock"
 )
 
@@ -23,15 +25,17 @@ type k3RegisteredRequest struct {
 	OwnerCapacity, HistoryCapacity int
 	Instance                       [16]byte
 	elapsed                        func() (time.Duration, error)
+	routeWireScope                 [32]byte
 }
 
 type k3RegisteredClock struct{ Before, After time.Duration }
 
 type k3RegisteredOwnerRef struct {
-	Direction  string
-	ConnID     domain.ConnID
-	Address    domain.PeerAddress
-	Generation uint64
+	Direction        string
+	ConnID           domain.ConnID
+	Address          domain.PeerAddress
+	Generation       uint64
+	RouteWireSession [32]byte `json:",omitzero"`
 }
 
 // One atomic owner delta. Equal nonzero identities mean a replacement, NOT a
@@ -79,15 +83,25 @@ type k3RegisteredOwner struct {
 	generation uint64
 }
 
+func (s *Service) loadstandRouteWireSession(conn net.Conn) [32]byte {
+	if s.k3Registered == nil || s.k3Registered.routeWireScope == ([32]byte{}) {
+		return [32]byte{}
+	}
+	id, _ := sessionv2.LoadstandSessionID(conn, s.k3Registered.routeWireScope)
+	return id
+}
+
 // All mutable fields are owned by the SAME Service.peerMu as the actual maps
 // and enabled Auth writers. Completed rows are preallocated, append-only and
 // immutable forever: Snapshot copies only its captured prefix after unlock.
 // A fault freezes counts, sequence, cut and prefix together. No suffix, reset,
 // retirement, current-identity map escape or long-term coverage is implied.
 type k3RegisteredSource struct {
+	routeWireScope                 [32]byte
 	instance                       [16]byte
 	clock                          func() (time.Duration, error)
 	lastClock                      time.Duration
+	loadstandDisconnected          bool
 	baseline, cut                  k3RegisteredClock
 	fault                          string
 	frozenOwners, frozenIdentities int
@@ -107,7 +121,7 @@ type k3RegisteredTicket struct {
 }
 
 func newK3RegisteredSource(request k3RegisteredRequest) *k3RegisteredSource {
-	o := &k3RegisteredSource{instance: request.Instance, clock: request.elapsed}
+	o := &k3RegisteredSource{instance: request.Instance, clock: request.elapsed, routeWireScope: request.routeWireScope}
 	if request.OwnerCapacity < 1 || request.OwnerCapacity > k3RegisteredMaxOwners || request.HistoryCapacity < 1 || request.HistoryCapacity > k3RegisteredMaxHistory || request.Instance == ([16]byte{}) {
 		o.fail("invalid-explicit-request")
 		return o
@@ -295,7 +309,7 @@ func k3RegisteredReference(key k3RegisteredKey, binding k3RegisteredBinding, gen
 	if key.direction == netcore.Outbound {
 		direction = "outbound"
 	}
-	return k3RegisteredOwnerRef{Direction: direction, ConnID: binding.id, Address: domain.PeerAddress(strings.Clone(string(key.address))), Generation: generation}
+	return k3RegisteredOwnerRef{Direction: direction, ConnID: binding.id, Address: domain.PeerAddress(strings.Clone(string(key.address))), Generation: generation, RouteWireSession: binding.core.LoadstandSessionID()}
 }
 
 // All refusal/capacity/arithmetic checks precede the single atomic row and
@@ -316,6 +330,10 @@ func (o *k3RegisteredSource) complete(ticket k3RegisteredTicket, current k3Regis
 	bracket := k3RegisteredClock{Before: ticket.before, After: after}
 	if ticket.previous == current {
 		o.cut = bracket
+		return
+	}
+	if current.present() && o.routeWireScope != ([32]byte{}) && current.core.LoadstandSessionID() == ([32]byte{}) {
+		o.fail("route-wire-session-unavailable")
 		return
 	}
 	count := len(o.owners)

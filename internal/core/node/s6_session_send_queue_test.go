@@ -93,7 +93,7 @@ func TestS6SessionSendQueueClosesBeforeServeAndRejectsLateWork(t *testing.T) {
 	if session.enqueueSend(legacyPeerSendItem(protocol.Frame{Type: "ping"})) {
 		t.Fatal("accepted late frame")
 	}
-	if _, ok := session.takeObservedSend(); ok {
+	if _, _, ok := session.takeObservedSend(); ok {
 		t.Fatal("stale readiness consumed a frame")
 	}
 	final := session.sendQueueObservation()

@@ -6,6 +6,8 @@ import (
 	"io"
 	"net/netip"
 	"path/filepath"
+	"slices"
+	"time"
 
 	"github.com/piratecash/corsa/internal/core/domain"
 )
@@ -19,15 +21,59 @@ type PlannedChildPeer struct {
 	Endpoint domain.PeerAddress
 }
 type PlannedChildConfig struct {
-	ID     MemberID
-	Role   MemberRole
-	Prefix netip.Prefix
-	Peers  []PlannedChildPeer
+	ID        MemberID
+	Role      MemberRole
+	Prefix    netip.Prefix
+	Peers     []PlannedChildPeer
+	RouteWire *PlannedRouteWireObservation `json:",omitempty"`
+}
+
+// PlannedRouteWireObservation selects a bounded capture for one FullNode
+// launch. The controller independently binds the expected census.
+type PlannedRouteWireObservation struct {
+	Window                 LaunchNonce
+	MaxEndpoints           int
+	Bounds                 RouteWireWindowBounds    `json:",omitzero"`
+	FullReceiptRouteBudget int                      `json:",omitempty"`
+	SeedRoutes             int                      `json:",omitempty"`
+	DisconnectAt           time.Duration            `json:",omitempty"`
+	DialRole               domain.RouteWireDialRole `json:",omitempty"`
+}
+
+func acceptsRouteWireCommitment(selection *PlannedRouteWireObservation, commitment RouteWireCommitment) bool {
+	return selection != nil && commitment.valid() && selection.Window == commitment.Window &&
+		selection.Bounds == commitment.Bounds && commitment.Count <= selection.MaxEndpoints
+}
+
+func samePlannedChild(a, b PlannedChildConfig) bool {
+	if a.ID != b.ID || a.Role != b.Role || a.Prefix != b.Prefix || !slices.Equal(a.Peers, b.Peers) {
+		return false
+	}
+	if a.RouteWire == nil || b.RouteWire == nil {
+		return a.RouteWire == b.RouteWire
+	}
+	return *a.RouteWire == *b.RouteWire
 }
 
 func copyPlannedChild(c ChildConfig, p PlannedChildConfig) (ChildConfig, PlannedChildConfig, error) {
 	if !filepath.IsAbs(c.DataDir) || filepath.Clean(c.DataDir) != c.DataDir || c.Procs < 1 || len(c.Bootstrap) == 0 || !plannedLiteralName(string(p.ID)) || !plannedApprovedPrefix(p.Prefix) || p.Role != MemberFull && p.Role != MemberSDK || p.Role == MemberFull && !c.Listener || p.Role == MemberSDK && c.Listener {
 		return ChildConfig{}, PlannedChildConfig{}, ErrInvalidConfiguration
+	}
+	if p.RouteWire != nil {
+		selection := *p.RouteWire
+		if p.Role != MemberFull || selection.Window == (LaunchNonce{}) || selection.MaxEndpoints <= 0 ||
+			routeWireReportLimit(selection.MaxEndpoints) == 0 || !selection.Bounds.validOrZero() ||
+			selection.FullReceiptRouteBudget < 0 || selection.FullReceiptRouteBudget > 0 &&
+			(!selection.Bounds.valid() || (selection.FullReceiptRouteBudget-1)/domain.RouteWireFullMaxDestinations >= selection.MaxEndpoints) ||
+			selection.SeedRoutes < 0 || selection.SeedRoutes > min(selection.FullReceiptRouteBudget, domain.RouteWireFullMaxDestinations) ||
+			selection.DialRole != "" && (!selection.Bounds.valid() || selection.FullReceiptRouteBudget <= 0 || len(p.Peers) != 2 ||
+				len(c.Bootstrap) != 1 || selection.DialRole != domain.RouteWireDialer && selection.DialRole != domain.RouteWireListener) ||
+			selection.SeedRoutes > 0 && len(p.Peers) != 2 || selection.DisconnectAt != 0 &&
+			(!selection.Bounds.valid() || selection.DisconnectAt <= selection.Bounds.Begin || selection.DisconnectAt >= selection.Bounds.End ||
+				selection.FullReceiptRouteBudget <= 0 || selection.MaxEndpoints < 2 || len(p.Peers) != 2 || selection.DialRole != domain.RouteWireDialer) {
+			return ChildConfig{}, PlannedChildConfig{}, ErrInvalidConfiguration
+		}
+		p.RouteWire = &selection
 	}
 	listen, err := netip.ParseAddrPort(string(c.Listen))
 	if err != nil || listen.Port() == 0 || listen.String() != string(c.Listen) || !plannedApprovedAddress(listen.Addr()) || !p.Prefix.Contains(listen.Addr()) || listen.Addr() == p.Prefix.Addr() {

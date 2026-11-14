@@ -144,12 +144,16 @@ func (s *Service) notifyCaptureNewConn(connID domain.ConnID) {
 		return
 	}
 
+	observer := s.routeWireObserver()
+	observer.begin(connID)
 	sink := &captureSinkAdapter{
-		connID:  connID,
-		manager: s.captureManager,
+		observer: observer,
+		connID:   connID,
+		manager:  s.captureManager,
 	}
 	remoteIP, peerDir, ok := s.attachCaptureSinkByID(connID, sink)
 	if !ok {
+		observer.fail()
 		// The connection raced away between the lifecycle hook and the
 		// registry lookup. Without registry metadata the manager cannot
 		// match standing rules anyway, so skip the OnNewConnection call.
@@ -241,11 +245,29 @@ func (s *Service) publishCaptureSessionEvicted(snap capture.SessionSnapshot, cau
 // conn_id and bridges the writer goroutine's OnSendAttempt calls to
 // capture.Manager.EnqueueSend.
 type captureSinkAdapter struct {
-	connID  domain.ConnID
-	manager *capture.Manager
+	observer *LoadstandRouteWireObservation
+	connID   domain.ConnID
+	manager  *capture.Manager
+}
+
+func (a *captureSinkAdapter) PrepareLoadstandQueue(data []byte, first time.Duration) []byte {
+	return a.observer.prepareQueue(a.connID, data, first)
+}
+
+func (a *captureSinkAdapter) DiscardLoadstandQueue(data []byte, admitted bool) {
+	a.observer.discardQueue(a.connID, data, admitted)
+}
+
+func (a *captureSinkAdapter) OnLoadstandWriteStart(data []byte) {
+	if a.observer != nil {
+		a.observer.startWrite(a.connID, data)
+	}
 }
 
 func (a *captureSinkAdapter) OnSendAttempt(data []byte, ok bool) {
+	if a.observer != nil {
+		a.observer.observe(a.connID, routeWireWrite, string(data), ok, 0)
+	}
 	// Skip the per-frame string copy + classification when nothing is
 	// capturing this connection (the production default). Without this gate
 	// every outbound frame was copied to a string only for EnqueueSend to

@@ -130,9 +130,13 @@ type loadStandByteBalanceCheck struct {
 var errLoadStandByteBalanceSource = errors.New("byte balance original source invalid")
 
 type loadStandExecutionReport struct {
-	C2Checks          []loadStandC2Check `json:",omitempty"`
-	TrafficSweeps     []loadStandTrafficSweep
-	ByteBalanceChecks []loadStandByteBalanceCheck
+	C2Checks           []loadStandC2Check           `json:",omitempty"`
+	RouteWire          []loadStandRouteWireFinal    `json:",omitempty"`
+	RouteWirePairs     int                          `json:",omitempty"`
+	RouteWireDurations []loadStandRouteWireDuration `json:",omitempty"`
+	RouteWireRates     *loadStandRouteWireRates     `json:",omitempty"`
+	TrafficSweeps      []loadStandTrafficSweep
+	ByteBalanceChecks  []loadStandByteBalanceCheck
 	// This functional profile declares a closed fixture, not kernel isolation.
 	ByteBalanceScope            string
 	ByteBalanceTerminal         string
@@ -163,6 +167,8 @@ type loadStandExpectedReceipt struct {
 type loadStandExecutor struct {
 	// Explicit functional control only. Nil preserves prior execution semantics.
 	c2            *loadStandC2Expectation
+	routeWire     *loadStandRouteWireWindow
+	routeCensus   map[loadStandRouteWireLife]loadstand.RouteWireCommitment
 	plan          loadStandPlan
 	members       map[loadStandNodeID]loadstand.Member
 	wall          runjournal.Clock
@@ -372,6 +378,11 @@ func (e *loadStandExecutor) compile() ([]loadStandExecutionAction, error) {
 		}
 		return 0
 	})
+	if e.routeWire != nil {
+		if err := e.routeWire.validate(actions); err != nil {
+			return nil, err
+		}
+	}
 	return actions, nil
 }
 func (e *loadStandExecutor) run(ctx context.Context) (report loadStandExecutionReport, err error) {
@@ -393,6 +404,7 @@ func (e *loadStandExecutor) run(ctx context.Context) (report loadStandExecutionR
 	e.ownedStarts = nil
 	e.lastElapsed = 0
 	e.starts = map[loadStandNodeID]loadstand.StartReceipt{}
+	e.routeCensus = nil
 	e.processes = map[loadStandNodeID]loadstand.RuntimeProcess{}
 	e.runtimeGroups = map[loadstand.RuntimeProcess]uint64{}
 	e.trafficLast = map[loadStandNodeID]domain.TransportTrafficStats{}
@@ -406,6 +418,18 @@ func (e *loadStandExecutor) run(ctx context.Context) (report loadStandExecutionR
 		cleanupErr := e.cleanup(cleanup)
 		cancel()
 		err = errors.Join(err, cleanupErr, e.reconcileByteBalance())
+		if len(e.routeCensus) != 0 || (err == nil && e.routeWire != nil && len(e.report.RouteWire) != len(e.routeWire.members)) {
+			err = errors.Join(err, loadstand.ErrFinalAccountingUnavailable)
+		}
+		if err == nil && e.routeWire != nil {
+			var reduced *loadStandRouteWireReduction
+			reduced, err = e.routeWire.verifyPairs(e.starts, e.report.RouteWire)
+			if err == nil {
+				e.report.RouteWireDurations = reduced.durations
+				e.report.RouteWirePairs = len(reduced.durations)
+				e.report.RouteWireRates = &reduced.rates
+			}
+		}
 		if err == nil && e.c2 != nil && !e.c2.Checked {
 			err = errors.Join(loadstand.ErrMemberState, errLoadStandC2Attribution)
 		}
@@ -446,6 +470,12 @@ func (e *loadStandExecutor) run(ctx context.Context) (report loadStandExecutionR
 	if e.clock == nil {
 		return e.report, loadstand.ErrInvalidConfiguration
 	}
+	if e.routeWire != nil {
+		e.diagnosticStage = "route_wire_begin"
+		if err := e.routeWire.checkBoundary(false); err != nil {
+			return e.report, err
+		}
+	}
 	for index, action := range actions {
 		actionIndex := index
 		e.diagnosticActionIndex = &actionIndex
@@ -482,8 +512,17 @@ func (e *loadStandExecutor) run(ctx context.Context) (report loadStandExecutionR
 			return e.report, err
 		}
 	}
-	e.diagnosticStage = "receipt_drain"
 	e.diagnosticActionIndex = nil
+	if e.routeWire != nil {
+		e.diagnosticStage = "route_wire_census"
+		capture, stop := context.WithTimeout(ctx, e.limits.Action)
+		e.routeCensus, err = e.routeWire.capture(capture, e.starts)
+		stop()
+		if err != nil {
+			return e.report, err
+		}
+	}
+	e.diagnosticStage = "receipt_drain"
 	drain, stop := context.WithTimeout(ctx, e.limits.ReceiptDrain)
 	defer stop()
 	if err := e.drainReceipts(drain); err != nil {
@@ -881,7 +920,17 @@ func (e *loadStandExecutor) stop(ctx context.Context, id loadStandNodeID, at tim
 	}
 	// This process-group slice is NOT a closed-network byte endpoint.
 	e.report.ByteBalanceChecks = append(e.report.ByteBalanceChecks, loadStandByteBalanceCheck{Phase: "prestop", Status: "undefined", Reason: "partial_network_sweep", PreStopOf: m.ID(), Tolerance: loadStandDefaultBalanceTolerance()})
-	receipt, stopErr := m.Stop(ctx)
+	life := loadStandRouteWireLife{Node: m.ID(), Incarnation: e.starts[id].Incarnation}
+	commitment, capture := e.routeCensus[life]
+	var receipt loadstand.StopReceipt
+	var report loadStandRouteWireFinal
+	var stopErr error
+	if capture {
+		delete(e.routeCensus, life)
+		receipt, report, stopErr = stopLoadStandRouteWire(ctx, m, e.routeWire.port, life, commitment)
+	} else {
+		receipt, stopErr = m.Stop(ctx)
+	}
 	// Freeze the original successful stopped life before a later Start can
 	// replace e.starts[id]. Even a history refusal never skips original Stop.
 	stopErr = errors.Join(stopErr, e.retainByteEnded(id, receipt.Ended))
@@ -892,7 +941,11 @@ func (e *loadStandExecutor) stop(ctx context.Context, id loadStandNodeID, at tim
 	} else {
 		e.removeOwnedStart(id)
 	}
-	return errors.Join(sampleErr, stopErr)
+	result := errors.Join(sampleErr, stopErr)
+	if capture && result == nil {
+		e.report.RouteWire = append(e.report.RouteWire, report)
+	}
+	return result
 }
 
 // Invalid source evidence is distinct from the qualified checker's legitimate
@@ -1279,6 +1332,9 @@ func (e *loadStandExecutor) journalKey() runjournal.ConfigKey {
 	params = append(params, loadStandParam("executor_version", "3"), loadStandParam("plan_digest", string(e.plan.Digest())), loadStandParam("profile", "functional-loopback"), loadStandParam("acceptance_eligible", "false"), loadStandParam("action_budget", e.limits.Action.String()), loadStandParam("readiness_budget", e.limits.Readiness.String()), loadStandParam("route_ready_budget", e.limits.RouteReady.String()), loadStandParam("cleanup_budget", e.limits.Cleanup.String()), loadStandParam("receipt_drain", e.limits.ReceiptDrain.String()), loadStandParam("allowed_lateness", e.limits.AllowedLateness.String()), loadStandParam("max_actions", strconv.Itoa(e.limits.MaxActions)), loadStandParam("max_samples", strconv.Itoa(e.limits.MaxSamples)), loadStandParam("max_trace_bytes", strconv.Itoa(e.limits.MaxTraceBytes)))
 	if e.c2 != nil {
 		params = append(params, e.c2.params()...)
+	}
+	if e.routeWire != nil {
+		params = append(params, e.routeWire.params()...)
 	}
 	return runjournal.ConfigKey{Measurement: "loadstand-functional-lifecycle", Label: "headless-sdk", Params: params}
 }

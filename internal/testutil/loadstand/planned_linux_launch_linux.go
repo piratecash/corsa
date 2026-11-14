@@ -7,7 +7,6 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"net/netip"
-	"slices"
 )
 
 // Only the real Member factory can mint this private original graph. The wire
@@ -109,9 +108,6 @@ func validLinuxFixtureConfiguration(spec LinuxFixtureSpec, namespace *OwnedNetNS
 		return spec.Config.ValidateLoopback() == nil && len(spec.Config.Bootstrap) == 1
 	}
 	return spec.planned.configValid(spec, namespace)
-}
-func samePlannedChild(a, b PlannedChildConfig) bool {
-	return a.ID == b.ID && a.Role == b.Role && a.Prefix == b.Prefix && slices.Equal(a.Peers, b.Peers)
 }
 func (p *linuxPlannedInit) valid(config ChildConfig, target ExecutableSHA256) bool {
 	if p == nil || p.Ordinal == 0 || p.FinalNonce == (LaunchNonce{}) || p.Ordinal > 1 && (p.ProfileDevice == 0 || p.ProfileInode == 0) || p.Ordinal == 1 && (p.ProfileDevice != 0 || p.ProfileInode != 0) {

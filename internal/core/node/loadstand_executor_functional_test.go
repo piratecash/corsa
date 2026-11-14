@@ -213,6 +213,11 @@ func runLoadStandSDKTimeline(t *testing.T, gossip bool) {
 }
 func loadStandExecutorJournal(t *testing.T, ctx context.Context) *runjournal.Journal {
 	t.Helper()
+	return loadStandExecutorJournalIn(t, ctx, filepath.Join(t.TempDir(), "journal"))
+}
+
+func loadStandExecutorJournalIn(t *testing.T, ctx context.Context, dir string) *runjournal.Journal {
+	t.Helper()
 	base, err := filepath.Abs("../../..")
 	if err != nil {
 		t.Fatal(err)
@@ -228,7 +233,7 @@ func loadStandExecutorJournal(t *testing.T, ctx context.Context) *runjournal.Jou
 		}
 		sources = append(sources, snapshot)
 	}
-	j, err := runjournal.New(runjournal.Config{Dir: filepath.Join(t.TempDir(), "journal"), Clock: runjournal.SystemClock{}, Sources: sources})
+	j, err := runjournal.New(runjournal.Config{Dir: dir, Clock: runjournal.SystemClock{}, Sources: sources})
 	if err != nil {
 		t.Fatal(err)
 	}

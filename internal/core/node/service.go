@@ -95,10 +95,11 @@ type receiptSignaturePolicy interface {
 }
 
 type Service struct {
-	directDMV2WakeSeq       uint64                // deliveryMu
-	directDMV2BeforeArmTest func()                // installed by the overlay test
-	directDMV2WriteSlots    chan struct{}         // bounded overlay writer jobs
-	directDMV2ListenerTest  bool                  // overlay activation only
+	directDMV2WakeSeq       uint64        // deliveryMu
+	directDMV2BeforeArmTest func()        // installed by the overlay test
+	directDMV2WriteSlots    chan struct{} // bounded overlay writer jobs
+	directDMV2ListenerTest  bool          // overlay activation only
+	loadstandRouteWire      atomic.Pointer[LoadstandRouteWireObservation]
 	r2OwnDMOwner            *ownDMProvenanceOwner // immutable before candidate constructor returns; ordinary nil
 	// Immutable constructor/private-factory composition; no ordinary activation.
 	proofToken     *proofTransportServiceToken
@@ -3099,6 +3100,7 @@ func (s *Service) stopRunLifecycle(cancel context.CancelFunc) {
 }
 
 func (s *Service) Run(ctx context.Context) (runErr error) {
+	s.loadstandRouteWire.CompareAndSwap(nil, routeWireDisabled)
 	// Fatal storage uncertainty must survive every teardown/flush and cancellation.
 	// Registered first, this runs last: the headless app propagates it to exit 1.
 	defer func() {
@@ -3698,8 +3700,14 @@ func (s *Service) handleConn(conn net.Conn, reservation *connbudget.Reservation)
 	// bridge reads RemoteIP / PeerDir back through the registry, so the
 	// raw net.Conn no longer crosses the §2.9 boundary.
 	s.notifyCaptureNewConn(connID)
+	wireObserver := s.routeWireObserver()
+	var wireReader *routeWireReader
+	if proven != nil {
+		wireReader = wireObserver.trackPlaintextReader(reader, wire)
+	}
 
 	defer func() {
+		wireReader.finish()
 		owner.end()
 		// Capture lifecycle hook: stop capture for this connection.
 		s.notifyCaptureConnClosed(connID)
@@ -3713,6 +3721,8 @@ func (s *Service) handleConn(conn net.Conn, reservation *connbudget.Reservation)
 		// close is needed — a Service whose Network could not reach this
 		// core (an override) never got this far, registerInboundConn refused.
 		s.unregisterInboundConn(wire)
+		wireObserver.finish(connID, routeWireRead)
+		wireObserver.finish(connID, routeWireWrite)
 		terminal.finish(terminalOutcome, false)
 		s.removeSubscriberConnID(connID)
 		s.clearConnAuth(connID)
@@ -3726,6 +3736,13 @@ func (s *Service) handleConn(conn net.Conn, reservation *connbudget.Reservation)
 		return
 	}
 
+	if proven != nil && wireObserver != nil {
+		var sessionID [32]byte
+		if core := s.netCoreForID(connID); core != nil {
+			sessionID = core.LoadstandSessionID()
+		}
+		wireObserver.bind(connID, proven.Identity, domain.PeerDirectionInbound, sessionID)
+	}
 	s.publishAcceptedProofTransport(owner)
 	var heartbeatStop chan struct{}
 	// The heartbeat is joined to THIS handler, and closing its stop channel is
@@ -3761,6 +3778,7 @@ func (s *Service) handleConn(conn net.Conn, reservation *connbudget.Reservation)
 		// bound — and, once its first byte is in, the frame itself.
 		// session_liveness.go has the schedule the two are fitted to.
 		if err := frames.awaitFrame(liveness.inboundIdle(heartbeatStop != nil), reader.Buffered() > 0); err != nil {
+			wireObserver.readError("", err, reader.Buffered() != 0)
 			if terminal != nil {
 				terminalOutcome = k10ReportedOutcome(err)
 			}
@@ -3769,8 +3787,11 @@ func (s *Service) handleConn(conn net.Conn, reservation *connbudget.Reservation)
 			return
 		}
 
+		wireReader.beginFrame(reader)
 		line, ownedReceive, ownedClaimed, ownedReceiveErr, err := s.readInboundOwnedFindNodeLine(reader, connID, owner)
+		firstRead, hasBytes := wireReader.endFrame()
 		if errors.Is(err, errInboundLineDropped) {
+			wireObserver.fail()
 			// One line consumed and dropped by admission; the connection lives
 			// on and the next line is read from where that one ended.
 			continue
@@ -3784,6 +3805,7 @@ func (s *Service) handleConn(conn net.Conn, reservation *connbudget.Reservation)
 				peerOfflineEvidence = s.observePeerOffline()
 			}
 			owner.end()
+			wireObserver.readError(line, err, hasBytes)
 			s.endInboundReadLoop(connID, conn.RemoteAddr().String(), err)
 			return
 		}
@@ -3791,6 +3813,7 @@ func (s *Service) handleConn(conn net.Conn, reservation *connbudget.Reservation)
 		// Capture tap: record raw inbound line before any parsing (plan §7.2).
 		// Strip only the transport newline, not all whitespace — leading
 		// spaces/tabs are part of the wire payload for diagnostic purposes.
+		wireObserver.observe(connID, routeWireRead, line, true, firstRead)
 		s.captureInboundRecv(connID, strings.TrimRight(line, "\r\n"))
 
 		// Per-connection command rate limiting — prevents a single peer
@@ -9764,6 +9787,7 @@ func (s *Service) registerInboundConn(conn net.Conn, reservation *connbudget.Res
 	// conn is what the session's frames travel on; on a v2 session that is
 	// TLS over the metered socket, which MeteredOf finds underneath.
 	metered := netcore.MeteredOf(conn)
+	wireSessionID := s.loadstandRouteWireSession(conn)
 	log.Trace().Str("site", "registerInboundConn").Str("phase", "lock_wait").Msg("peer_mu_writer")
 	s.peerMu.Lock()
 	log.Trace().Str("site", "registerInboundConn").Str("phase", "lock_held").Msg("peer_mu_writer")
@@ -9783,7 +9807,7 @@ func (s *Service) registerInboundConn(conn net.Conn, reservation *connbudget.Res
 	k10Previous := s.connIDCounter
 	s.connIDCounter++
 	s.k10IssuedLocked(domain.ConnID(k10Previous), domain.ConnID(s.connIDCounter))
-	pc = netcore.New(netcore.ConnID(s.connIDCounter), conn, netcore.Inbound, netcore.Options{ObserveWriterQueue: s.writerQueueLifecycle != nil})
+	pc = netcore.New(netcore.ConnID(s.connIDCounter), conn, netcore.Inbound, netcore.Options{ObserveWriterQueue: s.writerQueueLifecycle != nil, LoadstandSessionID: wireSessionID})
 	if addr, ok := conn.RemoteAddr().(*net.TCPAddr); ok && addr.IP.IsLoopback() {
 		pc.SetLocal(true)
 	}
@@ -9819,7 +9843,7 @@ func (s *Service) attachOutboundNetCore(session *peerSession) error {
 	if err := s.refuseRealConnectionUnderNetworkOverride(); err != nil {
 		return fmt.Errorf("attach outbound conn %d: %w", session.connID, err)
 	}
-	pc := netcore.New(session.connID, session.conn, netcore.Outbound, netcore.Options{ObserveWriterQueue: s.writerQueueLifecycle != nil})
+	pc := netcore.New(session.connID, session.conn, netcore.Outbound, netcore.Options{ObserveWriterQueue: s.writerQueueLifecycle != nil, LoadstandSessionID: s.loadstandRouteWireSession(session.conn)})
 	birthCompleted := false
 	if s.k3Registered != nil || s.k3Advertised != nil || s.writerQueueLifecycle != nil {
 		defer func() {
@@ -9885,6 +9909,7 @@ func (s *Service) attachOutboundNetCore(session *peerSession) error {
 	session.onClose = func() {
 		// Capture lifecycle hook: stop capture before registry removal.
 		s.notifyCaptureConnClosed(connID)
+		s.routeWireObserver().finish(connID, routeWireWrite)
 		log.Trace().Str("site", "attachOutboundNetCore_onClose").Str("phase", "lock_wait").Uint64("conn_id", uint64(connID)).Msg("peer_mu_writer")
 		s.peerMu.Lock()
 		adCloseLocked := true

@@ -86,18 +86,18 @@ func TestWriterQueueObservationBlockingCancelAndWake(t *testing.T) {
 	item := sendItem{data: []byte("blocked\n")}
 	cancel := make(chan struct{})
 	close(cancel)
-	if status := core.queueFrameBlocking(item, cancel, nil); status != SendCtxCancelled {
+	if status := core.queueFrameBlocking(item, cancel, nil, 0); status != SendCtxCancelled {
 		t.Fatalf("cancelled offer = %v", status)
 	}
 	deadline := make(chan time.Time, 1)
 	deadline <- time.Now()
-	if status := core.queueFrameBlocking(item, nil, deadline); status != SendTimeout {
+	if status := core.queueFrameBlocking(item, nil, deadline, 0); status != SendTimeout {
 		t.Fatalf("timed-out offer = %v", status)
 	}
 	result := make(chan SendStatus, 1)
 	timeout := time.NewTimer(2 * time.Second)
 	defer timeout.Stop()
-	go func() { result <- core.queueFrameBlocking(item, nil, timeout.C) }()
+	go func() { result <- core.queueFrameBlocking(item, nil, timeout.C, 0) }()
 	// The writer is inside Write and the queue is full. Only the blocked
 	// producer can install a wait notification in this interval.
 	observation := core.writerQueueObservation

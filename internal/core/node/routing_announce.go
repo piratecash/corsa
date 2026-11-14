@@ -1037,8 +1037,25 @@ func chunkRouteAnnounceV3EntriesBySize(entries []routing.AnnounceEntry, kind str
 // entry or any transport drop returns false so the caller's per-peer
 // cache stays untouched and the next cycle retries.
 func (s *Service) SendRouteAnnounceV3(ctx context.Context, peerAddress domain.PeerAddress, kind string, epoch uint64, entries []routing.AnnounceEntry) bool {
+	return s.sendRouteAnnounceV3(ctx, peerAddress, kind, epoch, entries, "")
+}
+
+// SendRouteAnnounceV3Full carries the local cause of a full pass to the
+// loadstand observer. The cause is absent from the routing frame.
+func (s *Service) SendRouteAnnounceV3Full(ctx context.Context, peerAddress domain.PeerAddress, epoch uint64, entries []routing.AnnounceEntry, source domain.RouteWireFullSource) bool {
+	return s.sendRouteAnnounceV3(ctx, peerAddress, protocol.RouteAnnounceV3KindFull, epoch, entries, source)
+}
+
+func (s *Service) sendRouteAnnounceV3(ctx context.Context, peerAddress domain.PeerAddress, kind string, epoch uint64, entries []routing.AnnounceEntry, source domain.RouteWireFullSource) (sentAll bool) {
 	if len(entries) == 0 {
 		return true
+	}
+	var pass *routeWireFullPass
+	if kind == protocol.RouteAnnounceV3KindFull {
+		pass = s.routeWireObserver().startFullPass(epoch, entries, source)
+		if pass != nil {
+			defer func() { pass.finish(sentAll) }()
+		}
 	}
 	// Phase 4 13.2-B: sign own-origin entries with the local identity
 	// private key before chunking. The signature covers
@@ -1070,7 +1087,7 @@ func (s *Service) SendRouteAnnounceV3(ctx context.Context, peerAddress domain.Pe
 				Msg("route_announce_v3_build_failed")
 			return false
 		}
-		if !s.dispatchAnnouncePlaneFrameWithCaps(ctx, peerAddress, frame,
+		if !s.dispatchAnnouncePlaneFrame(ctx, peerAddress, frame, pass,
 			domain.CapMeshRoutingV1,
 			domain.CapMeshRoutingV3,
 			domain.CapMeshRelayV1,
@@ -1687,13 +1704,17 @@ func (s *Service) dispatchAnnouncePlaneFrameWithCaps(
 	frame protocol.Frame,
 	requiredCaps ...domain.Capability,
 ) bool {
+	return s.dispatchAnnouncePlaneFrame(ctx, peerAddress, frame, nil, requiredCaps...)
+}
+
+func (s *Service) dispatchAnnouncePlaneFrame(ctx context.Context, peerAddress domain.PeerAddress, frame protocol.Frame, pass *routeWireFullPass, requiredCaps ...domain.Capability) bool {
 	if len(requiredCaps) == 0 {
 		return false
 	}
 	if strings.HasPrefix(string(peerAddress), "inbound:") {
-		return s.dispatchInboundAnnouncePlaneFrameWithCaps(ctx, peerAddress, frame, requiredCaps)
+		return s.dispatchInboundAnnouncePlaneFrameWithCaps(ctx, peerAddress, frame, requiredCaps, pass)
 	}
-	return s.dispatchOutboundAnnouncePlaneFrameWithCaps(peerAddress, frame, requiredCaps)
+	return s.dispatchOutboundAnnouncePlaneFrameWithCaps(peerAddress, frame, requiredCaps, pass)
 }
 
 // dispatchInboundAnnouncePlaneFrameWithCaps captures the inbound conn
@@ -1708,6 +1729,7 @@ func (s *Service) dispatchInboundAnnouncePlaneFrameWithCaps(
 	address domain.PeerAddress,
 	frame protocol.Frame,
 	requiredCaps []domain.Capability,
+	pass *routeWireFullPass,
 ) bool {
 	remoteAddr := strings.TrimPrefix(string(address), "inbound:")
 	var (
@@ -1732,6 +1754,7 @@ func (s *Service) dispatchInboundAnnouncePlaneFrameWithCaps(
 	if !ok {
 		return false
 	}
+	pass.frame(targetID, frame.RawLine)
 	return s.writeFrameToInboundConn(ctx, targetID, remoteAddr, frame)
 }
 
@@ -1750,6 +1773,7 @@ func (s *Service) dispatchOutboundAnnouncePlaneFrameWithCaps(
 	address domain.PeerAddress,
 	frame protocol.Frame,
 	requiredCaps []domain.Capability,
+	pass *routeWireFullPass,
 ) bool {
 	var target *peerSession
 	s.peerMu.RLock()
@@ -1777,6 +1801,7 @@ func (s *Service) dispatchOutboundAnnouncePlaneFrameWithCaps(
 	if target == nil {
 		return false
 	}
+	pass.frame(target.connID, frame.RawLine)
 	return s.enqueueSessionSendItem(target, legacyPeerSendItem(frame))
 }
 
@@ -2007,7 +2032,7 @@ func (s *Service) sendConnectTimeFullSync(ctx context.Context, peerIdentity doma
 	v3 := fullMode == routing.AnnounceModeV3
 	var sendOk bool
 	if v3 {
-		sendOk = s.SendRouteAnnounceV3(ctx, address, protocol.RouteAnnounceV3KindFull, s.routingTable.Epoch(), snapshot.Entries)
+		sendOk = s.SendRouteAnnounceV3Full(ctx, address, s.routingTable.Epoch(), snapshot.Entries, domain.RouteWireFullConnect)
 	} else {
 		sendOk = s.SendAnnounceRoutes(ctx, address, snapshot.Entries)
 	}
