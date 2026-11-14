@@ -42,7 +42,7 @@ func registryPublicationBodyPins() map[string]string {
 		"peer_sessions.go:withdrawRefusedCMSession":               "b878d1d7b3f47cc573ba9c8b90543d8270380b834a44b599578788172a78da73",
 		"peer_sessions.go:withdrawServedCMSession":                "59af33c360eb9a66a93ba86820e316b5df675149a7e4303882a374b0e9aaaef8",
 		"proof_transport_lifetime.go:proofTransportLifetime.end":  "d7a35159e88915a2454b8abcbead4d94577b49621981d24ec42866f71ef5891d",
-		"service.go:attachOutboundNetCore":                        "5c6b8140938f2bd8db47ce87ec2a4047156763989c3161110c50c27524541a89",
+		"service.go:attachOutboundNetCore":                        "dcfe44cf2b9e886c496876adfbf9582f0e93095bbb6bb41c9674b1d9c8b1f47b",
 		"service.go:closeRegisteredInboundCore":                   "7400f110299be697ca96fccab8ed58d490179da64796c4689f50bf73147fc780",
 		"service.go:unregisterInboundConn":                        "cad625a150d7661cce8404fb84de56c1244b2d768eb5646cd5f6f1e257dece5e",
 	}

@@ -106,6 +106,9 @@ var explicitMapInventoryFields = map[string]bool{
 // identityStateInventory is the classification, by Type.field (a field of an
 // anonymous struct inside a type is Type.outer.inner).
 var identityStateInventory = map[string]identityStateEntry{
+	"LoadstandRouteWireObservation.connections": {identityFromV2Proof, "diagnostic rows are allocated by ConnID and bind the remote identity only after a v2 proof"},
+	"routeWireFullReceive.claims":               {identityUnprovenClaim, "diagnostic census of destinations asserted by the transport peer, cleared when receipts are taken; never identity proof or admission input"},
+
 	// Service: penalties and budgets, split by origin.
 	"Service.peerQuarantine":        {identityByOrigin, "route quarantine per penaltySubject"},
 	"Service.peerDisconnectHistory": {identityByOrigin, "flap history per penaltySubject"},

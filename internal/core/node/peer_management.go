@@ -3205,7 +3205,6 @@ func (s *Service) peerSessionRequestAt(session *peerSession, frame protocol.Fram
 				return protocol.Frame{}, protocol.ErrorFromCode(incoming.Code)
 			}
 			if incoming.Type == "ping" {
-				pongFrame := protocol.Frame{Type: "pong", Node: nodeName, Network: networkName}
 				// Route through the injected Network surface (visible to
 				// netcoretest.Backend); on ErrUnknownConn the helper falls
 				// back to session.netCore via enqueueSessionFrame, which is
@@ -3213,7 +3212,7 @@ func (s *Service) peerSessionRequestAt(session *peerSession, frame protocol.Fram
 				// has been reaped or was never populated.
 				// writerLoop applies its own per-write deadline based on
 				// Direction, so no manual SetWriteDeadline is needed.
-				_ = s.sendSessionFrameViaNetwork(s.runCtx, session, pongFrame)
+				_ = s.sendSessionFrameViaNetwork(s.runCtx, session, protocol.Frame{Type: "pong", Node: nodeName, Network: networkName})
 				continue
 			}
 			// Unsolicited traffic FIRST — before the reply match. The

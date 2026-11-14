@@ -1,8 +1,10 @@
 package node
 
 import (
+	"bytes"
 	"fmt"
 	"go/ast"
+	"go/format"
 	"go/parser"
 	"go/token"
 	"os"
@@ -60,7 +62,6 @@ func TestEveryInboundWriteGoesThroughTheDeliveryGate(t *testing.T) {
 		// the gossip, relay or session paths instead, never from here.
 		"dispatchNetworkFrameOwned":        "answers to inbound requests — acks, errors, hop-acks",
 		"dispatchPeerSessionFrame":         "route_sync_summary — announce plane",
-		"peerSessionRequest":               "pong on the session's own read loop",
 		"dispatchInboundDatagramWireOwned": "auth-required error",
 		"emitPeerBannedNoticeByID":         "connection_notice — the ban notice, sent as the socket closes",
 		"handleConn":                       "rate-limited error, before any command is read",
@@ -147,6 +148,10 @@ func TestEveryInboundWriteGoesThroughTheDeliveryGate(t *testing.T) {
 					sel.Sel.Name == "sendSessionFrameViaNetwork" && isDeliveryGatePingBarrier(call) {
 					return true
 				}
+				if name == "peer_management.go" && fn.Name.Name == "peerSessionRequestAt" &&
+					sel.Sel.Name == "sendSessionFrameViaNetwork" && isDeliveryGateSessionPong(call) {
+					return true
+				}
 				if _, allowed := permitted[fn.Name.Name]; !allowed {
 					offenders[fn.Name.Name] = fmt.Sprintf("%s:%d (%s)", name, fset.Position(call.Pos()).Line, sel.Sel.Name)
 				}
@@ -167,6 +172,37 @@ func TestEveryInboundWriteGoesThroughTheDeliveryGate(t *testing.T) {
 		"reaches a writer without clearedToWrite can be handed to the recipient after its author recalled\n"+
 		"it, and the deletion will schedule no peer-side delete. If it provably cannot carry one, add it to\n"+
 		"the permitted map in this test with the reason.", strings.Join(names, "\n  "))
+}
+
+// The request loop may answer a ping with this specific control-only frame.
+func isDeliveryGateSessionPong(call *ast.CallExpr) bool {
+	if len(call.Args) != 3 {
+		return false
+	}
+	var frame bytes.Buffer
+	return format.Node(&frame, token.NewFileSet(), call.Args[2]) == nil &&
+		frame.String() == `protocol.Frame{Type: "pong", Node: nodeName, Network: networkName}`
+}
+
+func TestDeliveryGateSessionPongRequiresAControlOnlyFrame(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		frame string
+		want  bool
+	}{
+		{`protocol.Frame{Type: "pong", Node: nodeName, Network: networkName}`, true},
+		{`protocol.Frame{Type: "pong", Node: nodeName, Network: networkName, Topic: topic}`, false},
+		{`protocol.Frame{Type: kind, Node: nodeName, Network: networkName}`, false},
+		{`frame`, false},
+	} {
+		expr, err := parser.ParseExpr("send(ctx, session, " + tc.frame + ")")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := isDeliveryGateSessionPong(expr.(*ast.CallExpr)); got != tc.want {
+			t.Errorf("pong %s: got %v, want %v", tc.frame, got, tc.want)
+		}
+	}
 }
 
 // Only a literal ping with no other fields can order the test's writes without
