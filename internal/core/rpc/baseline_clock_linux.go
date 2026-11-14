@@ -134,7 +134,7 @@ func baselineChronycDigest() (string, error) {
 		return "", err
 	}
 	file := os.NewFile(uintptr(fd), baselineChronyc)
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	info, err := file.Stat()
 	if err != nil {
 		return "", err
