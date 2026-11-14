@@ -55,3 +55,36 @@ UNKNOWN.
    квалификации и отдельный результат по её RPC.
 
 [План наблюдения S6](s6-observation-plan-proposal.md)
+
+### Нода в Docker
+
+В штатном образе есть `corsa-cli` и `jq`. Проверьте источник
+clock RPC внутри контейнера:
+
+```sh
+docker exec corsa-node corsa-cli -host 127.0.0.1 getBaselineClock
+```
+
+Если ответ содержит `status: sample`, из корня репозитория на
+Docker-хосте запустите:
+
+```sh
+sh scripts/s6-baseline-docker.sh corsa-node s6-clock-pilot.jsonl
+```
+
+Укажите фактическое имя контейнера при необходимости. Понадобятся
+те же 15 минут в сети. Файл пишется на хосте. Скрипт использует
+настроенную аутентификацию ноды и loopback внутри контейнера.
+Python и публикация RPC-порта для этого варианта не нужны.
+
+Штатный Dockerfile не устанавливает `chronyc`. При
+`status: unavailable` пришлите первый JSON с `reason`, прежде чем
+собирать весь пилот. `clock_domain_or_chrony_socket_unavailable`
+означает, что команда не смогла прочитать часовой домен или увидеть
+Unix-сокет. `chronyc_binary_unavailable` означает, что проверка
+`/usr/bin/chronyc` не прошла. `chrony_tracking_unavailable` означает,
+что локальный вызов `tracking` не завершился штатно.
+
+Если chronyd работает на хосте, для квалификации нужно сверить
+его с контейнером по часовой области и источнику UTC. Установка
+`chronyc` сама по себе не даёт этой привязки.
