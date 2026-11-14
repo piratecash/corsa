@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 )
@@ -37,6 +38,7 @@ var errLinkLoop = errors.New("secretfile: audit: too many symlinks on the way to
 type chainEntry struct {
 	component LocationComponent
 	owner     uint32
+	group     uint32
 	mode      fs.FileMode
 	// parentShared: the directory holding this entry is sticky and others
 	// may write it, so it protects this entry only if this user owns it.
@@ -176,7 +178,7 @@ func (r route) entries() ([]chainEntry, error) {
 	entries := make([]chainEntry, 0, len(r.steps))
 	deepestDepth := len(splitPath(r.deepest))
 	for _, step := range r.steps {
-		owner, err := uidOf(step.info)
+		owner, group, err := ownerAndGroup(step.info)
 		if err != nil {
 			return nil, err
 		}
@@ -187,7 +189,7 @@ func (r route) entries() ([]chainEntry, error) {
 				LevelsAbove: deepestDepth - len(splitPath(step.path)) + 1 + r.missingLevels,
 			}
 		}
-		entries = append(entries, chainEntry{component: component, owner: owner, mode: step.info.Mode(), parentShared: step.parentShared})
+		entries = append(entries, chainEntry{component: component, owner: owner, group: group, mode: step.info.Mode(), parentShared: step.parentShared})
 	}
 	return entries, nil
 }
@@ -198,7 +200,7 @@ func (r route) entries() ([]chainEntry, error) {
 func judgeChain(entries []chainEntry, euid uint32) *UnsafeLocationError {
 	for i := len(entries) - 1; i >= 0; i-- {
 		entry := entries[i]
-		violation, found := judgeEntry(entry, euid)
+		violation, found := judgeEntry(entry, euid, runtime.GOOS == "android")
 		if found {
 			return &UnsafeLocationError{Component: entry.component, Violation: violation, Owner: uidName(entry.owner), Mode: entry.mode}
 		}
@@ -206,16 +208,23 @@ func judgeChain(entries []chainEntry, euid uint32) *UnsafeLocationError {
 	return nil
 }
 
-func judgeEntry(entry chainEntry, euid uint32) (LocationViolation, bool) {
+func judgeEntry(entry chainEntry, euid uint32, android bool) (LocationViolation, bool) {
 	if entry.component.Kind == ComponentFile {
 		return judgeFile(entry, euid)
 	}
+	// Android gives system-managed app-data ancestors and app-private
+	// directories group write access for their respective private groups.
+	const androidSystemID = 1000
+	systemOwned := android && entry.owner == androidSystemID
+	trustedGroup := android &&
+		((systemOwned && entry.group == androidSystemID) || (entry.owner == euid && entry.group == euid))
+	writable := entry.mode.Perm()&0o002 != 0 || (entry.mode.Perm()&0o020 != 0 && !trustedGroup)
 	switch {
-	case entry.owner != euid && entry.owner != rootUID:
+	case entry.owner != euid && entry.owner != rootUID && !systemOwned:
 		return ViolationForeignOwner, true
 	case entry.parentShared && entry.owner != euid:
 		return ViolationStickyChildNotOwned, true
-	case entry.mode.IsDir() && writableByOthers(entry.mode) && entry.mode&fs.ModeSticky == 0:
+	case entry.mode.IsDir() && writable && entry.mode&fs.ModeSticky == 0:
 		return ViolationWritableByOthers, true
 	}
 	return "", false
@@ -287,11 +296,16 @@ func countNames(names []string) int {
 func euid() uint32 { return uint32(os.Geteuid()) }
 
 func uidOf(info fs.FileInfo) (uint32, error) {
+	uid, _, err := ownerAndGroup(info)
+	return uid, err
+}
+
+func ownerAndGroup(info fs.FileInfo) (uint32, uint32, error) {
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok {
-		return 0, errors.New("secretfile: audit: this filesystem reports no owner")
+		return 0, 0, errors.New("secretfile: audit: this filesystem reports no owner")
 	}
-	return stat.Uid, nil
+	return stat.Uid, stat.Gid, nil
 }
 
 func uidName(uid uint32) string { return fmt.Sprintf("uid %d", uid) }

@@ -214,6 +214,37 @@ func TestJudgeChainSyntheticOwners(t *testing.T) {
 	}
 }
 
+func TestAndroidAppDataAudit(t *testing.T) {
+	t.Parallel()
+	const appUID = 10197
+	for _, tc := range []struct {
+		name         string
+		owner, group uint32
+		mode         fs.FileMode
+		want         LocationViolation
+	}{
+		{"Android system directory", 1000, 1000, fs.ModeDir | 0o771, ""},
+		{"app's no_backup directory", appUID, appUID, fs.ModeDir | 0o771, ""},
+		{"system directory with foreign group", 1000, 2000, fs.ModeDir | 0o771, ViolationWritableByOthers},
+		{"app directory with foreign group", appUID, 2000, fs.ModeDir | 0o771, ViolationWritableByOthers},
+		{"world-writable system directory", 1000, 1000, fs.ModeDir | 0o773, ViolationWritableByOthers},
+		{"directory owned by another app", appUID + 1, appUID + 1, fs.ModeDir | 0o700, ViolationForeignOwner},
+		{"system-owned secret file", 1000, 1000, 0o600, ViolationForeignOwner},
+		{"group-writable secret file", appUID, appUID, 0o620, ViolationFileNotOwnerOnly},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			entry := chainEntry{component: fileComponent(), owner: tc.owner, group: tc.group, mode: tc.mode}
+			if tc.mode.IsDir() {
+				entry.component = LocationComponent{Kind: ComponentDirectory, LevelsAbove: 1}
+			}
+			got, _ := judgeEntry(entry, appUID, true)
+			if got != tc.want {
+				t.Errorf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 // Two links naming each other never resolve. The audit must stop with its
 // own error, as the kernel stops with ELOOP, rather than walk forever or
 // report the location as safe.

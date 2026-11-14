@@ -189,7 +189,7 @@ func (d *Dir) write(name string, payload []byte, replace bool) error {
 		return fmt.Errorf("secretfile: close: %w", stripPath(err))
 	}
 	if !replace {
-		err := d.root.Link(tmp, name)
+		err := d.publishNew(tmp, name)
 		_ = d.root.Remove(tmp)
 		if err != nil {
 			return fmt.Errorf("secretfile: publish new %q: %w", name, stripPath(err))
