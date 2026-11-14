@@ -20,17 +20,20 @@
 package main
 
 import (
+	stdlog "log"
 	"os"
 	"path/filepath"
 
 	"github.com/piratecash/corsa/internal/app/desktop"
 	"github.com/piratecash/corsa/internal/core/appdata"
+	"github.com/piratecash/corsa/internal/core/config"
 	"github.com/piratecash/corsa/internal/core/crashlog"
 
 	"github.com/rs/zerolog/log"
 )
 
 func main() {
+	stdlog.Printf("Corsa %s: Android startup", config.CorsaVersion)
 	// Must happen before crashlog.Setup and desktop.Run — both derive
 	// their paths from appdata.DefaultDir.
 	anchorDataDir()
@@ -46,12 +49,16 @@ func main() {
 		}
 	}()
 
-	log.Info().Msg("corsa-android starting")
-
 	if err := desktop.Run(); err != nil {
-		log.Error().Err(err).Msg("corsa-android exited with error")
-		os.Exit(1)
+		exitStartup("%v", err)
 	}
+}
+
+func exitStartup(format string, args ...any) {
+	// Gio sends the standard logger directly to logcat. Its asynchronous
+	// stderr forwarding may still have pending output when os.Exit runs.
+	stdlog.Printf("Corsa Android startup failed: "+format, args...)
+	os.Exit(1)
 }
 
 // anchorDataDir points appdata at the platform data directory — on
@@ -77,8 +84,7 @@ func anchorDataDir() {
 	defer func() {
 		if r := recover(); r != nil {
 			if dataDirStrict {
-				log.Error().Interface("panic", r).Msg("data dir resolution panicked; refusing to start with a backup-exposed data dir")
-				os.Exit(1)
+				exitStartup("data dir resolution panicked: %v", r)
 			}
 			log.Error().Interface("panic", r).Msg("data dir resolution panicked; using appdata defaults")
 		}
@@ -87,8 +93,7 @@ func anchorDataDir() {
 	dir, err := platformDataDir()
 	if err != nil || dir == "" {
 		if dataDirStrict {
-			log.Error().Err(err).Msg("no-backup data dir unavailable; refusing to start (identity keys must not enter Android backups)")
-			os.Exit(1)
+			exitStartup("no-backup data dir unavailable: %v", err)
 		}
 		log.Error().Err(err).Msg("platform data dir unavailable; using appdata defaults")
 		return
@@ -105,16 +110,14 @@ func anchorDataDir() {
 	// breaks. The data is untouched, so the next launch simply retries.
 	if err := migrateLegacyDataDir(corsaDir); err != nil {
 		if dataDirStrict {
-			log.Error().Err(err).Msg("data dir migration failed; refusing to start (legacy dir is backup-exposed, empty target would mint a new identity)")
-			os.Exit(1)
+			exitStartup("data dir migration failed: %v", err)
 		}
 		log.Error().Err(err).Msg("data dir migration failed; using appdata defaults")
 		return
 	}
 	if err := os.MkdirAll(corsaDir, 0o700); err != nil {
 		if dataDirStrict {
-			log.Error().Err(err).Str("dir", corsaDir).Msg("data dir create failed; refusing to start with a backup-exposed data dir")
-			os.Exit(1)
+			exitStartup("no-backup data dir creation failed: %v", err)
 		}
 		log.Error().Err(err).Str("dir", corsaDir).Msg("data dir create failed; using appdata defaults")
 		return
