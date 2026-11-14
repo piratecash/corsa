@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -33,7 +34,7 @@ func TestSyncAncestorsConfirmsOwnedRouteAndPreservesFaults(t *testing.T) {
 	}
 	want := 0
 	for _, step := range route.steps {
-		if step.info.IsDir() {
+		if syncsTestAncestor(t, step, route.deepestInfo) {
 			want++
 		}
 	}
@@ -136,7 +137,7 @@ func TestSyncAncestorsRejectsChangedPinnedNamespace(t *testing.T) {
 				}
 				at = 0
 				for _, step := range route.steps {
-					if step.info.IsDir() {
+					if syncsTestAncestor(t, step, route.deepestInfo) {
 						at++
 					}
 				}
@@ -176,6 +177,42 @@ func TestSyncAncestorsRejectsChangedPinnedNamespace(t *testing.T) {
 			raw, err := os.ReadFile(original)
 			if err != nil || string(raw) != "held-original" {
 				t.Fatalf("original changed: %q %v", raw, err)
+			}
+		})
+	}
+}
+
+func syncsTestAncestor(t *testing.T, step routeStep, leaf fs.FileInfo) bool {
+	t.Helper()
+	if !step.info.IsDir() {
+		return false
+	}
+	if runtime.GOOS != "android" || os.SameFile(step.info, leaf) {
+		return true
+	}
+	owner, group, err := ownerAndGroup(step.info)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return !androidManagedAncestor(owner, group, step.info.Mode())
+}
+
+func TestAndroidManagedAncestor(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		owner, group uint32
+		mode         fs.FileMode
+		managed      bool
+	}{
+		{"root", 0, 0, 0o755, true},
+		{"system", 1000, 1000, 0o771, true},
+		{"app", 10197, 10197, 0o771, false},
+		{"foreign writable group", 1000, 2000, 0o771, false},
+		{"world writable", 1000, 1000, 0o773, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := androidManagedAncestor(tc.owner, tc.group, tc.mode); got != tc.managed {
+				t.Fatalf("managed = %t, want %t", got, tc.managed)
 			}
 		})
 	}

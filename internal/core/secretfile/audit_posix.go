@@ -29,6 +29,9 @@ import (
 // which is not a violation by itself.
 const rootUID uint32 = 0
 
+// androidSystemID is the privileged Android system UID and GID (AID_SYSTEM).
+const androidSystemID uint32 = 1000
+
 // maxLinkHops bounds link resolution, as the kernel's own ELOOP does.
 const maxLinkHops = 40
 
@@ -214,7 +217,6 @@ func judgeEntry(entry chainEntry, euid uint32, android bool) (LocationViolation,
 	}
 	// Android gives system-managed app-data ancestors and app-private
 	// directories group write access for their respective private groups.
-	const androidSystemID = 1000
 	systemOwned := android && entry.owner == androidSystemID
 	trustedGroup := android &&
 		((systemOwned && entry.group == androidSystemID) || (entry.owner == euid && entry.group == euid))

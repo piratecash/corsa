@@ -7,13 +7,17 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 )
 
 const durableAncestorSync durableStep = "ancestor_sync"
 
 // SyncAncestors confirms the namespace route to this already pinned directory.
-// It syncs each real directory, leaf to root, including parents passed while
+// It syncs real directories, leaf to root, including parents passed while
 // resolving symlinks, then checks that the route still names the same objects.
+// On Android the platform owns persistence of the protected system-managed
+// ancestors. Apps may traverse those directories without being able to read
+// them or open them for fsync. The app-owned directories still require fsync.
 // It creates nothing and changes no permissions. It is not a lease against a
 // trusted administrator changing the path after this call.
 func (d *Dir) SyncAncestors(path string) error {
@@ -36,6 +40,15 @@ func (d *Dir) SyncAncestors(path string) error {
 		step := before.steps[i]
 		if !step.info.IsDir() {
 			continue
+		}
+		if runtime.GOOS == "android" && !os.SameFile(step.info, held) {
+			owner, group, err := ownerAndGroup(step.info)
+			if err != nil {
+				return err
+			}
+			if androidManagedAncestor(owner, group, step.info.Mode()) {
+				continue
+			}
 		}
 		ancestor, err := Open(step.path)
 		if err != nil {
@@ -64,17 +77,24 @@ func (d *Dir) SyncAncestors(path string) error {
 	}
 	for i, step := range before.steps {
 		current := after.steps[i]
-		previousOwner, err := uidOf(step.info)
+		previousOwner, previousGroup, err := ownerAndGroup(step.info)
 		if err != nil {
 			return err
 		}
-		currentOwner, err := uidOf(current.info)
+		currentOwner, currentGroup, err := ownerAndGroup(current.info)
 		if err != nil {
 			return err
 		}
-		if step.path != current.path || !os.SameFile(step.info, current.info) || step.info.Mode() != current.info.Mode() || previousOwner != currentOwner {
+		if step.path != current.path || !os.SameFile(step.info, current.info) || step.info.Mode() != current.info.Mode() || previousOwner != currentOwner || previousGroup != currentGroup {
 			return fs.ErrInvalid
 		}
 	}
 	return nil
+}
+
+func androidManagedAncestor(owner, group uint32, mode fs.FileMode) bool {
+	if owner != rootUID && owner != androidSystemID {
+		return false
+	}
+	return mode.Perm()&0o002 == 0 && (mode.Perm()&0o020 == 0 || group == rootUID || group == androidSystemID)
 }
