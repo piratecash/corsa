@@ -6,10 +6,12 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"maps"
 	"net"
 	"os"
 	"reflect"
@@ -95,6 +97,7 @@ func newOwnedBareV2PilotRelay(t *testing.T, maxMembers int) (*Service, string) {
 // They never construct/install a Service, peerSession, registry entry or Session.
 type ownedBareV2PilotClient struct {
 	id       domain.PeerIdentity
+	identity *identity.Identity
 	wire     net.Conn
 	writeMu  sync.Mutex
 	cancel   context.CancelFunc
@@ -118,6 +121,21 @@ func (c *ownedBareV2PilotClient) write(raw []byte) error {
 	return err
 }
 
+func (c *ownedBareV2PilotClient) replyTo(t *testing.T, request protocol.FindNodeRequest) {
+	t.Helper()
+	if request.Target != c.id {
+		t.Fatal("bare pilot can only answer for its own identity")
+	}
+	answer := ownedAnswerSignedIdentity(t, c.identity, request)
+	wire, err := protocol.MarshalFindNodeAnswer(answer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.write(append(wire, '\n')); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func (c *ownedBareV2PilotClient) stop(t *testing.T) {
 	t.Helper()
 	c.cancel()
@@ -131,6 +149,11 @@ func (c *ownedBareV2PilotClient) stop(t *testing.T) {
 
 func dialOwnedBareV2PilotClient(t *testing.T, s *Service, address string, capability bool) *ownedBareV2PilotClient {
 	t.Helper()
+	return dialOwnedBareV2PilotClientFrom(t, s, address, capability, net.Dialer{}, nil)
+}
+
+func dialOwnedBareV2PilotClientFrom(t *testing.T, s *Service, address string, capability bool, dialer net.Dialer, quota *full512AppQuota) *ownedBareV2PilotClient {
+	t.Helper()
 	id, err := identity.Generate()
 	if err != nil {
 		t.Fatal(err)
@@ -141,7 +164,7 @@ func dialOwnedBareV2PilotClient(t *testing.T, s *Service, address string, capabi
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
-	raw, err := (&net.Dialer{}).DialContext(ctx, "tcp4", address)
+	raw, err := dialer.DialContext(ctx, "tcp4", address)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,8 +199,11 @@ func dialOwnedBareV2PilotClient(t *testing.T, s *Service, address string, capabi
 	if err != nil {
 		t.Fatal(err)
 	}
+	if quota != nil {
+		wire = full512AppConn{Conn: wire, quota: quota}
+	}
 	clientCtx, clientCancel := context.WithCancel(t.Context())
-	c := &ownedBareV2PilotClient{id: domain.PeerIdentityFromWire(id.Address), wire: wire, cancel: clientCancel, done: make(chan struct{}), requests: make(chan protocol.FindNodeRequest, 1), answers: make(chan protocol.FindNodeAnswer, 1), pongs: make(chan struct{}, 1), errors: make(chan error, 1)}
+	c := &ownedBareV2PilotClient{id: domain.PeerIdentityFromWire(id.Address), identity: id, wire: wire, cancel: clientCancel, done: make(chan struct{}), requests: make(chan protocol.FindNodeRequest, 1), answers: make(chan protocol.FindNodeAnswer, 1), pongs: make(chan struct{}, 1), errors: make(chan error, 1)}
 	t.Cleanup(func() { c.stop(t) })
 	transferred = true
 	go func() {
@@ -332,7 +358,7 @@ func TestOwnedBareV2PilotOriginalMembershipAndForward(t *testing.T) {
 	if from.id == target.id || from.id == domain.PeerIdentityFromWire(s.identity.Address) || target.id == domain.PeerIdentityFromWire(s.identity.Address) {
 		t.Fatal("pilot identities not distinct")
 	}
-	bareV2PilotOriginalMembers(t, s, from.id, target.id)
+	originals := bareV2PilotOriginalMembers(t, s, from.id, target.id)
 	if _, err := s.captureOwnedFindNodeCut(t.Context()); err != nil {
 		t.Fatal("original Runtime complete cut refused", err)
 	}
@@ -359,6 +385,241 @@ func TestOwnedBareV2PilotOriginalMembershipAndForward(t *testing.T) {
 	// The unique request, exact target wire and original commit/take are separate
 	// observations. No T Service, signed answer, delivery or timing SLA is asserted.
 	from.barrier(t)
+
+	dialOwnedPilotLegacy(t, address)
+	dialOwnedPilotLegacy(t, address)
+	runOwnedMixedP0Phases(t, s, from, target, originals, func() net.Conn {
+		return dialOwnedPilotLegacy(t, address)
+	})
+}
+
+// Both test scales use the same original Service and wire checks. The caller
+// owns the initial clients, their original F1 handles, and the extra legacy
+// dial in the isolated fixture.
+func runOwnedMixedP0Phases(t *testing.T, s *Service, from, target *ownedBareV2PilotClient,
+	originals []findnode.Session, dialExtraLegacy func() net.Conn) {
+	t.Helper()
+	members := len(originals)
+	var profile string
+	switch members {
+	case 2:
+		profile = "small2-mixed-v1"
+	case 512:
+		profile = "full512-mixed-v1"
+	default:
+		t.Fatal("unexpected mixed P0 profile size", members)
+	}
+	if s.bridgeCapture.priority != (findNodePriorityProfile{MaxMembers: members, MaxRegistryVisits: 2 * members}) {
+		t.Fatal("mixed P0 fixture priority profile does not match the original membership")
+	}
+	expected := make(map[findnode.Session]struct{}, members)
+	identities := make(map[domain.PeerIdentity]bool, members)
+	for _, session := range originals {
+		id := session.Identity()
+		if id.IsZero() || session.ConnID() == 0 || identities[id] {
+			t.Fatal("mixed P0 fixture did not retain distinct original sessions")
+		}
+		expected[session], identities[id] = struct{}{}, true
+	}
+	if from.id == target.id || !identities[from.id] || !identities[target.id] {
+		t.Fatal("mixed P0 endpoints are outside the original membership")
+	}
+	checkOriginals := func() int {
+		t.Helper()
+		observation, err := s.captureOwnedFindNodeObservation(t.Context())
+		if err != nil {
+			t.Fatal("complete mixed P0 capture failed", err)
+		}
+		facts := observation.facts
+		if len(facts.allOriginal) != members || len(facts.classes) != members {
+			t.Fatal("incomplete mixed P0 capture", len(facts.allOriginal), len(facts.classes))
+		}
+		remaining := maps.Clone(expected)
+		for _, original := range facts.allOriginal {
+			if _, ok := remaining[original]; !ok {
+				t.Fatal("mixed P0 capture substituted or repeated an original session")
+			}
+			delete(remaining, original)
+		}
+		return len(facts.allOriginal)
+	}
+
+	type population struct {
+		TLSv2    int `json:"tls_v2"`
+		Legacy   int `json:"legacy"`
+		Registry int `json:"registry"`
+	}
+	checkPopulation := func(legacy int) population {
+		t.Helper()
+		var observed population
+		waitFor(t, 2*time.Second, "exact mixed registry population not observed", func() bool {
+			v2, v1 := authenticatedInbound(s)
+			s.peerMu.RLock()
+			defer s.peerMu.RUnlock()
+			observed = population{TLSv2: v2, Legacy: v1, Registry: len(s.conns)}
+			return observed.TLSv2 == members && observed.Legacy == legacy && observed.Registry == members+legacy
+		})
+		return observed
+	}
+	emit := func(phase string, count population, originals int, request protocol.FindNodeRequest, forwarded bool,
+		counters findnode.IntakeDiagnosticCounters) {
+		t.Helper()
+		record, err := json.Marshal(struct {
+			Profile string `json:"profile"`
+			Phase   string `json:"phase"`
+			population
+			CompleteOriginals int                      `json:"complete_originals"`
+			RequestID         domain.FindNodeRequestID `json:"request_id"`
+			Forwarded         bool                     `json:"forwarded"`
+			Offered           uint64                   `json:"offered"`
+			Committed         uint64                   `json:"committed"`
+			Taken             uint64                   `json:"taken"`
+		}{profile, phase, count, originals, request.ID, forwarded,
+			counters.Offered, counters.Committed, counters.Taken})
+		if err != nil || len(record) > 512 {
+			t.Fatal("mixed phase record is not bounded", len(record), err)
+		}
+		t.Logf("D1_P0_MIXED_PHASE_V1 %s", record)
+	}
+	positivePopulation := checkPopulation(members)
+	positiveOriginals := checkOriginals()
+	before := s.bridgeCapture.intake.ResourceSnapshot().Intake
+
+	send := func(id domain.FindNodeRequestID, marker byte) protocol.FindNodeRequest {
+		t.Helper()
+		request := protocol.FindNodeRequest{ID: id, Target: target.id, Challenge: domain.FindNodeChallenge{marker}}
+		raw, err := protocol.MarshalFindNodeRequest(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := from.write(append(raw, '\n')); err != nil {
+			t.Fatal(err)
+		}
+		return request
+	}
+	checkForward := func(request protocol.FindNodeRequest) protocol.FindNodeRequest {
+		t.Helper()
+		var forwarded protocol.FindNodeRequest
+		select {
+		case forwarded = <-target.requests:
+			if forwarded.Target != request.Target || forwarded.Challenge != request.Challenge {
+				t.Fatal("mixed-registry writer forwarded a different request", forwarded, request)
+			}
+		case err := <-target.errors:
+			t.Fatal("mixed-registry target wire", err)
+		case <-time.After(2 * time.Second):
+			t.Fatal("mixed-registry writer did not forward")
+		}
+		return forwarded
+	}
+	positive := send(18, 30)
+	positiveForwarded := checkForward(positive)
+	from.barrier(t)
+	waitFor(t, 2*time.Second, "mixed-registry positive commit/take absent", func() bool {
+		counters := s.bridgeCapture.intake.ResourceSnapshot().Intake
+		return counters.Offered == before.Offered+1 && counters.Committed == before.Committed+1 && counters.Taken == before.Taken+1
+	})
+	mixed := s.bridgeCapture.intake.ResourceSnapshot().Intake
+	emit("POSITIVE", positivePopulation, positiveOriginals, positive, true, mixed)
+
+	extra := dialExtraLegacy()
+	overflowPopulation := checkPopulation(members + 1)
+	if cut, err := s.captureOwnedFindNodeCut(t.Context()); !errors.Is(err, findnode.ErrCapacity) || cut != (findnode.OwnedCut{}) {
+		t.Fatal("mixed registry did not refuse the first excess visit", err)
+	}
+	rejected := send(19, 31)
+	from.barrier(t)
+	overflow := s.bridgeCapture.intake.ResourceSnapshot().Intake
+	if overflow != mixed {
+		t.Fatal("overflow changed original intake counters", mixed, overflow)
+	}
+	select {
+	case unexpected := <-target.requests:
+		t.Fatal("overflow produced target work", unexpected)
+	default:
+	}
+	emit("OVERFLOW", overflowPopulation, 0, rejected, false, overflow)
+
+	target.replyTo(t, positiveForwarded)
+	var retainedAnswer protocol.FindNodeAnswer
+	select {
+	case retainedAnswer = <-from.answers:
+		if err := protocol.VerifyFindNodeAnswer(retainedAnswer, positive, domain.NetworkID(networkName)); err != nil {
+			t.Fatal("retained answer did not match the pre-overflow request", err)
+		}
+	case err := <-from.errors:
+		t.Fatal("retained answer upstream wire", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("overflow dropped the pre-existing answer obligation")
+	}
+	stillOverflow := checkPopulation(members + 1)
+	afterAnswer := s.bridgeCapture.intake.ResourceSnapshot().Intake
+	wantAfterAnswer := overflow
+	wantAfterAnswer.Answered++
+	if afterAnswer != wantAfterAnswer {
+		t.Fatal("finishing the retained answer changed unrelated intake counters", overflow, afterAnswer)
+	}
+	t.Logf("D1_P0_RETAINED_ANSWER_V1 {\"registry\":%d,\"request_id\":%d,\"answered_before\":%d,\"answered_after\":%d}",
+		stillOverflow.Registry, retainedAnswer.ID, overflow.Answered, afterAnswer.Answered)
+
+	if err := extra.Close(); err != nil {
+		t.Fatal("close the excess legacy client", err)
+	}
+	recoveryPopulation := checkPopulation(members)
+	recoveryOriginals := checkOriginals()
+	recovery := send(20, 32)
+	checkForward(recovery)
+	waitFor(t, 2*time.Second, "recovery changed more than the one original request", func() bool {
+		after := s.bridgeCapture.intake.ResourceSnapshot().Intake
+		return after.Offered == mixed.Offered+1 && after.Committed == mixed.Committed+1 && after.Taken == mixed.Taken+1
+	})
+	emit("RECOVERY", recoveryPopulation, recoveryOriginals, recovery, true, s.bridgeCapture.intake.ResourceSnapshot().Intake)
+}
+
+func dialOwnedPilotLegacy(t *testing.T, address string) net.Conn {
+	t.Helper()
+	return dialOwnedPilotLegacyFrom(t, address, net.Dialer{Timeout: 2 * time.Second}, nil)
+}
+
+func dialOwnedPilotLegacyFrom(t *testing.T, address string, dialer net.Dialer, quota *full512AppQuota) net.Conn {
+	t.Helper()
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	conn, err := dialer.DialContext(ctx, "tcp4", address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	if quota != nil {
+		conn = full512AppConn{Conn: conn, quota: quota}
+	}
+	if err := conn.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	writeJSONFrame(t, conn, protocol.Frame{
+		Type: "hello", Version: 30, MinimumProtocolVersion: config.MinimumProtocolVersion,
+		Client: "node", NodeType: string(domain.NodeTypeFull), Listener: "0", Address: id.Address,
+		PubKey: identity.PublicKeyBase64(id.PublicKey), BoxKey: identity.BoxPublicKeyBase64(id.BoxPublicKey),
+		BoxSig: identity.SignBoxKeyBinding(id),
+	})
+	reader := bufio.NewReaderSize(conn, 64*1024)
+	welcome := readJSONTestFrame(t, reader)
+	if welcome.Type != "welcome" || welcome.Challenge == "" {
+		t.Fatal("legacy pilot did not receive an auth challenge", welcome.Type)
+	}
+	writeJSONFrame(t, conn, protocol.Frame{Type: "auth_session", Address: id.Address,
+		Signature: identity.SignPayload(id, protocol.SessionAuthPayload(welcome.Challenge, id.Address))})
+	if reply := readJSONTestFrame(t, reader); reply.Type != "auth_ok" {
+		t.Fatal("legacy pilot was not authenticated", reply.Type, reply.Code)
+	}
+	if quota != nil {
+		return drainFull512Legacy(t, conn, reader)
+	}
+	return conn
 }
 
 func TestOwnedBareV2PilotRefusalsDoNotAdmit(t *testing.T) {
@@ -421,11 +682,18 @@ func bareV2PilotSources(t *testing.T) map[string][]byte {
 func bareV2PilotSourceErrors(sources map[string][]byte) []string {
 	const field = "ownedFindNodeAdvertiseTest"
 	const factory = "newOwnedBareV2PilotRelay"
+	const fullFile = "find_node_p0_full_coverage_linux_test.go"
+	const fullFactory = "newOwnedFull512GuestRelay"
+	const fullEntry = "TestOwnedP0FullPopulationAndRegistryOverflow"
 	var failures []string
 	if !qualifiedD1DiagnosticSource(sources["find_node_resource_diagnostic.go"]) {
 		failures = append(failures, "pilot diagnostic tagged Source changed")
 	}
+	if fmt.Sprintf("%x", sha256.Sum256(sources[fullFile])) != "a37cce7ad4e6fc0ad752a92eae0ab93d555b17d7439875e7535e36771ae72ef6" {
+		failures = append(failures, "pilot Full512 Linux fixture source changed")
+	}
 	declared, read, written, called, factories := 0, 0, 0, 0, 0
+	fullCalled, fullFactories := 0, 0
 	for path, raw := range sources {
 		file, err := parser.ParseFile(token.NewFileSet(), path, raw, 0)
 		if err != nil {
@@ -444,6 +712,13 @@ func bareV2PilotSourceErrors(sources map[string][]byte) []string {
 					allowed[fn.Name] = true
 					if site != "find_node_bare_v2_pilot_test.go:"+factory || fmt.Sprintf("%x", sha256.Sum256(raw[int(fn.Pos())-1:int(fn.End())-1])) != "60e61733b29eaca468c001b5056c2cf8d674184cbbe71d70f3364c3b13b20853" {
 						failures = append(failures, "pilot fixed factory changed")
+					}
+				}
+				if fn.Name.Name == fullFactory {
+					fullFactories++
+					allowed[fn.Name] = true
+					if path != fullFile {
+						failures = append(failures, "pilot Full512 factory declaration escaped")
 					}
 				}
 				if site == "datagram_integration.go:localHandshakeCapabilityNames" && fmt.Sprintf("%x", sha256.Sum256(raw[int(fn.Pos())-1:int(fn.End())-1])) != "af61e48321ba810c4904c8cd4f9f0dd32c84af30cfb0d37828734a6ccb06df54" {
@@ -478,7 +753,7 @@ func bareV2PilotSourceErrors(sources map[string][]byte) []string {
 							if len(n.Rhs) == 1 {
 								value, _ = n.Rhs[0].(*ast.Ident)
 							}
-							if (site != "find_node_bare_v2_pilot_test.go:"+factory && site != "find_node_automatic_endpoint_trace_test.go:newOwnedAutomaticTraceService" && site != "find_node_capability_selection_test.go:TestOwnedFindNodeHandshakeCapabilitySelection" && site != "find_node_resource_diagnostic.go:NewD1FindNodeResourceDiagnostic") || len(n.Lhs) != 1 || len(n.Rhs) != 1 || value == nil || value.Name != "true" {
+							if (site != "find_node_bare_v2_pilot_test.go:"+factory && site != "find_node_automatic_endpoint_trace_test.go:newOwnedAutomaticTraceService" && site != "find_node_capability_selection_test.go:TestOwnedFindNodeHandshakeCapabilitySelection" && site != "find_node_resource_diagnostic.go:NewD1FindNodeResourceDiagnostic" && site != fullFile+":"+fullFactory) || len(n.Lhs) != 1 || len(n.Rhs) != 1 || value == nil || value.Name != "true" {
 								failures = append(failures, "pilot unclosed setter")
 							}
 						}
@@ -503,6 +778,13 @@ func bareV2PilotSourceErrors(sources map[string][]byte) []string {
 							failures = append(failures, "pilot factory call escaped")
 						}
 					}
+					if name, ok := n.Fun.(*ast.Ident); ok && name.Name == fullFactory {
+						allowed[name] = true
+						fullCalled++
+						if site != fullFile+":"+fullEntry {
+							failures = append(failures, "pilot Full512 factory call escaped")
+						}
+					}
 				case *ast.BasicLit:
 					if !strings.HasSuffix(path, "_test.go") && n.Kind == token.STRING {
 						value, _ := strconv.Unquote(n.Value)
@@ -511,7 +793,7 @@ func bareV2PilotSourceErrors(sources map[string][]byte) []string {
 						}
 					}
 				case *ast.Ident:
-					if (n.Name == field || n.Name == factory) && !allowed[n] {
+					if (n.Name == field || n.Name == factory || n.Name == fullFactory) && !allowed[n] {
 						failures = append(failures, "pilot unclosed field/factory reference")
 					}
 				}
@@ -519,7 +801,7 @@ func bareV2PilotSourceErrors(sources map[string][]byte) []string {
 			})
 		}
 	}
-	if declared != 1 || read != 1 || written != 4 || called != 2 || factories != 1 {
+	if declared != 1 || read != 1 || written != 5 || called != 2 || factories != 1 || fullCalled != 1 || fullFactories != 1 {
 		failures = append(failures, "pilot exact declaration/read/write/call inventory")
 	}
 	return failures
@@ -543,6 +825,7 @@ func TestOwnedBareV2PilotAdvertisementSourceControls(t *testing.T) {
 		{"field-alias", "pilot_escape.go", "package node\nfunc pilotEscape(s *Service)*bool{return &s.ownedFindNodeAdvertiseTest}\n", "field address escape"},
 		{"reflection-name", "pilot_escape.go", "package node\nfunc pilotEscape(){_=reflect.ValueOf(Service{}).FieldByName(\"ownedFindNodeAdvertiseTest\")}\n", "reflection/string escape"},
 		{"factory-value-escape", "pilot_escape_test.go", "package node\nvar pilotEscape=newOwnedBareV2PilotRelay\n", "unclosed field/factory reference"},
+		{"full512-factory-value-escape", "pilot_escape_test.go", "package node\nvar pilotEscape=newOwnedFull512GuestRelay\n", "unclosed field/factory reference"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			sources := map[string][]byte{}

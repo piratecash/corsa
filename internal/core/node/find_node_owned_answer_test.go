@@ -29,7 +29,12 @@ func (c ownedAnswerCapture) OnSendAttempt(data []byte, ok bool) {
 
 func ownedAnswerSignedBody(t *testing.T, target *Service, request protocol.FindNodeRequest) protocol.FindNodeAnswer {
 	t.Helper()
-	key, err := identity.ParsePublicKey(target.identity.PublicKey)
+	return ownedAnswerSignedIdentity(t, target.identity, request)
+}
+
+func ownedAnswerSignedIdentity(t *testing.T, target *identity.Identity, request protocol.FindNodeRequest) protocol.FindNodeAnswer {
+	t.Helper()
+	key, err := identity.ParsePublicKey(target.PublicKey)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -38,7 +43,7 @@ func ownedAnswerSignedBody(t *testing.T, target *Service, request protocol.FindN
 		t.Fatal(err)
 	}
 	var signature domain.FindNodeSignature
-	copy(signature[:], ed25519.Sign(target.identity.PrivateKey, transcript))
+	copy(signature[:], ed25519.Sign(target.PrivateKey, transcript))
 	return protocol.FindNodeAnswer{ID: request.ID, Target: request.Target, PublicKey: key, Signature: signature}
 }
 
