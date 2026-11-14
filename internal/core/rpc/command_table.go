@@ -637,8 +637,9 @@ func frameFromArgs(commandType string, args map[string]interface{}) (protocol.Fr
 // are returned by the separate "version" command.
 const helpSchemaVersion = "1.0"
 
-// RegisterSystemCommands registers help, ping, hello, version, and getNodeStatus.
+// RegisterSystemCommands registers system commands and local diagnostics.
 func RegisterSystemCommands(t *CommandTable, node NodeProvider) {
+	registerBaselineClock(t)
 	t.Register(
 		CommandInfo{Name: "help", Description: "List all available RPC commands", Category: "system"},
 		func(req CommandRequest) CommandResponse {
