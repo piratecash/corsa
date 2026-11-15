@@ -48,6 +48,8 @@ Traffic captures now enforce storage limits, reserve free disk space and create 
 
 Stop Corsa and create a verified, SQLite-consistent backup of the complete data directory. Keep the identity file, pin store, pin-store marker and database together when moving or restoring a node.
 
+When changing ports with default paths, rename all port-specific files together, including `identity-<port>.json`, `identity-<port>.json.pin-store-marker.json` and `secure-sessions-<port>.json`. To keep the original filenames, set `CORSA_IDENTITY_PATH` and `CORSA_SECURE_SESSION_STORE_PATH` to the existing files and update the other data paths as needed. Keep the backup outside the old live store path. If startup reports `store_missing`, restore the corresponding store from the backup or correct the configured path. If it reports `two_stores`, identify the current store and move the other copy aside before restarting. Keep the marker with the identity throughout the migration. [Secure session migration and startup refusals](https://github.com/piratecash/corsa/blob/c391b0873e382beaec97496e6c6aa3e15a1b1f79/docs/protocol/session_v2.md#downgrade-protection)
+
 After schema 9 commits, v2.5.71 and other builds ending at schema 8 cannot open the upgraded database. Replacing only the binary is not a supported rollback; recovery requires the consistent backup made before upgrading.
 
 SDK integrations using `RPC.Enabled=true` must add both `RPC.Username` and `RPC.Password` before moving to this version.
@@ -103,6 +105,8 @@ Traffic captures теперь соблюдают лимиты хранилища
 ## Перед обновлением
 
 Остановите Corsa и создайте проверенную SQLite-consistent резервную копию всего каталога данных. При переносе или восстановлении ноды держите вместе identity-файл, pin store, pin-store marker и базу данных.
+
+При смене порта с путями по умолчанию переименуйте вместе все файлы, в именах которых есть порт, включая `identity-<port>.json`, `identity-<port>.json.pin-store-marker.json` и `secure-sessions-<port>.json`. Чтобы сохранить прежние имена, укажите существующие файлы в `CORSA_IDENTITY_PATH` и `CORSA_SECURE_SESSION_STORE_PATH` и при необходимости обновите пути к остальным данным. Храните резервную копию вне прежнего рабочего пути хранилища. При ошибке `store_missing` восстановите соответствующее хранилище из резервной копии или исправьте настроенный путь. При ошибке `two_stores` определите актуальное хранилище и переместите вторую копию в другое место перед перезапуском. Сохраняйте маркер рядом с файлом identity на всех этапах переноса. [Перенос и отказы запуска защищённой сессии](https://github.com/piratecash/corsa/blob/c391b0873e382beaec97496e6c6aa3e15a1b1f79/docs/protocol/session_v2.md#защита-от-понижения)
 
 После применения schema 9 версия v2.5.71 и другие сборки с последней schema 8 не смогут открыть обновлённую базу. Замена только binary не является поддерживаемым rollback; для восстановления нужна согласованная копия, сделанная до обновления.
 

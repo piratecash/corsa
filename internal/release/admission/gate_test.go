@@ -157,7 +157,8 @@ func TestCommittedManifestKeepsReleaseClosed(t *testing.T) {
 	// checks confirmed on the commit their evidence names. Closing another one
 	// is a deliberate edit here as well as in the manifest.
 	doneToday := []ConditionID{
-		"owner_release_shape", "compat_real_releases", "probe_per_contract", "tls_first_switch",
+		"owner_release_shape", "owner_session_choices", "compat_real_releases",
+		"probe_per_contract", "tls_first_switch",
 		"pin_store_marker", "dial_paths_unified", "self_record_min_session", "load_run_on_candidate", "loopback_inbound_class",
 	}
 	var want []ConditionID
