@@ -333,11 +333,14 @@ func TestOwnedLocalNodeShutdownDrainsOriginalPendingSlots(t *testing.T) {
 			from, _, _ := ownedCaptureTestService(t, 8, 8, 16)
 			original, _ := ownedRawAccepted(t, s, from)
 			clock.Store(int64(3 * time.Second))
+			loop := s.bridgeCapture.localLoop
+			// Schedule worker startup after ingress so its clock reads cannot
+			// make the nonblocking receive of a later request return Busy.
+			loop.started.Store(true)
 			first := ownedLocalNodeRequest(t, s)
 			if err := s.dispatchOwnedFindNodeReceive(ownedLocalNodeReadRequest(t, s, original, first)); err != nil {
 				t.Fatal(err)
 			}
-			_ = ownedLocalNodeReadAnswer(t, original)
 			second := first
 			second.ID++
 			second.Challenge[0] ^= 1
@@ -350,10 +353,16 @@ func TestOwnedLocalNodeShutdownDrainsOriginalPendingSlots(t *testing.T) {
 			if err := s.dispatchOwnedFindNodeReceive(ownedLocalNodeReadRequest(t, s, original, third)); err != nil {
 				t.Fatal(err)
 			}
-			loop := s.bridgeCapture.localLoop
-			if len(loop.slots) != 2 {
-				t.Fatal("genuine accepted future jobs absent before shutdown")
+			if len(loop.slots) != 3 || len(loop.jobs) != 3 {
+				t.Fatal("genuine accepted jobs absent before worker startup")
 			}
+			if !s.goOwnedFindNodeLoop(loop.done, func() { s.runOwnedFindNodeLocalLoop(loop) }) {
+				t.Fatal("local worker startup refused")
+			}
+			_ = ownedLocalNodeReadAnswer(t, original)
+			waitFor(t, 2*time.Second, "one future job in progress and one queued", func() bool {
+				return len(loop.slots) == 2 && len(loop.jobs) == 1
+			})
 			if mode == "clock-poison" {
 				clock.Store(int64(2 * time.Second)) // actual regression after genuine f=3s
 				waitFor(t, 2*time.Second, "poisoned original clock retires pending local work", func() bool { return len(loop.slots) == 0 && len(loop.jobs) == 0 })

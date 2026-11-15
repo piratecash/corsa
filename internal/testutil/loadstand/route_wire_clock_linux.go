@@ -20,12 +20,12 @@ func ReadLinuxRouteWireClockDomain() (RouteWireClockDomain, error) {
 	if err != nil {
 		return RouteWireClockDomain{}, err
 	}
-	defer process.Close()
+	defer func() { _ = process.Close() }()
 	thread, err := openRouteWireTimeNamespace("/proc/thread-self/ns/time")
 	if err != nil {
 		return RouteWireClockDomain{}, err
 	}
-	defer thread.Close()
+	defer func() { _ = thread.Close() }()
 	var processStat, threadStat unix.Stat_t
 	if unix.Fstat(int(process.Fd()), &processStat) != nil || unix.Fstat(int(thread.Fd()), &threadStat) != nil ||
 		processStat.Dev != threadStat.Dev || processStat.Ino != threadStat.Ino {
@@ -35,7 +35,7 @@ func ReadLinuxRouteWireClockDomain() (RouteWireClockDomain, error) {
 	if err != nil {
 		return RouteWireClockDomain{}, err
 	}
-	defer boot.Close()
+	defer func() { _ = boot.Close() }()
 	var fs unix.Statfs_t
 	if unix.Fstatfs(int(boot.Fd()), &fs) != nil || fs.Type != unix.PROC_SUPER_MAGIC {
 		return RouteWireClockDomain{}, ErrFinalAccountingUnavailable

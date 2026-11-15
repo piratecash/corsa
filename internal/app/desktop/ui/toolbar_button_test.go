@@ -5,9 +5,11 @@ import (
 	"image/color"
 	"testing"
 
+	"gioui.org/font/gofont"
 	"gioui.org/io/input"
 	"gioui.org/layout"
 	"gioui.org/op"
+	"gioui.org/text"
 	"gioui.org/unit"
 	"gioui.org/widget"
 )
@@ -41,7 +43,9 @@ func toolbarFrame(t *testing.T, button *widget.Clickable, opts ToolbarButtonOpts
 		Metric:      unit.Metric{PxPerDp: 1, PxPerSp: 1},
 		Constraints: layout.Constraints{Max: image.Pt(400, 100)},
 	}
-	dims := testKit(t).ToolbarButton(gtx, button, opts)
+	kit := testKit(t)
+	kit.Theme.Shaper = text.NewShaper(text.NoSystemFonts(), text.WithCollection(gofont.Collection()))
+	dims := kit.ToolbarButton(gtx, button, opts)
 	router.Frame(gtx.Ops)
 	return dims
 }
