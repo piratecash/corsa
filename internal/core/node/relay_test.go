@@ -1,6 +1,7 @@
 package node
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"net"
@@ -15,6 +16,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/piratecash/corsa/internal/core/config"
+	"github.com/piratecash/corsa/internal/core/connauth"
 	"github.com/piratecash/corsa/internal/core/directmsg"
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/domain/domaintest"
@@ -22,6 +24,130 @@ import (
 	"github.com/piratecash/corsa/internal/core/netcore"
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
+
+func TestRelayMessageUsesOriginalTransport(t *testing.T) {
+	for _, direction := range []string{"inbound", "outbound"} {
+		t.Run(direction, func(t *testing.T) {
+			svc := newTestService(t, config.NodeTypeFull)
+			svc.runCtx = t.Context()
+			sender := registerSenderKey(t, svc)
+			recipient, err := identity.Generate()
+			if err != nil {
+				t.Fatal(err)
+			}
+			downstream := newReceiveOwnerSession(t, svc, 5940, "192.0.2.102:64646")
+			svc.peerMu.Lock()
+			downstream.peerIdentity = domain.PeerIdentityFromWire(recipient.Address)
+			svc.health[downstream.address] = &peerHealth{Connected: true}
+			svc.peerMu.Unlock()
+			frame := protocol.Frame{
+				Type: "relay_message", ID: "relay-open", Address: sender.Address, Recipient: recipient.Address, Topic: "dm",
+				Body: sealDMBody(t, sender, recipient.Address, identity.BoxPublicKeyBase64(recipient.BoxPublicKey)),
+				Flag: string(protocol.MessageFlagImmutable), CreatedAt: time.Now().UTC().Format(time.RFC3339), HopCount: 1, MaxHops: 4,
+			}
+
+			var core *netcore.NetCore
+			var dispatch func(protocol.Frame)
+			var readAck func() protocol.Frame
+			if direction == "inbound" {
+				local, remote := net.Pipe()
+				t.Cleanup(func() { _ = remote.Close() })
+				conn := withRemoteAddr(local, &net.TCPAddr{IP: net.ParseIP("192.0.2.101"), Port: 64646})
+				if err := svc.registerInboundConn(conn, nil); err != nil {
+					_ = local.Close()
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { svc.unregisterInboundConn(conn) })
+				id, ok := svc.connIDFor(conn)
+				if !ok {
+					t.Fatal("inbound connection missing")
+				}
+				core = svc.netCoreForID(id)
+				core.ApplyOpts(netcore.Options{Address: "192.0.2.101:64646", Identity: idPeerB, Caps: legacyRoutingCaps})
+				core.SetAuth(&connauth.State{Verified: true, Hello: protocol.Frame{Address: idPeerB.String()}})
+				dispatch = func(frame protocol.Frame) {
+					wire, err := protocol.MarshalFrameLine(frame)
+					if err != nil {
+						t.Fatal(err)
+					}
+					svc.dispatchNetworkFrame(id, wire)
+				}
+				readAck = func() protocol.Frame {
+					if err := remote.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+						t.Fatal(err)
+					}
+					wire, err := bufio.NewReader(remote).ReadString('\n')
+					if err != nil {
+						t.Fatal(err)
+					}
+					ack, err := protocol.ParseFrameLine(wire)
+					if err != nil {
+						t.Fatal(err)
+					}
+					return ack
+				}
+			} else {
+				const address = domain.PeerAddress("192.0.2.101:64646")
+				replacement := newReceiveOwnerSession(t, svc, 5941, address)
+				original := newReceiveOwnerSession(t, svc, 5942, address)
+				svc.peerMu.Lock()
+				svc.health[address] = &peerHealth{Connected: true}
+				svc.peerMu.Unlock()
+				core = original.netCore
+				svc.sendAdmissionBarrier = func() {
+					svc.peerMu.Lock()
+					svc.sessions[address] = replacement
+					svc.peerMu.Unlock()
+				}
+				dispatch = func(frame protocol.Frame) { svc.dispatchPeerSessionFrame(address, original, frame) }
+				readAck = func() protocol.Frame {
+					svc.peerMu.RLock()
+					current := svc.sessions[address]
+					svc.peerMu.RUnlock()
+					if current != replacement {
+						t.Fatal("fixture did not replace the session during forwarding")
+					}
+					select {
+					case item := <-replacement.sendCh:
+						t.Fatalf("replacement received the reply: %s", item.Type)
+					default:
+					}
+					select {
+					case item := <-original.sendCh:
+						return item.Frame
+					default:
+						t.Fatal("original session did not receive the reply")
+						return protocol.Frame{}
+					}
+				}
+			}
+
+			dispatch(frame)
+			if ack := readAck(); ack.Type != "relay_hop_ack" || ack.ID != frame.ID || ack.Status != "forwarded" {
+				t.Fatalf("unexpected hop ack type=%q id=%q status=%q", ack.Type, ack.ID, ack.Status)
+			}
+			select {
+			case item := <-downstream.sendCh:
+				if item.Type != "relay_message" || item.ID != frame.ID || item.HopCount != 2 {
+					t.Fatalf("unexpected forwarded item: %+v", item.Frame)
+				}
+			default:
+				t.Fatal("open transport did not forward the relay")
+			}
+
+			core.ShutSendQueue()
+			if svc.netCoreForID(core.ConnID()) != core {
+				t.Fatal("test must exercise the interval before unregister")
+			}
+			frame.ID = "relay-closed"
+			frame.Body = sealDMBody(t, sender, recipient.Address, identity.BoxPublicKeyBase64(recipient.BoxPublicKey))
+			dispatch(frame)
+			if svc.relayStates.lookupReceiptForwardTo(envelopeRef(frameEnvelope(frame))) != "" || len(downstream.sendCh) != 0 {
+				t.Fatal("closed transport forwarded or retained a relay message")
+			}
+		})
+	}
+}
 
 // --- relayStateStore tests ---
 

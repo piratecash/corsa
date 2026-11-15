@@ -597,6 +597,7 @@ func (s *Service) reportDatagramResidueUnreachable(direction, peer string) {
 // handshake (sessionHasCapability).
 type datagramNeighbour struct {
 	label     string
+	transport *netcore.NetCore
 	budgetKey datagram.AdmissionKey
 	channel   datagram.ChannelID
 	identity  domain.PeerIdentity
@@ -617,6 +618,7 @@ type datagramNeighbour struct {
 func (s *Service) sessionDatagramNeighbour(session *peerSession) datagramNeighbour {
 	return datagramNeighbour{
 		direction: datagramOutboundSession,
+		transport: session.netCore,
 		budgetKey: sessionDatagramAdmissionKey(session),
 		channel:   datagram.NetworkChannel(session.connID),
 		// Read through the accessor for the ordering reason sessionPeerIdentity
@@ -658,6 +660,7 @@ func (s *Service) inboundDatagramNeighbour(connID domain.ConnID) datagramNeighbo
 	identity := s.authenticatedInboundPeerIdentity(connID)
 	return datagramNeighbour{
 		direction:   datagramInbound,
+		transport:   s.netCoreForID(connID),
 		budgetKey:   s.inboundDatagramBudgetKey(connID),
 		channel:     datagram.NetworkChannel(connID),
 		identity:    identity,
@@ -837,7 +840,9 @@ func (s *Service) dispatchInboundDatagramWireOwned(connID domain.ConnID, addr st
 //     the FULL wire line, before any decoding and before EVERY refusal below. A
 //     refusal that runs above the charge is a refusal the neighbour gets for
 //     free, and the cheapest verdict on the node makes the best flood;
-//  3. the capability of THIS connection. A neighbour that never negotiated
+//  3. the gate and capability of THIS connection. A line whose original
+//     transport stopped accepting frames is dropped after the wire charge.
+//     A neighbour that never negotiated
 //     mesh_datagram_v1 is dropped silently — no error frame, no tear-down, no
 //     ban score, whatever the dtype, class or payload — because
 //     docs/protocol/datagram.md §2 makes every refusal of this plane silent and
@@ -893,6 +898,9 @@ func (s *Service) handleDatagramFrame(ctx context.Context, line string, neighbou
 	layer := s.datagramLayer()
 	if layer != nil && !layer.admission.Admit(neighbour.budgetKey, len(line)) {
 		return s.refuseDatagram(direction, datagram.DropAdmission, false, nil)
+	}
+	if neighbour.transport != nil && !neighbour.transport.AcceptingFrames() {
+		return datagramIngressResult{}
 	}
 
 	if !neighbour.speaksPlane {

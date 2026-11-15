@@ -79,13 +79,17 @@ func (id receiptIdentity) senderKnown() bool { return id.Sender != "" }
 
 // dedupKey is the key of the "already handled" set (seenReceipts).
 func (id receiptIdentity) dedupKey() string {
-	return id.Recipient + ":" + string(id.MessageID) + ":" + id.Status + ":" + id.Sender
+	return "receipt:" + id.Recipient + ":" + string(id.MessageID) + ":" + id.Status + ":" + id.Sender
 }
 
 // retryKey is the key of the relay-retry map. The "receipt|" prefix keeps
 // it disjoint from relayMessageKey in the map they share.
-func (id receiptIdentity) retryKey() string {
-	return "receipt|" + id.Recipient + "|" + string(id.MessageID) + "|" + id.Status + "|" + id.Sender
+func (id receiptIdentity) retryKey(signed bool) string {
+	namespace := "receipt|"
+	if signed {
+		namespace = "signed-receipt|"
+	}
+	return namespace + id.Recipient + "|" + string(id.MessageID) + "|" + id.Status + "|" + id.Sender
 }
 
 // matches reports whether the receipt IS the one this identity names. An
@@ -101,12 +105,16 @@ func (id receiptIdentity) matches(receipt protocol.DeliveryReceipt) bool {
 
 // receiptKeyOf is the dedup key of a receipt this node holds.
 func receiptKeyOf(receipt protocol.DeliveryReceipt) string {
-	return identityOf(receipt).dedupKey()
+	key := identityOf(receipt).dedupKey()
+	if receipt.Signature != "" {
+		return "signed:" + key
+	}
+	return key
 }
 
 // relayReceiptKey is the relay-retry key of a receipt this node holds.
 func relayReceiptKey(receipt protocol.DeliveryReceipt) string {
-	return identityOf(receipt).retryKey()
+	return identityOf(receipt).retryKey(receipt.Signature != "")
 }
 
 // ackDelete is one ack_delete instruction: "I hold this, you may drop
@@ -125,6 +133,7 @@ type ackDelete struct {
 	// neither.
 	Status        string
 	ReceiptSender string
+	ReceiptProof  string
 }
 
 func ackDeleteForMessage(id protocol.MessageID) ackDelete {
@@ -137,6 +146,7 @@ func ackDeleteForReceipt(receipt protocol.DeliveryReceipt) ackDelete {
 		MessageID:     receipt.MessageID,
 		Status:        receipt.Status,
 		ReceiptSender: receipt.Sender,
+		ReceiptProof:  receipt.Signature,
 	}
 }
 
@@ -150,5 +160,6 @@ func ackDeleteFromFrame(frame protocol.Frame) ackDelete {
 		MessageID:     protocol.MessageID(frame.ID),
 		Status:        frame.Status,
 		ReceiptSender: frame.ReceiptSender,
+		ReceiptProof:  frame.ReceiptProof,
 	}
 }

@@ -465,7 +465,8 @@ func TestDispatchPeerSessionFrame_PushMessageBodyCapRejectsOversized(t *testing.
 		Topic: "dm",
 	}
 
-	svc.dispatchPeerSessionFrame("10.0.0.99:1234", nil, frame)
+	session := legacyOutboundSession("10.0.0.99:1234", idPeerB)
+	svc.dispatchPeerSessionFrame(session.address, session, frame)
 
 	// Verify the message was NOT stored.
 	// s.topics is guarded by s.gossipMu, not s.peerMu.
@@ -506,7 +507,8 @@ func TestDispatchPeerSessionFrame_PushMessageBodyAtLimitIsProcessed(t *testing.T
 	// a retry — both of which are harmless in a test with no live peers.
 	// The key assertion: no panic, and the message is NOT stored (because
 	// the sender key is unknown, not because of the body cap).
-	svc.dispatchPeerSessionFrame("10.0.0.99:1234", nil, frame)
+	session := legacyOutboundSession("", idPeerB)
+	svc.dispatchPeerSessionFrame(session.address, session, frame)
 
 	// s.topics is guarded by s.gossipMu, not s.peerMu.
 	svc.gossipMu.RLock()
@@ -542,7 +544,8 @@ func TestDispatchPeerSessionFrame_AnnouncePeerTruncation(t *testing.T) {
 		Peers:    peers,
 	}
 
-	svc.dispatchPeerSessionFrame("10.0.0.99:1234", nil, frame)
+	session := newReceiveOwnerSession(t, svc, 5701, "10.0.0.99:1234")
+	svc.dispatchPeerSessionFrame(session.address, session, frame)
 
 	svc.peerMu.RLock()
 	// newTestService starts with zero peers (no bootstrap).
@@ -577,7 +580,8 @@ func TestDispatchPeerSessionFrame_AnnouncePeerUnderLimitPassesAll(t *testing.T) 
 		Peers:    peers,
 	}
 
-	svc.dispatchPeerSessionFrame("10.0.0.99:1234", nil, frame)
+	session := newReceiveOwnerSession(t, svc, 5701, "10.0.0.99:1234")
+	svc.dispatchPeerSessionFrame(session.address, session, frame)
 
 	svc.peerMu.RLock()
 	learnedCount := len(svc.peers)

@@ -24,8 +24,8 @@ func TestHandleRelayHopAck_StaleTableRoutedSenderDoesNotSuppressTimer(t *testing
 	svc.relayStates = newRelayStateStore()
 
 	// Sessions supply captured send-time and incoming identities.
-	svc.sessions[domain.PeerAddress("addr-A")] = &peerSession{peerIdentity: idPeerA, address: "addr-A"}
-	svc.sessions[domain.PeerAddress("addr-B")] = &peerSession{peerIdentity: idPeerC, address: "addr-B"}
+	svc.sessions[domain.PeerAddress("addr-A")] = legacyOutboundSession("addr-A", idPeerA)
+	svc.sessions[domain.PeerAddress("addr-B")] = legacyOutboundSession("addr-B", idPeerC)
 
 	// Start through A, then replace it with B using the real upsert path.
 	// The current attempt has a fresh budget and captured B identity.
@@ -72,8 +72,8 @@ func TestHandleRelayHopAck_StaleGossipFallbackSenderDoesNotSuppressTimer(t *test
 	svc := newTestServiceWithRoutingAndHealth(t, idNodeB)
 	svc.relayStates = newRelayStateStore()
 
-	svc.sessions[domain.PeerAddress("addr-A")] = &peerSession{peerIdentity: idPeerA, address: "addr-A"}
-	svc.sessions[domain.PeerAddress("addr-G")] = &peerSession{peerIdentity: idPeerC, address: "addr-G"}
+	svc.sessions[domain.PeerAddress("addr-A")] = legacyOutboundSession("addr-A", idPeerA)
+	svc.sessions[domain.PeerAddress("addr-G")] = legacyOutboundSession("addr-G", idPeerC)
 
 	// Store the actual old sender A, then perform the real upsert to G.
 	// The transition captures A independently of any later address lookup.
@@ -133,8 +133,8 @@ func TestHandleRelayHopAck_TableRoutedAttemptIgnoresAckFromAnyOtherIdentity(t *t
 	svc := newTestServiceWithRoutingAndHealth(t, idNodeB)
 	svc.relayStates = newRelayStateStore()
 
-	svc.sessions[domain.PeerAddress("addr-A")] = &peerSession{peerIdentity: idPeerA, address: "addr-A"}
-	svc.sessions[domain.PeerAddress("addr-B")] = &peerSession{peerIdentity: idPeerC, address: "addr-B"}
+	svc.sessions[domain.PeerAddress("addr-A")] = legacyOutboundSession("addr-A", idPeerA)
+	svc.sessions[domain.PeerAddress("addr-B")] = legacyOutboundSession("addr-B", idPeerC)
 
 	svc.relayStates.store(&relayForwardState{
 		Message:              relayStateFixtureRef("m-table-other"),
@@ -161,8 +161,8 @@ func TestHandleRelayHopAck_UntabledAttemptRejectsOnlyAbandonedHops(t *testing.T)
 	svc := newTestServiceWithRoutingAndHealth(t, idNodeB)
 	svc.relayStates = newRelayStateStore()
 
-	svc.sessions[domain.PeerAddress("addr-A")] = &peerSession{peerIdentity: idPeerA, address: "addr-A"}
-	svc.sessions[domain.PeerAddress("addr-G")] = &peerSession{peerIdentity: idPeerC, address: "addr-G"}
+	svc.sessions[domain.PeerAddress("addr-A")] = legacyOutboundSession("addr-A", idPeerA)
+	svc.sessions[domain.PeerAddress("addr-G")] = legacyOutboundSession("addr-G", idPeerC)
 
 	svc.relayStates.store(&relayForwardState{
 		Message:              relayStateFixtureRef("m-gossip-other"),

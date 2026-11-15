@@ -143,7 +143,7 @@ func TestCommitOnlyClearsTheQueuedFramesOfItsOwnReceipt(t *testing.T) {
 		svc.pending[holder] = append(svc.pending[holder], pendingFrame{Frame: frame, QueuedAt: time.Now().UTC()})
 		svc.pendingKeys[pendingFrameKey(holder, frame)] = struct{}{}
 	}
-	svc.clearPendingReceiptLocked(identityOf(forged))
+	svc.clearPendingReceiptLocked(identityOf(forged), false)
 	left := append([]pendingFrame(nil), svc.pending[holder]...)
 	svc.deliveryMu.Unlock()
 

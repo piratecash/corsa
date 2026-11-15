@@ -9,6 +9,7 @@ import (
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/protocol"
+	"github.com/piratecash/corsa/internal/core/routing"
 )
 
 // fabricatedAuthor is a well-formed address nobody holds a key for.
@@ -25,6 +26,7 @@ func stalledOutboundSession(t *testing.T, svc *Service, n int) *peerSession {
 	}
 	address := domain.PeerAddress(fmt.Sprintf("10.0.1.%d:64646", n+1))
 	session := &peerSession{
+		receive:       routing.NewAnnounceReceiveState(nil),
 		address:       address,
 		connID:        domain.ConnID(9100 + n),
 		peerIdentity:  domain.PeerIdentityFromWire(owner.Address),

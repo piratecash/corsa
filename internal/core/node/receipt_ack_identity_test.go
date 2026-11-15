@@ -86,6 +86,42 @@ func heldReceipts(svc *Service, recipient string) []protocol.DeliveryReceipt {
 	return append([]protocol.DeliveryReceipt(nil), svc.receipts[recipient]...)
 }
 
+func TestAckDeleteUsesOriginalTransportGate(t *testing.T) {
+	svc := newTestService(t, config.NodeTypeFull)
+	peer, err := identity.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	register := func(address domain.PeerAddress) (domain.ConnID, *netcore.NetCore) {
+		id, core := newTrackedInboundHealthConn(t, svc, address)
+		core.SetAuth(&connauth.State{Verified: true, Hello: protocol.Frame{
+			Address: peer.Address, PubKey: identity.PublicKeyBase64(peer.PublicKey),
+		}})
+		return id, core
+	}
+	oldID, old := register("192.0.2.111:64646")
+	liveID, _ := register("192.0.2.112:64646")
+	held := receiptFrom("receipt-author", peer.Address, "ack-delete-transport")
+	seedReceiptBacklog(svc, held)
+	ack := (ackingPeer{id: peer}).ack(held.Sender, held.MessageID, held.Status)
+	wire, err := protocol.MarshalFrameLine(ack)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old.ShutSendQueue()
+	if svc.netCoreForID(oldID) != old {
+		t.Fatal("test must exercise the interval before unregister")
+	}
+	svc.dispatchNetworkFrame(oldID, wire)
+	if got := heldReceipts(svc, peer.Address); len(got) != 1 || got[0].MessageID != held.MessageID {
+		t.Fatal("closed transport removed the queued receipt")
+	}
+	svc.dispatchNetworkFrame(liveID, wire)
+	if got := heldReceipts(svc, peer.Address); len(got) != 0 {
+		t.Fatal("open transport did not acknowledge the queued receipt")
+	}
+}
+
 // The forgery is rejected at the end node — but the ack it answers with
 // is legitimate traffic, and used to name only recipient+id+status. A
 // relay applied it to every receipt that looked like that, so the real
@@ -431,4 +467,58 @@ func callsAllowedKeyBuilder(expr ast.Expr, allowed map[string]bool) bool {
 		return allowed[fun.Sel.Name]
 	}
 	return false
+}
+
+func TestAckDeleteNamesExactSignedReceipt(t *testing.T) {
+	svc := newTestService(t, config.NodeTypeFull)
+	peer := newAckingPeer(t, svc)
+	signer, err := identity.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := receiptFrom(signer.Address, peer.id.Address, "signed-ack-target")
+	signed := legacy
+	signed.DeliveredAt = signed.DeliveredAt.UTC().Truncate(time.Second)
+	signed.Signature, err = protocol.SignDeliveryReceipt(domain.NetworkID(networkName),
+		deliveryMessageRef(madeByMessageRecipient(signed)), signed, signer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedReceiptBacklog(svc, legacy, signed)
+	ack := peer.ack(signed.Sender, signed.MessageID, signed.Status)
+	ack.ReceiptProof = signed.Signature
+	ack.Signature = identity.SignPayload(peer.id, ackDeletePayloadForFrame(ack))
+
+	if _, ok := svc.handleAckDeleteFrame(peer.connID, ack); ok {
+		t.Fatal("accepted extended ACK before capability negotiation")
+	}
+	svc.netCoreForID(peer.connID).SetCapabilities([]domain.Capability{domain.CapSignedReceiptAckV1})
+	wrong := ack
+	wrong.ReceiptProof = identity.SignPayload(signer, []byte("different receipt"))
+	if err := identity.VerifyPayload(peer.id.Address, identity.PublicKeyBase64(peer.id.PublicKey),
+		ackDeletePayloadForFrame(wrong), wrong.Signature); err == nil {
+		t.Fatal("receipt proof is missing from the signed transcript")
+	}
+	wrong.Signature = identity.SignPayload(peer.id, ackDeletePayloadForFrame(wrong))
+	if reply, ok := svc.handleAckDeleteFrame(peer.connID, wrong); !ok || reply.Count != 0 {
+		t.Fatalf("wrong proof deleted a receipt: %+v ok=%v", reply, ok)
+	}
+	if reply, ok := svc.handleAckDeleteFrame(peer.connID, ack); !ok || reply.Count != 1 {
+		t.Fatalf("correct proof failed: %+v ok=%v", reply, ok)
+	}
+	left := heldReceipts(svc, peer.id.Address)
+	if len(left) != 1 || left[0].Signature != "" {
+		t.Fatalf("expected only the unsigned copy to remain, got %d receipts", len(left))
+	}
+
+	full := svc.buildAckDeleteFrame(ackDeleteForReceipt(signed))
+	oldSession := sessionAtVersion("legacy", config.ProtocolVersionReceiptSenderAck)
+	if got := svc.stampAckDeleteForSession(oldSession, legacyPeerSendItem(full)); got.Type != "" {
+		t.Fatal("sent a signed-copy ACK on a legacy session")
+	}
+	oldSession.capabilities = []domain.Capability{domain.CapSignedReceiptAckV1}
+	stamped := svc.stampAckDeleteForSession(oldSession, legacyPeerSendItem(full))
+	if stamped.ReceiptProof != signed.Signature || stamped.ReceiptSender != signed.Sender {
+		t.Fatal("session stamp lost the exact receipt proof")
+	}
 }

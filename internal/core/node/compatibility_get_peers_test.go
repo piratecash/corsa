@@ -8,10 +8,33 @@ import (
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/config"
+	"github.com/piratecash/corsa/internal/core/connauth"
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
+
+func TestGetPeersUsesOriginalTransportGate(t *testing.T) {
+	svc := newTestService(t, config.NodeTypeFull)
+	const address = domain.PeerAddress("192.0.2.113:64646")
+	id, core := newTrackedInboundHealthConn(t, svc, address)
+	core.SetAuth(&connauth.State{Verified: true, Hello: protocol.Frame{Address: idPeerB.String()}})
+	const request = "{\"type\":\"get_peers\"}\n"
+	svc.peersExchangeAccessNanos.Store(0)
+	svc.dispatchNetworkFrame(id, request)
+	if svc.peersExchangeAccessNanos.Load() == 0 {
+		t.Fatal("open connection did not build a peer exchange reply")
+	}
+	core.ShutSendQueue()
+	if svc.netCoreForID(id) != core {
+		t.Fatal("test must exercise the interval before unregister")
+	}
+	svc.peersExchangeAccessNanos.Store(0)
+	svc.dispatchNetworkFrame(id, request)
+	if svc.peersExchangeAccessNanos.Load() != 0 {
+		t.Fatal("closed connection built a peer exchange reply")
+	}
+}
 
 // Compatibility tests for Step 7 of docs/peer-discovery-conditional-get-peers.ru.md.
 //

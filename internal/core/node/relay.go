@@ -9,6 +9,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/piratecash/corsa/internal/core/crashlog"
+	"github.com/piratecash/corsa/internal/core/directmsg"
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
@@ -131,6 +132,7 @@ type relayForwardState struct {
 	// charges this and never re-resolves the address, which may by then be
 	// held by another connection. Zero when no connection held the address
 	// (the frame was queued locally): such an attempt is charged to nobody.
+	// The store drops receive evidence so it cannot retain a transport.
 	ForwardedVia routingSender
 	// Captured identities, never identities resolved from old addresses. The
 	// fixed history bounds memory; incomplete history disables only the
@@ -310,6 +312,7 @@ func (rs *relayStateStore) decrementTTLs() {
 // no wildcard operation may update or retire every message under a wire ID.
 // Caller owns rs.mu.
 func (rs *relayStateStore) setStateLocked(state *relayForwardState) {
+	state.ForwardedVia.receive = nil
 	rs.states[state.Message] = state
 	refs := rs.byID[state.Message.ID]
 	if refs == nil {
@@ -463,6 +466,7 @@ func (rs *relayStateStore) store(state *relayForwardState) bool {
 		}
 		existing.ForwardedTo = state.ForwardedTo
 		existing.ForwardedVia = state.ForwardedVia
+		existing.ForwardedVia.receive = nil
 		existing.NextHopSelection = state.NextHopSelection
 		existing.RemainingTTL = state.RemainingTTL
 		// Phase 3 PR 12.3 — FrameLine is the wire payload kept for
@@ -784,6 +788,7 @@ func (rs *relayStateStore) recordFailoverRetry(ref domain.MessageRef, newAddress
 	}
 	state.ForwardedTo = newAddress
 	state.ForwardedVia = via
+	state.ForwardedVia.receive = nil
 	state.NextHopSelection = relayNextHopFailover
 	state.RetryAttempt++
 	state.HopAckRemainingTicks = defaultHopAckBudgetSeconds
@@ -826,11 +831,8 @@ func (rs *relayStateStore) retryAttemptCountFor(ref domain.MessageRef) (int, boo
 // syncSession is an optional outbound peer session that can be reused for
 // on-demand sender-key sync (fetch_contacts). When the relay arrives on an
 // inbound connection, the caller looks up the outbound session to the same
-// peer and passes it here — this avoids opening a new TCP connection and
-// handles NATed peers whose transport address is not redialable. When the
-// relay arrives on an outbound session that may be inside a
-// peerSessionRequest read loop, the caller passes nil to avoid a deadlock
-// on the single-reader inboxCh.
+// peer and passes it here. When the relay arrives on an outbound session,
+// the caller passes that session for its owned key-sync requests.
 func (s *Service) handleRelayMessage(senderAddress domain.PeerAddress, syncSession *peerSession, frame protocol.Frame) string {
 	messageID := frame.ID
 	recipient := frame.Recipient
@@ -1271,15 +1273,17 @@ func (s *Service) deliverRelayedMessage(senderAddress domain.PeerAddress, syncSe
 	return true
 }
 
-// sendRelayHopAck sends a relay_hop_ack frame back to the peer that forwarded
-// the relay message to us.
-func (s *Service) sendRelayHopAck(peerAddress domain.PeerAddress, messageID, status string) {
+// sendRelayHopAck replies on the outbound session that delivered the relay.
+func (s *Service) sendRelayHopAck(session *peerSession, messageID, status string) {
+	if !session.receive.ReceiveReady() {
+		return
+	}
 	ackFrame := protocol.Frame{
 		Type:   "relay_hop_ack",
 		ID:     messageID,
 		Status: status,
 	}
-	s.enqueuePeerFrame(peerAddress, ackFrame)
+	s.enqueueSessionSendItem(session, legacyPeerSendItem(ackFrame))
 }
 
 // handleRelayHopAck processes an incoming relay_hop_ack frame. It
@@ -1298,6 +1302,9 @@ func (s *Service) sendRelayHopAck(peerAddress domain.PeerAddress, messageID, sta
 // This is message-ID acknowledgement, not cryptographic per-retry freshness:
 // another session of the same identity may acknowledge the current message.
 func (s *Service) handleRelayHopAck(senderAddress domain.PeerAddress, sender routingSender, frame protocol.Frame) {
+	if !sender.receiveReady() {
+		return
+	}
 	log.Debug().
 		Str("id", frame.ID).
 		Str("from", string(senderAddress)).
@@ -1839,14 +1846,7 @@ func (s *Service) gossipReceipt(receipt protocol.DeliveryReceipt) {
 
 func (s *Service) sendReceiptToPeer(address domain.PeerAddress, receipt protocol.DeliveryReceipt) bool {
 	defer crashlog.DeferRecover()
-	frame := protocol.Frame{
-		Type:        "relay_delivery_receipt",
-		ID:          string(receipt.MessageID),
-		Address:     receipt.Sender,
-		Recipient:   receipt.Recipient,
-		Status:      receipt.Status,
-		DeliveredAt: receipt.DeliveredAt.UTC().Format(time.RFC3339),
-	}
+	frame := relayReceiptFrame(receipt)
 	if s.enqueuePeerFrame(address, frame) {
 		log.Debug().Str("message_id", string(receipt.MessageID)).Str("recipient", receipt.Recipient).Str("peer", string(address)).Str("mode", "session").Str("status", receipt.Status).Msg("route_receipt_attempt")
 		return true
@@ -1857,6 +1857,19 @@ func (s *Service) sendReceiptToPeer(address domain.PeerAddress, receipt protocol
 	}
 	log.Debug().Str("message_id", string(receipt.MessageID)).Str("recipient", receipt.Recipient).Str("peer", string(address)).Str("mode", "dropped").Str("status", receipt.Status).Msg("route_receipt_attempt")
 	return false
+}
+
+func relayReceiptFrame(receipt protocol.DeliveryReceipt) protocol.Frame {
+	return protocol.Frame{
+		Type:        "relay_delivery_receipt",
+		ID:          string(receipt.MessageID),
+		Address:     receipt.Sender,
+		Recipient:   receipt.Recipient,
+		Status:      receipt.Status,
+		Signature:   receipt.Signature,
+		PubKey:      receipt.SignerPublicKey,
+		DeliveredAt: receipt.DeliveredAt.UTC().Format(time.RFC3339),
+	}
 }
 
 func (s *Service) retryRelayDeliveries() {
@@ -2378,7 +2391,9 @@ func (s *Service) deleteBacklogMessageForRecipient(recipient string, messageID p
 // name the author. Then the rule is "delete only if unambiguous": one
 // candidate is deleted, several are all KEPT. Keeping costs a duplicate
 // push the peer discards; deleting the wrong one costs the delivery.
-func (s *Service) deleteBacklogReceiptForRecipient(target receiptIdentity) int {
+// A legacy ack retires only unsigned receipts. The extended form must
+// name the exact receipt proof.
+func (s *Service) deleteBacklogReceiptForRecipient(target receiptIdentity, proof string) int {
 	recipient, messageID := target.Recipient, target.MessageID
 	log.Trace().Str("site", "deleteBacklogReceiptForRecipient").Str("phase", "lock_wait").Str("recipient", recipient).Str("msg_id", string(messageID)).Msg("delivery_mu_writer")
 	s.deliveryMu.Lock()
@@ -2392,7 +2407,7 @@ func (s *Service) deleteBacklogReceiptForRecipient(target receiptIdentity) int {
 	if !target.senderKnown() {
 		candidates := 0
 		for _, receipt := range list {
-			if target.matches(receipt) {
+			if receipt.Signature == proof && target.matches(receipt) {
 				candidates++
 			}
 		}
@@ -2406,7 +2421,7 @@ func (s *Service) deleteBacklogReceiptForRecipient(target receiptIdentity) int {
 	filtered := list[:0]
 	removed := 0
 	for _, receipt := range list {
-		if target.matches(receipt) {
+		if receipt.Signature == proof && target.matches(receipt) {
 			delete(s.relayRetry, relayReceiptKey(receipt))
 			removed++
 			continue
@@ -2616,7 +2631,7 @@ func (s *Service) clearRelayRetryForOutbound(frame protocol.Frame) {
 	if strings.TrimSpace(frame.Address) == "" {
 		return
 	}
-	key := identityFromRelayFrame(frame).retryKey()
+	key := identityFromRelayFrame(frame).retryKey(frame.Signature != "")
 
 	log.Trace().Str("site", "clearRelayRetryForOutbound").Str("phase", "lock_wait").Str("key", key).Str("msg_id", frame.ID).Msg("delivery_mu_writer")
 	s.deliveryMu.Lock()
@@ -2633,7 +2648,10 @@ func (s *Service) clearRelayRetryForOutbound(frame protocol.Frame) {
 
 func (s *Service) emitDeliveryReceipt(msg incomingMessage) {
 	defer crashlog.DeferRecover()
-	s.storeDeliveryReceipt(deliveredReceiptFor(s.identity.Address, msg))
+	receipt, ok := s.prepareOwnDeliveryReceipt(deliveredReceiptFor(s.identity.Address, msg), directmsg.HasV2EnvelopePrefix([]byte(msg.Body)))
+	if ok {
+		s.storeDeliveryReceipt(receipt)
+	}
 }
 
 // resendDeliveryReceipt redistributes the delivered receipt for a DM that
@@ -2645,7 +2663,10 @@ func (s *Service) emitDeliveryReceipt(msg incomingMessage) {
 // receipt state.
 func (s *Service) resendDeliveryReceipt(msg incomingMessage) {
 	defer crashlog.DeferRecover()
-	receipt := deliveredReceiptFor(s.identity.Address, msg)
+	receipt, ok := s.prepareOwnDeliveryReceipt(deliveredReceiptFor(s.identity.Address, msg), directmsg.HasV2EnvelopePrefix([]byte(msg.Body)))
+	if !ok {
+		return
+	}
 	log.Info().Str("message_id", string(receipt.MessageID)).Str("recipient", receipt.Recipient).Msg("resending delivered receipt for duplicate DM")
 	s.distributeReceipt(receipt)
 }

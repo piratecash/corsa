@@ -12,6 +12,7 @@ import (
 	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/netcore"
 	"github.com/piratecash/corsa/internal/core/protocol"
+	"github.com/piratecash/corsa/internal/core/routing"
 )
 
 // drainPipe creates a net.Pipe and starts a goroutine that drains reads on
@@ -426,6 +427,7 @@ func TestSessionRelayDeliveryReceiptForwardsTransitReceipt(t *testing.T) {
 	// Simulate the sending peer (where the receipt arrives from).
 	senderAddr := domain.PeerAddress("relay-hop-peer")
 	senderSession := &peerSession{
+		receive: routing.NewAnnounceReceiveState(nil),
 		address: senderAddr,
 		sendCh:  make(chan peerSendItem, 1),
 		authOK:  true,
@@ -496,6 +498,7 @@ func TestSessionRelayDeliveryReceiptGossipsFallbackForUnknown(t *testing.T) {
 
 	senderAddr := domain.PeerAddress("some-peer")
 	senderSession := &peerSession{
+		receive: routing.NewAnnounceReceiveState(nil),
 		address: senderAddr,
 		sendCh:  make(chan peerSendItem, 1),
 		authOK:  true,
@@ -695,6 +698,7 @@ func TestSessionRelayDeliveryReceiptDedupeGossip(t *testing.T) {
 
 	senderAddr := domain.PeerAddress("dedupe-sender-peer")
 	senderSession := &peerSession{
+		receive: routing.NewAnnounceReceiveState(nil),
 		address: senderAddr,
 		sendCh:  make(chan peerSendItem, 1),
 		authOK:  true,
@@ -764,6 +768,7 @@ func TestSessionRelayDeliveryReceiptDedupeForward(t *testing.T) {
 
 	senderAddr := domain.PeerAddress("dedupe-sess-sender")
 	senderSession := &peerSession{
+		receive: routing.NewAnnounceReceiveState(nil),
 		address: senderAddr,
 		sendCh:  make(chan peerSendItem, 1),
 		authOK:  true,
@@ -890,6 +895,7 @@ func TestSessionRelayDeliveryReceiptRetryAfterNoTargets(t *testing.T) {
 
 	senderAddr := domain.PeerAddress("recovery-sender-peer")
 	senderSession := &peerSession{
+		receive: routing.NewAnnounceReceiveState(nil),
 		address: senderAddr,
 		sendCh:  make(chan peerSendItem, 1),
 		authOK:  true,

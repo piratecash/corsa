@@ -5,10 +5,70 @@ import (
 	"testing"
 	"time"
 
+	"github.com/piratecash/corsa/internal/core/config"
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/netcore"
 	"github.com/piratecash/corsa/internal/core/protocol"
 	"github.com/piratecash/corsa/internal/core/routing"
 )
+
+func TestHopAckUsesOriginalTransportGate(t *testing.T) {
+	for _, direction := range []string{"inbound", "outbound"} {
+		t.Run(direction, func(t *testing.T) {
+			svc := newTestService(t, config.NodeTypeFull)
+			newSender := func(id domain.ConnID, address domain.PeerAddress) (routingSender, *netcore.NetCore) {
+				if direction == "inbound" {
+					id, core := newTrackedInboundHealthConn(t, svc, address)
+					return svc.inboundRoutingSender(id), core
+				}
+				session := newReceiveOwnerSession(t, svc, id, address)
+				return sessionRoutingSender(session), session.netCore
+			}
+			const oldAddress, liveAddress = "192.0.2.98:64646", "192.0.2.99:64646"
+			old, oldCore := newSender(5930, oldAddress)
+			live, _ := newSender(5931, liveAddress)
+			ref := relayStateFixtureRef("hop-ack-gate")
+			store := svc.relayStates
+			assertAttempt := func(via routingSender, payload string) {
+				t.Helper()
+				store.mu.Lock()
+				state := *store.states[ref]
+				store.mu.Unlock()
+				if state.ForwardedVia.receive != nil || state.ForwardedVia.identity != via.identity || state.ForwardedVia.penalty != via.penalty {
+					t.Fatal("forwarding state did not keep only the send-time identity and penalty subject")
+				}
+				if state.HopAckObserved || state.HopAckRemainingTicks != defaultHopAckBudgetSeconds || state.FrameLine != payload {
+					t.Fatal("forwarding attempt lost its timer or retry payload")
+				}
+			}
+			for _, via := range []routingSender{old, live} {
+				if !store.store(&relayForwardState{
+					Message: ref, Recipient: idTargetX, ForwardedTo: oldAddress, ForwardedVia: via,
+					NextHopSelection: relayNextHopRoutingTable, HopAckRemainingTicks: defaultHopAckBudgetSeconds, FrameLine: "initial",
+				}) {
+					t.Fatal("fixture did not store the initial or updated attempt")
+				}
+				assertAttempt(via, "initial")
+			}
+			if !store.recordFailoverRetry(ref, liveAddress, live, "retry") {
+				t.Fatal("fixture did not store the failover attempt")
+			}
+			assertAttempt(live, "retry")
+
+			oldCore.ShutSendQueue()
+			if svc.netCoreForID(oldCore.ConnID()) != oldCore {
+				t.Fatal("test must exercise the interval before unregister")
+			}
+			ack := protocol.Frame{Type: "relay_hop_ack", ID: string(ref.ID), Status: "forwarded"}
+			svc.handleRelayHopAck(oldAddress, old, ack)
+			assertAttempt(live, "retry")
+			svc.handleRelayHopAck(liveAddress, live, ack)
+			if !observedHopAck(t, svc, ref) {
+				t.Fatal("open transport of the current identity did not acknowledge the attempt")
+			}
+		})
+	}
+}
 
 // These are routing-state/handler fixtures, not authenticated wire sessions.
 // The captured sender values exercise attribution; they assert no per-retry
@@ -19,8 +79,8 @@ func TestHopAckReroutePreservesReplacementTimerAndPayload(t *testing.T) {
 			t.Run(fmt.Sprintf("%s/same-address-%v", transition, sameAddress), func(t *testing.T) {
 				svc := newTestServiceWithRoutingAndHealth(t, idNodeB)
 				svc.relayStates = newRelayStateStore()
-				a := &peerSession{address: "old", peerIdentity: idPeerA}
-				b := &peerSession{address: "new", peerIdentity: idPeerB}
+				a := legacyOutboundSession("old", idPeerA)
+				b := legacyOutboundSession("new", idPeerB)
 				if sameAddress {
 					b.address = a.address
 				}
@@ -89,10 +149,10 @@ func TestHopAckCreditsCapturedIdentityAcrossAddressReplacement(t *testing.T) {
 		t.Run(fmt.Sprintf("same-identity-other-session-%v", differentSession), func(t *testing.T) {
 			svc := newTestServiceWithRoutingAndHealth(t, idNodeB)
 			svc.relayStates = newRelayStateStore()
-			original := &peerSession{address: "shared-address", peerIdentity: idPeerA}
+			original := legacyOutboundSession("shared-address", idPeerA)
 			actual := original
 			if differentSession {
-				actual = &peerSession{address: "another-session", peerIdentity: idPeerA}
+				actual = legacyOutboundSession("another-session", idPeerA)
 			}
 			for _, id := range []domain.PeerIdentity{idPeerA, idPeerB} {
 				status, err := svc.routingTable.UpdateRoute(routing.RouteEntry{

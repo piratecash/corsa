@@ -8,9 +8,66 @@ import (
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/config"
+	"github.com/piratecash/corsa/internal/core/connauth"
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/identity"
+	"github.com/piratecash/corsa/internal/core/netcore"
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
+
+func newApplicationReceiveTransport(t *testing.T, svc *Service, inbound bool, id domain.ConnID, address domain.PeerAddress) (*netcore.NetCore, func(protocol.Frame)) {
+	t.Helper()
+	if inbound {
+		id, core := newTrackedInboundHealthConn(t, svc, address)
+		core.SetAuth(&connauth.State{Verified: true, Hello: protocol.Frame{Address: idPeerB.String()}})
+		return core, func(frame protocol.Frame) {
+			line, err := protocol.MarshalFrameLine(frame)
+			if err != nil {
+				t.Fatal(err)
+			}
+			svc.dispatchNetworkFrame(id, line)
+		}
+	}
+	session := newReceiveOwnerSession(t, svc, id, address)
+	return session.netCore, func(frame protocol.Frame) { svc.dispatchPeerSessionFrame(address, session, frame) }
+}
+
+func TestPushMessageAndNoticeUseOriginalTransport(t *testing.T) {
+	for _, direction := range []string{"inbound", "outbound"} {
+		t.Run(direction, func(t *testing.T) {
+			svc := newTestService(t, config.NodeTypeClient)
+			svc.runCtx = t.Context()
+			sender := registerSenderKey(t, svc)
+			old, dispatchOld := newApplicationReceiveTransport(t, svc, direction == "inbound", 5950, "192.0.2.105:64646")
+			_, dispatchLive := newApplicationReceiveTransport(t, svc, direction == "inbound", 5951, "192.0.2.106:64646")
+			push := protocol.Frame{Type: "push_message", Topic: "dm", Item: &protocol.MessageFrame{
+				ID: "push-transport", Sender: sender.Address, Recipient: svc.Address(),
+				Flag: string(protocol.MessageFlagImmutable), CreatedAt: time.Now().UTC().Format(time.RFC3339),
+				Body: sealDMBody(t, sender, svc.Address(), identity.BoxPublicKeyBase64(svc.identity.BoxPublicKey)),
+			}}
+			notice := protocol.Frame{Type: "push_notice", TTLSeconds: 30, Ciphertext: "transport-notice"}
+			assertStored := func(want int) {
+				t.Helper()
+				svc.gossipMu.RLock()
+				messages := len(svc.topics["dm"])
+				svc.gossipMu.RUnlock()
+				if notices := svc.fetchNoticesFrame().Count; messages != want || notices != want {
+					t.Fatalf("stored %d messages and %d notices, want %d of each", messages, notices, want)
+				}
+			}
+			old.ShutSendQueue()
+			if svc.netCoreForID(old.ConnID()) != old {
+				t.Fatal("test must exercise the interval before unregister")
+			}
+			dispatchOld(push)
+			dispatchOld(notice)
+			assertStored(0)
+			dispatchLive(push)
+			dispatchLive(notice)
+			assertStored(1)
+		})
+	}
+}
 
 func TestGazetaSharesNoticeAdmissionAcrossLocalAndPeerPaths(t *testing.T) {
 	s := &Service{cfg: config.Node{Type: domain.NodeTypeClient}}

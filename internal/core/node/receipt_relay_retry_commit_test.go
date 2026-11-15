@@ -8,6 +8,7 @@ import (
 
 	"github.com/stretchr/testify/mock"
 
+	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/netcore"
 	"github.com/piratecash/corsa/internal/core/protocol"
@@ -219,5 +220,63 @@ func TestStoreDeliveryReceipt_ConcurrentUnsubscribeLeavesNoOrphanRelayRetry(t *t
 	}
 	if orphans > 0 {
 		t.Fatalf("%d of %d interleavings left a relayRetry entry with no backlog receipt behind it", orphans, iterations)
+	}
+}
+
+func TestReceiptRelayRetrySeparatesSignedAndUnsignedCopies(t *testing.T) {
+	local, err := identity.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := identity.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := newInitMapsTestService(t, local)
+	const target = "transit-subscriber-identity"
+	_ = attachPushObserver(t, svc, target, netcore.ConnID(9421))
+	unsigned := transitReceiptFor("signed-relay-retry", target)
+	unsigned.Sender = signer.Address
+	unsigned.DeliveredAt = unsigned.DeliveredAt.UTC().Truncate(time.Second)
+	signed := unsigned
+	signed.SignerPublicKey = identity.PublicKeyBase64(signer.PublicKey)
+	signed.Signature, err = protocol.SignDeliveryReceipt(domain.NetworkID(networkName), deliveryMessageRef(madeByMessageRecipient(signed)), signed, signer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, receipt := range []protocol.DeliveryReceipt{unsigned, signed} {
+		_, _, _, result := svc.finishReceipt(receiptKeyOf(receipt), receipt, false)
+		if result != committedFirst {
+			t.Fatalf("commit = %v, want committedFirst", result)
+		}
+	}
+	svc.deliveryMu.RLock()
+	_, legacyArmed := svc.relayRetry[relayReceiptKey(unsigned)]
+	_, signedArmed := svc.relayRetry[relayReceiptKey(signed)]
+	count := len(svc.relayRetry)
+	svc.deliveryMu.RUnlock()
+	if !legacyArmed || !signedArmed || count != 2 {
+		t.Fatalf("expected independent retry entries, legacy=%v signed=%v count=%d", legacyArmed, signedArmed, count)
+	}
+
+	svc.clearRelayRetryForOutbound(relayReceiptFrame(unsigned))
+	if removed := svc.deleteBacklogReceiptForRecipient(identityOf(unsigned), ""); removed != 1 {
+		t.Fatalf("legacy ack deleted %d receipts, want 1", removed)
+	}
+	svc.deliveryMu.RLock()
+	_, legacyArmed = svc.relayRetry[relayReceiptKey(unsigned)]
+	_, signedArmed = svc.relayRetry[relayReceiptKey(signed)]
+	left := append([]protocol.DeliveryReceipt(nil), svc.receipts[target]...)
+	svc.deliveryMu.RUnlock()
+	if legacyArmed || !signedArmed || len(left) != 1 || left[0].Signature != signed.Signature {
+		t.Fatalf("legacy completion affected signed backlog: legacy=%v signed=%v rows=%d", legacyArmed, signedArmed, len(left))
+	}
+
+	svc.clearRelayRetryForOutbound(relayReceiptFrame(signed))
+	svc.deliveryMu.RLock()
+	_, signedArmed = svc.relayRetry[relayReceiptKey(signed)]
+	svc.deliveryMu.RUnlock()
+	if signedArmed {
+		t.Fatal("confirmed signed frame did not clear its own retry")
 	}
 }

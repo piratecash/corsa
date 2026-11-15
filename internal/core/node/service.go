@@ -3,6 +3,7 @@ package node
 import (
 	"bufio"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -4158,8 +4159,19 @@ func (s *Service) dispatchNetworkFrameOwned(connID domain.ConnID, wire string, o
 		owner.end()
 		return false
 	}
-
+	// Close retains the registry entry until its reader tears it down.
+	// A line already read before Close can arrive here after the transport
+	// writer has been joined, so neither RemoteAddr nor Verified proves it
+	// may still dispatch. Check before parsing or diverting datagrams.
 	core := s.netCoreForID(connID)
+	if core != nil {
+		select {
+		case <-core.WriterExited():
+			owner.end()
+			return false
+		default:
+		}
+	}
 
 	// A DATAGRAM NEVER REACHES protocol.ParseFrameLine.
 	// docs/protocol/datagram.md §4.1 step 1 charges the neighbour's byte and
@@ -4545,6 +4557,12 @@ func (s *Service) dispatchNetworkFrameOwned(connID domain.ConnID, wire string, o
 		return false
 	}
 
+	// Setup requests can arrive before the peer is published as active. Their
+	// authority comes from this connection, including when it is closing.
+	if (frame.Type == "get_peers" || frame.Type == "fetch_contacts") && !s.inboundRoutingSender(connID).receiveReady() {
+		accepted = false
+		return true
+	}
 	switch frame.Type {
 	case "get_peers":
 		// P2P peer discovery: authenticated peers request the peer list
@@ -4597,6 +4615,10 @@ func (s *Service) dispatchNetworkFrameOwned(connID domain.ConnID, wire string, o
 		_ = s.sendHandshakeReplyViaNetwork(s.runCtx, connID, s.contactsFrameForNetwork())
 		return true
 	case "ack_delete":
+		if !s.inboundRoutingSender(connID).receiveReady() {
+			accepted = false
+			return true
+		}
 		reply, ok := s.handleAckDeleteFrameOwned(connID, frame, owner)
 		if !ok {
 			owner.end()
@@ -4607,12 +4629,24 @@ func (s *Service) dispatchNetworkFrameOwned(connID domain.ConnID, wire string, o
 		_ = s.sendFrameViaNetwork(s.runCtx, connID, reply)
 		return true
 	case "push_message":
+		if !s.inboundRoutingSender(connID).receiveReady() {
+			accepted = false
+			return true
+		}
 		s.handleInboundPushMessage(connID, frame)
 		return true
 	case "push_delivery_receipt":
+		if !s.inboundRoutingSender(connID).receiveReady() {
+			accepted = false
+			return true
+		}
 		s.handleInboundPushDeliveryReceipt(connID, frame)
 		return true
 	case "relay_delivery_receipt":
+		if !s.inboundRoutingSender(connID).receiveReady() {
+			accepted = false
+			return true
+		}
 		// Gossip receipt path: a peer forwards a delivery receipt via
 		// the flat-field format (ID, Address, Recipient, Status,
 		// DeliveredAt) rather than the ReceiptFrame used by push.
@@ -4625,6 +4659,10 @@ func (s *Service) dispatchNetworkFrameOwned(connID domain.ConnID, wire string, o
 		s.handleInboundRelayDeliveryReceipt(connID, frame)
 		return true
 	case "push_notice":
+		if !s.inboundRoutingSender(connID).receiveReady() {
+			accepted = false
+			return true
+		}
 		s.handleInboundPushNotice(frame)
 		return true
 	case "announce_peer":
@@ -4646,13 +4684,21 @@ func (s *Service) dispatchNetworkFrameOwned(connID domain.ConnID, wire string, o
 			if peer == "" || classifyAddress(domain.PeerAddress(peer)) == domain.NetGroupLocal {
 				continue
 			}
-			s.promotePeerAddress(domain.PeerAddress(peer))
+			if !s.promotePeerAddressFromInbound(domain.PeerAddress(peer), connID, core) {
+				accepted = false
+				owner.end()
+				return false
+			}
 		}
 		_ = s.sendFrameViaNetwork(s.runCtx, connID, protocol.Frame{Type: "announce_peer_ack"})
 		return true
 	case "relay_message":
 		// Auth gate enforced above (INV-9).
 		if admit := admitRelayFrame(s.connHasCapability(connID, domain.CapMeshRelayV1), len(frame.Body)); admit != relayAdmitOK {
+			accepted = false
+			return true
+		}
+		if !s.inboundRoutingSender(connID).receiveReady() {
 			accepted = false
 			return true
 		}
@@ -4751,10 +4797,15 @@ func (s *Service) dispatchNetworkFrameOwned(connID domain.ConnID, wire string, o
 			accepted = false
 			return true
 		}
+		sender := s.inboundRoutingSender(connID)
+		if !sender.receiveReady() {
+			accepted = false
+			return true
+		}
 		// Pass the inbound peer identity so the file router applies
 		// split-horizon forwarding and never reflects the frame back
 		// to the neighbor that just delivered it.
-		s.handleFileCommandFrame(json.RawMessage(line), s.inboundPeerIdentity(connID))
+		s.handleFileCommandFrame(json.RawMessage(line), sender.identity)
 		return true
 	case "route_probe_v1":
 		// Auth gate enforced above. Phase 2 reachability probe gated
@@ -5832,6 +5883,14 @@ func ackDeletePayload(address, ackType, id, status string) []byte {
 // through here, so neither can pick the shape by its own assumption
 // about the other's version.
 func ackDeletePayloadForFrame(frame protocol.Frame) []byte {
+	if frame.ReceiptProof != "" {
+		payload := []byte("corsa-ack-delete-v3\x00")
+		for _, value := range []string{frame.Address, frame.AckType, frame.ID, frame.Status, frame.ReceiptSender, frame.ReceiptProof} {
+			payload = binary.AppendUvarint(payload, uint64(len(value)))
+			payload = append(payload, value...)
+		}
+		return payload
+	}
 	if frame.ReceiptSender == "" {
 		return ackDeletePayload(frame.Address, frame.AckType, frame.ID, frame.Status)
 	}
@@ -7643,6 +7702,11 @@ func (s *Service) handleAckDeleteFrameOwned(id domain.ConnID, frame protocol.Fra
 		s.addBanScore(id, banIncrementInvalidSig)
 		return protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidAckDelete, Error: "invalid ack identity or id"}, false
 	}
+	if frame.ReceiptProof != "" && (frame.AckType != "receipt" || frame.ReceiptSender == "" ||
+		!s.connHasCapability(id, domain.CapSignedReceiptAckV1)) {
+		owner.end()
+		return protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidAckDelete}, false
+	}
 	if err := identity.VerifyPayload(hello.Address, hello.PubKey, ackDeletePayloadForFrame(frame), frame.Signature); err != nil {
 		owner.end()
 		s.addBanScore(id, banIncrementInvalidSig)
@@ -7675,7 +7739,7 @@ func (s *Service) handleAckDeleteFrameOwned(id domain.ConnID, frame protocol.Fra
 			log.Debug().Str("message_id", frame.ID).Str("peer", frame.Address).Int("removed", count).Msg("ack_delete_suppression_not_recorded_not_relayed")
 		}
 	case "receipt":
-		count = s.deleteBacklogReceiptForRecipient(identityFromAck(frame))
+		count = s.deleteBacklogReceiptForRecipient(identityFromAck(frame), frame.ReceiptProof)
 	default:
 		owner.end()
 		return protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidAckDelete, Error: "unknown ack type"}, false
@@ -7808,7 +7872,13 @@ func (s *Service) storeIncomingMessageWithR2a(msg incomingMessage, validateTimes
 				log.Warn().Str("node", s.identity.Address).Str("id", string(msg.ID)).Str("sender", msg.Sender).Msg("cached_boxkey_binding_invalid_superseded_by_attached")
 			}
 		}
-		if err := directmsg.VerifyEnvelope(msg.Sender, senderPubKey, msg.Recipient, msg.Body); err != nil {
+		var verifyErr error
+		if msg.Topic == "dm" && msg.Recipient == s.identity.Address {
+			verifyErr = directmsg.VerifyDataEnvelopeForRecipient(s.identity, msg.Sender, senderPubKey, msg.Body)
+		} else {
+			verifyErr = directmsg.VerifyEnvelope(msg.Sender, senderPubKey, msg.Recipient, msg.Body)
+		}
+		if verifyErr != nil {
 			return false, 0, protocol.ErrCodeInvalidDirectMessageSig
 		}
 		// The envelope signature verified — NOW the attached material
@@ -8929,7 +8999,7 @@ func (s *Service) finishReceipt(key string, receipt protocol.DeliveryReceipt, en
 		msgAffected = s.clearPendingMessageLocked(confirmed)
 		s.dropConfirmedRelayMessageRetryLocked(confirmed)
 	}
-	rcptAffected := s.clearPendingReceiptLocked(identityOf(receipt))
+	rcptAffected := s.clearPendingReceiptLocked(identityOf(receipt), receipt.Signature != "")
 	delete(s.relayRetry, relayReceiptKey(receipt))
 	deltas = mergePendingDeltas(msgAffected, rcptAffected)
 	// statusMu is INNERMOST per canonical deliveryMu → statusMu order —
@@ -9066,6 +9136,14 @@ func (s *Service) storeDeliveryReceiptWithSeenReply(receipt protocol.DeliveryRec
 	log.Trace().Str("site", "storeDeliveryReceipt").Str("phase", "lock_wait").Str("msg_id", string(receipt.MessageID)).Msg("delivery_mu_writer")
 	s.deliveryMu.Lock()
 	log.Trace().Str("site", "storeDeliveryReceipt").Str("phase", "lock_held").Str("msg_id", string(receipt.MessageID)).Msg("delivery_mu_writer")
+	if receipt.Signature == "" && receipt.Recipient == s.identity.Address && protocol.ReceiptStatusConfirmsDelivery(receipt.Status) {
+		entry := s.awaitingDelivered[madeByMessageRecipient(receipt)]
+		if entry != nil && directmsg.HasV2EnvelopePrefix(entry.Envelope.Payload) {
+			s.deliveryMu.Unlock()
+			s.peerMu.Unlock()
+			return receiptOutcome{}
+		}
+	}
 	if s.seenReceipts.Has(key) {
 		// The key is written by finishReceipt, so it is here only if a
 		// previous copy of this receipt was fully handled — durable write
@@ -9530,7 +9608,7 @@ func (s *Service) clearPendingMessageLocked(message messageIdentity) []ebus.Peer
 // dedup keys and separate retry entries, and this was the last place
 // where committing one still discarded the other.
 // Caller MUST hold s.deliveryMu.Lock (mutates s.pending / s.pendingKeys).
-func (s *Service) clearPendingReceiptLocked(target receiptIdentity) []ebus.PeerPendingDelta {
+func (s *Service) clearPendingReceiptLocked(target receiptIdentity, signed bool) []ebus.PeerPendingDelta {
 	if strings.TrimSpace(string(target.MessageID)) == "" || strings.TrimSpace(target.Recipient) == "" ||
 		strings.TrimSpace(target.Status) == "" || !target.senderKnown() {
 		return nil
@@ -9541,7 +9619,7 @@ func (s *Service) clearPendingReceiptLocked(target receiptIdentity) []ebus.PeerP
 		remaining := items[:0]
 		for _, item := range items {
 			if item.Frame.Type == "relay_delivery_receipt" &&
-				identityFromRelayFrame(item.Frame) == target {
+				identityFromRelayFrame(item.Frame) == target && (item.Frame.Signature != "") == signed {
 				delete(s.pendingKeys, pendingFrameKey(address, item.Frame))
 				continue
 			}
@@ -11175,6 +11253,10 @@ func (s *Service) handleInboundRelayDeliveryReceipt(connID domain.ConnID, frame 
 	if receipt.Recipient == s.identity.Address || s.hasSubscriber(receipt.Recipient) {
 		s.storeDeliveryReceipt(receipt)
 		log.Info().Str("peer", string(peerAddr)).Str("message_id", string(receipt.MessageID)).Str("recipient", receipt.Recipient).Str("status", receipt.Status).Msg("received relay_delivery_receipt (inbound)")
+		return
+	}
+
+	if !s.authenticateReceiptSignature(receipt) {
 		return
 	}
 

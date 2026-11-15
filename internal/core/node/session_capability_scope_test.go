@@ -1,6 +1,7 @@
 package node
 
 import (
+	"bufio"
 	"encoding/json"
 	"net"
 	"strings"
@@ -9,7 +10,9 @@ import (
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/config"
+	"github.com/piratecash/corsa/internal/core/connauth"
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/netcore"
 	"github.com/piratecash/corsa/internal/core/protocol"
 	"github.com/piratecash/corsa/internal/core/routing"
 	"github.com/piratecash/corsa/internal/core/service/filerouter"
@@ -241,11 +244,68 @@ func TestFileCommandRefusedWhenDeliveringSessionLacksCapability(t *testing.T) {
 // one outbound session whose negotiated set is exactly caps.
 func newFileCommandReadFixture(t *testing.T, caps ...domain.Capability) (*Service, net.Conn, *peerSession) {
 	t.Helper()
-	svc, peerEnd, session := newReadPeerSessionFixture(t)
+	svc := newTestService(t, config.NodeTypeFull)
+	peerEnd, nodeEnd := net.Pipe()
+	t.Cleanup(func() { _ = peerEnd.Close(); _ = nodeEnd.Close() })
+	session := &peerSession{
+		address: "192.0.2.109:64646", peerIdentity: idPeerB, connID: 5970, conn: nodeEnd, authOK: true, capabilities: caps,
+		sendCh: make(chan peerSendItem, 4), inboxCh: make(chan protocol.Frame, 8), errCh: make(chan error, 4),
+	}
+	if err := svc.attachOutboundNetCore(session); err != nil {
+		t.Fatal(err)
+	}
 	svc.peerMu.Lock()
-	session.capabilities = caps
+	svc.sessions[session.address] = session
+	svc.health[session.address] = &peerHealth{Connected: true}
 	svc.peerMu.Unlock()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		svc.readPeerSession(bufio.NewReader(nodeEnd), session)
+	}()
+	t.Cleanup(func() { _ = session.Close(); <-done })
 	return svc, peerEnd, session
+}
+
+func TestFileCommandUsesOriginalTransportGate(t *testing.T) {
+	t.Run("outbound", func(t *testing.T) {
+		svc, peerEnd, session := newFileCommandReadFixture(t, domain.CapFileTransferV1)
+		cache := installRecordingFileRouter(svc)
+		writeWireLine(t, peerEnd, fileCommandWireLine(t))
+		writeWireLine(t, peerEnd, barrierPingLine)
+		if frame := awaitInboxFrame(t, session); frame.Type != "ping" || cache.count() != 1 {
+			t.Fatal("open transport did not pass the file command to the router")
+		}
+		session.netCore.ShutSendQueue()
+		if svc.netCoreForID(session.connID) != session.netCore {
+			t.Fatal("test must exercise the interval before unregister")
+		}
+		writeWireLine(t, peerEnd, fileCommandWireLine(t))
+		writeWireLine(t, peerEnd, barrierPingLine)
+		if frame := awaitInboxFrame(t, session); frame.Type != "ping" || cache.count() != 1 {
+			t.Fatal("closed transport passed another file command to the router")
+		}
+	})
+	t.Run("inbound", func(t *testing.T) {
+		svc := newTestService(t, config.NodeTypeFull)
+		cache := installRecordingFileRouter(svc)
+		const address = domain.PeerAddress("192.0.2.110:64646")
+		id, core := newTrackedInboundHealthConn(t, svc, address)
+		core.ApplyOpts(netcore.Options{Address: address, Identity: idPeerB, Caps: []domain.Capability{domain.CapFileTransferV1}})
+		core.SetAuth(&connauth.State{Verified: true, Hello: protocol.Frame{Address: idPeerB.String()}})
+		svc.dispatchNetworkFrame(id, fileCommandWireLine(t))
+		if cache.count() != 1 {
+			t.Fatal("open transport did not pass the file command to the router")
+		}
+		core.ShutSendQueue()
+		if svc.netCoreForID(id) != core {
+			t.Fatal("test must exercise the interval before unregister")
+		}
+		svc.dispatchNetworkFrame(id, fileCommandWireLine(t))
+		if cache.count() != 1 {
+			t.Fatal("closed transport passed another file command to the router")
+		}
+	})
 }
 
 // ---------------------------------------------------------------------------

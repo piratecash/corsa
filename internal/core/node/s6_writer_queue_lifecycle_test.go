@@ -8,6 +8,7 @@ import (
 
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/netcore"
+	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
 func writerQueueService(t *testing.T, capacity int) (*Service, *PendingObservation) {
@@ -125,6 +126,60 @@ func TestS6WriterQueueHistoryDefaultAndInvalidCapacity(t *testing.T) {
 	} {
 		if s, _, err := NewServiceWithObservations(cfg, id, nil, options); s != nil || err == nil {
 			t.Fatalf("invalid options accepted: %+v", options)
+		}
+	}
+}
+
+func TestS6WriterQueueObservationPreservesOriginalTransportAdmission(t *testing.T) {
+	for _, mode := range []struct {
+		name     string
+		capacity int
+	}{
+		{"ordinary", 0},
+		{"observed", 2},
+	} {
+		for _, direction := range []struct {
+			name    string
+			inbound bool
+		}{
+			{"inbound", true},
+			{"outbound", false},
+		} {
+			t.Run(mode.name+"/"+direction.name, func(t *testing.T) {
+				svc, observation := writerQueueService(t, mode.capacity)
+				svc.runCtx = t.Context()
+				old, dispatchOld := newApplicationReceiveTransport(t, svc, direction.inbound, 5960, "192.0.2.107:64646")
+				live, dispatchLive := newApplicationReceiveTransport(t, svc, direction.inbound, 5961, "192.0.2.108:64646")
+				if old.ConnID() == live.ConnID() {
+					t.Fatal("fixture reused the original connection")
+				}
+				if mode.capacity > 0 {
+					if history := observation.WriterQueueHistory(); history.UnknownReason != "" || history.Registered != 2 {
+						t.Fatalf("writer history is unavailable: %+v", history)
+					}
+				} else if history := observation.WriterQueueHistory(); history.UnknownReason != "source_unavailable" {
+					t.Fatalf("writer history is enabled by default: %+v", history)
+				}
+
+				old.ShutSendQueue()
+				if svc.netCoreForID(old.ConnID()) != old || !live.AcceptingFrames() {
+					t.Fatal("fixture requires an old registered core and a live replacement")
+				}
+				notice := protocol.Frame{Type: "push_notice", TTLSeconds: 30, Ciphertext: "writer-queue-observation"}
+				dispatchOld(notice)
+				old.Close()
+				if svc.netCoreForID(old.ConnID()) != old {
+					t.Fatal("writer join unexpectedly removed the test registration")
+				}
+				dispatchOld(notice)
+				if got := svc.fetchNoticesFrame().Count; got != 0 {
+					t.Fatalf("closed original stored %d notices", got)
+				}
+				dispatchLive(notice)
+				if got := svc.fetchNoticesFrame().Count; got != 1 {
+					t.Fatalf("live transport stored %d notices, want 1", got)
+				}
+			})
 		}
 	}
 }

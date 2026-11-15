@@ -474,3 +474,26 @@ func TestSendSideRebuildsPreserveTheMessageIdentifier(t *testing.T) {
 		})
 	}
 }
+
+func TestRelabeledControlDMDoesNotEnterChatlog(t *testing.T) {
+	f := newCrossPathFixture(t)
+	const id = "0b6f3f2e-6c55-4a8e-9a8e-6f3c2b1a0d11"
+	boxKey := identity.BoxPublicKeyBase64(f.svc.identity.BoxPublicKey)
+	control := sealControlDMBody(t, f.sender, f.svc.Address(), boxKey)
+	if status := f.relayArrival(t, id, control, "10.0.0.1:64646"); status == "delivered" || status == "stored" {
+		t.Fatalf("relay acknowledged relabeled control DM as %q", status)
+	}
+	if stored, code := f.pushArrival(t, id, control); stored || code != protocol.ErrCodeInvalidDirectMessageSig {
+		t.Fatalf("push accepted relabeled control DM: stored=%v code=%q", stored, code)
+	}
+	if rows := f.store.rows("dm", domain.PeerIdentityFromWire(f.sender.Address)); len(rows) != 0 {
+		t.Fatalf("relabeled control DM reached chatlog: %d rows", len(rows))
+	}
+	data := sealDMBody(t, f.sender, f.svc.Address(), boxKey)
+	if stored, code := f.pushArrival(t, id, data); !stored || code != "" {
+		t.Fatalf("refused control DM occupied the ID: stored=%v code=%q", stored, code)
+	}
+	if events := f.announcements(t); len(events) != 1 || events[0] != id {
+		t.Fatalf("want one event for the legitimate DM, got %v", events)
+	}
+}

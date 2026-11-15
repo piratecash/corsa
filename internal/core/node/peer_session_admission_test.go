@@ -14,6 +14,7 @@ import (
 
 	"github.com/piratecash/corsa/internal/core/datagram"
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/netcore"
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
@@ -628,6 +629,50 @@ func TestInboundDispatchChargesTheDatagramBudgetOnTheWireLine(t *testing.T) {
 	if charged != uint64(len(wire)) {
 		t.Fatalf("charged %d bytes, want %d — the wire line, not the %d-byte trimmed form",
 			charged, len(wire), len(trimmed))
+	}
+}
+
+func TestDatagramClosedTransportChargesWithoutDispatch(t *testing.T) {
+	for _, direction := range []string{"inbound", "outbound"} {
+		t.Run(direction, func(t *testing.T) {
+			var svc *Service
+			var core *netcore.NetCore
+			var dispatch func(string)
+			if direction == "inbound" {
+				node, _, id := newLayeredDatagramInboundFixture(t, domain.CapMeshDatagramV1)
+				svc, core = node, node.netCoreForID(id)
+				dispatch = func(wire string) {
+					if !svc.handleCommand(id, wire) {
+						t.Fatal("datagram closed the reader")
+					}
+				}
+			} else {
+				svc = newDatagramLayerService(t, true)
+				requireDatagramPlane(t, svc)
+				registerFixtureDatagramTypes(t, svc)
+				session := newReceiveOwnerSession(t, svc, 5980, "192.0.2.114:64646")
+				session.capabilities = []domain.Capability{domain.CapMeshDatagramV1}
+				core = session.netCore
+				dispatch = func(wire string) { svc.dispatchSessionDatagramLine(session, wire) }
+			}
+			wire, _ := paddedDatagramWireLine(t)
+			dispatch(wire)
+			if got := datagramObservedCount(svc); got != 1 {
+				t.Fatalf("conveyor observed %d frames from the open transport, want 1", got)
+			}
+			core.ShutSendQueue()
+			if svc.netCoreForID(core.ConnID()) != core {
+				t.Fatal("test must exercise the interval before unregister")
+			}
+			dispatch(wire)
+			if got := datagramObservedCount(svc); got != 1 {
+				t.Fatalf("conveyor observed %d frames after closing the transport, want 1", got)
+			}
+			stats := svc.datagramLayer().admission.Stats()
+			if stats.Admitted != 2 || stats.AdmittedBytes != uint64(2*len(wire)) {
+				t.Fatalf("charged %d frames and %d bytes; want 2 and %d", stats.Admitted, stats.AdmittedBytes, 2*len(wire))
+			}
+		})
 	}
 }
 

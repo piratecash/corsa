@@ -13,7 +13,7 @@ import (
 
 func ownedNodeReceiveSourceErrors(sources map[string][]byte) []string {
 	var failures []string
-	pins := map[string]string{"find_node_owned_local_target.go": "3f72673fd435bb363ff434ef5fb728d61fc151e06f85b72a9e1a303599983915", "find_node_owned_answer.go": "db16c461c252487076df0515d067202c0d8dbbfd84ea0a3f35fc7b795b2c202e", "peer_session_admission.go": "0c3029c707c1741848bd9a959d9ad5aeb549e378cf0483e1a8c3f8853e5c0557", "find_node_owned_receive.go": "74305a5ace9ed0a3244ea03521ea293372fed406b32b04fabcd55a8bb1353a6f", "find_node_bridge_capture.go": "920726a9421c2a8eacacd8ce8bbd665937c7f830deadb29eabc5ae0f6b5c6ba4", "service.go": "e48454c300d2cc39e4eacccee891adc79ecc25095f0a3931eb6d2a515272ce2d", "peer_management.go": "6ebf337d4055fd3a5a18fc6f052fae78ad376413c5bc8abde9ed697f4ea0352b"}
+	pins := map[string]string{"find_node_owned_local_target.go": "3f72673fd435bb363ff434ef5fb728d61fc151e06f85b72a9e1a303599983915", "find_node_owned_answer.go": "db16c461c252487076df0515d067202c0d8dbbfd84ea0a3f35fc7b795b2c202e", "peer_session_admission.go": "0c3029c707c1741848bd9a959d9ad5aeb549e378cf0483e1a8c3f8853e5c0557", "find_node_owned_receive.go": "74305a5ace9ed0a3244ea03521ea293372fed406b32b04fabcd55a8bb1353a6f", "find_node_bridge_capture.go": "920726a9421c2a8eacacd8ce8bbd665937c7f830deadb29eabc5ae0f6b5c6ba4", "service.go": "be2a851a26296a0bd8fed251a880dad356cce0a6e1a2362cea0395826f703a3f", "peer_management.go": "d132871c6d846162c3d6ba0919b640cfe4367d5a5b8529b599136fc43e7a7f5b"}
 	for path, want := range pins {
 		if fmt.Sprintf("%x", sha256.Sum256(sources[path])) != want {
 			failures = append(failures, "owned ingress raw Source changed: "+path)

@@ -2468,10 +2468,33 @@ func (s *Service) addPeerAddress(address domain.PeerAddress, nodeType string, pe
 // trusting third-party metadata such as node type. Freshness boosting is
 // applied only on the first successful insertion.
 func (s *Service) promotePeerAddress(address domain.PeerAddress) {
+	s.promotePeerAddressIf(address, nil)
+}
+
+func (s *Service) promotePeerAddressFromInbound(address domain.PeerAddress, id domain.ConnID, original *netcore.NetCore) bool {
+	return s.promotePeerAddressIf(address, func() bool {
+		return original != nil && s.coreForIDLocked(id) == original && original.AcceptingFrames()
+	})
+}
+
+func (s *Service) promotePeerAddressFromSession(address domain.PeerAddress, session *peerSession) bool {
+	return s.promotePeerAddressIf(address, func() bool {
+		// The transport is registered before the authenticated setup exchange.
+		// At that point the session need not be published in s.sessions yet.
+		return session != nil && session.authOK && !session.eligibilityEnded.Load() &&
+			session.netCore != nil && s.coreForIDLocked(session.connID) == session.netCore &&
+			session.netCore.AcceptingFrames()
+	})
+}
+
+// promotePeerAddressIf checks admission under peerMu before changing the
+// peer directory. The admission check must not acquire a lock or do I/O.
+// A false result tells the reader that its transport ended.
+func (s *Service) promotePeerAddressIf(address domain.PeerAddress, admit func() bool) bool {
 	s.peerAdmissionMu.Lock()
 	defer s.peerAdmissionMu.Unlock()
 	if address == "" || s.isSelfAddress(address) || s.shouldSkipDialAddress(address) {
-		return
+		return true
 	}
 
 	shouldMarkFresh := false
@@ -2488,6 +2511,11 @@ func (s *Service) promotePeerAddress(address domain.PeerAddress) {
 		}()
 	}
 	log.Trace().Str("site", "promotePeerAddress").Str("phase", "lock_held").Str("address", string(address)).Msg("peer_mu_writer")
+	if admit != nil && !admit() {
+		adLocked = false
+		s.peerMu.Unlock()
+		return false
+	}
 	existing, found := s.findKnownPeerByIPLocked(address)
 	if found && existing != address {
 		// Network-learned/promoted peers keep a single stored address per IP.
@@ -2495,7 +2523,7 @@ func (s *Service) promotePeerAddress(address domain.PeerAddress) {
 		adLocked = false
 		s.peerMu.Unlock()
 		log.Trace().Str("site", "promotePeerAddress").Str("phase", "lock_released_sameIP").Str("address", string(address)).Msg("peer_mu_writer")
-		return
+		return true
 	}
 
 	if !found {
@@ -2504,7 +2532,7 @@ func (s *Service) promotePeerAddress(address domain.PeerAddress) {
 		if !admitted {
 			adLocked = false
 			s.peerMu.Unlock()
-			return
+			return true
 		}
 		now := s.peerNow()
 		s.peers = append(s.peers, transport.Peer{
@@ -2532,6 +2560,7 @@ func (s *Service) promotePeerAddress(address domain.PeerAddress) {
 			s.peerProvider.MarkFresh(address, freshPeerTTL)
 		}
 	}
+	return true
 }
 
 func (s *Service) findKnownPeerByIPLocked(address domain.PeerAddress) (domain.PeerAddress, bool) {
@@ -2858,7 +2887,7 @@ func (s *Service) readPeerSession(reader *bufio.Reader, session *peerSession) {
 		if frame.Type == protocol.FileCommandFrameType {
 			s.markSessionRead(session, frame)
 			s.markSessionUsefulReceive(session)
-			if s.sessionHasCapability(session, domain.CapFileTransferV1) {
+			if session.receive.ReceiveReady() && s.sessionHasCapability(session, domain.CapFileTransferV1) {
 				// Outbound session carries the peer identity directly;
 				// pass it so the file router can split-horizon forward
 				// and never reflect the frame back to this same peer.
@@ -4027,7 +4056,7 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *
 	s.markSessionUsefulReceive(session)
 	switch frame.Type {
 	case "push_message":
-		if frame.Item == nil {
+		if session == nil || !session.receive.ReceiveReady() || frame.Item == nil {
 			return
 		}
 		if len(frame.Item.Body) > maxPeerCommandBodyBytes {
@@ -4055,23 +4084,15 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *
 		}
 		// Ingress link for hop accounting + echo suppression
 		// (transit_retention.go).
-		if session != nil {
-			msg.Via = session.address
-			msg.ViaIdentity = session.peerIdentity
-		}
+		msg.Via = session.address
+		msg.ViaIdentity = session.peerIdentity
 
 		// Non-DM sender verification: reject messages whose sender is not
 		// a known identity. DM-class messages — both data DMs ("dm") and
 		// control DMs (TopicControlDM) — have cryptographic verification
 		// in storeIncomingMessage (VerifyEnvelope); this gate targets
 		// only topics where no per-message signature exists.
-		peerID := domain.PeerIdentity{}
-		hopSubject := dialledAddressSubject(address)
-		if session != nil {
-			peerID = session.peerIdentity
-			hopSubject = session.penaltySubject()
-		}
-		if !s.nonDMAuthorAdmitted(msg, address, peerID, hopSubject, session) {
+		if !s.nonDMAuthorAdmitted(msg, address, session.peerIdentity, session.penaltySubject(), session) {
 			return
 		}
 
@@ -4112,7 +4133,7 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *
 		}
 		log.Info().Str("node", s.identity.Address).Str("peer", string(address)).Str("id", string(msg.ID)).Str("sender", msg.Sender).Str("recipient", msg.Recipient).Bool("stored", stored).Msg("received pushed message")
 	case "push_delivery_receipt":
-		if frame.Receipt == nil {
+		if session == nil || !session.receive.ReceiveReady() || frame.Receipt == nil {
 			return
 		}
 		receipt, err := receiptFromReceiptFrame(*frame.Receipt)
@@ -4146,6 +4167,9 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *
 		}
 		log.Info().Str("peer", string(address)).Str("message_id", string(receipt.MessageID)).Str("recipient", receipt.Recipient).Str("status", receipt.Status).Msg("received pushed delivery receipt")
 	case "relay_delivery_receipt":
+		if session == nil || !session.receive.ReceiveReady() {
+			return
+		}
 		// Gossip receipt path using flat Frame fields. Three paths mirror
 		// handleInboundRelayDeliveryReceipt: local delivery, transit
 		// forwarding via relay chain, or gossip fallback. No ban scoring.
@@ -4159,6 +4183,9 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *
 		if receipt.Recipient == s.identity.Address || s.hasSubscriber(receipt.Recipient) {
 			s.storeDeliveryReceipt(receipt)
 			log.Info().Str("peer", string(address)).Str("message_id", string(receipt.MessageID)).Str("recipient", receipt.Recipient).Str("status", receipt.Status).Msg("received relay_delivery_receipt")
+			return
+		}
+		if !s.authenticateReceiptSignature(receipt) {
 			return
 		}
 		// Fast-path dedupe: read-only check suppresses already-delivered receipts.
@@ -4213,7 +4240,9 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *
 			Str("local_identity", s.identity.Address).
 			Msg("relay_delivery_receipt gossip fallback: no relay path or send failed (session)")
 	case "push_notice":
-		s.handleInboundPushNotice(frame)
+		if session != nil && session.receive.ReceiveReady() {
+			s.handleInboundPushNotice(frame)
+		}
 	case "announce_peer":
 		nodeType := frame.NodeType
 		// node_type is validated for protocol compatibility only. announce_peer
@@ -4231,7 +4260,9 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *
 			if peer == "" || classifyAddress(domain.PeerAddress(peer)) == domain.NetGroupLocal {
 				continue
 			}
-			s.promotePeerAddress(domain.PeerAddress(peer))
+			if !s.promotePeerAddressFromSession(domain.PeerAddress(peer), session) {
+				break
+			}
 			added++
 			log.Info().Str("peer", peer).Str("node_type", nodeType).Str("from", string(address)).Msg("learned peer from announce")
 		}
@@ -4243,6 +4274,9 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *
 		if admit := admitRelayFrame(s.sessionHasCapability(session, domain.CapMeshRelayV1), len(frame.Body)); admit != relayAdmitOK {
 			return
 		}
+		if !session.receive.ReceiveReady() {
+			return
+		}
 		// Passing THIS session is safe post-owner-serialisation: the
 		// recovery goroutine never reads inboxCh — it only enqueues an
 		// owned-sync request on contactSyncCh, which the serve loop
@@ -4252,7 +4286,7 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *
 		// address is not freshly dialable, this session IS the wire
 		// key recovery arrives on.
 		if ackStatus := s.handleRelayMessage(domain.PeerAddress(address), session, frame); ackStatus != "" {
-			s.sendRelayHopAck(domain.PeerAddress(address), frame.ID, ackStatus)
+			s.sendRelayHopAck(session, frame.ID, ackStatus)
 		}
 	case "relay_hop_ack":
 		if admit := admitRelayFrame(s.sessionHasCapability(session, domain.CapMeshRelayV1), len(frame.Body)); admit != relayAdmitOK {
@@ -4531,6 +4565,9 @@ func (s *Service) sendAckDeleteToPeer(address domain.PeerAddress, ack ackDelete)
 	if session == nil || !session.authOK {
 		return
 	}
+	if ack.ReceiptProof != "" && !s.sessionHasCapability(session, domain.CapSignedReceiptAckV1) {
+		return
+	}
 	// Built full and stamped at the door it leaves by — the session
 	// resolved here is not necessarily the one that writes it, and the
 	// queued fallback below may be written after a reconnect.
@@ -4576,7 +4613,11 @@ func (s *Service) enqueueAckDeleteOnSession(session *peerSession, address domain
 	// enqueueSessionSendItem (see the comment above), so it applies the
 	// same stamp itself.
 	full := s.buildAckDeleteFrame(ack)
-	if session.enqueueSend(s.stampAckDeleteForSession(session, legacyPeerSendItem(full))) {
+	stamped := s.stampAckDeleteForSession(session, legacyPeerSendItem(full))
+	if stamped.Type == "" {
+		return
+	}
+	if session.enqueueSend(stamped) {
 		log.Debug().Str("peer", string(address)).Str("type", ack.Type).Str("id", string(ack.MessageID)).Str("status", ack.Status).Str("mode", "session_direct").Msg("ack_delete_send")
 		return
 	}
@@ -4604,6 +4645,7 @@ func (s *Service) buildAckDeleteFrame(ack ackDelete) protocol.Frame {
 		ID:            string(ack.MessageID),
 		Status:        ack.Status,
 		ReceiptSender: ack.ReceiptSender,
+		ReceiptProof:  ack.ReceiptProof,
 	}
 	frame.Signature = identity.SignPayload(s.identity, ackDeletePayloadForFrame(frame))
 	return frame
@@ -4629,6 +4671,9 @@ func (s *Service) stampAckDeleteForSession(session *peerSession, item peerSendIt
 	if session == nil || item.Type != "ack_delete" || item.Address != s.identity.Address {
 		return item
 	}
+	if item.ReceiptProof != "" && !s.sessionHasCapability(session, domain.CapSignedReceiptAckV1) {
+		return peerSendItem{}
+	}
 	item.Frame = s.buildAckDeleteFrameFor(ackDeleteFromFrame(item.Frame), session.version >= config.ProtocolVersionReceiptSenderAck)
 	return item
 }
@@ -4637,7 +4682,7 @@ func (s *Service) stampAckDeleteForSession(session *peerSession, item peerSendIt
 // destination can verify. Below the floor the frame is byte-identical to
 // what this node sent before the field existed.
 func (s *Service) buildAckDeleteFrameFor(ack ackDelete, peerCarriesReceiptSender bool) protocol.Frame {
-	if !peerCarriesReceiptSender {
+	if !peerCarriesReceiptSender && ack.ReceiptProof == "" {
 		ack.ReceiptSender = ""
 	}
 	return s.buildAckDeleteFrame(ack)
@@ -4652,6 +4697,9 @@ func (s *Service) buildAckDeleteFrameFor(ack ackDelete, peerCarriesReceiptSender
 func (s *Service) sendAckDeleteByID(connID domain.ConnID, ack ackDelete) {
 	core := s.netCoreForID(connID)
 	if core == nil {
+		return
+	}
+	if ack.ReceiptProof != "" && !core.HasCapability(domain.CapSignedReceiptAckV1) {
 		return
 	}
 	frame := s.buildAckDeleteFrameFor(ack, int(core.ProtocolVersion()) >= config.ProtocolVersionReceiptSenderAck)
@@ -5831,6 +5879,9 @@ func (s *Service) enqueueSessionSendItem(session *peerSession, item peerSendItem
 	// An ack we authored is signed for the version of the session that
 	// actually writes it — see stampAckDeleteForSession.
 	item = s.stampAckDeleteForSession(session, item)
+	if item.Type == "" {
+		return false
+	}
 	// peerAcceptsOutboundFrames resolves a dial address onto its canonical
 	// primary, so asking with the session's own address reaches the same health
 	// entry the address-keyed caller above would have reached.
@@ -6158,10 +6209,11 @@ func (s *Service) queuePeerFrame(address domain.PeerAddress, frame protocol.Fram
 // see pendingFrameKey). All fields are strings/PeerAddress so the struct stays
 // comparable and usable as a map key.
 type pendingKey struct {
-	Address domain.PeerAddress
-	Type    string
-	Topic   string // namespaces message-carrying keys; empty for non-message frames
-	A, B, C string
+	Address       domain.PeerAddress
+	Type          string
+	Topic         string // namespaces message-carrying keys; empty for non-message frames
+	SignedReceipt bool
+	A, B, C       string
 }
 
 // IsValid reports whether the key identifies a queueable frame (non-zero).
@@ -6181,14 +6233,14 @@ func pendingFrameKey(address domain.PeerAddress, frame protocol.Frame) pendingKe
 		// frame.Address is the receipt's AUTHOR here, and it belongs in the
 		// key: two receipts about one message from two peers are two frames,
 		// and collapsing them queues only whichever arrived first.
-		return pendingKey{Address: address, Type: "relay_delivery_receipt", A: frame.ID, B: frame.Recipient, C: frame.Status + "|" + frame.Address}
+		return pendingKey{Address: address, Type: "relay_delivery_receipt", A: frame.ID, B: frame.Recipient, C: frame.Status + "|" + frame.Address, SignedReceipt: frame.Signature != ""}
 	case "ack_delete":
 		// ack_delete must be queueable so that sendAckDeleteToPeer's
 		// fallback to queuePeerFrame works when the session's sendCh is
 		// full. Without this, a transient channel back-pressure silently
 		// drops the ack, the remote peer never clears its backlog, and
 		// the receipt is re-pushed on every reconnect.
-		return pendingKey{Address: address, Type: "ack_delete", A: frame.AckType, B: frame.ID, C: frame.Status + "|" + frame.ReceiptSender}
+		return pendingKey{Address: address, Type: "ack_delete", A: frame.AckType, B: frame.ID, C: frame.Status + "|" + frame.ReceiptSender + "|" + frame.ReceiptProof}
 	case "announce_peer":
 		if len(frame.Peers) > 0 {
 			return pendingKey{Address: address, Type: "announce_peer", A: frame.Peers[0]}
