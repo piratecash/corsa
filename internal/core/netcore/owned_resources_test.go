@@ -168,12 +168,22 @@ func resourceWaitZero(t *testing.T, intake findnode.DormantIntake) {
 	t.Fatal("last owned item did not release original-owner custody", intake.ResourceSnapshot().Writer)
 }
 func TestOwnedResourceParkedProducerLateOfferDetachesOnlyOwnWrapper(t *testing.T) {
+	t.Run("ordinary", func(t *testing.T) {
+		checkParkedProducerDetachesOnlyOwnWrapper(t, Options{}, 1)
+	})
+	t.Run("observed", func(t *testing.T) {
+		checkParkedProducerDetachesOnlyOwnWrapper(t, Options{ObserveWriterQueue: true}, 0)
+	})
+}
+
+func checkParkedProducerDetachesOnlyOwnWrapper(t *testing.T, options Options, wantBuffered int) {
+	t.Helper()
 	intake, target, work := resourceWork(t)
 	queued, err := work.QueueForOriginal(target)
 	if err != nil {
 		t.Fatal(err)
 	}
-	pc := New(41, newAutoConn(), Inbound, Options{})
+	pc := New(41, newAutoConn(), Inbound, options)
 	t.Cleanup(pc.Close)
 	item := &ownedFindNodeSend{core: pc, queued: queued}
 	entered, release := make(chan struct{}), make(chan struct{})
@@ -231,21 +241,32 @@ func TestOwnedResourceParkedProducerLateOfferDetachesOnlyOwnWrapper(t *testing.T
 		t.Fatal("terminal producer retained handles or changed immutable header")
 	}
 	resourceWaitZero(t, intake)
-	if len(pc.sendCh) != 1 {
-		t.Fatal("producer drained the shared channel or lateoffer was not exercised")
+	// The observed queue checks the gate again inside its offer.
+	if got := len(pc.sendCh); got != wantBuffered {
+		t.Fatalf("buffered after late offer = %d, want %d", got, wantBuffered)
 	}
 	if _, err := work.QueueForOriginal(target); !errors.Is(err, findnode.ErrStaleWork) {
 		t.Fatal("terminal detachment revived exact work", err)
 	}
 }
 func TestOwnedResourceTerminalProducerCannotClearClaimedLiveConsumer(t *testing.T) {
+	t.Run("ordinary", func(t *testing.T) {
+		checkTerminalProducerCannotClearClaimedLiveConsumer(t, Options{})
+	})
+	t.Run("observed", func(t *testing.T) {
+		checkTerminalProducerCannotClearClaimedLiveConsumer(t, Options{ObserveWriterQueue: true})
+	})
+}
+
+func checkTerminalProducerCannotClearClaimedLiveConsumer(t *testing.T, options Options) {
+	t.Helper()
 	intake, target, work := resourceWork(t)
 	queued, err := work.QueueForOriginal(target)
 	if err != nil {
 		t.Fatal(err)
 	}
 	c := newGatedConn()
-	pc := New(42, c, Inbound, Options{})
+	pc := New(42, c, Inbound, options)
 	t.Cleanup(pc.Close)
 	item := &ownedFindNodeSend{core: pc, queued: queued}
 	if status := pc.queueFrame(sendItem{owned: item}); status != SendOK {

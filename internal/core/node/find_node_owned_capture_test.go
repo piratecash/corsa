@@ -210,6 +210,83 @@ func TestOwnedRawP0RegistryVisitBoundaryHasNoPartialCoverage(t *testing.T) {
 	// admission or a bound on live sockets/active lifetimes in deployment.
 }
 
+func TestOwnedRawP0VisitOverflowPreservesOriginalMembersOnRecovery(t *testing.T) {
+	s, _, _ := ownedF1TestService(t)
+	a, _, _ := ownedF1TestService(t)
+	b, _, _ := ownedF1TestService(t)
+	_, first := ownedRawAccepted(t, s, a)
+	_, second := ownedRawAccepted(t, s, b)
+	want := map[findnode.Session]bool{first: true, second: true}
+	profile := findNodePriorityProfile{MaxMembers: 512, MaxRegistryVisits: 1024}
+
+	// Nil entries exercise visit accounting. Only the two genuine TLS
+	// originals can appear in successful member and class snapshots.
+	s.peerMu.Lock()
+	start := len(s.conns)
+	if start != 2 || len(want) != 2 {
+		s.peerMu.Unlock()
+		t.Fatal("expected two distinct original registry members", start, len(want))
+	}
+	var entries []domain.ConnID
+	for id := domain.ConnID(9001); len(s.conns) < profile.MaxRegistryVisits+1; id++ {
+		if _, exists := s.conns[id]; exists {
+			continue
+		}
+		s.conns[id] = nil
+		entries = append(entries, id)
+	}
+	overflow := entries[len(entries)-1]
+	delete(s.conns, overflow)
+	s.peerMu.Unlock()
+	t.Cleanup(func() {
+		s.peerMu.Lock()
+		defer s.peerMu.Unlock()
+		for _, id := range entries {
+			delete(s.conns, id)
+		}
+	})
+	checkComplete := func(t *testing.T) {
+		t.Helper()
+		members, err := s.findNodePriorityMembers(t.Context(), profile)
+		if err != nil || members.coverage != registeredAcceptedAndCMPostSetup ||
+			len(members.sessions) != len(want) || members.sessions[0] == members.sessions[1] {
+			t.Fatal("priority traversal lost complete original coverage", members, err)
+		}
+		for _, member := range members.sessions {
+			if !want[member] {
+				t.Fatal("priority traversal replaced an original member")
+			}
+		}
+		facts, err := s.collectOwnedFindNodeRawFacts(t.Context(), profile)
+		if err != nil || len(facts.allOriginal) != len(want) ||
+			len(facts.classes) != len(want) || facts.allOriginal[0] == facts.allOriginal[1] {
+			t.Fatal("raw traversal lost complete original coverage", facts, err)
+		}
+		for i, member := range facts.allOriginal {
+			if !want[member] || facts.classes[i] != findnode.ClassOrdinary {
+				t.Fatal("raw traversal changed an original member or class", i, facts.classes[i])
+			}
+		}
+	}
+
+	t.Run("positive-1024", checkComplete)
+	s.peerMu.Lock()
+	s.conns[overflow] = nil
+	s.peerMu.Unlock()
+	t.Run("overflow-1025", func(t *testing.T) {
+		members, err := s.findNodePriorityMembers(t.Context(), profile)
+		if !errors.Is(err, findnode.ErrCapacity) || members.coverage != 0 || members.sessions != nil {
+			t.Fatal("overflow returned partial priority coverage", members, err)
+		}
+		facts, err := s.collectOwnedFindNodeRawFacts(t.Context(), profile)
+		ownedRawAssertEmpty(t, facts, err, findnode.ErrCapacity)
+	})
+	s.peerMu.Lock()
+	delete(s.conns, overflow)
+	s.peerMu.Unlock()
+	t.Run("recovery-1024", checkComplete)
+}
+
 func TestOwnedRawF1NilCoreListenerAndOriginalTuple(t *testing.T) {
 	s, _, _ := ownedF1TestService(t)
 	d, _, _ := ownedF1TestService(t)
