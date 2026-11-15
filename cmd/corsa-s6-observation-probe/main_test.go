@@ -286,6 +286,11 @@ func TestS6ProbePipeCustodyAndDeadlines(t *testing.T) {
 func TestS6ProbeCanonicalSessionAndEightIndependentReads(t *testing.T) {
 	init := sampleInit()
 	raw := marshal(t, init)
+	for _, optional := range []string{"DurableWrites", "DatagramQueueGrowth", "WriterQueueHistoryCapacity", "GossipQueueDepth", "SessionQueueHistoryCapacity"} {
+		if bytes.Contains(raw, []byte(`"`+optional+`"`)) {
+			t.Fatalf("default INIT unexpectedly includes %s", optional)
+		}
+	}
 	if len(raw) > initLimit {
 		t.Fatal("full8request INIT exceeds4096", len(raw))
 	}
@@ -298,6 +303,12 @@ func TestS6ProbeCanonicalSessionAndEightIndependentReads(t *testing.T) {
 	}
 	if err = validateInit(got, testNonce); err != nil {
 		t.Fatal(err)
+	}
+	paged := init
+	paged.Request.RawPinMembership.DurableWrites = true
+	if err = canonical(marshal(t, paged), &got); err != nil ||
+		!got.Request.RawPinMembership.DurableWrites {
+		t.Fatal("paged INIT opt-in was lost", err)
 	}
 	got.Request.RegisteredProvenV2.OwnerCapacity = 1025
 	if validateInit(got, testNonce) == nil {
@@ -329,6 +340,7 @@ func TestS6ProbeCanonicalSessionAndEightIndependentReads(t *testing.T) {
 		t.Fatal(order)
 	}
 }
+
 func TestS6ProbeOptInDatagramQueueGrowthOverChannel(t *testing.T) {
 	init := sampleInit()
 	init.Request.DatagramQueueGrowth = true
@@ -479,12 +491,72 @@ func TestS6ProbeOptInGossipQueuesOverChannel(t *testing.T) {
 	}
 }
 
+func TestS6ProbeOptInSessionQueueHistoryOverChannel(t *testing.T) {
+	init := sampleInit()
+	init.Request.SessionQueueHistoryCapacity = 64
+	var decoded initFrame
+	if err := canonical(marshal(t, init), &decoded); err != nil || decoded.Request.SessionQueueHistoryCapacity != 64 {
+		t.Fatal("session queue INIT capacity was lost", err)
+	}
+	if err := validateInit(decoded, testNonce); err != nil {
+		t.Fatal(err)
+	}
+	decoded.Request.SessionQueueHistoryCapacity = corenode.MaxSessionQueueHistory + 1
+	if err := validateInit(decoded, testNonce); err == nil {
+		t.Fatal("capacity above the source maximum passed")
+	}
+	rows := make([]corenode.SessionQueueHistoryRow, 64)
+	for i := range rows {
+		rows[i] = corenode.SessionQueueHistoryRow{
+			ConnID: domain.ConnID(i + 1), ReaderStarted: true, Closed: i > 0, Retired: i > 0,
+			Send: corenode.QueueDepthSnapshot{
+				Instance: [16]byte{1}, OpenedAt: 1, At: 10, Enqueued: 2, Taken: 1, Drained: 1, Stopped: i > 0,
+			},
+			Inbox: corenode.SessionInboxQueueSnapshot{
+				QueueDepthSnapshot: corenode.QueueDepthSnapshot{Instance: [16]byte{2}, OpenedAt: 1, At: 10, Depth: 2, Enqueued: 3, Taken: 1},
+				ReaderDone:         i > 0,
+			},
+		}
+	}
+	want := observed[corenode.SessionQueueHistorySnapshot, corenode.PendingObservationKey]{
+		Identity: "local-owner", Key: init.Request.Pending,
+		Snapshot: corenode.SessionQueueHistorySnapshot{Instance: [16]byte{3}, Born: 64, Pending: 1, Rows: rows},
+	}
+	r := captureReads{sessionQueueHistory: func() observed[corenode.SessionQueueHistorySnapshot, corenode.PendingObservationKey] {
+		return want
+	}}
+	var returned atomic.Bool
+	if _, _, err := r.capture(context.Background(), &returned, "OFF"); err == nil {
+		t.Fatal("OFF accepted a session queue reader")
+	}
+	var order []int
+	reads := fakeReads(&order)
+	reads.sessionQueueHistory = r.sessionQueueHistory
+	f := fixture(t)
+	done, reader := session(t, f, reads, "ON", &returned)
+	send(t, f, marshal(t, readFrame{1, testNonce, 0, "READ"}))
+	cut := read(t, f, reader)
+	if cut.InvokedSources != 9 || cut.Sources == nil || cut.Sources.SessionQueueHistory == nil ||
+		!reflect.DeepEqual(*cut.Sources.SessionQueueHistory, want) ||
+		!cut.IndependentReads || cut.JointAtomicCut || cut.AttributionVerified {
+		t.Fatal("session queue capture lost data or asserted an atomic cut")
+	}
+	send(t, f, marshal(t, readFrame{1, testNonce, 1, "STOP"}))
+	_ = f.request.Close()
+	if stopped := read(t, f, reader); stopped.Kind != "STOP_REQUESTED" {
+		t.Fatal(stopped)
+	}
+	if err := wait(t, done); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestS6ProbePreservesUnknownDisabledAndUnverifiedLabels(t *testing.T) {
 	var order []int
 	var returned atomic.Bool
 	r := fakeReads(&order)
 	v, n, err := r.capture(context.Background(), &returned, "ON")
-	if err != nil || n != 8 {
+	if err != nil || n != 8 || v == nil || v.GossipQueues != nil || v.SessionQueueHistory != nil {
 		t.Fatal(n, err)
 	}
 	if v.Registered.Snapshot.Status != "UNKNOWN" || v.Registered.Snapshot.Qualification != "UNKNOWN" || v.Pins.Snapshot.Qualification != "UNKNOWN" || v.Terminal.Snapshot.CodeStatus != "UNKNOWN" || v.Terminal.Snapshot.Coarse != 1 || v.Total.Snapshot.Status != "DISABLED" || v.Pending.Snapshot.CoverageValid || v.Guard.Snapshot.AttributionBound {
@@ -645,6 +717,7 @@ func TestS6ProbeEncodingBoundsAndBackpressure(t *testing.T) {
 		t.Fatal("write deadline not pollable")
 	}
 }
+
 func TestS6ProbePagedPinCut(t *testing.T) {
 	var order []int
 	reads := fakeReads(&order)
@@ -903,65 +976,5 @@ func TestS6ProbeDefaultAndMixedTagExclusion(t *testing.T) {
 			}
 			return true
 		})
-	}
-}
-
-func TestS6ProbeOptInSessionQueueHistoryOverChannel(t *testing.T) {
-	init := sampleInit()
-	init.Request.SessionQueueHistoryCapacity = 64
-	var decoded initFrame
-	if err := canonical(marshal(t, init), &decoded); err != nil || decoded.Request.SessionQueueHistoryCapacity != 64 {
-		t.Fatal("session queue INIT capacity was lost", err)
-	}
-	if err := validateInit(decoded, testNonce); err != nil {
-		t.Fatal(err)
-	}
-	decoded.Request.SessionQueueHistoryCapacity = corenode.MaxSessionQueueHistory + 1
-	if err := validateInit(decoded, testNonce); err == nil {
-		t.Fatal("capacity above the source maximum passed")
-	}
-	rows := make([]corenode.SessionQueueHistoryRow, 64)
-	for i := range rows {
-		rows[i] = corenode.SessionQueueHistoryRow{
-			ConnID: domain.ConnID(i + 1), ReaderStarted: true, Closed: i > 0, Retired: i > 0,
-			Send: corenode.QueueDepthSnapshot{
-				Instance: [16]byte{1}, OpenedAt: 1, At: 10, Enqueued: 2, Taken: 1, Drained: 1, Stopped: i > 0,
-			},
-			Inbox: corenode.SessionInboxQueueSnapshot{
-				QueueDepthSnapshot: corenode.QueueDepthSnapshot{Instance: [16]byte{2}, OpenedAt: 1, At: 10, Depth: 2, Enqueued: 3, Taken: 1},
-				ReaderDone:         i > 0,
-			},
-		}
-	}
-	want := observed[corenode.SessionQueueHistorySnapshot, corenode.PendingObservationKey]{
-		Identity: "local-owner", Key: init.Request.Pending,
-		Snapshot: corenode.SessionQueueHistorySnapshot{Instance: [16]byte{3}, Born: 64, Pending: 1, Rows: rows},
-	}
-	r := captureReads{sessionQueueHistory: func() observed[corenode.SessionQueueHistorySnapshot, corenode.PendingObservationKey] {
-		return want
-	}}
-	var returned atomic.Bool
-	if _, _, err := r.capture(context.Background(), &returned, "OFF"); err == nil {
-		t.Fatal("OFF accepted a session queue reader")
-	}
-	var order []int
-	reads := fakeReads(&order)
-	reads.sessionQueueHistory = r.sessionQueueHistory
-	f := fixture(t)
-	done, reader := session(t, f, reads, "ON", &returned)
-	send(t, f, marshal(t, readFrame{1, testNonce, 0, "READ"}))
-	cut := read(t, f, reader)
-	if cut.InvokedSources != 9 || cut.Sources == nil || cut.Sources.SessionQueueHistory == nil ||
-		!reflect.DeepEqual(*cut.Sources.SessionQueueHistory, want) ||
-		!cut.IndependentReads || cut.JointAtomicCut || cut.AttributionVerified {
-		t.Fatal("session queue capture lost data or asserted an atomic cut")
-	}
-	send(t, f, marshal(t, readFrame{1, testNonce, 1, "STOP"}))
-	_ = f.request.Close()
-	if stopped := read(t, f, reader); stopped.Kind != "STOP_REQUESTED" {
-		t.Fatal(stopped)
-	}
-	if err := wait(t, done); err != nil {
-		t.Fatal(err)
 	}
 }

@@ -214,34 +214,6 @@ func TestAppS6ObservationProbeErrorsAndDefaults(t *testing.T) {
 	})
 }
 
-func TestAppS6ObservationProbeUnstartedLifecycle(t *testing.T) {
-	isolateTotalApp(t)
-	request := appS6ProbeRequest()
-	a, err := NewWithS6ObservationProbe(request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ownUnstartedGuardApp(t, a, time.Now().Add(10*time.Second))
-	assertAppS6ProbeHandles(t, a, request)
-	r, ad, raw := a.RegisteredProvenV2Observation(), a.AdvertisedConnectionObservation(), a.RawPinMembershipObservation()
-	p, tv, g := a.PendingObservation(), a.TerminalObservation(), a.GuardObservation()
-	h, total := a.HandshakeObservation(), a.ConnectionTotalObservation()
-	// Original memory-only construction owns no file observation resources.
-	// Exercise the existing idempotent cleanup without starting App.Run.
-	for i := 0; i < 2; i++ {
-		if err := a.CloseHandshakeFileObservation(); err != nil {
-			t.Fatal(err)
-		}
-		if err := a.CloseConnectionTotalFileObservation(); err != nil {
-			t.Fatal(err)
-		}
-	}
-	assertAppS6ProbeHandles(t, a, request)
-	if r != a.RegisteredProvenV2Observation() || ad != a.AdvertisedConnectionObservation() || raw != a.RawPinMembershipObservation() || p != a.PendingObservation() || tv != a.TerminalObservation() || g != a.GuardObservation() || h != a.HandshakeObservation() || total != a.ConnectionTotalObservation() {
-		t.Fatal("original cleanup replaced a memory source")
-	}
-}
-
 func TestAppS6ObservationProbeDatagramQueueGrowth(t *testing.T) {
 	for _, tc := range []struct {
 		name, datagram string
@@ -315,30 +287,6 @@ func TestAppS6ObservationProbeWriterQueueHistory(t *testing.T) {
 	}
 }
 
-func TestAppS6ObservationProbeGossipQueueDepth(t *testing.T) {
-	for _, tc := range []struct {
-		name    string
-		enabled bool
-		reason  string
-	}{{"default", false, "source_unavailable"}, {"requested", true, "pool_not_started"}} {
-		t.Run(tc.name, func(t *testing.T) {
-			isolateTotalApp(t)
-			request := appS6ProbeRequest()
-			request.GossipQueueDepth = tc.enabled
-			a, err := NewWithS6ObservationProbe(request)
-			if err != nil {
-				t.Fatal(err)
-			}
-			ownUnstartedGuardApp(t, a, time.Now().Add(10*time.Second))
-			o := a.PendingObservation()
-			if o.HasGossipQueueDepth() != tc.enabled || o.Key() != request.Pending ||
-				o.Identity() != a.TerminalObservation().Identity() || o.GossipQueues().UnknownReason != tc.reason {
-				t.Fatalf("unexpected gossip source: installed=%v key=%+v snapshot=%+v", o.HasGossipQueueDepth(), o.Key(), o.GossipQueues())
-			}
-		})
-	}
-}
-
 func TestAppS6ObservationProbeSessionQueueHistory(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -368,5 +316,57 @@ func TestAppS6ObservationProbeSessionQueueHistory(t *testing.T) {
 				t.Fatalf("empty opted-in source: %+v", cut)
 			}
 		})
+	}
+}
+
+func TestAppS6ObservationProbeGossipQueueDepth(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		enabled bool
+		reason  string
+	}{{"default", false, "source_unavailable"}, {"requested", true, "pool_not_started"}} {
+		t.Run(tc.name, func(t *testing.T) {
+			isolateTotalApp(t)
+			request := appS6ProbeRequest()
+			request.GossipQueueDepth = tc.enabled
+			a, err := NewWithS6ObservationProbe(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ownUnstartedGuardApp(t, a, time.Now().Add(10*time.Second))
+			o := a.PendingObservation()
+			if o.HasGossipQueueDepth() != tc.enabled || o.Key() != request.Pending ||
+				o.Identity() != a.TerminalObservation().Identity() || o.GossipQueues().UnknownReason != tc.reason {
+				t.Fatalf("unexpected gossip source: installed=%v key=%+v snapshot=%+v", o.HasGossipQueueDepth(), o.Key(), o.GossipQueues())
+			}
+		})
+	}
+}
+
+func TestAppS6ObservationProbeUnstartedLifecycle(t *testing.T) {
+	isolateTotalApp(t)
+	request := appS6ProbeRequest()
+	a, err := NewWithS6ObservationProbe(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownUnstartedGuardApp(t, a, time.Now().Add(10*time.Second))
+	assertAppS6ProbeHandles(t, a, request)
+	r, ad, raw := a.RegisteredProvenV2Observation(), a.AdvertisedConnectionObservation(), a.RawPinMembershipObservation()
+	p, tv, g := a.PendingObservation(), a.TerminalObservation(), a.GuardObservation()
+	h, total := a.HandshakeObservation(), a.ConnectionTotalObservation()
+	// Original memory-only construction owns no file observation resources.
+	// Exercise the existing idempotent cleanup without starting App.Run.
+	for i := 0; i < 2; i++ {
+		if err := a.CloseHandshakeFileObservation(); err != nil {
+			t.Fatal(err)
+		}
+		if err := a.CloseConnectionTotalFileObservation(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	assertAppS6ProbeHandles(t, a, request)
+	if r != a.RegisteredProvenV2Observation() || ad != a.AdvertisedConnectionObservation() || raw != a.RawPinMembershipObservation() || p != a.PendingObservation() || tv != a.TerminalObservation() || g != a.GuardObservation() || h != a.HandshakeObservation() || total != a.ConnectionTotalObservation() {
+		t.Fatal("original cleanup replaced a memory source")
 	}
 }
