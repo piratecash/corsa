@@ -26,6 +26,13 @@
 .corsa-identity-status{margin:8px 0;color:#b6c4d4;font-size:12px}.corsa-identity-example img{display:block;width:176px;height:176px;max-width:100%;margin:12px auto;image-rendering:pixelated}
 .corsa-identity-address code{min-width:0;overflow-wrap:anywhere;color:#9ac4eb;font-size:12px}.corsa-identity-footer{padding:12px 16px;background:#172330;border-top:1px solid #344457}
 .corsa-identity-footer button{width:100%;height:44px;border-radius:8px}
+[data-corsa-desktop-panel]{background:#151a22;border-radius:8px;overflow:hidden}
+[data-corsa-desktop-chat-header]{display:flex;align-items:center;gap:6px;padding:4px 0 4px 8px;border-bottom:1px solid #293544}
+.corsa-desktop-chat-name{flex:1;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;color:#c8d4e4;font-size:15px;font-weight:600}
+.corsa-desktop-chat-dot{flex:none;width:10px;height:10px;border-radius:50%;background:#48c78e}
+.corsa-desktop-chat-id{flex:none;height:44px;border-radius:8px;gap:5px;padding:0 8px;font-size:12px}
+.corsa-desktop-chat-id span{color:#b7c5d5}
+.corsa-desktop-chat-id code{color:#9ac4eb;font-family:'IBM Plex Mono',monospace}
 </style></helmet>
 
 <section class="dv-turn" id="s1">
@@ -34,7 +41,7 @@
 <div style="max-width:760px;margin:0 0 28px;padding:18px 20px;background:#fff;border:1px solid rgba(0,0,0,.08);border-radius:8px;font:13px/1.6 'IBM Plex Sans',system-ui,sans-serif;color:#33312c">
 <div style="font-weight:600;margin-bottom:8px">Откуда взяты значения</div>
 <div>Иерархия экранов — <code style="font-family:'IBM Plex Mono',monospace;font-size:12px">docs/ui.md</code>. Все цвета, размеры, отступы и радиусы — литералы <code style="font-family:'IBM Plex Mono',monospace;font-size:12px">color.NRGBA</code> / <code style="font-family:'IBM Plex Mono',monospace;font-size:12px">unit.Dp</code> из <code style="font-family:'IBM Plex Mono',monospace;font-size:12px">internal/app/desktop/window.go</code> и <code style="font-family:'IBM Plex Mono',monospace;font-size:12px">emoji_picker.go</code>. Подписи — из английского каталога <code style="font-family:'IBM Plex Mono',monospace;font-size:12px">i18n.go</code>, дословно. Одна колонка — потому что <code style="font-family:'IBM Plex Mono',monospace;font-size:12px">compactLayoutMaxDp = 600</code>, а composer складывает footer ниже 360dp.</div>
-<div style="margin-top:10px;color:#6b6862"><b>Что я допустил, а не нашёл:</b> заголовок приложения на Android (<code style="font-family:'IBM Plex Mono',monospace;font-size:12px">app.title</code> = «Corsa Desktop», строки для Android нет — поставил «CORSA»); шрифт (в коде — семейство Go, в браузере его нет, подставлен IBM Plex Sans); иконки — те же Material Design, что грузит Gio, но веб-версией; цвета цитаты ответа и бейджа непрочитанных в коде не нашёл — выведены из соседних токенов. Всё это помечено в шаге <a class="dv-oid" href="#7a">7a</a>.</div>
+<div style="margin-top:10px;color:#6b6862"><b>Что я допустил, а не нашёл:</b> шрифт (в коде — семейство Go, в браузере его нет, подставлен IBM Plex Sans); иконки — те же Material Design, что грузит Gio, но веб-версией; цвета цитаты ответа и бейджа непрочитанных в коде не нашёл — выведены из соседних токенов. Всё это помечено в шаге <a class="dv-oid" href="#7a">7a</a>.</div>
 </div>
 
 <div class="dv-opts">
@@ -48,8 +55,7 @@
 <div style="flex:1;min-height:0">
 <div style="height:100%;background:#0c0f14;border-radius:6px;padding:4px 6px 6px;box-sizing:border-box;display:flex;flex-direction:column;font-family:'IBM Plex Sans',system-ui,sans-serif;overflow:hidden">
 
-  <div style="display:flex;align-items:baseline;justify-content:space-between;gap:8px;padding:2px 2px 6px">
-    <div style="flex:1;min-width:0;font-weight:700;font-size:24px;line-height:1.1;color:#f4f7fc;white-space:nowrap">Corsa Desktop</div>
+  <div style="display:flex;align-items:baseline;justify-content:flex-end;gap:8px;padding:2px 2px 6px">
     <div style="flex:none;display:flex;align-items:center;gap:6px">
       <div data-corsa-button="notice" style="background:#e67e22;border-radius:4px;padding:7px 11px;font-size:13px;color:#ffffff;white-space:nowrap">Update available</div>
       <div style="font-size:13px;color:#b0bbcd">Language</div>
@@ -60,8 +66,7 @@
   <div style="flex:1;min-height:0;display:flex;gap:6px">
 
     <div style="flex:3;min-width:0;display:flex;flex-direction:column">
-      <div style="font-size:15px;color:#909cad;padding-bottom:4px">DEX Messenger</div>
-      <div style="flex:1;min-height:0;background:#151a22;border-radius:6px;padding:8px;box-sizing:border-box;display:flex;flex-direction:column;gap:10px;overflow:hidden">
+      <div data-corsa-desktop-panel style="flex:1;min-height:0;padding:4px 8px 8px;box-sizing:border-box;display:flex;flex-direction:column;gap:10px">
 
         <div style="background:#161f2a;border:1px solid #364559;border-radius:10px;padding:12px 10px 12px 12px;display:flex;align-items:center;gap:12px;box-sizing:border-box">
           <div style="width:56px;height:56px;border-radius:50%;flex:none;background:#197743;display:flex;align-items:center;justify-content:center"><span class="ms" style="font-size:30px;color:#f0faf4">fingerprint</span></div>
@@ -113,13 +118,14 @@
       </div>
     </div>
 
-    <div style="flex:7;min-width:0;display:flex;flex-direction:column">
-      <div style="display:flex;align-items:baseline;gap:8px;padding-bottom:4px">
-        <div style="font-size:15px;font-weight:600;color:#c8d4e4">Chat with alice</div>
-        <div style="flex:1;min-width:0;font-size:13px;color:#e6b060;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">· 1 message waiting for the peer to delete</div>
-      </div>
+    <div data-corsa-desktop-panel style="flex:7;min-width:0;display:flex;flex-direction:column">
+      <header data-corsa-desktop-chat-header>
+        <span class="corsa-desktop-chat-dot" role="img" aria-label="Online"></span>
+        <span class="corsa-desktop-chat-name">alice</span>
+        <button type="button" data-corsa-button="primary" class="corsa-component-action corsa-desktop-chat-id" aria-label="Open contact"><span>ID:</span><code>c763fc02b91db467d5ebe430a881e0ba568bf173</code></button>
+      </header>
 
-      <div style="flex:1;min-height:0;background:#151a22;border-radius:6px;padding:8px;box-sizing:border-box;display:flex;flex-direction:column;gap:8px;justify-content:flex-end;overflow:hidden">
+      <div style="flex:1;min-height:0;padding:8px;box-sizing:border-box;display:flex;flex-direction:column;gap:8px;justify-content:flex-end;overflow:hidden">
         <div style="display:flex;justify-content:flex-start">
           <div style="max-width:520px;border:1px solid #374456;border-radius:8px;padding:10px">
             <div style="display:flex;align-items:center;gap:8px"><div style="flex:1;min-width:0;font-size:12px;color:#a2b0c4">alice</div><div style="font-size:12px;color:#a0b9dc">21.08.2026 14:07</div><span class="ms" style="font-size:16px;color:#6e82a0">more_horiz</span></div>
@@ -153,12 +159,6 @@
       <div style="padding-top:6px;display:flex;flex-direction:column">
         <div style="padding:0 2px 4px;font-size:16px;color:#c4cdda;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Chat selected.</div>
         <div style="border:1px solid #60728e;background:#191f28;border-radius:12px;padding:8px 6px 5px 9px;box-sizing:border-box">
-        <div style="display:flex;align-items:center;gap:6px;padding:0 2px 6px">
-        <span style="font-size:14px;color:#b0bbcd;white-space:nowrap">Message for</span>
-        <span style="flex:1;min-width:0;font-size:17px;font-weight:700;color:#96d2ff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">alice</span>
-        <span style="font-size:12px;color:#a0aabe;white-space:nowrap">ID:</span>
-        <span style="font-size:15px;font-weight:700;color:#82ebbe;white-space:nowrap">c763fc02...8bf173</span>
-      </div>
         <div style="display:flex;align-items:center;gap:4px;min-height:36px">
           <span class="ms" style="font-size:20px;color:#9db0c9;flex:none">attach_file</span>
           <div style="flex:1;min-width:0;font-size:15px;color:#758294;padding:0 2px">Write an encrypted message</div>
@@ -189,8 +189,7 @@
 <div class="dv-opt" id="1b"><div class="dv-olabel"><a class="dv-oid" href="#1b">1b</a><span style="font-weight:600;color:rgba(0,0,0,.75)">Телефон</span> · Контакты — sidebar в compact-режиме</div>
 <x-import component-from-global-scope="AndroidDevice" from="./android-frame.jsx" dark="{{ true }}" width="412px" height="892px" hint-size="412px,892px">
 <div style="height:100%;background:#0c0f14;display:flex;flex-direction:column;font-family:'IBM Plex Sans',system-ui,sans-serif">
-  <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:10px 12px 8px">
-    <div style="flex:1;min-width:0;font-weight:700;font-size:24px;line-height:1.1;color:#f4f7fc;white-space:nowrap">Corsa</div>
+  <div style="display:flex;align-items:center;justify-content:flex-end;gap:8px;padding:10px 12px 8px">
     <div style="flex:none;display:flex;align-items:center;gap:6px">
       <div data-corsa-button="notice" style="background:#e67e22;border-radius:4px;padding:7px 11px;font-size:13px;color:#ffffff;white-space:nowrap">Update available</div>
       <div style="font-size:13px;color:#b0bbcd">Language</div>
@@ -198,7 +197,6 @@
     </div>
   </div>
 
-  <div style="font-size:15px;color:#909cad;padding:0 12px 4px">DEX Messenger</div>
 
   <div style="flex:1;min-height:0;background:#151a22;display:flex;flex-direction:column;padding:8px;gap:12px">
 
@@ -392,10 +390,6 @@
     <div style="font-size:16px;color:#c4cdda;padding:0 2px 6px">Message sent.</div>
 
     <div style="border:1px solid #60728e;background:#191f28;border-radius:12px;padding:8px 6px 6px 9px;box-sizing:border-box">
-      <div style="display:flex;align-items:center;gap:6px;padding:0 2px 6px">
-        <span style="font-size:14px;color:#b0bbcd;white-space:nowrap">Message for</span>
-        <span style="flex:1;min-width:0;font-size:17px;font-weight:700;color:#96d2ff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">alice</span>
-      </div>
       <div style="display:flex;align-items:center;gap:4px;min-height:44px">
         <span class="ms" style="font-size:22px;color:#9db0c9;flex:none">attach_file</span>
         <div style="flex:1;min-width:0;font-size:15px;color:#758294;padding:0 2px">Write an encrypted message</div>
@@ -435,8 +429,7 @@
   </div>
 
   <div style="flex:1;min-height:0;position:relative;padding:4px 6px 6px;box-sizing:border-box">
-    <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:2px 2px 6px">
-      <div style="flex:1;min-width:0;font-weight:700;font-size:24px;line-height:1.1;color:#f4f7fc;white-space:nowrap">Corsa Desktop</div>
+    <div style="display:flex;align-items:center;justify-content:flex-end;gap:8px;padding:2px 2px 6px">
       <div style="flex:none;display:flex;align-items:center;gap:6px">
         <div data-corsa-button="notice" style="background:#e67e22;border-radius:4px;padding:7px 11px;font-size:13px;color:#fff;white-space:nowrap">Update available</div>
         <div style="font-size:13px;color:#b0bbcd">Language</div>
@@ -466,8 +459,7 @@
 <div class="dv-opt" id="2b"><div class="dv-olabel"><a class="dv-oid" href="#2b">2b</a><span style="font-weight:600;color:rgba(0,0,0,.75)">Телефон</span> · Мой identity — модалка по содержимому с затемнением 85%</div>
 <x-import component-from-global-scope="AndroidDevice" from="./android-frame.jsx" dark="{{ true }}" width="412px" height="892px" hint-size="412px,892px">
 <div style="height:100%;position:relative;box-sizing:border-box;padding:12px;background:#0c0f14;color:#f0f4f9;font-family:'IBM Plex Sans',system-ui,sans-serif">
-  <div style="font-size:24px">Corsa</div>
-  <div style="border:1px solid #344457;border-radius:12px;background:#151e29;padding:12px;margin-top:8px">My identity</div>
+  <div style="border:1px solid #344457;border-radius:12px;background:#151e29;padding:12px">My identity</div>
   <div style="position:absolute;inset:0;display:grid;place-items:center;padding:12px;background:rgba(6,8,12,.85);color:#f0f4f9">
 <div class="corsa-identity-example">
   <div class="corsa-identity-body">
@@ -576,10 +568,6 @@
     <div style="font-size:16px;color:#c4cdda;padding:0 2px 6px">Message sent.</div>
 
     <div style="border:1px solid #60728e;background:#191f28;border-radius:12px;padding:8px 6px 6px 9px;box-sizing:border-box">
-      <div style="display:flex;align-items:center;gap:6px;padding:0 2px 6px">
-        <span style="font-size:14px;color:#b0bbcd;white-space:nowrap">Message for</span>
-        <span style="flex:1;min-width:0;font-size:17px;font-weight:700;color:#96d2ff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">alice</span>
-      </div>
       <div style="display:flex;align-items:center;gap:4px;min-height:44px">
         <span class="ms" style="font-size:22px;color:#9db0c9;flex:none">attach_file</span>
         <div style="flex:1;min-width:0;font-size:15px;color:#758294;padding:0 2px">Write an encrypted message</div>
@@ -1033,10 +1021,6 @@
     </div>
 
     <div style="border:1px solid #60728e;background:#191f28;border-radius:12px;padding:8px 6px 6px 9px;box-sizing:border-box">
-      <div style="display:flex;align-items:center;gap:6px;padding:0 2px 6px">
-        <span style="font-size:14px;color:#b0bbcd;white-space:nowrap">Message for</span>
-        <span style="flex:1;min-width:0;font-size:17px;font-weight:700;color:#96d2ff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">c763fc02...8bf173</span>
-      </div>
       <div style="display:flex;align-items:center;gap:4px;min-height:44px">
       <span class="ms" style="font-size:22px;color:#9db0c9;flex:none">attach_file</span>
       <div style="flex:1;min-width:0;font-size:15px;color:#f4f7fc;padding:0 2px">TTL loop is in, capture attached 🎉</div>
@@ -1785,15 +1769,13 @@
     <div style="flex:1;text-align:center;font:500 12px 'IBM Plex Sans',system-ui,sans-serif;color:#9aa6b6;padding-right:52px">Corsa Desktop</div>
   </div>
   <div style="flex:1;min-height:0;position:relative;padding:4px 6px 6px;box-sizing:border-box">
-    <div style="display:flex;align-items:baseline;justify-content:space-between;gap:8px;padding:2px 2px 6px">
-      <div style="flex:1;min-width:0;font-weight:700;font-size:24px;color:#f4f7fc;white-space:nowrap">Corsa Desktop</div>
+    <div style="display:flex;align-items:baseline;justify-content:flex-end;gap:8px;padding:2px 2px 6px">
       <div style="flex:none;display:flex;align-items:center;gap:6px">
         <div data-corsa-button="notice" style="background:#e67e22;border-radius:4px;padding:7px 11px;font-size:13px;color:#fff;white-space:nowrap">Update available</div>
         <div style="font-size:13px;color:#b0bbcd">Language</div>
         <div style="flex:none;box-sizing:border-box;background:#3962aa;border-radius:4px;padding:10px 12px;display:flex;align-items:center;gap:8px;font-size:13px;color:#ffffff;white-space:nowrap">EN<span class="ms" style="font-size:18px">expand_more</span></div>
       </div>
     </div>
-    <div style="font-size:15px;color:#909cad;padding:0 2px 4px">DEX Messenger</div>
     <div style="height:180px;background:#151a22;border-radius:6px"></div>
 
     <div style="position:absolute;top:48px;right:16px;height:316px;overflow:hidden"><div style="width:220px;box-sizing:border-box;background:#151a22;border:1px solid #344457;border-radius:8px;padding:8px;display:flex;flex-direction:column;gap:4px;box-shadow:0 12px 32px rgba(0,0,0,.5)"><div style="background:#3962aa;border-radius:5px;padding:9px 12px;font-size:13px;color:#ffffff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">EN — English</div><div style="background:#222e3e;border-radius:5px;padding:9px 12px;font-size:13px;color:#f5f7fa;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">RU — Русский</div><div style="background:#222e3e;border-radius:5px;padding:9px 12px;font-size:13px;color:#f5f7fa;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">ES — Español</div><div style="background:#222e3e;border-radius:5px;padding:9px 12px;font-size:13px;color:#f5f7fa;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">FR — Français</div><div style="background:#222e3e;border-radius:5px;padding:9px 12px;font-size:13px;color:#f5f7fa;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">AR — العربية</div><div style="background:#222e3e;border-radius:5px;padding:9px 12px;font-size:13px;color:#f5f7fa;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">ZH — 中文</div></div></div>

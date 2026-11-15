@@ -36,9 +36,8 @@ func TestAttachingAFileGrowsTheComposerByTheChip(t *testing.T) {
 	t.Parallel()
 
 	w := newIdentityLayoutTestWindow(t)
-	// A zero recipient keeps the router out of it — the send button asks
-	// about a wipe only for a real peer — and the header is then one line in
-	// both passes, so the difference measured below is the chip alone.
+	// A zero recipient keeps the router out of it. The send button checks
+	// for a wipe only when a peer is selected.
 	var nobody domain.PeerIdentity
 
 	gtx := composerFrame()
@@ -104,7 +103,7 @@ func TestComposerCardIsAsTallAsWhatItDraws(t *testing.T) {
 	chip := w.layoutAttachedFilePreview(composerFrame())
 
 	// The chip cannot be taller than the card that contains it, border,
-	// padding, header and editor row included.
+	// padding and editor row included.
 	if card.Size.Y <= chip.Size.Y {
 		t.Fatalf("card = %d, chip alone = %d", card.Size.Y, chip.Size.Y)
 	}

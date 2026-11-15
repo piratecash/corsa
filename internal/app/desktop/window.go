@@ -1483,14 +1483,7 @@ func (w *Window) layoutWindowSurfaces(gtx layout.Context, inset layout.Inset) la
 					Axis: layout.Vertical,
 				}.Layout(gtx,
 					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						return keyboardYieldingChrome(gtx, &w.touchKbd, func(gtx layout.Context) layout.Dimensions {
-							return layout.Flex{
-								Axis: layout.Vertical,
-							}.Layout(gtx,
-								layout.Rigid(w.layoutHeader),
-								layout.Rigid(layout.Spacer{Height: unit.Dp(6)}.Layout),
-							)
-						})
+						return keyboardYieldingChrome(gtx, &w.touchKbd, w.layoutUpdateBadge)
 					}),
 					// The inset can never exceed what this child is
 					// given: while the chrome is drawn the yield test
@@ -2999,41 +2992,6 @@ func (w *Window) sendFileCore(to domain.PeerIdentity, srcPath, caption string, r
 	}()
 }
 
-func (w *Window) layoutHeader(gtx layout.Context) layout.Dimensions {
-	titleText := w.t("app.title")
-	if w.isCompactLayout(gtx) {
-		// Phone width — which is every Android screen: the full product name
-		// wraps into two lines under the header buttons, so the brand alone
-		// goes there. It is its own message rather than a literal even though
-		// no locale translates the brand, so the one place a translator would
-		// look for the header title has both forms of it.
-		titleText = w.t("app.title.compact")
-	}
-	title := material.Label(w.theme, unit.Sp(24), titleText)
-	title.Color = color.NRGBA{R: 244, G: 247, B: 252, A: 255}
-	title.Font.Weight = 700
-	title.MaxLines = 1
-
-	return layout.Flex{
-		Axis:      layout.Horizontal,
-		Spacing:   layout.SpaceBetween,
-		Alignment: layout.Middle,
-	}.Layout(gtx,
-		layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-			return title.Layout(gtx)
-		}),
-		layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			return layout.Flex{
-				Axis:      layout.Horizontal,
-				Alignment: layout.Middle,
-			}.Layout(gtx,
-				layout.Rigid(w.layoutUpdateBadge),
-			)
-		}),
-	)
-}
-
 // navigationDismissTarget identifies the top in-app surface handled by Back
 // or Escape before navigation is allowed to reach the platform.
 type navigationDismissTarget uint8
@@ -3131,6 +3089,8 @@ func (w *Window) handleBackNavigation(gtx layout.Context) {
 // the open chat, with an explicit back affordance between them.
 const compactLayoutMaxDp = 600
 
+const desktopPanelRadius = unit.Dp(8)
+
 // isCompactLayout reports whether the available width calls for the
 // single-pane phone layout.
 func (w *Window) isCompactLayout(gtx layout.Context) bool {
@@ -3155,39 +3115,21 @@ func (w *Window) layoutMain(gtx layout.Context) layout.Dimensions {
 		Spacing: layout.SpaceBetween,
 	}.Layout(gtx,
 		layout.Flexed(0.3, func(gtx layout.Context) layout.Dimensions {
-			return layout.Flex{
-				Axis: layout.Vertical,
-			}.Layout(gtx,
-				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					lbl := material.Label(w.theme, unit.Sp(15), w.t("app.subtitle"))
-					lbl.Color = color.NRGBA{R: 144, G: 156, B: 173, A: 255}
-					return layout.Inset{Bottom: unit.Dp(4)}.Layout(gtx, lbl.Layout)
-				}),
-				layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-					return w.layoutContactsCard(gtx, status, recipients)
-				}),
-			)
+			return w.layoutContactsCard(gtx, status, recipients)
 		}),
 		layout.Rigid(layout.Spacer{Width: unit.Dp(6)}.Layout),
 		layout.Flexed(0.7, func(gtx layout.Context) layout.Dimensions {
-			return layout.Flex{
-				Axis: layout.Vertical,
-			}.Layout(gtx,
-				// This label and the composer card are the rows the touch
-				// keyboard must not cover; the chat card between them is free
-				// to shrink to nothing. keyboardTailRow reports how tall they
-				// really came out, which is what lets the window header yield
-				// in time instead of on a guess. The label counts even though
-				// nobody needs to READ it under a keyboard — it sits above the
-				// composer and pushes it down by its full height either way.
-				layout.Rigid(keyboardTailRow(&w.touchKbd, func(gtx layout.Context) layout.Dimensions {
-					return w.layoutChatHeader(gtx, false)
-				})),
-				layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-					return w.layoutChatCard(gtx, status)
-				}),
-				layout.Rigid(keyboardTailRow(&w.touchKbd, w.layoutComposerCard)),
-			)
+			return layoutPanel(gtx, layout.Inset{}, desktopPanelRadius, func(gtx layout.Context) layout.Dimensions {
+				return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+					// The header and composer reserve room above the touch
+					// keyboard. The history takes the space between them.
+					layout.Rigid(keyboardTailRow(&w.touchKbd, w.layoutDesktopChatHeader)),
+					layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+						return w.layoutChatCard(gtx, status)
+					}),
+					layout.Rigid(keyboardTailRow(&w.touchKbd, w.layoutComposerCard)),
+				)
+			})
 		}),
 	)
 }
@@ -3208,11 +3150,6 @@ func (w *Window) layoutMainCompact(gtx layout.Context, status service.NodeStatus
 		return layout.Flex{
 			Axis: layout.Vertical,
 		}.Layout(gtx,
-			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				lbl := material.Label(w.theme, unit.Sp(15), w.t("app.subtitle"))
-				lbl.Color = color.NRGBA{R: 144, G: 156, B: 173, A: 255}
-				return layout.Inset{Bottom: unit.Dp(4)}.Layout(gtx, lbl.Layout)
-			}),
 			layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
 				return w.layoutContactsCard(gtx, status, recipients)
 			}),
@@ -3368,18 +3305,25 @@ func (w *Window) layoutContactsCard(gtx layout.Context, status service.NodeStatu
 	// frame's keystrokes.
 	searchResults := w.resolveIdentitySearchRows(status, recipients)
 
-	return w.card(gtx, "", nil, func(gtx layout.Context) layout.Dimensions {
-		return w.layoutMyIdentityButton(gtx, len(recipients))
-	}, func(gtx layout.Context) layout.Dimensions {
-		children := []layout.FlexChild{}
-		children = append(children,
+	inset := layout.Inset{Top: chatHeaderInset, Left: unit.Dp(8), Right: unit.Dp(8), Bottom: unit.Dp(8)}
+	radius := desktopPanelRadius
+	if w.paneCompact {
+		inset.Top = unit.Dp(12)
+		radius = 0
+	}
+	return layoutPanel(gtx, inset, radius, func(gtx layout.Context) layout.Dimensions {
+		children := []layout.FlexChild{
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				return w.layoutMyIdentityButton(gtx, len(recipients))
+			}),
+			layout.Rigid(layout.Spacer{Height: unit.Dp(4)}.Layout),
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 				return w.identitySearchCard(gtx, status, searchResults)
 			}),
 			layout.Rigid(layout.Spacer{Height: unit.Dp(12)}.Layout),
 			layout.Rigid(w.layoutKnownIdentitiesHeader),
 			layout.Rigid(layout.Spacer{Height: unit.Dp(8)}.Layout),
-		)
+		}
 
 		if len(recipients) == 0 {
 			children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
@@ -4356,30 +4300,6 @@ func composerSendActionState(hasRecipient, deletePending, hasContent bool) (enab
 	}
 }
 
-// layoutComposerChrome lays out the message body header and the attached file chip.
-//
-// It is its own function because its HEIGHT is a number the rest of the card
-// needs — the editor and the emoji picker are budgeted against what is left
-// after it — and the only honest way to have that number is to lay these
-// rows out and look. messageInputCard therefore records this once and replays
-// the recording into the flex, the same way layoutComposerCard already
-// handles its footer.
-func (w *Window) layoutComposerChrome(gtx layout.Context) layout.Dimensions {
-	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			label := material.Body2(w.theme, w.t("compose.body"))
-			label.Color = color.NRGBA{R: 176, G: 187, B: 205, A: 255}
-			return label.Layout(gtx)
-		}),
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			if w.attachedFile == "" {
-				return layout.Dimensions{}
-			}
-			return w.layoutAttachedFilePreview(gtx)
-		}),
-	)
-}
-
 func (w *Window) messageInputCard(gtx layout.Context, recipient domain.PeerIdentity, maxInputHeight, footerReserve int) layout.Dimensions {
 	borderColor := color.NRGBA{R: 96, G: 114, B: 142, A: 255}
 	backgroundColor := color.NRGBA{R: 25, G: 31, B: 40, A: 255}
@@ -4395,24 +4315,20 @@ func (w *Window) messageInputCard(gtx layout.Context, recipient domain.PeerIdent
 	cardBorder := unit.Dp(1)
 	cardPad := layout.Inset{Top: unit.Dp(2), Bottom: unit.Dp(5), Left: unit.Dp(8), Right: unit.Dp(8)}
 
-	// What stands above the editor is MEASURED, not estimated: laid out once
-	// here, at the width it will have inside the card, and replayed into the
-	// flex below — the same record-and-replay layoutComposerCard uses for its
-	// footer, so nothing is laid out twice.
-	//
-	// It used to be a constant: 26dp, plus 40 for an attachment. Nothing kept
-	// that number in step with the rows it stood for — the chip alone is 44 —
-	// and the four missing points came out of whatever the card was allowed
-	// to overrun. That was the border while the card was painted at a height
-	// decided in advance, and the footer's reserve once it was painted at the
-	// size of its content.
-	chromeGtx := gtx
-	chromeGtx.Constraints.Max.X = max(0, gtx.Constraints.Max.X-2*gtx.Dp(cardBorder)-gtx.Dp(cardPad.Left)-gtx.Dp(cardPad.Right))
-	chromeGtx.Constraints.Min.X = min(gtx.Constraints.Min.X, chromeGtx.Constraints.Max.X)
-	chromeMacro := op.Record(gtx.Ops)
-	chromeDims := w.layoutComposerChrome(chromeGtx)
-	chromeCall := chromeMacro.Stop()
-	chromeHeight := chromeDims.Size.Y + gtx.Dp(cardPad.Top) + gtx.Dp(cardPad.Bottom) + 2*gtx.Dp(cardBorder)
+	// Measure the attachment once at its final width so the picker and
+	// editor budget for the same chip that is drawn above the input.
+	var attachmentDims layout.Dimensions
+	var attachmentCall op.CallOp
+	if w.attachedFile != "" {
+		attachmentGtx := gtx
+		attachmentGtx.Constraints.Max.X = max(0, gtx.Constraints.Max.X-2*gtx.Dp(cardBorder)-gtx.Dp(cardPad.Left)-gtx.Dp(cardPad.Right))
+		attachmentGtx.Constraints.Min.X = min(gtx.Constraints.Min.X, attachmentGtx.Constraints.Max.X)
+		attachmentGtx.Constraints.Min.Y = 0
+		macro := op.Record(gtx.Ops)
+		attachmentDims = w.layoutAttachedFilePreview(attachmentGtx)
+		attachmentCall = macro.Stop()
+	}
+	chromeHeight := attachmentDims.Size.Y + gtx.Dp(cardPad.Top) + gtx.Dp(cardPad.Bottom) + 2*gtx.Dp(cardBorder)
 
 	line, _ := w.messageEditor.CaretPos()
 	totalLines := max(line+1, strings.Count(w.messageEditor.Text(), "\n")+1)
@@ -4445,12 +4361,9 @@ func (w *Window) messageInputCard(gtx layout.Context, recipient domain.PeerIdent
 					return layout.Flex{
 						Axis: layout.Vertical,
 					}.Layout(gtx,
-						// The rows measured above, placed rather than laid
-						// out again: one layout, one set of event handlers,
-						// and a height the budget below already knows.
 						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-							chromeCall.Add(gtx.Ops)
-							return chromeDims
+							attachmentCall.Add(gtx.Ops)
+							return attachmentDims
 						}),
 						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 							return layout.Flex{
@@ -4504,6 +4417,7 @@ func (w *Window) messageInputCard(gtx layout.Context, recipient domain.PeerIdent
 														// direction, which is where its caret and
 														// its hint belong.
 														gtx = directedByContent(gtx, w.messageEditor.Text())
+														semantic.DescriptionOp(w.t("compose.body")).Add(gtx.Ops)
 														return editorTouchKeyboardArea(gtx, &w.touchKbdTags[0], &w.touchKbd, func(gtx layout.Context) layout.Dimensions {
 															dims := layoutComposerEditorContent(gtx, totalLines, editor.Layout)
 															if w.emojiPicker.takeSoftKeyboardSuppression(gtx.Enabled()) {
@@ -7085,7 +6999,10 @@ func (w *Window) layoutUpdateBadge(gtx layout.Context) layout.Dimensions {
 		return layout.Dimensions{}
 	}
 	btn := w.kit().TextButton(&w.updateButton, w.t("header.update"), ui.ButtonNotice)
-	return btn.Layout(gtx)
+	return layout.Inset{Bottom: unit.Dp(6)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		gtx.Constraints.Min.X = gtx.Constraints.Max.X
+		return layout.E.Layout(gtx, btn.Layout)
+	})
 }
 
 // updateAvailable is the badge's question, answered by EITHER source.
@@ -7831,14 +7748,8 @@ func (w *Window) selectLanguage(code string) {
 }
 
 func (w *Window) card(gtx layout.Context, titleText string, rows []string, extras ...func(layout.Context) layout.Dimensions) layout.Dimensions {
-	// Record the content layout first so we know the actual height,
-	// then draw the background to match. Without this, fill() would
-	// use gtx.Constraints.Max.Y which stretches Rigid cards (like the
-	// composer) to the bottom of the window.
-	macro := op.Record(gtx.Ops)
-
 	inset := layout.UniformInset(unit.Dp(8))
-	dims := inset.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+	return layoutPanel(gtx, inset, 0, func(gtx layout.Context) layout.Dimensions {
 		children := make([]layout.FlexChild, 0, len(rows)+len(extras)+2)
 		if strings.TrimSpace(titleText) != "" {
 			children = append(children,
@@ -7870,7 +7781,13 @@ func (w *Window) card(gtx layout.Context, titleText string, rows []string, extra
 			Axis: layout.Vertical,
 		}.Layout(gtx, children...)
 	})
+}
 
+func layoutPanel(gtx layout.Context, inset layout.Inset, cornerRadius unit.Dp, body layout.Widget) layout.Dimensions {
+	// Paint only the measured height so rigid panels such as the composer
+	// end at their content even when the maximum height is much larger.
+	macro := op.Record(gtx.Ops)
+	dims := inset.Layout(gtx, body)
 	contentOps := macro.Stop()
 
 	// Draw the background sized to the actual content (or Max.Y for
@@ -7879,11 +7796,18 @@ func (w *Window) card(gtx layout.Context, titleText string, rows []string, extra
 	if gtx.Constraints.Min.Y > bgHeight {
 		bgHeight = gtx.Constraints.Min.Y
 	}
-	bgStack := clip.Rect{Max: image.Pt(gtx.Constraints.Max.X, bgHeight)}.Push(gtx.Ops)
+	width := gtx.Constraints.Max.X
+	radius := min(gtx.Dp(cornerRadius), width/2, bgHeight/2)
+	outline := clip.UniformRRect(image.Rect(0, 0, width, bgHeight), radius)
+	bgStack := outline.Push(gtx.Ops)
 	paint.ColorOp{Color: ui.PanelFill()}.Add(gtx.Ops)
 	paint.PaintOp{}.Add(gtx.Ops)
-	bgStack.Pop()
 
+	if radius > 0 {
+		defer bgStack.Pop()
+	} else {
+		bgStack.Pop()
+	}
 	contentOps.Add(gtx.Ops)
 	return dims
 }

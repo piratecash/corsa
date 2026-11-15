@@ -49,7 +49,11 @@ func TestChatHeaderKeepsIDAtRightEdgeAndOpensContactModal(t *testing.T) {
 				now = now.Add(time.Millisecond * 16)
 				w.resetConversationStateOnPeerChange()
 				w.handleActions(gtx)
-				dims := w.layoutChatHeader(gtx, tc.compact)
+				header := w.layoutDesktopChatHeader
+				if tc.compact {
+					header = func(gtx layout.Context) layout.Dimensions { return w.layoutChatHeader(gtx, true) }
+				}
+				dims := header(gtx)
 				if w.identityPanelVisible {
 					w.layoutIdentityPanelOverlay(gtx)
 				}
@@ -73,6 +77,13 @@ func TestChatHeaderKeepsIDAtRightEdgeAndOpensContactModal(t *testing.T) {
 			wantLabel := "ID: " + tc.id
 			if button.Bounds.Max.X != tc.width || button.Label != wantLabel {
 				t.Fatalf("ID button = %q at %v, want %q at the right edge (%d)", button.Label, button.Bounds, wantLabel, tc.width)
+			}
+			if !tc.compact {
+				const inset = 4
+				const dividerHeight = 1
+				if button.Bounds.Min.Y != inset || short.Size.Y-button.Bounds.Max.Y-dividerHeight != inset {
+					t.Fatalf("ID button at %v in header %v, want equal spacing above and below", button.Bounds, short.Size)
+				}
 			}
 			if tc.compact {
 				var backBounds image.Rectangle

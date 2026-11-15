@@ -4,11 +4,17 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"image"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"gioui.org/io/input"
+	"gioui.org/layout"
+	"gioui.org/op"
+	"gioui.org/unit"
 
 	"github.com/piratecash/corsa/internal/core/config"
 	"github.com/piratecash/corsa/internal/core/domain"
@@ -118,6 +124,34 @@ func TestUpdateBadgeReadsBothSources(t *testing.T) {
 			t.Fatal("a failed check lit the badge")
 		}
 	})
+}
+
+func TestUpdateBadgeOnlyReservesSpaceWhenVisible(t *testing.T) {
+	w := newIdentityLayoutTestWindow(t)
+	var router input.Router
+	gtx := layout.Context{
+		Ops:         new(op.Ops),
+		Source:      router.Source(),
+		Metric:      unit.Metric{PxPerDp: 1, PxPerSp: 1},
+		Constraints: layout.Constraints{Max: image.Pt(320, 600)},
+	}
+	if dims := w.layoutUpdateBadge(gtx); dims.Size != (image.Point{}) {
+		t.Fatalf("hidden update badge reserves %v", dims.Size)
+	}
+
+	w.snap.NodeStatus.AggregateStatus = &service.AggregateStatus{UpdateAvailable: true}
+	dims := w.layoutUpdateBadge(gtx)
+	router.Frame(gtx.Ops)
+	for _, node := range router.AppendSemantics(nil) {
+		if node.Desc.Label == w.t("header.update") {
+			if bounds := node.Desc.Bounds; bounds.Max.X != gtx.Constraints.Max.X ||
+				bounds.Min.X <= 0 || dims.Size.Y != bounds.Max.Y+gtx.Dp(6) {
+				t.Fatalf("update badge at %v in %v, want right alignment and a bottom gap", bounds, dims.Size)
+			}
+			return
+		}
+	}
+	t.Fatal("visible update badge is missing")
 }
 
 // Consent is persisted before it is acted on, so a process that dies in

@@ -697,6 +697,36 @@ func TestMyIdentityCardGrowsForNarrowTwoPaneWindows(t *testing.T) {
 	}
 }
 
+func TestDesktopIdentityControlsShareTopEdge(t *testing.T) {
+	w := newIdentityLayoutTestWindow(t)
+	w.prefs = &Preferences{}
+	w.snap.MyAddress = domaintest.ID("self")
+	w.snap.ActivePeer = domaintest.ID("contact")
+	var router input.Router
+	gtx := layout.Context{
+		Ops:         new(op.Ops),
+		Source:      router.Source(),
+		Metric:      unit.Metric{PxPerDp: 1, PxPerSp: 1},
+		Constraints: layout.Exact(image.Pt(1000, 600)),
+	}
+	w.layoutMain(gtx)
+	router.Frame(gtx.Ops)
+
+	var self, contact image.Rectangle
+	for _, node := range router.AppendSemantics(nil) {
+		desc := node.Desc
+		if desc.Description == w.t("chat.show_contact") {
+			contact = desc.Bounds
+		}
+		if desc.Class == semantic.Button && desc.Bounds.Min.X < 300 && desc.Bounds.Dy() >= 96 {
+			self = desc.Bounds
+		}
+	}
+	if self.Empty() || contact.Empty() || self.Min.Y != contact.Min.Y {
+		t.Fatalf("My identity at %v, contact ID at %v, want a shared top edge", self, contact)
+	}
+}
+
 func TestIdentitySearchEditorLayoutAppliesOpticalOffset(t *testing.T) {
 	contextFor := func() layout.Context {
 		return layout.Context{

@@ -1,11 +1,14 @@
 package desktop
 
 import (
+	"image"
 	"image/color"
 
 	"gioui.org/font"
 	"gioui.org/io/semantic"
 	"gioui.org/layout"
+	"gioui.org/op/clip"
+	"gioui.org/op/paint"
 	"gioui.org/text"
 	"gioui.org/unit"
 	"gioui.org/widget/material"
@@ -14,6 +17,25 @@ import (
 )
 
 const fullChatHeaderIDMinWidth = 500
+const chatHeaderInset = unit.Dp(4)
+
+func (w *Window) layoutDesktopChatHeader(gtx layout.Context) layout.Dimensions {
+	if w.snap.ActivePeer.IsZero() {
+		return layout.Dimensions{}
+	}
+	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return layout.Inset{Top: chatHeaderInset, Left: unit.Dp(8)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+				return w.layoutChatHeader(gtx, false)
+			})
+		}),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			size := image.Pt(gtx.Constraints.Max.X, min(gtx.Dp(1), gtx.Constraints.Max.Y))
+			paint.FillShape(gtx.Ops, color.NRGBA{R: 41, G: 53, B: 68, A: 255}, clip.Rect{Max: size}.Op())
+			return layout.Dimensions{Size: size}
+		}),
+	)
+}
 
 func (w *Window) layoutChatHeader(gtx layout.Context, compact bool) layout.Dimensions {
 	peer := w.snap.ActivePeer
@@ -31,7 +53,7 @@ func (w *Window) layoutChatHeader(gtx layout.Context, compact bool) layout.Dimen
 		id = address[:8] + "…" + address[len(address)-6:]
 	}
 
-	return layout.Inset{Bottom: unit.Dp(4)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+	return layout.Inset{Bottom: chatHeaderInset}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 		return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 				children := make([]layout.FlexChild, 0, 4)
