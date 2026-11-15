@@ -93,6 +93,8 @@ type Window struct {
 	consoleButton            widget.Clickable
 	updateButton             widget.Clickable
 	compactBackBtn           widget.Clickable
+	chatIdentityButton       widget.Clickable
+	chatIdentityPeer         domain.PeerIdentity
 	sendButton               widget.Clickable
 	myIdentityButton         widget.Clickable
 	copyIdentityButton       widget.Clickable
@@ -100,8 +102,11 @@ type Window struct {
 	identityPanelClose       widget.Clickable
 	identityPanelDismissTag  struct{}
 	identityPanelVisible     bool
+	identityPanelPeer        domain.PeerIdentity
 	identityPanelQRImage     widget.Image
 	identityPanelContactLink string
+	identityPanelFeedback    string
+	identityPanelGeneration  uint64
 	identityPanelList        layout.List
 	searchIcon               *widget.Icon
 	fingerprintIcon          *widget.Icon
@@ -1202,7 +1207,7 @@ func (w *Window) layout(gtx layout.Context) layout.Dimensions {
 		w.msgMenuFocus.restoreOnClose(gtx, &w.messageEditor)
 	}
 	if !w.identityPanelVisible {
-		w.identityPanelFocus.restoreOnClose(gtx, &w.myIdentityButton)
+		w.identityPanelFocus.restoreOnClose(gtx, &w.messageEditor)
 	}
 	if !w.consoleModalVisible() && w.consoleModal != nil {
 		// The console hands the keyboard back to the button that opened it.
@@ -1354,7 +1359,7 @@ func (w *Window) layout(gtx layout.Context) layout.Dimensions {
 
 	// Not while the console covers it: the reply row's Cancel is a background
 	// widget, and reading its clicks would put it in the focus traversal.
-	if !w.consoleModalVisible() {
+	if !w.consoleModalVisible() && !w.identityPanelVisible {
 		w.handleReplyContextClicks(gtx)
 	}
 	w.handlePendingActions()
@@ -1400,7 +1405,7 @@ func (w *Window) layout(gtx layout.Context) layout.Dimensions {
 	focusComposer, raiseKeyboard := consumeComposerFocus(w.focusComposerPending, w.composerKeyboardPending, w.contextMenuOpen())
 	w.focusComposerPending = false
 	w.composerKeyboardPending = false
-	if focusComposer {
+	if focusComposer && !w.identityPanelVisible {
 		w.touchKbd.noteExplicitEditorFocus()
 		gtx.Execute(key.FocusCmd{Tag: &w.messageEditor})
 		if raiseKeyboard {
@@ -1470,6 +1475,9 @@ func (w *Window) layoutWindowSurfaces(gtx layout.Context, inset layout.Inset) la
 	return layout.Stack{}.Layout(gtx,
 		layout.Expanded(func(gtx layout.Context) layout.Dimensions {
 			gtx = w.disableUnderConsoleModal(gtx)
+			if w.identityPanelVisible {
+				gtx = gtx.Disabled()
+			}
 			return inset.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 				return layout.Flex{
 					Axis: layout.Vertical,
@@ -1703,6 +1711,9 @@ func (w *Window) resetConversationStateOnPeerChange() {
 	}
 	w.clearReplyQuiet()
 	w.msgContextMsg = nil
+	if !w.identityPanelPeer.IsZero() && w.identityPanelPeer != peer {
+		w.closeIdentityPanel()
+	}
 	w.chatJump = chatJump{}
 	w.msgHighlight = msgHighlight{}
 	// What was reported belongs to the conversation being left. The one being
@@ -2209,6 +2220,7 @@ func (w *Window) applyPendingAttach(msg pendingAttachMsg) {
 }
 
 func (w *Window) handleActions(gtx layout.Context) {
+	identityWasOpen := w.identityPanelVisible
 	w.handleBackNavigation(gtx)
 
 	// The image viewer covers everything, the console included, so nothing
@@ -2223,7 +2235,7 @@ func (w *Window) handleActions(gtx layout.Context) {
 	// The Console button comes first so that the frame which OPENS the modal
 	// stops at the guard below too. Checking only at the top let that one
 	// frame run on and register every other control for the next one.
-	if !w.consoleModalVisible() {
+	if !w.consoleModalVisible() && !identityWasOpen {
 		for w.consoleButton.Clicked(gtx) {
 			w.openConsoleModal(gtx)
 		}
@@ -2240,6 +2252,17 @@ func (w *Window) handleActions(gtx layout.Context) {
 	// Back is the exception above: it is a key filter, not a widget, and it is
 	// how the modal is dismissed on Android.
 	if w.consoleModalVisible() {
+		return
+	}
+
+	if identityWasOpen {
+		if w.identityPanelVisible {
+			w.handleIdentityPanelActions(gtx)
+		}
+		return
+	}
+	w.handleIdentityPanelOpen(gtx)
+	if w.identityPanelVisible {
 		return
 	}
 
@@ -2293,19 +2316,6 @@ func (w *Window) handleActions(gtx layout.Context) {
 	}
 
 	w.handleMessageSubmitShortcut(gtx)
-	w.handleMyIdentityPanel(gtx)
-
-	for w.copyIdentityButton.Clicked(gtx) {
-		gtx.Execute(clipboard.WriteCmd{
-			Type: "text/plain",
-			Data: io.NopCloser(strings.NewReader(w.snap.MyAddress.String())),
-		})
-		w.router.SetSendStatus(w.t("status.identity_copied"))
-		if w.window != nil {
-			w.window.Invalidate()
-		}
-	}
-	w.handleShareContact(gtx)
 	w.handleContactLinkPaste()
 
 	w.handleContextMenuActions(gtx)
@@ -3171,23 +3181,7 @@ func (w *Window) layoutMain(gtx layout.Context) layout.Dimensions {
 				// nobody needs to READ it under a keyboard — it sits above the
 				// composer and pushes it down by its full height either way.
 				layout.Rigid(keyboardTailRow(&w.touchKbd, func(gtx layout.Context) layout.Dimensions {
-					recipient := w.snap.ActivePeer
-					if recipient.IsZero() {
-						return layout.Dimensions{}
-					}
-					return layout.Inset{Bottom: unit.Dp(4)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-						return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								lbl := material.Label(w.theme, unit.Sp(15), w.t("chat.with", w.peerDisplayName(recipient)))
-								lbl.Color = color.NRGBA{R: 200, G: 212, B: 228, A: 255}
-								lbl.Font.Weight = 600
-								return lbl.Layout(gtx)
-							}),
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								return w.layoutPendingDeletesCaption(gtx, recipient)
-							}),
-						)
-					})
+					return w.layoutChatHeader(gtx, false)
 				})),
 				layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
 					return w.layoutChatCard(gtx, status)
@@ -3232,7 +3226,9 @@ func (w *Window) layoutMainCompact(gtx layout.Context, status service.NodeStatus
 	return layout.Flex{
 		Axis: layout.Vertical,
 	}.Layout(gtx,
-		layout.Rigid(keyboardTailRow(&w.touchKbd, w.layoutCompactChatHeader)),
+		layout.Rigid(keyboardTailRow(&w.touchKbd, func(gtx layout.Context) layout.Dimensions {
+			return w.layoutChatHeader(gtx, true)
+		})),
 		layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
 			return w.layoutChatCard(gtx, status)
 		}),
@@ -3240,57 +3236,8 @@ func (w *Window) layoutMainCompact(gtx layout.Context, status service.NodeStatus
 	)
 }
 
-// layoutCompactChatHeader replaces the plain "chat with X" label of the
-// two-pane layout with a back-button + status + label row for the
-// single-pane mode. The reachability dot mirrors the contact-list rows:
-// in compact mode the sidebar (and its online/offline indicators) is off
-// screen while a chat is open, so the header is the only place the
-// user can see whether the peer is reachable.
-func (w *Window) layoutCompactChatHeader(gtx layout.Context) layout.Dimensions {
-	recipient := w.snap.ActivePeer
-	if recipient.IsZero() {
-		return layout.Dimensions{}
-	}
-	status := w.snap.NodeStatus
-	return layout.Inset{Bottom: unit.Dp(4)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-		return layout.Flex{
-			Axis:      layout.Horizontal,
-			Alignment: layout.Middle,
-		}.Layout(gtx,
-			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				btn := material.Button(w.theme, &w.compactBackBtn, w.t("chat.back"))
-				btn.Background = color.NRGBA{R: 34, G: 46, B: 62, A: 255}
-				btn.Color = color.NRGBA{R: 245, G: 247, B: 250, A: 255}
-				btn.Inset = layout.Inset{
-					Top: unit.Dp(3), Bottom: unit.Dp(3),
-					Left: unit.Dp(8), Right: unit.Dp(8),
-				}
-				btn.CornerRadius = unit.Dp(5)
-				btn.TextSize = unit.Sp(12)
-				return btn.Layout(gtx)
-			}),
-			layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
-			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				return w.layoutReachableIndicator(gtx, status, recipient)
-			}),
-			layout.Rigid(layout.Spacer{Width: unit.Dp(6)}.Layout),
-			layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-				lbl := material.Label(w.theme, unit.Sp(15), w.t("chat.with", w.peerDisplayName(recipient)))
-				lbl.Color = color.NRGBA{R: 200, G: 212, B: 228, A: 255}
-				lbl.Font.Weight = 600
-				lbl.MaxLines = 1
-				return lbl.Layout(gtx)
-			}),
-			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				return w.layoutPendingDeletesCaption(gtx, recipient)
-			}),
-		)
-	})
-}
-
 // layoutPendingDeletesCaption renders what this conversation still owes —
-// messages waiting to be sent, messages waiting for the peer to delete —
-// next to the conversation title, and nothing at all when it owes neither.
+// messages waiting to be sent, messages waiting for the peer to delete.
 //
 // A deletion removes the bubble immediately, so once the user has
 // clicked there is no message left to hang a per-row indicator on. This
@@ -3303,12 +3250,10 @@ func (w *Window) layoutPendingDeletesCaption(gtx layout.Context, peer domain.Pee
 	if caption == "" {
 		return layout.Dimensions{}
 	}
-	return layout.Inset{Left: unit.Dp(8)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-		lbl := material.Caption(w.theme, caption)
-		lbl.Color = color.NRGBA{R: 230, G: 176, B: 96, A: 255}
-		lbl.MaxLines = 1
-		return lbl.Layout(gtx)
-	})
+	lbl := material.Caption(w.theme, caption)
+	lbl.Color = color.NRGBA{R: 230, G: 176, B: 96, A: 255}
+	lbl.MaxLines = 1
+	return lbl.Layout(gtx)
 }
 
 // headerPendingCaption is the whole caption: what is still to be SENT and
@@ -4154,10 +4099,11 @@ func (w *Window) layoutComposerFooter(gtx layout.Context, status service.NodeSta
 		return layout.E.Layout(gtx, w.layoutConsoleButton)
 	}
 	if gtx.Constraints.Max.X < gtx.Dp(unit.Dp(composerFooterStackMaxDp)) {
+		gtx.Constraints.Min.X = gtx.Constraints.Max.X
 		return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-			layout.Rigid(statusRow),
+			layout.Rigid(w.layoutConsoleButton),
 			layout.Rigid(layout.Spacer{Height: unit.Dp(6)}.Layout),
-			layout.Rigid(consoleButton),
+			layout.Rigid(statusRow),
 		)
 	}
 
@@ -4410,8 +4356,7 @@ func composerSendActionState(hasRecipient, deletePending, hasContent bool) (enab
 	}
 }
 
-// layoutComposerChrome draws what stands above the editor: the "Message body
-// for: NAME" header and, when there is one, the attached file's chip.
+// layoutComposerChrome lays out the message body header and the attached file chip.
 //
 // It is its own function because its HEIGHT is a number the rest of the card
 // needs — the editor and the emoji picker are budgeted against what is left
@@ -4419,72 +4364,12 @@ func composerSendActionState(hasRecipient, deletePending, hasContent bool) (enab
 // rows out and look. messageInputCard therefore records this once and replays
 // the recording into the flex, the same way layoutComposerCard already
 // handles its footer.
-func (w *Window) layoutComposerChrome(gtx layout.Context, recipient domain.PeerIdentity) layout.Dimensions {
-	return layout.Flex{
-		Axis: layout.Vertical,
-	}.Layout(gtx,
+func (w *Window) layoutComposerChrome(gtx layout.Context) layout.Dimensions {
+	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			if recipient.IsZero() {
-				label := material.Body2(w.theme, w.t("compose.body"))
-				label.Color = color.NRGBA{R: 176, G: 187, B: 205, A: 255}
-				return label.Layout(gtx)
-			}
-			// The single-line invariant is kept for the reader's sake and
-			// not for the arithmetic's any more — the card measures this
-			// row rather than assuming its height — but a wrapped header
-			// is still a worse header: the name is Flexed and truncated
-			// instead of wrapping, and the decorative ID chunk is dropped
-			// when the row is too narrow to plausibly hold it.
-			showID := gtx.Constraints.Max.X >= gtx.Dp(unit.Dp(420))
-			children := []layout.FlexChild{
-				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					label := material.Body2(w.theme, w.t("compose.body_for"))
-					label.Color = color.NRGBA{R: 176, G: 187, B: 205, A: 255}
-					label.MaxLines = 1
-					return label.Layout(gtx)
-				}),
-				layout.Rigid(layout.Spacer{Width: unit.Dp(6)}.Layout),
-				layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-					name := w.peerDisplayName(recipient)
-					lbl := material.Body1(w.theme, name)
-					lbl.Font.Weight = font.Bold
-					lbl.TextSize = unit.Sp(17)
-					lbl.Color = color.NRGBA{R: 150, G: 210, B: 255, A: 255}
-					lbl.MaxLines = 1
-					return lbl.Layout(gtx)
-				}),
-			}
-			if showID {
-				children = append(children,
-					layout.Rigid(layout.Spacer{Width: unit.Dp(10)}.Layout),
-					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						lbl := material.Caption(w.theme, w.t("compose.identity_label"))
-						lbl.Color = color.NRGBA{R: 160, G: 170, B: 190, A: 255}
-						lbl.MaxLines = 1
-						return lbl.Layout(gtx)
-					}),
-					layout.Rigid(layout.Spacer{Width: unit.Dp(4)}.Layout),
-					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						lbl := material.Body1(w.theme, shortFingerprint(recipient.String()))
-						lbl.Font.Weight = font.Bold
-						lbl.TextSize = unit.Sp(15)
-						lbl.Color = color.NRGBA{R: 130, G: 235, B: 190, A: 255}
-						lbl.MaxLines = 1
-						// A fingerprint is an identifier, not a word.
-						return lbl.Layout(leftToRight(gtx))
-					}),
-				)
-			}
-			// "Message body for: NAME  ID: fingerprint" is a sentence, so it
-			// has to be arranged in the direction the interface is read in.
-			// Left as written, the Arabic build strands the label on the left
-			// and the name it introduces on the right — see inReadingOrder.
-			// Every child here is a label, a value or a spacer, none of which
-			// has a side of its own, so reversing them is the whole of it.
-			return layout.Flex{
-				Axis:      layout.Horizontal,
-				Alignment: layout.Baseline,
-			}.Layout(gtx, inReadingOrder(gtx, children...)...)
+			label := material.Body2(w.theme, w.t("compose.body"))
+			label.Color = color.NRGBA{R: 176, G: 187, B: 205, A: 255}
+			return label.Layout(gtx)
 		}),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			if w.attachedFile == "" {
@@ -4525,7 +4410,7 @@ func (w *Window) messageInputCard(gtx layout.Context, recipient domain.PeerIdent
 	chromeGtx.Constraints.Max.X = max(0, gtx.Constraints.Max.X-2*gtx.Dp(cardBorder)-gtx.Dp(cardPad.Left)-gtx.Dp(cardPad.Right))
 	chromeGtx.Constraints.Min.X = min(gtx.Constraints.Min.X, chromeGtx.Constraints.Max.X)
 	chromeMacro := op.Record(gtx.Ops)
-	chromeDims := w.layoutComposerChrome(chromeGtx, recipient)
+	chromeDims := w.layoutComposerChrome(chromeGtx)
 	chromeCall := chromeMacro.Stop()
 	chromeHeight := chromeDims.Size.Y + gtx.Dp(cardPad.Top) + gtx.Dp(cardPad.Bottom) + 2*gtx.Dp(cardBorder)
 
@@ -4573,12 +4458,12 @@ func (w *Window) messageInputCard(gtx layout.Context, recipient domain.PeerIdent
 								Alignment: layout.Middle,
 							}.Layout(gtx,
 								layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-									btn := material.IconButton(w.theme, &w.attachButton, w.attachIcon, w.t("file.attach"))
-									btn.Background = backgroundColor
-									btn.Color = color.NRGBA{R: 157, G: 176, B: 201, A: 255}
-									btn.Size = unit.Dp(22)
-									btn.Inset = layout.UniformInset(unit.Dp(6))
-									return btn.Layout(gtx)
+									return w.kit().ButtonFrame(gtx, &w.attachButton, ui.ButtonSecondary, unit.Dp(17), func(gtx layout.Context) layout.Dimensions {
+										semantic.DescriptionOp(w.t("file.attach")).Add(gtx.Ops)
+										return layout.UniformInset(unit.Dp(6)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+											return ui.Icon(gtx, w.attachIcon, unit.Dp(22), color.NRGBA{R: 157, G: 176, B: 201, A: 255})
+										})
+									})
 								}),
 								layout.Rigid(layout.Spacer{Width: unit.Dp(6)}.Layout),
 								layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
@@ -4826,9 +4711,7 @@ func (w *Window) layoutAttachedFilePreview(gtx layout.Context) layout.Dimensions
 					layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
 					// Close / cancel button "×".
 					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						btn := material.Button(w.theme, &w.attachCancelBtn, "\u00d7") // × character
-						btn.Background = color.NRGBA{R: 65, G: 70, B: 85, A: 255}
-						btn.Color = color.NRGBA{R: 210, G: 215, B: 225, A: 255}
+						btn := w.kit().TextButton(&w.attachCancelBtn, "\u00d7", ui.ButtonSecondary)
 						btn.TextSize = unit.Sp(14)
 						btn.Inset = layout.UniformInset(unit.Dp(2))
 						btn.CornerRadius = unit.Dp(10)
@@ -5283,9 +5166,7 @@ func (w *Window) layoutReceiverProgress(gtx layout.Context, bg, fg color.NRGBA, 
 		}),
 		layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			matBtn := material.Button(w.theme, cancelBtn, "✕")
-			matBtn.Background = color.NRGBA{R: 65, G: 70, B: 85, A: 255}
-			matBtn.Color = color.NRGBA{R: 220, G: 220, B: 220, A: 255}
+			matBtn := w.kit().TextButton(cancelBtn, "✕", ui.ButtonSecondary)
 			matBtn.Inset = layout.UniformInset(unit.Dp(2))
 			matBtn.CornerRadius = unit.Dp(10)
 			matBtn.TextSize = unit.Sp(12)
@@ -5323,9 +5204,7 @@ func (w *Window) layoutFileDownloadButton(gtx layout.Context, messageID domain.M
 		}()
 	}
 
-	matBtn := material.Button(w.theme, btn, w.t("file.download"))
-	matBtn.Background = color.NRGBA{R: 36, G: 67, B: 126, A: 255}
-	matBtn.Color = color.NRGBA{R: 255, G: 255, B: 255, A: 255}
+	matBtn := w.kit().TextButton(btn, w.t("file.download"), ui.ButtonPrimary)
 	matBtn.Inset = layout.Inset{
 		Top: unit.Dp(4), Bottom: unit.Dp(4),
 		Left: unit.Dp(12), Right: unit.Dp(12),
@@ -5372,9 +5251,7 @@ func (w *Window) layoutFileRestartButton(gtx layout.Context, messageID domain.Me
 		}()
 	}
 
-	matBtn := material.Button(w.theme, btn, w.t("file.restart"))
-	matBtn.Background = color.NRGBA{R: 180, G: 80, B: 60, A: 255}
-	matBtn.Color = color.NRGBA{R: 255, G: 255, B: 255, A: 255}
+	matBtn := w.kit().TextButton(btn, w.t("file.restart"), ui.ButtonPrimary)
 	matBtn.Inset = layout.Inset{
 		Top: unit.Dp(4), Bottom: unit.Dp(4),
 		Left: unit.Dp(12), Right: unit.Dp(12),
@@ -5446,9 +5323,6 @@ func (w *Window) layoutFileActionButtons(gtx layout.Context, msg service.DirectM
 		go openFile(revealPath)
 	}
 
-	btnBg := color.NRGBA{R: 50, G: 60, B: 80, A: 255}
-	btnFg := color.NRGBA{R: 180, G: 200, B: 230, A: 255}
-
 	// Layout: [Show in Folder] [Open] left-aligned, plus [Delete]
 	// only on outgoing rows. Default Spacing (SpaceEnd) packs items
 	// to the start so the row width grows naturally with the
@@ -5464,9 +5338,7 @@ func (w *Window) layoutFileActionButtons(gtx layout.Context, msg service.DirectM
 	if runtime.GOOS == "android" {
 		children = []layout.FlexChild{
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				matBtn := material.Button(w.theme, revealBtn, w.t("file.export"))
-				matBtn.Background = btnBg
-				matBtn.Color = btnFg
+				matBtn := w.kit().TextButton(revealBtn, w.t("file.export"), ui.ButtonSecondary)
 				matBtn.Inset = layout.Inset{
 					Top: unit.Dp(3), Bottom: unit.Dp(3),
 					Left: unit.Dp(8), Right: unit.Dp(8),
@@ -5479,9 +5351,7 @@ func (w *Window) layoutFileActionButtons(gtx layout.Context, msg service.DirectM
 	} else {
 		children = []layout.FlexChild{
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				matBtn := material.Button(w.theme, revealBtn, w.t("file.show_in_folder"))
-				matBtn.Background = btnBg
-				matBtn.Color = btnFg
+				matBtn := w.kit().TextButton(revealBtn, w.t("file.show_in_folder"), ui.ButtonSecondary)
 				matBtn.Inset = layout.Inset{
 					Top: unit.Dp(3), Bottom: unit.Dp(3),
 					Left: unit.Dp(8), Right: unit.Dp(8),
@@ -5492,9 +5362,7 @@ func (w *Window) layoutFileActionButtons(gtx layout.Context, msg service.DirectM
 			}),
 			layout.Rigid(layout.Spacer{Width: unit.Dp(6)}.Layout),
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				matBtn := material.Button(w.theme, openBtn, w.t("file.open_file"))
-				matBtn.Background = btnBg
-				matBtn.Color = btnFg
+				matBtn := w.kit().TextButton(openBtn, w.t("file.open_file"), ui.ButtonSecondary)
 				matBtn.Inset = layout.Inset{
 					Top: unit.Dp(3), Bottom: unit.Dp(3),
 					Left: unit.Dp(8), Right: unit.Dp(8),
@@ -5545,9 +5413,7 @@ func (w *Window) layoutFileCardDeleteButton(gtx layout.Context, msg service.Dire
 		w.dispatchMessageDeleteAsync(peer, target)
 	}
 
-	matBtn := material.Button(w.theme, btn, w.t("context.delete_message"))
-	matBtn.Background = color.NRGBA{R: 120, G: 50, B: 60, A: 255}
-	matBtn.Color = color.NRGBA{R: 250, G: 240, B: 240, A: 255}
+	matBtn := w.kit().TextButton(btn, w.t("context.delete_message"), ui.ButtonDanger)
 	matBtn.Inset = layout.Inset{
 		Top: unit.Dp(3), Bottom: unit.Dp(3),
 		Left: unit.Dp(8), Right: unit.Dp(8),
@@ -7218,9 +7084,7 @@ func (w *Window) layoutUpdateBadge(gtx layout.Context) layout.Dimensions {
 	if !w.updateAvailable() {
 		return layout.Dimensions{}
 	}
-	btn := material.Button(w.theme, &w.updateButton, w.t("header.update"))
-	btn.Background = color.NRGBA{R: 230, G: 126, B: 34, A: 255}
-	btn.Color = color.NRGBA{R: 255, G: 255, B: 255, A: 255}
+	btn := w.kit().TextButton(&w.updateButton, w.t("header.update"), ui.ButtonNotice)
 	return btn.Layout(gtx)
 }
 
@@ -7275,97 +7139,130 @@ func (w *Window) layoutIdentityPanelOverlay(gtx layout.Context) layout.Dimension
 		w.closeIdentityPanel()
 		return layout.Dimensions{}
 	}
+	title := "clients.my_identity"
+	if !w.identityPanelPeer.IsZero() {
+		title = "chat.contact"
+	}
 	return w.kit().Modal(gtx, ui.Modal{
-		Title:      w.t("clients.my_identity"),
-		CloseHint:  w.t("clients.close_identity"),
-		Close:      &w.identityPanelClose,
-		DismissTag: &w.identityPanelDismissTag,
-		Dismiss:    w.closeIdentityPanel,
-		// Identity details keeps the rounder corner the design gives it; the
-		// other modals use ui.ModalCardRadiusDp.
-		CornerRadius: unit.Dp(ui.ModalIdentityRadiusDp),
-		Sizing:       ui.ModalSizingCentered,
-		Compact:      w.isCompactLayout(gtx),
-		Content:      w.layoutIdentityPanelList,
+		Title:         w.t(title),
+		CloseHint:     w.t("clients.close_identity"),
+		Close:         &w.identityPanelClose,
+		DismissTag:    &w.identityPanelDismissTag,
+		Dismiss:       w.closeIdentityPanel,
+		CornerRadius:  unit.Dp(ui.ModalIdentityRadiusDp),
+		Sizing:        ui.ModalSizingContent,
+		BackdropAlpha: 217, // 85% of 255.
+		Content:       w.layoutIdentityPanelList,
+		Footer:        w.layoutIdentityPanelFooter,
 	})
 }
 
 func (w *Window) identityPanelItems() []event.Tag {
+	if w.identityPanelContactLink == "" {
+		return []event.Tag{&w.identityPanelClose, &w.copyIdentityButton}
+	}
 	return []event.Tag{&w.identityPanelClose, &w.copyIdentityButton, &w.shareContactButton}
 }
 
 func (w *Window) layoutIdentityPanelList(gtx layout.Context) layout.Dimensions {
+	qrLimit := gtx.Constraints.Max.Y
+	wideShort := !w.identityPanelPeer.IsZero() && qrLimit < gtx.Dp(unit.Dp(216)) && gtx.Constraints.Max.X >= gtx.Dp(unit.Dp(300))
+	if wideShort {
+		qrLimit = min(qrLimit, gtx.Constraints.Max.X/2)
+	}
+	qr := func(gtx layout.Context) layout.Dimensions {
+		gtx.Constraints.Max.Y = min(gtx.Constraints.Max.Y, qrLimit)
+		gtx.Constraints.Min.Y = min(gtx.Constraints.Min.Y, gtx.Constraints.Max.Y)
+		return w.layoutIdentityQR(gtx, unit.Dp(176))
+	}
 	return w.identityPanelList.Layout(gtx, 1, func(gtx layout.Context, _ int) layout.Dimensions {
-		return w.layoutIdentityPanelContent(gtx)
+		if w.identityPanelPeer.IsZero() {
+			return layout.Center.Layout(gtx, qr)
+		}
+		if wideShort {
+			return layout.Flex{Alignment: layout.Middle, Gap: gtx.Dp(unit.Dp(12))}.Layout(gtx,
+				layout.Flexed(1, w.layoutPeerIdentityPanelSummary),
+				layout.Rigid(qr),
+			)
+		}
+		return layout.Flex{Axis: layout.Vertical, Gap: gtx.Dp(unit.Dp(12))}.Layout(gtx,
+			layout.Rigid(w.layoutPeerIdentityPanelSummary),
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				return layout.Center.Layout(gtx, qr)
+			}),
+		)
 	})
 }
 
-func (w *Window) layoutIdentityPanelContent(gtx layout.Context) layout.Dimensions {
-	// The title and the close button belong to the modal shell around this
-	// content (modal_shell.go), not to the content itself — every modal in the
-	// application wears the same header.
+func (w *Window) layoutIdentityPanelFooter(gtx layout.Context) layout.Dimensions {
+	hasLink := w.identityPanelContactLink != ""
+	address := w.chatAddressLabel(w.t("chat.identity_label") + " " + w.identityPanelAddress().String())
+	address.WrapPolicy = text.WrapGraphemes
+	address.Alignment = text.Middle
+	addressLabel := func(gtx layout.Context) layout.Dimensions {
+		return address.Layout(leftToRight(gtx))
+	}
 	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			return layout.Center.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-				return w.layoutIdentityQR(gtx, unit.Dp(220))
+			return layout.Inset{Left: 16, Right: 16, Bottom: 14}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+				if !hasLink {
+					return layout.Center.Layout(gtx, addressLabel)
+				}
+				return layout.Flex{Alignment: layout.Middle, Gap: gtx.Dp(unit.Dp(6))}.Layout(gtx,
+					layout.Flexed(1, addressLabel),
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						return w.kit().SquareIconButton(gtx, &w.copyIdentityButton, w.copyIcon, w.t("chat.copy_id"))
+					}),
+				)
 			})
 		}),
-		layout.Rigid(layout.Spacer{Height: unit.Dp(16)}.Layout),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			label := material.Body1(w.theme, w.snap.MyAddress.String())
-			label.Color = color.NRGBA{R: 190, G: 204, B: 222, A: 255}
-			label.Alignment = text.Middle
-			label.MaxLines = 2
-			// An address is an identifier: left to right in every language.
-			return label.Layout(leftToRight(gtx))
-		}),
-		layout.Rigid(layout.Spacer{Height: unit.Dp(18)}.Layout),
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			gtx.Constraints.Min.Y = gtx.Dp(unit.Dp(1))
-			gtx.Constraints.Max.Y = gtx.Constraints.Min.Y
-			ui.Fill(gtx, color.NRGBA{R: 50, G: 65, B: 84, A: 255})
-			return layout.Dimensions{Size: image.Pt(gtx.Constraints.Max.X, gtx.Constraints.Min.Y)}
-		}),
-		layout.Rigid(layout.Spacer{Height: unit.Dp(18)}.Layout),
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			return w.layoutIdentityActionButton(gtx, &w.copyIdentityButton, w.copyIcon, w.t("clients.copy_identity"))
-		}),
-		layout.Rigid(layout.Spacer{Height: unit.Dp(10)}.Layout),
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			return w.layoutIdentityActionButton(gtx, &w.shareContactButton, w.shareIcon, w.t("clients.share_contact"))
+			return w.kit().ModalActionFooter(gtx, func(gtx layout.Context) layout.Dimensions {
+				return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						if hasLink {
+							label := "chat.copy_contact_link"
+							if w.identityPanelPeer.IsZero() {
+								label = "clients.share_contact"
+							}
+							return w.kit().ModalActionButton(gtx, &w.shareContactButton, w.shareIcon, w.t(label), true)
+						}
+						return w.kit().ModalActionButton(gtx, &w.copyIdentityButton, w.copyIcon, w.t("chat.copy_id"), true)
+					}),
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						if w.identityPanelFeedback == "" {
+							return layout.Dimensions{}
+						}
+						return layout.Inset{Top: 6}.Layout(gtx, material.Caption(w.theme, w.identityPanelFeedback).Layout)
+					}),
+				)
+			})
 		}),
 	)
 }
 
-func (w *Window) layoutIdentityActionButton(gtx layout.Context, button *widget.Clickable, icon *widget.Icon, labelText string) layout.Dimensions {
-	gtx.Constraints.Min.Y = gtx.Dp(unit.Dp(52))
-	gtx.Constraints.Max.Y = gtx.Constraints.Min.Y
-	border := widget.Border{
-		Color:        color.NRGBA{R: 57, G: 75, B: 98, A: 255},
-		CornerRadius: unit.Dp(10),
-		Width:        unit.Dp(1),
-	}
-	return border.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-		buttonStyle := material.ButtonLayout(w.theme, button)
-		buttonStyle.Background = color.NRGBA{R: 27, G: 39, B: 53, A: 255}
-		buttonStyle.CornerRadius = unit.Dp(10)
-		return buttonStyle.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-			return layout.Inset{Left: unit.Dp(14), Right: unit.Dp(14), Top: unit.Dp(13), Bottom: unit.Dp(13)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-				return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
-					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						return ui.Icon(gtx, icon, unit.Dp(23), color.NRGBA{R: 202, G: 215, B: 231, A: 255})
-					}),
-					layout.Rigid(layout.Spacer{Width: unit.Dp(12)}.Layout),
-					layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-						label := material.Body1(w.theme, labelText)
-						label.Color = color.NRGBA{R: 242, G: 245, B: 249, A: 255}
-						label.MaxLines = 1
-						return label.Layout(gtx)
-					}),
-				)
-			})
-		})
-	})
+func (w *Window) layoutPeerIdentityPanelSummary(gtx layout.Context) layout.Dimensions {
+	return layout.Flex{Axis: layout.Vertical, Gap: gtx.Dp(unit.Dp(6))}.Layout(gtx,
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			name := w.prefs.Alias(w.identityPanelPeer)
+			if name == "" {
+				return layout.Dimensions{}
+			}
+			label := material.Body1(w.theme, name)
+			return label.Layout(directedByContent(gtx, name))
+		}),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			key := "chat.contact_id_only"
+			fg := color.NRGBA{R: 183, G: 197, B: 213, A: 255}
+			if w.identityPanelContactLink != "" {
+				key = "chat.contact_key_verified"
+				fg = color.NRGBA{R: 152, G: 220, B: 186, A: 255}
+			}
+			label := material.Caption(w.theme, w.t(key))
+			label.Color = fg
+			return label.Layout(gtx)
+		}),
+	)
 }
 
 // menuMinUsableDp is the smallest height in which drawing a context menu is
@@ -8055,23 +7952,22 @@ func (w *Window) handleIdentityResolutionState(state ebus.IdentityResolutionStat
 	if w.router == nil {
 		return
 	}
-	short := shortFingerprint(state.Target.String())
-	var msg string
+	var outcome string
 	switch {
 	case state.DMAvailable == domain.DMAvailabilityNo:
-		msg = w.t("status.identity_lookup_dm_disabled", short)
+		outcome = "dm_disabled"
 	case state.Lifecycle == domain.IdentityResolutionSucceeded:
-		msg = w.t("status.identity_lookup_succeeded", short)
+		outcome = "succeeded"
 	case state.Lifecycle == domain.IdentityResolutionExhausted && !state.Usable:
-		msg = w.t("status.identity_lookup_exhausted", short)
+		outcome = "exhausted"
 	case state.InteractiveTimeout && !state.Usable && !state.Lifecycle.Terminal():
-		msg = w.t("status.identity_lookup_timeout", short)
+		outcome = "timeout"
 	case state.NoRoute && !state.Usable && !state.Lifecycle.Terminal():
-		msg = w.t("status.identity_lookup_no_route", short)
+		outcome = "no_route"
 	default:
 		return
 	}
-	w.router.SetSendStatus(msg)
+	w.router.SetPeerSendStatus(state.Target, w.t("status.lookup_active_"+outcome), w.t("status.identity_lookup_"+outcome, shortFingerprint(state.Target.String())))
 	if w.window != nil {
 		w.window.Invalidate()
 	}
@@ -9083,18 +8979,14 @@ func (w *Window) layoutFailedSends(gtx layout.Context) layout.Dimensions {
 						}),
 						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 							return layout.Inset{Left: unit.Dp(4)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-								btn := material.Button(w.theme, &w.failedRetryButton, w.t("compose.retry"))
-								btn.Background = color.NRGBA{R: 70, G: 90, B: 60, A: 255}
-								btn.Color = color.NRGBA{R: 210, G: 225, B: 200, A: 255}
+								btn := w.kit().TextButton(&w.failedRetryButton, w.t("compose.retry"), ui.ButtonPrimary)
 								btn.Inset = layout.Inset{Top: unit.Dp(2), Bottom: unit.Dp(2), Left: unit.Dp(6), Right: unit.Dp(6)}
 								return btn.Layout(gtx)
 							})
 						}),
 						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 							return layout.Inset{Left: unit.Dp(4)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-								btn := material.Button(w.theme, &w.failedDismissButton, "✕")
-								btn.Background = color.NRGBA{R: 78, G: 50, B: 50, A: 255}
-								btn.Color = color.NRGBA{R: 225, G: 200, B: 200, A: 255}
+								btn := w.kit().TextButton(&w.failedDismissButton, "✕", ui.ButtonDanger)
 								btn.Inset = layout.Inset{Top: unit.Dp(2), Bottom: unit.Dp(2), Left: unit.Dp(6), Right: unit.Dp(6)}
 								return btn.Layout(gtx)
 							})
@@ -9176,9 +9068,7 @@ func (w *Window) layoutReplyPreview(gtx layout.Context) layout.Dimensions {
 						}),
 						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 							return layout.Inset{Left: unit.Dp(4)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-								btn := material.Button(w.theme, &w.replyCancelButton, "✕")
-								btn.Background = color.NRGBA{R: 50, G: 60, B: 78, A: 255}
-								btn.Color = color.NRGBA{R: 200, G: 210, B: 225, A: 255}
+								btn := w.kit().TextButton(&w.replyCancelButton, "✕", ui.ButtonSecondary)
 								btn.Inset = layout.Inset{Top: unit.Dp(2), Bottom: unit.Dp(2), Left: unit.Dp(6), Right: unit.Dp(6)}
 								return btn.Layout(gtx)
 							})

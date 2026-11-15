@@ -2,6 +2,7 @@ package desktop
 
 import (
 	"image"
+	"strings"
 	"testing"
 
 	"gioui.org/f32"
@@ -209,6 +210,38 @@ func TestComposerFooterCarriesTheConsoleButton(t *testing.T) {
 	}
 	if buttons < 1 {
 		t.Fatal("footer exposes no buttons, want the console button")
+	}
+}
+
+func TestCompactComposerFooterPlacesFullWidthConsoleAboveStatus(t *testing.T) {
+	var router input.Router
+	w := newConsoleModalTestWindow(t)
+	gtx := layout.Context{
+		Ops:         new(op.Ops),
+		Source:      router.Source(),
+		Metric:      unit.Metric{PxPerDp: 1, PxPerSp: 1},
+		Constraints: layout.Constraints{Max: image.Pt(320, 200)},
+	}
+	status := service.NodeStatus{}
+	dims := w.layoutComposerFooter(gtx, status)
+	router.Frame(gtx.Ops)
+
+	state, connected, total, pending := networkStatusSummary(status)
+	statusLabel := w.t("compose.network_status", strings.ToUpper(state), connected, total, pending)
+	var buttonBounds, statusBounds image.Rectangle
+	for _, node := range router.AppendSemantics(nil) {
+		if node.Desc.Class == semantic.Button {
+			buttonBounds = node.Desc.Bounds
+		}
+		if node.Desc.Label == statusLabel {
+			statusBounds = node.Desc.Bounds
+		}
+	}
+	if buttonBounds.Empty() || buttonBounds.Min.X != 0 || buttonBounds.Max.X != dims.Size.X || dims.Size.X != 320 {
+		t.Fatalf("Console bounds %v, want full width of footer %v", buttonBounds, dims.Size)
+	}
+	if statusBounds.Empty() || statusBounds.Min.Y < buttonBounds.Max.Y {
+		t.Fatalf("network status %v must sit beneath Console %v", statusBounds, buttonBounds)
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"gioui.org/io/pointer"
 	"gioui.org/io/semantic"
 	"gioui.org/layout"
+	"gioui.org/op"
 	"gioui.org/op/clip"
 	"gioui.org/op/paint"
 	"gioui.org/unit"
@@ -45,19 +46,20 @@ const (
 	// modalTitleSizeSp is the header title size.
 	modalTitleSizeSp = 22
 
-	// modalCloseButtonSideDp is the diameter of the close button. 44dp is the
-	// smallest comfortable touch target, and the button is the only way out of
-	// a modal on a phone.
+	// ModalButtonRadiusDp is the corner radius for labelled modal actions.
+	ModalButtonRadiusDp = 8
+	// modalCloseButtonSideDp is the standard icon control's touch target.
 	modalCloseButtonSideDp = 44
-	// modalCloseButtonIconDp is the size of the glyph inside that circle.
+	// modalCloseButtonIconDp is the size of the glyph inside the control.
 	modalCloseButtonIconDp = 22
-	// modalCloseButtonBorderDp is the width of the ring around it.
+	// modalCloseButtonBorderDp is the width of the frame around it.
 	modalCloseButtonBorderDp = 1
 
 	// modalCenteredMaxWidthDp and modalCenteredMaxHeightDp bound a centred
 	// card, and modalCenteredEdgeDp keeps it off the window edges when the
 	// window is smaller than those bounds.
 	modalCenteredMaxWidthDp  = 384
+	modalContentMaxWidthDp   = 410
 	modalCenteredMaxHeightDp = 520
 	modalCenteredEdgeDp      = 16
 )
@@ -132,9 +134,7 @@ func ModalCloseButtonStateFor(hovered bool) ModalCloseButtonState {
 	return ModalCloseButtonIdle
 }
 
-// RoundIconButton is one circular icon control: the close button of a modal,
-// and every button of the image viewer (design screen 7c calls them one
-// component, and they are).
+// RoundIconButton describes a circular icon control.
 //
 // The zero value is not usable: a button with no icon and no palette is not a
 // state this application has, and defaulting either would hide the omission
@@ -155,7 +155,7 @@ type RoundIconButton struct {
 	// ModalCloseButtonStateFor.
 	Idle    ModalCloseButtonPalette
 	Hovered ModalCloseButtonPalette
-	// Enabled false draws the same circle at DimmedAlpha and wraps NO
+	// Enabled false draws the control at DimmedAlpha and wraps NO
 	// Clickable: no hover, no hit area, no click. It is how a control says
 	// "not now" without disappearing — a control that vanishes moves
 	// everything laid out beside it.
@@ -170,13 +170,7 @@ func dim(c color.NRGBA) color.NRGBA {
 	return c
 }
 
-// RoundIconButton draws one: a circle with a 1dp ring, filled per its current
-// state.
-//
-// The ring is an outer disc with the fill laid over it inset by its width,
-// rather than a stroked outline. A stroke is centred ON the path, so half of
-// it falls outside the button's bounds — and widget.Clickable clips to exactly
-// those bounds, which cut the ring on all four sides.
+// RoundIconButton draws a filled control with a 1dp frame inside its hit area.
 func (k Kit) RoundIconButton(gtx layout.Context, button *widget.Clickable, opts RoundIconButton) layout.Dimensions {
 	sideDp := opts.SideDp
 	if sideDp == 0 {
@@ -186,7 +180,7 @@ func (k Kit) RoundIconButton(gtx layout.Context, button *widget.Clickable, opts 
 	if iconDp == 0 {
 		iconDp = modalCloseButtonIconDp
 	}
-	side := gtx.Dp(unit.Dp(sideDp))
+	side := min(gtx.Dp(unit.Dp(sideDp)), gtx.Constraints.Max.X, gtx.Constraints.Max.Y)
 	gtx.Constraints = layout.Exact(image.Pt(side, side))
 
 	palette := opts.Idle
@@ -230,12 +224,61 @@ func (k Kit) RoundIconButton(gtx layout.Context, button *widget.Clickable, opts 
 // ModalCloseButton draws the shared close button in the standard palette.
 // hint is the accessibility description screen readers announce.
 func (k Kit) ModalCloseButton(gtx layout.Context, button *widget.Clickable, hint string) layout.Dimensions {
+	return k.ModalIconButton(gtx, button, k.CloseIcon, hint)
+}
+
+// ModalIconButton draws a secondary icon action in the shared modal style.
+func (k Kit) ModalIconButton(gtx layout.Context, button *widget.Clickable, icon *widget.Icon, hint string) layout.Dimensions {
 	return k.RoundIconButton(gtx, button, RoundIconButton{
-		Icon:    k.CloseIcon,
+		Icon:    icon,
 		Hint:    hint,
 		Idle:    ModalCloseButtonColors(ModalCloseButtonIdle),
 		Hovered: ModalCloseButtonColors(ModalCloseButtonHighlighted),
 		Enabled: true,
+	})
+}
+
+// ModalActionButton draws a full-width labelled action in a modal.
+func (k Kit) ModalActionButton(gtx layout.Context, button *widget.Clickable, icon *widget.Icon, label string, primary bool) layout.Dimensions {
+	gtx.Constraints.Min.X = gtx.Constraints.Max.X
+	gtx.Constraints.Min.Y = max(gtx.Constraints.Min.Y, min(gtx.Dp(unit.Dp(modalCloseButtonSideDp)), gtx.Constraints.Max.Y))
+	variant := ButtonSecondary
+	if primary {
+		variant = ButtonPrimary
+	}
+	return k.ButtonFrame(gtx, button, variant, unit.Dp(ModalButtonRadiusDp), func(gtx layout.Context) layout.Dimensions {
+		semantic.LabelOp(label).Add(gtx.Ops)
+		return layout.Inset{Left: 10, Right: 10, Top: 6, Bottom: 6}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+			labelStyle := material.Body1(k.Theme, label)
+			labelStyle.Color = actionButtonPalette(variant).text
+			labelStyle.MaxLines = 1
+			if icon == nil {
+				return layout.Center.Layout(gtx, labelStyle.Layout)
+			}
+			return layout.Flex{Alignment: layout.Middle, Spacing: layout.SpaceSides, Gap: gtx.Dp(unit.Dp(8))}.Layout(gtx,
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					return Icon(gtx, icon, unit.Dp(19), ModalCloseButtonColors(ModalCloseButtonIdle).Icon)
+				}),
+				layout.Rigid(labelStyle.Layout),
+			)
+		})
+	})
+}
+
+// ModalActionFooter separates a fitted modal's actions from its body.
+func (k Kit) ModalActionFooter(gtx layout.Context, content layout.Widget) layout.Dimensions {
+	return Filled(gtx, color.NRGBA{R: 23, G: 35, B: 48, A: 255}, 0, func(gtx layout.Context) layout.Dimensions {
+		return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				size := image.Pt(gtx.Constraints.Max.X, gtx.Dp(unit.Dp(1)))
+				gtx.Constraints = layout.Exact(size)
+				Fill(gtx, modalCardBorderColor())
+				return layout.Dimensions{Size: size}
+			}),
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				return layout.Inset{Top: 12, Bottom: 12, Left: modalCardPaddingDp, Right: modalCardPaddingDp}.Layout(gtx, content)
+			}),
+		)
 	})
 }
 
@@ -253,6 +296,9 @@ const (
 	// ModalCardInsetDp. Used by the console, which wants every pixel of width
 	// it can get.
 	ModalSizingInset
+	// ModalSizingContent centers a card that fits its content up to the
+	// available height. A scrollable Content keeps a supplied Footer visible.
+	ModalSizingContent
 )
 
 // ModalCardSize measures the card. window is the client area in pixels.
@@ -263,6 +309,10 @@ func ModalCardSize(window image.Point, pxPerDp float32, sizing ModalSizing, comp
 	switch sizing {
 	case ModalSizingInset:
 		return modalInsetCardSize(window, pxPerDp)
+	case ModalSizingContent:
+		size := modalCenteredCardSize(window, pxPerDp)
+		size.X = clampNonNegative(min(scaleDp(modalContentMaxWidthDp, pxPerDp), window.X-2*scaleDp(modalCenteredEdgeDp, pxPerDp)))
+		return size
 	default:
 		return modalCenteredCardSize(window, pxPerDp)
 	}
@@ -306,10 +356,9 @@ func ModalCardBounds(window, card image.Point) image.Rectangle {
 	return image.Rectangle{Min: origin, Max: origin.Add(card)}
 }
 
-// Modal describes one modal window to Kit.Modal. Every field is required: a
-// modal with no title, no close button or no way to dismiss it is not a state
-// this application has, and defaulting any of them would hide the omission at
-// the call site instead of at the compiler.
+// Modal describes one modal window to Kit.Modal. Callers supply the title,
+// close button and dismissal handler. The backdrop can use the shared shade
+// or an explicit alpha.
 type Modal struct {
 	// Title is the header text.
 	Title string
@@ -329,8 +378,12 @@ type Modal struct {
 	Sizing ModalSizing
 	// Compact is the phone layout, where the card fills the screen.
 	Compact bool
+	// BackdropAlpha sets the shade behind the card. Zero uses the default.
+	BackdropAlpha uint8
 	// Content fills the card below the header.
 	Content layout.Widget
+	// Footer, if set for ModalSizingContent, is pinned below the content.
+	Footer layout.Widget
 }
 
 // Modal draws one: backdrop, card, header, content.
@@ -343,8 +396,9 @@ type Modal struct {
 // underneath. Without the second one the contact list stays clickable through
 // a modal that is visibly covering it.
 func (k Kit) Modal(gtx layout.Context, modal Modal) layout.Dimensions {
-	cardSize := ModalCardSize(gtx.Constraints.Max, gtx.Metric.PxPerDp, modal.Sizing, modal.Compact)
-	cardBounds := ModalCardBounds(gtx.Constraints.Max, cardSize)
+	windowSize := gtx.Constraints.Max
+	cardSize := ModalCardSize(windowSize, gtx.Metric.PxPerDp, modal.Sizing, modal.Compact)
+	var cardBounds image.Rectangle
 
 	return layout.Stack{Alignment: layout.Center}.Layout(gtx,
 		layout.Expanded(func(gtx layout.Context) layout.Dimensions {
@@ -355,13 +409,23 @@ func (k Kit) Modal(gtx layout.Context, modal Modal) layout.Dimensions {
 				return layout.Dimensions{}
 			}
 			gtx.Constraints = layout.Exact(cardSize)
-			return k.modalCard(gtx, modal)
+			if modal.Sizing == ModalSizingContent && !modal.Compact {
+				gtx.Constraints.Min.Y = 0
+			}
+			dims := k.modalCard(gtx, modal)
+			// Stack measures this card before laying out the backdrop.
+			cardBounds = ModalCardBounds(windowSize, dims.Size)
+			return dims
 		}),
 	)
 }
 
 func (k Kit) modalBackdrop(gtx layout.Context, modal Modal, cardBounds image.Rectangle) layout.Dimensions {
-	Fill(gtx, modalBackdropColor())
+	backdrop := modalBackdropColor()
+	if modal.BackdropAlpha != 0 {
+		backdrop.A = modal.BackdropAlpha
+	}
+	Fill(gtx, backdrop)
 
 	area := clip.Rect(image.Rectangle{Max: gtx.Constraints.Max}).Push(gtx.Ops)
 	event.Op(gtx.Ops, modal.DismissTag)
@@ -376,7 +440,7 @@ func (k Kit) modalBackdrop(gtx layout.Context, modal Modal, cardBounds image.Rec
 		if !ok {
 			continue
 		}
-		// Only the desktop area OUTSIDE the card dismisses. In the compact
+		// Only the area OUTSIDE the card dismisses. In the compact
 		// layout the card is the whole window, so there is no outside.
 		if !modal.Compact && !PointInside(press.Position, cardBounds) {
 			modal.Dismiss()
@@ -390,6 +454,9 @@ func (k Kit) modalBackdrop(gtx layout.Context, modal Modal, cardBounds image.Rec
 // hugging the display edge reads as a rendering artefact.
 func (k Kit) modalCard(gtx layout.Context, modal Modal) layout.Dimensions {
 	body := func(gtx layout.Context) layout.Dimensions {
+		if modal.Sizing == ModalSizingContent && !modal.Compact {
+			return k.layoutFittedModal(gtx, modal)
+		}
 		return layout.UniformInset(unit.Dp(modalCardPaddingDp)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 			return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
@@ -411,10 +478,37 @@ func (k Kit) modalCard(gtx layout.Context, modal Modal) layout.Dimensions {
 		CornerRadius: modal.CornerRadius,
 		Width:        unit.Dp(1),
 	}
+	record := op.Record(gtx.Ops)
+	dims := body(gtx)
+	content := record.Stop()
+	gtx.Constraints = layout.Exact(dims.Size)
+	defer clip.UniformRRect(image.Rectangle{Max: dims.Size}, gtx.Dp(modal.CornerRadius)).Push(gtx.Ops).Pop()
 	return border.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-		FillRounded(gtx, modalCardFillColor(), modal.CornerRadius)
-		return body(gtx)
+		Fill(gtx, modalCardFillColor())
+		content.Add(gtx.Ops)
+		return dims
 	})
+}
+
+func (k Kit) layoutFittedModal(gtx layout.Context, modal Modal) layout.Dimensions {
+	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return layout.Inset{Top: modalCardPaddingDp, Left: modalCardPaddingDp, Right: modalCardPaddingDp, Bottom: modalHeaderGapDp}.
+				Layout(gtx, func(gtx layout.Context) layout.Dimensions { return k.modalHeader(gtx, modal) })
+		}),
+		layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+			// Give a short body its natural height. A scrolling body still
+			// gets only the space left between the header and the footer.
+			gtx.Constraints.Min.Y = 0
+			return layout.Inset{Left: modalCardPaddingDp, Right: modalCardPaddingDp, Bottom: 12}.Layout(gtx, modal.Content)
+		}),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			if modal.Footer == nil {
+				return layout.Dimensions{}
+			}
+			return modal.Footer(gtx)
+		}),
+	)
 }
 
 func (k Kit) modalHeader(gtx layout.Context, modal Modal) layout.Dimensions {

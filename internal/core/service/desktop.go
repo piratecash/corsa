@@ -809,6 +809,14 @@ func (c *DesktopClient) BuildContactLink() (string, error) {
 	return contactlink.Build(c.id, domain.NetworkID(c.NetworkName()))
 }
 
+// PeerContactLink returns an exportable local public key binding, if present.
+func (c *DesktopClient) PeerContactLink(peer domain.PeerIdentity) string {
+	if c == nil || c.localNode == nil {
+		return ""
+	}
+	return c.localNode.PeerContactLink(peer)
+}
+
 // ImportContactLink verifies a pasted corsa: link and imports the contact:
 // verify-then-import — the fingerprint and box binding are checked by the
 // parser, the node-side import re-verifies and pins the contact in the

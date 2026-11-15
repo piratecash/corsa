@@ -8,6 +8,8 @@ import (
 	"strings"
 
 	"gioui.org/io/clipboard"
+	"gioui.org/io/event"
+	"gioui.org/io/key"
 	"gioui.org/layout"
 	"gioui.org/op/paint"
 	"gioui.org/unit"
@@ -23,9 +25,21 @@ import (
 // link pasted into identity search or the composer imports the contact — keys
 // verified — with no network involved.
 
-// handleMyIdentityPanel opens the node identity details after preparing the
-// same verified contact link used by the share action and QR code.
-func (w *Window) handleMyIdentityPanel(gtx layout.Context) {
+func (w *Window) handleIdentityPanelOpen(gtx layout.Context) {
+	peer := w.snap.ActivePeer
+	if !peer.IsZero() && w.chatIdentityButton.Clicked(gtx) && w.chatIdentityPeer == peer {
+		link, qr, err := peerIdentityPanelPayload(peer, w.client.PeerContactLink(peer))
+		if err != nil {
+			w.router.SetSendStatus(w.t("status.contact_share_failed", err.Error()))
+			return
+		}
+		w.showIdentityPanel(&w.chatIdentityButton, peer, link, qr)
+		w.touchKbd.cancelPendingShow()
+		gtx.Execute(key.FocusCmd{})
+		gtx.Execute(key.SoftKeyboardCmd{Show: false})
+		return
+	}
+
 	for w.myIdentityButton.Clicked(gtx) {
 		link, err := w.router.BuildContactLink()
 		if err != nil {
@@ -39,18 +53,39 @@ func (w *Window) handleMyIdentityPanel(gtx layout.Context) {
 		}
 		w.openIdentityPanel(link, qrImage)
 	}
+}
 
-	for w.identityPanelClose.Clicked(gtx) {
+func (w *Window) handleIdentityPanelActions(gtx layout.Context) {
+	if w.identityPanelClose.Clicked(gtx) {
 		w.closeIdentityPanel()
+		return
 	}
+	if w.copyIdentityButton.Clicked(gtx) {
+		w.copyIdentityPanelValue(gtx, w.identityPanelAddress().String(), "status.identity_copied")
+	}
+	if w.shareContactButton.Clicked(gtx) {
+		if link, ok := contactLinkForClipboard(w.identityPanelContactLink); ok {
+			w.copyIdentityPanelValue(gtx, link, "status.contact_link_copied")
+		} else if w.identityPanelPeer.IsZero() {
+			w.router.SetSendStatus(w.t("status.contact_share_unavailable"))
+		}
+	}
+	w.refreshPeerIdentityPanel()
 }
 
 func (w *Window) openIdentityPanel(link string, qrImage widget.Image) {
+	w.showIdentityPanel(&w.myIdentityButton, domain.PeerIdentity{}, link, qrImage)
+}
+
+func (w *Window) showIdentityPanel(trigger event.Tag, peer domain.PeerIdentity, link string, qrImage widget.Image) {
+	w.identityPanelPeer = peer
 	w.identityPanelContactLink = link
 	w.identityPanelQRImage = qrImage
+	w.identityPanelFeedback = ""
+	w.identityPanelGeneration = w.snap.Generation
 	w.identityPanelList.Position = layout.Position{}
 	w.identityPanelVisible = true
-	w.identityPanelFocus.open(&w.myIdentityButton)
+	w.identityPanelFocus.open(trigger)
 	w.contextMenuPeer = domain.PeerIdentity{}
 	w.showDeleteConfirm = false
 	w.showClearChatConfirm = false
@@ -62,26 +97,60 @@ func (w *Window) openIdentityPanel(link string, qrImage widget.Image) {
 
 func (w *Window) closeIdentityPanel() {
 	w.identityPanelVisible = false
+	w.identityPanelPeer = domain.PeerIdentity{}
 	w.identityPanelContactLink = ""
 	w.identityPanelQRImage = widget.Image{}
+	w.identityPanelFeedback = ""
 	if w.window != nil {
 		w.window.Invalidate()
 	}
 }
 
-// handleShareContact copies the contact link shown by the open identity panel.
-func (w *Window) handleShareContact(gtx layout.Context) {
-	for w.shareContactButton.Clicked(gtx) {
-		link, ok := contactLinkForClipboard(w.identityPanelContactLink)
-		if !ok {
-			w.router.SetSendStatus(w.t("status.contact_share_unavailable"))
-			continue
+func (w *Window) identityPanelAddress() domain.PeerIdentity {
+	if !w.identityPanelPeer.IsZero() {
+		return w.identityPanelPeer
+	}
+	return w.snap.MyAddress
+}
+
+func (w *Window) copyIdentityPanelValue(gtx layout.Context, value, status string) {
+	if value == "" {
+		return
+	}
+	gtx.Execute(clipboard.WriteCmd{Type: "text/plain", Data: io.NopCloser(strings.NewReader(value))})
+	if w.identityPanelPeer.IsZero() {
+		w.router.SetSendStatus(w.t(status))
+	}
+	w.identityPanelFeedback = w.t(status)
+}
+
+func peerIdentityPanelPayload(peer domain.PeerIdentity, link string) (string, widget.Image, error) {
+	if link != "" {
+		if qr, err := contactLinkQRImage(link); err == nil {
+			return link, qr, nil
 		}
-		gtx.Execute(clipboard.WriteCmd{
-			Type: "text/plain",
-			Data: io.NopCloser(strings.NewReader(link)),
-		})
-		w.router.SetSendStatus(w.t("status.contact_link_copied"))
+	}
+	qr, err := contactLinkQRImage(peer.String())
+	return "", qr, err
+}
+
+// Keys can arrive while the card is open. Update its QR and copy action
+// together on a new snapshot so both describe the same credential.
+func (w *Window) refreshPeerIdentityPanel() {
+	peer := w.identityPanelPeer
+	if peer.IsZero() || w.identityPanelGeneration == w.snap.Generation {
+		return
+	}
+	w.identityPanelGeneration = w.snap.Generation
+	link := w.client.PeerContactLink(peer)
+	if link == w.identityPanelContactLink {
+		return
+	}
+	link, qr, err := peerIdentityPanelPayload(peer, link)
+	if err == nil {
+		w.identityPanelContactLink = link
+		w.identityPanelQRImage = qr
+		w.identityPanelFeedback = ""
 	}
 }
 
@@ -171,7 +240,7 @@ func contactLinkQRImage(link string) (widget.Image, error) {
 }
 
 func (w *Window) layoutIdentityQR(gtx layout.Context, sideDp unit.Dp) layout.Dimensions {
-	side := min(gtx.Dp(sideDp), gtx.Constraints.Max.X)
+	side := min(gtx.Dp(sideDp), gtx.Constraints.Max.X, gtx.Constraints.Max.Y)
 	gtx.Constraints.Min = image.Pt(side, side)
 	gtx.Constraints.Max = image.Pt(side, side)
 	return w.identityPanelQRImage.Layout(gtx)

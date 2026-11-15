@@ -56,9 +56,7 @@ type ToolbarButtonOpts struct {
 	Active bool
 }
 
-// ToolbarButton draws one. It sizes itself to its content: a fixed width is
-// what cut "中文" off the language button and left "EN" floating in the middle
-// of it.
+// ToolbarButton fits its content and centers it when the caller sets a minimum width.
 func (k Kit) ToolbarButton(gtx layout.Context, button *widget.Clickable, opts ToolbarButtonOpts) layout.Dimensions {
 	label := toolbarButtonLabelColor()
 	if opts.Active {
@@ -81,12 +79,16 @@ func (k Kit) ToolbarButton(gtx layout.Context, button *widget.Clickable, opts To
 		children = []layout.FlexChild{text, gap, icon}
 	}
 
-	return k.Chip(gtx, button, ChipFill(opts.Active), unit.Dp(toolbarButtonRadiusDp), func(gtx layout.Context) layout.Dimensions {
+	variant := ButtonSecondary
+	if opts.Active {
+		variant = ButtonSelected
+	}
+	return k.ButtonFrame(gtx, button, variant, unit.Dp(toolbarButtonRadiusDp), func(gtx layout.Context) layout.Dimensions {
 		return layout.Inset{
 			Top: unit.Dp(toolbarButtonPaddingYDp), Bottom: unit.Dp(toolbarButtonPaddingYDp),
 			Left: unit.Dp(toolbarButtonPaddingXDp), Right: unit.Dp(toolbarButtonPaddingXDp),
 		}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-			return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx, children...)
+			return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle, Spacing: layout.SpaceSides}.Layout(gtx, children...)
 		})
 	})
 }

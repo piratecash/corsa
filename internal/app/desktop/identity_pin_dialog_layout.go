@@ -106,7 +106,7 @@ func (c *consoleModal) layoutIdentityPinContent(gtx layout.Context) layout.Dimen
 				}),
 				layout.Rigid(layout.Spacer{Height: unit.Dp(6)}.Layout),
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					return c.layoutSettingsAction(gtx, &d.cancelButton, c.parent.t("pin.cancel"))
+					return c.parent.kit().ModalActionButton(gtx, &d.cancelButton, nil, c.parent.t("pin.cancel"), false)
 				}),
 			)
 		}),
@@ -200,5 +200,5 @@ func (c *consoleModal) layoutIdentityPinAction(gtx layout.Context, button *widge
 		opacity := paint.PushOpacity(gtx.Ops, ui.DimmedAlpha)
 		defer opacity.Pop()
 	}
-	return c.layoutSettingsAction(gtx, button, c.parent.t(key))
+	return c.parent.kit().ModalActionButton(gtx, button, nil, c.parent.t(key), enabled)
 }

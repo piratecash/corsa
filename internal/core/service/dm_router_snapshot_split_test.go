@@ -76,6 +76,39 @@ func TestSnapshotSplit_StatusNotifyReusesDMCollections(t *testing.T) {
 	}
 }
 
+func TestPeerSendStatusRetainsRecipientOutsideItsConversation(t *testing.T) {
+	r := newSnapshotTestRouter(t)
+	peer := domaintest.ID("status recipient")
+	const status = "Keys received and verified."
+	const fallback = "Keys for the other peer received and verified."
+	r.SetPeerSendStatus(peer, status, fallback)
+	if got := r.Snapshot().SendStatus; got != fallback {
+		t.Fatalf("no chat selected: status = %q, want %q", got, fallback)
+	}
+
+	r.mu.Lock()
+	r.activePeer = peer
+	r.mu.Unlock()
+	r.notify(UIEventSidebarUpdated)
+	if got := r.Snapshot().SendStatus; got != status {
+		t.Fatalf("chat selected: status = %q, want %q", got, status)
+	}
+
+	r.DeselectPeer()
+	if got := r.Snapshot().SendStatus; got != fallback {
+		t.Fatalf("chat closed: status = %q, want %q", got, fallback)
+	}
+
+	r.SetSendStatus("message sent")
+	r.mu.Lock()
+	r.activePeer = peer
+	r.mu.Unlock()
+	r.notify(UIEventSidebarUpdated)
+	if got := r.Snapshot().SendStatus; got != "message sent" {
+		t.Fatalf("ordinary status replaced the lookup status: got %q", got)
+	}
+}
+
 // TestSnapshotSplit_DMNotifyRebuildsCollections pins the inverse: a
 // DM-data notify DOES refresh the collections (a new peer appears) and
 // the rebuilt map is a distinct backing from the previous snapshot.

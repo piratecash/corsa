@@ -259,6 +259,10 @@ type DMRouter struct {
 	activeMessages []DirectMessage
 	cache          *ConversationCache
 	sendStatus     string
+	peerSendStatus struct {
+		peer domain.PeerIdentity
+		text string
+	}
 	seenMessageIDs map[string]messageGate
 	peerGen        map[domain.PeerIdentity]uint64 // bumped by RemovePeer; goroutines compare to detect stale sends
 	initialSynced  bool
@@ -967,7 +971,7 @@ func (r *DMRouter) SendMessage(to domain.PeerIdentity, msg domain.OutgoingDM) er
 			// error travels on TopicMessageSendFailed and the desktop
 			// subscriber replaces this line with a localised one. This
 			// stays as the fallback for a runtime with no UI attached.
-			r.sendStatus = "send failed: " + err.Error()
+			r.setSendStatusLocked("send failed: " + err.Error())
 			// Hand the unsent text back to the composer to restore for retry
 			// (it cleared synchronously at send). Only for composer-originated
 			// sends: RPC sends have no composer and headless runtimes never
@@ -984,7 +988,7 @@ func (r *DMRouter) SendMessage(to domain.PeerIdentity, msg domain.OutgoingDM) er
 			return
 		}
 
-		r.sendStatus = "message sent"
+		r.setSendStatusLocked("message sent")
 
 		if sent != nil {
 			r.placeOwnSentLocked(to, *sent)
@@ -1181,7 +1185,7 @@ func (r *DMRouter) sendFileAnnounceWithBaseline(to domain.PeerIdentity, msg doma
 				Msg("dm_router: peer removed after file commit, removed orphaned sender mapping")
 			return
 		}
-		r.sendStatus = "message sent"
+		r.setSendStatusLocked("message sent")
 
 		r.placeOwnSentLocked(to, *result.Sent)
 
@@ -1388,6 +1392,17 @@ func (r *DMRouter) SetSendStatus(s string) {
 	r.setSendStatusNotify(s)
 }
 
+// SetPeerSendStatus shows the short status in the named conversation and the
+// status with its recipient identified in any other conversation.
+func (r *DMRouter) SetPeerSendStatus(peer domain.PeerIdentity, status, fallback string) {
+	r.mu.Lock()
+	r.sendStatus = fallback
+	r.peerSendStatus.peer = peer
+	r.peerSendStatus.text = status
+	r.mu.Unlock()
+	r.notify(UIEventStatusUpdated)
+}
+
 // SetSendStatusIfCurrent atomically replaces sendStatus with replacement
 // IFF the current value still equals expected. Returns true on success
 // (UIEventStatusUpdated emitted), false otherwise. Used by the
@@ -1396,11 +1411,11 @@ func (r *DMRouter) SetSendStatus(s string) {
 // through the ebus subscriber first.
 func (r *DMRouter) SetSendStatusIfCurrent(expected, replacement string) bool {
 	r.mu.Lock()
-	if r.sendStatus != expected {
+	if r.sendStatusLocked() != expected {
 		r.mu.Unlock()
 		return false
 	}
-	r.sendStatus = replacement
+	r.setSendStatusLocked(replacement)
 	r.mu.Unlock()
 	r.notify(UIEventStatusUpdated)
 	return true
@@ -2378,7 +2393,7 @@ func (r *DMRouter) resetIdentityState() {
 	r.activeMessages = nil
 	r.seenMessageIDs = make(map[string]messageGate)
 	r.initialSynced = false
-	r.sendStatus = ""
+	r.setSendStatusLocked("")
 	r.pendingScrollToEnd = false
 	r.pendingComposerRestore = nil
 	r.pendingRecipientText = domain.PeerIdentity{}
@@ -5059,8 +5074,21 @@ func (r *DMRouter) removePeerLocked(peer domain.PeerIdentity) {
 
 func (r *DMRouter) setSendStatus(s string) {
 	r.mu.Lock()
-	r.sendStatus = s
+	r.setSendStatusLocked(s)
 	r.mu.Unlock()
+}
+
+func (r *DMRouter) setSendStatusLocked(s string) {
+	r.sendStatus = s
+	r.peerSendStatus.peer = domain.PeerIdentity{}
+	r.peerSendStatus.text = ""
+}
+
+func (r *DMRouter) sendStatusLocked() string {
+	if !r.peerSendStatus.peer.IsZero() && r.peerSendStatus.peer == r.activePeer {
+		return r.peerSendStatus.text
+	}
+	return r.sendStatus
 }
 
 // setSendStatusNotify updates the send status and emits UIEventStatusUpdated.
@@ -5135,7 +5163,7 @@ func (r *DMRouter) composeSnapshotLocked(gen uint64) RouterSnapshot {
 		ActivePeer:   r.activePeer,
 		PeerClicked:  r.peerClicked,
 		UnreadMarker: r.reader.marker,
-		SendStatus:   r.sendStatus,
+		SendStatus:   r.sendStatusLocked(),
 		MyAddress:    r.client.Address(),
 		// Expensive collections shared from the cached DM half.
 		Peers:          dm.Peers,

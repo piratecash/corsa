@@ -817,9 +817,7 @@ func (c *consoleModal) layoutFileTabReceiverProgress(gtx layout.Context, bg, fg 
 		}),
 		layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			matBtn := material.Button(c.theme(), cancelBtn, "✕")
-			matBtn.Background = color.NRGBA{R: 65, G: 70, B: 85, A: 255}
-			matBtn.Color = color.NRGBA{R: 220, G: 220, B: 220, A: 255}
+			matBtn := c.parent.kit().TextButton(cancelBtn, "✕", ui.ButtonSecondary)
 			matBtn.Inset = layout.UniformInset(unit.Dp(2))
 			matBtn.CornerRadius = unit.Dp(10)
 			matBtn.TextSize = unit.Sp(12)
@@ -842,9 +840,7 @@ func (c *consoleModal) layoutFileTabDownloadButton(gtx layout.Context, fileID do
 	for btn.Clicked(gtx) {
 		c.dispatchFileTabDownloadAsync(fileID)
 	}
-	matBtn := material.Button(c.theme(), btn, c.parent.t("file.download"))
-	matBtn.Background = color.NRGBA{R: 36, G: 67, B: 126, A: 255}
-	matBtn.Color = color.NRGBA{R: 255, G: 255, B: 255, A: 255}
+	matBtn := c.parent.kit().TextButton(btn, c.parent.t("file.download"), ui.ButtonPrimary)
 	matBtn.Inset = layout.Inset{
 		Top: unit.Dp(4), Bottom: unit.Dp(4),
 		Left: unit.Dp(12), Right: unit.Dp(12),
@@ -869,9 +865,7 @@ func (c *consoleModal) layoutFileTabRestartButton(gtx layout.Context, fileID dom
 	for btn.Clicked(gtx) {
 		c.dispatchFileTabRestartAsync(fileID)
 	}
-	matBtn := material.Button(c.theme(), btn, c.parent.t("file.restart"))
-	matBtn.Background = color.NRGBA{R: 70, G: 90, B: 130, A: 255}
-	matBtn.Color = color.NRGBA{R: 255, G: 255, B: 255, A: 255}
+	matBtn := c.parent.kit().TextButton(btn, c.parent.t("file.restart"), ui.ButtonPrimary)
 	matBtn.Inset = layout.Inset{
 		Top: unit.Dp(4), Bottom: unit.Dp(4),
 		Left: unit.Dp(12), Right: unit.Dp(12),
@@ -1048,17 +1042,12 @@ func (c *consoleModal) layoutFileRowDiskActions(gtx layout.Context, t filetransf
 		go openFile(path)
 	}
 
-	btnBg := color.NRGBA{R: 50, G: 60, B: 80, A: 255}
-	btnFg := color.NRGBA{R: 180, G: 200, B: 230, A: 255}
-
 	// Left-aligned: no Spacing flag, no Flexed spacer. Rigid items
 	// pack on the start (left) edge in their natural order.
 	return layout.Inset{Top: unit.Dp(6)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 		return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				matBtn := material.Button(c.theme(), revealBtn, c.parent.t("file.show_in_folder"))
-				matBtn.Background = btnBg
-				matBtn.Color = btnFg
+				matBtn := c.parent.kit().TextButton(revealBtn, c.parent.t("file.show_in_folder"), ui.ButtonSecondary)
 				matBtn.Inset = layout.Inset{
 					Top: unit.Dp(3), Bottom: unit.Dp(3),
 					Left: unit.Dp(8), Right: unit.Dp(8),
@@ -1069,9 +1058,7 @@ func (c *consoleModal) layoutFileRowDiskActions(gtx layout.Context, t filetransf
 			}),
 			layout.Rigid(layout.Spacer{Width: unit.Dp(6)}.Layout),
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				matBtn := material.Button(c.theme(), openBtn, c.parent.t("file.open_file"))
-				matBtn.Background = btnBg
-				matBtn.Color = btnFg
+				matBtn := c.parent.kit().TextButton(openBtn, c.parent.t("file.open_file"), ui.ButtonSecondary)
 				matBtn.Inset = layout.Inset{
 					Top: unit.Dp(3), Bottom: unit.Dp(3),
 					Left: unit.Dp(8), Right: unit.Dp(8),
@@ -1128,9 +1115,7 @@ func (c *consoleModal) layoutFileRowDeleteAction(gtx layout.Context, t filetrans
 	for btn.Clicked(gtx) {
 		c.dispatchFileDeleteAsync(t)
 	}
-	label := material.Button(c.theme(), btn, c.parent.t("console.file.delete"))
-	label.Background = color.NRGBA{R: 120, G: 50, B: 60, A: 255}
-	label.Color = color.NRGBA{R: 250, G: 240, B: 240, A: 255}
+	label := c.parent.kit().TextButton(btn, c.parent.t("console.file.delete"), ui.ButtonDanger)
 	label.Inset = layout.Inset{
 		Top: unit.Dp(3), Bottom: unit.Dp(3),
 		Left: unit.Dp(10), Right: unit.Dp(10),

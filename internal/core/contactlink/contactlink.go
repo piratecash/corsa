@@ -85,10 +85,39 @@ func Build(owner *identity.Identity, network domain.NetworkID) (string, error) {
 		return "", fmt.Errorf("encode link bs: %w", err)
 	}
 
-	link := Scheme + ":" + owner.Address +
+	return encode(owner.Address, network, pubKey, owner.BoxPublicKey, boxSig)
+}
+
+// BuildVerified renders a contact link from public material already received
+// from the owner. The same verification as on import applies before export.
+func BuildVerified(contact Contact) (string, error) {
+	pubKey, err := base64.StdEncoding.DecodeString(string(contact.PubKey))
+	if err != nil {
+		return "", fmt.Errorf("%w: decode signing key: %v", ErrLinkInvalidKeys, err)
+	}
+	boxKey, err := base64.StdEncoding.DecodeString(string(contact.BoxKey))
+	if err != nil {
+		return "", fmt.Errorf("%w: decode encryption key: %v", ErrLinkInvalidKeys, err)
+	}
+	boxSig, err := base64.RawURLEncoding.DecodeString(string(contact.BoxSig))
+	if err != nil {
+		return "", fmt.Errorf("%w: decode key binding: %v", ErrLinkInvalidKeys, err)
+	}
+	link, err := encode(contact.Address.String(), contact.Network, pubKey, boxKey, boxSig)
+	if err != nil {
+		return "", err
+	}
+	if _, err := Parse(link, contact.Network); err != nil {
+		return "", err
+	}
+	return link, nil
+}
+
+func encode(address string, network domain.NetworkID, pubKey, boxKey, boxSig []byte) (string, error) {
+	link := Scheme + ":" + address +
 		"?v=1&net=" + escapeQueryComponent(network.String()) +
 		"&pk=" + base64.RawURLEncoding.EncodeToString(pubKey) +
-		"&bk=" + base64.RawURLEncoding.EncodeToString(owner.BoxPublicKey) +
+		"&bk=" + base64.RawURLEncoding.EncodeToString(boxKey) +
 		"&bs=" + base64.RawURLEncoding.EncodeToString(boxSig)
 	if len(link) > MaxLinkBytes {
 		return "", fmt.Errorf("%w: built link is %d bytes", ErrLinkTooLarge, len(link))

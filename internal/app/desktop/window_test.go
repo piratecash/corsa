@@ -748,9 +748,21 @@ func TestDesktopIdentityPanelCentersItsCloseButton(t *testing.T) {
 	}
 
 	frame()
+	var bounds image.Rectangle
+	for _, node := range router.AppendSemantics(nil) {
+		if node.Desc.Description == w.t("clients.close_identity") {
+			bounds = node.Desc.Bounds
+			break
+		}
+	}
+	if bounds.Size() != image.Pt(44, 44) || bounds.Min.X <= 500 || bounds.Min.Y <= 100 {
+		t.Fatalf("close button is not in the upper-right of the fitted card: %v", bounds)
+	}
+	center := bounds.Min.Add(bounds.Size().Div(2))
+	position := f32.Pt(float32(center.X), float32(center.Y))
 	router.Queue(
-		pointer.Event{Source: pointer.Mouse, Kind: pointer.Press, Buttons: pointer.ButtonPrimary, Position: f32.Pt(660, 124)},
-		pointer.Event{Source: pointer.Mouse, Kind: pointer.Release, Position: f32.Pt(660, 124)},
+		pointer.Event{Source: pointer.Mouse, Kind: pointer.Press, Buttons: pointer.ButtonPrimary, Position: position},
+		pointer.Event{Source: pointer.Mouse, Kind: pointer.Release, Position: position},
 	)
 	gtx := layout.Context{
 		Ops:         new(op.Ops),

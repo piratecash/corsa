@@ -6,6 +6,27 @@
 
 The desktop UI is built with [Gio](https://gioui.org) — a portable immediate-mode GUI library for Go. The UI layer is thin: it reads state from the `DMRouter` via atomic snapshots and delegates all business logic to the service layer.
 
+### Shared action components
+
+Android and desktop use the same Gio components in `internal/app/desktop/ui`.
+
+| Component | Where it belongs |
+|---|---|
+| `TextButton` and `ButtonFrame` | Regular actions use primary, secondary, selected, danger or notice colours. Existing buttons retain their dimensions and corner radius. Run is primary. Update available retains its shape and uses the orange notice palette. |
+| `SquareIconButton` | A 44 dp square icon button with an accessible label. Use the copy icon beside console output, donation addresses and an identity ID. The compact chat header uses a back icon at the same height as the ID button. |
+| `ModalCloseButton` | A round 44 dp icon control shared by the modal shell and related overlays. |
+| `ModalActionButton` | A labelled full-width action, including the primary copy action at the bottom of an identity card. |
+| Console tabs | Navigation with a selected state and its own tab presentation. |
+| Send, emoji and My identity entry point | Individually styled controls in the composer and contact list. |
+
+My identity and a contact’s identity use the same fitted modal, QR layout,
+85% backdrop and action footer. The title identifies the owner of the card.
+A shareable link puts a square copy button beside the ID and a labelled link
+action in the footer. An ID-only contact puts Copy ID in the footer.
+
+When the footer has less than 360 dp available, the secondary Console
+button sits above the network status and both fill the available width.
+
 ### Local message identity
 
 Message metadata, row widgets, reaction chips, remembered image paths,
@@ -37,8 +58,8 @@ Window (Gio event loop)
   │   ├── My identity card (fingerprint, fully wrapped address, known count)
   │   │   └── Identity details overlay
   │   │       ├── QR contact link + full address
-  │   │       ├── Copy identity / Share contact actions
-  │   │       └── Centered modal on desktop; opaque full-screen view in compact mode
+  │   │       ├── Copy icon beside the ID and one primary footer action
+  │   │       └── Fitted centered modal shared with chat contact details
   │   ├── Identity search (short visual hint, descriptive accessibility label)
   │   ├── Known identity list (from router peers)
   │   │   └── Presence avatar (green/gray/outline) + last-online timestamp

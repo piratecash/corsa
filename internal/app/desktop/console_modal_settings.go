@@ -341,7 +341,7 @@ func (c *consoleModal) layoutReleaseCheckSection(gtx layout.Context) layout.Dime
 func (c *consoleModal) layoutSettingsAction(gtx layout.Context, button *widget.Clickable, text string) layout.Dimensions {
 	return layout.W.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 		gtx.Constraints.Min.X = 0
-		return c.parent.kit().Chip(gtx, button, ui.ChipFill(false), unit.Dp(settingsActionRadius), func(gtx layout.Context) layout.Dimensions {
+		return c.parent.kit().ButtonFrame(gtx, button, ui.ButtonSecondary, unit.Dp(settingsActionRadius), func(gtx layout.Context) layout.Dimensions {
 			semantic.LabelOp(text).Add(gtx.Ops)
 			return layout.Inset{
 				Top: unit.Dp(settingsActionPadYDp), Bottom: unit.Dp(settingsActionPadYDp),

@@ -207,3 +207,63 @@ func TestModalCardBoundsCentersTheCard(t *testing.T) {
 		t.Fatalf("modalCardBounds = %v, want %v", got, want)
 	}
 }
+
+func TestFittedModalMeasuresItsBodyAndReservesItsFooter(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		windowY    int
+		wantHeight int
+	}{
+		{"natural height", 700, 191},
+		{"short window", 200, 168},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var router input.Router
+			var modalTag struct{}
+			dismissed := false
+			kit := Kit{Theme: material.NewTheme()}
+			closeButton := new(widget.Clickable)
+			window := image.Pt(500, tc.windowY)
+			card := ModalCardBounds(window, image.Pt(410, tc.wantHeight))
+			frame := func() {
+				gtx := layout.Context{
+					Ops:         new(op.Ops),
+					Source:      router.Source(),
+					Metric:      unit.Metric{PxPerDp: 1, PxPerSp: 1},
+					Constraints: layout.Exact(window),
+				}
+				kit.Modal(gtx, Modal{
+					Title: "Contact", Close: closeButton, CloseHint: "Close",
+					DismissTag: &modalTag, Dismiss: func() { dismissed = true },
+					Sizing: ModalSizingContent, CornerRadius: 16,
+					Content: func(gtx layout.Context) layout.Dimensions {
+						return layout.Dimensions{Size: gtx.Constraints.Constrain(image.Pt(0, 55))}
+					},
+					Footer: func(gtx layout.Context) layout.Dimensions {
+						if gtx.Constraints.Max.Y < 50 {
+							t.Fatal("the header and body consumed the footer's space")
+						}
+						return layout.Dimensions{Size: gtx.Constraints.Constrain(image.Pt(0, 50))}
+					},
+				})
+				router.Frame(gtx.Ops)
+			}
+			press := func(y int) {
+				router.Queue(
+					pointer.Event{Kind: pointer.Press, Source: pointer.Mouse, Buttons: pointer.ButtonPrimary, Position: f32.Pt(250, float32(y))},
+					pointer.Event{Kind: pointer.Release, Source: pointer.Mouse, Position: f32.Pt(250, float32(y))},
+				)
+				frame()
+			}
+			frame()
+			press(card.Max.Y - 3)
+			if dismissed {
+				t.Fatal("press inside the fitted footer dismissed the modal")
+			}
+			press(card.Min.Y - 2)
+			if !dismissed {
+				t.Fatal("the area above the fitted card did not dismiss the modal")
+			}
+		})
+	}
+}

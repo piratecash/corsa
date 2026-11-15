@@ -44,12 +44,12 @@ const (
 	viewerCompactPadDp    = 12
 	viewerCompactBottomDp = 34
 
-	// viewerButtonDp is the standard circle. The shared component
+	// viewerButtonDp is the standard icon button. The shared component
 	// (ui.RoundIconButton) uses the same 44dp when it is not told a size, so
 	// this is named only where a size has to be passed alongside another.
 	viewerButtonDp    = 44
 	viewerArrowIconDp = 24
-	// viewerStripButtonDp is the smaller circle that steps the carousel on
+	// viewerStripButtonDp is the smaller icon button that steps the carousel on
 	// the phone layout, where the arrows are not beside the picture.
 	viewerStripButtonDp     = 36
 	viewerStripButtonIconDp = 20
@@ -99,10 +99,10 @@ func viewerBackdropColor() color.NRGBA {
 	return color.NRGBA{R: 0x06, G: 0x08, B: 0x0c, A: 255}
 }
 
-// viewerDeletePalettes are the destructive circle's two looks. The design
+// viewerDeletePalettes are the destructive action’s two looks. The design
 // (screen 8a) names the idle one — #2a1c1e on #4a3336 with an #e6746c
 // glyph — and says the button is otherwise the same control as every other
-// 44dp circle, so it lights up under the pointer the same way, along the same
+// 44dp button, so it lights up under the pointer the same way, along the same
 // step the shared pair takes.
 var viewerDeletePalettes = [2]ui.ModalCloseButtonPalette{
 	{
@@ -117,7 +117,7 @@ var viewerDeletePalettes = [2]ui.ModalCloseButtonPalette{
 	},
 }
 
-// viewerButtonPalettes is the standard circle, shared with every modal's
+// viewerButtonPalettes is the standard palette, shared with every modal’s
 // close button — the design draws them as one component (screen 7c).
 func viewerButtonPalettes() (idle, hovered ui.ModalCloseButtonPalette) {
 	return ui.ModalCloseButtonColors(ui.ModalCloseButtonIdle),
@@ -680,7 +680,7 @@ func (v *imageViewer) layoutActionRow(gtx layout.Context, compact bool) layout.D
 	canDelete := hasFile && !item.mine
 	return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			return v.layoutCircleButton(gtx, &v.downloadBtn, ui.RoundIconButton{
+			return v.layoutViewerIconButton(gtx, &v.downloadBtn, ui.RoundIconButton{
 				Icon:    v.parent.downloadIcon,
 				Hint:    v.parent.t("file.download"),
 				Enabled: hasFile,
@@ -695,7 +695,7 @@ func (v *imageViewer) layoutActionRow(gtx layout.Context, compact bool) layout.D
 			})
 		}),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			return v.layoutCircleButton(gtx, &v.deleteBtn, ui.RoundIconButton{
+			return v.layoutViewerIconButton(gtx, &v.deleteBtn, ui.RoundIconButton{
 				Icon:    v.parent.deleteIcon,
 				Hint:    v.parent.t("viewer.delete"),
 				Idle:    viewerDeletePalettes[0],
@@ -777,11 +777,8 @@ func (v *imageViewer) layoutThumbTile(gtx layout.Context, index, width, height i
 	})
 }
 
-// layoutCircleButton draws one of the viewer's circular controls through the
-// shared component every modal close button uses (ui.RoundIconButton): the
-// same geometry, the same two palettes, the same hover — which this viewer
-// used to redraw by hand and, drawing it by hand, forgot.
-func (v *imageViewer) layoutCircleButton(gtx layout.Context, button *widget.Clickable, opts ui.RoundIconButton) layout.Dimensions {
+// layoutViewerIconButton keeps the viewer controls in the modal button family.
+func (v *imageViewer) layoutViewerIconButton(gtx layout.Context, button *widget.Clickable, opts ui.RoundIconButton) layout.Dimensions {
 	if opts.Idle == (ui.ModalCloseButtonPalette{}) {
 		opts.Idle, opts.Hovered = viewerButtonPalettes()
 	}
@@ -804,7 +801,7 @@ func (v *imageViewer) layoutStepButton(gtx layout.Context, button *widget.Clicka
 		icon = v.parent.chevronIcon
 		hint = v.parent.t("viewer.next")
 	}
-	return v.layoutCircleButton(gtx, button, ui.RoundIconButton{
+	return v.layoutViewerIconButton(gtx, button, ui.RoundIconButton{
 		Icon:    icon,
 		Hint:    hint,
 		SideDp:  size,
@@ -820,7 +817,7 @@ func (v *imageViewer) layoutZoomButton(gtx layout.Context, button *widget.Clicka
 		icon = v.parent.zoomInIcon
 		hint = v.parent.t("viewer.zoom_in")
 	}
-	return v.layoutCircleButton(gtx, button, ui.RoundIconButton{
+	return v.layoutViewerIconButton(gtx, button, ui.RoundIconButton{
 		Icon:    icon,
 		Hint:    hint,
 		Enabled: viewerZoomStep(v.zoom, delta) != v.zoom,

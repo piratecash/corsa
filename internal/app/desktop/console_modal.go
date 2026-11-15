@@ -1510,11 +1510,11 @@ func (c *consoleModal) layoutConsoleInput(gtx layout.Context) layout.Dimensions 
 					if c.isConsoleBusy() {
 						label = c.parent.t("console.running")
 					}
-					btn := material.Button(c.theme(), &c.runButton, label)
+					variant := ui.ButtonPrimary
 					if c.isConsoleBusy() {
-						btn.Background = color.NRGBA{R: 48, G: 56, B: 70, A: 255}
+						variant = ui.ButtonSecondary
 					}
-					return btn.Layout(gtx)
+					return c.parent.kit().TextButton(&c.runButton, label, variant).Layout(gtx)
 				}),
 			)
 		}),
@@ -1574,18 +1574,11 @@ func (c *consoleModal) layoutConsoleSuggestionItem(gtx layout.Context, command s
 	gtx = leftToRight(gtx)
 
 	btn := c.suggestionButton(command)
-	return material.Clickable(gtx, btn, func(gtx layout.Context) layout.Dimensions {
-		bg := color.NRGBA{R: 34, G: 46, B: 62, A: 255}
-		if selected {
-			bg = color.NRGBA{R: 57, G: 98, B: 170, A: 255}
-		}
-		ui.Fill(gtx, bg)
-		return layout.Inset{Top: unit.Dp(10), Bottom: unit.Dp(10), Left: unit.Dp(12), Right: unit.Dp(12)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-			label := material.Body2(c.theme(), command)
-			label.Color = color.NRGBA{R: 231, G: 237, B: 246, A: 255}
-			return label.Layout(gtx)
-		})
-	})
+	variant := ui.ButtonSecondary
+	if selected {
+		variant = ui.ButtonSelected
+	}
+	return c.parent.kit().TextButton(btn, command, variant).Layout(gtx)
 }
 
 func (c *consoleModal) layoutConsoleHistory(gtx layout.Context) layout.Dimensions {
@@ -1626,9 +1619,7 @@ func (c *consoleModal) layoutConsoleHistoryCard(gtx layout.Context, entry *conso
 						}),
 						layout.Rigid(layout.Spacer{Width: unit.Dp(12)}.Layout),
 						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-							btn := material.Button(c.theme(), &entry.CopyButton, c.parent.t("console.copy"))
-							btn.Background = color.NRGBA{R: 48, G: 56, B: 70, A: 255}
-							return btn.Layout(gtx)
+							return c.parent.kit().SquareIconButton(gtx, &entry.CopyButton, c.parent.copyIcon, c.parent.t("console.copy"))
 						}),
 					)
 				}),
@@ -2395,9 +2386,7 @@ func (c *consoleModal) layoutDonateAddressCard(gtx layout.Context, entry *consol
 					}),
 					layout.Rigid(layout.Spacer{Width: unit.Dp(12)}.Layout),
 					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						btn := material.Button(c.theme(), &entry.CopyButton, c.parent.t("console.copy"))
-						btn.Background = color.NRGBA{R: 48, G: 56, B: 70, A: 255}
-						return btn.Layout(gtx)
+						return c.parent.kit().SquareIconButton(gtx, &entry.CopyButton, c.parent.copyIcon, c.parent.t("console.copy"))
 					}),
 				)
 			})
@@ -3349,9 +3338,7 @@ func (c *consoleModal) layoutStopRecordingBanner(gtx layout.Context) layout.Dime
 					return label.Layout(gtx)
 				}),
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					btn := material.Button(c.theme(), &c.stopRecordingButton, "Stop all")
-					btn.Background = color.NRGBA{R: 180, G: 40, B: 40, A: 255}
-					btn.Color = color.NRGBA{R: 255, G: 255, B: 255, A: 255}
+					btn := c.parent.kit().TextButton(&c.stopRecordingButton, "Stop all", ui.ButtonDanger)
 					return btn.Layout(gtx)
 				}),
 			)
