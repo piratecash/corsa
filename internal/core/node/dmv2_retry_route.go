@@ -25,10 +25,16 @@ func (s *Service) directDMV2RetryWriter(recipient string) *netcore.NetCore {
 }
 
 func (s *Service) directDMV2RetryWriterLocked(identity domain.PeerIdentity) *netcore.NetCore {
+	return s.provenPeerWriterLocked(identity, domain.CapDirectDMV2)
+}
+
+// provenPeerWriterLocked returns a unique live, identity-proved writer
+// that negotiated capability. The caller holds peerMu.
+func (s *Service) provenPeerWriterLocked(identity domain.PeerIdentity, capability domain.Capability) *netcore.NetCore {
 	var selected *netcore.NetCore
 	for _, session := range s.sessions {
 		if session.peerIdentity != identity || !session.authOK || session.eligibilityEnded.Load() ||
-			!session.receive.ReceiveReady() || !capsContain(session.capabilities, domain.CapDirectDMV2) {
+			!session.receive.ReceiveReady() || !capsContain(session.capabilities, capability) {
 			continue
 		}
 		proof, proven := session.provenIdentity()
@@ -46,7 +52,7 @@ func (s *Service) directDMV2RetryWriterLocked(identity domain.PeerIdentity) *net
 		selected = core
 	}
 	s.forEachConnIDLocked(func(id domain.ConnID) bool {
-		core, _ := s.directDMV2ListenerLocked(id, identity, domain.CapDirectDMV2)
+		core, _ := s.directDMV2ListenerLocked(id, identity, capability)
 		if core == nil || !core.AcceptingFrames() {
 			return true
 		}

@@ -73,14 +73,13 @@ func (d *DMCrypto) SendControlMessage(
 		Command:     cmd,
 		CommandData: payload,
 	}
-	ciphertext, err := directmsg.EncryptForParticipants(d.id, recipient, envelope)
-	if err != nil {
-		return "", fmt.Errorf("encrypt control DM: %w", err)
-	}
-
 	messageID, err := protocol.NewMessageID()
 	if err != nil {
 		return "", err
+	}
+	ciphertext, err := directmsg.EncryptForMessage(d.id, recipient, envelope, protocol.TopicControlDM, string(messageID))
+	if err != nil {
+		return "", fmt.Errorf("encrypt control DM: %w", err)
 	}
 
 	frame := buildControlMessageFrame(d.id.Address, to.String(), string(messageID), ciphertext, time.Now().UTC())
@@ -159,7 +158,7 @@ func (d *DMCrypto) DecryptIncomingControlMessage(event protocol.LocalChangeEvent
 		return "", "", domain.PeerIdentity{}, false
 	}
 
-	msg, err := directmsg.DecryptForIdentity(d.id, event.Sender, senderPubKey, event.Recipient, event.Body)
+	msg, err := directmsg.DecryptForMessage(d.id, localMessageRef(event), senderPubKey, event.Body)
 	if err != nil {
 		return "", "", domain.PeerIdentity{}, false
 	}

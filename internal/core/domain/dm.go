@@ -2,6 +2,9 @@ package domain
 
 import "regexp"
 
+// MaxRelayMessageBodyBytes is the legacy relay limit on the encoded body.
+const MaxRelayMessageBodyBytes = 64 * 1024
+
 // messageIDPattern matches a strict UUID v4 string:
 //   - 8-4-4-4-12 lowercase hex digits separated by dashes
 //   - version nibble (position 15) must be '4'

@@ -73,6 +73,7 @@ func localCapabilities(enableV3 bool, datagrams datagramAdvertise) []domain.Capa
 		domain.CapMeshRouteProbeV1,
 		domain.CapMeshRouteQueryV1,
 		domain.CapMeshRouteSyncV1,
+		domain.CapSignedDirectDeliveryV1,
 	}
 	if enableV3 {
 		caps = append(caps, domain.CapMeshRoutingV3)

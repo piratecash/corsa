@@ -8,6 +8,8 @@ Receipts, retries, deletion, recovery and file-transfer state now follow that co
 
 Storage schema 9 applies this identity to the message database while preserving existing row order, message bodies and wire values. The migration is forward-only: after it is applied, a build whose migration catalog ends at schema 8 cannot open the database.
 
+New DM v1 messages can carry their topic, ID, sender and recipient inside both encrypted copies. Upgraded clients validate this reference when reading the message. Messages that would exceed the legacy relay's 64 KiB encoded body limit with the reference use the original encoding. Older releases can read both forms.
+
 ## Identity Recovery Preserves Existing State
 
 If the SDK cannot read or validate an existing identity file, it now leaves the file untouched and reports the error instead of replacing it. Identity restore also preserves the signed record sequence, preventing a restored identity from publishing an older record than peers have already seen.
@@ -36,7 +38,7 @@ This release contains extensive preparation for the future DHT, but it does not 
 
 The S6 and D1 test infrastructure can now observe first-contact timing, durable pin writes, datagram and gossip queue growth, session writer queues, clocks, route traffic and resource use. These probes are opt-in and bounded so that measurements do not create another unbounded source of state. The D1 load stand also gains RouteWire accounting, recovery checks and larger Full512 fixtures for later admission testing.
 
-Direct DM v2 envelopes and signed delivery receipts are implemented and exercised by dedicated tests, but remain disabled in ordinary builds until the mixed-version delivery policy is approved. Their presence does not change the message format used by normal delivery in this release.
+Direct DM v2 envelopes remain disabled in ordinary builds until the mixed-version delivery policy is approved. Ordinary delivery still uses DM v1. On a direct proved session where both peers support signed delivery receipts, the recipient can send a signed copy of `delivered`. The legacy receipt remains available for mixed-version routing. Ordinary DM v1 read receipts are unsigned.
 
 The preparation also exposed issues in existing paths, and their fixes are included here. Peer activity and route handling stay bound to the authenticated transport that produced them; inbound sessions retain verified endpoint metadata; receipt admission follows the same transport rules; rejected legacy sessions fully purge pending legacy routes; and stored DM v2 data is verified before any delivery retry is rebuilt. The full message-identity repair described above came from the same integration work and is active in this release.
 
@@ -66,6 +68,8 @@ Wire message ID больше не считается глобально уник
 
 Storage schema 9 переносит это правило в базу сообщений, сохраняя существующий порядок строк, тела сообщений и wire values. Миграция однонаправленная: после её применения сборка, чей каталог миграций заканчивается на schema 8, не сможет открыть базу.
 
+Новые сообщения DM v1 могут содержать тему, ID, отправителя и получателя внутри обеих зашифрованных копий. Обновлённые клиенты проверяют эту ссылку при чтении сообщения. Если привязка увеличивает закодированное тело сверх лимита старых реле в 64 КиБ, сообщение отправляется в исходном кодировании. Старые версии читают оба варианта.
+
 ## Восстановление identity сохраняет прежнее состояние
 
 Если SDK не может прочитать или проверить существующий identity-файл, теперь он оставляет файл без изменений и сообщает об ошибке вместо его замены. Восстановление identity также сохраняет номер последовательности подписанных записей, чтобы восстановленная identity не опубликовала запись старше той, которую peers уже видели.
@@ -94,7 +98,7 @@ Identities с сохранёнными именами теперь остают�
 
 Инфраструктура S6 и D1 теперь может измерять время первого контакта, durable-запись pins, рост очередей datagram и gossip, очереди session writers, часы, route traffic и потребление ресурсов. Эти probes включаются явно и имеют ограничения, чтобы сами измерения не создавали неограниченно растущее состояние. Load stand D1 также получил учёт RouteWire, проверки восстановления и увеличенные Full512 fixtures для будущей приёмки.
 
-Direct DM v2 envelopes и подписанные delivery receipts реализованы и проверяются отдельными тестами, но выключены в обычных сборках до утверждения политики доставки между версиями. Их наличие не меняет формат сообщений обычной доставки в этом релизе.
+Direct DM v2 envelopes выключены в обычных сборках до утверждения политики доставки между версиями. Обычная доставка по-прежнему использует DM v1. На прямой подтверждённой сессии с поддержкой подписанных квитанций у обеих сторон получатель может отправить подписанную копию `delivered`. Для маршрутов со старыми узлами сохраняется обычная квитанция. Квитанции прочтения DM v1 остаются неподписанными.
 
 Подготовительные работы также выявили проблемы в существующих путях, и исправления включены в релиз. Peer activity и обработка маршрутов остаются привязаны к тому authenticated transport, который их создал; входящие sessions сохраняют проверенные endpoint metadata; допуск receipts следует тем же transport rules; после отказа legacy-сессии полностью удаляются ожидающие legacy routes; сохранённые данные DM v2 проверяются до восстановления повторной доставки. Описанное выше разделение сообщений по полной identity появилось в рамках той же интеграции и активно в этом релизе.
 

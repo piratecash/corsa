@@ -14,7 +14,7 @@ import (
 // deletion policy and must not be substituted for the signed wire value.
 func openApplicationDM(id *identity.Identity, network string, ref domain.MessageRef, authorKey, body string, createdAt time.Time, liveFlag *string) (*directmsg.PlainMessage, error) {
 	if network == "" || !strings.HasPrefix(body, directmsg.V2EnvelopePrefix) {
-		return directmsg.DecryptForIdentity(id, ref.Sender, authorKey, ref.Recipient, body)
+		return directmsg.DecryptForMessage(id, ref, authorKey, body)
 	}
 	if createdAt.IsZero() {
 		return nil, directmsg.ErrEnvelopeAuth

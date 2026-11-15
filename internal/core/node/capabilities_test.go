@@ -27,6 +27,7 @@ func TestLocalCapabilities_OptOutExcludesV3(t *testing.T) {
 		// Added in lockstep with the localCapabilities() entry
 		// so the order-sensitive check below stays honest.
 		domain.CapMeshRouteSyncV1,
+		domain.CapSignedDirectDeliveryV1,
 	}
 	if len(caps) != len(expected) {
 		t.Fatalf("localCapabilities(false) = %v, want %v", caps, expected)
@@ -60,6 +61,7 @@ func TestLocalCapabilities_EnabledAppendsV3(t *testing.T) {
 		domain.CapMeshRouteProbeV1,
 		domain.CapMeshRouteQueryV1,
 		domain.CapMeshRouteSyncV1,
+		domain.CapSignedDirectDeliveryV1,
 		domain.CapMeshRoutingV3,
 		domain.CapMeshPoisonReverseV1,
 		domain.CapMeshPoisonReverseV2,

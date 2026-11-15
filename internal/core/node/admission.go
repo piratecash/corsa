@@ -8,6 +8,8 @@ import (
 	"io"
 	"strings"
 	"time"
+
+	"github.com/piratecash/corsa/internal/core/domain"
 )
 
 // admission.go centralizes relay frame admission control and documents the
@@ -87,7 +89,7 @@ const maxAnnouncePeers = 64
 //
 // DM bodies are X25519+ChaCha20-Poly1305 sealed envelopes. A reasonable
 // upper bound for DM text + overhead is 64 KiB.
-const maxRelayBodyBytes = 65536
+const maxRelayBodyBytes = domain.MaxRelayMessageBodyBytes
 
 // maxRelayStates is the hard cap on the total number of in-flight
 // relayForwardState entries across all peers. Each entry is ~200 bytes;

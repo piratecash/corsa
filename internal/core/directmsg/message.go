@@ -64,7 +64,40 @@ type sealedPart struct {
 	Data      string `json:"data"`
 }
 
+// v1MessageRef is carried inside both encrypted copies. Legacy readers ignore
+// the extra JSON field, and relays still handle the original dm-v1 envelope.
+type v1MessageRef struct {
+	Topic     string `json:"topic"`
+	ID        string `json:"id"`
+	Sender    string `json:"sender"`
+	Recipient string `json:"recipient"`
+}
+
+type v1PlainMessage struct {
+	PlainMessage
+	Ref *v1MessageRef `json:"message_ref,omitempty"`
+}
+
 func EncryptForParticipants(sender *identity.Identity, recipient domain.DMRecipient, msg domain.OutgoingDM) (string, error) {
+	return encryptV1(sender, recipient, msg, nil)
+}
+
+// EncryptForMessage binds the reference without changing the dm-v1 envelope.
+func EncryptForMessage(sender *identity.Identity, recipient domain.DMRecipient, msg domain.OutgoingDM, topic, id string) (string, error) {
+	if topic == "" || id == "" {
+		return "", ErrEnvelopeAuth
+	}
+	ref := v1MessageRef{Topic: topic, ID: id, Sender: sender.Address, Recipient: recipient.Address.String()}
+	encoded, err := encryptV1(sender, recipient, msg, &ref)
+	if err != nil || len(encoded) <= domain.MaxRelayMessageBodyBytes {
+		return encoded, err
+	}
+	// Preserve delivery for messages at the legacy relay limit. The receiver
+	// already supports unbound copies from older senders.
+	return EncryptForParticipants(sender, recipient, msg)
+}
+
+func encryptV1(sender *identity.Identity, recipient domain.DMRecipient, msg domain.OutgoingDM, ref *v1MessageRef) (string, error) {
 	recipientBoxKey, err := base64.StdEncoding.DecodeString(recipient.BoxKeyBase64)
 	if err != nil {
 		return "", fmt.Errorf("decode recipient box key: %w", err)
@@ -76,14 +109,14 @@ func EncryptForParticipants(sender *identity.Identity, recipient domain.DMRecipi
 		return "", fmt.Errorf("create recipient public key: %w", err)
 	}
 
-	plain, err := json.Marshal(PlainMessage{
+	plain, err := json.Marshal(v1PlainMessage{Ref: ref, PlainMessage: PlainMessage{
 		Body:        msg.Body,
 		CreatedAt:   time.Now().UTC(),
 		ReplyTo:     string(msg.ReplyTo),
 		Command:     string(msg.Command),
 		CommandData: msg.CommandData,
 		RetryOf:     string(msg.RetryOf),
-	})
+	}})
 	if err != nil {
 		return "", fmt.Errorf("marshal direct message: %w", err)
 	}
@@ -128,20 +161,37 @@ func EncryptForParticipants(sender *identity.Identity, recipient domain.DMRecipi
 }
 
 func DecryptForIdentity(id *identity.Identity, senderAddress, senderPublicKeyBase64, recipientAddress, encoded string) (*PlainMessage, error) {
-	envelope, err := verifyEnvelope(senderAddress, senderPublicKeyBase64, recipientAddress, encoded)
+	return DecryptForMessage(id, domain.MessageRef{Sender: senderAddress, Recipient: recipientAddress}, senderPublicKeyBase64, encoded)
+}
+
+// DecryptForMessage checks the encrypted reference when present and reads
+// messages produced by versions that did not write one.
+func DecryptForMessage(id *identity.Identity, ref domain.MessageRef, senderPublicKeyBase64, encoded string) (*PlainMessage, error) {
+	envelope, err := verifyEnvelope(ref.Sender, senderPublicKeyBase64, ref.Recipient, encoded)
 	if err != nil {
 		return nil, err
 	}
-	return decryptEnvelope(id, envelope)
+	return decryptEnvelope(id, envelope, ref)
 }
 
-func decryptEnvelope(id *identity.Identity, envelope sealedEnvelope) (*PlainMessage, error) {
+func decryptEnvelope(id *identity.Identity, envelope sealedEnvelope, ref domain.MessageRef) (*PlainMessage, error) {
 	parts := []sealedPart{envelope.Recipient, envelope.Sender}
 	for _, part := range parts {
-		message, err := openPart(id, part)
-		if err == nil {
-			return message, nil
+		plain, err := openSealedPart(id, part, dmKeyLabel)
+		if err != nil {
+			continue
 		}
+		var message v1PlainMessage
+		if err := json.Unmarshal(plain, &message); err != nil {
+			return nil, fmt.Errorf("%w: invalid sealed DM payload", ErrEnvelopeMalformed)
+		}
+		if binding := message.Ref; binding != nil {
+			if binding.Sender != envelope.From || binding.Recipient != envelope.To || binding.Topic == "" || binding.ID == "" ||
+				(ref.Topic != "" && binding.Topic != ref.Topic) || (ref.ID != "" && binding.ID != ref.ID) {
+				return nil, fmt.Errorf("%w: sealed message reference differs", ErrEnvelopeAuth)
+			}
+		}
+		return &message.PlainMessage, nil
 	}
 
 	// The envelope authenticated above; only the sealed halves refused the
@@ -149,15 +199,20 @@ func decryptEnvelope(id *identity.Identity, envelope sealedEnvelope) (*PlainMess
 	return nil, ErrSealedUnreadable
 }
 
-// VerifyDataEnvelopeForRecipient rejects known control commands carried as
-// ordinary data. Unreadable copies retain the legacy key recovery path.
-func VerifyDataEnvelopeForRecipient(recipient *identity.Identity, senderAddress, senderPublicKeyBase64, encoded string) error {
-	envelope, err := verifyEnvelope(senderAddress, senderPublicKeyBase64, recipient.Address, encoded)
+// VerifyDataEnvelopeForRecipient checks the reference and rejects control
+// commands carried as data. Unreadable copies retain legacy key recovery.
+func VerifyDataEnvelopeForRecipient(recipient *identity.Identity, ref domain.MessageRef, senderPublicKeyBase64, encoded string) error {
+	if ref.Recipient != recipient.Address {
+		return ErrEnvelopeAuth
+	}
+	message, err := DecryptForMessage(recipient, ref, senderPublicKeyBase64, encoded)
 	if err != nil {
+		if errors.Is(err, ErrSealedUnreadable) {
+			return nil
+		}
 		return err
 	}
-	message, err := decryptEnvelope(recipient, envelope)
-	if err == nil && domain.DMCommand(message.Command).IsControl() {
+	if domain.DMCommand(message.Command).IsControl() {
 		return fmt.Errorf("%w: control command in data envelope", ErrEnvelopeAuth)
 	}
 	return nil
@@ -265,11 +320,19 @@ func sealPart(publicKey *ecdh.PublicKey, plain []byte, label string) (sealedPart
 	}, nil
 }
 
-func openPart(id *identity.Identity, part sealedPart) (*PlainMessage, error) {
-	return openLabeledPart(id, part, dmKeyLabel)
+func openLabeledPart(id *identity.Identity, part sealedPart, label string) (*PlainMessage, error) {
+	plain, err := openSealedPart(id, part, label)
+	if err != nil {
+		return nil, err
+	}
+	var message PlainMessage
+	if err := json.Unmarshal(plain, &message); err != nil {
+		return nil, fmt.Errorf("unmarshal direct message: %w", err)
+	}
+	return &message, nil
 }
 
-func openLabeledPart(id *identity.Identity, part sealedPart, label string) (*PlainMessage, error) {
+func openSealedPart(id *identity.Identity, part sealedPart, label string) ([]byte, error) {
 	ephemeralBytes, err := base64.RawURLEncoding.DecodeString(part.Ephemeral)
 	if err != nil {
 		return nil, fmt.Errorf("decode ephemeral key: %w", err)
@@ -296,10 +359,5 @@ func openLabeledPart(id *identity.Identity, part sealedPart, label string) (*Pla
 		return nil, fmt.Errorf("decrypt payload: %w", err)
 	}
 
-	var message PlainMessage
-	if err := json.Unmarshal(plain, &message); err != nil {
-		return nil, fmt.Errorf("unmarshal direct message: %w", err)
-	}
-
-	return &message, nil
+	return plain, nil
 }

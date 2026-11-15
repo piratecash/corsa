@@ -17,6 +17,9 @@ const (
 	// CapSignedReceiptAckV1 is reserved for acknowledging an exact signed receipt.
 	CapSignedReceiptAckV1 Capability = "signed_receipt_ack_v1"
 	CapDirectDMV2         Capability = "direct_dm_v2" // inactive overlay proposal
+	// CapSignedDirectDeliveryV1 supports signed delivered receipts over a
+	// proved session with the final recipient of the receipt.
+	CapSignedDirectDeliveryV1 Capability = "signed_direct_delivery_v1"
 
 	// CapMeshRelayV1 gates hop-by-hop relay (relay_message frames).
 	CapMeshRelayV1 Capability = "mesh_relay_v1"
@@ -267,7 +270,7 @@ func (c Capability) String() string { return string(c) }
 func ParseCapability(s string) (Capability, bool) {
 	c := Capability(strings.ToLower(s))
 	switch c {
-	case CapOverlayFindNodeV1, CapOverlayResponderV1, CapSignedReceiptAckV1, CapDirectDMV2, CapMeshRelayV1, CapMeshRoutingV1, CapMeshRoutingV2, CapFileTransferV1, CapMeshRouteProbeV1, CapMeshRouteQueryV1, CapMeshRouteSyncV1, CapMeshRoutingV3, CapMeshAttestedLinksV1, CapMeshPoisonReverseV1, CapMeshPoisonReverseV2, CapMeshDatagramV1, CapMeshDatagramTransitV1:
+	case CapOverlayFindNodeV1, CapOverlayResponderV1, CapSignedReceiptAckV1, CapSignedDirectDeliveryV1, CapDirectDMV2, CapMeshRelayV1, CapMeshRoutingV1, CapMeshRoutingV2, CapFileTransferV1, CapMeshRouteProbeV1, CapMeshRouteQueryV1, CapMeshRouteSyncV1, CapMeshRoutingV3, CapMeshAttestedLinksV1, CapMeshPoisonReverseV1, CapMeshPoisonReverseV2, CapMeshDatagramV1, CapMeshDatagramTransitV1:
 		return c, true
 	default:
 		return "", false

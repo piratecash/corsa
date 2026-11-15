@@ -2650,7 +2650,10 @@ func (s *Service) emitDeliveryReceipt(msg incomingMessage) {
 	defer crashlog.DeferRecover()
 	receipt, ok := s.prepareOwnDeliveryReceipt(deliveredReceiptFor(s.identity.Address, msg), directmsg.HasV2EnvelopePrefix([]byte(msg.Body)))
 	if ok {
-		s.storeDeliveryReceipt(receipt)
+		outcome := s.storeDeliveryReceipt(receipt)
+		if outcome.stored {
+			s.sendSignedDirectDelivery(receipt)
+		}
 	}
 }
 
@@ -2668,6 +2671,7 @@ func (s *Service) resendDeliveryReceipt(msg incomingMessage) {
 		return
 	}
 	log.Info().Str("message_id", string(receipt.MessageID)).Str("recipient", receipt.Recipient).Msg("resending delivered receipt for duplicate DM")
+	s.sendSignedDirectDelivery(receipt)
 	s.distributeReceipt(receipt)
 }
 

@@ -1226,7 +1226,8 @@ func (m *recoveryManager) tryResend(root domain.MessageRef) {
 		return
 	}
 	self := m.router.client.id
-	plain, err := directmsg.DecryptForIdentity(self, entry.Sender, identity.PublicKeyBase64(self.PublicKey), entry.Recipient, entry.Body)
+	ref := domain.MessageRef{Topic: "dm", ID: entry.ID, Sender: entry.Sender, Recipient: entry.Recipient}
+	plain, err := directmsg.DecryptForMessage(self, ref, identity.PublicKeyBase64(self.PublicKey), entry.Body)
 	if err != nil {
 		log.Warn().Err(err).Str("message_id", entry.ID).Msg("decrypt_recovery_own_copy_unreadable")
 		m.releaseResendOwned(store, root)

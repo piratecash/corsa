@@ -310,7 +310,7 @@ func (d *DMCrypto) sendDirectMessageWithResidence(ctx, residence context.Context
 			Command: string(msg.Command), CommandData: msg.CommandData, RetryOf: string(msg.RetryOf),
 		})
 	} else {
-		ciphertext, err = directmsg.EncryptForParticipants(d.id, recipient, msg)
+		ciphertext, err = directmsg.EncryptForMessage(d.id, recipient, msg, "dm", string(messageID))
 	}
 	if err != nil {
 		return nil, err

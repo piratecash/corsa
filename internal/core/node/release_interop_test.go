@@ -1249,11 +1249,13 @@ func scenarioDMNewToOld(t *testing.T, fuse networkFuse, release releaseUnderTest
 		return newNode.SessionKindStats().OutboundLegacy > 0
 	})
 
-	id := newMessageID(t)
-	sendDMToRelease(t, newNode, old, id, "to-the-release")
-	waitForConditionMsg(t, 40*time.Second, "the DM never reached the release's inbox", func() bool {
-		return old.hasDM(id)
-	})
+	for _, body := range []string{"to-the-release", strings.Repeat("a", 18180)} {
+		id := newMessageID(t)
+		sendDMToRelease(t, newNode, old, id, body)
+		waitForConditionMsg(t, 40*time.Second, "the DM never reached the release's inbox", func() bool {
+			return old.hasDM(id)
+		})
+	}
 }
 
 func newMessageID(t *testing.T) string {
@@ -1264,13 +1266,13 @@ func newMessageID(t *testing.T) string {
 
 func sendDMToRelease(t *testing.T, from *Service, to *releasedNode, id, body string) {
 	t.Helper()
-	ciphertext, err := directmsg.EncryptForParticipants(
+	ciphertext, err := directmsg.EncryptForMessage(
 		from.identity,
 		domain.DMRecipient{
 			Address:      to.peerIdentity(),
 			BoxKeyBase64: identity.BoxPublicKeyBase64(to.keys.BoxPublicKey),
 		},
-		domain.OutgoingDM{Body: body},
+		domain.OutgoingDM{Body: body}, "dm", id,
 	)
 	if err != nil {
 		t.Fatalf("encrypt DM %s: %v", id, err)

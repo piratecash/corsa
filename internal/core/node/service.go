@@ -7874,7 +7874,7 @@ func (s *Service) storeIncomingMessageWithR2a(msg incomingMessage, validateTimes
 		}
 		var verifyErr error
 		if msg.Topic == "dm" && msg.Recipient == s.identity.Address {
-			verifyErr = directmsg.VerifyDataEnvelopeForRecipient(s.identity, msg.Sender, senderPubKey, msg.Body)
+			verifyErr = directmsg.VerifyDataEnvelopeForRecipient(s.identity, admissionRef(msg), senderPubKey, msg.Body)
 		} else {
 			verifyErr = directmsg.VerifyEnvelope(msg.Sender, senderPubKey, msg.Recipient, msg.Body)
 		}
