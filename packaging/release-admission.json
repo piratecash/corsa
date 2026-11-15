@@ -91,10 +91,10 @@
       "executor": "developer",
       "check": "Integration tests on the release build: safe and unsafe directory, wrong owner, writable by others, substitution through links, restart with existing pins, damaged store; the criteria are stated explicitly (not only mode 0777); Docker documentation describes a protected subdirectory for the node's user; the owner deferred real Windows owner/DACL and reparse-point execution on 2026-10-23, with its behaviour UNVERIFIED and issues handled as they arise; all macOS/Linux startup, location, ownership and link checks remain required; the release notes carry the migration instructions.",
       "evidence": {
-        "report": "Verified the v2.6.72 daemon at c391b0873e382beaec97496e6c6aa3e15a1b1f79 on native macOS arm64 and Ubuntu 24.04 Linux amd64. Both platforms started twice with an existing pin and retained the marker, and refused a group-writable directory, an unsafe file mode, a symlink, damaged storage and a missing store with an existing marker. Linux exercised genuine foreign UID on both a file and its containing directory. On native macOS the daemon at euid 501 refused a real uid 0 regular file with location_unsafe/foreign_owner and exit 1 before listener startup; the fixture's inode, uid, mode, modification time and digest were intact. The macOS ACL tests and full applicable release suites on Linux and macOS passed. These checks used isolated data and loopback. Windows owner/DACL and reparse-point startup remain UNVERIFIED under the 2026-10-23 owner deferral. README.md documents a protected Docker subdirectory; the v2.6.72 release notes include pin-store migration and refusal recovery. Historical POSIX test evidence was recorded at b3adfd8dcc514276f4d40be954795c02479d1496. Current logs are in docs/_internal/d1-artifacts/2026-11-15/v2.6.72-admission/.",
-        "commit": "c391b0873e382beaec97496e6c6aa3e15a1b1f79"
+        "report": "docs/operations/v2.6.72-pin-store-startup.md records the emitted daemon hashes, native macOS and Linux startup results, real foreign owner tests, marker tests and retained state. Native macOS ACL and startup-order tests also cover daemon, Desktop and SDK. Linux ran in Docker with external networking disabled. Native Windows owner/DACL and reparse-point startup remain UNVERIFIED under the owner decision of 2026-10-23.",
+        "commit": "5bffcb5f4fe9ebe41995d1281af43283820e12fc"
       },
-      "status": "partial"
+      "status": "done"
     },
     {
       "id": "dial_paths_unified",

@@ -8,7 +8,7 @@ Receipts, retries, deletion, recovery and file-transfer state now follow that co
 
 Storage schema 9 applies this identity to the message database while preserving existing row order, message bodies and wire values. The migration is forward-only: after it is applied, a build whose migration catalog ends at schema 8 cannot open the database.
 
-New DM v1 messages can carry their topic, ID, sender and recipient inside both encrypted copies. Upgraded clients validate this reference when reading the message. Messages that would exceed the legacy relay's 64 KiB encoded body limit with the reference use the original encoding. Older releases can read both forms.
+New DM v1 messages can carry their topic, ID, sender and recipient inside both encrypted copies. Upgraded clients validate this reference when reading the message. Messages without a negotiated receipt signature requirement use the original encoding if the reference would push the body over the legacy relay's 64 KiB limit. Older releases can read both forms.
 
 ## Identity Recovery Preserves Existing State
 
@@ -52,7 +52,11 @@ Stop Corsa and create a verified, SQLite-consistent backup of the complete data 
 
 When changing ports with default paths, rename all port-specific files together, including `identity-<port>.json`, `identity-<port>.json.pin-store-marker.json` and `secure-sessions-<port>.json`. To keep the original filenames, set `CORSA_IDENTITY_PATH` and `CORSA_SECURE_SESSION_STORE_PATH` to the existing files and update the other data paths as needed. Keep the backup outside the old live store path. If startup reports `store_missing`, restore the corresponding store from the backup or correct the configured path. If it reports `two_stores`, identify the current store and move the other copy aside before restarting. Keep the marker with the identity throughout the migration. [Secure session migration and startup refusals](https://github.com/piratecash/corsa/blob/c391b0873e382beaec97496e6c6aa3e15a1b1f79/docs/protocol/session_v2.md#downgrade-protection)
 
-After schema 9 commits, v2.5.71 and other builds ending at schema 8 cannot open the upgraded database. Replacing only the binary is not a supported rollback; recovery requires the consistent backup made before upgrading.
+Corsa refuses to start before opening a network listener if the pin store, its marker or their directories have unsafe ownership, permissions or links. For Docker, move the data together into a private subdirectory owned by the container user and mount it at the configured data path. The standard image uses UID/GID `10001:10001`. Use mode `0700` for the private directory and `0600` for the pin store and marker. The startup error gives the path, cause and process UID/GID.
+
+TLS-first is on by default. Setting `CORSA_V2_TLS_FIRST=off` on the daemon or `NodeConfig.V2TLSFirst` to a pointer to false in the SDK starts with an identity-less probe only where legacy is permitted. Endpoints and identities already required to use the secure session still require it. Switching off TLS-first retains the stored downgrade protection.
+
+Rollback requires a build that supports the secure session and can read the current pin store format. Keep the current identity, pin store and marker together. After schema 9 commits, a build ending at schema 8 also requires the database from the consistent backup made before upgrading.
 
 SDK integrations using `RPC.Enabled=true` must add both `RPC.Username` and `RPC.Password` before moving to this version.
 
@@ -68,7 +72,7 @@ Wire message ID больше не считается глобально уник
 
 Storage schema 9 переносит это правило в базу сообщений, сохраняя существующий порядок строк, тела сообщений и wire values. Миграция однонаправленная: после её применения сборка, чей каталог миграций заканчивается на schema 8, не сможет открыть базу.
 
-Новые сообщения DM v1 могут содержать тему, ID, отправителя и получателя внутри обеих зашифрованных копий. Обновлённые клиенты проверяют эту ссылку при чтении сообщения. Если привязка увеличивает закодированное тело сверх лимита старых реле в 64 КиБ, сообщение отправляется в исходном кодировании. Старые версии читают оба варианта.
+Новые сообщения DM v1 могут содержать тему, ID, отправителя и получателя внутри обеих зашифрованных копий. Обновлённые клиенты проверяют эту ссылку при чтении сообщения. Сообщения без согласованного требования подписи используют исходное кодирование, если привязка увеличивает тело сверх лимита старых реле в 64 КиБ. Старые версии читают оба варианта.
 
 ## Восстановление identity сохраняет прежнее состояние
 
@@ -112,6 +116,10 @@ Traffic captures теперь соблюдают лимиты хранилища
 
 При смене порта с путями по умолчанию переименуйте вместе все файлы, в именах которых есть порт, включая `identity-<port>.json`, `identity-<port>.json.pin-store-marker.json` и `secure-sessions-<port>.json`. Чтобы сохранить прежние имена, укажите существующие файлы в `CORSA_IDENTITY_PATH` и `CORSA_SECURE_SESSION_STORE_PATH` и при необходимости обновите пути к остальным данным. Храните резервную копию вне прежнего рабочего пути хранилища. При ошибке `store_missing` восстановите соответствующее хранилище из резервной копии или исправьте настроенный путь. При ошибке `two_stores` определите актуальное хранилище и переместите вторую копию в другое место перед перезапуском. Сохраняйте маркер рядом с файлом identity на всех этапах переноса. [Перенос и отказы запуска защищённой сессии](https://github.com/piratecash/corsa/blob/c391b0873e382beaec97496e6c6aa3e15a1b1f79/docs/protocol/session_v2.md#защита-от-понижения)
 
-После применения schema 9 версия v2.5.71 и другие сборки с последней schema 8 не смогут открыть обновлённую базу. Замена только binary не является поддерживаемым rollback; для восстановления нужна согласованная копия, сделанная до обновления.
+Corsa отказывается запускаться до открытия сетевого порта, если у pin store, маркера или их каталогов небезопасный владелец, права доступа или ссылки. В Docker перенесите данные вместе в приватный подкаталог пользователя контейнера и смонтируйте его по настроенному пути данных. Стандартный образ использует UID/GID `10001:10001`. Установите права `0700` на приватный каталог и `0600` на pin store и маркер. Сообщение об отказе указывает путь, причину и UID/GID процесса.
+
+Режим TLS-first включён по умолчанию. `CORSA_V2_TLS_FIRST=off` у демона или указатель на `false` в `NodeConfig.V2TLSFirst` у SDK включает пробное соединение без отправки identity только там, где разрешён старый протокол. Для адресов и identity с требованием защищённой сессии оно продолжает действовать. При выключении TLS-first сохранённая защита от понижения остаётся в силе.
+
+Для отката нужна сборка с поддержкой защищённой сессии и текущего формата pin store. Сохраните текущие identity, pin store и маркер вместе. После применения schema 9 сборке с последней schema 8 также потребуется база из согласованной копии, сделанной до обновления.
 
 SDK-интеграции с `RPC.Enabled=true` должны до обновления добавить `RPC.Username` и `RPC.Password`.

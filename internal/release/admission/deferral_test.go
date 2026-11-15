@@ -145,8 +145,8 @@ func TestCommittedDeferralIsUnverifiedAndCannotRelease(t *testing.T) {
 				t.Fatal("crypto review unexpectedly completed", c)
 			}
 		case "unsafe_pin_store_refusal":
-			if c.Status != ConditionPartial {
-				t.Fatal("POSIX obligation unexpectedly completed", c)
+			if c.Status != ConditionDone || c.Evidence == nil || c.Evidence.Commit == nil {
+				t.Fatal("POSIX refusal checks lost their candidate evidence", c)
 			}
 		case "first_contact_latency":
 			if c.Status != ConditionNotDone {

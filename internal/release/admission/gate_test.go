@@ -159,7 +159,7 @@ func TestCommittedManifestKeepsReleaseClosed(t *testing.T) {
 	doneToday := []ConditionID{
 		"owner_release_shape", "owner_session_choices", "compat_real_releases",
 		"probe_per_contract", "tls_first_switch",
-		"pin_store_marker", "dial_paths_unified", "self_record_min_session", "load_run_on_candidate", "loopback_inbound_class",
+		"pin_store_marker", "unsafe_pin_store_refusal", "dial_paths_unified", "self_record_min_session", "load_run_on_candidate", "loopback_inbound_class",
 	}
 	var want []ConditionID
 	for _, id := range RequiredConditions() {
