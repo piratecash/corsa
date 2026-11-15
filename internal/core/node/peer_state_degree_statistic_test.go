@@ -540,7 +540,7 @@ func degreeStatisticConstructionPins() map[string]string {
 		"internal/core/node/identity_pin_membership_observation.go": "216e90b8efd36d9f718a81a821cc80b46942e44d7b403c2ff04f0bf33d758f40",
 		"internal/core/node/find_node_degree_terminal_bridge.go":    "e6c1022489eb1de4969683cecba0c40590fe5a3ffef14e272e5464b722677ef8",
 		"internal/core/node/find_node_bridge_construction.go":       "09d857b53409deb6a9d2be2a2ba6a04c14d212ea0e1d7dec7415646a24e3878e",
-		"internal/core/node/service.go":                             "a81eb464182bb70ee42a98215ba750a19fccb87fb99a5b4ed616439697f6d6ce",
+		"internal/core/node/service.go":                             "c02ee4e0ca7289e6195e6482be30bfcd8f3fa0c245e6695dc2f5400680485b53",
 		"internal/core/node/advertised_connection_observation.go":   "bb2338c2c968b0066f3e6a70e2d894981b5a105f3ea8b71e2a4f36d8efcb625e",
 		"internal/core/node/find_node_degree.go":                    "5fd8c8fd9700cb63fd238bd9fb3255c7e434081258e4448d3febb89f4e0e35ea",
 		"internal/core/node/datagram_runtime_state.go":              "62817ed3c561f3eedbaa8baca6ded4c3696b8595a5c3a5345e35faada9ebcf64",

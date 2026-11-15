@@ -310,7 +310,9 @@ func (d *DMCrypto) sendDirectMessageWithResidence(ctx, residence context.Context
 			Command: string(msg.Command), CommandData: msg.CommandData, RetryOf: string(msg.RetryOf),
 		})
 	} else {
-		ciphertext, err = directmsg.EncryptForMessage(d.id, recipient, msg, "dm", string(messageID))
+		local := d.rpc.LocalNode()
+		required := msg.RequireSignedReceipts || (local != nil && local.SupportsSignedReceipts(to))
+		ciphertext, err = directmsg.EncryptForMessageWithSignedReceipts(d.id, recipient, msg, "dm", string(messageID), required)
 	}
 	if err != nil {
 		return nil, err

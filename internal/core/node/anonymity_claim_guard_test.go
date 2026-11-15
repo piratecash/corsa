@@ -49,18 +49,20 @@ import (
 // is unused.
 func advertisableCapabilities() map[domain.Capability]struct{} {
 	return map[domain.Capability]struct{}{
-		domain.CapMeshRelayV1:           {},
-		domain.CapMeshRoutingV1:         {},
-		domain.CapMeshRoutingV2:         {},
-		domain.CapFileTransferV1:        {},
-		domain.CapMeshRouteProbeV1:      {},
-		domain.CapMeshRouteQueryV1:      {},
-		domain.CapMeshRouteSyncV1:       {},
-		domain.CapMeshRoutingV3:         {},
-		domain.CapMeshPoisonReverseV1:   {},
-		domain.CapMeshPoisonReverseV2:   {},
-		domain.CapMeshDatagramV1:        {},
-		domain.CapMeshDatagramTransitV1: {},
+		domain.CapMeshRelayV1:            {},
+		domain.CapMeshRoutingV1:          {},
+		domain.CapMeshRoutingV2:          {},
+		domain.CapFileTransferV1:         {},
+		domain.CapMeshRouteProbeV1:       {},
+		domain.CapMeshRouteQueryV1:       {},
+		domain.CapMeshRouteSyncV1:        {},
+		domain.CapMeshRoutingV3:          {},
+		domain.CapMeshPoisonReverseV1:    {},
+		domain.CapMeshPoisonReverseV2:    {},
+		domain.CapMeshDatagramV1:         {},
+		domain.CapMeshDatagramTransitV1:  {},
+		domain.CapSignedDirectDeliveryV1: {},
+		domain.CapSignedDirectReceiptsV1: {},
 	}
 }
 

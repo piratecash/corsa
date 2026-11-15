@@ -32,6 +32,20 @@ func (s *Service) directDMV2RetryWriterLocked(identity domain.PeerIdentity) *net
 // that negotiated capability. The caller holds peerMu.
 func (s *Service) provenPeerWriterLocked(identity domain.PeerIdentity, capability domain.Capability) *netcore.NetCore {
 	var selected *netcore.NetCore
+	selectWriter := func(core *netcore.NetCore) bool {
+		if capability == domain.CapSignedDirectReceiptsV1 {
+			if core.HasCapability(domain.CapMeshRelayV1) && (selected == nil || core.ConnIDNum() < selected.ConnIDNum()) {
+				selected = core
+			}
+			return true
+		}
+		if selected != nil && selected != core {
+			selected = nil
+			return false
+		}
+		selected = core
+		return true
+	}
 	for _, session := range s.sessions {
 		if session.peerIdentity != identity || !session.authOK || session.eligibilityEnded.Load() ||
 			!session.receive.ReceiveReady() || !capsContain(session.capabilities, capability) {
@@ -46,22 +60,16 @@ func (s *Service) provenPeerWriterLocked(identity domain.PeerIdentity, capabilit
 		if core == nil || core != session.netCore || !core.AcceptingFrames() {
 			continue
 		}
-		if selected != nil && selected != core {
+		if !selectWriter(core) {
 			return nil
 		}
-		selected = core
 	}
 	s.forEachConnIDLocked(func(id domain.ConnID) bool {
 		core, _ := s.directDMV2ListenerLocked(id, identity, capability)
 		if core == nil || !core.AcceptingFrames() {
 			return true
 		}
-		if selected != nil && selected != core {
-			selected = nil
-			return false
-		}
-		selected = core
-		return true
+		return selectWriter(core)
 	})
 	return selected
 }

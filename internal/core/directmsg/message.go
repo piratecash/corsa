@@ -15,11 +15,13 @@ import (
 )
 
 type PlainMessage struct {
-	Body        string    `json:"body"`
-	CreatedAt   time.Time `json:"created_at"`
-	ReplyTo     string    `json:"reply_to,omitempty"`
-	Command     string    `json:"command,omitempty"`      // e.g. "file_announce"; empty for regular DMs
-	CommandData string    `json:"command_data,omitempty"` // JSON-encoded payload; empty for regular DMs
+	// SignedReceiptRequired is derived from the authenticated v1 reference.
+	SignedReceiptRequired bool      `json:"-"`
+	Body                  string    `json:"body"`
+	CreatedAt             time.Time `json:"created_at"`
+	ReplyTo               string    `json:"reply_to,omitempty"`
+	Command               string    `json:"command,omitempty"`      // e.g. "file_announce"; empty for regular DMs
+	CommandData           string    `json:"command_data,omitempty"` // JSON-encoded payload; empty for regular DMs
 	// RetryOf is the original message id this envelope re-sends after a
 	// decrypt-failure recovery (docs/protocol/identity-lookup.md §4.10).
 	// Inside the encrypted part, like ReplyTo, and for the same privacy
@@ -75,22 +77,35 @@ type v1MessageRef struct {
 
 type v1PlainMessage struct {
 	PlainMessage
-	Ref *v1MessageRef `json:"message_ref,omitempty"`
+	Ref            *v1MessageRef `json:"message_ref,omitempty"`
+	SignedReceipts bool          `json:"signed_receipts,omitempty"`
 }
 
 func EncryptForParticipants(sender *identity.Identity, recipient domain.DMRecipient, msg domain.OutgoingDM) (string, error) {
-	return encryptV1(sender, recipient, msg, nil)
+	return encryptV1WithReceiptPolicy(sender, recipient, msg, nil, false)
 }
 
 // EncryptForMessage binds the reference without changing the dm-v1 envelope.
 func EncryptForMessage(sender *identity.Identity, recipient domain.DMRecipient, msg domain.OutgoingDM, topic, id string) (string, error) {
+	return EncryptForMessageWithSignedReceipts(sender, recipient, msg, topic, id, false)
+}
+
+// EncryptForMessageWithSignedReceipts records the sender's receipt policy inside
+// both sealed copies. A required policy never falls back to unbound encoding.
+func EncryptForMessageWithSignedReceipts(sender *identity.Identity, recipient domain.DMRecipient, msg domain.OutgoingDM, topic, id string, required bool) (string, error) {
 	if topic == "" || id == "" {
 		return "", ErrEnvelopeAuth
 	}
+	if required && topic != "dm" {
+		return "", ErrEnvelopeAuth
+	}
 	ref := v1MessageRef{Topic: topic, ID: id, Sender: sender.Address, Recipient: recipient.Address.String()}
-	encoded, err := encryptV1(sender, recipient, msg, &ref)
+	encoded, err := encryptV1WithReceiptPolicy(sender, recipient, msg, &ref, required)
 	if err != nil || len(encoded) <= domain.MaxRelayMessageBodyBytes {
 		return encoded, err
+	}
+	if required {
+		return "", errors.New("direct message exceeds the relay limit with required receipt signatures")
 	}
 	// Preserve delivery for messages at the legacy relay limit. The receiver
 	// already supports unbound copies from older senders.
@@ -98,6 +113,10 @@ func EncryptForMessage(sender *identity.Identity, recipient domain.DMRecipient, 
 }
 
 func encryptV1(sender *identity.Identity, recipient domain.DMRecipient, msg domain.OutgoingDM, ref *v1MessageRef) (string, error) {
+	return encryptV1WithReceiptPolicy(sender, recipient, msg, ref, false)
+}
+
+func encryptV1WithReceiptPolicy(sender *identity.Identity, recipient domain.DMRecipient, msg domain.OutgoingDM, ref *v1MessageRef, required bool) (string, error) {
 	recipientBoxKey, err := base64.StdEncoding.DecodeString(recipient.BoxKeyBase64)
 	if err != nil {
 		return "", fmt.Errorf("decode recipient box key: %w", err)
@@ -109,7 +128,7 @@ func encryptV1(sender *identity.Identity, recipient domain.DMRecipient, msg doma
 		return "", fmt.Errorf("create recipient public key: %w", err)
 	}
 
-	plain, err := json.Marshal(v1PlainMessage{Ref: ref, PlainMessage: PlainMessage{
+	plain, err := json.Marshal(v1PlainMessage{Ref: ref, SignedReceipts: required, PlainMessage: PlainMessage{
 		Body:        msg.Body,
 		CreatedAt:   time.Now().UTC(),
 		ReplyTo:     string(msg.ReplyTo),
@@ -191,6 +210,10 @@ func decryptEnvelope(id *identity.Identity, envelope sealedEnvelope, ref domain.
 				return nil, fmt.Errorf("%w: sealed message reference differs", ErrEnvelopeAuth)
 			}
 		}
+		if message.SignedReceipts && (message.Ref == nil || message.Ref.Topic != "dm") {
+			return nil, ErrEnvelopeAuth
+		}
+		message.SignedReceiptRequired = message.SignedReceipts
 		return &message.PlainMessage, nil
 	}
 
@@ -202,20 +225,27 @@ func decryptEnvelope(id *identity.Identity, envelope sealedEnvelope, ref domain.
 // VerifyDataEnvelopeForRecipient checks the reference and rejects control
 // commands carried as data. Unreadable copies retain legacy key recovery.
 func VerifyDataEnvelopeForRecipient(recipient *identity.Identity, ref domain.MessageRef, senderPublicKeyBase64, encoded string) error {
+	_, err := DataEnvelopeReceiptPolicy(recipient, ref, senderPublicKeyBase64, encoded)
+	return err
+}
+
+// DataEnvelopeReceiptPolicy verifies the envelope and returns its negotiated
+// receipt requirement when the local copy can be opened.
+func DataEnvelopeReceiptPolicy(recipient *identity.Identity, ref domain.MessageRef, senderPublicKeyBase64, encoded string) (bool, error) {
 	if ref.Recipient != recipient.Address {
-		return ErrEnvelopeAuth
+		return false, ErrEnvelopeAuth
 	}
 	message, err := DecryptForMessage(recipient, ref, senderPublicKeyBase64, encoded)
 	if err != nil {
 		if errors.Is(err, ErrSealedUnreadable) {
-			return nil
+			return false, nil
 		}
-		return err
+		return false, err
 	}
 	if domain.DMCommand(message.Command).IsControl() {
-		return fmt.Errorf("%w: control command in data envelope", ErrEnvelopeAuth)
+		return false, fmt.Errorf("%w: control command in data envelope", ErrEnvelopeAuth)
 	}
-	return nil
+	return message.SignedReceiptRequired, nil
 }
 
 func VerifyEnvelope(senderAddress, senderPublicKeyBase64, recipientAddress, encoded string) error {

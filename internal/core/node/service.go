@@ -592,6 +592,8 @@ type Service struct {
 	// awaitingDelivered, which is deleted on the first receipt) because it is
 	// only ever evicted by LRU capacity, never on receipt.
 	sentDMIDs *boundedKnownIdentities
+	// Protected refs use the same retention window as sentDMIDs. deliveryMu owns both.
+	signedSentDMIDs map[string]struct{}
 	// seenAckJournal / deliveryFailureJournal are the optional durable
 	// journals behind awaitingSeenAck and the retry-abandonment path
 	// (delivery_retry.go). Set once by RegisterDeliveryOutbox before Run —
@@ -1939,6 +1941,8 @@ type incomingMessage struct {
 	CreatedAt  time.Time
 	TTLSeconds int
 	Body       string
+	// Derived only from the authenticated sealed copy for this node.
+	signedReceiptRequired bool
 
 	// Hops is the raw wire hop budget (frame Hops field). 0 = absent:
 	// either a legacy peer that predates the field or a local send —
@@ -7769,7 +7773,8 @@ func (s *Service) storeIncomingMessageWithR2a(msg incomingMessage, validateTimes
 	// this node's box key cannot even compose the DM (the key is not
 	// redistributed via fetch_contacts — see Service.selfBoxKey); those
 	// that cached it from a direct handshake land here and are dropped.
-	if s.dropsInboundDM(msg) {
+	dropInboundDM := s.dropsInboundDM(msg)
+	if dropInboundDM && (msg.Topic != protocol.TopicControlDM || len(msg.Body) > maxSignedReceiptControlBody) {
 		log.Debug().Str("node", s.identity.Address).Str("id", string(msg.ID)).Str("topic", msg.Topic).Str("sender", msg.Sender).Msg("inbound_dm_dropped_no_dm_inbox")
 		return false, 0, ""
 	}
@@ -7874,12 +7879,27 @@ func (s *Service) storeIncomingMessageWithR2a(msg incomingMessage, validateTimes
 		}
 		var verifyErr error
 		if msg.Topic == "dm" && msg.Recipient == s.identity.Address {
-			verifyErr = directmsg.VerifyDataEnvelopeForRecipient(s.identity, admissionRef(msg), senderPubKey, msg.Body)
+			msg.signedReceiptRequired, verifyErr = directmsg.DataEnvelopeReceiptPolicy(s.identity, admissionRef(msg), senderPubKey, msg.Body)
+		} else if (msg.Topic == "dm" && msg.Sender == s.identity.Address) || (msg.Topic == protocol.TopicControlDM && msg.Recipient == s.identity.Address) {
+			var plain *directmsg.PlainMessage
+			plain, verifyErr = directmsg.DecryptForMessage(s.identity, admissionRef(msg), senderPubKey, msg.Body)
+			if errors.Is(verifyErr, directmsg.ErrSealedUnreadable) {
+				verifyErr = nil
+			}
+			if plain != nil {
+				if msg.Topic == protocol.TopicControlDM && plain.Command == signedReceiptControlCommand {
+					return s.acceptSignedReceiptControl(msg, plain)
+				}
+				msg.signedReceiptRequired = plain.SignedReceiptRequired
+			}
 		} else {
 			verifyErr = directmsg.VerifyEnvelope(msg.Sender, senderPubKey, msg.Recipient, msg.Body)
 		}
 		if verifyErr != nil {
 			return false, 0, protocol.ErrCodeInvalidDirectMessageSig
+		}
+		if dropInboundDM {
+			return false, 0, ""
 		}
 		// The envelope signature verified — NOW the attached material
 		// is proven to belong to a sender that authored a genuine
@@ -8010,18 +8030,19 @@ func (s *Service) storeIncomingMessageWithR2a(msg incomingMessage, validateTimes
 	}
 
 	envelope := protocol.Envelope{
-		ID:          msg.ID,
-		Topic:       msg.Topic,
-		Sender:      msg.Sender,
-		Recipient:   msg.Recipient,
-		Flag:        msg.Flag,
-		TTLSeconds:  msg.TTLSeconds,
-		Payload:     []byte(msg.Body),
-		CreatedAt:   msg.CreatedAt,
-		Hops:        hopBudget,
-		Via:         string(msg.Via),
-		ViaIdentity: msg.ViaIdentity.String(),
-		StoredAt:    time.Now().UTC(),
+		SignedReceiptRequired: msg.signedReceiptRequired,
+		ID:                    msg.ID,
+		Topic:                 msg.Topic,
+		Sender:                msg.Sender,
+		Recipient:             msg.Recipient,
+		Flag:                  msg.Flag,
+		TTLSeconds:            msg.TTLSeconds,
+		Payload:               []byte(msg.Body),
+		CreatedAt:             msg.CreatedAt,
+		Hops:                  hopBudget,
+		Via:                   string(msg.Via),
+		ViaIdentity:           msg.ViaIdentity.String(),
+		StoredAt:              time.Now().UTC(),
 	}
 
 	// Only messages that belong to this node (sender or recipient) get
@@ -8093,7 +8114,7 @@ func (s *Service) storeIncomingMessageWithR2a(msg incomingMessage, validateTimes
 	// works because executeGossipTargets and the table-directed relay
 	// path send frames on the wire on the fly without depending on
 	// s.topics as a backing store.
-	if storeResult == StoreDeferred {
+	if storeResult == StoreDeferred || (storeResult == StoreFailed && msg.signedReceiptRequired && !ownAuthored) {
 		// Out BEFORE any routing. The store could not decide whether this
 		// node may keep the message, so this node has not received it:
 		// nothing is marked seen, nothing enters the backlog, nothing is
@@ -9022,7 +9043,7 @@ func (s *Service) finishReceipt(key string, receipt protocol.DeliveryReceipt, en
 	// seen_ack is scheduler plumbing, not a deliverable artefact: dedupe it
 	// via seenReceipts but never store it in s.receipts, so it cannot leak
 	// through fetch_delivery_receipts or the auth-time backlog replay.
-	if receipt.Status != protocol.ReceiptStatusSeenAck && !s.isDirectDMV2OwnSeen(receipt) {
+	if receipt.Status != protocol.ReceiptStatusSeenAck && !receipt.NegotiatedSignature && !s.isDirectDMV2OwnSeen(receipt) {
 		list := append(s.receipts[receipt.Recipient], receipt)
 		// Hard-cap every recipient's backlog. Own-identity receipts are never
 		// drained by ack_delete (that only fires for relay/forward recipients),
@@ -9136,13 +9157,10 @@ func (s *Service) storeDeliveryReceiptWithSeenReply(receipt protocol.DeliveryRec
 	log.Trace().Str("site", "storeDeliveryReceipt").Str("phase", "lock_wait").Str("msg_id", string(receipt.MessageID)).Msg("delivery_mu_writer")
 	s.deliveryMu.Lock()
 	log.Trace().Str("site", "storeDeliveryReceipt").Str("phase", "lock_held").Str("msg_id", string(receipt.MessageID)).Msg("delivery_mu_writer")
-	if receipt.Signature == "" && receipt.Recipient == s.identity.Address && protocol.ReceiptStatusConfirmsDelivery(receipt.Status) {
-		entry := s.awaitingDelivered[madeByMessageRecipient(receipt)]
-		if entry != nil && directmsg.HasV2EnvelopePrefix(entry.Envelope.Payload) {
-			s.deliveryMu.Unlock()
-			s.peerMu.Unlock()
-			return receiptOutcome{}
-		}
+	if receipt.Signature == "" && receipt.Recipient == s.identity.Address && s.requiresLiveReceiptSignatureLocked(receipt) {
+		s.deliveryMu.Unlock()
+		s.peerMu.Unlock()
+		return receiptOutcome{}
 	}
 	if s.seenReceipts.Has(key) {
 		// The key is written by finishReceipt, so it is here only if a

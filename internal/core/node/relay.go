@@ -2648,7 +2648,7 @@ func (s *Service) clearRelayRetryForOutbound(frame protocol.Frame) {
 
 func (s *Service) emitDeliveryReceipt(msg incomingMessage) {
 	defer crashlog.DeferRecover()
-	receipt, ok := s.prepareOwnDeliveryReceipt(deliveredReceiptFor(s.identity.Address, msg), directmsg.HasV2EnvelopePrefix([]byte(msg.Body)))
+	receipt, ok := s.prepareOwnDeliveryReceipt(deliveredReceiptFor(s.identity.Address, msg), msg.signedReceiptRequired || directmsg.HasV2EnvelopePrefix([]byte(msg.Body)))
 	if ok {
 		outcome := s.storeDeliveryReceipt(receipt)
 		if outcome.stored {
@@ -2666,7 +2666,7 @@ func (s *Service) emitDeliveryReceipt(msg incomingMessage) {
 // receipt state.
 func (s *Service) resendDeliveryReceipt(msg incomingMessage) {
 	defer crashlog.DeferRecover()
-	receipt, ok := s.prepareOwnDeliveryReceipt(deliveredReceiptFor(s.identity.Address, msg), directmsg.HasV2EnvelopePrefix([]byte(msg.Body)))
+	receipt, ok := s.prepareOwnDeliveryReceipt(deliveredReceiptFor(s.identity.Address, msg), msg.signedReceiptRequired || directmsg.HasV2EnvelopePrefix([]byte(msg.Body)))
 	if !ok {
 		return
 	}
@@ -2682,6 +2682,10 @@ func (s *Service) resendDeliveryReceipt(msg incomingMessage) {
 // storeDeliveryReceipt and is shared by the duplicate re-send paths and
 // the delivery retry scheduler.
 func (s *Service) distributeReceipt(receipt protocol.DeliveryReceipt) {
+	if receipt.NegotiatedSignature {
+		s.sendNegotiatedSignedReceipt(receipt)
+		return
+	}
 	if s.isDirectDMV2OwnSeen(receipt) {
 		s.tryDirectDMV2OwnSeen(receipt)
 		return
@@ -2696,11 +2700,12 @@ func (s *Service) distributeReceipt(receipt protocol.DeliveryReceipt) {
 // remote sender of msg.
 func deliveredReceiptFor(localAddress string, msg incomingMessage) protocol.DeliveryReceipt {
 	return protocol.DeliveryReceipt{
-		MessageID:   msg.ID,
-		Sender:      localAddress,
-		Recipient:   msg.Sender,
-		Status:      protocol.ReceiptStatusDelivered,
-		DeliveredAt: time.Now().UTC(),
+		NegotiatedSignature: msg.signedReceiptRequired,
+		MessageID:           msg.ID,
+		Sender:              localAddress,
+		Recipient:           msg.Sender,
+		Status:              protocol.ReceiptStatusDelivered,
+		DeliveredAt:         time.Now().UTC(),
 	}
 }
 

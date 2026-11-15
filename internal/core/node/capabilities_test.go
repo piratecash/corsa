@@ -28,6 +28,7 @@ func TestLocalCapabilities_OptOutExcludesV3(t *testing.T) {
 		// so the order-sensitive check below stays honest.
 		domain.CapMeshRouteSyncV1,
 		domain.CapSignedDirectDeliveryV1,
+		domain.CapSignedDirectReceiptsV1,
 	}
 	if len(caps) != len(expected) {
 		t.Fatalf("localCapabilities(false) = %v, want %v", caps, expected)
@@ -62,6 +63,7 @@ func TestLocalCapabilities_EnabledAppendsV3(t *testing.T) {
 		domain.CapMeshRouteQueryV1,
 		domain.CapMeshRouteSyncV1,
 		domain.CapSignedDirectDeliveryV1,
+		domain.CapSignedDirectReceiptsV1,
 		domain.CapMeshRoutingV3,
 		domain.CapMeshPoisonReverseV1,
 		domain.CapMeshPoisonReverseV2,
@@ -101,6 +103,8 @@ func TestLocalCapabilityStrings_OptOutExcludesV3(t *testing.T) {
 		"mesh_route_query_v1",
 		// Phase 3 PR 12.5 — see TestLocalCapabilities_OptOutExcludesV3.
 		"mesh_route_sync_v1",
+		"signed_direct_delivery_v1",
+		"signed_direct_receipts_v1",
 	}
 	if len(strs) != len(expected) {
 		t.Fatalf("localCapabilityStrings(false) = %v, want %v", strs, expected)

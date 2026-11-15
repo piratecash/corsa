@@ -1090,7 +1090,7 @@ func (s *Service) registerAwaitingDeliveredLocked(envelope protocol.Envelope, no
 	// the idempotency check so a re-send promotes the id in the LRU; the entry
 	// survives the delivered→seen transition because it is evicted only by LRU
 	// capacity, never on receipt arrival.
-	s.sentDMIDs.Add(envelopeRef(envelope).Key())
+	s.rememberSentReceiptPolicyLocked(envelope)
 	if _, exists := s.awaitingDelivered[messageIdentityOf(envelope)]; exists {
 		return
 	}
@@ -1310,6 +1310,8 @@ func (s *Service) RegisterDeliveryOutbox(outbox DeliveryOutbox) {
 			}
 			if v2 {
 				e.Flag = protocol.MessageFlag(metadata.Flag)
+			} else if message, err := directmsg.DecryptForMessage(s.identity, envelopeRef(*e), localKey, string(e.Payload)); err == nil {
+				e.SignedReceiptRequired = e.SignedReceiptRequired || message.SignedReceiptRequired
 			}
 			eligible = append(eligible, row)
 		}

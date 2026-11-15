@@ -277,6 +277,13 @@ func (a *MessageStoreAdapter) StoreMessage(envelope protocol.Envelope, isOutgoin
 			entry.Metadata = strings.TrimSuffix(entry.Metadata, "}") + `,"signed_receipt_required":true}`
 		}
 	}
+	if envelope.Topic == "dm" && envelope.SignedReceiptRequired {
+		if entry.Metadata == "" {
+			entry.Metadata = `{"negotiated_signed_receipts":true}`
+		} else {
+			entry.Metadata = strings.TrimSuffix(entry.Metadata, "}") + `,"negotiated_signed_receipts":true}`
+		}
+	}
 	inserted, err := a.chatlog.AppendReportNew(a.opContext(), envelope.Topic, domain.PeerIdentityFromWire(a.id.Address), entry)
 	if err != nil {
 		log.Error().Str("topic", envelope.Topic).Str("id", string(envelope.ID)).Err(err).Msg("chatlog append failed")
@@ -367,6 +374,14 @@ func (a *MessageStoreAdapter) RequiresSignedReceipt(ref domain.MessageRef) (bool
 		return false, errors.New("receipt policy store unavailable")
 	}
 	return a.chatlog.Store().RequiresSignedReceipt(a.opContext(), ref)
+}
+
+// ReceiptSignaturePolicy exposes the persisted policy and its v1 profile.
+func (a *MessageStoreAdapter) ReceiptSignaturePolicy(ref domain.MessageRef) (bool, bool, error) {
+	if a == nil || a.chatlog == nil || a.chatlog.Store() == nil {
+		return false, false, errors.New("receipt policy store unavailable")
+	}
+	return a.chatlog.Store().ReceiptSignaturePolicy(a.opContext(), ref)
 }
 
 // UpdateDeliveryStatus applies a delivery receipt to the persisted record.
@@ -465,14 +480,15 @@ func (a *MessageStoreAdapter) UndeliveredOutgoing() ([]node.OutboxEntry, error) 
 		}
 		rows = append(rows, node.OutboxEntry{
 			Envelope: protocol.Envelope{
-				ID:         protocol.MessageID(entry.ID),
-				Topic:      "dm",
-				Sender:     entry.Sender,
-				Recipient:  entry.Recipient,
-				Flag:       protocol.MessageFlag(entry.Flag),
-				TTLSeconds: entry.TTLSeconds,
-				Payload:    []byte(entry.Body),
-				CreatedAt:  createdAt.UTC(),
+				ID:                    protocol.MessageID(entry.ID),
+				Topic:                 "dm",
+				Sender:                entry.Sender,
+				Recipient:             entry.Recipient,
+				Flag:                  protocol.MessageFlag(entry.Flag),
+				TTLSeconds:            entry.TTLSeconds,
+				Payload:               []byte(entry.Body),
+				CreatedAt:             createdAt.UTC(),
+				SignedReceiptRequired: chatlog.NegotiatedSignedReceipts(entry.Metadata),
 			},
 			// The row carries the claim only while nothing has been
 			// handed to a writer; everything else — including every row

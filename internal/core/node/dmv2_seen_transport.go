@@ -77,12 +77,12 @@ func (s *Service) handleDirectDMV2Seen(receipt protocol.DeliveryReceipt, current
 }
 
 func (s *Service) directDMV2ReceiptRequired(receipt protocol.DeliveryReceipt) (bool, error) {
-	policy, ok := s.messageStore.(receiptSignaturePolicy)
-	if !ok {
+	if _, ok := s.messageStore.(receiptSignaturePolicy); !ok {
 		return false, errors.New("direct dm-v2 receipt policy unavailable")
 	}
 	id, _ := confirmedMessageOf(receipt)
-	return policy.RequiresSignedReceipt(deliveryMessageRef(id))
+	required, negotiated, err := s.localReceiptSignaturePolicy(deliveryMessageRef(id))
+	return required && !negotiated, err
 }
 
 func sendDirectDMV2Receipt(core *netcore.NetCore, receipt protocol.DeliveryReceipt) error {
@@ -101,7 +101,7 @@ func sendDirectDMV2Receipt(core *netcore.NetCore, receipt protocol.DeliveryRecei
 // direct writer, so it must never enter the relay/subscriber backlog.
 func (s *Service) isDirectDMV2OwnSeen(receipt protocol.DeliveryReceipt) bool {
 	return s.directDMV2ListenerEnabled() && receipt.Sender == s.identity.Address &&
-		receipt.Status == protocol.ReceiptStatusSeen && receipt.Signature != ""
+		receipt.Status == protocol.ReceiptStatusSeen && receipt.Signature != "" && !receipt.NegotiatedSignature
 }
 
 // tryDirectDMV2OwnSeen selects the unique proved writer in either direction.

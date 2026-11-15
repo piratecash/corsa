@@ -70,29 +70,50 @@ func (s *Store) EntryByRef(ctx context.Context, ref domain.MessageRef) (Entry, b
 // saved before the metadata flag was present. A prefix only requires a
 // signature. It does not authenticate the stored envelope.
 func (s *Store) RequiresSignedReceipt(ctx context.Context, ref domain.MessageRef) (bool, error) {
+	required, _, err := s.ReceiptSignaturePolicy(ctx, ref)
+	return required, err
+}
+
+// ReceiptSignaturePolicy distinguishes a negotiated v1 DM from v2 rows.
+func (s *Store) ReceiptSignaturePolicy(ctx context.Context, ref domain.MessageRef) (required, negotiated bool, err error) {
 	var metadata sql.NullString
 	var prefix string
-	err := s.db.QueryRowContext(ctx, `SELECT metadata, substr(body, 1, ?) FROM messages WHERE topic=? AND id=? AND sender=? AND recipient=?`,
+	err = s.db.QueryRowContext(ctx, `SELECT metadata, substr(body, 1, ?) FROM messages WHERE topic=? AND id=? AND sender=? AND recipient=?`,
 		len(directmsg.V2EnvelopePrefix), ref.Topic, ref.ID, ref.Sender, ref.Recipient).Scan(&metadata, &prefix)
 	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
+		return false, false, nil
 	}
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
 	if ref.Topic == "dm" && prefix == directmsg.V2EnvelopePrefix {
-		return true, nil
+		return true, false, nil
 	}
-	if strings.TrimSpace(metadata.String) == "" {
-		return false, nil
+	fields, err := readReceiptPolicyMetadata(metadata.String)
+	if err != nil {
+		return false, false, err
 	}
-	var fields struct {
-		SignedReceiptRequired bool `json:"signed_receipt_required"`
+	return fields.SignedReceiptRequired || fields.NegotiatedSignedReceipts, fields.NegotiatedSignedReceipts, nil
+}
+
+type receiptPolicyMetadata struct {
+	SignedReceiptRequired    bool `json:"signed_receipt_required"`
+	NegotiatedSignedReceipts bool `json:"negotiated_signed_receipts"`
+}
+
+func readReceiptPolicyMetadata(metadata string) (receiptPolicyMetadata, error) {
+	var fields receiptPolicyMetadata
+	if strings.TrimSpace(metadata) == "" {
+		return fields, nil
 	}
-	if err := json.Unmarshal([]byte(metadata.String), &fields); err != nil {
-		return false, err
-	}
-	return fields.SignedReceiptRequired, nil
+	err := json.Unmarshal([]byte(metadata), &fields)
+	return fields, err
+}
+
+// NegotiatedSignedReceipts reads the v1 policy from an existing row's metadata.
+func NegotiatedSignedReceipts(metadata string) bool {
+	fields, err := readReceiptPolicyMetadata(metadata)
+	return err == nil && fields.NegotiatedSignedReceipts
 }
 
 func (s *Store) MessageSeqByRef(ctx context.Context, ref domain.MessageRef) (int64, bool, error) {

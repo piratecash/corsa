@@ -32,6 +32,8 @@ type Envelope struct {
 	// The fields below are NODE-LOCAL bookkeeping — Envelope is an
 	// in-memory struct (no json tags); the wire shape is MessageFrame.
 	// They exist for the transit-retention and hop-budget layers.
+	// SignedReceiptRequired is the authenticated policy in a local DM v1.
+	SignedReceiptRequired bool
 
 	// Hops is the remaining propagation budget THIS node may stamp on
 	// outbound gossip for the message (already decremented at
@@ -65,6 +67,8 @@ type Envelope struct {
 }
 
 type DeliveryReceipt struct {
+	// NegotiatedSignature is local dispatch bookkeeping for signed DM v1.
+	NegotiatedSignature bool
 	// Signature is the receipt author’s optional end-to-end proof.
 	Signature       string
 	SignerPublicKey string

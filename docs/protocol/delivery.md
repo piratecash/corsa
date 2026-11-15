@@ -4,7 +4,7 @@
 
 Delivery receipts report two states for a direct message. `delivered` reports that the message reached the recipient's node, and `seen` reports that the recipient opened it in chat. Ordinary DM v1 receipts are unsigned. Peers authenticate the transport hop and the receiver correlates the receipt with the message. The receipt therefore provides a delivery status signal and lacks end-to-end cryptographic proof of who issued it.
 
-When both endpoints negotiate `signed_direct_delivery_v1` and `mesh_relay_v1` on a direct identity-proved session, the message recipient can also send a signed `delivered` copy. The signature binds the original message reference, the status and the timestamp. The signed copy uses the direct writer and leaves the legacy receipt path available. Receipt signatures remain optional for DM v1, and `seen` and `seen_ack` still use the legacy path.
+When the endpoints negotiate `signed_direct_receipts_v1` on a direct identity-proved session, a new DM v1 requires signed `delivered`, `seen`, and `seen_ack` receipts. The sender carries this requirement inside the encrypted message, and each endpoint stores it with the message. The requirement survives a reconnect or an application restart. The signature binds the original message reference, the status and the timestamp. If the direct writer is unavailable, the signed receipt can travel inside an encrypted control DM through a legacy relay. Messages sent without the negotiated requirement retain the legacy receipt behavior.
 
 ## Commands
 
@@ -195,7 +195,7 @@ sequenceDiagram
 
 Квитанции доставки сообщают о двух состояниях прямого сообщения. `delivered` означает, что сообщение дошло до узла получателя, а `seen` — что получатель открыл его в чате. Обычные квитанции DM v1 передаются без подписи. Узлы аутентифицируют транспортный участок, а принимающий узел сопоставляет квитанцию с сообщением. Такая квитанция служит сигналом о доставке без сквозного криптографического подтверждения её автора.
 
-Если обе стороны согласовали `signed_direct_delivery_v1` и `mesh_relay_v1` на прямой сессии с подтверждённой identity, получатель сообщения также может отправить подписанную копию `delivered`. Подпись связывает ссылку на исходное сообщение, статус и время. Подписанная копия идёт по прямой сессии, а прежний маршрут квитанции остаётся доступным. Для DM v1 подпись остаётся необязательной, а `seen` и `seen_ack` используют прежний маршрут.
+Если обе стороны согласовали `signed_direct_receipts_v1` на прямой сессии с подтверждённой identity, новое сообщение DM v1 требует подписанные `delivered`, `seen` и `seen_ack`. Отправитель помещает требование внутрь зашифрованного сообщения, обе стороны сохраняют его вместе с сообщением. Требование переживает переподключение и перезапуск приложения. Подпись связывает ссылку на исходное сообщение, статус и время. Если прямая сессия недоступна, подписанная квитанция может пройти через старое реле внутри зашифрованного служебного DM. Сообщения, отправленные без согласованного требования, сохраняют прежнее поведение квитанций.
 
 ## Команды
 
