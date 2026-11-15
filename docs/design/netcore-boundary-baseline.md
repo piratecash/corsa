@@ -123,7 +123,7 @@ unreviewed importer; the reviewed degree addition does not allow those changes.
 The following additions are explicit reviewed access debt, not a recalculation
 from HEAD or a whole-file exception. All previous records, matcher semantics,
 zero-pattern gates, import restrictions and multiplicity remain unchanged.
-Current totals are **26 declaration matches, 11 registry sites, 10 entry.core
+The totals for this checkpoint were **26 declaration matches, 11 registry sites, 10 entry.core
 sites, 20 net import occurrences and one uint64 helper**. The 23/18 legacy and
 24/20 earlier D1 subtotals above describe their original scopes.
 
@@ -153,6 +153,21 @@ both exact multisets. Focused controls require the one physical overlap, reject
 its duplication in both categories, and reject missing/duplicate/substituted
 K10 declarations, changed terminal/F1/auth predicates and additional access in
 an already reviewed diagnostic file. Nothing here executes a Go fixture.
+
+### S6 heartbeat, queue observation and diagnostics (2026-11-13)
+
+The baseline adds 18 exact records. All earlier records and matcher rules
+remain in force.
+
+| Added records | Ownership and scope |
+|---|---|
+| Two heartbeat registry sites | Under `peerMu`, the code verifies that the ConnID still names the original live inbound core before recording or reading that connection's pong timestamp. |
+| Two writer registry sites and five `entry.core` sites | The opt-in writer observer checks membership under `peerMu`. It reads queue snapshots and ConnID or direction from the original core. Missing or inconsistent lifecycle evidence makes the cut unavailable. |
+| Three `net.Conn` declarations and six `net` imports | First-contact wrappers time or forward the existing dial and TLS calls. RouteWire reads the session ID only with a configured measurement scope and uses `net.ErrClosed` when classifying reader termination. |
+
+The current baseline has 31 declaration matches, including two tagged
+DMv2 QA adapters, 15 registry sites, 15 `entry.core` sites, 26
+`net` imports and one uint64 helper.
 
 ## Русский
 
@@ -274,7 +289,7 @@ zero-pattern gates. Отдельные D1 controls удаляют, дублир�
 
 Это индивидуально рассмотренный долг точных sites, не вычисление baseline из
 HEAD и не исключение файлов. Все прежние записи, алгоритм checker, нулевые
-запреты, imports и кратность сохранены. Текущие итоги: **26 деклараций, 11
+запреты, imports и кратность сохранены. Итоги этой проверки: **26 деклараций, 11
 registry sites, 10 entry.core sites, 20 вхождений net и один uint64 helper**;
 числа 23/18 и прежние 24/20 выше относятся к своим историческим scopes.
 
@@ -298,3 +313,18 @@ registry sites, 10 entry.core sites, 20 вхождений net и один uint6
 новом доступе в уже рассмотренном файле. Это некомпилируемые fixtures; Go не
 запускается. Отдельный архитектурный cleanup возможен позднее; перенос или alias
 ради обхода regex этим исправлением не выполняется.
+
+### Heartbeat S6, наблюдение очередей и диагностика (2026-11-13)
+
+Добавлены 18 точных записей. Прежние записи и правила проверки
+сохранены.
+
+| Записи | Владелец и область |
+|---|---|
+| Две записи heartbeat в реестре | Под `peerMu` проверяется, что ConnID по-прежнему относится к исходному живому входящему соединению. После этого читается или записывается время его pong. |
+| Две записи реестра writer и пять записей `entry.core` | Явно включённый наблюдатель проверяет состав реестра под `peerMu` и читает снимок очереди, ConnID и направление исходного core. Неполные или противоречивые данные делают снимок недоступным. |
+| Три декларации `net.Conn` и шесть импортов `net` | Обвязка first-contact измеряет или передаёт существующие вызовы dial и TLS. RouteWire читает идентификатор сессии только с заданной областью измерения и учитывает `net.ErrClosed` при классификации завершения чтения. |
+
+Текущие числа: 31 декларация, включая две в DMv2 QA с тегом сборки,
+15 записей реестра, 15 записей `entry.core`, 26 импортов `net` и один
+uint64 helper.

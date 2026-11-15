@@ -46,6 +46,74 @@ choices change here. / Пороги, статусы17условий, разре�
 
 Source audit / Сверка исходников: **2026-10-23**. Status / Статус: **draft source matrix; full observation plan incomplete / проект матрицы источников; полный план наблюдения не завершён**.
 
+**11 November source QA / QA исходников 11 ноября.** Four K5 reducer tests
+passed on macOS arm64, covering the strict UTC day threshold, interval union,
+scope, coverage and segment reconstruction. Live UTC binding and independently
+verified permitted benign load remain open. For K11, four SQLite/store tests
+passed. A fresh read-only snapshot saw the exact tuple after `AppendReportNew`,
+while an older snapshot did not. The unchanged published Linux amd64 Desktop
+was rechecked by SHA-256. K11 still needs the functional check on both Desktop
+artifacts and calibrated time bounds on the comparison platform.
+
+Четыре теста K5 подтвердили строгий суточный порог, объединение интервалов,
+область и покрытие, а также восстановление сегментов. Привязка к UTC на стенде
+и независимое подтверждение разрешённой добросовестной нагрузки ещё открыты.
+По K11 четыре теста SQLite/store прошли. Точный кортеж виден свежему read-only
+snapshot после `AppendReportNew`, старый snapshot его не увидел. SHA-256
+опубликованного Linux amd64 Desktop совпал. Для K11 остаются функциональная
+проверка обоих Desktop и калиброванные границы на платформе сравнения.
+
+**K5 UTC projection QA / QA преобразования K5 в UTC.** A test-only Go overlay
+confirmed conversion of checkpoint-relative intervals with a fixture offset
+enclosure, conservative uncertainty bounds and UTC-day clipping with a gap.
+Seven tests and 30 subtests passed. Real calibration, clock continuity,
+artifact/run attribution and the independent benign-load witness remain open.
+
+Семь тестов и 30 подтестов подтвердили арифметику преобразования checkpoint
+на заданной модели погрешности. При пропуске подтверждённое превышение часа
+остаётся P, а ровно час остаётся UNKNOWN. Реальные калибровка, непрерывность,
+привязка к запуску и независимое свидетельство нагрузки ещё открыты.
+
+**K3 continuous-window QA / QA непрерывного окна K3.** A reference check
+over fixture interval bounds passed 10 cases for the three simultaneous
+thresholds, including cross-anchor deduplication and a brief dip between
+polls. Three Go tests of the source owners passed 25 test events on macOS
+with loopback available. A release check still needs qualified interval
+construction, current-pin evidence and continuous cross-anchor coverage.
+
+Десять проверок эталонного расчёта K3 на тестовых интервалах прошли, включая
+дедупликацию между узлами и краткий провал между опросами. Три Go-теста
+исходных владельцев дали 25 RUN/PASS с подтестами. Для приёмки ещё нужны
+подтверждённые интервалы, текущие pins и непрерывное покрытие всех узлов.
+
+**K3 pin custody QA / QA источника pins для K3.** Store tests distinguished
+30 memory-only pins with equal `written`/`changes`, 31 live pins while
+only 29 were on disk, and the exact 30-pin image recovered after a successful
+write followed by an earlier-stage refusal of the next write. A sufficient
+K3 lower bound can use the intersection of current memory and a qualified
+writer image in the same epoch. The current raw source does not publish that
+bound. Qualification must cover all accessible writers, recovery and gaps.
+
+Тесты показали 30 pins в memory-only при равных `written`/`changes`,
+31 pin в памяти при 29 на диске и ровно 30 после открытия успешного образа.
+Достаточная нижняя граница K3 может считать пересечение текущей карты и
+подтверждённого образа той же эпохи. Источник этого свидетельства ещё нужно
+подключить к доступным writer/recovery путям и проверять непрерывность.
+
+**K16 previous Desktop / K16 на предыдущем Desktop.** Rechecked the
+unchanged published v2.4.70 Linux amd64 Desktop and its matching source.
+`fetchPeerHealth` and `getActiveConnections` expose point state. The internal
+`peer.disconnected` topic omits ConnID/generation/cause, can follow a failed
+dial, and is not a complete loss-accounted observation stream. K16 still
+needs an external observer proven against the unchanged artifact. The
+delivery part remains tied to K11.
+
+На неизменённом v2.4.70 Linux amd64 статически подтверждены точечные API.
+Внутренний `peer.disconnected` не содержит ConnID, поколения и причины,
+может следовать за неудачным dial и не даёт полного потока с учётом потерь.
+Для K16 остаётся проверка внешнего источника на том же бинарнике. Доставка
+остаётся связана с K11.
+
 ## English
 
 The owner approved only the calendar and spread threshold in the [recorded decision](d1-release-decision-proposal.md): seven baseline days before the tag, 72 acute hours, all three spread tests together for three consecutive days, then 14 stability days; verdict no earlier than day 28 after the tag. The spread tests remain ≥40% of distinct connected identities advertising protocol ≥31, ≥30 distinct identities with v2 proof across anchors, and ≥30 pins on every public anchor. Day 45 without spread requires a separate decision; day 60 is not automatic success. The recorded reset rules apply to affecting changes.

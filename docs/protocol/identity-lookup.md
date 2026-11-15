@@ -239,6 +239,11 @@ untouched. The cache reports its count, bytes, evictions and expirations in
 
 ### 5. Identity backup
 
+When an older local identity file has no X25519 key, loading derives one
+from the Ed25519 seed using the same derivation as seed-only restore.
+The upgrade keeps the signing identity and its record sequence floor.
+Files that already contain an X25519 key use the stored key.
+
 The identity file keeps both private keys. The versioned **full backup**
 carries both keys plus the record seq:
 
@@ -257,14 +262,35 @@ against the stored one; `record_seq` is a FLOOR — the first record issued
 after a restore starts above it. An unknown backup version is a typed
 reject.
 
+If the backup belongs to the running signing identity, local restore
+also preserves the running node's known floor and issued self-record
+sequence. A repeated restore before restart also preserves the floor
+from the installed identity file when that file can be checked and its
+signing key matches. The reply reports the floor saved with the restored identity.
+A backup used on a different node can still predate records already
+known to peers.
+
 The user surface is the LOCAL-ONLY RPC pair `identity_backup` /
 `identity_restore` (console commands `identityBackup <name>` /
-`identityRestore <name>`). Three separate promises hold here, each
+`identityRestore <name> [prior-record-name]`). Three separate promises hold here, each
 enforced by code rather than by convention:
 
 **Key material never crosses the RPC boundary.** Both frames carry a
-`backup_name`; the reply carries the name, the address, the seq and the
-warnings.
+`backup_name`; restore can also carry a `prior_record_name`. The reply
+carries the backup name, address, saved floor and warnings.
+
+When recovering on another node, place the newest available prior signed
+self-record as a JSON `{v, body, sig}` object in that node's backup directory
+and supply its file name. The record must fit the 2900-byte wire cap and
+verify for the restored signing identity and the configured protocol
+network. Only its sequence can raise the floor. Explicitly supplied
+evidence that cannot be read or verified causes restore to fail before
+replacement. Without the optional file, restore uses the floors available
+from the backup and local identity state. When switching away from the
+running signing identity without a prior record, the reply warns that
+peers may reject the restored sequence. The operator can retry with a
+newer backup or a signed record. The warning also appears alongside the
+derived box-key warning when both apply.
 
 **The caller never picks a path.** The name selects a file inside the
 node's own backup directory — `<data dir>/identity-backups`, derived from
@@ -321,6 +347,12 @@ legacy bare-Ed25519 branch, and the reply then carries `box_key_derived`
 with the §5 warning verbatim; a malformed or future-version JSON backup is
 the typed reject, never silently retried as a legacy key.
 
+The Desktop console and `corsa-cli` display the restore response as JSON.
+Check `restart_required`, `record_seq` when present, and any `warning`.
+For `corsa-cli`, connect to the authenticated local RPC listener.
+Restore leaves the installed identity file in place if the selected
+sequence floor has no successor.
+
 The **legacy branch** — import from a bare Ed25519 private key — is
 preserved: the address survives, but the box key is derived from the seed
 and may differ from the randomly generated original. The restored value
@@ -329,6 +361,36 @@ address is kept, the encryption key changes.
 
 Identity and trust-store files are written via write-temp-then-rename: a
 crash mid-write must never leave a truncated key file.
+
+#### Export a prior record from a surviving node
+
+Use the donor's trust-store file, configured by `CORSA_TRUST_STORE_PATH`
+or stored as `trust-<port>.json` in its data directory by default. The
+donor must still have a persisted record for the recovery address and
+network. A record present only in its session cache is unavailable by
+this method.
+
+```sh
+donor_trust=/path/to/trust-64646.json
+recovery_address=your_40_hex_identity
+recovery_network=gazeta-devnet
+record=$(jq -cse --arg network "$recovery_network" --arg address "$recovery_address" '
+if length != 1 or (.[0] | type) != "object" then
+  error("expected one trust snapshot")
+else
+  [.[0].records[]? | select(.network == $network and .address == $address)]
+  | if length != 1 then error("expected one matching persisted record")
+    else .[0] | {v, body, sig}
+    end
+end
+' -- "$donor_trust") &&
+  (umask 077; set -C; printf '%s' "$record" > prior.json)
+```
+
+Transfer only `prior.json` to the recovery node's backup directory and
+run `identityRestore backup.json prior.json`. Restore verifies the
+signature and uses the result as a lower bound. A donor's record may be
+older than a record held elsewhere.
 
 ### 6. Discovery datagram types
 
@@ -989,6 +1051,11 @@ lookup'ами, — поэтому полностью защищённый кэш
 
 ### 5. Backup identity
 
+При загрузке старого локального файла identity без ключа X25519
+ключ выводится из Ed25519 seed тем же способом, что при восстановлении
+из одного seed. Обновление сохраняет подписывающую identity и нижнюю
+границу номера записи. Если ключ X25519 уже есть в файле, используется он.
+
 Файл identity хранит оба приватных ключа. Versioned **full backup** несёт
 оба ключа плюс seq записи:
 
@@ -1007,13 +1074,45 @@ lookup'ами, — поэтому полностью защищённый кэш
 восстановления выпускается выше неё. Неизвестная версия backup-а — типизированный
 reject.
 
+Если backup относится к ключу подписи работающего узла, локальное
+восстановление также сохраняет известную узлу границу и номер уже
+выпущенной собственной записи. Повторное восстановление до перезапуска
+сохраняет границу из установленного файла identity, если файл прошёл
+проверку и ключ подписи совпадает. Ответ сообщает сохранённую границу.
+При восстановлении на другом узле копия всё ещё может предшествовать
+записям, известным пирам.
+
 Пользовательская поверхность — ТОЛЬКО-ЛОКАЛЬНАЯ RPC-пара
 `identity_backup` / `identity_restore` (консольные команды
-`identityBackup <name>` / `identityRestore <name>`). Здесь держатся три
+`identityBackup <name>` / `identityRestore <name> [prior-record-name]`). Здесь держатся три
 отдельных обещания, и каждое закреплено кодом, а не договорённостью.
 
 **Ключевой материал не пересекает границу RPC.** Оба фрейма несут
-`backup_name`; ответ несёт имя, адрес, seq и предупреждения.
+`backup_name`. При восстановлении можно передать `prior_record_name`.
+Ответ сообщает имя backup, адрес, сохранённую границу и предупреждения.
+
+При переносе на другой узел положите самую свежую доступную подписанную
+запись владельца в каталог бэкапов этого узла. Файл содержит JSON-объект
+`{v, body, sig}` размером до 2900 байт. Подпись проверяется для
+восстановленного ключа и сети протокола. Из записи используется только
+номер, который может поднять нижнюю границу. Если явно указанный файл
+не читается или запись не проходит проверку, восстановление останавливается
+до замены identity. Без этого аргумента применяются границы из backup
+и доступного локального состояния. Если после выбранной границы нельзя
+выпустить следующий номер, установленный identity-файл сохраняется.
+При переходе на другой ключ подписи
+без записи ответ предупреждает, что пиры могут отклонить восстановленный
+номер. Оператор может повторить восстановление с более свежим backup
+или подписанной записью. Для legacy-восстановления это предупреждение
+выводится вместе с предупреждением о производном box-ключе.
+
+Если исходный узел недоступен, возьмите запись из trust store узла,
+который успел сохранить её на диск. Укажите адрес восстанавливаемой
+identity и сеть, затем перенесите только `prior.json` в каталог бэкапов
+и выполните `identityRestore backup.json prior.json`. Запись из
+session cache на диске отсутствует, а сохранённая запись может
+уступать по номеру записи у другого пира.
+[Команда выгрузки сохранённой записи](#export-a-prior-record-from-a-surviving-node).
 
 **Путь выбирает не вызывающий.** Имя выбирает файл внутри собственного
 каталога бэкапов узла — `<data dir>/identity-backups`, выведенного из
@@ -1070,6 +1169,11 @@ loopback-сокета И слушатель обязан требовать уч
 легаси-ветке голого Ed25519-ключа, и ответ тогда несёт `box_key_derived` с
 предупреждением §5 дословно; порченый или будущей версии JSON-backup —
 типизированный reject, а не тихая перепопытка как легаси-ключ.
+
+Консоль Desktop и `corsa-cli` показывают ответ восстановления в JSON.
+Проверьте `restart_required`, поле `record_seq`, если оно есть, и
+предупреждение `warning`. Для `corsa-cli` используйте локальный RPC
+с аутентификацией.
 
 **Легаси-ветка** — импорт из одного Ed25519-ключа — сохранена: адрес
 переживает восстановление, но box-ключ деривируется из seed-а и может не
