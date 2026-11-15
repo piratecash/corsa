@@ -59,6 +59,7 @@ import (
 	"github.com/piratecash/corsa/internal/core/directmsg"
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/ebus"
+	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
@@ -1293,8 +1294,27 @@ func (s *Service) RegisterDeliveryOutbox(outbox DeliveryOutbox) {
 	if err != nil {
 		log.Error().Err(err).Msg("delivery_retry_outbox_reseed_failed")
 	} else if len(entries) > 0 {
-		s.deliveryMu.Lock()
+		// Authenticate restored author fields outside the delivery lock.
+		eligible := make([]OutboxEntry, 0, len(entries))
+		localKey := identity.PublicKeyBase64(s.identity.PublicKey)
 		for _, row := range entries {
+			e := &row.Envelope
+			binding := directmsg.V2Binding{
+				Network: networkName, ID: string(e.ID), Topic: e.Topic,
+				Sender: e.Sender, Recipient: e.Recipient,
+			}
+			metadata, v2, err := directmsg.VerifyStoredV2(binding, localKey, string(e.Payload))
+			if err != nil {
+				log.Warn().Str("id", string(e.ID)).Err(err).Msg("delivery_retry_invalid_stored_dm_v2")
+				continue
+			}
+			if v2 {
+				e.Flag = protocol.MessageFlag(metadata.Flag)
+			}
+			eligible = append(eligible, row)
+		}
+		s.deliveryMu.Lock()
+		for _, row := range eligible {
 			// Reseeded from chatlog on restart: held=false, and DUE
 			// IMMEDIATELY (NextAttemptAt=now) rather than now+first-backoff,
 			// so the first retry tick evaluates reachability and either
@@ -1358,7 +1378,7 @@ func (s *Service) RegisterDeliveryOutbox(outbox DeliveryOutbox) {
 		count := len(s.awaitingDelivered)
 		standing := len(s.markedNeverEmitted)
 		s.deliveryMu.Unlock()
-		log.Info().Int("reseeded", len(entries)).Int("awaiting_delivered", count).
+		log.Info().Int("reseeded", len(eligible)).Int("awaiting_delivered", count).
 			Int("standing_claims", standing).Msg("delivery_retry_outbox_reseeded")
 	}
 
