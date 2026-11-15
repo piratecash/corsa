@@ -37,7 +37,7 @@ func (o *LoadstandRouteWireObservation) startFullPass(epoch uint64, entries []ro
 		return nil
 	}
 	o.mu.Lock()
-	if o.sealed || o.window.advance() != nil {
+	if o.reportSealed || o.window.advance() != nil {
 		o.incomplete = true
 		o.mu.Unlock()
 		return nil
@@ -87,7 +87,7 @@ func (p *routeWireFullPass) frame(id domain.ConnID, line string) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	conn := o.connections[id]
-	if o.sealed || conn == nil || conn.peer.IsZero() || conn.finished[routeWireWrite] ||
+	if o.reportSealed || conn == nil || conn.peer.IsZero() || conn.finished[routeWireWrite] ||
 		p.send != nil && id != p.connID || err != nil || frame.Kind != protocol.RouteAnnounceV3KindFull ||
 		frame.Epoch != p.epoch || len(frame.Entries) == 0 || len(frame.Entries) > len(p.entries)-p.next {
 		o.incomplete = true
@@ -131,7 +131,7 @@ func (p *routeWireFullPass) finish(sentAll bool) {
 	if p.send != nil {
 		p.send.active = false
 	}
-	if o.sealed || o.window.advance() != nil {
+	if o.reportSealed || o.window.advance() != nil {
 		o.incomplete = true
 		return
 	}

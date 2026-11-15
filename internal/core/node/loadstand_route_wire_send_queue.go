@@ -41,7 +41,7 @@ func (q *routeWireSendQueue) beforeOffer(frame protocol.Frame) time.Duration {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	conn := o.connections[q.id]
-	if o.sealed || conn == nil || conn.finished[routeWireWrite] || o.window.advance() != nil || o.window.last <= 0 {
+	if o.reportSealed || conn == nil || conn.finished[routeWireWrite] || o.window.advance() != nil || o.window.last <= 0 {
 		o.incomplete = true
 		return 0
 	}
@@ -76,7 +76,7 @@ func (q *routeWireSendQueue) retire(first time.Duration, admitted, handedOff boo
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	conn := o.connections[q.id]
-	if o.sealed || conn == nil || conn.upperPending == 0 {
+	if o.reportSealed || conn == nil || conn.upperPending == 0 {
 		o.incomplete = true
 		return
 	}

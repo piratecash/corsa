@@ -39,7 +39,7 @@ func (r *routeWireReader) Read(p []byte) (int, error) {
 	o.mu.Lock()
 	err := o.window.advance()
 	at := o.window.last
-	if err != nil || o.sealed || !r.active {
+	if err != nil || o.reportSealed || !r.active {
 		o.incomplete = true
 	}
 	o.mu.Unlock()

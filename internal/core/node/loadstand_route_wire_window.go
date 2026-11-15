@@ -51,10 +51,10 @@ func (w *routeWireFrameWindow) outside(first time.Duration) bool {
 func (o *LoadstandRouteWireObservation) SealWindow(census []RouteWireCensusEndpoint) ([]RouteWireEndpoint, error) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	if o.sealed || o.incomplete || o.window == nil || census == nil || o.fullPassesPending != 0 || o.fullBudget > 0 && !o.fullTaken {
+	if o.reportSealed || o.incomplete || o.window == nil || census == nil || o.fullPassesPending != 0 || o.fullBudget > 0 && !o.fullTaken {
 		return nil, errRouteWireIncomplete
 	}
-	o.sealed = true
+	o.reportSealed = true
 	if err := o.window.advance(); err != nil || o.window.last <= o.window.windowEnd || len(census) > len(o.connections) {
 		return nil, errRouteWireIncomplete
 	}

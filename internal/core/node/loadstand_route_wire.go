@@ -88,7 +88,7 @@ type LoadstandRouteWireObservation struct {
 	maximum           int
 	connections       map[domain.ConnID]*routeWireConnection
 	incomplete        bool
-	sealed            bool
+	reportSealed      bool
 	window            *routeWireFrameWindow
 	fullBudget        int
 	fullRows          int
@@ -145,7 +145,7 @@ func (o *LoadstandRouteWireObservation) begin(id domain.ConnID) {
 	}
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	if o.sealed || id == 0 || o.connections[id] != nil || len(o.connections) >= o.maximum {
+	if o.reportSealed || id == 0 || o.connections[id] != nil || len(o.connections) >= o.maximum {
 		o.incomplete = true
 		return
 	}
@@ -159,7 +159,7 @@ func (o *LoadstandRouteWireObservation) bind(id domain.ConnID, peer domain.PeerI
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	row := o.connections[id]
-	if o.sealed || row == nil || peer.IsZero() || !row.peer.IsZero() || (o.window != nil && sessionID == ([32]byte{})) {
+	if o.reportSealed || row == nil || peer.IsZero() || !row.peer.IsZero() || (o.window != nil && sessionID == ([32]byte{})) {
 		o.incomplete = true
 		return
 	}
@@ -174,7 +174,7 @@ func (o *LoadstandRouteWireObservation) finish(id domain.ConnID, direction int) 
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	row := o.connections[id]
-	if o.sealed || row == nil || row.finished[direction] || (direction == routeWireWrite && (row.writeStarted || len(row.queued) != 0)) {
+	if o.reportSealed || row == nil || row.finished[direction] || (direction == routeWireWrite && (row.writeStarted || len(row.queued) != 0)) {
 		o.incomplete = true
 		return
 	}
@@ -200,7 +200,7 @@ func (o *LoadstandRouteWireObservation) prepareQueue(id domain.ConnID, data []by
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	conn := o.connections[id]
-	if o.sealed || conn == nil || conn.finished[routeWireWrite] || len(conn.queued) >= maxRouteWireQueueOffers || o.window.advance() != nil ||
+	if o.reportSealed || conn == nil || conn.finished[routeWireWrite] || len(conn.queued) >= maxRouteWireQueueOffers || o.window.advance() != nil ||
 		first < 0 || first > o.window.last || first != 0 && conn.upperPending == 0 {
 		o.incomplete = true
 		return data
@@ -240,7 +240,7 @@ func (o *LoadstandRouteWireObservation) discardQueue(id domain.ConnID, data []by
 	if !admitted {
 		return
 	}
-	if o.sealed || conn.finished[routeWireWrite] || !found || o.window.advance() != nil {
+	if o.reportSealed || conn.finished[routeWireWrite] || !found || o.window.advance() != nil {
 		o.incomplete = true
 		return
 	}
@@ -264,7 +264,7 @@ func (o *LoadstandRouteWireObservation) startWrite(id domain.ConnID, data []byte
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	conn := o.connections[id]
-	if o.sealed || conn == nil || conn.finished[routeWireWrite] || conn.writeStarted || o.window.advance() != nil {
+	if o.reportSealed || conn == nil || conn.finished[routeWireWrite] || conn.writeStarted || o.window.advance() != nil {
 		o.incomplete = true
 		return
 	}
@@ -337,7 +337,7 @@ func (o *LoadstandRouteWireObservation) observe(id domain.ConnID, direction int,
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	conn := o.connections[id]
-	if o.sealed || conn == nil || conn.finished[direction] || err != nil {
+	if o.reportSealed || conn == nil || conn.finished[direction] || err != nil {
 		o.incomplete = true
 		return
 	}
@@ -406,10 +406,10 @@ func routeWireSnapshot(rows [routeWireClasses]routeWireCounter) RouteWireCounts 
 func (o *LoadstandRouteWireObservation) Seal() ([]RouteWireEndpoint, error) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	if o.sealed || o.incomplete || o.window != nil {
+	if o.reportSealed || o.incomplete || o.window != nil {
 		return nil, errRouteWireIncomplete
 	}
-	o.sealed = true
+	o.reportSealed = true
 	rows := make([]RouteWireEndpoint, 0, len(o.connections))
 	for id, conn := range o.connections {
 		if conn.peer.IsZero() || !conn.finished[routeWireRead] || !conn.finished[routeWireWrite] {

@@ -72,7 +72,7 @@ func (s *Service) CaptureLoadstandRouteWireFullReceipts() error {
 
 func (o *LoadstandRouteWireObservation) captureFullReceipts(snapshot func() routing.Snapshot) error {
 	o.mu.Lock()
-	if o.sealed || o.incomplete || o.window.advance() != nil || o.window.last <= o.window.windowEnd || o.fullPassesPending != 0 {
+	if o.reportSealed || o.incomplete || o.window.advance() != nil || o.window.last <= o.window.windowEnd || o.fullPassesPending != 0 {
 		o.mu.Unlock()
 		return errRouteWireIncomplete
 	}
@@ -91,7 +91,7 @@ func (o *LoadstandRouteWireObservation) captureFullReceipts(snapshot func() rout
 	}
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	if o.sealed || o.incomplete || o.window.advance() != nil {
+	if o.reportSealed || o.incomplete || o.window.advance() != nil {
 		return errRouteWireIncomplete
 	}
 	if o.fullTaken {
