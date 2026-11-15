@@ -1288,8 +1288,8 @@ const identitySearchRows = 16
 
 // SearchIdentities returns the identities the node still knows whose
 // address contains fragment and which are not already on screen — this
-// node's own address, and the identities the user already has a
-// conversation with.
+// node's own address, existing conversations, and any additional identities
+// the caller lists, such as named contacts without a conversation.
 //
 // Those exclusions travel WITH the query rather than being applied to the
 // answer, because the node is the only party holding the whole set and so
@@ -1318,7 +1318,7 @@ const identitySearchRows = 16
 // Blocking: it calls the embedded node synchronously. The caller must not
 // be a render path — the desktop runs it on its own goroutine and discards
 // answers whose query is no longer current.
-func (r *DMRouter) SearchIdentities(fragment string) ([]domain.PeerIdentity, error) {
+func (r *DMRouter) SearchIdentities(fragment string, listed ...domain.PeerIdentity) ([]domain.PeerIdentity, error) {
 	fragment = strings.TrimSpace(fragment)
 	if fragment == "" {
 		return nil, nil
@@ -1327,7 +1327,7 @@ func (r *DMRouter) SearchIdentities(fragment string) ([]domain.PeerIdentity, err
 	reply, err := r.client.rpc.LocalRequestFrameCtx(r.opContext(), protocol.Frame{
 		Type:    "search_identities",
 		Query:   fragment,
-		Exclude: r.identitySearchExclusions(),
+		Exclude: r.identitySearchExclusions(listed),
 		Limit:   identitySearchRows,
 	})
 	if err != nil {
@@ -1349,25 +1349,30 @@ func (r *DMRouter) SearchIdentities(fragment string) ([]domain.PeerIdentity, err
 }
 
 // identitySearchExclusions is what the search must not offer: this node,
-// and every identity already listed as a conversation. Built before the
-// node call so r.mu is not held across it.
+// the router's conversations, and the caller's listed contacts. Built
+// before the node call so r.mu is not held across it.
 //
 // Wire form, because it goes into the frame: the node keys its set by
-// address string. The list is the user's own conversations, so it is
+// address string. The list is the user's own contacts, so it is
 // user-scale, and the frame is handed to the embedded node in memory
 // rather than serialised.
-func (r *DMRouter) identitySearchExclusions() []string {
+func (r *DMRouter) identitySearchExclusions(listed []domain.PeerIdentity) []string {
+	self := r.client.Address()
 	r.mu.Lock()
-	excluded := make([]string, 0, len(r.peers)+1)
+	excluded := make([]string, 0, max(len(r.peers), len(listed))+1)
 	for peer := range r.peers {
-		if peer.IsZero() {
-			continue
+		if !peer.IsZero() && peer != self {
+			excluded = append(excluded, peer.String())
 		}
-		excluded = append(excluded, peer.String())
+	}
+	for _, peer := range listed {
+		if _, ok := r.peers[peer]; !ok && !peer.IsZero() && peer != self {
+			excluded = append(excluded, peer.String())
+		}
 	}
 	r.mu.Unlock()
 
-	if self := r.client.Address(); !self.IsZero() {
+	if !self.IsZero() {
 		excluded = append(excluded, self.String())
 	}
 	return excluded

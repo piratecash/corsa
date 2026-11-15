@@ -198,6 +198,31 @@ func TestSearchIdentitiesLooksPastExcludedMatches(t *testing.T) {
 	}
 }
 
+func TestSearchIdentitiesLooksPastNamedContactsWithoutConversations(t *testing.T) {
+	t.Parallel()
+	router, svc, _ := newSearchRouter(t)
+
+	addresses := make([]string, 0, identitySearchRows+2)
+	additionalExcludes := make([]domain.PeerIdentity, 0, identitySearchRows)
+	for i := range identitySearchRows {
+		address := testSearchAddress("aa", i)
+		addresses = append(addresses, address)
+		additionalExcludes = append(additionalExcludes, domain.PeerIdentityFromWire(address))
+	}
+	conversation := testSearchAddress("aa", identitySearchRows)
+	router.peers[domain.PeerIdentityFromWire(conversation)] = &RouterPeerState{}
+	wanted := testSearchAddress("aa", identitySearchRows+1)
+	svc.SeedKnownIdentitiesForTest(append(addresses, conversation, wanted)...)
+
+	results, err := router.SearchIdentities("aa", additionalExcludes...)
+	if err != nil {
+		t.Fatalf("SearchIdentities: %v", err)
+	}
+	if len(results) != 1 || results[0] != domain.PeerIdentityFromWire(wanted) {
+		t.Fatalf("results = %v, want the identity absent from both the contacts and conversations", results)
+	}
+}
+
 // The node's own address is excluded on the same side as the conversations,
 // so it never takes one of the rows either.
 func TestSearchIdentitiesExcludesSelf(t *testing.T) {

@@ -1811,7 +1811,7 @@ func TestIdentitySearchIsAsynchronousAndDropsStaleAnswers(t *testing.T) {
 	release := make(chan struct{})
 	answers := make(chan string, 8)
 	w := &Window{}
-	w.searchIdentities = func(query string) ([]domain.PeerIdentity, error) {
+	w.searchIdentities = func(query string, _ ...domain.PeerIdentity) ([]domain.PeerIdentity, error) {
 		answers <- query
 		<-release
 		switch query {
@@ -1823,7 +1823,7 @@ func TestIdentitySearchIsAsynchronousAndDropsStaleAnswers(t *testing.T) {
 	}
 
 	// First frame with a query: nothing held yet, so no rows and one ask.
-	if got := w.identitySearchMatches("11", 0, 0); got != nil {
+	if got := w.identitySearchMatches("11", 0, nil); got != nil {
 		t.Fatalf("first frame returned %v, want nothing while the node is being asked", got)
 	}
 	if query := <-answers; query != "11" {
@@ -1833,12 +1833,12 @@ func TestIdentitySearchIsAsynchronousAndDropsStaleAnswers(t *testing.T) {
 	// Further frames with the same query in flight must not ask again — a
 	// render loop would otherwise issue one request per frame.
 	for range 5 {
-		w.identitySearchMatches("11", 0, 0)
+		w.identitySearchMatches("11", 0, nil)
 	}
 
 	// The user types on before the answer lands. The answer to "11" is now
 	// stale and must not become the answer to "22".
-	if got := w.identitySearchMatches("22", 0, 0); got != nil {
+	if got := w.identitySearchMatches("22", 0, nil); got != nil {
 		t.Fatalf("new query returned %v, want nothing of the previous query", got)
 	}
 	close(release)
@@ -1848,7 +1848,7 @@ func TestIdentitySearchIsAsynchronousAndDropsStaleAnswers(t *testing.T) {
 
 	deadline := time.After(2 * time.Second)
 	for {
-		matches := w.identitySearchMatches("22", 0, 0)
+		matches := w.identitySearchMatches("22", 0, nil)
 		if len(matches) == 1 && matches[0] == domain.PeerIdentityFromWire(hexNew) {
 			break
 		}
@@ -1866,7 +1866,7 @@ func TestIdentitySearchIsAsynchronousAndDropsStaleAnswers(t *testing.T) {
 	// The node discovering something new retires the held answer: the
 	// counter is the only thing the status snapshot still carries about
 	// identities, and this is what it is for.
-	w.identitySearchMatches("22", 1, 0)
+	w.identitySearchMatches("22", 1, nil)
 	select {
 	case query := <-answers:
 		if query != "22" {
@@ -1881,7 +1881,7 @@ func TestIdentitySearchIsAsynchronousAndDropsStaleAnswers(t *testing.T) {
 // must neither panic nor wedge the query as permanently in flight.
 func TestIdentitySearchWithoutARouterIsInert(t *testing.T) {
 	w := &Window{}
-	if got := w.identitySearchMatches("11", 0, 0); got != nil {
+	if got := w.identitySearchMatches("11", 0, nil); got != nil {
 		t.Fatalf("matches = %v, want nil", got)
 	}
 	w.identitySearchMu.Lock()
@@ -1893,53 +1893,56 @@ func TestIdentitySearchWithoutARouterIsInert(t *testing.T) {
 }
 
 // The node applies the exclusions now, so an answer describes one
-// particular set of existing conversations. Deleting one changes neither
+// particular set of existing contacts. Removing one changes neither
 // the query nor the discovery counter — and the address it hid must come
 // back into the search anyway.
-func TestIdentitySearchReAsksWhenTheConversationsChange(t *testing.T) {
+func TestIdentitySearchReAsksWhenTheContactsChange(t *testing.T) {
 	const hexFound = "11ab110000000000000000000000000000000000"
+	listed := identitiesFromHex(hexFound)
 
-	asked := make(chan uint64, 8)
+	asked := make(chan []domain.PeerIdentity, 8)
 	w := &Window{}
-	var nextExcludes uint64
-	w.searchIdentities = func(string) ([]domain.PeerIdentity, error) {
-		asked <- nextExcludes
-		if nextExcludes == 0 {
+	w.searchIdentities = func(_ string, excludes ...domain.PeerIdentity) ([]domain.PeerIdentity, error) {
+		asked <- excludes
+		if len(excludes) > 0 {
 			return nil, nil
 		}
 		return identitiesFromHex(hexFound), nil
 	}
 
-	// First question, with the address excluded as an existing conversation.
-	w.identitySearchMatches("11", 0, 7)
-	if got := <-asked; got != 0 {
-		t.Fatalf("first ask carried excludes=%d", got)
+	// First question, with the address excluded as an existing contact.
+	w.identitySearchMatches("11", 0, listed)
+	if got := <-asked; len(got) != 1 || got[0] != listed[0] {
+		t.Fatalf("first ask carried excludes=%v, want %v", got, listed)
 	}
-	waitForIdentitySearch(t, w, "11", 0, 7)
-	if matches := w.identitySearchMatches("11", 0, 7); len(matches) != 0 {
-		t.Fatalf("matches = %v, want none while the conversation exists", matches)
+	waitForIdentitySearch(t, w, "11", 0, listed)
+	if matches := w.identitySearchMatches("11", 0, listed); len(matches) != 0 {
+		t.Fatalf("matches = %v, want none while the contact exists", matches)
 	}
 
-	// Same query, same discovery counter, different conversations: the
+	// Same query, same discovery counter, different contacts: the
 	// window must ask again rather than hold the filtered answer.
-	nextExcludes = 1
-	w.identitySearchMatches("11", 0, 9)
+	w.identitySearchMatches("11", 0, nil)
 	select {
-	case <-asked:
+	case got := <-asked:
+		if len(got) != 0 {
+			t.Fatalf("second ask carried excludes=%v, want none", got)
+		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("deleting a conversation did not re-ask; its address stays hidden")
+		t.Fatal("removing a contact did not re-ask; its address stays hidden")
 	}
-	waitForIdentitySearch(t, w, "11", 0, 9)
-	matches := w.identitySearchMatches("11", 0, 9)
+	waitForIdentitySearch(t, w, "11", 0, nil)
+	matches := w.identitySearchMatches("11", 0, nil)
 	if len(matches) != 1 || matches[0] != domain.PeerIdentityFromWire(hexFound) {
-		t.Fatalf("matches = %v, want the address the deleted conversation was hiding", matches)
+		t.Fatalf("matches = %v, want the address the removed contact was hiding", matches)
 	}
 }
 
 // waitForIdentitySearch blocks until the window holds an answer for exactly
 // this question.
-func waitForIdentitySearch(t *testing.T, w *Window, query string, version, excludes uint64) {
+func waitForIdentitySearch(t *testing.T, w *Window, query string, version uint64, listed []domain.PeerIdentity) {
 	t.Helper()
+	excludes := peerSetDigest(listed)
 	deadline := time.After(2 * time.Second)
 	for {
 		w.identitySearchMu.Lock()

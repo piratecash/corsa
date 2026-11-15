@@ -77,7 +77,7 @@ type Window struct {
 	// the ordering this window is responsible for (a late answer to a
 	// superseded query, a query already in flight) can be driven without a
 	// node behind it.
-	searchIdentities     func(query string) ([]domain.PeerIdentity, error)
+	searchIdentities     func(query string, listed ...domain.PeerIdentity) ([]domain.PeerIdentity, error)
 	messageEditor        widget.Editor
 	focusComposerPending bool
 	// composerKeyboardPending rides alongside focusComposerPending but is
@@ -3541,10 +3541,10 @@ func (w *Window) layoutKnownIdentitiesHeader(gtx layout.Context) layout.Dimensio
 type identitySearchState struct {
 	answeredQuery   string
 	answeredVersion uint64
-	// answeredExcludes is the membership digest of the conversations the
+	// answeredExcludes is the membership digest of the contacts the
 	// request was made with. The node applies the exclusions, so an answer
 	// describes one particular exclusion set and stops being true when that
-	// set changes — deleting a conversation must put its address back into
+	// set changes — removing a contact must put its address back into
 	// the search, and neither the query nor the discovery counter moves
 	// when it does.
 	answeredExcludes uint64
@@ -3583,7 +3583,7 @@ const identitySearchTextTopInset = unit.Dp(2)
 func (w *Window) resolveIdentitySearchRows(status service.NodeStatus, recipients []domain.PeerIdentity) []domain.PeerIdentity {
 	query := strings.TrimSpace(w.identitySearchEditor.Text())
 	results := searchKnownIdentities(
-		w.identitySearchMatches(query, status.KnownIDsVersion, peerSetDigest(recipients)),
+		w.identitySearchMatches(query, status.KnownIDsVersion, recipients),
 		status.ReachableIDs, recipients, w.snap.MyAddress, query,
 	)
 	if len(results) > identitySearchMaxRows {
@@ -3607,11 +3607,10 @@ func (w *Window) resolveIdentitySearchRows(status service.NodeStatus, recipients
 // and the reply invalidates the window when it lands.
 //
 // An answer is held against three things, all of which can make it untrue:
-// the query, the node's discovery counter, and `excludes` — the membership
-// digest of the conversations the answer was filtered against. The node
-// applies those exclusions, so deleting a conversation must bring its
-// address back into the search even though the query and the counter are
-// exactly as they were.
+// the query, the node's discovery counter, and the membership digest of
+// the contacts the answer was filtered against. The node applies those
+// exclusions, so removing a contact must bring its address back into the
+// search even though the query and the counter are exactly as they were.
 //
 // Answers to superseded questions are dropped: the request generation is
 // compared on arrival, so a slow reply for a question the user has already
@@ -3621,7 +3620,7 @@ func (w *Window) resolveIdentitySearchRows(status service.NodeStatus, recipients
 // is in flight, and one whose answer failed is not retried until something
 // in the key changes — a render loop must not turn a persistent error into
 // a request per frame.
-func (w *Window) identitySearchMatches(query string, version, excludes uint64) []domain.PeerIdentity {
+func (w *Window) identitySearchMatches(query string, version uint64, recipients []domain.PeerIdentity) []domain.PeerIdentity {
 	if query == "" {
 		// The generation advances even here, so an answer already on its
 		// way to a question the user has just erased is discarded on
@@ -3632,6 +3631,7 @@ func (w *Window) identitySearchMatches(query string, version, excludes uint64) [
 		return nil
 	}
 
+	excludes := peerSetDigest(recipients)
 	w.identitySearchMu.Lock()
 	state := &w.identitySearch
 	answered := state.answeredQuery == query &&
@@ -3665,13 +3665,13 @@ func (w *Window) identitySearchMatches(query string, version, excludes uint64) [
 	if ask != nil && w.beginUIOp() {
 		go func() {
 			defer w.endUIOp()
-			results, err := ask(query)
+			results, err := ask(query, recipients...)
 			w.identitySearchMu.Lock()
 			if w.identitySearch.gen == gen {
 				w.identitySearch.pending = ""
 				// Recorded even on failure, so the next frame does not ask
 				// again for the same question; a new query, a new discovery
-				// or a change to the conversations moves it on. The keys
+				// or a change to the contacts moves it on. The keys
 				// stored are the ones the request was MADE with — an answer
 				// describes the world it was asked about, not the one it
 				// arrived in.
@@ -5642,16 +5642,26 @@ func (w *Window) snapPreview(recipient domain.PeerIdentity) string {
 	return ""
 }
 
-// snapRecipients builds the sidebar recipient list from the router's peer
-// state. Contacts are managed exclusively by the router: loaded from
-// chatlog at startup, added on incoming messages, removed via RemovePeer.
-// No polling or external contact source is involved.
+// snapRecipients builds the sidebar list from conversations and identities
+// the user has named. Saved names keep contacts visible even without chat
+// history, including on the first frame after a restart.
 func (w *Window) snapRecipients() []domain.PeerIdentity {
 	recipients := make([]domain.PeerIdentity, 0, len(w.snap.Peers))
 	me := w.snap.MyAddress
 	for id := range w.snap.Peers {
 		if id != me && !id.IsZero() {
 			recipients = append(recipients, id)
+		}
+	}
+	if w.prefs != nil {
+		for address, alias := range w.prefs.Aliases {
+			if strings.TrimSpace(alias) == "" {
+				continue
+			}
+			id, err := domain.ParsePeerIdentity(address)
+			if err == nil && id != me && !id.IsZero() {
+				recipients = append(recipients, id)
+			}
 		}
 	}
 	sort.Slice(recipients, func(i, j int) bool { return recipients[i].Compare(recipients[j]) < 0 })
@@ -5869,7 +5879,7 @@ const (
 // chat digest rides rebuildMsgCache instead.
 // peerSetDigest fingerprints peers as a SET: the same identities in a
 // different order give the same answer. That is what the identity search
-// needs from it — the node excludes the conversations by membership, so an
+// needs from it — the node excludes the contacts by membership, so an
 // answer stops being true when one is added or removed, and not when an
 // arriving message reorders the sidebar. peerOrderDigest below answers the
 // other question, and the two are deliberately separate.
