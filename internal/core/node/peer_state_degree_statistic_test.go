@@ -562,7 +562,7 @@ func degreeStatisticConstructionPins() map[string]string {
 		"internal/core/node/traffic_capture_bridge.go":              "934c4b72164cf2c8ea075feb5ddcc103f8591f2fedd9b38dbf35f07f93de7025",
 		"internal/core/node/session_secure.go":                      "f6390bbc5ee14795a377d8bc8e73642964cc3f74d535553844f67216c0792289",
 		"internal/core/node/proof_transport_lifetime.go":            "5b12ec684cb095751c62c9b90e64593da266ed3a5e0ea50fc6801624c1939119",
-		"internal/core/node/datagram_integration.go":                "998d80dedbffc4fc1f051e2cec78d447bde494c4f55bff77f021160f3956c867",
+		"internal/core/node/datagram_integration.go":                "7ce9232db3c11f7754549fe00b412e7eb815352bacd4fe678e5309b5528c4704",
 		"internal/core/capture/manager.go":                          "e3c91e512ef6dc6279ad52512f442db12c010d24a416b59819fb0917672f2ceb",
 		"internal/core/routing/announce.go":                         "b42221e9fbe0674771b726fed1da696dce935c148a203094e4a0dbdf030a4423",
 		"internal/core/datagram/planner.go":                         "f2a9bc7737217e9e327efc6e8198296018de7514b63c632f9de3e3be1a280897",
