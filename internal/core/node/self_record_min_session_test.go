@@ -73,9 +73,10 @@ func TestSessionSetupDeliversTheSelfRecordWithMinSession(t *testing.T) {
 			if version, declared := ownBody.MinSession.Version(); !declared || version != domain.SessionVersionSecure {
 				t.Fatalf("the listener's own record states min_session (%d, %v), want (2, true)", version, declared)
 			}
-			held, heldBody, _ := dialer.trust.recordFor(testRecordStoreNetwork, listenerID)
-			if !bytes.Equal(held.Body, ownRecord.Body) {
-				t.Fatalf("the dialler holds %s, not the listener's own record %s", held.Body, ownRecord.Body)
+			held, heldBody, found := dialer.trust.recordFor(testRecordStoreNetwork, listenerID)
+			if !found || held.Version != ownRecord.Version ||
+				!bytes.Equal(held.Body, ownRecord.Body) || !bytes.Equal(held.Sig, ownRecord.Sig) {
+				t.Fatal("the dialler does not hold the listener's exact signed record")
 			}
 			if version, declared := heldBody.MinSession.Version(); !declared || version != domain.SessionVersionSecure {
 				t.Fatalf("the dialler reads min_session (%d, %v) from the listener's record, want (2, true)", version, declared)
@@ -85,9 +86,10 @@ func TestSessionSetupDeliversTheSelfRecordWithMinSession(t *testing.T) {
 			if _, declared := dialerBody.MinSession.Version(); declared != wantV2 {
 				t.Fatalf("dialler record min_session declaration=%v, want %v", declared, wantV2)
 			}
-			heldByListener, _, _ := listener.trust.recordFor(testRecordStoreNetwork, dialerID)
-			if !bytes.Equal(heldByListener.Body, dialerRecord.Body) {
-				t.Fatalf("the listener holds %s, not the dialler's own record %s", heldByListener.Body, dialerRecord.Body)
+			heldByListener, _, found := listener.trust.recordFor(testRecordStoreNetwork, dialerID)
+			if !found || heldByListener.Version != dialerRecord.Version ||
+				!bytes.Equal(heldByListener.Body, dialerRecord.Body) || !bytes.Equal(heldByListener.Sig, dialerRecord.Sig) {
+				t.Fatal("the listener does not hold the dialler's exact signed record")
 			}
 		})
 	}

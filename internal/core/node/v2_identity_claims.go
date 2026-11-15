@@ -233,9 +233,11 @@ func (s *Service) closeLegacyClaimsOf(ctx context.Context, id domain.PeerIdentit
 // itself). The caller must hold no domain mutex.
 func (s *Service) forgetClaimedAddressesOf(id domain.PeerIdentity) {
 	bound := s.secureSessions.store.endpointsBoundTo(id)
-	s.peerMu.Lock()
-	forgotten := s.forgetClaimedAddressesLocked(id, bound)
-	s.peerMu.Unlock()
+	forgotten := func() int {
+		s.peerMu.Lock()
+		defer s.peerMu.Unlock()
+		return s.forgetClaimedAddressesLocked(id, bound)
+	}()
 	if forgotten == 0 {
 		return
 	}
@@ -332,7 +334,9 @@ func (s *Service) admitRoutingInput(sender routingSender, frameType string) (rel
 	}
 	s.unprovenRouting.enter(id)
 	if s.identityRequiresV2(id) {
-		s.unprovenRouting.leave(id)
+		// A refused check can be the last registered input when a proof
+		// cancels while this check is pending. It still owns the purge.
+		s.releaseRoutingInput(id)
 		log.Debug().
 			Str("peer", id.String()).
 			Str("penalty_subject", sender.penalty.String()).
@@ -347,17 +351,16 @@ func (s *Service) admitRoutingInput(sender routingSender, frameType string) (rel
 	return func() { s.releaseRoutingInput(id) }, true
 }
 
-// releaseRoutingInput ends one admitted legacy input of id. When it was the
-// last one and a cancelled proof left the purge owed to it, it purges here —
-// still counted in flight, so a proof waiting meanwhile wakes only after the
-// purge. Called with no domain mutex held, like admitRoutingInput.
+// releaseRoutingInput ends one registered legacy check/input of id. When it
+// was the last one and a cancelled proof left the purge owed to it, it purges
+// here while still counted in flight. A proof cancelled during that purge may
+// leave another obligation, so every leave result is consumed before exit.
+// Called with no domain mutex held, like admitRoutingInput.
 func (s *Service) releaseRoutingInput(id domain.PeerIdentity) {
-	if !s.unprovenRouting.leave(id) {
-		return
+	for s.unprovenRouting.leave(id) {
+		log.Info().Str("peer", id.String()).Msg("routing_unproven_owed_purge_run_by_last_legacy_writer")
+		s.forgetUnprovenRoutingResidue(id)
 	}
-	log.Info().Str("peer", id.String()).Msg("routing_unproven_owed_purge_run_by_last_legacy_writer")
-	s.forgetUnprovenRoutingResidue(id)
-	s.unprovenRouting.leave(id)
 }
 
 // forgetUnprovenRoutingResidue forgets what legacy connections naming id wrote
@@ -431,8 +434,8 @@ type unprovenRoutingWriters struct {
 	// one is not "closest to expiring" when the routes it stands for are
 	// refreshed by other writers.
 	overflowUntil time.Time
-	// inflight counts legacy routing input admitted per identity and not yet
-	// released; drained holds the proofs waiting for it to reach zero.
+	// inflight counts legacy routing checks/input registered per identity and
+	// not yet released; drained holds proofs waiting for it to reach zero.
 	inflight map[domain.PeerIdentity]int
 	drained  map[domain.PeerIdentity][]chan struct{}
 	// owed holds the identities whose proof stopped waiting (its context
@@ -491,7 +494,7 @@ func (m *unprovenRoutingWriters) cleanup(now time.Time) {
 	}
 }
 
-// enter registers legacy routing input for id as admitted and not yet applied.
+// enter registers legacy routing input before checking whether it is admitted.
 func (m *unprovenRoutingWriters) enter(id domain.PeerIdentity) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
