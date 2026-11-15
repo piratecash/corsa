@@ -3,6 +3,7 @@ package node
 import (
 	"errors"
 	"os"
+	"runtime"
 	"testing"
 	"time"
 
@@ -21,6 +22,29 @@ func appRawPinLabels(t *testing.T, v corenode.RawPinMembershipObservationSnapsho
 	}
 }
 func TestAppRawPinMembershipObservation(t *testing.T) {
+	t.Run("explicit-durable-guard-history", func(t *testing.T) {
+		isolatePendingApp(t)
+		request := appRawPinRequest()
+		request.DurableWrites = true
+		a, err := NewWithRawPinMembershipObservation(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ownUnstartedGuardApp(t, a, time.Now().Add(5*time.Second))
+		v := a.RawPinMembershipObservation().Snapshot()
+		appRawPinLabels(t, v)
+		writes := v.DurableWrites
+		if writes == nil || writes.BaselineConfirmed {
+			t.Fatal("fresh App store supplied the wrong write history", v)
+		}
+		if runtime.GOOS == "windows" {
+			if writes.Status != "UNKNOWN" || writes.GuardCoverage != nil {
+				t.Fatal("unverified writer supplied guard coverage", writes)
+			}
+		} else if writes.Status != "PAST" || writes.GuardCoverage == nil || writes.GuardCoverage.Gap {
+			t.Fatal("clean App startup did not supply guard history", writes)
+		}
+	})
 	t.Run("unstarted-App-owner-copied-input-key-and-distinct-identity", func(t *testing.T) {
 		isolatePendingApp(t)
 		request := appRawPinRequest()
