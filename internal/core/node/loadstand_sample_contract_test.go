@@ -14,6 +14,7 @@ import (
 
 	"github.com/piratecash/corsa/internal/core/datagram"
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/protocol"
 	"github.com/piratecash/corsa/internal/core/routing"
 	"github.com/piratecash/corsa/internal/testutil/runjournal"
 )
@@ -1310,16 +1311,12 @@ func testLoadStandByteBalanceReadsTheWholeLifeHistory(t *testing.T) {
 	}
 }
 
-// loadStandStopAttempts is how many stops must see bytes arrive while they
-// ran before the test believes it exercised the final reading at all.
+// loadStandStopAttempts is how many stops must include a real socket read.
 const loadStandStopAttempts = 3
 
-// The final reading of a life is taken AFTER its stop: bytes the node still
-// read while stopping are in it. The full node writes to the edge throughout
-// the edge's Stop; a stop whose counters grew while it ran must have a final
-// reading equal to the counters after it — a reading taken when Stop began
-// would miss that growth. Stops that happened to see no growth prove
-// nothing and are repeated.
+// The final reading includes bytes received after Stop starts. Hold the
+// cancellation step open while a real ping travels from the full node to
+// the edge, so a reading taken before shutdown misses those bytes.
 func testLoadStandFinalReadingIsTakenAfterTheStop(t *testing.T) {
 	ports := newLoadStandPortRegistry(reserveLoopbackAddress)
 	full := newFullNodeForTest(t, ports, "full-000", loopbackOpts())
@@ -1330,69 +1327,68 @@ func testLoadStandFinalReadingIsTakenAfterTheStop(t *testing.T) {
 	startLoadStandNodeForTest(t, full)
 	startLoadStandNodeForTest(t, edge)
 
-	deadline := time.Now().Add(3 * loadStandSampleWait)
-	for grown := 0; grown < loadStandStopAttempts; {
-		if time.Now().After(deadline) {
-			t.Fatalf("only %d of %d stops saw bytes arrive while they ran", grown, loadStandStopAttempts)
+	ctx, cancel := context.WithTimeout(t.Context(), 3*loadStandSampleWait)
+	defer cancel()
+	var previousInbound domain.ConnID
+	for attempt := range loadStandStopAttempts {
+		if ctx.Err() != nil {
+			t.Fatalf("only %d of %d stops saw bytes arrive while they ran", attempt, loadStandStopAttempts)
 		}
 		awaitLoadStandRedial(t, edge, nil)
-		stopping := runningServiceForTest(t, edge)
-		stopFlood := floodLoadStandInbound(t, runningServiceForTest(t, full))
-		before := stopping.TransportTrafficStats()
-		stopLoadStandNodeForTest(t, edge)
-		after := stopping.TransportTrafficStats()
-		stopFlood()
+		writer := runningServiceForTest(t, full)
+		var ids []domain.ConnID
+		if err := awaitNodeState(ctx, full.current.running.exited, func() bool {
+			ids = loadStandInboundConnIDs(writer)
+			return len(ids) == 1 && ids[0] != previousInbound
+		}); err != nil {
+			t.Fatalf("wait for the current edge connection, previous %v and live %v: %v", previousInbound, ids, err)
+		}
+		inbound := ids[0]
+		previousInbound = inbound
+		running := edge.current.running
+		stopCtx, cancelStop := context.WithTimeout(ctx, harnessGenerousBudget)
+		var before domain.TransportTrafficStats
+		var pingErr error
+		cancelRun := running.cancel
+		running.cancel = func() {
+			running.cancel = cancelRun
+			defer cancelRun()
+			before = running.svc.TransportTrafficStats()
+			pingErr = writer.sendFrameViaNetworkSync(stopCtx, inbound, protocol.Frame{Type: "ping"})
+			if pingErr == nil {
+				pingErr = awaitNodeState(stopCtx, running.exited, func() bool {
+					return running.svc.TransportTrafficStats().BytesReceived > before.BytesReceived
+				})
+			}
+		}
+		stopErr := edge.Stop(stopCtx)
+		cancelStop()
+		if stopErr != nil {
+			logGoroutinesOnStopOverrun(t, stopErr)
+			t.Fatalf("stop %d: %v (ping: %v)", attempt+1, stopErr, pingErr)
+		}
+		if pingErr != nil {
+			t.Fatalf("stop %d did not observe ping traffic: %v", attempt+1, pingErr)
+		}
+		after := running.svc.TransportTrafficStats()
+		if after.BytesReceived <= before.BytesReceived {
+			t.Fatalf("stop %d saw no new bytes", attempt+1)
+		}
 
 		ended := edge.EndedIncarnations()
-		final := ended[len(ended)-1].Final
+		if len(ended) != attempt+1 {
+			t.Fatalf("after stop %d got %d final readings", attempt+1, len(ended))
+		}
+		final := ended[attempt].Final
 		if final.BytesSent != after.BytesSent || final.BytesReceived != after.BytesReceived {
 			t.Fatalf("final reading %d/%d, counters after the stop %d/%d (before it %d/%d)",
 				final.BytesSent, final.BytesReceived, after.BytesSent, after.BytesReceived, before.BytesSent, before.BytesReceived)
 		}
-		if after.BytesReceived > before.BytesReceived {
-			grown++
-		}
-		if err := edge.Start(t.Context()); err != nil {
-			t.Fatalf("restart edge: %v", err)
-		}
-	}
-}
-
-// floodLoadStandInbound has svc write pings to its inbound connections as
-// fast as the writers take them, until the returned stop is called, which
-// waits for the writer to finish. A stop closes the edge's sockets in well
-// under a millisecond, so only a continuous stream is reliably arriving
-// while it does.
-func floodLoadStandInbound(t *testing.T, svc *Service) func() {
-	t.Helper()
-
-	ping := []byte("{\"type\":\"ping\"}\n")
-	ids := loadStandInboundConnIDs(svc)
-	if len(ids) == 0 {
-		t.Fatal("the full node has no inbound connection to flood")
-	}
-	done := make(chan struct{})
-	finished := make(chan struct{})
-	go func() {
-		defer close(finished)
-		for {
-			select {
-			case <-done:
-				return
-			default:
+		if attempt+1 < loadStandStopAttempts {
+			if err := edge.Start(ctx); err != nil {
+				t.Fatalf("restart edge: %v", err)
 			}
-			for _, id := range ids {
-				// A send to a connection the stopping edge just closed, or to
-				// a queue the flood has filled, fails; that is the point of
-				// the flood, not a fault in it.
-				_ = svc.Network().SendFrame(context.Background(), id, ping)
-			}
-			runtime.Gosched()
 		}
-	}()
-	return func() {
-		close(done)
-		<-finished
 	}
 }
 
