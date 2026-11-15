@@ -378,6 +378,8 @@ func TestTheDialToIdentityGuardReadsTheWholeModule(t *testing.T) {
 	writeProbeFile(t, root, "internal/core/domain/inside.go", "package domain\nfunc inside() { _, _ = DialToIdentity(x) }\n")
 	writeProbeFile(t, root, "internal/core/node/caller_test.go", "package node\nfunc probe() { _, _ = domain.DialToIdentity(x) }\n")
 	writeProbeFile(t, root, ".gomodcache/dep/dep.go", "package dep\nfunc dep() { _, _ = domain.DialToIdentity(x) }\n")
+	writeProbeFile(t, root, "docs/_internal/archive/invalid.go", "archived data, not Go source")
+	writeProbeFile(t, root, "_scratch/escape.go", "package scratch\nfunc open() { _, _ = domain.DialToIdentity(x) }\n")
 	calls := callsOfDialToIdentity(t, root)
 	if len(calls) != 2 {
 		t.Fatalf("calls found = %v, want the SDK one and the one inside domain", calls)
@@ -416,7 +418,8 @@ func moduleRoot(t *testing.T) string {
 
 // callsOfDialToIdentity lists the calls of DialToIdentity in the non-test Go
 // files under root, skipping hidden directories (the module and build caches
-// live there), vendor and testdata.
+// live there), underscore-prefixed directories, vendor and testdata, matching
+// the directory exclusions of go ./....
 func callsOfDialToIdentity(t *testing.T, root string) []string {
 	t.Helper()
 	fset := token.NewFileSet()
@@ -427,7 +430,7 @@ func callsOfDialToIdentity(t *testing.T, root string) []string {
 		}
 		if entry.IsDir() {
 			name := entry.Name()
-			if path != root && (strings.HasPrefix(name, ".") || name == "vendor" || name == "testdata") {
+			if path != root && (strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_") || name == "vendor" || name == "testdata") {
 				return filepath.SkipDir
 			}
 			return nil
@@ -491,7 +494,7 @@ func inactiveSenderKeyIntentViolations(t *testing.T, root string) []string {
 			return err
 		}
 		if entry.IsDir() {
-			if path != root && (strings.HasPrefix(entry.Name(), ".") || entry.Name() == "vendor" || entry.Name() == "testdata") {
+			if path != root && (strings.HasPrefix(entry.Name(), ".") || strings.HasPrefix(entry.Name(), "_") || entry.Name() == "vendor" || entry.Name() == "testdata") {
 				return filepath.SkipDir
 			}
 			return nil
@@ -595,6 +598,7 @@ func TestInactiveSenderKeyIntentGuardRejectsActiveAndAliasEscapes(t *testing.T) 
 				path = "internal/core/domain/escape.go"
 			}
 			writeProbeFile(t, root, path, source)
+			writeProbeFile(t, root, "docs/_internal/archive/invalid.go", "archived data, not Go source")
 			bad := inactiveSenderKeyIntentViolations(t, root)
 			matched := false
 			for _, row := range bad {

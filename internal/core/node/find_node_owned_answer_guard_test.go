@@ -18,6 +18,7 @@ import (
 func ownedAnswerSourceErrors(sources map[string][]byte) []string {
 	var failures []string
 	pins := map[string]string{"internal/core/findnode/owned_resources.go": "7b3347cbe548e78ab4a92ebcf4c857545edd33d81d3a3af39c25a079b3aa036a", "internal/core/netcore/owned_resources.go": "59c2d0e4123a77aa5811210e4a6f91a25cafa4412e64eac5e94ea968a40858e2", "internal/core/node/find_node_resources.go": "14ecd1d16f6ff4a579136a3a9e72fd4651e6f7f191bccf79443a75e353a1aeab", "internal/core/node/find_node_owned_local_target.go": "3f72673fd435bb363ff434ef5fb728d61fc151e06f85b72a9e1a303599983915", "internal/core/findnode/owned_bridge_answer.go": "6cf27edfd3d0f5ce5595dd602cd8aac74f7848a3e85392dd20377affe8f6043e", "internal/core/findnode/owned_bridge_forward_answer.go": "c96366c955ce0c2ae5f90e1caee46c697d7672c7ed0bb7e852833bd97eb5e139", "internal/core/findnode/owned_bridge_local_target.go": "0c317edc5b3de6f36014ff2a8c195fd786e03596615d9869d77149452f3a7ed5", "internal/core/node/find_node_owned_answer.go": "db16c461c252487076df0515d067202c0d8dbbfd84ea0a3f35fc7b795b2c202e", "internal/core/node/find_node_owned_receive.go": "74305a5ace9ed0a3244ea03521ea293372fed406b32b04fabcd55a8bb1353a6f", "internal/core/node/peer_management.go": "d132871c6d846162c3d6ba0919b640cfe4367d5a5b8529b599136fc43e7a7f5b", "internal/core/netcore/net_core.go": "0666ed34e95880be60dd96e14084caafc6dff4a5cc0edf75c0a31a08046cc51a", "internal/core/netcore/owned_findnode_write.go": "5ebeb88ec8e82db8034bf66927f91c9ea7b08505b4ef5e6b939cf80fe6899a96", "internal/core/netcore/owned_findnode_answer_write.go": "a8f11fa1f5398b8811ef41460e2849000a438389e39ab662af446a9c7c134d0c"}
+	pins["internal/core/netcore/writer_queue_observation.go"] = "b5fbcbd5fa047e83ee12791877ce9b643dc1ed9b49a1c9a95786f0e8bb82f240"
 	for path, want := range pins {
 		if fmt.Sprintf("%x", sha256.Sum256(sources[path])) != want {
 			failures = append(failures, "owned answer exact Source changed: "+path)
@@ -67,6 +68,9 @@ func TestOwnedAnswerClosedSource(t *testing.T) {
 	}
 }
 func TestOwnedAnswerSourceControls(t *testing.T) {
+	if failures := ownedAnswerSourceErrors(ownedAnswerSources(t)); len(failures) != 0 {
+		t.Fatal("owned answer Source controls require a clean baseline", failures)
+	}
 	for _, tc := range []struct{ name, path, before, after string }{
 		{"answer-unclaimed", "internal/core/node/find_node_owned_receive.go", "kind != protocol.FindNodeAnswerFrameType", "true"},
 		{"command-bypass", "internal/core/node/find_node_owned_answer.go", "if !s.outboundControlFrameAllowed(session)", "if false"},

@@ -34,6 +34,9 @@ func TestOwnDMRuntimeClosedOriginalComposition(t *testing.T) {
 }
 func TestOwnDMRuntimeRejectsDefaultActivationAndAlternateMint(t *testing.T) {
 	baseline := ownDMProductionSources(t)
+	if failures := ownDMRuntimeSourceErrors(baseline); len(failures) != 0 {
+		t.Fatal("Runtime composition controls require a clean baseline", failures)
+	}
 	for _, tc := range []struct{ file, old, new string }{
 		{"sdk/runtime.go", "if !nodeStarted && r.cancelConstruction != nil", "if r.cancelConstruction != nil"},
 		{"sdk/runtime.go", "return newWithContext(ctx, cfg, nil)", "return newWithContext(ctx, cfg, &profile)"},

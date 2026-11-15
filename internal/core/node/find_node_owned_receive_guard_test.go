@@ -91,6 +91,9 @@ func TestOwnedNodeReceiveClosedSource(t *testing.T) {
 	}
 }
 func TestOwnedNodeReceiveSourceControls(t *testing.T) {
+	if failures := ownedNodeReceiveSourceErrors(ninN1Sources(t)); len(failures) != 0 {
+		t.Fatal("ingress Source controls require a clean baseline", failures)
+	}
 	for _, tc := range []struct{ name, path, before, after string }{
 		{"discard", "service.go", "s.dispatchOwnedFindNodeReceive(ownedReceive)", "error(nil)"},
 		{"original-rebind", "find_node_owned_receive.go", "entry.common != cell.transport.life", "false"},

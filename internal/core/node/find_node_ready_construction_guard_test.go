@@ -271,6 +271,9 @@ func TestOwnedReadyClosedSource(t *testing.T) {
 	}
 }
 func TestOwnedReadySourceControls(t *testing.T) {
+	if failures := ownedReadySourceErrors(ownedReadySources(t)); len(failures) != 0 {
+		t.Fatal("Ready Source controls require a clean baseline", failures)
+	}
 	for _, tc := range []struct{ name, path, before, after string }{
 		{"lost-contact-source", "internal/core/node/find_node_ready_construction.go", "admission.kSource != contactRecordReconciliationSource", "false"},
 		{"lost-contact-wake", "internal/core/node/find_node_ready_construction.go", "producer.wake != r.originalContactWake", "false"},
