@@ -153,6 +153,7 @@ var identityStateInventory = map[string]identityStateEntry{
 	// Service: identities this node named.
 	"Service.awaitingDelivered":         {identityNamedLocally, "full message reference → this node's own outgoing DM; optional fixture-only R2a stamp is exact local owner plus original X observation and actual Y proof, never inferred by ordinary/reseed input"},
 	"Service.presenceResolutionAskedAt": {identityNamedLocally, "trusted contacts presence resolves"},
+	"Service.signedSentDMIDs":           {identityNamedLocally, "full own-message reference with a required receipt signature; keyed by locally chosen addressee and evicted with sentDMIDs"},
 
 	// Other Service maps, classified by the identities their keys or values carry.
 	"Service.bannedIPSet":             {identityNotApplicable, "IP → ban entry with addresses"},

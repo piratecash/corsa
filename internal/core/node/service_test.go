@@ -1852,9 +1852,26 @@ func TestFullNodePushRoutesDirectMessageToClientNode(t *testing.T) {
 		return reply.Type == "messages" && len(reply.Messages) == 1 && reply.Messages[0].ID == "push-dm-1"
 	})
 
-	waitForCondition(t, 10*time.Second, func() bool {
+	waitForConditionMsg(t, 10*time.Second, "missing delivered receipt for the pushed DM", func() bool {
 		reply := nodeA.HandleLocalFrame(protocol.Frame{Type: "fetch_delivery_receipts", Recipient: nodeA.Address()})
-		return reply.Type == "delivery_receipts" && len(reply.Receipts) == 1 && reply.Receipts[0].MessageID == "push-dm-1"
+		if reply.Type != "delivery_receipts" || len(reply.Receipts) == 0 {
+			return false
+		}
+		// This legacy envelope can receive both an unsigned receipt and
+		// a signed copy over the proved session.
+		copies := make(map[bool]bool, 2)
+		for _, receipt := range reply.Receipts {
+			if receipt.MessageID != "push-dm-1" || receipt.Status != protocol.ReceiptStatusDelivered ||
+				receipt.Sender != nodeB.Address() || receipt.Recipient != nodeA.Address() {
+				t.Fatalf("unexpected pushed-DM receipt: %#v", receipt)
+			}
+			signed := receipt.Signature != ""
+			if copies[signed] {
+				t.Fatalf("duplicate pushed-DM receipt with signed=%v", signed)
+			}
+			copies[signed] = true
+		}
+		return true
 	})
 }
 

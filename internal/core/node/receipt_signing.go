@@ -151,6 +151,26 @@ func (s *Service) sendSignedReceiptControl(peer domain.PeerIdentity, receipt pro
 	})
 }
 
+// openSignedReceiptControl checks the only control packet an opted-out node
+// consumes. Failed probes are ordinary DM drops and do not trigger key sync.
+func (s *Service) openSignedReceiptControl(message incomingMessage) *directmsg.PlainMessage {
+	if message.Topic != protocol.TopicControlDM || len(message.Body) > maxSignedReceiptControlBody {
+		return nil
+	}
+	pub, ok := s.knownPubKey(message.Sender)
+	if !ok {
+		if validateAttachedSenderPubKey(message) != nil {
+			return nil
+		}
+		pub = message.SenderPubKey
+	}
+	plain, err := directmsg.DecryptForMessage(s.identity, admissionRef(message), pub, message.Body)
+	if err != nil || plain.Command != signedReceiptControlCommand {
+		return nil
+	}
+	return plain
+}
+
 func (s *Service) acceptSignedReceiptControl(message incomingMessage, plain *directmsg.PlainMessage) (bool, int, string) {
 	if len(message.Body) > maxSignedReceiptControlBody {
 		return false, 0, protocol.ErrCodeInvalidSendDeliveryReceipt

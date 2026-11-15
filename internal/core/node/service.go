@@ -7758,13 +7758,10 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 
 func (s *Service) storeIncomingMessageWithR2a(msg incomingMessage, validateTimestamp bool, r2a *r2aDispatch) (bool, int, string) {
 	// Relay-only DM opt-out enforcement (cfg.DisableDirectMessages).
-	// Runs FIRST — before timestamp validation and signature
-	// verification — so spam addressed to a node that opted out of DMs
-	// costs no crypto work, no lock traffic,
-	// and no memory: the message never enters s.topics/s.seen/s.known
-	// and no delivery receipt is emitted (the sender must not believe
-	// anyone will read it). The (false, 0, "") return deliberately
-	// mirrors the duplicate outcome: shouldAckOnStoreResult acks the
+	// The node can still receive confirmations of its own outgoing messages
+	// through an old relay. Other messages never enter the inbox, dedup set
+	// or contact state, and no delivery receipt is emitted. Returning
+	// (false, 0, "") mirrors the duplicate outcome: shouldAckOnStoreResult acks the
 	// previous hop (push path) and deliverRelayedMessage reports
 	// success for the hop-ack (relay path), so upstream hop-level
 	// retries stop instead of looping — the same reconnect-storm
@@ -7773,8 +7770,13 @@ func (s *Service) storeIncomingMessageWithR2a(msg incomingMessage, validateTimes
 	// this node's box key cannot even compose the DM (the key is not
 	// redistributed via fetch_contacts — see Service.selfBoxKey); those
 	// that cached it from a direct handshake land here and are dropped.
-	dropInboundDM := s.dropsInboundDM(msg)
-	if dropInboundDM && (msg.Topic != protocol.TopicControlDM || len(msg.Body) > maxSignedReceiptControlBody) {
+	if s.dropsInboundDM(msg) {
+		if carrier := s.openSignedReceiptControl(msg); carrier != nil {
+			if validateTimestamp && s.validateMessageTiming(msg) != nil {
+				return false, 0, protocol.ErrCodeMessageTimestampOutOfRange
+			}
+			return s.acceptSignedReceiptControl(msg, carrier)
+		}
 		log.Debug().Str("node", s.identity.Address).Str("id", string(msg.ID)).Str("topic", msg.Topic).Str("sender", msg.Sender).Msg("inbound_dm_dropped_no_dm_inbox")
 		return false, 0, ""
 	}
@@ -7897,9 +7899,6 @@ func (s *Service) storeIncomingMessageWithR2a(msg incomingMessage, validateTimes
 		}
 		if verifyErr != nil {
 			return false, 0, protocol.ErrCodeInvalidDirectMessageSig
-		}
-		if dropInboundDM {
-			return false, 0, ""
 		}
 		// The envelope signature verified — NOW the attached material
 		// is proven to belong to a sender that authored a genuine
@@ -8725,8 +8724,8 @@ func (s *Service) owesDeliveryReceipt(msg incomingMessage) bool {
 //     grow s.topics unboundedly (local messages are exempt from transit
 //     retention caps) and emitting a delivered receipt would lie to the
 //     sender;
-//   - control DMs (TopicControlDM) — they mutate chat state this node
-//     does not keep.
+//   - control DMs (TopicControlDM) — handled by the receipt-only branch at
+//     admission because the node still tracks receipts of its own sends.
 //
 // Everything else stays untouched: broadcasts and global topics
 // (recipient "*"/empty), transit DMs this node merely relays between two

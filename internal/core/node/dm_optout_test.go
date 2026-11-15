@@ -16,9 +16,9 @@ import (
 // These tests pin the relay-only DM opt-out (config.Node.
 // DisableDirectMessages, env CORSA_ACCEPT_DM on the headless binary):
 //
-//   - inbound DM-class messages addressed to the node itself are dropped
-//     BEFORE crypto/locks with duplicate semantics (ack to the previous
-//     hop, no receipt, nothing enters memory);
+//   - inbound messages for the DM inbox drop with duplicate semantics.
+//     Small control packets can be opened solely to receive a signed
+//     confirmation of this node's own message;
 //   - transit DMs between other parties and broadcast/global topics are
 //     untouched — the node keeps relaying;
 //   - the node's own box key stays OUT of the contact plane
@@ -113,6 +113,71 @@ func TestDisableDMDropsControlDMToSelf(t *testing.T) {
 	if stored || count != 0 || errCode != "" {
 		t.Fatalf("want drop with duplicate semantics (false, 0, \"\"), got (%v, %d, %q)", stored, count, errCode)
 	}
+
+	commandData, err := json.Marshal(domain.MessageDeletePayload{TargetID: domain.MessageID(msgID)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := directmsg.EncryptForMessage(sender, domain.DMRecipient{
+		Address:      domain.PeerIdentityFromWire(svc.Address()),
+		BoxKeyBase64: identity.BoxPublicKeyBase64(svc.identity.BoxPublicKey),
+	}, domain.OutgoingDM{Command: domain.DMCommandMessageDelete, CommandData: string(commandData)}, protocol.TopicControlDM, string(msgID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, count, errCode = svc.storeIncomingMessage(incomingMessage{
+		ID: msgID, Topic: protocol.TopicControlDM, Sender: sender.Address, Recipient: svc.Address(),
+		Body: body, SenderPubKey: identity.PublicKeyBase64(sender.PublicKey),
+	}, false)
+	if stored || count != 0 || errCode != "" {
+		t.Fatalf("signed ordinary control must still drop, got (%v, %d, %q)", stored, count, errCode)
+	}
+	if _, known := svc.knownPubKey(sender.Address); known {
+		t.Fatal("dropped control must not import its sender's key")
+	}
+}
+
+func TestDisableDMReceivesSignedReceiptControl(t *testing.T) {
+	t.Parallel()
+	from, stopFrom := startRelayOnlyTestNode(t)
+	defer stopFrom()
+	to, _, stopTo := listenerNode(t, nil)
+	defer stopTo()
+	ref := sendDMRequiringSignedReceipts(t, from, to)
+
+	receipt := protocol.DeliveryReceipt{
+		MessageID: protocol.MessageID(ref.ID), Sender: to.Address(), Recipient: from.Address(),
+		Status: protocol.ReceiptStatusDelivered, DeliveredAt: time.Now().UTC().Truncate(time.Second),
+		SignerPublicKey: identity.PublicKeyBase64(to.identity.PublicKey),
+	}
+	var err error
+	receipt.Signature, err = protocol.SignDeliveryReceipt(domain.NetworkID(networkName), ref, receipt, to.identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(receiptFrame(receipt))
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := protocol.NewMessageID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := directmsg.EncryptForMessage(to.identity, domain.DMRecipient{
+		Address:      domain.PeerIdentityFromWire(from.Address()),
+		BoxKeyBase64: identity.BoxPublicKeyBase64(from.identity.BoxPublicKey),
+	}, domain.OutgoingDM{Command: signedReceiptControlCommand, CommandData: string(payload)}, protocol.TopicControlDM, string(id))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, _, errCode := from.storeIncomingMessage(incomingMessage{
+		ID: id, Topic: protocol.TopicControlDM, Sender: to.Address(), Recipient: from.Address(),
+		Flag: protocol.MessageFlagSenderDelete, Body: body, CreatedAt: receipt.DeliveredAt,
+	}, true)
+	if !stored || errCode != "" {
+		t.Fatalf("signed receipt control refused by opted-out author, stored=%v err=%q", stored, errCode)
+	}
+	waitForSignedReceipt(t, from, to, ref, protocol.ReceiptStatusDelivered)
 }
 
 // TestDisableDMKeepsTransitDM: a DM between two OTHER parties must keep
