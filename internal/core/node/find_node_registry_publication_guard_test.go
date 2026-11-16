@@ -31,14 +31,11 @@ func registryPublicationBodyPins() map[string]string {
 		"find_node_connection.go:publishFindNodeCM":               "fb26ab47369e1d4e2b8600821acb6c5422a1c2f2ff0dbe9226dbdc2cbed8ebb1",
 		"find_node_connection.go:publishFindNodeLocked":           "7320628cd8080ffb5cb220eeaf6ee7e8e207209ac77d2d68177e138d551f251b",
 		"find_node_degree_terminal_bridge.go:endBridgeLocked":     "9041c5822dd74678779831771eb89168f94faf027e30f1c822bc5ab5936c94aa",
-		"peer_management.go:ensurePeerSessions":                   "bc785affa049c15148cbfc010f6326e09c64abaafc7cf84f11878be02fb7b657",
-		"peer_sessions.go:finishPeerSessionForCM":                 "d5a115dd3451857e0ae53f4ee330af7a1096e0eefe60fd1f4021a1895e9f34aa",
+		"peer_sessions.go:finishPeerSessionForCM":                 "5d364e2ac337d197e78499c407bcf30cd9351ef5e07173f63119fca95baf57a6",
 		"peer_sessions.go:markSessionHandshakeComplete":           "e2b420d83dd3323649516ee3a96811b7d1104b7a86b9dc008ed0e45c073544db",
 		"peer_sessions.go:onCMSessionEstablished":                 "bf77a927642553c989c7cdddb3cb42be10aabb196a7b30277a12abe350f582b9",
 		"peer_sessions.go:onCMSessionTeardown":                    "487df410ce5eeb7858e9e3c9c65ff4d481624086d11356b26f4732fcb5e8633c",
-		"peer_sessions.go:openPeerSession":                        "996c9442f8ab060f2ba71ec1d3eb81fe6d1986db6a1c22e498a2a0820b45d7b6",
 		"peer_sessions.go:registerCMSession":                      "299c41502519700efa77d362b57ebd54607eabd001d998d93589f628d404d2b2",
-		"peer_sessions.go:runPeerSession":                         "762ad659056e3e91e65766494ca206f8b65c09e1f60c3a7c2f4d64e75aaafb85",
 		"peer_sessions.go:withdrawRefusedCMSession":               "b878d1d7b3f47cc573ba9c8b90543d8270380b834a44b599578788172a78da73",
 		"peer_sessions.go:withdrawServedCMSession":                "59af33c360eb9a66a93ba86820e316b5df675149a7e4303882a374b0e9aaaef8",
 		"proof_transport_lifetime.go:proofTransportLifetime.end":  "d7a35159e88915a2454b8abcbead4d94577b49621981d24ec42866f71ef5891d",
@@ -53,8 +50,6 @@ func registryPublicationSourceErrors(sources map[string][]byte) []string {
 		"conn_registry.go:registerInboundConnLocked":    1,
 		"conn_registry.go:attachOutboundCoreLocked":     1,
 		"conn_registry.go:unregisterConnLocked":         1,
-		"peer_sessions.go:runPeerSession":               1,
-		"peer_sessions.go:openPeerSession":              1,
 		"peer_sessions.go:markSessionHandshakeComplete": 2,
 		"peer_sessions.go:finishPeerSessionForCM":       1,
 		"peer_sessions.go:onCMSessionEstablished":       1,
@@ -62,7 +57,6 @@ func registryPublicationSourceErrors(sources map[string][]byte) []string {
 		"peer_sessions.go:withdrawRefusedCMSession":     1,
 		"peer_sessions.go:withdrawServedCMSession":      1,
 		"peer_sessions.go:onCMSessionTeardown":          1,
-		"peer_management.go:ensurePeerSessions":         1,
 	}
 	// Direct original paired registry/session mutation membership: no wildcard.
 	expectedWrites := map[string]int{
@@ -72,13 +66,10 @@ func registryPublicationSourceErrors(sources map[string][]byte) []string {
 		"conn_registry.go:attachOutboundCoreLocked:connIDByNetConn:assign":  1,
 		"conn_registry.go:unregisterConnLocked:conns:delete":                1,
 		"conn_registry.go:unregisterConnLocked:connIDByNetConn:delete":      1,
-		"peer_sessions.go:runPeerSession:sessions:delete":                   1,
-		"peer_sessions.go:openPeerSession:sessions:assign":                  1,
 		"peer_sessions.go:registerCMSession:sessions:assign":                1,
 		"peer_sessions.go:withdrawRefusedCMSession:sessions:delete":         1,
 		"peer_sessions.go:withdrawServedCMSession:sessions:delete":          1,
 		"peer_sessions.go:onCMSessionTeardown:sessions:delete":              1,
-		"peer_management.go:ensurePeerSessions:sessions:delete":             1,
 	}
 	pins := registryPublicationBodyPins()
 	gotPins := map[string]string{}
@@ -156,7 +147,7 @@ func registryPublicationSourceErrors(sources map[string][]byte) []string {
 		failures = append(failures, "registry exact body/order/nil-guard/lease scope changed")
 	}
 	if !reflect.DeepEqual(refs, expected) || !reflect.DeepEqual(calls, expected) {
-		failures = append(failures, "registry publisher reference/call escaped exact15 sites")
+		failures = append(failures, "registry publisher reference/call escaped expected sites")
 	}
 	if !reflect.DeepEqual(writes, expectedWrites) {
 		failures = append(failures, "registry paired/session mutation membership changed")

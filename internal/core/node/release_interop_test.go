@@ -31,18 +31,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/piratecash/corsa/internal/core/config"
-	"github.com/piratecash/corsa/internal/core/directmsg"
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/identity"
+	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
 // release_interop_test.go runs a node of this build (in process) against the
-// REAL released corsa-node binaries that speak only v1 — every release named
-// for each legacy ProtocolVersion (28, 29, 30) in CORSA_INTEROP_BIN_V28 /
-// _V29 / _V30, built from their tags. It is the cross-binary counterpart of
-// the emulation in legacy_peer_emulation_test.go: here the old side is the
-// released code itself, not this build in v1-only mode.
+// released corsa-node binaries on either side of the minimum protocol.
+// The older binaries exercise refusal over actual loopback connections.
 //
 // A released binary is run only in isolation, and every rule below is a
 // condition of running one, enforced by the test rather than trusted to the
@@ -104,17 +100,6 @@ const (
 	interopNodeLifetime = 5 * time.Minute
 	// interopVersionDeadline bounds `corsa-node --version`.
 	interopVersionDeadline = 10 * time.Second
-	// interopLatencyRuns is how many first dials scenario (f) measures.
-	interopLatencyRuns = 20
-	// releaseConnRatePerWindow and releaseConnRateWindow are the per-IP
-	// inbound connection limiter of every release v28–v30
-	// (defaultConnRateLimit, defaultConnRateWindow in their conn_limiter.go).
-	releaseConnRatePerWindow = 10
-	releaseConnRateWindow    = 10 * time.Second
-	// interopLatencyPacing spaces the measured dials so that the two
-	// connections of each stay within the limiter: at most four dials, eight
-	// connections, fall into one window.
-	interopLatencyPacing = 2500 * time.Millisecond
 	// heavyRunLockDefault is the lock directory of scripts/heavy-run.sh unless
 	// HEAVY_LOCK names another.
 	heavyRunLockDefault = "/tmp/corsa-heavy-run.lock"
@@ -132,11 +117,11 @@ var releaseVersionFormat = regexp.MustCompile(`^\d+\.\d+\.\d+\n$`)
 // background list of a non-interactive shell reads /dev/null otherwise.
 const lifelineScript = `exec 3<&0; "$@" </dev/null & child=$!; ( read -r _ <&3; kill -KILL 0 ) & wait "$child"; kill -KILL 0`
 
-func TestReleasedBuildsInterop(t *testing.T) {
+func TestReleasedBuildsBelowMinimumAreRefused(t *testing.T) {
 	fuse := requireNetworkFuse(t)
 	requireHeavyRunLock(t)
 	skipped := interopSkips(t)
-	for _, version := range releasedLegacyVersions() {
+	for _, version := range retiredReleaseVersions {
 		t.Run(versionName(version), func(t *testing.T) {
 			if skipped[interopVersionKey(version)] {
 				t.Skipf("ProtocolVersion %d left out by CORSA_INTEROP_SKIP", version)
@@ -144,7 +129,7 @@ func TestReleasedBuildsInterop(t *testing.T) {
 			for _, binary := range interopBinaries(t, version) {
 				release := describeRelease(t, fuse, binary, version)
 				t.Run(release.release, func(t *testing.T) {
-					runReleaseScenarios(t, fuse, release)
+					checkBelowFloorRelease(t, fuse, release)
 				})
 			}
 		})
@@ -158,7 +143,7 @@ func TestReleasedBuildsInterop(t *testing.T) {
 func interopSkips(t *testing.T) map[string]bool {
 	t.Helper()
 	known := map[string]bool{}
-	for _, version := range releasedLegacyVersions() {
+	for _, version := range retiredReleaseVersions {
 		known[interopVersionKey(version)] = true
 	}
 	skipped := map[string]bool{}
@@ -192,35 +177,8 @@ func interopBinaries(t *testing.T, version int) []string {
 	return binaries
 }
 
-func runReleaseScenarios(t *testing.T, fuse networkFuse, release releaseUnderTest) {
-	scenarios := []struct {
-		name string
-		run  func(*testing.T, networkFuse, releaseUnderTest)
-	}{
-		{"a_new_dials_old_tls_then_probe_then_legacy", scenarioNewDialsOld},
-		{"b_dm_new_to_old", scenarioDMNewToOld},
-		{"c_transit_through_old_relay", scenarioTransitThroughOld},
-		{"d_old_dials_new", scenarioOldDialsNew},
-		{"e_legacy_refused_pinned_identity_outbound", scenarioPinnedIdentityOutbound},
-		{"e_legacy_refused_pinned_identity_inbound", scenarioPinnedIdentityInbound},
-		{"e_legacy_refused_v2_bound_endpoint", scenarioBoundEndpoint},
-		{"f_first_dial_latency", scenarioFirstDialLatency},
-		{"f_first_dials_beyond_the_rate_limit", scenarioFirstDialsBeyondTheRateLimit},
-		{"g_tls_first_off_unpinned_probe_then_legacy", scenarioTLSFirstOffUnpinned},
-		{"g_tls_first_off_pinned_identity_refused", scenarioTLSFirstOffPinnedIdentity},
-		{"g_tls_first_off_bound_endpoint_refused", scenarioTLSFirstOffBoundEndpoint},
-		{"h_restart_keeps_pins", scenarioRestartKeepsPins},
-		{"i_release_restart", scenarioReleaseRestart},
-		{"j_forged_probe_answer_unbound_identity", scenarioForgedProbeAnswerUnbound},
-		{"j_forged_probe_answer_pinned_identity", scenarioForgedProbeAnswerPinned},
-		{"j_cut_off_probe_answer", scenarioCutOffProbeAnswer},
-		{"j_dropped_tls_handshake", scenarioDroppedTLSHandshake},
-		{"j_broken_tls_handshake", scenarioBrokenTLSHandshake},
-	}
-	for _, scenario := range scenarios {
-		t.Run(scenario.name, func(t *testing.T) { scenario.run(t, fuse, release) })
-	}
-}
+// Retired release fixtures cover every previous supported protocol.
+var retiredReleaseVersions = [...]int{28, 29, 30}
 
 // --- the network fuse --------------------------------------------------------
 
@@ -651,6 +609,7 @@ type releasedNode struct {
 	rpcHost     string
 	rpcPort     string
 	rpcPassword string
+	probeFirst  bool
 	// home is the old node's HOME; dataDir is the data directory a release
 	// derives from it, created in advance.
 	home       string
@@ -760,7 +719,7 @@ func (n *releasedNode) identityPath() string {
 // environment is the whole environment of the old process: nothing of the
 // caller's is inherited.
 func (n *releasedNode) environment(peer string) []string {
-	return []string{
+	env := []string{
 		"PATH=/usr/bin:/bin",
 		"HOME=" + n.home,
 		"TMPDIR=" + filepath.Join(n.home, "tmp"),
@@ -778,6 +737,10 @@ func (n *releasedNode) environment(peer string) []string {
 		"CORSA_ACCEPT_DM=true",
 		"CORSA_LOG_LEVEL=debug",
 	}
+	if n.probeFirst {
+		env = append(env, "CORSA_V2_TLS_FIRST=off")
+	}
+	return env
 }
 
 // stdout is what the old process wrote to its stdout and stderr so far.
@@ -1114,790 +1077,86 @@ func loopbackSocketName(name string) bool {
 // put on the wire, not a value the proxy could have written.
 func startRecordingProxy(t *testing.T, target string, side oldPeerSide) *legacyVersionProxy {
 	t.Helper()
-	return launchLegacyProxy(t, &legacyVersionProxy{target: target, side: side, verbatim: true})
+	return launchLegacyProxy(t, &legacyVersionProxy{target: target, side: side})
 }
 
-// (a) A node of this build dials the release: the TLS attempt is answered
-// with a v1 line, the identity-less probe follows on a new connection, and a
-// legacy session is established on the probe's connection. The address is not
-// charged for being old.
-func scenarioNewDialsOld(t *testing.T, fuse networkFuse, release releaseUnderTest) {
-	old := startReleasedNode(t, fuse, release, freeAddress(t))
-	proxy := startRecordingProxy(t, string(old.listen), oldPeerListens)
-	dialer, stop := startQuietNode(t, nil)
-	defer stop()
-	target := proxy.peerAddress()
-
-	session, err := dialEstablishedPastTransport(t, dialer, target)
-	if err != nil {
-		t.Fatalf("the node did not reach the release: %v", err)
-	}
-	requireLegacySessionWith(t, session, old, release)
-	if got := proxy.connections(); got != 2 {
-		t.Fatalf("%d connections, want the TLS attempt and the probe's", got)
-	}
-	if got := proxy.clientHellos(); got != 1 {
-		t.Fatalf("%d connections opened with a ClientHello, want the first one only", got)
-	}
-	if hellos := proxy.nodeHellos(); len(hellos) < 2 || hellos[0] || !hellos[1] {
-		t.Fatalf("hellos (identified?) = %v, want the identity-less probe, then the full hello", hellos)
-	}
-	requireAddressNotCharged(t, dialer, target)
-	if !dialer.secureSessions.marks.legacyObserved(target) {
-		t.Fatal("the release was not recorded as legacy_observed")
-	}
+// clientHellos is how many connections the node under test opened with a
+// TLS ClientHello so far.
+func (p *legacyVersionProxy) clientHellos() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.nodeClientHellos
 }
 
-func requireLegacySessionWith(t *testing.T, session *peerSession, old *releasedNode, release releaseUnderTest) {
+// nodeHellos reports, per hello the node under test sent so far, whether it
+// carried an identity.
+func (p *legacyVersionProxy) nodeHellos() []bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]bool(nil), p.nodeHelloIdentified...)
+}
+
+// connections is how many connections the proxy has forwarded.
+func (p *legacyVersionProxy) connections() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.conns) / 2
+}
+
+// nodeSentFrame reports whether the node under test sent a frame of this type.
+func (p *legacyVersionProxy) nodeSentFrame(frameType string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, t := range p.nodeFrameTypes {
+		if t == frameType {
+			return true
+		}
+	}
+	return false
+}
+
+func checkBelowFloorRelease(t *testing.T, fuse networkFuse, release releaseUnderTest) {
 	t.Helper()
-	if session.proven != nil {
-		t.Fatal("the session with the release was taken for v2")
-	}
-	if session.peerIdentity != old.peerIdentity() {
-		t.Fatalf("the session names %s, want the release's test identity", session.peerIdentity)
-	}
-	if session.version != release.protocol {
-		t.Fatalf("the release announced ProtocolVersion %d, want %d", session.version, release.protocol)
-	}
-}
-
-// requireAddressNotCharged is requireAddressAfterDial for a dial that
-// established its session: nothing recorded against the address at all.
-func requireAddressNotCharged(t *testing.T, svc *Service, address domain.PeerAddress) {
-	t.Helper()
-	requireAddressAfterDial(t, svc, address, nil, addressAfterDial{})
-}
-
-// addressAfterDial is what a dial must have left at its address.
-type addressAfterDial struct {
-	// failure: the dial counts as an ordinary failed dial of the address —
-	// one more consecutive failure and a lower score. Never a ban: no state
-	// here may ban the address.
-	failure bool
-	// legacyHeld: the fall back to v1 at the address is held.
-	legacyHeld bool
-	// v2RetrySteps: how many steps the address's v2 retry backoff took —
-	// one dial takes one at most.
-	v2RetrySteps int
-}
-
-// requireAddressAfterDial hands a failed dial's error to what the connection
-// manager calls with it (onCMDialFailed) — the test dials past the manager,
-// and only that handler charges an address — and then checks the address
-// against want. Whatever want says, a dial never leaves a setup failure, a
-// ban or a v2 binding at a release's address.
-func requireAddressAfterDial(t *testing.T, svc *Service, address domain.PeerAddress, dialErr error, want addressAfterDial) {
-	t.Helper()
-	if dialErr != nil {
-		svc.onCMDialFailed(address, dialErr, errors.Is(dialErr, errIncompatibleProtocol))
-	}
-	svc.peerMu.RLock()
-	health := svc.health[address]
-	setup := svc.setupFailures[address]
-	svc.peerMu.RUnlock()
-	if setup != nil && setup.Consecutive > 0 {
-		t.Fatalf("the dial was counted as a setup failure: %+v", *setup)
-	}
-	if health != nil && !health.BannedUntil.IsZero() {
-		t.Fatalf("the dial banned the address until %v", health.BannedUntil)
-	}
-	failed := health != nil && health.ConsecutiveFailures > 0
-	if failed != want.failure {
-		t.Fatalf("failed dials of the address: %v (health %+v), want %v", failed, health, want.failure)
-	}
-	if !want.failure && health != nil && health.Score < 0 {
-		t.Fatalf("the dial lowered the address's score to %d", health.Score)
-	}
-	if svc.secureSessions.store.endpointRequiresV2(address) {
-		t.Fatal("the dial left a v2 binding on a release's address")
-	}
-	marks := svc.secureSessions.marks
-	if held := marks.legacyHeld(address); held != want.legacyHeld {
-		t.Fatalf("the fall back to v1 held: %v, want %v", held, want.legacyHeld)
-	}
-	if steps := v2RetrySteps(marks, address); steps != want.v2RetrySteps {
-		t.Fatalf("the v2 retry backoff took %d steps, want %d", steps, want.v2RetrySteps)
-	}
-	if held := marks.v2RetryHeld(address); held != (want.v2RetrySteps > 0) {
-		t.Fatalf("the v2 retry backoff holds the next dial: %v, want %v", held, want.v2RetrySteps > 0)
-	}
-}
-
-// heldAfterRefusal is what a refused v1 answer leaves: nothing charged, the
-// fall back to v1 held, and the next v2 attempt paced.
-var heldAfterRefusal = addressAfterDial{legacyHeld: true, v2RetrySteps: 1}
-
-// pacedAfterUnprovenFailure is what a dial that failed before anything was
-// authenticated leaves — a probe answer that admitted nothing, a TLS
-// handshake broken before the proof: nothing charged, nothing held, the next
-// dial paced.
-var pacedAfterUnprovenFailure = addressAfterDial{v2RetrySteps: 1}
-
-// (b) A DM from a node of this build reaches the release's inbox, read back
-// over the release's own RPC.
-func scenarioDMNewToOld(t *testing.T, fuse networkFuse, release releaseUnderTest) {
-	newAddress := freeAddress(t)
-	old := startReleasedNode(t, fuse, release, newAddress)
-	newNode, stop := startTestNodeWithSetup(t, config.Node{
-		ListenAddress:  newAddress,
-		BootstrapPeers: []string{string(old.listen)},
-		ConnectOnly:    string(old.listen),
-		Type:           config.NodeTypeFull,
-	}, nil)
-	defer stop()
-	waitForConditionMsg(t, 40*time.Second, "no legacy session with the release", func() bool {
-		return newNode.SessionKindStats().OutboundLegacy > 0
+	t.Run("outbound", func(t *testing.T) {
+		old := startReleasedNode(t, fuse, release, freeAddress(t))
+		proxy := startRecordingProxy(t, string(old.listen), oldPeerListens)
+		dialer, stop := startQuietNode(t, nil)
+		t.Cleanup(stop)
+		session, err := dialEstablishedPastTransport(t, dialer, proxy.peerAddress())
+		if err == nil || session != nil {
+			t.Fatalf("accepted a session with protocol %d below the floor", release.protocol)
+		}
+		proxy.drain(t)
+		if proxy.connections() != 1 || proxy.clientHellos() != 1 || len(proxy.nodeHellos()) != 0 {
+			t.Fatalf("wanted one TLS attempt and no legacy hello, connections=%d TLS=%d hello=%v",
+				proxy.connections(), proxy.clientHellos(), proxy.nodeHellos())
+		}
 	})
-
-	for _, body := range []string{"to-the-release", strings.Repeat("a", 18180)} {
-		id := newMessageID(t)
-		sendDMToRelease(t, newNode, old, id, body)
-		waitForConditionMsg(t, 40*time.Second, "the DM never reached the release's inbox", func() bool {
-			return old.hasDM(id)
+	t.Run("inbound", func(t *testing.T) {
+		listener, address, stop := listenerNode(t, nil)
+		t.Cleanup(stop)
+		proxy := startRecordingProxy(t, address, oldPeerDials)
+		old := startReleasedNode(t, fuse, release, proxy.address())
+		waitForConditionMsg(t, 10*time.Second, "released peer never connected to the listener", func() bool {
+			return proxy.connections() > 0
 		})
-	}
+		proxy.drain(t)
+		if secure, legacy := authenticatedInbound(listener); secure != 0 || legacy != 0 {
+			t.Fatalf("accepted a session from protocol %d, TLS=%d legacy=%d", release.protocol, secure, legacy)
+		}
+		if proxy.nodeSentFrame("welcome") || listener.secureSessions.store.identityPinned(old.peerIdentity()) {
+			t.Fatalf("below-floor protocol %d got a welcome or changed the pin store", release.protocol)
+		}
+	})
 }
 
 func newMessageID(t *testing.T) string {
 	t.Helper()
-	raw := randomHex(t, 16)
-	return raw[0:8] + "-" + raw[8:12] + "-4" + raw[13:16] + "-a" + raw[17:20] + "-" + raw[20:32]
-}
-
-func sendDMToRelease(t *testing.T, from *Service, to *releasedNode, id, body string) {
-	t.Helper()
-	ciphertext, err := directmsg.EncryptForMessage(
-		from.identity,
-		domain.DMRecipient{
-			Address:      to.peerIdentity(),
-			BoxKeyBase64: identity.BoxPublicKeyBase64(to.keys.BoxPublicKey),
-		},
-		domain.OutgoingDM{Body: body}, "dm", id,
-	)
+	id, err := protocol.NewMessageID()
 	if err != nil {
-		t.Fatalf("encrypt DM %s: %v", id, err)
+		t.Fatalf("generate message ID: %v", err)
 	}
-	ts := time.Now().UTC().Format(time.RFC3339)
-	stored := from.HandleLocalFrame(sendMessageFrame("dm", id, from.Address(), to.keys.Address, "sender-delete", ts, 0, ciphertext))
-	if stored.Type != "message_stored" {
-		t.Fatalf("send %s: %#v", id, stored)
-	}
-}
-
-// (c) Transit: nodes A and C of this build reach each other only through the
-// release B. A DM crosses each way, and A and C never meet.
-func scenarioTransitThroughOld(t *testing.T, fuse networkFuse, release releaseUnderTest) {
-	addressA := freeAddress(t)
-	addressC := freeAddress(t)
-	relay := startReleasedNode(t, fuse, release, addressA)
-	nodeA, stopA := startTestNodeWithSetup(t, config.Node{
-		ListenAddress:  addressA,
-		BootstrapPeers: []string{string(relay.listen)},
-		ConnectOnly:    string(relay.listen),
-		Type:           config.NodeTypeFull,
-	}, nil)
-	defer stopA()
-	nodeC, stopC := startTestNodeWithSetup(t, config.Node{
-		ListenAddress:  addressC,
-		BootstrapPeers: []string{string(relay.listen)},
-		ConnectOnly:    string(relay.listen),
-		Type:           config.NodeTypeFull,
-	}, nil)
-	defer stopC()
-	waitForConditionMsg(t, 40*time.Second, "A and C never both reached the release", func() bool {
-		return nodeA.SessionKindStats().OutboundLegacy > 0 && nodeC.SessionKindStats().OutboundLegacy > 0
-	})
-
-	idA, idC := domain.PeerIdentityFromWire(nodeA.Address()), domain.PeerIdentityFromWire(nodeC.Address())
-	assertNoDirectContact(t, nodeA, idC, "before the DMs")
-	deliverDM(t, nodeA, nodeC, newMessageID(t), "a-to-c-through-the-release")
-	deliverDM(t, nodeC, nodeA, newMessageID(t), "c-to-a-through-the-release")
-	assertNoDirectContact(t, nodeA, idC, "after the DMs")
-	assertNoDirectContact(t, nodeC, idA, "after the DMs")
-}
-
-// (d) The release dials a node of this build: a legacy session, counted by
-// the session-kind metrics as an inbound legacy one below the v2 version.
-func scenarioOldDialsNew(t *testing.T, fuse networkFuse, release releaseUnderTest) {
-	newAddress := freeAddress(t)
-	newNode, stop := startTestNodeWithSetup(t, config.Node{
-		ListenAddress:  newAddress,
-		BootstrapPeers: []string{},
-		Type:           config.NodeTypeFull,
-	}, withoutOwnDials(nil))
-	defer stop()
-	old := startReleasedNode(t, fuse, release, newAddress)
-
-	waitForConditionMsg(t, 40*time.Second, "the release never authenticated to the node", func() bool {
-		_, v1 := authenticatedInbound(newNode)
-		return v1 > 0
-	})
-	kinds := newNode.SessionKindStats()
-	if kinds.InboundLegacy == 0 || kinds.InboundV2 != 0 || kinds.HellosBelowSecureVersion == 0 {
-		t.Fatalf("session kinds = %+v, want an inbound legacy session below the v2 version and no v2", kinds)
-	}
-	if versions := inboundVersionsOf(newNode, old.peerIdentity()); !slices.Equal(versions, []domain.ProtocolVersion{domain.ProtocolVersion(release.protocol)}) {
-		t.Fatalf("the release's inbound sessions announced %v, want [%d]", versions, release.protocol)
-	}
-}
-
-// inboundVersionsOf is the announced ProtocolVersion of every authenticated
-// inbound connection of id.
-func inboundVersionsOf(svc *Service, id domain.PeerIdentity) []domain.ProtocolVersion {
-	svc.peerMu.RLock()
-	defer svc.peerMu.RUnlock()
-	var versions []domain.ProtocolVersion
-	for _, entry := range svc.conns {
-		core := entry.core
-		if core == nil || core.Identity() != id {
-			continue
-		}
-		if auth := core.Auth(); auth != nil && auth.Verified {
-			versions = append(versions, core.ProtocolVersion())
-		}
-	}
-	return versions
-}
-
-// (e) No legacy for an identity that proved v2 — outbound: a node that pinned
-// the release's identity refuses the probe's answer and never sends its full
-// hello.
-func scenarioPinnedIdentityOutbound(t *testing.T, fuse networkFuse, release releaseUnderTest) {
-	old := startReleasedNode(t, fuse, release, freeAddress(t))
-	proxy := startRecordingProxy(t, string(old.listen), oldPeerListens)
-	dialer, stop := startQuietNode(t, pinningSetup(t, old.peerIdentity()))
-	defer stop()
-
-	established, err := dialPastTransport(t, dialer, proxy.peerAddress())
-	if established || !errors.Is(err, errLegacyRefusedPinned) {
-		t.Fatalf("established=%v err=%v, want errLegacyRefusedPinned", established, err)
-	}
-	proxy.drain(t)
-	for i, identified := range proxy.nodeHellos() {
-		if identified {
-			t.Fatalf("hello %d carried this node's identity to a pinned release", i)
-		}
-	}
-	if !dialer.secureSessions.store.identityPinned(old.peerIdentity()) {
-		t.Fatal("the refusal cost the identity its pin")
-	}
-}
-
-// (e) No legacy for an identity that proved v2 — inbound: the release dials a
-// node that pinned its identity and is refused at its hello, before any
-// welcome or challenge.
-func scenarioPinnedIdentityInbound(t *testing.T, fuse networkFuse, release releaseUnderTest) {
-	newAddress := freeAddress(t)
-	proxy := startRecordingProxy(t, newAddress, oldPeerDials)
-	old := startReleasedNode(t, fuse, release, proxy.address())
-	pinned := old.peerIdentity()
-	newNode, stop := startTestNodeWithSetup(t, config.Node{
-		ListenAddress:  newAddress,
-		BootstrapPeers: []string{},
-		Type:           config.NodeTypeFull,
-	}, withoutOwnDials(pinningSetup(t, pinned)))
-	defer stop()
-
-	waitForConditionMsg(t, 40*time.Second, "the node never refused the release's hello", func() bool {
-		return newNode.SecureSessionStoreStats().V1RefusalsIdentityPinned > 0
-	})
-	// Every frame the node wrote must have been read by the proxy before the
-	// check that it sent no welcome: drain waits until both ends closed.
-	proxy.drain(t)
-	if _, v1 := authenticatedInbound(newNode); v1 != 0 {
-		t.Fatalf("%d legacy sessions with a pinned identity", v1)
-	}
-	if proxy.nodeSentFrame("welcome") {
-		t.Fatal("the node sent a welcome with a challenge to a pinned identity's hello")
-	}
-	if !newNode.secureSessions.store.identityPinned(pinned) {
-		t.Fatal("the refusal cost the identity its pin")
-	}
-}
-
-// (e) No legacy for an endpoint bound to v2: the release answers the TLS
-// attempt with a v1 line at an endpoint where another identity proved v2, and
-// the dial ends there — no probe, no hello.
-func scenarioBoundEndpoint(t *testing.T, fuse networkFuse, release releaseUnderTest) {
-	old := startReleasedNode(t, fuse, release, freeAddress(t))
-	proxy := startRecordingProxy(t, string(old.listen), oldPeerListens)
-	owner := generateProbeIdentity(t)
-	dialer, stop := startQuietNode(t, func(svc *Service) {
-		if _, err := svc.secureSessions.store.noteProvenOutbound(dialledAt(proxy.peerAddress()), domain.PeerIdentityFromWire(owner.Address), endpointProtectionNone()); err != nil {
-			t.Fatalf("bind: %v", err)
-		}
-	})
-	defer stop()
-	if !dialer.secureSessions.store.endpointRequiresV2(proxy.peerAddress()) {
-		t.Fatal("fixture: the endpoint is not bound to v2")
-	}
-
-	established, err := dialPastTransport(t, dialer, proxy.peerAddress())
-	if established || !errors.Is(err, errLegacyRefusedV2Bound) {
-		t.Fatalf("established=%v err=%v, want errLegacyRefusedV2Bound", established, err)
-	}
-	proxy.drain(t)
-	if got := proxy.connections(); got != 1 {
-		t.Fatalf("%d connections, want the TLS attempt alone", got)
-	}
-	if hellos := proxy.nodeHellos(); len(hellos) != 0 {
-		t.Fatalf("the node sent %d hellos to a v2-bound endpoint", len(hellos))
-	}
-	if dialer.SecureSessionStoreStats().V1RefusalsEndpointBound == 0 {
-		t.Fatal("the refusal was not counted as an endpoint-bound one")
-	}
-}
-
-// (f) How long the first dial of a node of this build to the release takes,
-// from the start of the dial to the established legacy session: TLS attempt,
-// v1 answer, probe, legacy handshake. Each run is a fresh node, so nothing it
-// learned on a previous run shortens the next. The same is measured with
-// TLS-first switched off (the dial opens with the probe) as the reference for
-// what the TLS attempt costs — input for choosing the probe timeouts and
-// whether TLS-first stays the default.
-//
-// The runs are paced: a release accepts at most releaseConnRatePerWindow
-// connections from one IP per releaseConnRateWindow and resets the rest, and a
-// TLS-first dial to it spends two of them (the TLS attempt and the probe), so
-// back-to-back runs from loopback would measure the release's limiter instead
-// of the dial. The limiter itself is shown once, unpaced, in
-// scenarioFirstDialsBeyondTheRateLimit.
-func scenarioFirstDialLatency(t *testing.T, fuse networkFuse, release releaseUnderTest) {
-	old := startReleasedNode(t, fuse, release, freeAddress(t))
-	for _, mode := range firstDialModes() {
-		samples := make([]time.Duration, 0, interopLatencyRuns)
-		var failures []string
-		for run := range interopLatencyRuns {
-			if run > 0 {
-				time.Sleep(interopLatencyPacing)
-			}
-			elapsed, err := timeFirstDial(t, old, mode.setup)
-			if err != nil {
-				failures = append(failures, fmt.Sprintf("run %d after %s: %v", run+1, elapsed, err))
-				continue
-			}
-			samples = append(samples, elapsed)
-		}
-		t.Logf("interop latency v%d (%s) %s: %s", release.protocol, release.release, mode.name, latencySummary(samples))
-		if len(failures) > 0 {
-			t.Errorf("v%d %s: %d of %d paced first dials failed: %v", release.protocol, mode.name, len(failures), interopLatencyRuns, failures)
-		}
-		time.Sleep(releaseConnRateWindow)
-	}
-}
-
-// firstDialMode is how a fresh node of this build opens its first dial.
-type firstDialMode struct {
-	name  string
-	setup func(*Service)
-}
-
-func firstDialModes() []firstDialMode {
-	return []firstDialMode{
-		{"tls-first", nil},
-		{"probe-first", func(svc *Service) { svc.secureSessions.tlsFirstDisabled = true }},
-	}
-}
-
-// (f') The release's per-IP connection limiter against unpaced first dials of
-// fresh nodes behind one IP: how many dials in a row succeed before the
-// release resets them. A TLS-first dial spends two connections of the window,
-// a probe-first one spends one. Recorded, not asserted beyond "at least one":
-// it is the release's policy, and the number is input for the same choice as
-// scenario (f).
-func scenarioFirstDialsBeyondTheRateLimit(t *testing.T, fuse networkFuse, release releaseUnderTest) {
-	for i, mode := range firstDialModes() {
-		if i > 0 {
-			time.Sleep(releaseConnRateWindow)
-		}
-		old := startReleasedNode(t, fuse, release, freeAddress(t))
-		succeeded, firstFailure := 0, ""
-		for run := range releaseConnRatePerWindow + 1 {
-			if _, err := timeFirstDial(t, old, mode.setup); err != nil {
-				firstFailure = fmt.Sprintf("run %d: %v", run+1, err)
-				break
-			}
-			succeeded++
-		}
-		t.Logf("interop rate limit v%d (%s) %s: %d unpaced first dials in a row succeeded; first failure: %s",
-			release.protocol, release.release, mode.name, succeeded, firstFailure)
-		if succeeded == 0 {
-			t.Errorf("v%d %s: not even the first unpaced dial succeeded: %s", release.protocol, mode.name, firstFailure)
-		}
-	}
-}
-
-// timeFirstDial makes one first dial from a fresh node to the release and
-// returns how long it took and how it ended.
-func timeFirstDial(t *testing.T, old *releasedNode, setup func(*Service)) (time.Duration, error) {
-	t.Helper()
-	dialer, stop := startQuietNode(t, setup)
-	defer stop()
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	started := time.Now()
-	result, err := dialer.dialForCM(ctx, []domain.PeerAddress{old.listen})
-	elapsed := time.Since(started)
-	if err != nil {
-		return elapsed, err
-	}
-	// The session belongs to no slot and must be closed here; a close error
-	// would be about tearing it down, not about the dial being measured, and
-	// the node's stop releases whatever is left.
-	if closeErr := result.Session.Close(); closeErr != nil {
-		t.Logf("close the measured session: %v", closeErr)
-	}
-	if result.Session.proven != nil {
-		return elapsed, errors.New("the first dial to the release ended in a v2 session")
-	}
-	return elapsed, nil
-}
-
-// latencySummary is the nearest-rank p50, p95 and max of samples, and the
-// samples themselves in milliseconds.
-func latencySummary(samples []time.Duration) string {
-	sorted := slices.Clone(samples)
-	slices.Sort(sorted)
-	rank := func(percent int) time.Duration {
-		index := (percent*len(sorted)+99)/100 - 1
-		return sorted[max(index, 0)]
-	}
-	ms := make([]string, len(samples))
-	for i, sample := range samples {
-		ms[i] = strconv.FormatFloat(float64(sample.Microseconds())/1000, 'f', 1, 64)
-	}
-	if len(sorted) == 0 {
-		return "n=0"
-	}
-	return fmt.Sprintf("n=%d p50=%s p95=%s max=%s samples_ms=[%s]",
-		len(sorted), rank(50), rank(95), sorted[len(sorted)-1], strings.Join(ms, " "))
-}
-
-// startTLSFirstOffNode is startQuietNode with TLS-first switched off through
-// the node's config, as the operator switches it.
-func startTLSFirstOffNode(t *testing.T, setup func(*Service)) (*Service, func()) {
-	t.Helper()
-	return startTestNodeWithSetup(t, config.Node{
-		ListenAddress:     freeAddress(t),
-		BootstrapPeers:    []string{},
-		Type:              domain.NodeTypeFull,
-		DisableV2TLSFirst: true,
-	}, withoutOwnDials(setup))
-}
-
-// pinningSetup is a setup that pins id in the node's store.
-func pinningSetup(t *testing.T, id domain.PeerIdentity) func(*Service) {
-	return func(svc *Service) {
-		if err := svc.secureSessions.store.noteProvenInbound(id); err != nil {
-			t.Fatalf("pin: %v", err)
-		}
-	}
-}
-
-// requireOnlyIdentityLessHellos fails when a hello carrying this node's
-// identity reached the release, and when not even the probe did.
-func requireOnlyIdentityLessHellos(t *testing.T, proxy *legacyVersionProxy) {
-	t.Helper()
-	hellos := proxy.nodeHellos()
-	if len(hellos) == 0 {
-		t.Fatal("no probe reached the release")
-	}
-	for i, identified := range hellos {
-		if identified {
-			t.Fatalf("hello %d carried this node's identity to the release", i)
-		}
-	}
-}
-
-// (g) TLS-first switched off, an unpinned release at an address nothing
-// binds: one connection, the probe first and the full hello after it, a legacy
-// session — and no ClientHello on the wire.
-func scenarioTLSFirstOffUnpinned(t *testing.T, fuse networkFuse, release releaseUnderTest) {
-	old := startReleasedNode(t, fuse, release, freeAddress(t))
-	proxy := startRecordingProxy(t, string(old.listen), oldPeerListens)
-	dialer, stop := startTLSFirstOffNode(t, nil)
-	defer stop()
-	target := proxy.peerAddress()
-
-	session, err := dialEstablishedPastTransport(t, dialer, target)
-	if err != nil {
-		t.Fatalf("the node did not reach the release: %v", err)
-	}
-	requireLegacySessionWith(t, session, old, release)
-	if got, tls := proxy.connections(), proxy.clientHellos(); got != 1 || tls != 0 {
-		t.Fatalf("%d connections, %d ClientHellos; want the probe's connection alone and no ClientHello", got, tls)
-	}
-	if hellos := proxy.nodeHellos(); len(hellos) < 2 || hellos[0] || !hellos[1] {
-		t.Fatalf("hellos (identified?) = %v, want the identity-less probe, then the full hello", hellos)
-	}
-	requireAddressNotCharged(t, dialer, target)
-	if got := dialer.SecureSessionStoreStats().DialsOpenedByProbe; got != 1 {
-		t.Fatalf("%d dials opened by the probe, want 1", got)
-	}
-}
-
-// (g) TLS-first switched off, a release whose identity this node pinned: it is
-// known only from the probe's answer, so the probe runs — and the answer is
-// refused before this node's identity is on the wire.
-func scenarioTLSFirstOffPinnedIdentity(t *testing.T, fuse networkFuse, release releaseUnderTest) {
-	old := startReleasedNode(t, fuse, release, freeAddress(t))
-	proxy := startRecordingProxy(t, string(old.listen), oldPeerListens)
-	dialer, stop := startTLSFirstOffNode(t, pinningSetup(t, old.peerIdentity()))
-	defer stop()
-
-	established, err := dialPastTransport(t, dialer, proxy.peerAddress())
-	if established || !errors.Is(err, errLegacyRefusedPinned) {
-		t.Fatalf("established=%v err=%v, want errLegacyRefusedPinned", established, err)
-	}
-	proxy.drain(t)
-	requireOnlyIdentityLessHellos(t, proxy)
-	if tls := proxy.clientHellos(); tls != 0 {
-		t.Fatalf("%d ClientHellos before the probe with TLS-first off", tls)
-	}
-	requireAddressAfterDial(t, dialer, proxy.peerAddress(), err, heldAfterRefusal)
-}
-
-// (g) TLS-first switched off, an endpoint bound to v2: the identity is known
-// before the dial, so the switch changes nothing — a TLS attempt alone, no
-// probe, the release's v1 answer refused.
-func scenarioTLSFirstOffBoundEndpoint(t *testing.T, fuse networkFuse, release releaseUnderTest) {
-	old := startReleasedNode(t, fuse, release, freeAddress(t))
-	proxy := startRecordingProxy(t, string(old.listen), oldPeerListens)
-	owner := generateProbeIdentity(t)
-	dialer, stop := startTLSFirstOffNode(t, func(svc *Service) {
-		if _, err := svc.secureSessions.store.noteProvenOutbound(dialledAt(proxy.peerAddress()), domain.PeerIdentityFromWire(owner.Address), endpointProtectionNone()); err != nil {
-			t.Fatalf("bind: %v", err)
-		}
-	})
-	defer stop()
-
-	established, err := dialPastTransport(t, dialer, proxy.peerAddress())
-	if established || !errors.Is(err, errLegacyRefusedV2Bound) {
-		t.Fatalf("established=%v err=%v, want errLegacyRefusedV2Bound", established, err)
-	}
-	proxy.drain(t)
-	if got, tls := proxy.connections(), proxy.clientHellos(); got != 1 || tls != 1 {
-		t.Fatalf("%d connections, %d ClientHellos; want the TLS attempt alone", got, tls)
-	}
-	if hellos := proxy.nodeHellos(); len(hellos) != 0 {
-		t.Fatalf("the node sent %d hellos to a v2-bound endpoint", len(hellos))
-	}
-}
-
-// (h) This node restarts on its data directory with pins it stored before:
-// the pinned release is refused on the probe's answer, while an unpinned one
-// is reached again as at a first contact — TLS, the probe, legacy — since the
-// marks of the run before are gone.
-func scenarioRestartKeepsPins(t *testing.T, fuse networkFuse, release releaseUnderTest) {
-	pinned := startReleasedNode(t, fuse, release, freeAddress(t))
-	unpinned := startReleasedNode(t, fuse, release, freeAddress(t))
-	pinnedProxy := startRecordingProxy(t, string(pinned.listen), oldPeerListens)
-	unpinnedProxy := startRecordingProxy(t, string(unpinned.listen), oldPeerListens)
-
-	cfg := restartableNodeConfig(t, t.TempDir(), false)
-	self, err := identity.Generate()
-	if err != nil {
-		t.Fatalf("generate identity: %v", err)
-	}
-	before, stopBefore := startTestNodeAs(t, cfg, self, withoutOwnDials(pinningSetup(t, pinned.peerIdentity())))
-	if established, err := dialPastTransport(t, before, unpinnedProxy.peerAddress()); !established {
-		t.Fatalf("the unpinned release was not reached before the restart: %v", err)
-	}
-	if !before.secureSessions.marks.legacyObserved(unpinnedProxy.peerAddress()) {
-		t.Fatal("premise: the dial before the restart left no legacy_observed")
-	}
-	stopBefore()
-	connectionsBefore, tlsBefore := unpinnedProxy.connections(), unpinnedProxy.clientHellos()
-
-	after, stopAfter := startTestNodeAs(t, cfg, self, withoutOwnDials(nil))
-	defer stopAfter()
-	if !after.secureSessions.store.identityPinned(pinned.peerIdentity()) {
-		t.Fatal("the restart lost the stored pin")
-	}
-	if after.secureSessions.marks.legacyObserved(unpinnedProxy.peerAddress()) {
-		t.Fatal("legacy_observed outlived the restart")
-	}
-
-	established, err := dialPastTransport(t, after, pinnedProxy.peerAddress())
-	if established || !errors.Is(err, errLegacyRefusedPinned) {
-		t.Fatalf("pinned after the restart: established=%v err=%v, want errLegacyRefusedPinned", established, err)
-	}
-	pinnedProxy.drain(t)
-	requireOnlyIdentityLessHellos(t, pinnedProxy)
-	requireAddressAfterDial(t, after, pinnedProxy.peerAddress(), err, heldAfterRefusal)
-
-	session, err := dialEstablishedPastTransport(t, after, unpinnedProxy.peerAddress())
-	if err != nil {
-		t.Fatalf("the unpinned release was not reached after the restart: %v", err)
-	}
-	requireLegacySessionWith(t, session, unpinned, release)
-	if got, tls := unpinnedProxy.connections()-connectionsBefore, unpinnedProxy.clientHellos()-tlsBefore; got != 2 || tls != 1 {
-		t.Fatalf("after the restart %d connections, %d ClientHellos; want the TLS attempt, then the probe's", got, tls)
-	}
-	requireAddressNotCharged(t, after, unpinnedProxy.peerAddress())
-}
-
-// (i) The release itself restarts on its data directory: this node reaches it
-// again the way it did before — TLS, the probe, legacy, the same identity —
-// and the restart costs the address nothing.
-func scenarioReleaseRestart(t *testing.T, fuse networkFuse, release releaseUnderTest) {
-	old := startReleasedNode(t, fuse, release, freeAddress(t))
-	proxy := startRecordingProxy(t, string(old.listen), oldPeerListens)
-	dialer, stop := startQuietNode(t, nil)
-	defer stop()
-	target := proxy.peerAddress()
-
-	first, err := dialEstablishedPastTransport(t, dialer, target)
-	if err != nil {
-		t.Fatalf("the release was not reached before its restart: %v", err)
-	}
-	requireLegacySessionWith(t, first, old, release)
-
-	old.restart(t, fuse, release, freeAddress(t))
-	connectionsBefore, tlsBefore := proxy.connections(), proxy.clientHellos()
-
-	second, err := dialEstablishedPastTransport(t, dialer, target)
-	if err != nil {
-		t.Fatalf("the release was not reached after its restart: %v", err)
-	}
-	requireLegacySessionWith(t, second, old, release)
-	if got, tls := proxy.connections()-connectionsBefore, proxy.clientHellos()-tlsBefore; got != 2 || tls != 1 {
-		t.Fatalf("after the release's restart %d connections, %d ClientHellos; want the TLS attempt, then the probe's", got, tls)
-	}
-	requireAddressNotCharged(t, dialer, target)
-}
-
-// startForgingProxy is startRecordingProxy whose old-node answers are changed
-// on the way by forge before the proxy starts — a man in the middle in front
-// of a real release.
-func startForgingProxy(t *testing.T, target string, forge func(*legacyVersionProxy)) *legacyVersionProxy {
-	t.Helper()
-	proxy := &legacyVersionProxy{target: target, side: oldPeerListens, verbatim: true}
-	forge(proxy)
-	return launchLegacyProxy(t, proxy)
-}
-
-// requireRefusedAtTheProbe is the end of a dial whose probe answer was
-// forged or cut off on the way: no session, the error of that kind, no hello
-// with this node's identity, no legacy_observed, and at the address exactly
-// what want says.
-func requireRefusedAtTheProbe(t *testing.T, dialer *Service, proxy *legacyVersionProxy, established bool, err, kind error, want addressAfterDial) {
-	t.Helper()
-	if established {
-		t.Fatal("a legacy session came out of a forged or cut-off answer")
-	}
-	if !errors.Is(err, kind) {
-		t.Fatalf("err = %v, want %v", err, kind)
-	}
-	proxy.drain(t)
-	requireOnlyIdentityLessHellos(t, proxy)
-	if dialer.secureSessions.marks.legacyObserved(proxy.peerAddress()) {
-		t.Fatal("a forged or cut-off answer marked the address as an old node")
-	}
-	requireAddressAfterDial(t, dialer, proxy.peerAddress(), err, want)
-}
-
-// (j) The probe's answer is forged: its address is relabelled to another
-// identity, so the identity fields no longer bind. Nothing is admitted;
-// nothing authenticated the answer, so the address is not charged — the next
-// dial is only paced. No hold of v1: no refusal by pin happened.
-func scenarioForgedProbeAnswerUnbound(t *testing.T, fuse networkFuse, release releaseUnderTest) {
-	old := startReleasedNode(t, fuse, release, freeAddress(t))
-	other := generateProbeIdentity(t)
-	proxy := startForgingProxy(t, string(old.listen), func(p *legacyVersionProxy) { p.victimAddress = other.Address })
-	dialer, stop := startQuietNode(t, nil)
-	defer stop()
-
-	established, err := dialPastTransport(t, dialer, proxy.peerAddress())
-	requireRefusedAtTheProbe(t, dialer, proxy, established, err, errLegacyProbeAddressMismatch, pacedAfterUnprovenFailure)
-}
-
-// (j) The probe's answer is forged whole — a self-consistent welcome of an
-// identity this node pinned: refused on the pin, before this node's identity
-// is on the wire. Not charged; the fall back to v1 is held and the next v2
-// attempt paced, as after any refusal by pin.
-func scenarioForgedProbeAnswerPinned(t *testing.T, fuse networkFuse, release releaseUnderTest) {
-	old := startReleasedNode(t, fuse, release, freeAddress(t))
-	victim := generateProbeIdentity(t)
-	proxy := startForgingProxy(t, string(old.listen), func(p *legacyVersionProxy) { p.victim = victim })
-	dialer, stop := startQuietNode(t, pinningSetup(t, domain.PeerIdentityFromWire(victim.Address)))
-	defer stop()
-
-	established, err := dialPastTransport(t, dialer, proxy.peerAddress())
-	requireRefusedAtTheProbe(t, dialer, proxy, established, err, errLegacyRefusedPinned, heldAfterRefusal)
-}
-
-// (j) The probe's answer is cut off half way: an answer that never arrived
-// whole admits nothing, and costs the address what (j) with a relabelled
-// answer does: the pacing of its next dial alone.
-func scenarioCutOffProbeAnswer(t *testing.T, fuse networkFuse, release releaseUnderTest) {
-	old := startReleasedNode(t, fuse, release, freeAddress(t))
-	proxy := startForgingProxy(t, string(old.listen), func(p *legacyVersionProxy) { p.cutWelcome = true })
-	dialer, stop := startQuietNode(t, nil)
-	defer stop()
-
-	established, err := dialPastTransport(t, dialer, proxy.peerAddress())
-	requireRefusedAtTheProbe(t, dialer, proxy, established, err, errLegacyProbeNoAnswer, pacedAfterUnprovenFailure)
-	if proxy.cut() == 0 {
-		t.Fatal("the proxy never cut a welcome: the dial ended for another reason")
-	}
-}
-
-// (j) The TLS attempt is dropped on the way, right after the ClientHello and
-// before any answer: no evidence either way, so the probe follows on a new
-// connection and the release's correct answer to it — not the TLS error —
-// lets v1 in. Nothing is charged.
-func scenarioDroppedTLSHandshake(t *testing.T, fuse networkFuse, release releaseUnderTest) {
-	old := startReleasedNode(t, fuse, release, freeAddress(t))
-	proxy := startForgingProxy(t, string(old.listen), func(p *legacyVersionProxy) { p.interceptTLS = tlsDropped })
-	dialer, stop := startQuietNode(t, nil)
-	defer stop()
-
-	session, err := dialEstablishedPastTransport(t, dialer, proxy.peerAddress())
-	if err != nil {
-		t.Fatalf("the release was not reached after the dropped TLS attempt: %v", err)
-	}
-	requireLegacySessionWith(t, session, old, release)
-	if got := proxy.intercepted(); got != 1 {
-		t.Fatalf("%d TLS attempts dropped, want 1", got)
-	}
-	if got := proxy.connections(); got != 1 {
-		t.Fatalf("%d connections reached the release, want the probe's alone", got)
-	}
-	if hellos := proxy.nodeHellos(); len(hellos) < 2 || hellos[0] || !hellos[1] {
-		t.Fatalf("hellos (identified?) = %v, want the identity-less probe, then the full hello", hellos)
-	}
-	requireAddressNotCharged(t, dialer, proxy.peerAddress())
-}
-
-// (j) The TLS handshake is broken in the middle: a handshake record comes back
-// and then fails. The far end spoke TLS, so no probe follows and nothing leads
-// to v1: a v2 hint and the next v2 attempt paced. Nothing was authenticated,
-// so the address is not charged.
-func scenarioBrokenTLSHandshake(t *testing.T, fuse networkFuse, release releaseUnderTest) {
-	old := startReleasedNode(t, fuse, release, freeAddress(t))
-	proxy := startForgingProxy(t, string(old.listen), func(p *legacyVersionProxy) { p.interceptTLS = tlsBrokenMidway })
-	dialer, stop := startQuietNode(t, nil)
-	defer stop()
-
-	established, err := dialPastTransport(t, dialer, proxy.peerAddress())
-	if established {
-		t.Fatal("a session came out of a broken TLS handshake")
-	}
-	proxy.drain(t)
-	if got := proxy.intercepted(); got != 1 {
-		t.Fatalf("%d TLS attempts broken, want 1", got)
-	}
-	if hellos := proxy.nodeHellos(); len(hellos) != 0 || proxy.connections() != 0 {
-		t.Fatalf("%d hellos over %d connections reached the release, want none: no probe after a TLS answer", len(hellos), proxy.connections())
-	}
-	if !dialer.secureSessions.marks.v2Hinted(proxy.peerAddress()) {
-		t.Fatal("a TLS answer left no v2 hint")
-	}
-	if !errors.Is(err, errV2FailedBeforeProof) {
-		t.Fatalf("err = %v, want errV2FailedBeforeProof", err)
-	}
-	requireAddressAfterDial(t, dialer, proxy.peerAddress(), err, pacedAfterUnprovenFailure)
+	return string(id)
 }
 
 // The watchdog and the log scan are the fuse's second line: a socket name or

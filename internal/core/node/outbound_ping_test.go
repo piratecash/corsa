@@ -130,7 +130,7 @@ func TestPeerSessionRequest_PingDuringWaitRespondsPong(t *testing.T) {
 		session.inboxCh <- protocol.Frame{Type: "peers"}
 	}()
 
-	resp, err := svc.peerSessionRequest(session, protocol.Frame{Type: "get_peers"}, "peers", false)
+	resp, err := svc.peerSessionRequest(session, protocol.Frame{Type: "get_peers"}, "peers")
 	if err != nil {
 		t.Fatalf("peerSessionRequest failed: %v", err)
 	}

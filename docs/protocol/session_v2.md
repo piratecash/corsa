@@ -8,7 +8,10 @@ The [later owner decision](../operations/d1-release-decision-proposal.md#measure
 
 ## English
 
-### Status
+**Protocol floor 31.** Current peer sessions require TLS and the session proof. Outbound dials never fall back to plaintext. The listener still redirects v2.5.71’s identity-less protocol-31 probe to TLS, without opening a peer session. Descriptions of legacy admission below apply to the historical transition period. The stored identity and endpoint protections still apply.
+
+
+### Status during the historical transition
 
 **Nodes use v2.** From protocol version 31 two new nodes connect over v2, and a new node and an old one over v1, in either direction:
 
@@ -228,7 +231,7 @@ The operator may switch TLS-first off by hand. It is the way back from TLS-first
 - **Where the value comes from.** Headless: `config.Node.DisableV2TLSFirst`, set by `CORSA_V2_TLS_FIRST` — TLS-first stays on unless the variable is explicitly falsey (`0`, `false`, `no`, `off`). SDK: `sdk.NodeConfig.V2TLSFirst` (`*bool`, `nil` = on); the SDK reads no environment.
 - **What changes.** Only the preliminary ClientHello, and only on a dial where v1 is not ruled out — an unpinned identity at an endpoint nothing binds. Such a dial opens with the identity-less probe (step 3), and the probe's answer is judged as in steps 4–5. A correct old-protocol answer of a supported old version (28 up to below 31) lets v1 in on the probe's connection — no ClientHello reaches an old node at all. A correct `welcome` of version 31 or above requires v2 from then on: the same dial goes on with a TLS attempt on a new connection, and if that attempt fails — silence, a reset, a v1 line, a TLS error, an alert — nothing in this dial leads to v1: no second probe, no full `hello` (a v1 line there is counted and held as a refused downgrade). A TLS alert to the probe ends the dial and is read as the listener's refusal of a TLS attempt: not charged, paced with a jitter. A v1 line on the TLS attempt after a v2 welcome is counted on its own (`v1_refusals_after_v2_welcome`). After an alert or a v2 welcome to the probe the next dial to the address waits for the v2 retry backoff, and so does it after any probe answer that admitted nothing, a probe the far end closed without an answer included.
 - **Recorded marks do not bring the ClientHello back.** `v2_hint` — whether a handshake record, an alert or a v2 welcome to an earlier probe left it — and `legacy_observed` are unproven answers of the past: with the switch off a dial at such an address still opens with the probe, and the mark stays as it was until the probe's own answer is judged (steps 4–5). Only a **live** answer moves a dial to TLS: a correct `welcome` of version 31 or above to that dial's own probe. `v2_strong` is not a hint but a requirement, and neither is the hold of the fall back to v1 (both below).
-- **Known limit (to be decided before nodes that speak v2 only are allowed).** A future node that speaks v2 only closes a connection that is not TLS: with TLS-first off, the probe to it meets EOF, nothing follows in that dial, and such a node is unreachable at an endpoint nothing binds — the next dial only waits for the v2 retry backoff instead of coming at the connection manager's rate. Either a v2-only listener answers the probe with a `welcome` of version 31 or above, or the mode is closed for v2-only nodes in another way; this is decided before the minimum protocol version is raised to the secure session.
+- **Protocol 31-only listener.** The listener answers the exact identity-less protocol 31 probe with a challenge-less `welcome` advertising protocol and minimum 31, then closes the connection. A v2.5.71 node configured for probe-first opens a new TLS connection. The probe earns no session or identity state.
 - **What it is not.** The mode is not a way around a block of TLS to a node of v31 or later: such a node is still reached over v2 or not at all. It only spares an old node, and the path to it, the ClientHello it cannot answer.
 - **What does not change.** Where v2 is required — an endpoint bound to v2, `v2_strong`, a dial "to X", a v2-only node — the dial still opens with TLS, no probe runs and no answer leads to v1. A pinned identity, or one with a live v2 connection, named in the probe's answer is refused there before this node's identity is on the wire, and the hold that refusal starts makes the next dial to the address open with TLS. The listener keeps accepting v2.
 - **While the fall back to v1 is held.** After a refused v1 answer the fall back to v1 at that address is held (5 minutes, doubled per further refusal, at most 6 hours). While it is held, a dial there opens with TLS even with the switch off — the probe could offer nothing, since v1 is forbidden there — and only once the address's v2 retry backoff lets a dial through at all. No failure of that TLS attempt — silence, a reset, a v1 line, a TLS error, an alert — leads to v1. The hold is not evidence that the address speaks v2: it creates no pin, no binding, no `v2_strong`, no proven identity, and it charges neither the address's IP nor an identity. Once it has ended and nothing else requires v2, the switch decides again: the dial opens with the probe.
@@ -241,8 +244,8 @@ The session mode of a build follows from its version constants alone (`sessionv2
 | Constants | Mode | Behaviour |
 |---|---|---|
 | `ProtocolVersion < 31` | `legacy_only` | v1 only — builds before v31 |
-| `ProtocolVersion ≥ 31`, `MinimumProtocolVersion < 31` | `transition` — **this build** | TLS first; v1 only after a correct old-protocol answer to the identity-less probe, and never where v2 is required ("Choosing the session kind on dial") |
-| `MinimumProtocolVersion ≥ 31` | `v2_only` | the listener closes what is not TLS, the dialer never probes and never goes legacy |
+| `ProtocolVersion ≥ 31`, `MinimumProtocolVersion < 31` | `transition` | TLS first; v1 only after a correct old-protocol answer to the identity-less probe, and never where v2 is required ("Choosing the session kind on dial") |
+| `MinimumProtocolVersion ≥ 31` | `v2_only` — **this build** | TLS for every session. The listener can redirect a protocol 31 probe to a new TLS connection. The dialer never probes or goes legacy. |
 
 The downgrade to legacy is a temporary allowance of the transition. Raising `MinimumProtocolVersion` to 31 closes the relay hole for the whole network. It is closed by switching the legacy **path** off, not by checking a version number: the version in a v1 `hello` is unsigned, and a man in the middle would simply write 31 into it.
 
@@ -459,37 +462,17 @@ Each of these must verify `false`:
 
 #### Running the compatibility check against released builds
 
-`internal/core/node/release_interop_test.go` (build tag `interop`, so a plain `go test` never sees it) runs a node of this build, in process, against the **released** `corsa-node` binaries that speak only v1 — every release given for each legacy `ProtocolVersion`: 28 (`v1.0.64` … `v2.1.67`), 29 (`v2.2.68`), 30 (`v2.3.69`, `v2.4.70`). The release version and the `ProtocolVersion` are different numbers; the test logs both, requires the release version to be one `MAJOR.MINOR.BUILD` line and requires the announced `ProtocolVersion` as the release put it on the wire (the recording proxy forwards a release's frames byte for byte). For every binary it checks: (a) a dial of this build goes TLS → v1 answer → identity-less probe → legacy session on the probe's connection, and the address is not charged; (b) a DM from this build reaches the release's inbox, read back over the release's RPC; (c) two nodes of this build that reach each other only through the release exchange a DM each way and never meet; (d) the release dials this build and gets a legacy session counted by the session-kind metrics; (e) no legacy for what requires v2 — an identity pinned by this node is refused on the probe's answer (outbound, no full `hello`) and at its `hello` (inbound, no `welcome`), and an endpoint bound to v2 ends the dial after the TLS attempt with no probe; (f) the first-dial latency of a fresh node of this build to the release, 20 paced runs, TLS-first and probe-first, and how many unpaced first dials in a row pass the release's per-IP limiter (10 connections per 10 s from one IP: a TLS-first dial spends two of them); (g) with TLS-first switched off, an unpinned release is reached on one connection — the probe, then the full `hello`, legacy, no ClientHello — a pinned identity is refused on the probe's answer, and an endpoint bound to v2 gets a TLS attempt alone; (h) after a restart of the node of this build on its data directory, a release whose identity it pinned before is refused on the probe's answer, and an unpinned one is reached again TLS → probe → legacy; (i) after a restart of the release on its own data directory it is reached the same way again; (j) a forged answer to the probe — its identity fields relabelled so they do not bind, or a self-consistent welcome of a pinned identity — and an answer cut off half way admit no v1 and send no `hello` with this node's identity; the pinned one is a refusal (the fall back to v1 held, the next v2 attempt paced, nothing charged), the other two pace the next dial and are not charged (no failure, no hold of v1); a TLS attempt dropped right after the ClientHello is followed by the probe and v1 comes only from the release's correct answer to it, nothing charged; a TLS handshake broken in the middle leaves a v2 hint and paces the next v2 attempt, not charged — no probe, no v1. Every one of these is checked against what the connection manager records for the failed dial, and none leaves a ban, a setup failure or a v2 binding.
-
-A released binary is run only in isolation, and the test enforces it rather than trusting the caller:
-
-- **The fuse.** It skips without `sandbox-exec` (non-darwin). Before the first start it requires the sandbox profile to refuse an external connection with `Operation not permitted` and to allow a loopback one. The profile denies every outbound connection and bind except loopback, and every write under the user's real data directory (its path and, if a symlink, its resolved path).
-- **The watchdog, fail-closed.** The sandbox does not stop a bind on `0.0.0.0`, so a watchdog reads the old process group's sockets (`lsof`) at once and every 0.5 s and kills the group on any endpoint outside loopback (listener included), on any `lsof` error or output on its stderr, when the node's listener it has seen is gone, and after 5 minutes. Afterwards the old node's logs (stdout, `corsa.log`, `stderr.log`, `crash-*.log`) are scanned for any address outside loopback, IPv4 or IPv6, bracketed or bare.
-- **The environment.** Each old process — `--version` included, since a binary that ignored the argument would start as a node — gets an empty environment, its own temporary `HOME` and data directory and a test identity the test generated; its bootstrap and `CORSA_CONNECT_ONLY` always name a loopback peer of the test (an empty bootstrap list would mean the production seeds, and a release ignores arguments, so there is no flag for its data directory).
-- **The process group.** Releases run one after another; each old process runs in its own process group behind a lifeline shell that kills the whole group when the binary exits, when the test closes the lifeline, or when the test process dies. `t.Cleanup` kills the group while its leader is still unreaped, so the group id cannot have passed to another process.
-- **Completeness.** Every legacy `ProtocolVersion` must be given at least one binary; one is left out only by name (`CORSA_INTEROP_SKIP=V29`), and the skip shows in the output. A name that is not a legacy version fails the run.
-- **No overlap with heavy jobs.** The test refuses to run unless it holds the heavy-job lock of `scripts/heavy-run.sh` (a directory and owner file of this user, not symlinks, naming the test's process group).
-
-Build each binary offline from its tag, in a directory of its own outside the repository tree:
+The released binaries are started under the loopback-only macOS network fuse. The tests check refusal in both directions for protocols 28–30 and TLS interoperability with v2.5.71 on protocol 31. The v2.5.71 cases cover probe-first discovery, ordinary message delivery, and receipt transport. Use binaries built from the listed release tags.
 
 ```bash
-git archive v2.4.70 | tar -x -C "$SRC"
-(cd "$SRC" && GOTOOLCHAIN=local GOMODCACHE="$REPO/.gomodcache" GOCACHE="$REPO/.gocache" \
-  GOPROXY=off GOFLAGS=-mod=readonly go build -o "$BIN/corsa-node-v2.4.70" ./cmd/corsa-node)
-shasum -a 256 "$BIN"/corsa-node-*
+CORSA_INTEROP_BIN_V28=/path/to/corsa-node-v1.0.64:/path/to/corsa-node-v2.1.67 \
+CORSA_INTEROP_BIN_V29=/path/to/corsa-node-v2.2.68 \
+CORSA_INTEROP_BIN_V30=/path/to/corsa-node-v2.3.69:/path/to/corsa-node-v2.4.70 \
+CORSA_INTEROP_BIN_V31=/path/to/corsa-node-v2.5.71 \
+scripts/heavy-run.sh floor31-interop go test -tags interop -count=1 -v \
+  -run '^Test(ReleasedBuildsBelowMinimumAreRefused|Floor31(AcceptsV2571ProbeFirst|DeliversToV2571)|ReceiptLifecycleAcrossSecureReleaseRelay|RelayReceiptCapabilityAcrossSecureRelease)$' \
+  ./internal/core/node
 ```
-
-Run (about 2½ minutes per release; the binaries of one version are separated like `PATH`; `CORSA_INTEROP_LOG_DIR` keeps copies of the old nodes' logs; the lines `interop latency` and `interop rate limit` of the `-v` output carry the measurements):
-
-```bash
-CORSA_INTEROP_BIN_V28="$BIN/corsa-node-v1.0.64:$BIN/corsa-node-v2.1.67" \
-CORSA_INTEROP_BIN_V29="$BIN/corsa-node-v2.2.68" \
-CORSA_INTEROP_BIN_V30="$BIN/corsa-node-v2.3.69:$BIN/corsa-node-v2.4.70" \
-scripts/heavy-run.sh interop-releases go test -tags interop \
-  -run 'TestReleasedBuildsInterop|TestInteropFuse' -count=1 -v -timeout 60m ./internal/core/node/
-```
-
-What it does not show: latency over a real network or Tor (everything is loopback on one host), and a DM sent by the release (a headless release answers `sendDm` with 503).
 
 ## Address aging
 
@@ -521,6 +504,9 @@ Local business ports are implemented and tested separately. Public confirm and v
 ---
 
 ## Русский
+
+**Минимум протокола 31.** Для каждой пиринговой сессии требуются TLS и доказательство identity. При исходящем дозвоне возврата к plaintext нет. Слушатель всё ещё перенаправляет безымянную пробу v2.5.71 с версией 31 на TLS без открытия пиринговой сессии. Описания допуска legacy ниже относятся к переходному периоду. Сохранённые защиты identity и адресов продолжают действовать.
+
 
 ### Статус
 
@@ -742,7 +728,7 @@ v1-дозвон, чей полный `hello` не получил `welcome` во�
 - **Откуда значение.** Headless: `config.Node.DisableV2TLSFirst`, задаётся `CORSA_V2_TLS_FIRST` — «TLS-первым» остаётся включённым, пока переменная явно не ложна (`0`, `false`, `no`, `off`). SDK: `sdk.NodeConfig.V2TLSFirst` (`*bool`, `nil` — включено); SDK окружение не читает.
 - **Что меняется.** Только предварительный ClientHello и только в дозвоне, где v1 не исключён, — непрошитая identity на адресе, который ничем не привязан. Такой дозвон начинается с пробы без identity (шаг 3), и ответ на неё оценивается как в шагах 4–5. Корректный ответ поддерживаемого старого протокола (версии от 28 до 31, не включая) открывает v1 на соединении пробы — старый узел ClientHello не получает вовсе. Корректный `welcome` версии 31 и выше требует v2 дальше: тот же дозвон продолжается попыткой TLS на новом соединении, и если она неудачна — молчание, сброс, строка v1, ошибка TLS, alert, — ничто в этом дозвоне не ведёт к v1: ни второй пробы, ни полного `hello` (строка v1 там учитывается и удерживается как отвергнутое понижение). TLS-alert в ответ на пробу завершает дозвон и читается как отказ слушателя на попытку TLS: в счёт не идёт, отступ — со случайной прибавкой. Строка v1 на попытке TLS после welcome v2 считается отдельно (`v1_refusals_after_v2_welcome`). После alert или welcome v2 на пробу следующий дозвон к адресу ждёт отступа повторов v2, как и после пробы, на которую дальний конец закрыл соединение без ответа.
 - **Записанные метки ClientHello не возвращают.** `v2_hint` — оставил ли его рекорд рукопожатия, alert или v2-welcome на прежнюю пробу — и `legacy_observed` — недоказанные ответы прошлого: при выключенном переключателе дозвон на такой адрес всё равно начинается с пробы, а метка остаётся как была, пока не оценён ответ на саму эту пробу (шаги 4–5). Перевести дозвон на TLS может только **живой** ответ: корректный `welcome` версии 31 и выше на пробу этого же дозвона. `v2_strong` — не подсказка, а требование, как и удержание отката на v1 (оба ниже).
-- **Известное ограничение (решается до того, как появятся узлы только с v2).** Будущий узел, говорящий только на v2, закрывает соединение без TLS: при выключенном «TLS-первым» проба к нему получает EOF, в этом дозвоне больше ничего не следует, и такой узел недостижим по непривязанному адресу — следующий дозвон лишь ждёт отступа повторов v2, а не идёт с частотой менеджера соединений. Либо слушатель v2-only отвечает на пробу `welcome` версии 31 и выше, либо режим закрывается для узлов v2-only иначе; решается до подъёма минимальной версии протокола до защищённой сессии.
+- **Слушатель с минимумом 31.** Он отвечает на точную пробу протокола 31 без identity фреймом `welcome` без challenge, сообщает версию и минимум 31 и закрывает соединение. v2.5.71 в режиме probe-first открывает новое соединение с TLS. Проба не создаёт сессию и ничего не записывает об identity.
 - **Чем режим не является.** Режим не обходит блокировку TLS к узлу v31 и новее: такой узел по-прежнему достигается по v2 или никак. Он лишь избавляет старый узел и путь до него от ClientHello, на который тот не может ответить.
 - **Что не меняется.** Где требуется v2 — адрес, привязанный к v2, `v2_strong`, дозвон «к X», узел только-v2, — дозвон по-прежнему начинается с TLS, проба не посылается, и никакой ответ не ведёт к v1. Закреплённая identity или identity с живым соединением v2, названная в ответе на пробу, отвергается там же, до того как identity этого узла попадёт на провод, а удержание, которое начинает этот отказ, заставляет следующий дозвон к адресу начаться с TLS. Слушатель продолжает принимать v2.
 - **Пока откат на v1 удержан.** После отвергнутого ответа v1 откат на v1 на этом адресе удерживается (5 минут, удвоение после каждого следующего отказа, не больше 6 часов). Пока он удержан, дозвон туда начинается с TLS даже при выключенном переключателе — проба ничего не могла бы предложить, ведь v1 там запрещён, — и только когда отступ повторов v2 этого адреса вообще пропускает дозвон. Никакая неудача этой попытки TLS — молчание, сброс, строка v1, ошибка TLS, alert — к v1 не ведёт. Удержание не доказывает, что адрес говорит на v2: оно не создаёт ни pin, ни привязки, ни `v2_strong`, ни доказанной identity и не штрафует ни IP адреса, ни identity. Когда оно закончилось и ничто другое не требует v2, снова решает переключатель: дозвон начинается с пробы.
@@ -755,8 +741,8 @@ v1-дозвон, чей полный `hello` не получил `welcome` во�
 | Константы | Режим | Поведение |
 |---|---|---|
 | `ProtocolVersion < 31` | `legacy_only` | только v1 — сборки до v31 |
-| `ProtocolVersion ≥ 31`, `MinimumProtocolVersion < 31` | `transition` — **эта сборка** | сначала TLS; v1 — только после корректного ответа старого протокола на пробу без identity и никогда там, где требуется v2 («Выбор вида сессии при дозвоне») |
-| `MinimumProtocolVersion ≥ 31` | `v2_only` | слушатель закрывает всё, что не TLS; дозвонившийся не делает пробу и не уходит в legacy |
+| `ProtocolVersion ≥ 31`, `MinimumProtocolVersion < 31` | `transition` | сначала TLS; v1 — только после корректного ответа старого протокола на пробу без identity и никогда там, где требуется v2 («Выбор вида сессии при дозвоне») |
+| `MinimumProtocolVersion ≥ 31` | `v2_only` — **эта сборка** | для каждой сессии нужен TLS. Слушатель может перенаправить пробу протокола 31 на новое соединение с TLS. Исходящие соединения не используют пробу и legacy. |
 
 Понижение до legacy — временное допущение переходного периода. Подъём `MinimumProtocolVersion` до 31 закрывает дыру с пересылкой для всей сети. Закрывает её выключение legacy-**пути**, а не проверка номера версии: версия в `hello` v1 не подписана, и посредник просто впишет туда 31.
 
@@ -974,37 +960,17 @@ sig D      = 914a3f9ae1cf2b98e50fd76ece8d65eb528a0d497b94e56deb1dd12c89cb612e9d8
 
 #### Как прогнать проверку совместимости с выпусками
 
-`internal/core/node/release_interop_test.go` (build-тег `interop`, обычный `go test` его не видит) запускает узел этой сборки в процессе теста против **выпущенных** бинарей `corsa-node`, говорящих только по v1, — всех выпусков, указанных для каждой legacy-версии `ProtocolVersion`: 28 (`v1.0.64` … `v2.1.67`), 29 (`v2.2.68`), 30 (`v2.3.69`, `v2.4.70`). Версия выпуска и `ProtocolVersion` — разные числа; тест пишет в журнал обе, требует, чтобы версия выпуска была одной строкой `MAJOR.MINOR.BUILD`, и требует объявленную `ProtocolVersion` такой, какой её выпуск положил на провод (записывающий прокси передаёт кадры выпуска байт в байт). Для каждого бинаря проверяется: (а) дозвон этой сборки идёт TLS → ответ v1 → проба без identity → legacy-сессия на соединении пробы, и адрес не наказывается; (б) DM от этой сборки доходит до inbox выпуска и читается обратно через RPC выпуска; (в) два узла этой сборки, связанные только через выпуск, обмениваются DM в обе стороны и ни разу не соединяются напрямую; (г) выпуск дозванивается до этой сборки и получает legacy-сессию, учтённую метриками видов сессий; (д) нет legacy для того, что требует v2: identity, закреплённая этим узлом, отвергается на ответе пробы (исходящий, без полного `hello`) и на своём `hello` (входящий, без `welcome`), а endpoint, привязанный к v2, завершает дозвон после попытки TLS без пробы; (е) задержка первого дозвона нового узла этой сборки до выпуска, 20 разнесённых по времени повторов, TLS-первым и пробой-первой, и сколько неразнесённых первых дозвонов подряд проходит ограничитель выпуска по IP (10 соединений за 10 с с одного IP: дозвон TLS-первым тратит два); (ж) при выключенном TLS-первым незакреплённый выпуск достигается одним соединением — проба, затем полный `hello`, legacy, без ClientHello, — закреплённая identity отвергается по ответу на пробу, а адрес, привязанный к v2, получает только попытку TLS; (з) после перезапуска узла этой сборки на его каталоге данных выпуск, чью identity он закрепил до перезапуска, отвергается по ответу на пробу, а незакреплённый снова достигается TLS → проба → legacy; (и) после перезапуска самого выпуска на его каталоге данных он достигается так же; (к) подделанный ответ на пробу — с переписанными полями identity, которые больше не связаны, или самосогласованный welcome закреплённой identity — и ответ, оборванный на половине, не допускают v1 и не отправляют `hello` с identity этого узла; закреплённая — это отказ (откат на v1 удержан, следующая попытка v2 отложена, в счёт не идёт), два других откладывают следующий дозвон и в счёт не идут (без неудачи и без удержания v1); попытка TLS, оборванная сразу после ClientHello, сменяется пробой, и v1 идёт только от корректного ответа выпуска на неё, в счёт не идёт; рукопожатие TLS, сломанное на середине, оставляет `v2_hint` и откладывает следующую попытку v2, в счёт не идёт — без пробы и без v1. Каждый исход сверяется с тем, что менеджер соединений записывает за неудачный дозвон, и ни один не оставляет бана, setup failure или v2-привязки.
-
-Выпущенный бинарь запускается только в изоляции, и тест обеспечивает её сам, не полагаясь на вызывающего:
-
-- **Предохранитель.** Без `sandbox-exec` (не darwin) тест пропускается. До первого запуска он требует, чтобы профиль песочницы отказал внешнему соединению с `Operation not permitted` и пропустил соединение по loopback. Профиль запрещает любое исходящее соединение и bind, кроме loopback, и любую запись в настоящий каталог данных пользователя (по его пути и, если это symlink, по разрешённому пути).
-- **Сторож, fail-closed.** Песочница не запрещает bind на `0.0.0.0`, поэтому сторож читает сокеты группы процессов старого узла (`lsof`) сразу и далее каждые 0,5 с и убивает группу при любом адресе вне loopback (включая слушателя), при любой ошибке `lsof` или выводе в его stderr, когда уже виденный слушатель узла пропал, и через 5 минут. После прогона журналы старого узла (stdout, `corsa.log`, `stderr.log`, `crash-*.log`) проверяются на адреса вне loopback — IPv4 и IPv6, в скобках и без.
-- **Окружение.** Каждый старый процесс — включая `--version`, ведь бинарь, проигнорировавший аргумент, стартовал бы как узел, — получает пустое окружение, свои временные `HOME` и каталог данных и тестовую identity, созданную тестом; его bootstrap и `CORSA_CONNECT_ONLY` всегда указывают loopback-узел теста (пустой список bootstrap означает боевые сиды, а выпуск игнорирует аргументы, так что флага для каталога данных нет).
-- **Группа процессов.** Выпуски идут последовательно; каждый старый процесс — в своей группе процессов за shell-«пуповиной», которая убивает всю группу, когда бинарь завершился, когда тест закрыл пуповину или когда процесс теста умер. `t.Cleanup` убивает группу, пока её лидер ещё не собран, так что номер группы не может достаться другому процессу.
-- **Полнота.** Для каждой legacy-версии `ProtocolVersion` нужен хотя бы один бинарь; версию можно исключить только по имени (`CORSA_INTEROP_SKIP=V29`), и пропуск виден в выводе. Имя, не являющееся legacy-версией, валит прогон.
-- **Без пересечения с тяжёлыми задачами.** Тест отказывается работать, не держа замок тяжёлых задач `scripts/heavy-run.sh` (каталог и файл владельца этого пользователя, не symlink, с группой процессов теста).
-
-Каждый бинарь собирается офлайн из тега, в собственном каталоге вне дерева репозитория:
+Релизные бинарники запускаются на macOS в изоляции с сетью только на loopback. Проверки подтверждают отказ в обе стороны на протоколах 28–30 и работу по TLS с v2.5.71 на протоколе 31. Для v2.5.71 проверяются обнаружение с probe-first, обычная доставка и передача квитанций. Соберите бинарники из указанных релизных тегов.
 
 ```bash
-git archive v2.4.70 | tar -x -C "$SRC"
-(cd "$SRC" && GOTOOLCHAIN=local GOMODCACHE="$REPO/.gomodcache" GOCACHE="$REPO/.gocache" \
-  GOPROXY=off GOFLAGS=-mod=readonly go build -o "$BIN/corsa-node-v2.4.70" ./cmd/corsa-node)
-shasum -a 256 "$BIN"/corsa-node-*
+CORSA_INTEROP_BIN_V28=/path/to/corsa-node-v1.0.64:/path/to/corsa-node-v2.1.67 \
+CORSA_INTEROP_BIN_V29=/path/to/corsa-node-v2.2.68 \
+CORSA_INTEROP_BIN_V30=/path/to/corsa-node-v2.3.69:/path/to/corsa-node-v2.4.70 \
+CORSA_INTEROP_BIN_V31=/path/to/corsa-node-v2.5.71 \
+scripts/heavy-run.sh floor31-interop go test -tags interop -count=1 -v \
+  -run '^Test(ReleasedBuildsBelowMinimumAreRefused|Floor31(AcceptsV2571ProbeFirst|DeliversToV2571)|ReceiptLifecycleAcrossSecureReleaseRelay|RelayReceiptCapabilityAcrossSecureRelease)$' \
+  ./internal/core/node
 ```
-
-Запуск (около 2½ минут на выпуск; бинари одной версии разделяются как в `PATH`; `CORSA_INTEROP_LOG_DIR` сохраняет копии журналов старых узлов; замеры — в строках `interop latency` и `interop rate limit` вывода `-v`):
-
-```bash
-CORSA_INTEROP_BIN_V28="$BIN/corsa-node-v1.0.64:$BIN/corsa-node-v2.1.67" \
-CORSA_INTEROP_BIN_V29="$BIN/corsa-node-v2.2.68" \
-CORSA_INTEROP_BIN_V30="$BIN/corsa-node-v2.3.69:$BIN/corsa-node-v2.4.70" \
-scripts/heavy-run.sh interop-releases go test -tags interop \
-  -run 'TestReleasedBuildsInterop|TestInteropFuse' -count=1 -v -timeout 60m ./internal/core/node/
-```
-
-Чего проверка не показывает: задержку в настоящей сети и через Tor (всё на loopback одного хоста) и DM, отправленный выпуском (headless-выпуск отвечает на `sendDm` кодом 503).
 
 ## Старение адресов
 

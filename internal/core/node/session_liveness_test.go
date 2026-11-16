@@ -12,8 +12,8 @@ import (
 
 // session_liveness_test.go pins the agreement between the heartbeat schedule
 // and the read bounds of a session: a healthy session that carries nothing
-// but heartbeats lives on, in either direction and with a released peer,
-// while a peer that stops answering is still dropped within one heartbeat
+// but heartbeats lives on in either direction, while a peer that stops
+// answering is still dropped within one heartbeat
 // cycle.
 //
 // The nodes are real and talk over loopback TCP; only the clock of the
@@ -37,23 +37,6 @@ func compressedWorstCase(l livenessSchedule) livenessSchedule {
 	l.inboundSessionIdle /= livenessCompression
 	l.pickJitter = func(max time.Duration) time.Duration { return max }
 	return l
-}
-
-// releasedLiveness is the schedule of every released build that speaks only
-// v1 (v28 … v30, v1.0.64 … v2.4.70): both sides ping every 2 min plus up to
-// 14 s, a pong is awaited 45 s, and an inbound connection is closed when no
-// whole frame arrived within 120 s of the start of the wait for it — one
-// deadline per frame, session or not.
-func releasedLiveness() livenessSchedule {
-	return livenessSchedule{
-		diallerPingInterval:  2 * time.Minute,
-		listenerPingInterval: 2 * time.Minute,
-		maxPingJitter:        14 * time.Second,
-		pongStall:            45 * time.Second,
-		inboundFrameRead:     120 * time.Second,
-		inboundSessionIdle:   120 * time.Second,
-		pickJitter:           uniformPingJitter,
-	}
 }
 
 // withLiveness installs l on a node before Run.
@@ -163,43 +146,9 @@ func TestAnIdleV2SessionOutlivesSeveralHeartbeatCycles(t *testing.T) {
 	}
 }
 
-// A node of this build and an emulated released build (v28, v29, v30) — the
-// old node running the released schedule — exchange nothing but heartbeats
-// for four heartbeat cycles over the two legacy sessions between them: the
-// one the new node dialled (an old listener reads it with the released
-// 120-second per-frame deadline) and the one the old node dialled (its pings
-// come on the released schedule). Neither is torn down.
-func TestAnIdleLegacySessionOutlivesSeveralHeartbeatCycles(t *testing.T) {
-	t.Parallel()
-	newLiveness := compressedWorstCase(productionLiveness())
-	oldLiveness := compressedWorstCase(releasedLiveness())
-	for _, version := range releasedLegacyVersions() {
-		t.Run(versionName(version), func(t *testing.T) {
-			t.Parallel()
-			pair := startLegacyPairWithSetup(t, version, withLiveness(newLiveness), withLiveness(oldLiveness))
-
-			waitForConditionMsg(t, 20*time.Second, "no legacy session each way between the node and the old peer", func() bool {
-				kinds := pair.new.SessionKindStats()
-				return kinds.InboundLegacy > 0 && kinds.OutboundLegacy > 0
-			})
-			nodes := map[string]*Service{"new node": pair.new, "old node": pair.old}
-			settled := awaitSessionsSettled(t, nodes)
-
-			requireNoSessionReestablished(t, idleWindow(oldLiveness), nodes, settled)
-
-			if _, v1 := authenticatedInbound(pair.new); v1 == 0 {
-				t.Fatal("after the idle window the new node has no legacy inbound session")
-			}
-			if _, v1 := authenticatedInbound(pair.old); v1 == 0 {
-				t.Fatal("after the idle window the old node has no legacy inbound session")
-			}
-		})
-	}
-}
-
 // A peer that stops answering — the proxy drains both directions and
 // forwards nothing — is dropped by each end of the session within that end's
-// own bound, for v2 and v1. They differ because the two ends learn of the
+// own bound on a v2 session. They differ because the two ends learn of the
 // silence differently:
 //
 //   - the dialler, from its own heartbeat: its next ping comes at most
@@ -233,79 +182,66 @@ func TestAnUnresponsivePeerIsDroppedWithinOneHeartbeatCycle(t *testing.T) {
 		bounds[end] = bound/livenessCompression + slack
 	}
 
-	kinds := []struct {
-		name  string
-		setup func(*Service)
-	}{
-		{"v2", withLiveness(liveness)},
-		{"v1", func(svc *Service) { asOldNode(svc); withLiveness(liveness)(svc) }},
+	listenAddress := freeAddress(t)
+	proxy := newCountingProxy(t, listenAddress)
+	proxyAddress := proxy.ln.Addr().String()
+	listener, stopListener := startTestNodeWithSetup(t, config.Node{
+		ListenAddress:  listenAddress,
+		AdvertisePort:  peerPortOf(t, proxyAddress),
+		BootstrapPeers: []string{},
+		Type:           domain.NodeTypeFull,
+	}, withLiveness(liveness))
+	t.Cleanup(stopListener)
+	dialler, stopDialler := startTestNodeWithSetup(t, config.Node{
+		ListenerSet:     true,
+		ListenerEnabled: false,
+		AdvertisePort:   peerPortOf(t, freeAddress(t)),
+		BootstrapPeers:  []string{proxyAddress},
+		Type:            domain.NodeTypeFull,
+	}, withLiveness(liveness))
+	t.Cleanup(stopDialler)
+
+	waitForConditionMsg(t, 15*time.Second, "no v2 session between the two nodes", func() bool {
+		v2, _ := authenticatedInbound(listener)
+		return v2 == 1 && hasOutboundSession(dialler)
+	})
+	awaitSessionsSettled(t, map[string]*Service{"dialler": dialler, "listener": listener})
+
+	pipe := proxy.last()
+	requirePipeOpen(t, "before the peer goes silent", pipe)
+	// No redial may reach the listener: a new session of the same
+	// identity would end the old connection for its own reason.
+	_ = proxy.ln.Close()
+	silentAt := time.Now()
+	pipe.holdToServer.Store(true)
+	pipe.holdToClient.Store(true)
+
+	ends := map[string]<-chan struct{}{
+		"dialler":  pipe.clientToServerDone,
+		"listener": pipe.serverToClientDone,
 	}
-	for _, kind := range kinds {
-		t.Run(kind.name, func(t *testing.T) {
-			t.Parallel()
-			listenAddress := freeAddress(t)
-			proxy := newCountingProxy(t, listenAddress)
-			proxyAddress := proxy.ln.Addr().String()
-			listener, stopListener := startTestNodeWithSetup(t, config.Node{
-				ListenAddress:  listenAddress,
-				AdvertisePort:  peerPortOf(t, proxyAddress),
-				BootstrapPeers: []string{},
-				Type:           domain.NodeTypeFull,
-			}, kind.setup)
-			t.Cleanup(stopListener)
-			dialler, stopDialler := startTestNodeWithSetup(t, config.Node{
-				ListenerSet:     true,
-				ListenerEnabled: false,
-				AdvertisePort:   peerPortOf(t, freeAddress(t)),
-				BootstrapPeers:  []string{proxyAddress},
-				Type:            domain.NodeTypeFull,
-			}, kind.setup)
-			t.Cleanup(stopDialler)
-
-			waitForConditionMsg(t, 15*time.Second, "no session between the two nodes", func() bool {
-				v2, v1 := authenticatedInbound(listener)
-				return v2+v1 == 1 && hasOutboundSession(dialler)
-			})
-			awaitSessionsSettled(t, map[string]*Service{"dialler": dialler, "listener": listener})
-
-			pipe := proxy.last()
-			requirePipeOpen(t, "before the peer goes silent", pipe)
-			// No redial may reach the listener: a new session of the same
-			// identity would end the old connection for its own reason.
-			_ = proxy.ln.Close()
-			silentAt := time.Now()
-			pipe.holdToServer.Store(true)
-			pipe.holdToClient.Store(true)
-
-			ends := map[string]<-chan struct{}{
-				"dialler":  pipe.clientToServerDone,
-				"listener": pipe.serverToClientDone,
+	for len(ends) > 0 {
+		for name, closed := range ends {
+			select {
+			case <-closed:
+				t.Logf("the %s dropped the silent peer after %v (production %v)", name,
+					time.Since(silentAt).Round(time.Millisecond), (time.Since(silentAt) * livenessCompression).Round(time.Second))
+				delete(ends, name)
+				continue
+			default:
 			}
-			for len(ends) > 0 {
-				for name, closed := range ends {
-					select {
-					case <-closed:
-						t.Logf("the %s dropped the silent peer after %v (production %v)", name,
-							time.Since(silentAt).Round(time.Millisecond), (time.Since(silentAt) * livenessCompression).Round(time.Second))
-						delete(ends, name)
-						continue
-					default:
-					}
-					if elapsed := time.Since(silentAt); elapsed > bounds[name] {
-						t.Fatalf("%v after the peer went silent the %s still holds the session; its bound is %v in production",
-							elapsed.Round(time.Millisecond), name, productionBounds[name])
-					}
-				}
-				time.Sleep(10 * time.Millisecond)
+			if elapsed := time.Since(silentAt); elapsed > bounds[name] {
+				t.Fatalf("%v after the peer went silent the %s still holds the session; its bound is %v in production",
+					elapsed.Round(time.Millisecond), name, productionBounds[name])
 			}
-		})
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
 // On an inbound session a frame that has started must end within the frame
-// bound, not the idle bound: a peer that sends the first bytes of a frame and
-// stops is dropped as soon as the frame bound runs out, for v1 and for v2,
-// where the bytes are a TLS record the reader cannot open until it is whole.
+// bound, not the idle bound: a peer that sends the first bytes of a TLS
+// record and stops is dropped as soon as the frame bound runs out.
 // The schedule here makes the idle bound far longer than the frame bound and
 // than the heartbeat cycle, so only the frame bound can explain a close.
 func TestAStartedFrameOnAnIdleSessionIsBoundByTheFrameBound(t *testing.T) {
@@ -315,59 +251,46 @@ func TestAStartedFrameOnAnIdleSessionIsBoundByTheFrameBound(t *testing.T) {
 	liveness.inboundSessionIdle = time.Minute
 	const slack = time.Second
 
-	kinds := []struct {
-		name    string
-		setup   func(*Service)
-		partial []byte
-	}{
-		// A TLS application-data record that announces 64 bytes and
-		// delivers three.
-		{"v2", withLiveness(liveness), []byte{0x17, 0x03, 0x03, 0x00, 0x40, 0x01, 0x02, 0x03}},
-		{"v1", func(svc *Service) { asOldNode(svc); withLiveness(liveness)(svc) }, []byte(`{"type":"ping","node":`)},
+	listenAddress := freeAddress(t)
+	proxy := newCountingProxy(t, listenAddress)
+	proxyAddress := proxy.ln.Addr().String()
+	listener, stopListener := startTestNodeWithSetup(t, config.Node{
+		ListenAddress:  listenAddress,
+		AdvertisePort:  peerPortOf(t, proxyAddress),
+		BootstrapPeers: []string{},
+		Type:           domain.NodeTypeFull,
+	}, withLiveness(liveness))
+	t.Cleanup(stopListener)
+	dialler, stopDialler := startTestNodeWithSetup(t, config.Node{
+		ListenerSet:     true,
+		ListenerEnabled: false,
+		AdvertisePort:   peerPortOf(t, freeAddress(t)),
+		BootstrapPeers:  []string{proxyAddress},
+		Type:            domain.NodeTypeFull,
+	}, withLiveness(liveness))
+	t.Cleanup(stopDialler)
+
+	waitForConditionMsg(t, 15*time.Second, "no v2 session between the two nodes", func() bool {
+		v2, _ := authenticatedInbound(listener)
+		return v2 == 1 && hasOutboundSession(dialler)
+	})
+	awaitSessionsSettled(t, map[string]*Service{"dialler": dialler, "listener": listener})
+
+	pipe := proxy.last()
+	requirePipeOpen(t, "before the partial frame", pipe)
+	_ = proxy.ln.Close()
+	pipe.holdToServer.Store(true)
+	startedAt := time.Now()
+	// An incomplete TLS application-data record.
+	partial := []byte{0x17, 0x03, 0x03, 0x00, 0x40, 0x01, 0x02, 0x03}
+	if _, err := pipe.server.Write(partial); err != nil {
+		t.Fatalf("write the partial frame: %v", err)
 	}
-	for _, kind := range kinds {
-		t.Run(kind.name, func(t *testing.T) {
-			t.Parallel()
-			listenAddress := freeAddress(t)
-			proxy := newCountingProxy(t, listenAddress)
-			proxyAddress := proxy.ln.Addr().String()
-			listener, stopListener := startTestNodeWithSetup(t, config.Node{
-				ListenAddress:  listenAddress,
-				AdvertisePort:  peerPortOf(t, proxyAddress),
-				BootstrapPeers: []string{},
-				Type:           domain.NodeTypeFull,
-			}, kind.setup)
-			t.Cleanup(stopListener)
-			dialler, stopDialler := startTestNodeWithSetup(t, config.Node{
-				ListenerSet:     true,
-				ListenerEnabled: false,
-				AdvertisePort:   peerPortOf(t, freeAddress(t)),
-				BootstrapPeers:  []string{proxyAddress},
-				Type:            domain.NodeTypeFull,
-			}, kind.setup)
-			t.Cleanup(stopDialler)
-
-			waitForConditionMsg(t, 15*time.Second, "no session between the two nodes", func() bool {
-				v2, v1 := authenticatedInbound(listener)
-				return v2+v1 == 1 && hasOutboundSession(dialler)
-			})
-			awaitSessionsSettled(t, map[string]*Service{"dialler": dialler, "listener": listener})
-
-			pipe := proxy.last()
-			requirePipeOpen(t, "before the partial frame", pipe)
-			_ = proxy.ln.Close()
-			pipe.holdToServer.Store(true)
-			startedAt := time.Now()
-			if _, err := pipe.server.Write(kind.partial); err != nil {
-				t.Fatalf("write the partial frame: %v", err)
-			}
-			select {
-			case <-pipe.serverToClientDone:
-				t.Logf("the listener dropped the stalled frame after %v", time.Since(startedAt).Round(time.Millisecond))
-			case <-time.After(liveness.inboundFrameRead + slack):
-				t.Fatalf("the listener still waits for a frame that started %v ago; the frame bound is %v", time.Since(startedAt).Round(time.Millisecond), liveness.inboundFrameRead)
-			}
-		})
+	select {
+	case <-pipe.serverToClientDone:
+		t.Logf("the listener dropped the stalled frame after %v", time.Since(startedAt).Round(time.Millisecond))
+	case <-time.After(liveness.inboundFrameRead + slack):
+		t.Fatalf("the listener still waits for a frame that started %v ago; the frame bound is %v", time.Since(startedAt).Round(time.Millisecond), liveness.inboundFrameRead)
 	}
 }
 
@@ -380,98 +303,72 @@ func TestAStalledHandshakeIsDroppedWithinTheSetupBound(t *testing.T) {
 	liveness := compressedWorstCase(productionLiveness())
 	bound := liveness.inboundFrameRead + time.Second
 
-	modes := []struct {
-		name  string
-		setup func(*Service)
-	}{
-		{"v2 node", withLiveness(liveness)},
-		{"v1-only node", func(svc *Service) { asOldNode(svc); withLiveness(liveness)(svc) }},
-	}
 	stalls := []struct {
 		name  string
-		bytes string
+		bytes []byte
 	}{
-		{"silent", ""},
-		{"inside the first frame", `{"type":"hello","version":`},
+		{"silent", nil},
+		{"inside the TLS handshake", []byte{0x16, 0x03, 0x01, 0x00, 0x40, 0x01}},
 	}
-	for _, mode := range modes {
-		for _, stall := range stalls {
-			t.Run(mode.name+"/"+stall.name, func(t *testing.T) {
-				t.Parallel()
-				listenAddress := freeAddress(t)
-				_, stop := startTestNodeWithSetup(t, config.Node{
-					ListenAddress:  listenAddress,
-					BootstrapPeers: []string{},
-					Type:           domain.NodeTypeFull,
-				}, mode.setup)
-				t.Cleanup(stop)
+	for _, stall := range stalls {
+		t.Run(stall.name, func(t *testing.T) {
+			t.Parallel()
+			listenAddress := freeAddress(t)
+			_, stop := startTestNodeWithSetup(t, config.Node{
+				ListenAddress:  listenAddress,
+				BootstrapPeers: []string{},
+				Type:           domain.NodeTypeFull,
+			}, withLiveness(liveness))
+			t.Cleanup(stop)
 
-				conn, err := net.Dial("tcp", listenAddress)
-				if err != nil {
-					t.Fatalf("dial: %v", err)
+			conn, err := net.Dial("tcp", listenAddress)
+			if err != nil {
+				t.Fatalf("dial: %v", err)
+			}
+			t.Cleanup(func() { _ = conn.Close() })
+			openedAt := time.Now()
+			if len(stall.bytes) != 0 {
+				if _, err := conn.Write(stall.bytes); err != nil {
+					t.Fatalf("write: %v", err)
 				}
-				t.Cleanup(func() { _ = conn.Close() })
-				openedAt := time.Now()
-				if stall.bytes != "" {
-					if _, err := conn.Write([]byte(stall.bytes)); err != nil {
-						t.Fatalf("write: %v", err)
+			}
+			if err := conn.SetReadDeadline(openedAt.Add(bound)); err != nil {
+				t.Fatalf("deadline: %v", err)
+			}
+			buf := make([]byte, 4096)
+			for {
+				if _, err := conn.Read(buf); err != nil {
+					if ne, ok := err.(net.Error); ok && ne.Timeout() {
+						t.Fatalf("the node still holds a stalled handshake %v after it opened; the bound is %v in production", time.Since(openedAt).Round(time.Millisecond), productionLiveness().inboundFrameRead)
 					}
+					return
 				}
-				if err := conn.SetReadDeadline(openedAt.Add(bound)); err != nil {
-					t.Fatalf("deadline: %v", err)
-				}
-				buf := make([]byte, 4096)
-				for {
-					if _, err := conn.Read(buf); err != nil {
-						if ne, ok := err.(net.Error); ok && ne.Timeout() {
-							t.Fatalf("the node still holds a stalled handshake %v after it opened; the bound is %v in production", time.Since(openedAt).Round(time.Millisecond), productionLiveness().inboundFrameRead)
-						}
-						return
-					}
-				}
-			})
-		}
+			}
+		})
 	}
 }
 
-// The production schedule fits the read bound of every released listener,
-// and the read bound of this build fits the schedule of every released
-// dialler, each with room for the delivery and scheduling delay of a ping.
-func TestTheProductionScheduleFitsReleasedPeers(t *testing.T) {
+// The TLS dialler heartbeat fits the listener's idle bound with room for
+// message delivery and scheduling.
+func TestTheProductionTLSHeartbeatFitsInboundDeadline(t *testing.T) {
 	t.Parallel()
-	// The delay a ping may take on its way — the round trip of the previous
-	// pong, the writer queue, the scheduler — before a reader on the far
-	// side must still have it.
 	const deliveryMargin = 30 * time.Second
-	ours := productionLiveness()
-	released := releasedLiveness()
+	schedule := productionLiveness()
+	diallerGap := schedule.diallerPingInterval + schedule.maxPingJitter
+	if diallerGap+deliveryMargin > schedule.inboundSessionIdle {
+		t.Errorf("dialler pings up to %v apart; inbound idle bound %v lacks room for delivery",
+			diallerGap, schedule.inboundSessionIdle)
+	}
 
-	ourDiallerGap := ours.diallerPingInterval + ours.maxPingJitter
-	if ourDiallerGap+deliveryMargin > released.inboundSessionIdle {
-		t.Errorf("our dialler pings up to %v apart; a released listener drops a connection with no frame for %v, which leaves less than %v for delivery",
-			ourDiallerGap, released.inboundSessionIdle, deliveryMargin)
+	if schedule.inboundFrameRead > 120*time.Second {
+		t.Errorf("the frame bound exceeds 120s: %v", schedule.inboundFrameRead)
 	}
-	releasedDiallerGap := released.diallerPingInterval + released.maxPingJitter
-	if releasedDiallerGap+deliveryMargin > ours.inboundSessionIdle {
-		t.Errorf("a released dialler pings up to %v apart; our listener drops a session with no frame for %v, which leaves less than %v for delivery",
-			releasedDiallerGap, ours.inboundSessionIdle, deliveryMargin)
+	if schedule.pongStall > 45*time.Second {
+		t.Errorf("the pong stall exceeds 45s: %v", schedule.pongStall)
 	}
-	if ourDiallerGap+deliveryMargin > ours.inboundSessionIdle {
-		t.Errorf("our dialler pings up to %v apart; our listener drops a session with no frame for %v", ourDiallerGap, ours.inboundSessionIdle)
-	}
-	// What the fit must not cost: the bounds that guard a connection slot
-	// against a stalled handshake or a trickled frame stay where they were,
-	// and a dead peer is still dropped within one cycle of the slower side.
-	if ours.inboundFrameRead > released.inboundFrameRead {
-		t.Errorf("the frame bound grew from %v to %v", released.inboundFrameRead, ours.inboundFrameRead)
-	}
-	if ours.pongStall > released.pongStall {
-		t.Errorf("the pong stall grew from %v to %v", released.pongStall, ours.pongStall)
-	}
-	slowestCycle := max(ours.diallerPingInterval, ours.listenerPingInterval) + ours.maxPingJitter + ours.pongStall
-	releasedCycle := max(released.diallerPingInterval, released.listenerPingInterval) + released.maxPingJitter + released.pongStall
-	if slowestCycle > releasedCycle {
-		t.Errorf("a dead peer may now hold a session %v instead of %v", slowestCycle, releasedCycle)
+	slowestCycle := max(schedule.diallerPingInterval, schedule.listenerPingInterval) + schedule.maxPingJitter + schedule.pongStall
+	if slowestCycle > 179*time.Second {
+		t.Errorf("a dead peer may hold a TLS session for %v, want at most 179s", slowestCycle)
 	}
 }
 

@@ -511,18 +511,12 @@ func TestEveryListenerRefusalPutsExactlyTheAlertOnTheWire(t *testing.T) {
 	// The inbound limit at registration is held from accept on by the shared
 	// budget, which refuses first (the case above); the registration bound is
 	// the defence behind it and is driven through handleConn directly, with
-	// no budget reservation.
-	t.Run("inbound limit", func(t *testing.T) {
+	// no budget reservation. After TLS proof it closes the secure session.
+	t.Run("inbound limit after TLS", func(t *testing.T) {
 		t.Parallel()
 		svc := refusingNode(t, config.Node{MaxIncomingPeers: 1}, func(*Service) {})
-		holder, err := net.Dial("tcp", svc.cfg.ListenAddress)
-		if err != nil {
-			t.Fatalf("dial the registered holder: %v", err)
-		}
+		holder := loopbackProvedSession(t, svc.cfg.ListenAddress)
 		t.Cleanup(func() { _ = holder.Close() })
-		if _, err := holder.Write([]byte("{")); err != nil {
-			t.Fatalf("holder's first byte: %v", err)
-		}
 		waitForConditionMsg(t, 5*time.Second, "the holder was never registered", func() bool {
 			svc.peerMu.RLock()
 			defer svc.peerMu.RUnlock()
@@ -535,10 +529,10 @@ func TestEveryListenerRefusalPutsExactlyTheAlertOnTheWire(t *testing.T) {
 			defer close(handled)
 			svc.handleConn(server, nil)
 		}()
-		_, _ = client.Write(v1HelloBytes)
-		got, err := readAnswer(t, client, 5*time.Second)
-		if err != nil || !bytes.Equal(got, alert) {
-			t.Fatalf("on the wire: % x then %v, want exactly % x and an orderly end", got, err, alert)
+		wire := proveLoopbackFixtureConn(t, client)
+		got, err := readAnswer(t, wire, 5*time.Second)
+		if err != nil || len(got) != 0 {
+			t.Fatalf("after TLS proof: % x then %v, want an orderly close without application data", got, err)
 		}
 		<-handled
 		if stats := svc.ListenerRefusalStats(); stats.InboundLimit != 1 {
@@ -942,9 +936,6 @@ func TestAListenerRefusalIsNotChargedAndHoldsTheNextV2Attempt(t *testing.T) {
 	}
 	if setup != nil && setup.Consecutive > 0 {
 		t.Fatalf("the refusal was counted as a setup failure: %+v", *setup)
-	}
-	if dialer.secureSessions.marks.legacyObserved(address) {
-		t.Fatal("a TLS refusal marked the address as an old node")
 	}
 	if !dialer.dialHeld(address) {
 		t.Fatal("the next v2 attempt is not held: a busy listener would be redialled at once")

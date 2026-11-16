@@ -112,8 +112,6 @@ func TestDispatchInboundPing_WritesPongViaNetworkBackend(t *testing.T) {
 // The table covers a representative cross-section of the async switch
 // cases:
 //
-//   - "hello" with incompatible protocol version — un-auth path, error reply.
-//   - "hello" without identity fields — un-auth path, welcome reply.
 //   - "announce_peer" with unknown node_type — auth-gated, early-return ack.
 //   - "announce_peer" with known node_type and empty Peers — auth-gated,
 //     full-path ack after the (no-op) promotion loop.
@@ -148,24 +146,6 @@ func TestDispatchNetworkFrame_AsyncReplies_RouteViaNetworkBackend(t *testing.T) 
 		inboundFrameLine  string
 		expectedReplyType string
 	}{
-		{
-			name: "hello_incompatible_protocol",
-			// No identity fields; version=1 is below MinimumProtocolVersion, so
-			// validateProtocolHandshake fails and the branch replies with a
-			// structured error frame via sendFrameViaNetwork.
-			authVerified:      false,
-			inboundFrameLine:  `{"type":"hello","version":1,"client":"node"}`,
-			expectedReplyType: "error",
-		},
-		{
-			name: "hello_no_identity_fields",
-			// Current-version hello without Address/PubKey/BoxKey/BoxSig takes
-			// the unauthenticated branch and replies with welcomeFrame (empty
-			// challenge) via sendFrameViaNetwork.
-			authVerified:      false,
-			inboundFrameLine:  helloNoIdentityLine(),
-			expectedReplyType: "welcome",
-		},
 		{
 			name: "announce_peer_unknown_node_type",
 			// Auth-gated: the branch rejects unknown node_type values by
@@ -283,28 +263,6 @@ func parseFrameLineForTest(line []byte) (protocol.Frame, error) {
 	return f, nil
 }
 
-// helloNoIdentityLine returns a current-protocol-version hello frame
-// carrying no identity fields (no Address / PubKey / BoxKey / BoxSig), so
-// dispatchNetworkFrame takes the "unauthenticated hello" branch and
-// replies with the welcome frame via sendFrameViaNetwork. Built from a
-// protocol.Frame value so the test stays in lockstep with
-// config.ProtocolVersion — hardcoding a literal version number would
-// silently pass the gate after a protocol bump and regress on the next.
-func helloNoIdentityLine() string {
-	line, err := protocol.MarshalFrameLine(protocol.Frame{
-		Type:    "hello",
-		Version: config.ProtocolVersion,
-		Client:  "node",
-	})
-	if err != nil {
-		// MarshalFrameLine on a literal struct cannot realistically fail;
-		// returning an invalid JSON string surfaces the fault at test time
-		// instead of panicking at package init.
-		return `{"type":"hello","broken":true}`
-	}
-	return line
-}
-
 // uint64Hash is a tiny test-local string hash used to derive distinct
 // synthetic ConnIDs per table case, so parallel sub-tests don't collide
 // on backend.Outbound(connID) channel keys.
@@ -374,6 +332,13 @@ func TestDispatchNetworkFrame_SyncReplies_RouteViaNetworkBackendSync(t *testing.
 			inboundFrameLine:  `{"type":"get_peers"}`,
 			expectedReplyType: "error",
 			expectedReplyCode: protocol.ErrCodeAuthRequired,
+		},
+		{
+			name:              "hello_after_tls_authentication",
+			authVerified:      true,
+			inboundFrameLine:  `{"type":"hello"}`,
+			expectedReplyType: "error",
+			expectedReplyCode: protocol.ErrCodeHelloAfterAuth,
 		},
 		{
 			name: "unknown_command_authenticated",

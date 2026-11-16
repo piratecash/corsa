@@ -10,6 +10,7 @@ import (
 	"github.com/piratecash/corsa/internal/core/config"
 	"github.com/piratecash/corsa/internal/core/config/configtest"
 	"github.com/piratecash/corsa/internal/core/netcore/netcoretest"
+	"github.com/piratecash/corsa/internal/core/sessionv2"
 )
 
 // network_override_test.go pins the invariant behind NewServiceWithNetwork:
@@ -79,17 +80,23 @@ func TestHandleConnClosesTheConnItCannotRegisterUnderANetworkOverride(t *testing
 		svc.handleConn(server, nil)
 	}()
 
-	// A non-TLS first byte is a v1 session, which needs no handshake before
-	// registration.
-	if _, err := client.Write([]byte("{")); err != nil {
-		t.Fatalf("write the first byte: %v", err)
+	dialer := newTestService(t, config.NodeTypeFull)
+	ctx, cancel := context.WithTimeout(t.Context(), promptWaitBound)
+	defer cancel()
+	session, err := sessionv2.Dial(ctx, client, dialer.secureSessions.local, dialer.nodeHelloFrame(), sessionv2.AnyPeer(), sessionv2.DefaultTimeouts)
+	if err != nil {
+		t.Fatalf("TLS handshake: %v", err)
+	}
+	conn, err := session.Conn()
+	if err != nil {
+		t.Fatal(err)
 	}
 	select {
 	case <-reachedRegistration:
 	case <-time.After(promptWaitBound):
 		t.Fatal("fixture: the handler never reached registration, so a refusal proves nothing")
 	}
-	expectHangUp(t, client)
+	expectHangUp(t, conn)
 	select {
 	case <-handlerDone:
 	case <-time.After(promptWaitBound):

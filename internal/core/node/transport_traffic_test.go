@@ -1,13 +1,9 @@
 package node
 
 import (
-	"bufio"
 	"context"
-	"errors"
-	"fmt"
 	"io"
 	"net"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -16,6 +12,7 @@ import (
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/netcore"
 	"github.com/piratecash/corsa/internal/core/protocol"
+	"github.com/piratecash/corsa/internal/core/sessionv2"
 )
 
 // readTransportTraffic polls fetch_traffic_totals the way the metrics
@@ -299,82 +296,6 @@ func TestTransportTrafficCountsSyncPeerDial(t *testing.T) {
 	}
 }
 
-// TestTransportTrafficCountsLegacySessionDial pins the legacy session dial
-// (openPeerSession). Production never reaches it — NewService always wires the
-// connection manager, and refreshKnowledgeFromPeers returns before
-// ensurePeerSessions while it is wired — but as long as the path exists it
-// opens a real socket, and the "every peer socket wrapped exactly once" rule
-// has to hold for it rather than be remembered for it. The scripted peer sends
-// a welcome without a challenge, which the dialler refuses after reading it.
-func TestTransportTrafficCountsLegacySessionDial(t *testing.T) {
-	t.Parallel()
-
-	raw, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	ln := &countingListener{Listener: raw}
-	t.Cleanup(func() { _ = raw.Close() })
-
-	svc := newTestService(t, config.NodeTypeFull)
-	asLegacyOnlyDialler(svc)
-	peerDone := make(chan error, 1)
-	go func() { peerDone <- serveWelcomeWithoutChallenge(ln) }()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if _, err := svc.openPeerSession(ctx, domain.PeerAddress(raw.Addr().String())); err == nil {
-		t.Fatal("precondition: a welcome without a challenge must end the legacy dial")
-	}
-
-	select {
-	case err := <-peerDone:
-		if err != nil {
-			t.Fatalf("mock peer: %v", err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("mock peer did not finish")
-	}
-	if ln.read.Load() == 0 || ln.written.Load() == 0 {
-		t.Fatalf("precondition: no traffic exchanged (peer read %d, wrote %d)", ln.read.Load(), ln.written.Load())
-	}
-	got := svc.TransportTrafficStats()
-	if got.BytesSent != ln.read.Load() || got.BytesReceived != ln.written.Load() {
-		t.Fatalf("transport = %d sent / %d received, peer saw %d read / %d written",
-			got.BytesSent, got.BytesReceived, ln.read.Load(), ln.written.Load())
-	}
-}
-
-// serveWelcomeWithoutChallenge answers a hello with a bare welcome and then
-// reads until the dialler closes, so every byte the dialler wrote has been
-// counted by the time it returns.
-func serveWelcomeWithoutChallenge(ln net.Listener) error {
-	conn, err := ln.Accept()
-	if err != nil {
-		return err
-	}
-	defer func() { _ = conn.Close() }()
-	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
-	reader := bufio.NewReader(conn)
-
-	if _, err := reader.ReadBytes('\n'); err != nil {
-		return err
-	}
-	welcome, err := protocol.MarshalFrameLine(protocol.Frame{
-		Type:                   "welcome",
-		Version:                config.ProtocolVersion,
-		MinimumProtocolVersion: config.MinimumProtocolVersion,
-	})
-	if err != nil {
-		return err
-	}
-	if _, err := io.WriteString(conn, welcome); err != nil {
-		return err
-	}
-	_, err = io.Copy(io.Discard, reader)
-	return err
-}
-
 // TestTransportTrafficCountsNoticeFallbackDial pins the same for the push_notice
 // fallback, the other dial that never becomes a session.
 func TestTransportTrafficCountsNoticeFallbackDial(t *testing.T) {
@@ -388,16 +309,13 @@ func TestTransportTrafficCountsNoticeFallbackDial(t *testing.T) {
 	t.Cleanup(func() { _ = raw.Close() })
 
 	svc := newTestService(t, config.NodeTypeFull)
-	peerDone := make(chan error, 1)
-	go func() { peerDone <- serveAuthenticatedNotice(ln) }()
-
-	asLegacyOnlyDialler(svc)
+	peerDone := serveV2Intro(ln, newDialWelcomeResponder(t), currentSecureIntro())
 	svc.sendNoticeToPeer(domain.PeerAddress(raw.Addr().String()), time.Minute, "transport-ciphertext")
 
 	select {
-	case err := <-peerDone:
-		if err != nil {
-			t.Fatalf("mock peer: %v", err)
+	case result := <-peerDone:
+		if result.err != nil || len(result.received) != 1 || result.received[0] != "push_notice" {
+			t.Fatalf("notice recipient got %+v", result)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("mock peer did not finish")
@@ -407,51 +325,6 @@ func TestTransportTrafficCountsNoticeFallbackDial(t *testing.T) {
 		t.Fatalf("transport = %d sent / %d received, peer saw %d read / %d written",
 			got.BytesSent, got.BytesReceived, ln.read.Load(), ln.written.Load())
 	}
-}
-
-// serveAuthenticatedNotice answers one push_notice dial as a current responder
-// does — a challenging welcome, auth_ok for a valid auth_session
-// (v1HandshakeResponder) — and then reads until the dialler closes, so every byte
-// the dialler wrote has been counted by the time it returns.
-func serveAuthenticatedNotice(ln net.Listener) error {
-	conn, err := ln.Accept()
-	if err != nil {
-		return err
-	}
-	defer func() { _ = conn.Close() }()
-	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
-	reader := bufio.NewReader(conn)
-
-	responder, err := newV1HandshakeResponder()
-	if err != nil {
-		return err
-	}
-	if _, err := responder.answerHello(conn, reader); err != nil {
-		return err
-	}
-	authReply, err := responder.answerAuth(conn, reader)
-	if err != nil {
-		return err
-	}
-	if authReply.Type != "auth_ok" {
-		return fmt.Errorf("auth_session refused: %s", authReply.Code)
-	}
-	notice, err := reader.ReadBytes('\n')
-	if err != nil {
-		return err
-	}
-	if frame, err := protocol.ParseFrameLine(strings.TrimSpace(string(notice))); err != nil || frame.Type != "push_notice" {
-		return errors.New("expected push_notice")
-	}
-	reply, err := protocol.MarshalFrameLine(protocol.Frame{Type: "ok"})
-	if err != nil {
-		return err
-	}
-	if _, err := io.WriteString(conn, reply); err != nil {
-		return err
-	}
-	_, err = io.Copy(io.Discard, reader)
-	return err
 }
 
 // TestTransportTrafficCountsAcceptedConnection drives the real accept path:
@@ -480,22 +353,11 @@ func TestTransportTrafficCountsAcceptedConnection(t *testing.T) {
 	var clientRead, clientWritten atomic.Uint64
 	client := countingConn{Conn: tcp, read: &clientRead, written: &clientWritten}
 
-	hello, err := protocol.MarshalFrameLine(protocol.Frame{
-		Type:                   "hello",
-		Version:                config.ProtocolVersion,
-		MinimumProtocolVersion: config.MinimumProtocolVersion,
-		Client:                 "test",
-		ClientVersion:          config.CorsaVersion,
-	})
-	if err != nil {
-		t.Fatalf("marshal hello: %v", err)
-	}
-	if _, err := io.WriteString(client, hello); err != nil {
-		t.Fatalf("write hello: %v", err)
-	}
-	reader := bufio.NewReader(client)
-	if _, err := reader.ReadBytes('\n'); err != nil {
-		t.Fatalf("read welcome: %v", err)
+	dialler := newTestService(t, config.NodeTypeClient)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	if _, err := sessionv2.Dial(ctx, client, dialler.secureSessions.local, dialler.nodeHelloFrame(), sessionv2.ExpectedPeer{}, sessionv2.DefaultTimeouts); err != nil {
+		t.Fatalf("secure handshake: %v", err)
 	}
 	// Half-close: the node sees EOF and tears the connection down, while
 	// everything it still writes reaches us, so the two sides' counts can be
@@ -503,7 +365,7 @@ func TestTransportTrafficCountsAcceptedConnection(t *testing.T) {
 	if err := tcp.CloseWrite(); err != nil {
 		t.Fatalf("close write: %v", err)
 	}
-	if _, err := io.Copy(io.Discard, reader); err != nil {
+	if _, err := io.Copy(io.Discard, client); err != nil {
 		t.Fatalf("drain: %v", err)
 	}
 

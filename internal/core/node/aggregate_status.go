@@ -299,7 +299,7 @@ func (s *Service) aggregateStatusFrame() protocol.Frame {
 			MaxObservedPeerVersion:       int(vpSnap.MaxObservedPeerVersion),
 
 			// Set once in NewService and immutable after: read without a lock.
-			V2TLSFirst: !s.tlsFirstDisabled(),
+			V2TLSFirst: true,
 		},
 	}
 }

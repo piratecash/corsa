@@ -444,9 +444,6 @@ func TestSendSideRebuildsPreserveTheMessageIdentifier(t *testing.T) {
 		"gossip fan-out (gossipPushFrame)": func(t *testing.T) protocol.MessageID {
 			return protocol.MessageID(gossipPushFrame(envelope).Item.ID)
 		},
-		"sender retry restamp (legacyTransitRestamp)": func(t *testing.T) protocol.MessageID {
-			return legacyTransitRestamp(envelope, time.Now().UTC()).ID
-		},
 		"receive from the wire (incomingMessageFromFrame)": func(t *testing.T) protocol.MessageID {
 			msg, err := incomingMessageFromFrame(protocol.Frame{
 				ID:        string(id),

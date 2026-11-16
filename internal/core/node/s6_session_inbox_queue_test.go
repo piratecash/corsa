@@ -58,7 +58,7 @@ func TestS6SessionInboxQueueCountsRequestAndServeReaders(t *testing.T) {
 	}()
 	requestDone := make(chan error, 1)
 	go func() {
-		_, err := s.peerSessionRequest(session, protocol.Frame{Type: "ping"}, "pong", false)
+		_, err := s.peerSessionRequest(session, protocol.Frame{Type: "ping"}, "pong")
 		requestDone <- err
 	}()
 	readWire("ping")

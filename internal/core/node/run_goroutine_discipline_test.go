@@ -50,7 +50,6 @@ const maxFollowDepth = 2
 // Each entry is a verdict, not a suppression: it says which lifetime owns the
 // goroutine. A new one appearing in these functions still has to be added here
 // deliberately, and anywhere else in the package still fails. The ONE entry
-// that is not a verdict is "openPeerSession": nothing joins its goroutines,
 // and it is listed as a known exception (docs/locking.md), not as owned.
 var otherLifecycles = map[string]string{
 	// The LEGACY session path (ensurePeerSessions → runPeerSession →
@@ -61,7 +60,6 @@ var otherLifecycles = map[string]string{
 	// Wait. A known exception, listed in docs/locking.md — not a verdict that
 	// something joins them. openPeerSessionForCM is deliberately absent: its
 	// goroutines are on runLoopsWg.
-	"openPeerSession": "legacy path, inert under the CM; NOT joined by Run (known exception)",
 
 	// The ConnectionManager's dial goroutines. cm.dialWg tracks every one of
 	// them and cm.shutdown() waits on it, so they have a join — the CM's, not

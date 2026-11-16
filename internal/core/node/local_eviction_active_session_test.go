@@ -10,6 +10,7 @@ import (
 
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/protocol"
+	"github.com/piratecash/corsa/internal/core/sessionv2/sessionv2test"
 )
 
 // local_eviction_active_session_test.go extends local_eviction_session_test.go
@@ -108,8 +109,10 @@ func (rig *evictionRig) counters() sessionCounters {
 // zero) while leaving the served session the last relay one.
 func newServedRig(t *testing.T, hangUp <-chan struct{}) *evictionRig {
 	t.Helper()
+	peer, _ := sessionv2test.NewProvenPeer(t)
 	rig := newEvictionRig(t, evictionRigOptions{
-		farEnd: answeringFarEnd(hangUp),
+		provenPeer: &peer,
+		farEnd:     answeringFarEnd(hangUp),
 		beforeEstablished: func(info SessionInfo) {
 			info.Session.capabilities = []domain.Capability{domain.CapMeshRelayV1}
 		},

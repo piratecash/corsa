@@ -205,19 +205,18 @@ func TestDeliveredReceiptSigningUsesOnlyNegotiatedProvedSessions(t *testing.T) {
 		}
 	})
 
-	t.Run("legacy delivery keeps an unsigned receipt", func(t *testing.T) {
-		pair := startLegacyPair(t, 30)
-		waitKinds(t, pair.new, "no outbound legacy session", func(stats domain.SessionKindStats) bool { return stats.OutboundLegacy > 0 })
+	t.Run("unnegotiated message keeps an unsigned receipt over TLS relay", func(t *testing.T) {
+		sender, _, recipient := startTLSRelayPair(t)
 		id, err := protocol.NewMessageID()
 		if err != nil {
 			t.Fatal(err)
 		}
-		deliverDM(t, pair.old, pair.new, string(id), "check legacy receipt")
-		waitForConditionMsg(t, 10*time.Second, "missing legacy delivered receipt", func() bool {
-			for _, frame := range pair.old.fetchDeliveryReceiptsFrame(pair.old.Address()).Receipts {
+		deliverDM(t, sender, recipient, string(id), "check ordinary receipt through a TLS relay")
+		waitForConditionMsg(t, 10*time.Second, "missing unsigned delivered receipt", func() bool {
+			for _, frame := range sender.fetchDeliveryReceiptsFrame(sender.Address()).Receipts {
 				if frame.MessageID == string(id) && frame.Status == protocol.ReceiptStatusDelivered {
 					if frame.Signature != "" || frame.SignerPublicKey != "" {
-						t.Fatal("legacy peer received signing fields")
+						t.Fatal("unnegotiated receipt included signing fields")
 					}
 					return true
 				}

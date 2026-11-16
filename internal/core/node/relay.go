@@ -984,24 +984,16 @@ func (s *Service) handleRelayMessage(senderAddress domain.PeerAddress, syncSessi
 	// cap — and have every hop amplify them across the mesh; oversized
 	// fields can never validate on the recipient anyway, so they are
 	// dropped here (the recipient falls back to the on-demand key sync).
-	forwardCreatedAt, forwardTTL := legacyTransitWireStamp(frame.Topic, recipient, frame.CreatedAt, frame.TTLSeconds, time.Now().UTC())
 	forwardFrame := protocol.Frame{
-		Type:      "relay_message",
-		ID:        messageID,
-		Address:   originSender,
-		Recipient: recipient,
-		Topic:     frame.Topic,
-		Body:      frame.Body,
-		Flag:      frame.Flag,
-		// TODO(transit-age-restamp-removal): forwarding somebody else's old
-		// message needs the same treatment as sending our own — a pre-v30
-		// node further along the route drops it otherwise, silently. Decided
-		// HERE, once, so every onward copy (direct peer, table route, gossip,
-		// the stashed failover line) carries the same date. The TTL is
-		// re-derived with it so the author's deadline does not move. See
-		// legacy_transit_restamp.go.
-		CreatedAt:   forwardCreatedAt,
-		TTLSeconds:  forwardTTL,
+		Type:        "relay_message",
+		ID:          messageID,
+		Address:     originSender,
+		Recipient:   recipient,
+		Topic:       frame.Topic,
+		Body:        frame.Body,
+		Flag:        frame.Flag,
+		CreatedAt:   frame.CreatedAt,
+		TTLSeconds:  frame.TTLSeconds,
 		HopCount:    newHopCount,
 		MaxHops:     maxHops,
 		PreviousHop: string(s.identity.Address),
@@ -2387,12 +2379,8 @@ func (s *Service) deleteBacklogMessageForRecipient(recipient string, messageID p
 // re-sent. The forgery is rejected at the end node, but the ack for it
 // is still legitimate traffic, and this is what it must not sweep up.
 //
-// An ack from a peer older than ProtocolVersionReceiptSenderAck cannot
-// name the author. Then the rule is "delete only if unambiguous": one
-// candidate is deleted, several are all KEPT. Keeping costs a duplicate
-// push the peer discards; deleting the wrong one costs the delivery.
-// A legacy ack retires only unsigned receipts. The extended form must
-// name the exact receipt proof.
+// An ack without a receipt proof retires only the named unsigned receipt.
+// An ack with a proof must name that exact signed receipt.
 func (s *Service) deleteBacklogReceiptForRecipient(target receiptIdentity, proof string) int {
 	recipient, messageID := target.Recipient, target.MessageID
 	log.Trace().Str("site", "deleteBacklogReceiptForRecipient").Str("phase", "lock_wait").Str("recipient", recipient).Str("msg_id", string(messageID)).Msg("delivery_mu_writer")
@@ -2403,20 +2391,6 @@ func (s *Service) deleteBacklogReceiptForRecipient(target receiptIdentity, proof
 		s.deliveryMu.Unlock()
 		log.Trace().Str("site", "deleteBacklogReceiptForRecipient").Str("phase", "lock_released_empty").Str("recipient", recipient).Str("msg_id", string(messageID)).Msg("delivery_mu_writer")
 		return 0
-	}
-	if !target.senderKnown() {
-		candidates := 0
-		for _, receipt := range list {
-			if receipt.Signature == proof && target.matches(receipt) {
-				candidates++
-			}
-		}
-		if candidates > 1 {
-			s.deliveryMu.Unlock()
-			log.Warn().Str("recipient", recipient).Str("msg_id", string(messageID)).Str("status", target.Status).Int("candidates", candidates).
-				Msg("ack_delete kept every receipt: the acking peer cannot name which one it holds and more than one matches")
-			return 0
-		}
 	}
 	filtered := list[:0]
 	removed := 0

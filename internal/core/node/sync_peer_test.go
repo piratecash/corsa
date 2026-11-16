@@ -13,56 +13,17 @@ import (
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/protocol"
-	"github.com/piratecash/corsa/internal/core/transport"
 )
 
-// newSyncPeerTestService creates a minimal Service for testing syncPeer().
-// It populates all maps that syncPeer touches to avoid nil-pointer panics.
-//
-// The identity is real: a current responder challenges only a hello whose
-// identity fields bind (connauth.PrepareAuth), and syncPeer signs the
-// challenge with it.
 func newSyncPeerTestService(t *testing.T, aggregateStatus domain.NetworkStatus) *Service {
 	t.Helper()
-	id, err := identity.Generate()
-	if err != nil {
-		t.Fatalf("identity.Generate: %v", err)
-	}
-	return &Service{
-		peerTCPDial:   dialTCPDirect,
-		identity:      id,
-		selfBoxKey:    identity.BoxPublicKeyBase64(id.BoxPublicKey),
-		selfBoxSig:    identity.SignBoxKeyBinding(id),
-		cfg:           config.Node{AllowPrivatePeers: true},
-		runCtx:        context.Background(),
-		health:        make(map[domain.PeerAddress]*peerHealth),
-		pending:       make(map[domain.PeerAddress][]pendingFrame),
-		peers:         []transport.Peer{},
-		known:         newBoundedKnownIdentities(maxKnownIdentities),
-		boxKeys:       make(map[string]string),
-		pubKeys:       make(map[string]string),
-		boxSigs:       make(map[string]string),
-		peerTypes:     make(map[domain.PeerAddress]domain.NodeType),
-		peerIDs:       make(addressIdentities),
-		peerVersions:  make(map[domain.PeerAddress]string),
-		peerBuilds:    make(map[domain.PeerAddress]int),
-		persistedMeta: make(map[domain.PeerAddress]*peerEntry),
-		dialOrigin:    make(map[domain.PeerAddress]domain.PeerAddress),
-		bannedIPSet:   make(map[string]domain.BannedIPEntry),
-		observedAddrs: make(map[domain.PeerIdentity]string),
-		aggregateStatus: domain.AggregateStatusSnapshot{
-			Status: aggregateStatus,
-		},
-	}
+	svc := newTestService(t, config.NodeTypeFull)
+	svc.aggregateStatus.Status = aggregateStatus
+	return svc
 }
 
-// syncPeerMockServer accepts a single TCP connection and simulates a current
-// peer that responds to the syncPeer() handshake: hello, a challenging
-// welcome, auth_session verified before auth_ok (v1HandshakeResponder), then
-// get_peers and fetch_contacts. A request the responder could not
-// authenticate is answered auth-required, as on a real node.
-//
-// Returns the ordered list of frame types received from the client.
+// syncPeerMockServer accepts a secure session and reports the application
+// requests in arrival order.
 func syncPeerMockServer(t *testing.T, ln net.Listener, respondPeers []string) []string {
 	t.Helper()
 	conn, err := ln.Accept()
@@ -72,17 +33,13 @@ func syncPeerMockServer(t *testing.T, ln net.Listener, respondPeers []string) []
 	defer func() { _ = conn.Close() }()
 
 	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
-	reader := bufio.NewReader(conn)
-
-	responder, err := newV1HandshakeResponder()
+	wire, err := acceptSecureTestWire(conn, newDialWelcomeResponder(t), currentSecureIntro())
 	if err != nil {
-		t.Fatalf("mock server: responder identity: %v", err)
+		t.Fatalf("mock server: secure handshake: %v", err)
 	}
-	hello, err := responder.answerHello(conn, reader)
-	if err != nil {
-		t.Fatalf("mock server: hello: %v", err)
-	}
-	received := []string{hello.Type}
+	defer func() { _ = wire.Close() }()
+	reader := bufio.NewReader(wire)
+	var received []string
 
 	// Read and respond to subsequent requests until client closes.
 	for {
@@ -102,20 +59,16 @@ func syncPeerMockServer(t *testing.T, ln net.Listener, respondPeers []string) []
 		received = append(received, frame.Type)
 
 		var resp protocol.Frame
-		switch {
-		case frame.Type == "auth_session":
-			resp = responder.authReply(frame)
-		case !responder.authenticated():
-			resp = protocol.Frame{Type: "error", Code: protocol.ErrCodeAuthRequired}
-		case frame.Type == "get_peers":
+		switch frame.Type {
+		case "get_peers":
 			resp = protocol.Frame{Type: "peers", Peers: respondPeers}
-		case frame.Type == "fetch_contacts":
+		case "fetch_contacts":
 			resp = protocol.Frame{Type: "contacts", Contacts: []protocol.ContactFrame{}}
 		default:
 			continue
 		}
 		line, _ = protocol.MarshalFrameLine(resp)
-		_, _ = conn.Write([]byte(line))
+		_, _ = wire.Write([]byte(line))
 	}
 
 	return received
@@ -153,7 +106,7 @@ func TestSyncPeer_RequestPeersTrue_SendsGetPeers(t *testing.T) {
 	received := <-receivedCh
 
 	// Expect: hello, auth_session, get_peers, fetch_contacts.
-	expectedTypes := []string{"hello", "auth_session", "get_peers", "fetch_contacts"}
+	expectedTypes := []string{"get_peers", "fetch_contacts"}
 	if len(received) != len(expectedTypes) {
 		t.Fatalf("expected %d requests %v, got %d: %v",
 			len(expectedTypes), expectedTypes, len(received), received)
@@ -211,7 +164,7 @@ func TestSyncPeer_RequestPeersFalse_SkipsGetPeers(t *testing.T) {
 	received := <-receivedCh
 
 	// Expect: hello, auth_session, fetch_contacts — NO get_peers.
-	expectedTypes := []string{"hello", "auth_session", "fetch_contacts"}
+	expectedTypes := []string{"fetch_contacts"}
 	if len(received) != len(expectedTypes) {
 		t.Fatalf("expected %d requests %v, got %d: %v",
 			len(expectedTypes), expectedTypes, len(received), received)
@@ -395,7 +348,7 @@ func TestSyncSenderKeys_FreshDialFallback_SkipsGetPeers(t *testing.T) {
 	received := <-receivedCh
 
 	// Expect: hello, auth_session, fetch_contacts — NO get_peers.
-	expectedTypes := []string{"hello", "auth_session", "fetch_contacts"}
+	expectedTypes := []string{"fetch_contacts"}
 	if len(received) != len(expectedTypes) {
 		t.Fatalf("expected %d requests %v, got %d: %v",
 			len(expectedTypes), expectedTypes, len(received), received)
@@ -539,71 +492,20 @@ func TestSyncPeer_RecordsOutboundSuccess(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = ln.Close() })
 
-	responder, err := newV1HandshakeResponder()
-	if err != nil {
-		t.Fatalf("responder identity: %v", err)
-	}
-
-	peerDone := make(chan error, 1)
-	go func() {
-		c, err := ln.Accept()
-		if err != nil {
-			peerDone <- err
-			return
-		}
-		defer func() { _ = c.Close() }()
-		_ = c.SetDeadline(time.Now().Add(3 * time.Second))
-		reader := bufio.NewReader(c)
-
-		// hello → the challenging welcome of a current responder; auth_ok,
-		// only for a valid signature, is where the convergence hook must
-		// fire.
-		if _, err := responder.answerHello(c, reader); err != nil {
-			peerDone <- err
-			return
-		}
-		if _, err := responder.answerAuth(c, reader); err != nil {
-			peerDone <- err
-			return
-		}
-
-		// fetch_contacts → empty contacts; syncPeer reads one contacts
-		// reply and returns. requestPeers=false so no get_peers between.
-		if _, err := reader.ReadBytes('\n'); err != nil {
-			peerDone <- err
-			return
-		}
-		contactsLine, err := protocol.MarshalFrameLine(protocol.Frame{
-			Type:     "contacts",
-			Contacts: []protocol.ContactFrame{},
-		})
-		if err != nil {
-			peerDone <- err
-			return
-		}
-		if _, err := c.Write([]byte(contactsLine)); err != nil {
-			peerDone <- err
-			return
-		}
-		peerDone <- nil
-	}()
+	peerDone := make(chan []string, 1)
+	go func() { peerDone <- syncPeerMockServer(t, ln, nil) }()
 
 	peerAddr := domain.PeerAddress(ln.Addr().String())
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
-	// requestPeers=false mirrors the sender-key recovery call site —
-	// the production caller that exercises the auth_ok branch.
-	asLegacyOnlyDialler(svc)
 	svc.syncPeer(ctx, peerAddr, false)
-
 	select {
-	case err := <-peerDone:
-		if err != nil {
-			t.Fatalf("peer goroutine: %v", err)
+	case requests := <-peerDone:
+		if len(requests) != 1 || requests[0] != "fetch_contacts" {
+			t.Fatalf("sync peer application requests: %v", requests)
 		}
-	case <-time.After(5 * time.Second):
-		t.Fatalf("syncPeer handshake did not complete within 5s")
+	case <-ctx.Done():
+		t.Fatal("syncPeer did not complete")
 	}
 
 	svc.peerMu.RLock()
@@ -648,10 +550,6 @@ func TestSyncPeer_RecordsOutboundSuccess(t *testing.T) {
 // interleaved push_message frame was mistaken for the contacts reply,
 // imported stayed 0 (sync_peer_no_new_contacts), and sender-key recovery
 // for relayed DMs never succeeded.
-// The mock authenticates like every current responder (v1HandshakeResponder) and
-// interleaves a burst BEFORE auth_ok too — reproducing the
-// trackInboundConnect flood (pending-ring flush + route sync) that the
-// responder enqueues before the auth reply.
 func interleavedSyncPeerMockServer(t *testing.T, ln net.Listener, interleaveCount int, respondPeers []string, respondContacts []protocol.ContactFrame) {
 	t.Helper()
 	conn, err := ln.Accept()
@@ -662,17 +560,13 @@ func interleavedSyncPeerMockServer(t *testing.T, ln net.Listener, interleaveCoun
 	defer func() { _ = conn.Close() }()
 
 	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
-	reader := bufio.NewReader(conn)
-
-	responder, err := newV1HandshakeResponder()
+	wire, err := acceptSecureTestWire(conn, newDialWelcomeResponder(t), currentSecureIntro())
 	if err != nil {
-		t.Errorf("mock server: responder identity: %v", err)
+		t.Errorf("mock server: secure handshake: %v", err)
 		return
 	}
-	if _, err := responder.answerHello(conn, reader); err != nil {
-		t.Errorf("mock server: hello: %v", err)
-		return
-	}
+	defer func() { _ = wire.Close() }()
+	reader := bufio.NewReader(wire)
 
 	writeInterleaved := func() {
 		push, _ := protocol.MarshalFrameLine(protocol.Frame{
@@ -689,7 +583,7 @@ func interleavedSyncPeerMockServer(t *testing.T, ln net.Listener, interleaveCoun
 		announce, _ := protocol.MarshalFrameLine(protocol.Frame{Type: "announce_routes"})
 		// Buffer the burst: thousands of one-line conn.Write calls make
 		// the mock, not the code under test, the slow party.
-		w := bufio.NewWriterSize(conn, 1<<16)
+		w := bufio.NewWriterSize(wire, 1<<16)
 		for i := 0; i < interleaveCount; i++ {
 			switch i % 3 {
 			case 0:
@@ -716,24 +610,14 @@ func interleavedSyncPeerMockServer(t *testing.T, ln net.Listener, interleaveCoun
 			continue
 		}
 		switch frame.Type {
-		case "auth_session":
-			// Production ordering: the responder's auth-time side
-			// effects (pending-ring flush, route sync) hit the FIFO
-			// writer BEFORE the auth_ok reply.
-			reply := responder.authReply(frame)
-			if reply.Type == "auth_ok" {
-				writeInterleaved()
-			}
-			authReply, _ := protocol.MarshalFrameLine(reply)
-			_, _ = conn.Write([]byte(authReply))
 		case "get_peers":
 			writeInterleaved()
 			resp, _ := protocol.MarshalFrameLine(protocol.Frame{Type: "peers", Peers: respondPeers})
-			_, _ = conn.Write([]byte(resp))
+			_, _ = wire.Write([]byte(resp))
 		case "fetch_contacts":
 			writeInterleaved()
 			resp, _ := protocol.MarshalFrameLine(protocol.Frame{Type: "contacts", Contacts: respondContacts})
-			_, _ = conn.Write([]byte(resp))
+			_, _ = wire.Write([]byte(resp))
 		}
 	}
 }
@@ -818,67 +702,5 @@ func TestSyncPeer_ContactsReply_SkipsInterleavedFrames(t *testing.T) {
 	svc.peerMu.RUnlock()
 	if peerCount != 1 {
 		t.Errorf("expected 1 peer imported despite interleaved frames, got %d", peerCount)
-	}
-}
-
-// TestSyncPeer_AuthReply_SkipsInterleavedFrames locks the AUTH-phase
-// interleave tolerance on the recovery dial. Production responders
-// always challenge, and handleAuthSession runs trackInboundConnect —
-// which can flush a full pending ring of fire-and-forget frames plus
-// route-sync output — BEFORE the caller enqueues auth_ok on the FIFO
-// writer. The historical "skip up to 5 frames" auth wait broke the
-// recovery exactly when it mattered (a loaded responder holding a
-// backlog for us); the auth wait must survive a pending-ring-sized
-// flood, same as the contacts wait.
-func TestSyncPeer_AuthReply_SkipsInterleavedFrames(t *testing.T) {
-	t.Parallel()
-
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("failed to start listener: %v", err)
-	}
-	defer func() { _ = ln.Close() }()
-
-	// Real identities: the client must sign auth_session (the mock's
-	// v1HandshakeResponder verifies it) and the served contact must pass
-	// VerifyBoxKeyBinding.
-	svc := newTestService(t, config.NodeTypeFull)
-	senderID, err := identity.Generate()
-	if err != nil {
-		t.Fatalf("identity.Generate (sender): %v", err)
-	}
-	contact := protocol.ContactFrame{
-		Address: senderID.Address,
-		PubKey:  identity.PublicKeyBase64(senderID.PublicKey),
-		BoxKey:  identity.BoxPublicKeyBase64(senderID.BoxPublicKey),
-		BoxSig:  identity.SignBoxKeyBinding(senderID),
-	}
-
-	// Pending-ring-sized flood before auth_ok AND before each reply.
-	interleaveCount := maxPendingFramesPerPeer + 100
-
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		interleavedSyncPeerMockServer(t, ln, interleaveCount, nil, []protocol.ContactFrame{contact})
-	}()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-
-	asLegacyOnlyDialler(svc)
-	imported := svc.syncPeer(ctx, domain.PeerAddress(ln.Addr().String()), false)
-
-	_ = ln.Close()
-	<-done
-
-	if imported != 1 {
-		t.Fatalf("expected 1 imported contact through the auth-phase flood, got %d", imported)
-	}
-	svc.knowledgeMu.RLock()
-	gotPub := svc.pubKeys[senderID.Address]
-	svc.knowledgeMu.RUnlock()
-	if gotPub == "" {
-		t.Errorf("sender pubkey not imported through auth-phase interleave")
 	}
 }

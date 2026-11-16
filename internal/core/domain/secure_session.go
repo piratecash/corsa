@@ -127,17 +127,11 @@ type SecureSessionStoreStats struct {
 	// ClockJumpActive reports that the wall clock is ahead of the trusted
 	// time right now, so the terms run on the trusted time instead.
 	ClockJumpActive bool
-	// TLSFirstDisabled reports that the operator switched TLS-first off
-	// (CORSA_V2_TLS_FIRST): a dial where v1 is not ruled out opens
-	// with the identity-less probe, without a ClientHello. Where v2 is
-	// required the dial still opens with TLS.
+	// TLSFirstDisabled is always false on this build. Retained for clients.
 	TLSFirstDisabled bool
-	// DialsOpenedByProbe counts the dials that opened with the probe
-	// because TLS-first is off, since the process started.
+	// DialsOpenedByProbe is always zero on this build.
 	DialsOpenedByProbe uint64
-	// V1RefusalsAfterV2Welcome counts v1 answers refused on the TLS attempt
-	// that followed a correct v2 welcome to the probe — one of the two was
-	// forged — since the process started.
+	// V1RefusalsAfterV2Welcome is always zero on this build.
 	V1RefusalsAfterV2Welcome uint64
 }
 

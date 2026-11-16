@@ -4,16 +4,18 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"github.com/piratecash/corsa/internal/core/protocol"
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/config"
 	"github.com/piratecash/corsa/internal/core/config/configtest"
 	"github.com/piratecash/corsa/internal/core/identity"
+	"github.com/piratecash/corsa/internal/core/protocol"
+	"github.com/piratecash/corsa/internal/core/sessionv2"
 )
 
 // The SDK's normal-origin latch depends on Run joining the actual managed CM
@@ -136,11 +138,12 @@ type finalTransportHeldWire struct {
 	readHeld, writeHeld       chan struct{}
 	releaseRead, releaseWrite <-chan struct{}
 	readOnce, writeOnce       sync.Once
+	armed                     atomic.Bool
 }
 
 func (c *finalTransportHeldWire) Read(p []byte) (int, error) {
 	n, err := c.Conn.Read(p)
-	if err != nil || bytes.Contains(p[:n], []byte("final-read-tail")) {
+	if c.armed.Load() {
 		c.readOnce.Do(func() { close(c.readHeld) })
 		<-c.releaseRead
 	}
@@ -148,7 +151,7 @@ func (c *finalTransportHeldWire) Read(p []byte) (int, error) {
 }
 func (c *finalTransportHeldWire) Write(p []byte) (int, error) {
 	n, err := c.Conn.Write(p)
-	if bytes.Contains(p, []byte("final-tail-barrier")) {
+	if c.armed.Load() {
 		c.writeOnce.Do(func() { close(c.writeHeld) })
 		<-c.releaseWrite
 	}
@@ -161,7 +164,6 @@ func TestFinalTransportManagedRunJoinsActualNetCoreReaderAndWriter(t *testing.T)
 		t.Fatal(err)
 	}
 	svc := NewService(cfg, id, nil)
-	legacySelfRecordFixture(t)(svc)
 	local, remote := net.Pipe()
 	releaseRead, releaseWrite := make(chan struct{}), make(chan struct{})
 	wire := &finalTransportHeldWire{Conn: local, readHeld: make(chan struct{}), writeHeld: make(chan struct{}), releaseRead: releaseRead, releaseWrite: releaseWrite}
@@ -169,21 +171,19 @@ func TestFinalTransportManagedRunJoinsActualNetCoreReaderAndWriter(t *testing.T)
 	unblockRead := func() { readOnce.Do(func() { close(releaseRead) }) }
 	unblockWrite := func() { writeOnce.Do(func() { close(releaseWrite) }) }
 	svc.peerTCPDial = func(context.Context, string, time.Duration) (net.Conn, error) { return wire, nil }
-	peer, err := identity.Generate()
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, welcome := oldNodeWelcomes(t, peer, config.ProtocolVersion)
+	peer := newTestService(t, config.NodeTypeFull)
 	remoteDone := make(chan struct{})
 	go func() {
 		defer close(remoteDone)
-		reader := bufio.NewReader(remote)
-		if _, err := reader.ReadString('\n'); err != nil || !writeFrameLine(remote, welcome) {
+		proof, err := sessionv2.Accept(t.Context(), remote, peer.secureSessions.local, peer.welcomeFrame("", ""), peer.secureSessions.certificates, sessionv2.DefaultTimeouts)
+		if err != nil {
 			return
 		}
-		if _, err := reader.ReadString('\n'); err != nil || !writeFrameLine(remote, protocol.Frame{Type: "auth_ok"}) {
+		conn, err := proof.Conn()
+		if err != nil {
 			return
 		}
+		reader := bufio.NewReader(conn)
 		for {
 			line, err := reader.ReadString('\n')
 			if err != nil {
@@ -194,7 +194,7 @@ func TestFinalTransportManagedRunJoinsActualNetCoreReaderAndWriter(t *testing.T)
 				return
 			}
 			if bytes.Contains([]byte(line), []byte("final-tail-barrier")) {
-				_, _ = io.WriteString(remote, "{\"type\":\"pong\",\"message\":\"final-read-tail\"}\n")
+				_, _ = io.WriteString(conn, "{\"type\":\"pong\",\"message\":\"final-read-tail\"}\n")
 				continue
 			}
 			reply := protocol.Frame{}
@@ -206,7 +206,7 @@ func TestFinalTransportManagedRunJoinsActualNetCoreReaderAndWriter(t *testing.T)
 			default:
 				continue
 			}
-			if !writeFrameLine(remote, reply) {
+			if !writeFrameLine(conn, reply) {
 				return
 			}
 		}
@@ -236,6 +236,7 @@ func TestFinalTransportManagedRunJoinsActualNetCoreReaderAndWriter(t *testing.T)
 	if session.netCore == nil {
 		t.Fatal("actual managed NetCore absent")
 	}
+	wire.armed.Store(true)
 	svc.enqueueSessionFrame(session, []byte("{\"type\":\"ping\",\"message\":\"final-tail-barrier\"}\n"))
 	select {
 	case <-wire.writeHeld:

@@ -3,7 +3,6 @@ package node
 import (
 	"bufio"
 	"fmt"
-	"net"
 	"testing"
 	"time"
 
@@ -461,7 +460,7 @@ func TestRelayFloodPerPeerLimitProtectsOtherPeers(t *testing.T) {
 
 // ---------------------------------------------------------------------------
 // Integration test: relay chain with live inbox route. Sender injects a DM
-// into NodeA. The recipient connects directly to NodeC; the inbox route is
+// into NodeA. The recipient connects directly to NodeB. The inbox route is
 // auto-registered at auth time (registerHelloRoute). The DM should be pushed
 // to the recipient via the live route.
 // ---------------------------------------------------------------------------
@@ -503,48 +502,16 @@ func TestRelayChainWithLiveInboxRoute(t *testing.T) {
 	}
 
 	waitForCondition(t, 5*time.Second, func() bool {
-		return len(nodeA.Peers()) >= 1 && len(nodeB.Peers()) >= 1
+		return nodeA.SessionKindStats().OutboundV2 > 0 && nodeB.SessionKindStats().OutboundV2 > 0
 	})
 
-	// Recipient connects to nodeB with an authenticated session — the live
-	// inbox route is auto-registered at auth time.
-	recipConn, err := net.DialTimeout("tcp", nodeB.externalListenAddress(), 2*time.Second)
-	if err != nil {
-		t.Fatalf("dial recipient: %v", err)
-	}
+	// The authenticated recipient acquires a live inbox route during setup.
+	recipConn, _ := dialTestTLSClientAs(t, nodeB.externalListenAddress(), recipientID, nil)
 	defer func() { _ = recipConn.Close() }()
-	_ = recipConn.SetDeadline(time.Now().Add(15 * time.Second))
 	recipReader := bufio.NewReader(recipConn)
-
-	// hello + auth
-	writeJSONFrame(t, recipConn, protocol.Frame{
-		Type:                   "hello",
-		Version:                config.ProtocolVersion,
-		MinimumProtocolVersion: config.MinimumProtocolVersion,
-		Client:                 "node",
-		ClientVersion:          config.CorsaVersion,
-		Address:                recipientID.Address,
-		PubKey:                 identity.PublicKeyBase64(recipientID.PublicKey),
-		BoxKey:                 identity.BoxPublicKeyBase64(recipientID.BoxPublicKey),
-		BoxSig:                 identity.SignBoxKeyBinding(recipientID),
+	waitForCondition(t, 5*time.Second, func() bool {
+		return nodeB.SubscriberCount(recipientID.Address) > 0
 	})
-	welcome := readJSONTestFrame(t, recipReader)
-	if welcome.Type != "welcome" || welcome.Challenge == "" {
-		t.Fatalf("expected welcome with challenge, got %s", welcome.Type)
-	}
-
-	writeJSONFrame(t, recipConn, protocol.Frame{
-		Type:      "auth_session",
-		Address:   recipientID.Address,
-		Signature: identity.SignPayload(recipientID, []byte("corsa-session-auth-v1|"+welcome.Challenge+"|"+recipientID.Address)),
-	})
-	authOK := readJSONTestFrame(t, recipReader)
-	if authOK.Type != "auth_ok" {
-		t.Fatalf("expected auth_ok, got %s: %s", authOK.Type, authOK.Error)
-	}
-
-	// The live inbox route was auto-registered at auth time
-	// (registerHelloRoute) — no explicit subscription round-trip exists.
 
 	// Encrypt DM and inject into nodeA.
 	ciphertext, err := directmsg.EncryptForParticipants(

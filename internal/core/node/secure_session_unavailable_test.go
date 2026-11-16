@@ -115,16 +115,15 @@ func TestAV1OnlyBuildOverAPinStoreIsARefusal(t *testing.T) {
 	}
 }
 
-func TestAV1OnlyBuildWithNoPinStoreStarts(t *testing.T) {
+func TestFloor31RefusesAnUnsupportedSessionModeWithoutPinStore(t *testing.T) {
 	t.Parallel()
-	builders := productionSecureSessionBuilders()
-	builders.mode = modeAlways(sessionv2.ModeLegacyOnly)
-	sessions := buildSecureSessions(generatedIdentity(t), sessionsOptionsIn(t.TempDir()), builders)
-	if err := (&Service{secureSessions: sessions}).StartupRefusal(); err != nil {
-		t.Fatalf("StartupRefusal = %v, want a v1-only node with nothing on disk to start", err)
-	}
-	if sessions.mode != sessionv2.ModeLegacyOnly {
-		t.Fatalf("mode = %s, want legacy only", sessions.mode)
+	for _, mode := range []sessionv2.Mode{sessionv2.ModeLegacyOnly, sessionv2.ModeTransition} {
+		builders := productionSecureSessionBuilders()
+		builders.mode = modeAlways(mode)
+		sessions := buildSecureSessions(generatedIdentity(t), sessionsOptionsIn(t.TempDir()), builders)
+		if reason := refusalOfSessions(t, sessions); reason != domain.PinStoreRefusalSecureSessionUnavailable {
+			t.Fatalf("mode %s refusal=%s, want %s", mode, reason, domain.PinStoreRefusalSecureSessionUnavailable)
+		}
 	}
 }
 

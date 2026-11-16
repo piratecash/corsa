@@ -15,6 +15,7 @@ import (
 	"github.com/piratecash/corsa/internal/core/netcore"
 	"github.com/piratecash/corsa/internal/core/protocol"
 	"github.com/piratecash/corsa/internal/core/routing"
+	"github.com/piratecash/corsa/internal/core/sessionv2/sessionv2test"
 )
 
 func newReceiveOwnerSession(t *testing.T, svc *Service, id domain.ConnID, address domain.PeerAddress) *peerSession {
@@ -252,12 +253,17 @@ func TestReceiveSetupEvidenceCannotEscapeEvictedCMGeneration(t *testing.T) {
 	var once sync.Once
 	release := func() { once.Do(func() { close(gate) }) }
 	defer release()
+	peer, _ := sessionv2test.NewProvenPeer(t)
 	var rig *evictionRig
-	rig = newEvictionRig(t, evictionRigOptions{farEnd: baselineDuringContactsFarEnd(ctx, newEvictionSession().peerIdentity), beforeEstablished: func(info SessionInfo) {
-		<-built
-		info.Session.capabilities = legacyRoutingCaps
-		rig.svc.cmSessionRegisterBarrier = func() { close(reached); <-gate }
-	}})
+	rig = newEvictionRig(t, evictionRigOptions{
+		provenPeer: &peer,
+		farEnd:     baselineDuringContactsFarEnd(ctx, peer.Identity),
+		beforeEstablished: func(info SessionInfo) {
+			<-built
+			info.Session.capabilities = legacyRoutingCaps
+			rig.svc.cmSessionRegisterBarrier = func() { close(reached); <-gate }
+		},
+	})
 	close(built)
 	awaitClosed(t, reached, "setup baseline before CM publication")
 	if !rig.session.receive.HasReceivedBaseline() {
@@ -316,7 +322,14 @@ func TestReceiveInboundDispatcherUsesRegisteredConnectionOwner(t *testing.T) {
 func TestReceiveSetupBaselineSurvivesActualCMRegistration(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
-	rig := newEvictionRig(t, evictionRigOptions{farEnd: baselineDuringContactsFarEnd(ctx, newEvictionSession().peerIdentity), beforeEstablished: func(info SessionInfo) { info.Session.capabilities = legacyRoutingCaps }})
+	peer, _ := sessionv2test.NewProvenPeer(t)
+	rig := newEvictionRig(t, evictionRigOptions{
+		provenPeer: &peer,
+		farEnd:     baselineDuringContactsFarEnd(ctx, peer.Identity),
+		beforeEstablished: func(info SessionInfo) {
+			info.Session.capabilities = legacyRoutingCaps
+		},
+	})
 	deadline := time.NewTimer(4 * time.Second)
 	defer deadline.Stop()
 	ticker := time.NewTicker(time.Millisecond)

@@ -33,7 +33,7 @@ awk -F '\t' -v root="$BASE/" '
  }
 ' "$SCRIPT_DIR/netcore-boundary-baseline.tsv"
 printf 'package domain\n' > "$BASE/internal/core/domain/domain.go"
-for spec in 'routing_relay.go 3' 'socks5.go 2'; do
+for spec in 'routing_relay.go 1' 'socks5.go 2'; do
     read -r name count <<< "$spec"
     {
         printf '\nfunc fixtureSocketWrites() {\n'

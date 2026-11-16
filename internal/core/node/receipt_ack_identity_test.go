@@ -161,46 +161,25 @@ func TestAckForAForgedReceiptLeavesTheRealOneStanding(t *testing.T) {
 	}
 }
 
-// A peer below ProtocolVersionReceiptSenderAck cannot say which one it
-// holds. One candidate is unambiguous and goes; several are all kept,
-// because a duplicate push the peer discards is cheaper than deleting
-// the receipt somebody is still waiting for.
-func TestLegacyAckDeletesOnlyWhenThereIsNothingToConfuseItWith(t *testing.T) {
+// A receipt acknowledgment must name its author even if there is only
+// one candidate in the current backlog.
+func TestReceiptAckRequiresSender(t *testing.T) {
 	t.Parallel()
 	svc := newTestService(t, config.NodeTypeFull)
 	peer := newAckingPeer(t, svc)
+	held := receiptFrom("the-actual-recipient", peer.id.Address, "one-claim-only")
+	seedReceiptBacklog(svc, held)
 
-	const contested = protocol.MessageID("two-claims-one-message")
-	genuine := receiptFrom("the-actual-recipient", peer.id.Address, contested)
-	forged := receiptFrom("someone-who-knew-the-id", peer.id.Address, contested)
-	const alone = protocol.MessageID("one-claim-only")
-	single := receiptFrom("the-actual-recipient", peer.id.Address, alone)
-	seedReceiptBacklog(svc, genuine, forged, single)
-
-	reply, ok := svc.handleAckDeleteFrame(peer.connID, peer.ack("", contested, genuine.Status))
-	if !ok {
-		t.Fatalf("the legacy ack was refused: %+v", reply)
+	reply, ok := svc.handleAckDeleteFrame(peer.connID, peer.ack("", held.MessageID, held.Status))
+	if ok || reply.Code != protocol.ErrCodeInvalidAckDelete {
+		t.Fatalf("receipt ack without sender admitted: ok=%v reply=%+v", ok, reply)
 	}
-	if reply.Count != 0 {
-		t.Fatalf("an ack that cannot name its receipt removed %d of 2 candidates", reply.Count)
-	}
-
-	reply, ok = svc.handleAckDeleteFrame(peer.connID, peer.ack("", alone, single.Status))
-	if !ok {
-		t.Fatalf("the legacy ack was refused: %+v", reply)
-	}
-	if reply.Count != 1 {
-		t.Fatalf("an unambiguous legacy ack removed %d receipts, want 1", reply.Count)
-	}
-	if len(heldReceipts(svc, peer.id.Address)) != 2 {
-		t.Errorf("backlog = %+v, want both contested receipts kept", heldReceipts(svc, peer.id.Address))
+	if len(heldReceipts(svc, peer.id.Address)) != 1 {
+		t.Fatal("receipt ack without sender removed a held receipt")
 	}
 }
 
-// The author is INSIDE the signature, so the two payload shapes must be
-// told apart by the frame and not by either side's guess about the
-// other's version — a verifier that rebuilt the wrong shape would score
-// an honest ack as a forgery and ban the peer for it.
+// A receipt ack signs its sender together with the other receipt identity fields.
 func TestAckSignatureShapeFollowsTheFrameItSigns(t *testing.T) {
 	t.Parallel()
 	svc := newTestService(t, config.NodeTypeFull)
@@ -214,40 +193,12 @@ func TestAckSignatureShapeFollowsTheFrameItSigns(t *testing.T) {
 		t.Fatalf("a v2-signed ack was not accepted: ok=%v reply=%+v", ok, reply)
 	}
 
-	seedReceiptBacklog(svc, held)
-	if reply, ok := svc.handleAckDeleteFrame(peer.connID, peer.ack("", target, held.Status)); !ok || reply.Count != 1 {
-		t.Fatalf("a legacy-signed ack was not accepted: ok=%v reply=%+v", ok, reply)
-	}
-
 	// And a frame whose author was substituted after signing is neither.
 	seedReceiptBacklog(svc, held)
 	tampered := peer.ack(held.Sender, target, held.Status)
 	tampered.ReceiptSender = "someone-else-entirely"
 	if _, ok := svc.handleAckDeleteFrame(peer.connID, tampered); ok {
 		t.Error("an ack whose named author was swapped after signing was accepted")
-	}
-}
-
-// Below the floor the frame must be byte-identical to what this node
-// sent before the field existed: an older verifier rebuilds the v1
-// payload, and a signature it cannot reproduce is scored as forgery.
-func TestAckToAnOlderPeerCarriesNothingNew(t *testing.T) {
-	t.Parallel()
-	svc := newTestService(t, config.NodeTypeFull)
-	receipt := receiptFrom("the-actual-recipient", svc.Address(), "older-peer")
-
-	old := svc.buildAckDeleteFrameFor(ackDeleteForReceipt(receipt), false)
-	if old.ReceiptSender != "" {
-		t.Fatalf("frame for a pre-floor peer carries receipt_sender = %q", old.ReceiptSender)
-	}
-	if err := identity.VerifyPayload(svc.identity.Address, identity.PublicKeyBase64(svc.identity.PublicKey),
-		ackDeletePayload(old.Address, old.AckType, old.ID, old.Status), old.Signature); err != nil {
-		t.Errorf("a pre-floor peer cannot verify our ack: %v", err)
-	}
-
-	fresh := svc.buildAckDeleteFrameFor(ackDeleteForReceipt(receipt), true)
-	if fresh.ReceiptSender != receipt.Sender {
-		t.Errorf("frame for a current peer does not name the receipt's author: %q", fresh.ReceiptSender)
 	}
 }
 
@@ -512,12 +463,12 @@ func TestAckDeleteNamesExactSignedReceipt(t *testing.T) {
 	}
 
 	full := svc.buildAckDeleteFrame(ackDeleteForReceipt(signed))
-	oldSession := sessionAtVersion("legacy", config.ProtocolVersionReceiptSenderAck)
-	if got := svc.stampAckDeleteForSession(oldSession, legacyPeerSendItem(full)); got.Type != "" {
+	oldSession := sessionAtVersion("legacy", config.ProtocolVersion)
+	if got := svc.gateAckDeleteForSession(oldSession, legacyPeerSendItem(full)); got.Type != "" {
 		t.Fatal("sent a signed-copy ACK on a legacy session")
 	}
 	oldSession.capabilities = []domain.Capability{domain.CapSignedReceiptAckV1}
-	stamped := svc.stampAckDeleteForSession(oldSession, legacyPeerSendItem(full))
+	stamped := svc.gateAckDeleteForSession(oldSession, legacyPeerSendItem(full))
 	if stamped.ReceiptProof != signed.Signature || stamped.ReceiptSender != signed.Sender {
 		t.Fatal("session stamp lost the exact receipt proof")
 	}

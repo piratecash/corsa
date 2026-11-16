@@ -118,7 +118,6 @@ For public or VPS nodes, the practical network settings are:
 - `CORSA_DATA_DIR` — directory for all node-local files (identity keys, history, contacts, downloads, crash logs). Must already exist: the node refuses to start rather than create it, so a directory inside an unmounted encrypted container is never recreated on the plain disk. See [docs/privacy.md](docs/privacy.md)
 - `CORSA_TRUST_STORE_PATH` — local pinned-contact trust database
 - `CORSA_SECURE_SESSION_STORE_PATH` — downgrade protection of the secure session v2; default `secure-sessions-<port>.json` next to the peers file
-- `CORSA_V2_TLS_FIRST` — operator switch of the secure session v2; TLS-first is on unless the value is `0`, `false`, `no` or `off`. Off, a dial to an unpinned peer at an endpoint nothing binds opens with the identity-less probe instead of a ClientHello (a v2 welcome still leads to TLS; no way around a TLS block for v31 nodes); pinned identities and bound endpoints keep v2. Warned at start and shown as `v2_tls_first` in `fetchAggregateStatus`
 - `CORSA_NODE_TYPE` — `full` or `client`
 - `CORSA_MAX_OUTGOING_PEERS` — max outbound peer sessions, default `8`
 - `CORSA_CONNECT_ONLY` — pin all outbound dialing to a single peer. Accepts an IP, an overlay address (`.onion` / `.b32.i2p`), or a DNS hostname, with or without a port (a bare host gets the default peer port); a DNS hostname is resolved once to an IP at pin time. The node drops every other outbound connection and (re)dials only this address; **incoming connections are unaffected**. Empty (default) means no restriction. This is a startup seed only — the runtime `connectOnly` RPC command can change the target or clear it. A self-pin is rejected, and the handshake self-identity guard still prevents connecting to our own identity.
@@ -355,7 +354,6 @@ CORSA_LISTEN_ADDRESS=127.0.0.1:64647 CORSA_ADVERTISE_PORT=64647 CORSA_BOOTSTRAP_
 - `CORSA_DATA_DIR` — папка для всех локальных файлов узла (ключи identity, история, контакты, загрузки, crash-логи). Должна уже существовать: узел скорее откажется запускаться, чем создаст её, — так папка внутри несмонтированного зашифрованного контейнера никогда не пересоздаётся на открытом диске. См. [docs/privacy.md](docs/privacy.md)
 - `CORSA_TRUST_STORE_PATH` — локальная база pinned-контактов
 - `CORSA_SECURE_SESSION_STORE_PATH` — защита от понижения защищённой сессии v2; по умолчанию `secure-sessions-<port>.json` рядом с файлом пиров
-- `CORSA_V2_TLS_FIRST` — выключатель оператора защищённой сессии v2; «TLS-первым» включён, если значение не `0`, `false`, `no` или `off`. Выключен — дозвон к непрошитому пиру на непривязанном адресе начинается с пробы без identity вместо ClientHello (welcome v2 всё равно ведёт к TLS; блокировку TLS к узлам v31 это не обходит); закреплённые identity и привязанные адреса сохраняют v2. Предупреждение на старте и `v2_tls_first` в `fetchAggregateStatus`
 - `CORSA_NODE_TYPE` — `full` или `client`
 - `CORSA_MAX_OUTGOING_PEERS` — максимум исходящих peer-session, по умолчанию `8`
 - `CORSA_MAX_INCOMING_PEERS` — опциональный лимит на входящие peer-соединения; `0` означает без app-level лимита

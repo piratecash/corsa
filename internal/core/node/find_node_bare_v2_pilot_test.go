@@ -47,7 +47,8 @@ func newOwnedBareV2PilotRelay(t *testing.T, maxMembers int) (*Service, string) {
 	})
 	profile := ownedCutProfile()
 	profile.Capture = findNodeOwnedCaptureProfile{
-		Degree:   degreeProfile{MaxActive: 2},
+		// The degree owner also counts proved peers without the pilot capability.
+		Degree:   degreeProfile{MaxActive: 5},
 		Priority: findNodePriorityProfile{MaxMembers: maxMembers, MaxRegistryVisits: 4},
 	}
 	// Copy the existing explicit P0 timing tuple; no production/default change.
@@ -154,6 +155,12 @@ func dialOwnedBareV2PilotClient(t *testing.T, s *Service, address string, capabi
 
 func dialOwnedBareV2PilotClientFrom(t *testing.T, s *Service, address string, capability bool, dialer net.Dialer, quota *full512AppQuota) *ownedBareV2PilotClient {
 	t.Helper()
+	id, wire := dialOwnedBareV2PilotWire(t, s, address, capability, dialer, quota)
+	return startOwnedBareV2PilotClient(t, id, wire)
+}
+
+func dialOwnedBareV2PilotWire(t *testing.T, s *Service, address string, capability bool, dialer net.Dialer, quota *full512AppQuota) (*identity.Identity, net.Conn) {
+	t.Helper()
 	id, err := identity.Generate()
 	if err != nil {
 		t.Fatal(err)
@@ -202,10 +209,15 @@ func dialOwnedBareV2PilotClientFrom(t *testing.T, s *Service, address string, ca
 	if quota != nil {
 		wire = full512AppConn{Conn: wire, quota: quota}
 	}
+	transferred = true
+	return id, wire
+}
+
+func startOwnedBareV2PilotClient(t *testing.T, id *identity.Identity, wire net.Conn) *ownedBareV2PilotClient {
+	t.Helper()
 	clientCtx, clientCancel := context.WithCancel(t.Context())
 	c := &ownedBareV2PilotClient{id: domain.PeerIdentityFromWire(id.Address), identity: id, wire: wire, cancel: clientCancel, done: make(chan struct{}), requests: make(chan protocol.FindNodeRequest, 1), answers: make(chan protocol.FindNodeAnswer, 1), pongs: make(chan struct{}, 1), errors: make(chan error, 1)}
 	t.Cleanup(func() { c.stop(t) })
-	transferred = true
 	go func() {
 		defer close(c.done)
 		report := func(err error) {
@@ -386,26 +398,26 @@ func TestOwnedBareV2PilotOriginalMembershipAndForward(t *testing.T) {
 	// observations. No T Service, signed answer, delivery or timing SLA is asserted.
 	from.barrier(t)
 
-	dialOwnedPilotLegacy(t, address)
-	dialOwnedPilotLegacy(t, address)
+	dialOwnedPilotUnnegotiated(t, s, address, net.Dialer{}, nil)
+	dialOwnedPilotUnnegotiated(t, s, address, net.Dialer{}, nil)
 	runOwnedMixedP0Phases(t, s, from, target, originals, func() net.Conn {
-		return dialOwnedPilotLegacy(t, address)
+		return dialOwnedPilotUnnegotiated(t, s, address, net.Dialer{}, nil)
 	})
 }
 
 // Both test scales use the same original Service and wire checks. The caller
-// owns the initial clients, their original F1 handles, and the extra legacy
-// dial in the isolated fixture.
+// owns the initial clients, their original F1 handles, and an extra proved
+// peer without the overlay capability.
 func runOwnedMixedP0Phases(t *testing.T, s *Service, from, target *ownedBareV2PilotClient,
-	originals []findnode.Session, dialExtraLegacy func() net.Conn) {
+	originals []findnode.Session, dialExtraUnnegotiated func() net.Conn) {
 	t.Helper()
 	members := len(originals)
 	var profile string
 	switch members {
 	case 2:
-		profile = "small2-mixed-v1"
+		profile = "small2-mixed-v2"
 	case 512:
-		profile = "full512-mixed-v1"
+		profile = "full512-mixed-v2"
 	default:
 		t.Fatal("unexpected mixed P0 profile size", members)
 	}
@@ -445,19 +457,30 @@ func runOwnedMixedP0Phases(t *testing.T, s *Service, from, target *ownedBareV2Pi
 	}
 
 	type population struct {
-		TLSv2    int `json:"tls_v2"`
-		Legacy   int `json:"legacy"`
-		Registry int `json:"registry"`
+		TLSv2        int `json:"tls_v2"`
+		WithoutPilot int `json:"without_pilot"`
+		Registry     int `json:"registry"`
 	}
-	checkPopulation := func(legacy int) population {
+	checkPopulation := func(withoutPilot int) population {
 		t.Helper()
 		var observed population
 		waitFor(t, 2*time.Second, "exact mixed registry population not observed", func() bool {
-			v2, v1 := authenticatedInbound(s)
 			s.peerMu.RLock()
 			defer s.peerMu.RUnlock()
-			observed = population{TLSv2: v2, Legacy: v1, Registry: len(s.conns)}
-			return observed.TLSv2 == members && observed.Legacy == legacy && observed.Registry == members+legacy
+			observed = population{Registry: len(s.conns)}
+			for _, entry := range s.conns {
+				if entry.core == nil {
+					continue
+				}
+				if _, proved := entry.core.Auth().ProvenIdentity(); !proved {
+					continue
+				}
+				observed.TLSv2++
+				if !entry.core.HasCapability(domain.CapOverlayFindNodeV1) {
+					observed.WithoutPilot++
+				}
+			}
+			return observed.TLSv2 == members+withoutPilot && observed.WithoutPilot == withoutPilot && observed.Registry == observed.TLSv2
 		})
 		return observed
 	}
@@ -479,7 +502,7 @@ func runOwnedMixedP0Phases(t *testing.T, s *Service, from, target *ownedBareV2Pi
 		if err != nil || len(record) > 512 {
 			t.Fatal("mixed phase record is not bounded", len(record), err)
 		}
-		t.Logf("D1_P0_MIXED_PHASE_V1 %s", record)
+		t.Logf("D1_P0_MIXED_PHASE_V2 %s", record)
 	}
 	positivePopulation := checkPopulation(members)
 	positiveOriginals := checkOriginals()
@@ -522,7 +545,7 @@ func runOwnedMixedP0Phases(t *testing.T, s *Service, from, target *ownedBareV2Pi
 	mixed := s.bridgeCapture.intake.ResourceSnapshot().Intake
 	emit("POSITIVE", positivePopulation, positiveOriginals, positive, true, mixed)
 
-	extra := dialExtraLegacy()
+	extra := dialExtraUnnegotiated()
 	overflowPopulation := checkPopulation(members + 1)
 	if cut, err := s.captureOwnedFindNodeCut(t.Context()); !errors.Is(err, findnode.ErrCapacity) || cut != (findnode.OwnedCut{}) {
 		t.Fatal("mixed registry did not refuse the first excess visit", err)
@@ -559,11 +582,11 @@ func runOwnedMixedP0Phases(t *testing.T, s *Service, from, target *ownedBareV2Pi
 	if afterAnswer != wantAfterAnswer {
 		t.Fatal("finishing the retained answer changed unrelated intake counters", overflow, afterAnswer)
 	}
-	t.Logf("D1_P0_RETAINED_ANSWER_V1 {\"registry\":%d,\"request_id\":%d,\"answered_before\":%d,\"answered_after\":%d}",
+	t.Logf("D1_P0_RETAINED_ANSWER_V2 {\"registry\":%d,\"request_id\":%d,\"answered_before\":%d,\"answered_after\":%d}",
 		stillOverflow.Registry, retainedAnswer.ID, overflow.Answered, afterAnswer.Answered)
 
 	if err := extra.Close(); err != nil {
-		t.Fatal("close the excess legacy client", err)
+		t.Fatal("close the excess peer without the pilot capability", err)
 	}
 	recoveryPopulation := checkPopulation(members)
 	recoveryOriginals := checkOriginals()
@@ -576,48 +599,12 @@ func runOwnedMixedP0Phases(t *testing.T, s *Service, from, target *ownedBareV2Pi
 	emit("RECOVERY", recoveryPopulation, recoveryOriginals, recovery, true, s.bridgeCapture.intake.ResourceSnapshot().Intake)
 }
 
-func dialOwnedPilotLegacy(t *testing.T, address string) net.Conn {
+func dialOwnedPilotUnnegotiated(t *testing.T, s *Service, address string, dialer net.Dialer, quota *full512AppQuota) net.Conn {
 	t.Helper()
-	return dialOwnedPilotLegacyFrom(t, address, net.Dialer{Timeout: 2 * time.Second}, nil)
-}
-
-func dialOwnedPilotLegacyFrom(t *testing.T, address string, dialer net.Dialer, quota *full512AppQuota) net.Conn {
-	t.Helper()
-	id, err := identity.Generate()
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
-	defer cancel()
-	conn, err := dialer.DialContext(ctx, "tcp4", address)
-	if err != nil {
-		t.Fatal(err)
-	}
+	_, conn := dialOwnedBareV2PilotWire(t, s, address, false, dialer, quota)
 	t.Cleanup(func() { _ = conn.Close() })
 	if quota != nil {
-		conn = full512AppConn{Conn: conn, quota: quota}
-	}
-	if err := conn.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
-		t.Fatal(err)
-	}
-	writeJSONFrame(t, conn, protocol.Frame{
-		Type: "hello", Version: 30, MinimumProtocolVersion: config.MinimumProtocolVersion,
-		Client: "node", NodeType: string(domain.NodeTypeFull), Listener: "0", Address: id.Address,
-		PubKey: identity.PublicKeyBase64(id.PublicKey), BoxKey: identity.BoxPublicKeyBase64(id.BoxPublicKey),
-		BoxSig: identity.SignBoxKeyBinding(id),
-	})
-	reader := bufio.NewReaderSize(conn, 64*1024)
-	welcome := readJSONTestFrame(t, reader)
-	if welcome.Type != "welcome" || welcome.Challenge == "" {
-		t.Fatal("legacy pilot did not receive an auth challenge", welcome.Type)
-	}
-	writeJSONFrame(t, conn, protocol.Frame{Type: "auth_session", Address: id.Address,
-		Signature: identity.SignPayload(id, protocol.SessionAuthPayload(welcome.Challenge, id.Address))})
-	if reply := readJSONTestFrame(t, reader); reply.Type != "auth_ok" {
-		t.Fatal("legacy pilot was not authenticated", reply.Type, reply.Code)
-	}
-	if quota != nil {
-		return drainFull512Legacy(t, conn, reader)
+		return drainFull512Application(t, conn, bufio.NewReaderSize(conn, 64*1024))
 	}
 	return conn
 }
@@ -689,7 +676,7 @@ func bareV2PilotSourceErrors(sources map[string][]byte) []string {
 	if !qualifiedD1DiagnosticSource(sources["find_node_resource_diagnostic.go"]) {
 		failures = append(failures, "pilot diagnostic tagged Source changed")
 	}
-	if fmt.Sprintf("%x", sha256.Sum256(sources[fullFile])) != "a37cce7ad4e6fc0ad752a92eae0ab93d555b17d7439875e7535e36771ae72ef6" {
+	if fmt.Sprintf("%x", sha256.Sum256(sources[fullFile])) != "92eb5d96f6b9070fe0c43b81abbbd5700c4b70c3504f71a84f38cebba67e9721" {
 		failures = append(failures, "pilot Full512 Linux fixture source changed")
 	}
 	declared, read, written, called, factories := 0, 0, 0, 0, 0
@@ -710,7 +697,7 @@ func bareV2PilotSourceErrors(sources map[string][]byte) []string {
 				if fn.Name.Name == factory {
 					factories++
 					allowed[fn.Name] = true
-					if site != "find_node_bare_v2_pilot_test.go:"+factory || fmt.Sprintf("%x", sha256.Sum256(raw[int(fn.Pos())-1:int(fn.End())-1])) != "60e61733b29eaca468c001b5056c2cf8d674184cbbe71d70f3364c3b13b20853" {
+					if site != "find_node_bare_v2_pilot_test.go:"+factory || fmt.Sprintf("%x", sha256.Sum256(raw[int(fn.Pos())-1:int(fn.End())-1])) != "eef051cb73e4ce8f54ad2e691cf2b5beeb51efb261d22ce18c3af87fa5b4734f" {
 						failures = append(failures, "pilot fixed factory changed")
 					}
 				}

@@ -1,7 +1,6 @@
 package node
 
 import (
-	"context"
 	"errors"
 	"io"
 	"math"
@@ -9,9 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/piratecash/corsa/internal/core/config"
 	"github.com/piratecash/corsa/internal/core/domain"
-	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/netcore"
 	"github.com/piratecash/corsa/internal/core/protocol"
 	"github.com/piratecash/corsa/internal/core/routing"
@@ -246,130 +243,6 @@ func claimsOf(node *Service, id domain.PeerIdentity) (v2, legacy int) {
 		}
 	}
 	return v2, legacy
-}
-
-// The scenario an unproven legacy identity must not win: a legacy impostor of
-// X connects first; the real X then proves itself over v2; then X's v2
-// session closes. From the proof on, the impostor has no connection to this
-// node, so it neither keeps routing rights nor is a path for traffic meant
-// for X — and that stays so after the last v2 session of X is gone, because
-// the requirement to prove v2 is pinned.
-//
-// The impostor here is an old node holding X's keys: on the listener that is
-// indistinguishable from a node relaying X's auth_session, which is the
-// attack, and it needs no relay to set up.
-func TestALegacyImpostorLosesEverythingOnceTheRealIdentityProvesV2(t *testing.T) {
-	t.Parallel()
-	// The listener dials nobody: every connection it holds here is one the
-	// test's nodes opened to it.
-	listener, address, stopListener := listenerNode(t, withoutOwnDials(nil))
-	defer stopListener()
-	xKeys := testIdentityForNetworkConsumerTest(t)
-	x := peerIdentityOf(t, &Service{identity: xKeys})
-
-	_, stopImpostor := startTestNodeWithIdentityAndSetup(t, config.Node{
-		ListenAddress:  freeAddress(t),
-		BootstrapPeers: []string{normalizeAddress(address)},
-		Type:           domain.NodeTypeFull,
-	}, xKeys, asOldNode)
-	defer stopImpostor()
-	waitForConditionMsg(t, 15*time.Second, "the impostor never connected over v1", func() bool {
-		_, legacy := claimsOf(listener, x)
-		return legacy > 0
-	})
-
-	_, stopReal := startTestNodeWithIdentity(t, config.Node{
-		ListenAddress:  freeAddress(t),
-		BootstrapPeers: []string{normalizeAddress(address)},
-		Type:           domain.NodeTypeFull,
-	}, xKeys)
-	waitForConditionMsg(t, 15*time.Second, "the real X never connected over v2", func() bool {
-		v2, _ := claimsOf(listener, x)
-		return v2 > 0
-	})
-	waitForConditionMsg(t, 5*time.Second, "the impostor's legacy connection survived X's v2 proof", func() bool {
-		_, legacy := claimsOf(listener, x)
-		return legacy == 0
-	})
-
-	stopReal()
-	waitForConditionMsg(t, 15*time.Second, "X's v2 session never went away", func() bool {
-		v2, _ := claimsOf(listener, x)
-		return v2 == 0
-	})
-
-	// A fresh v1 attempt in X's name, made now instead of waited for: the
-	// impostor's own reconnect sits behind a backoff (2, 4, 8 s, then the
-	// periodic fill), so a window watched for it may hold no attempt at all.
-	// The impostor is stopped first, so the listener's refusals from here on
-	// are the probe's alone.
-	stopImpostor()
-	target := domain.PeerAddress(normalizeAddress(address))
-
-	// Precondition: the listener serves its contacts to a v1 peer it has no
-	// reason to refuse — otherwise "nothing imported" below would prove
-	// nothing.
-	if imported := syncAsOldNode(t, nil, target); imported == 0 {
-		t.Fatal("precondition: the listener served no contacts to an unpinned v1 peer")
-	}
-
-	// A hello the impostor sent before it stopped may still be in the
-	// listener's handler; its refusal must not be counted for the probe.
-	waitForConditionMsg(t, 10*time.Second, "the listener kept an inbound connection after the impostor stopped", func() bool {
-		return inboundConnCount(listener) == 0
-	})
-	refusedBefore := listener.SecureSessionStoreStats().V1RefusalsIdentityPinned
-	imported := syncAsOldNode(t, xKeys, target)
-	// The gate is the listener's own refusal of this hello; a sync that
-	// ended for any other reason never reached the protection.
-	if listener.SecureSessionStoreStats().V1RefusalsIdentityPinned == refusedBefore {
-		t.Fatalf("the listener did not refuse the v1 hello in X's name (imported %d)", imported)
-	}
-	if imported != 0 {
-		t.Fatalf("the listener served a v1 session in X's name after X's last v2 session closed: %d contacts imported", imported)
-	}
-	// This catches a connection of X the listener still holds at this point —
-	// the stopped impostor's, or any other that outlived its session — and the
-	// relay path. The probe's own connection is closed by the time syncPeer
-	// returns; that one is covered by the refusal above.
-	if targets := listener.peerSendableTargetsForTest(x); targets > 0 {
-		t.Fatalf("%d connections would carry traffic meant for X", targets)
-	}
-}
-
-// syncAsOldNode runs one recovery sync to target from a fresh old node that
-// dials nobody else, holding keys (a new identity when nil), and returns how
-// many contacts it imported. syncPeer has finished with the connection when
-// it returns.
-func syncAsOldNode(t *testing.T, keys *identity.Identity, target domain.PeerAddress) int {
-	t.Helper()
-	if keys == nil {
-		keys = testIdentityForNetworkConsumerTest(t)
-	}
-	prober, stopProber := startTestNodeWithIdentityAndSetup(t, config.Node{
-		ListenAddress:  freeAddress(t),
-		BootstrapPeers: []string{},
-		Type:           domain.NodeTypeFull,
-	}, keys, func(svc *Service) {
-		asOldNode(svc)
-		svc.connManager.config.MaxSlotsFn = func() int { return 0 }
-	})
-	defer stopProber()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	return prober.syncPeer(ctx, target, false)
-}
-
-// peerSendableTargetsForTest counts the connections a send to id would pick
-// from, by the same selection the send paths use, plus the relay path.
-func (s *Service) peerSendableTargetsForTest(id domain.PeerIdentity) int {
-	s.peerMu.RLock()
-	sendable := len(s.peerSendableConnectionsLocked(id, domain.CapMeshRelayV1, time.Now()))
-	s.peerMu.RUnlock()
-	if s.resolveRelayAddress(id) != "" {
-		sendable++
-	}
-	return sendable
 }
 
 // RT-6: what an impostor's legacy session wrote about X BEFORE X proved

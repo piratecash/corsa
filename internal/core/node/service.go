@@ -853,7 +853,6 @@ type Service struct {
 	connIDCounter   uint64 // monotonic counter for connection IDs (protected by peerMu)
 	bans            map[string]banEntry
 	listener        net.Listener
-	lastSync        time.Time
 	peersStatePath  string
 	overlayDWin     overlayDegreeStatistic // peerMu; optional loaded statistic, no live producer
 	lastPeerSave    time.Time
@@ -1038,7 +1037,7 @@ type Service struct {
 
 	// Connection management subsystem (Stage 3 integration).
 	peerProvider *PeerProvider      // single source of dial candidates — replaces peers[] + peerDialCandidates()
-	connManager  *ConnectionManager // event-driven outbound connection lifecycle — replaces ensurePeerSessions()
+	connManager  *ConnectionManager // event-driven outbound connection lifecycle
 
 	// connBudget is the SHARED admission ceiling over inbound plus outbound
 	// connections plus the attempts in flight — the one number neither
@@ -2804,7 +2803,6 @@ func newServiceWithConstruction(cfg config.Node, id *identity.Identity, eventBus
 		storePath:        secureSessionStorePath(cfg),
 		markerPath:       pinStoreMarkerPath(cfg),
 		clock:            time.Now,
-		tlsFirstDisabled: cfg.DisableV2TLSFirst,
 	})
 	if construction.ready != nil {
 		construction.ready.sessions, construction.ready.store = svc.secureSessions, svc.secureSessions.store
@@ -4273,265 +4271,12 @@ func (s *Service) dispatchNetworkFrameOwned(connID domain.ConnID, wire string, o
 	case "pong":
 		s.markInboundPeerRead(connID, core, frame.Type)
 		return true
-	case "hello":
-		// Reject re-hello once auth has been initiated (challenge issued)
-		// or completed (Verified). Without this guard a second hello
-		// between challenge issuance and auth_session would overwrite
-		// NetCore identity/address/caps via rememberConnPeerAddr while
-		// handleAuthSession still verifies against the original
-		// state.Hello — allowing an attacker to authenticate as identity A
-		// but bind the connection to an unverified address B, poisoning
-		// health tracking and capability context.
-		if s.isAuthInitiated(connID) {
-			accepted = false
-			_ = s.sendFrameViaNetworkSync(s.runCtx, connID, protocol.Frame{
-				Type:  "error",
-				Code:  protocol.ErrCodeHelloAfterAuth,
-				Error: "re-hello rejected: authentication in progress or completed",
-			})
-			return true
-		}
-		if err := validateProtocolHandshake(frame); err != nil {
-			accepted = false
-			log.Warn().Err(err).Str("addr", addr).Int("version", frame.Version).Msg("inbound_peer_protocol_too_old")
-			_ = s.sendFrameViaNetwork(s.runCtx, connID, protocol.Frame{
-				Type:                   "error",
-				Code:                   protocol.ErrCodeIncompatibleProtocol,
-				Error:                  err.Error(),
-				Version:                config.ProtocolVersion,
-				MinimumProtocolVersion: config.MinimumProtocolVersion,
-			})
-			// Per-peer storm-suppression signal. Emit the peer-banned notice
-			// on the very first incompatible hello so the dialler-side
-			// gate 6c.2 can record THIS PeerAddress as banned and stop
-			// fanning out reconnects — keeping cm_session_setup_failed out
-			// of the ebus. Reason is peer-ban (not blacklisted) because a
-			// one-off incompatible hello must not be treated as an IP-wide
-			// lockout: NAT/VPN/Tor exits/multi-homed hosts share an egress
-			// IP across many peers, and punishing compatible siblings for
-			// one misconfigured neighbour would be a wider blast radius
-			// than the misbehaviour justifies. The Until window mirrors
-			// the overlay per-peer duration so the dialler's gate and
-			// server's overlay converge on the same 24-hour horizon.
-			peerBannedUntil := time.Now().UTC().Add(peerBanIncompatible)
-			s.emitPeerBannedNoticeByID(connID, peerBannedUntil, protocol.PeerBannedReasonPeerBan)
-			// Transport-level IP blacklist (graduated safety net): accumulates
-			// banIncrementIncompatibleVersion per attempt, reaching banThreshold
-			// after 4 attempts. This is the tool for sustained noise from a
-			// single IP — not the first-contact signal, which is handled above
-			// by the per-peer notice. When the threshold is crossed, addBanScore
-			// flips Blacklisted on the entry and fires a second peer-banned
-			// notice with reason=blacklisted on the connection that crossed
-			// it; from that moment handleConn silently closes all further TCP
-			// attempts from that IP for 24 hours.
-			s.addBanScore(connID, banIncrementIncompatibleVersion)
-			// Overlay-level record under the peer's canonical health key.
-			// The version comes from the hello frame it just sent, which
-			// nothing proves: a man in the middle can rewrite an honest
-			// node's hello below the floor. So it is a claim — diagnostics
-			// only, no score, ban, IP ban, lockout or reporter
-			// (noteClaimedIncompatibleVersion); the transport-level
-			// addBanScore above keys the actual TCP source.
-			claim := incompatibleVersionClaim{
-				peerVersion:   domain.ProtocolVersion(frame.Version),
-				peerMinimum:   domain.ProtocolVersion(frame.MinimumProtocolVersion),
-				clientVersion: domain.ClientVersion(frame.ClientVersion),
-			}
-			// Build the health key from the verified TCP IP and the
-			// self-reported advertise_port — the same shape the accepted
-			// inbound path uses (rememberConnPeerAddr). The hello carries
-			// no host, and frame.Address is just the Ed25519 identity, not
-			// a host:port — using it as a health key would silently
-			// consolidate every peer behind the same observed IP under
-			// "<ip>:64646" and break version-gated bans for peers running
-			// on a non-default advertise_port.
-			// peerAddressFromInbound returns "" when the TCP host is not
-			// parseable as an IP, in which case there is no usable health
-			// key to record — the per-peer notice + IP-level addBanScore
-			// above remain the operative signals on that degenerate edge.
-			if peerAddr := peerAddressFromInbound(addr, extractAdvertisePort(frame)); peerAddr != "" {
-				s.noteClaimedIncompatibleVersion(domain.PeerAddress(peerAddr), claim)
-			}
-			return true
-		}
-		// Advertise convergence decision. Runs after version compatibility
-		// but before auth. The decision helper never rejects on advertise-
-		// learning grounds and never emits any mismatch wire signal — the
-		// v10/v11 reject-and-correct path was removed in the v12 cleanup
-		// phase. validateAdvertisedAddress surfaces only the persistence
-		// write mode and the resolved advertise_port for passive learning.
-		// Accept branches are applied to persistedMeta after
-		// rememberConnPeerAddr so the domain record stays consistent with
-		// NetCore's view of the inbound session.
-		advertiseResult := validateAdvertisedAddress(addr, frame)
-		// Determine auth path by checking server-verifiable identity fields
-		// (Address, PubKey, BoxKey, BoxSig), NOT frame.Client which the
-		// attacker controls. This eliminates GAP-0.
-		if connauth.HasIdentityFields(frame) {
-			// Self-loopback guard at the identity layer. The remote has
-			// cryptographic material — if it claims our Ed25519 address
-			// AND announces itself as a listener the dial is reflecting
-			// back to us (NAT hairpin, peer-exchange mirror, fallback-port
-			// alias, onion/clearnet echo). Address helpers (isSelfAddress
-			// / isSelfDialIP) can't catch this because the reflected
-			// socket arrives on a different host:port tuple. Break the
-			// loop here before PrepareAuth can poison connauth state or
-			// learnPeerFromFrame can ingest our own key material as a
-			// foreign peer. The connection_notice teaches the dialler
-			// to cooldown the address; return=false triggers
-			// unregisterInboundConn on the handleConn defer, so teardown
-			// stays inside the NetCore wrapper.
-			//
-			// The Listener=="1" gate is critical: local subscribers
-			// (RPC-style clients that authenticate with the local
-			// identity to subscribe to their own inbox) dial the same
-			// TCP port but never declare themselves as listeners. Peer
-			// hellos ALWAYS set Listener=1 because the handshake
-			// emitter (nodeHelloJSONLine) always reflects
-			// EffectiveListenerEnabled, and only listener-enabled peers
-			// propagate hello to other nodes. Without this gate the
-			// guard would break legitimate self-subscription on the
-			// same host. Every real self-loopback path surfaces
-			// Listener=1 because it reaches us through OUR outbound
-			// dialler code, which always sets it. The listener flag is
-			// the only hello field that distinguishes a peer from a
-			// local subscriber.
-			if strings.TrimSpace(frame.Listener) == "1" && s.isSelfIdentity(domain.PeerIdentityFromWire(frame.Address)) {
-				owner.end()
-				accepted = false
-				log.Warn().
-					Str("local_identity", s.identity.Address).
-					Str("remote_addr", addr).
-					Str("remote_client", frame.Client).
-					Msg("inbound_self_identity_rejected")
-				s.emitPeerBannedNoticeByID(connID, time.Time{}, protocol.PeerBannedReasonSelfIdentity)
-				return false
-			}
-			// An identity that proved v2 is never served over v1: this hello
-			// may be a man in the middle who stripped TLS to collect a
-			// relayable v1 proof. Refused without a penalty here — the claim
-			// is unproven, so it may not be the named peer at all. The dialler
-			// is told so in the peer-banned notice every release since v28
-			// honours: without it an old dialler would redial at once, and
-			// every redial is refused the same way. The dialler does pay: it
-			// skips this address for its default window (24 h on v28–v30),
-			// even if it is upgraded meanwhile. No until, because a short one
-			// read against the dialler's clock is fragile when the clocks
-			// disagree, and the dialler's default is the window it knows.
-			if err := s.refuseLegacyIdentity(domain.PeerIdentityFromWire(frame.Address)); err != nil {
-				owner.end()
-				accepted = false
-				log.Warn().Err(err).Uint64("conn_id", uint64(connID)).Str("addr", addr).Msg("inbound_v1_refused_identity_pinned_to_v2")
-				s.emitPeerBannedNoticeByID(connID, time.Time{}, protocol.PeerBannedReasonPeerBan)
-				return false
-			}
-			authState, err := connauth.PrepareAuth(frame)
-			if err != nil {
-				owner.end()
-				accepted = false
-				s.addBanScore(connID, banIncrementInvalidSig)
-				_ = s.sendFrameViaNetworkSync(s.runCtx, connID, protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidAuthSignature, Error: err.Error()})
-				return false
-			}
-			s.setConnAuthStateByID(connID, authState)
-			s.rememberConnPeerAddr(connID, frame, addr)
-			// Advertise convergence persistence (accept branches).
-			s.applyAdvertiseOnInboundAccept(addr, advertiseResult)
-			if frame.Client == "node" || frame.Client == "desktop" {
-				log.Info().Str("client", frame.Client).Str("address", frame.Address).Str("listener", frame.Listener).Str("node_type", frame.NodeType).Str("version", frame.ClientVersion).Msg("hello")
-			}
-			// Diagnostic: warn when a localhost peer has a different identity
-			// than ours — indicates a separate local process (Task #69).
-			if remoteIP := net.ParseIP(remoteIPFromString(addr)); remoteIP != nil && remoteIP.IsLoopback() && frame.Address != "" && frame.Address != s.identity.Address {
-				log.Warn().
-					Int("pid", os.Getpid()).
-					Str("local_identity", s.identity.Address).
-					Str("remote_identity", frame.Address).
-					Str("remote_addr", addr).
-					Str("remote_listener", frame.Listener).
-					Str("remote_client", frame.Client).
-					Msg("localhost_peer_foreign_identity")
-			}
-			s.sendWelcomeFrame(connID, authState.Challenge, remoteIPFromString(addr))
-			return true
-		}
-		// No identity fields → unauthenticated peer. It stays
-		// unauthenticated with access limited to handshake commands
-		// (hello, ping, pong, auth_session). All P2P wire commands
-		// are blocked until auth_session completes.
-		s.rememberConnPeerAddr(connID, frame, addr)
-		// Advertise convergence persistence (accept branches).
-		s.applyAdvertiseOnInboundAccept(addr, advertiseResult)
-		log.Debug().
-			Str("client", frame.Client).
-			Str("addr", addr).
-			Msg("hello_without_identity_fields")
-		s.sendWelcomeFrame(connID, "", remoteIPFromString(addr))
-		return true
-	case "auth_session":
-		reply, ok, backlogSub, fullSync := s.handleAuthSessionOwned(connID, frame, owner)
-		if !ok {
-			owner.end()
-			accepted = false
-			_ = s.sendFrameViaNetworkSync(s.runCtx, connID, reply)
-			return false
-		}
-		// Handshake-phase reply: auth_ok is the gate the dialler waits on
-		// before the session becomes usable. Use the no-eviction path so a
-		// transient burst of fire-and-forget frames the asynchronous senders
-		// queued toward this peer does not torpedo the connection right at
-		// the threshold of becoming usable. See network_consumer.go.
-		//
-		// Half-auth window contract: handleAuthSession has ALREADY
-		// committed local auth state (setConnAuthStateByID), learned
-		// the peer's hello, registered the hello route, fired the
-		// announce-to-sessions goroutine, and mirrored the identity
-		// into NetCore — see service.go::handleAuthSession. We do NOT
-		// roll those side effects back if the auth_ok ack fails to
-		// land: the rollback path is wide and concurrent
-		// (cross-domain locks, separate goroutines already started),
-		// and the failure mode is bounded.
-		//
-		// What actually happens when the ack is dropped:
-		//   1. Dialler side. authenticatePeerSession waits for auth_ok
-		//      via peerSessionRequest with peerRequestTimeout
-		//      (peer_sessions.go::authenticatePeerSession). It does
-		//      NOT reissue auth_session on the same TCP session —
-		//      timeout returns an error that bubbles up to
-		//      openPeerSessionForCM which closes the connection and
-		//      emits DialFailed.
-		//   2. CM side. DialFailed cycles through reconnectMaxRetries
-		//      with exponential backoff; each retry opens a fresh TCP
-		//      connection and a fresh connID. handleAuthSession runs
-		//      from scratch on the new connID — its Verified
-		//      fast-path applies only to repeat auth on the SAME
-		//      connID and does not carry across reconnects.
-		//   3. Local side. Our previous session's connID still carries
-		//      Verified=true and the side-effect chain (route entry,
-		//      announce goroutine output, hello cache). handleConn's
-		//      defer (clearConnAuth, removeSubscriberConnID,
-		//      trackInboundDisconnect) cleans those up when the peer
-		//      finally drops the dead TCP connection or when our own
-		//      read loop hits EOF.
-		//
-		// Window bound: from ack-drop to handleConn defer firing — at
-		// most one inbound read deadline (120s) on the failing socket,
-		// usually much less because the dialler closes promptly on its
-		// own peerRequestTimeout. If the outbound buffer NEVER drains,
-		// the heartbeat path (inboundHeartbeat) evicts us on its own
-		// schedule. A failed auth_ok is logged at WARN with conn_id
-		// for forensics. See docs/protocol/realtime.md § Handshake
-		// reply: no-eviction contract for the full discussion.
-		if err := s.sendHandshakeReplyViaNetwork(s.runCtx, connID, reply); err != nil {
-			log.Warn().Err(err).
-				Uint64("conn_id", uint64(connID)).
-				Msg("auth_ok ack failed — peer will close on its peerRequestTimeout and CM will redial (fresh connID, half-auth state cleared by handleConn defer)")
-			// auth_ok did not land — do NOT replay the backlog: the peer is
-			// about to be redialed on a fresh connID, and pushing onto a wedged
-			// buffer would be wasted work the peer never reads.
-			return true
-		}
-		s.startInboundSessionDeliveryOwned(connID, backlogSub, fullSync, owner)
+	case "hello", "auth_session":
+		accepted = false
+		_ = s.sendFrameViaNetworkSync(s.runCtx, connID, protocol.Frame{
+			Type: "error", Code: protocol.ErrCodeHelloAfterAuth,
+			Error: "session authentication takes place during the TLS handshake",
+		})
 		return true
 
 	default:
@@ -5803,11 +5548,6 @@ func logUnregisteredWrite(addr string, frame protocol.Frame, origin string) {
 		Msg("unregistered_write: conn missing NetCore — single-writer invariant violation, frame dropped")
 }
 
-// sendWelcomeFrame answers a peer's hello.
-func (s *Service) sendWelcomeFrame(connID domain.ConnID, challenge string, observedAddr string) {
-	_ = s.sendFrameViaNetwork(s.runCtx, connID, s.welcomeFrame(challenge, observedAddr))
-}
-
 // welcomeFrame builds the welcome this node answers a hello with.
 func (s *Service) welcomeFrame(challenge string, observedAddr string) protocol.Frame {
 	// The welcome carries no host: the dialer already knows where it
@@ -5852,11 +5592,8 @@ func validateProtocolHandshake(frame protocol.Frame) error {
 	return nil
 }
 
-// isConnAuthenticated returns true when the connection has completed
-// session auth (auth_session verified). Connections that never initiated
-// auth (NetCore.auth is nil) are considered unauthenticated — they may
-// still issue handshake commands, but they should not trigger high-trust
-// side effects such as peer promotion.
+// isConnAuthenticated reports that the connection has completed peer
+// authentication.
 //
 // ConnID-first: callers that start from a net.Conn cross the boundary
 // via s.connIDFor(conn) once and then operate on ConnID. A zero or
@@ -5866,26 +5603,14 @@ func (s *Service) isConnAuthenticated(id domain.ConnID) bool {
 	return state != nil && state.Verified
 }
 
-// isAuthInitiated returns true if the connection has started (challenge
-// issued, Verified=false) or completed (Verified=true) the auth handshake.
-// Used by the re-hello guard to block identity/address overwrites once
-// PrepareAuth has recorded the initial hello and challenge.
-//
-// ConnID-first: same boundary convention as isConnAuthenticated.
-func (s *Service) isAuthInitiated(id domain.ConnID) bool {
-	return s.connAuthStateByID(id) != nil
-}
-
 func ackDeletePayload(address, ackType, id, status string) []byte {
 	return []byte("corsa-ack-delete-v1|" + address + "|" + ackType + "|" + id + "|" + status)
 }
 
 // ackDeletePayloadForFrame is what an ack_delete frame signs, and the two
-// shapes are told apart by the frame itself: a frame that names the
-// receipt's author signs v2 over it, one that does not signs exactly the
-// v1 bytes older peers have always produced. Signer and verifier both go
-// through here, so neither can pick the shape by its own assumption
-// about the other's version.
+// layouts depend on what the ack confirms. A message ack uses the
+// original payload. A receipt ack binds the author and, when negotiated,
+// the exact signed receipt proof.
 func ackDeletePayloadForFrame(frame protocol.Frame) []byte {
 	if frame.ReceiptProof != "" {
 		payload := []byte("corsa-ack-delete-v3\x00")
@@ -5901,72 +5626,8 @@ func ackDeletePayloadForFrame(frame protocol.Frame) []byte {
 	return []byte("corsa-ack-delete-v2|" + frame.Address + "|" + frame.AckType + "|" + frame.ID + "|" + frame.Status + "|" + frame.ReceiptSender)
 }
 
-// handleAuthSession verifies the auth_session frame's Ed25519 signature via
-// connauth.VerifyAuthSession, then applies post-auth side effects (peer
-// learning, route registration, peer announcement, health tracking).
-//
-// Ban scoring for invalid signatures is applied here because it depends on
-// the connection rate limiter which lives in Service. The remote address
-// string consumed by learnPeerFromFrame is resolved via the Network
-// surface (RemoteAddr(id) returns "" for an unregistered ConnID, which is
-// what learnPeerFromFrame already tolerates).
-//
-// The third return value is the v20 auto-subscribe backlog subscriber (or nil).
-// The caller MUST replay it via pushBacklogToSubscriber ONLY AFTER the auth_ok
-// reply has been enqueued into the writer — replaying it here would race the
-// push_message/push_delivery_receipt frames ahead of auth_ok, and a v20
-// initiator treats auth_ok as the handshake boundary (it no longer waits for a
-// subscribed frame), so a backlog frame arriving first would break its
-// post-handshake framing expectations.
-// Two pieces of work are RETURNED rather than done here, and for one reason:
-// both write onto this connection, and both must follow the auth_ok that makes
-// the peer treat the connection as negotiated. The backlog replay is the older
-// of the two; the connect-time full sync joined it after a round in which the
-// dialler, having started refusing capability-gated frames until auth_ok, began
-// dropping the very route table this call sends.
-func (s *Service) handleAuthSessionOwned(id domain.ConnID, frame protocol.Frame, owner *proofTransportOwner) (reply protocol.Frame, ok bool, backlogSub *subscriber, fullSync connectFullSync) {
-	// Trace checkpoints along this function share conn_id as the
-	// correlation key so the inbound-auth arc can be reconstructed from
-	// interleaved goroutine logs (announce is spawned async).
-	log.Trace().Uint64("conn_id", uint64(id)).Msg("handle_auth_session_begin")
-
-	state := s.connAuthStateByID(id)
-	verified, reply, ok := connauth.VerifyAuthSession(state, frame)
-	if !ok {
-		owner.end()
-		if reply.Code == protocol.ErrCodeInvalidAuthSignature {
-			s.addBanScore(id, banIncrementInvalidSig)
-		}
-		log.Trace().Uint64("conn_id", uint64(id)).Str("reply_code", reply.Code).Msg("handle_auth_session_verify_failed")
-		return reply, false, nil, connectFullSync{}
-	}
-	// Already verified — idempotent re-auth returns success immediately.
-	if state != nil && state.Verified {
-		log.Trace().Uint64("conn_id", uint64(id)).Msg("handle_auth_session_idempotent")
-		return reply, true, nil, connectFullSync{}
-	}
-	// The hello was checked against the pin before the challenge went out;
-	// the identity may have proved itself over v2 in between, and the sweep
-	// that closes legacy connections then may have run before this one was
-	// recognisable. Checking again here, as the last step before the session
-	// counts, leaves no window (v2_identity_claims.go).
-	if err := s.refuseLegacyIdentity(domain.PeerIdentityFromWire(verified.Hello.Address)); err != nil {
-		owner.end()
-		log.Warn().Err(err).Uint64("conn_id", uint64(id)).Msg("inbound_v1_refused_identity_proved_v2_during_auth")
-		// The same refusal as at the hello, so the same notice: an old
-		// dialler meets it again on every redial. It goes out before the
-		// error reply, on the still-open connection.
-		s.emitPeerBannedNoticeByID(id, time.Time{}, protocol.PeerBannedReasonPeerBan)
-		return protocol.Frame{Type: "error", Code: protocol.ErrCodeAuthRequired, Error: "identity requires a secure session"}, false, nil, connectFullSync{}
-	}
-
-	backlogSub, fullSync = s.completeInboundAuth(id, verified)
-	return reply, true, backlogSub, fullSync
-}
-
-// completeInboundAuth is everything an inbound session gets once its peer's
-// identity is proven — by auth_session on v1 (handleAuthSession) or by
-// session_proof on v2 (acceptProvenInbound). It commits the auth state,
+// completeInboundAuth is everything an inbound session gets after the
+// TLS session proof verifies. It commits the auth state,
 // learns the peer, registers its hello route, announces it and mirrors the
 // identity into NetCore. The caller starts delivery (backlog, initial push,
 // full sync) once the session may carry it.
@@ -5993,9 +5654,7 @@ func (s *Service) completeInboundAuth(id domain.ConnID, verified *connauth.State
 	// auth-time registration (the legacy subscribe_inbox round-trip has been
 	// removed from the protocol).
 	//
-	// We do NOT spawn the replay here: it is returned to the caller, which runs
-	// it strictly AFTER the auth_ok reply is enqueued, so backlog frames cannot
-	// race ahead of auth_ok on the writer (see the function doc).
+	// The caller starts the backlog replay from the registered transport.
 	backlogSub = helloSub
 
 	// Announce the newly authenticated peer to all active outbound sessions.
@@ -7011,7 +6670,6 @@ func (s *Service) contactsFrame() protocol.Frame {
 // strings twice for every contact, so formatting outside the lock bought a
 // second full-size array rather than a shorter lock window.
 func (s *Service) contactsFrameLimited(limit int) protocol.Frame {
-	s.refreshKnowledgeFromPeers()
 
 	s.knowledgeMu.RLock()
 	contacts := make([]protocol.ContactFrame, 0, contactsCapacityFor(limit, len(s.boxKeys)))
@@ -7444,7 +7102,7 @@ func (s *Service) importContactsFrame(contacts []protocol.ContactFrame) protocol
 // nil-NetCore guard.
 //
 // Returns the installed (or pre-existing) node-route subscriber so the caller
-// (handleAuthSession) can replay the inbox backlog to it at auth time.
+// can replay the inbox backlog after authentication.
 // Returns nil when no route is installed (non-node client, empty address, or
 // unregistered conn).
 func (s *Service) registerHelloRoute(connID domain.ConnID, frame protocol.Frame) *subscriber {
@@ -7513,38 +7171,6 @@ func (s *Service) removeSubscriberConnIDLocked(recipient string, connID domain.C
 	if len(subs) == 0 {
 		delete(s.subs, recipient)
 	}
-}
-
-func (s *Service) refreshKnowledgeFromPeers() {
-	// When ConnectionManager is active it owns the outbound session
-	// lifecycle — slots are filled continuously via the event loop.
-	// Calling the legacy ensurePeerSessions here would bypass CM slot
-	// accounting, retry/backoff and generation guards.
-	if s.connManager != nil {
-		return
-	}
-
-	s.peerMu.RLock()
-	lastSync := s.lastSync
-	s.peerMu.RUnlock()
-
-	// Avoid dialing upstream peers on every UI poll while still making
-	// contact discovery responsive for NAT/light clients.
-	if !lastSync.IsZero() && time.Since(lastSync) < 3*time.Second {
-		return
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
-	defer cancel()
-
-	s.ensurePeerSessions(ctx)
-
-	log.Trace().Str("site", "refreshKnowledgeFromPeers").Str("phase", "lock_wait").Msg("peer_mu_writer")
-	s.peerMu.Lock()
-	log.Trace().Str("site", "refreshKnowledgeFromPeers").Str("phase", "lock_held").Msg("peer_mu_writer")
-	s.lastSync = time.Now().UTC()
-	s.peerMu.Unlock()
-	log.Trace().Str("site", "refreshKnowledgeFromPeers").Str("phase", "lock_released").Msg("peer_mu_writer")
 }
 
 func (s *Service) storeMessageFrame(frame protocol.Frame) protocol.Frame {
@@ -7706,8 +7332,8 @@ func (s *Service) handleAckDeleteFrameOwned(id domain.ConnID, frame protocol.Fra
 		s.addBanScore(id, banIncrementInvalidSig)
 		return protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidAckDelete, Error: "invalid ack identity or id"}, false
 	}
-	if frame.ReceiptProof != "" && (frame.AckType != "receipt" || frame.ReceiptSender == "" ||
-		!s.connHasCapability(id, domain.CapSignedReceiptAckV1)) {
+	if strings.TrimSpace(frame.AckType) == "receipt" && strings.TrimSpace(frame.ReceiptSender) == "" ||
+		frame.ReceiptProof != "" && (frame.AckType != "receipt" || !s.connHasCapability(id, domain.CapSignedReceiptAckV1)) {
 		owner.end()
 		return protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidAckDelete}, false
 	}
@@ -7793,26 +7419,6 @@ func (s *Service) storeIncomingMessageWithR2a(msg incomingMessage, validateTimes
 		log.Debug().Str("node", s.identity.Address).Str("id", string(msg.ID)).Str("topic", msg.Topic).Str("sender", msg.Sender).Str("recipient", msg.Recipient).Time("created_at", msg.CreatedAt).Msg("transit_dm_dropped_age_ceiling")
 		return false, 0, ""
 	}
-
-	// TODO(transit-age-restamp-removal): the legacy-ceiling date, normalised
-	// ONCE at ADMISSION — the single door every foreign message comes through
-	// (both push_message handlers, the relay fallback, the inbox fetch). From
-	// here on this node handles one envelope with one date, and every onward
-	// emission — gossip, directed relay, the relay-retry contour, the stored
-	// copy in s.topics — carries it without deciding anything.
-	//
-	// Putting it at the door is the fourth and last shape of this fix, and the
-	// only one that holds: the earlier ones sat on the frame builders, on the
-	// transport exits, and then on "the start of the outgoing path" — but a
-	// message has several ways IN and each one grew its own outgoing path.
-	// Doors are enumerable and few; exits are not. See
-	// legacy_transit_restamp.go.
-	//
-	// Only TRANSIT is normalised: a message addressed to US — or authored by
-	// us — is stored and shown, and its date is the author's to state. The
-	// TTL moves with the date, so the absolute DEADLINE the author set is
-	// preserved rather than extended at every hop.
-	msg.CreatedAt, msg.TTLSeconds = s.legacyTransitAdmissionStamp(msg, time.Now().UTC())
 
 	if validateTimestamp {
 		if err := s.validateMessageTiming(msg); err != nil {
@@ -8374,30 +7980,14 @@ func (s *Service) storeIncomingMessageWithR2a(msg incomingMessage, validateTimes
 		s.deliveryMu.Unlock()
 	}
 
-	// TODO(transit-age-restamp-removal): the legacy-ceiling date for the
-	// FIRST send of a message this node authored. The retry path normalises
-	// its own copy, but the first attempt goes out from here — and a message
-	// can be old the moment it is sent (an import, a restored history, a
-	// clock that was wrong). Leaving that first copy with the original date
-	// meant a pre-v30 relay dropped it silently and charged the route a
-	// failure, and the message only got a usable date half a minute later.
-	//
-	// A separate value, not a rewrite: `envelope` is what the retry entry,
-	// the relay-retry contour and the chatlog row hold, and their date is
-	// the one the user wrote. See legacy_transit_restamp.go.
-	wireEnvelope := envelope
-	if ownOutgoingDM {
-		wireEnvelope = legacyTransitRestamp(envelope, time.Now().UTC())
-	}
-
-	sealR2aWireProjection(r2a, wireEnvelope)
+	sealR2aWireProjection(r2a, envelope)
 
 	if len(decision.PushSubscribers) > 0 {
 		// Tracked: writePushFrame itself is network-only, but the
 		// spawned fan-out must complete before TempDir cleanup so
 		// subscriber state is fully torn down before tests assert
 		// on side effects.
-		s.goBackground(func() { s.pushOwnEnvelopeToSubscribers(wireEnvelope, decision.PushSubscribers, dispatchedAt) })
+		s.goBackground(func() { s.pushOwnEnvelopeToSubscribers(envelope, decision.PushSubscribers, dispatchedAt) })
 	}
 
 	// routesStored folds in the re-propagation gate; the relay retry of a
@@ -8423,7 +8013,7 @@ func (s *Service) storeIncomingMessageWithR2a(msg incomingMessage, validateTimes
 		if ownOutgoingDM {
 			gossipDelivery = deliveryDispatchRef{Envelope: envelope, DispatchedAt: dispatchedAt}
 		}
-		s.executeGossipTargets(wireEnvelope, gossipTargets, gossipDelivery)
+		s.executeGossipTargets(envelope, gossipTargets, gossipDelivery)
 
 		// Table-directed relay (Phase 1.2): when the routing table knows a
 		// next-hop for this recipient, send relay_message directly to that
@@ -8433,13 +8023,13 @@ func (s *Service) storeIncomingMessageWithR2a(msg incomingMessage, validateTimes
 		if (msg.Topic == "dm" || msg.Topic == protocol.TopicControlDM) && msg.Recipient != "" && msg.Recipient != "*" {
 			relayed := relaySendRefused
 			if decision.RelayNextHop != nil {
-				relayed = s.sendTableDirectedRelayWithR2a(s.runCtx, wireEnvelope, *decision.RelayNextHop, decision.RelayNextHopAddress, decision.RelayNextHopHops, dispatchedAt, r2a)
+				relayed = s.sendTableDirectedRelayWithR2a(s.runCtx, envelope, *decision.RelayNextHop, decision.RelayNextHopAddress, decision.RelayNextHopHops, dispatchedAt, r2a)
 			} else {
 				// No table route — fall back to blind gossip relay to
 				// capable full nodes (pre-Phase 1.2 behavior). Same
 				// hop/ingress gates as the gossip fan-out above: this
 				// path is blind propagation too.
-				relayed = s.tryRelayToCapableFullNodes(wireEnvelope, gossipTargets, dispatchedAt)
+				relayed = s.tryRelayToCapableFullNodes(envelope, gossipTargets, dispatchedAt)
 			}
 			switch {
 			case relayed.leftTheNode():

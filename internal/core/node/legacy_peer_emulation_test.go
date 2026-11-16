@@ -1,49 +1,24 @@
+//go:build interop
+
 package node
 
 import (
 	"bufio"
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
-	"regexp"
 	"sync"
 	"syscall"
 	"testing"
 	"time"
 
-	"github.com/piratecash/corsa/internal/core/config"
 	"github.com/piratecash/corsa/internal/core/domain"
-	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/sessionv2"
 )
 
-// legacy_peer_emulation_test.go emulates a released build that speaks only
-// v1 — ProtocolVersion 28, 29 or 30 — in front of a test node of this build.
-//
-// The old peer is a real Service turned into a v1-only node (asOldNode): it
-// never dials TLS, and its listener serves every connection as v1 — on a
-// ClientHello it answers the first line it reads (the ClientHello always
-// carries a 0x0a byte: the supported_groups extension type) with
-// {"type":"error","code":"invalid-json"} and closes the connection without
-// charging anything, exactly as handleCommand did in every release from
-// v1.0.64 to v2.4.70. What a v1-only Service of this build cannot do is
-// announce an older version: hello and welcome carry config.ProtocolVersion.
-// legacyVersionProxy stands between the two nodes and rewrites the version of
-// the hello or welcome the old node sends, so the node under test sees the
-// version a released build would announce and applies every gate that
-// depends on it.
-//
-// What the emulation does NOT reproduce: the rest of the old node's
-// behaviour is this build's — the frames it emits, the features it uses
-// toward a peer of version 31, its own gates. The tests built on it check
-// what the node under test does with an old peer, not what an old binary
-// does with it.
-
-// oldPeerSide says on which side of a legacyVersionProxy the old node stands:
-// its frames are the ones rewritten.
+// oldPeerSide identifies the released binary's side of a recording proxy.
 type oldPeerSide int
 
 const (
@@ -55,37 +30,11 @@ const (
 	oldPeerDials
 )
 
-// legacyVersionProxy forwards TCP connections to target, rewriting the
-// version announced in the hello and welcome lines the old node sends.
+// legacyVersionProxy forwards TCP bytes without rewriting the release's frames.
 type legacyVersionProxy struct {
 	listener net.Listener
 	target   string
 	side     oldPeerSide
-	version  int
-	// victimAddress, when set, is written into the address field of every
-	// hello and welcome the old node sends — the man-in-the-middle move of
-	// A1: claiming to be a peer the node under test knows over v2. The old
-	// node's own pubkey/boxkey/signature are left as they are; the node
-	// under test refuses on the identity before it ever checks them.
-	victimAddress string
-	// victim, when set, replaces the whole identity of every hello and
-	// welcome the old node sends — address, pubkey, box key and its
-	// signature, all public — so the relabelled frame is self-consistent and
-	// passes every check a v1 frame can be given without a proof.
-	victim *identity.Identity
-	// verbatim keeps the version the old node announces: the old node is a
-	// released binary that announces its own (startRecordingProxy in
-	// release_interop_test.go, build tag interop). The relabelling above
-	// still applies when it is set — a forged answer in front of a release.
-	verbatim bool
-	// cutWelcome forwards only the first half of the first welcome the old
-	// node sends on a connection and then closes it: an answer cut off on
-	// the way.
-	cutWelcome bool
-	// interceptTLS takes over every connection the node under test opens
-	// with a ClientHello instead of forwarding it to the old node: the
-	// TLS handshake dropped or broken on the way (tlsInterception).
-	interceptTLS tlsInterception
 
 	mu             sync.Mutex
 	conns          []net.Conn
@@ -96,10 +45,6 @@ type legacyVersionProxy struct {
 	// nodeClientHellos is how many connections the node under test opened
 	// with a TLS ClientHello rather than a v1 line.
 	nodeClientHellos int
-	// welcomesCut counts the welcomes cutWelcome cut off; tlsIntercepted
-	// the ClientHellos interceptTLS took over.
-	welcomesCut    int
-	tlsIntercepted int
 	// stopped is set by close: a connection accepted just before the
 	// listener closed is then closed at once instead of escaping the
 	// close that already ran over conns.
@@ -107,31 +52,6 @@ type legacyVersionProxy struct {
 	done    sync.WaitGroup
 }
 
-// startLegacyVersionProxy listens on a loopback port and forwards every
-// connection to target. version is what the old node's hello or welcome
-// announces once rewritten.
-func startLegacyVersionProxy(t *testing.T, target string, side oldPeerSide, version int) *legacyVersionProxy {
-	t.Helper()
-	return launchLegacyProxy(t, &legacyVersionProxy{target: target, side: side, version: version})
-}
-
-// startImpersonatingProxy is startLegacyVersionProxy that also relabels the
-// old node's hello/welcome as coming from victim.
-func startImpersonatingProxy(t *testing.T, target string, side oldPeerSide, version int, victim domain.PeerIdentity) *legacyVersionProxy {
-	t.Helper()
-	return launchLegacyProxy(t, &legacyVersionProxy{target: target, side: side, version: version, victimAddress: victim.String()})
-}
-
-// startIdentitySwappingProxy is startLegacyVersionProxy that also relabels
-// the old node's hello/welcome with victim's whole public identity.
-func startIdentitySwappingProxy(t *testing.T, target string, side oldPeerSide, version int, victim *identity.Identity) *legacyVersionProxy {
-	t.Helper()
-	return launchLegacyProxy(t, &legacyVersionProxy{target: target, side: side, version: version, victim: victim})
-}
-
-// launchLegacyProxy starts a fully configured proxy. Every field is set before
-// the accept loop starts: a field written after it would race with the copy
-// goroutines that read it.
 func launchLegacyProxy(t *testing.T, proxy *legacyVersionProxy) *legacyVersionProxy {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -145,37 +65,11 @@ func launchLegacyProxy(t *testing.T, proxy *legacyVersionProxy) *legacyVersionPr
 	return proxy
 }
 
-var (
-	legacyAddressField = regexp.MustCompile(`"address":"[^"]*"`)
-	legacyPubKeyField  = regexp.MustCompile(`"pubkey":"[^"]*"`)
-	legacyBoxKeyField  = regexp.MustCompile(`"boxkey":"[^"]*"`)
-	legacyBoxSigField  = regexp.MustCompile(`"boxsig":"[^"]*"`)
-)
-
 func (p *legacyVersionProxy) address() string { return p.listener.Addr().String() }
 
 func (p *legacyVersionProxy) peerAddress() domain.PeerAddress {
 	return domain.PeerAddress(p.address())
 }
-
-// tlsInterception is what the proxy does with a connection the node under
-// test opens with a ClientHello.
-type tlsInterception int
-
-const (
-	// tlsForwarded: nothing — the connection goes to the old node.
-	tlsForwarded tlsInterception = iota
-	// tlsDropped: the connection is reset right after the ClientHello,
-	// before any answer.
-	tlsDropped
-	// tlsBrokenMidway: a TLS handshake record the client cannot parse comes
-	// back, and then the connection ends — a handshake broken in the middle.
-	tlsBrokenMidway
-)
-
-// tlsInterceptDeadline bounds how long an intercepting proxy waits for the
-// first byte of a connection and for the node to close a broken handshake.
-const tlsInterceptDeadline = 10 * time.Second
 
 func (p *legacyVersionProxy) acceptLoop() {
 	defer p.done.Done()
@@ -184,12 +78,7 @@ func (p *legacyVersionProxy) acceptLoop() {
 		if err != nil {
 			return
 		}
-		if p.interceptTLS == tlsForwarded {
-			p.relay(client)
-			continue
-		}
-		p.done.Add(1)
-		go p.interceptOrRelay(client)
+		p.relay(client)
 	}
 }
 
@@ -214,69 +103,10 @@ func (p *legacyVersionProxy) relay(client net.Conn) {
 	go p.forwardFromListener(server, client)
 }
 
-// interceptOrRelay reads the first byte of client: a ClientHello is taken
-// over as interceptTLS says, anything else is relayed with that byte put back.
-func (p *legacyVersionProxy) interceptOrRelay(client net.Conn) {
-	defer p.done.Done()
-	first := make([]byte, 1)
-	if err := client.SetReadDeadline(time.Now().Add(tlsInterceptDeadline)); err != nil {
-		_ = client.Close()
-		return
-	}
-	if _, err := io.ReadFull(client, first); err != nil {
-		_ = client.Close()
-		return
-	}
-	if err := client.SetReadDeadline(time.Time{}); err != nil {
-		_ = client.Close()
-		return
-	}
-	if first[0] != sessionv2.TLSRecordHandshake {
-		p.relay(&prefixedConn{Conn: client, prefix: first})
-		return
-	}
-	p.mu.Lock()
-	p.nodeClientHellos++
-	p.tlsIntercepted++
-	p.mu.Unlock()
-	if p.interceptTLS == tlsBrokenMidway {
-		// The node reads the broken record and gives up; what it wrote
-		// meanwhile is of no interest, and a failed write is the node
-		// having closed already.
-		_, _ = client.Write(tlsHandshakeGarbage)
-		_ = client.SetReadDeadline(time.Now().Add(tlsInterceptDeadline))
-		_, _ = io.Copy(io.Discard, client)
-	}
-	resetConn(client)
-}
-
-// prefixedConn is a connection whose first bytes were already read: they are
-// returned again before the rest.
-type prefixedConn struct {
-	net.Conn
-	prefix []byte
-}
-
-func (c *prefixedConn) Read(b []byte) (int, error) {
-	if len(c.prefix) > 0 {
-		n := copy(b, c.prefix)
-		c.prefix = c.prefix[n:]
-		return n, nil
-	}
-	return c.Conn.Read(b)
-}
-
-// errProxyWrite marks a copy that ended because the destination refused a
-// write, as opposed to the source ending its stream.
 var errProxyWrite = errors.New("proxy: write to the destination failed")
 
-// errProxyCut marks a copy the proxy ended itself in the middle of a welcome
-// (cutWelcome).
-var errProxyCut = errors.New("proxy: the welcome was cut off")
-
 // forwardFromDialer carries what the dialling side sends. When the dialler is
-// the old node (oldPeerDials) its frames are rewritten; when it is the node
-// under test (oldPeerListens) its frame types are recorded.
+// the node under test (oldPeerListens) its frame types are recorded.
 //
 // It never closes the dialler's connection: only forwardFromListener does,
 // once the listener ended. An old listener answers the first line of a
@@ -286,7 +116,7 @@ var errProxyCut = errors.New("proxy: the welcome was cut off")
 // the old node did send.
 func (p *legacyVersionProxy) forwardFromDialer(from, to net.Conn) {
 	defer p.done.Done()
-	err := p.copy(to, from, p.side == oldPeerDials, p.side == oldPeerListens)
+	err := p.copy(to, from, p.side == oldPeerListens)
 	switch {
 	case errors.Is(err, errProxyWrite):
 		// The listener stopped reading. What the dialler still writes is
@@ -304,14 +134,11 @@ func (p *legacyVersionProxy) forwardFromDialer(from, to net.Conn) {
 	}
 }
 
-// forwardFromListener carries what the listening side sends. When the listener
-// is the old node (oldPeerListens) its frames are rewritten; when it is the
-// node under test (oldPeerDials) its frame types are recorded. It reads the
-// listener to its end before closing both connections, so everything the
-// listener wrote reaches the dialler first.
+// forwardFromListener records frames if the listener is the node under test.
+// It reads the listener to its end before closing either connection.
 func (p *legacyVersionProxy) forwardFromListener(from, to net.Conn) {
 	defer p.done.Done()
-	err := p.copy(to, from, p.side == oldPeerListens, p.side == oldPeerDials)
+	err := p.copy(to, from, p.side == oldPeerDials)
 	if errors.Is(err, errProxyWrite) {
 		// The dialler is gone; the listener's end is still waited for, so
 		// the close below mirrors how the listener ended.
@@ -342,13 +169,8 @@ func resetConn(conn net.Conn) {
 	_ = conn.Close()
 }
 
-// copy forwards bytes line by line. When rewrite is set, the version (and, for
-// an impersonating proxy, the address) of a hello/welcome is replaced; nothing
-// else is touched and v1 hello/welcome are not signed. When record is set, the
-// frame type of each JSON line is remembered — this is how a test reads what
-// the node under test actually put on the wire. A failed write is returned
-// wrapped in errProxyWrite; a read that ended returns the read error.
-func (p *legacyVersionProxy) copy(dst io.Writer, src io.Reader, rewrite, record bool) error {
+// copy forwards bytes in order and records frame types sent by the node under test.
+func (p *legacyVersionProxy) copy(dst io.Writer, src io.Reader, record bool) error {
 	reader := bufio.NewReader(src)
 	opening := true
 	for {
@@ -358,23 +180,10 @@ func (p *legacyVersionProxy) copy(dst io.Writer, src io.Reader, rewrite, record 
 				p.recordOpening(line)
 			}
 			opening = false
-			out := line
-			if rewrite {
-				out = p.announceOldVersion(line)
-			}
 			if record {
 				p.recordFrameType(line)
 			}
-			if rewrite && p.cutWelcome && frameTypeOf(line) == "welcome" {
-				p.mu.Lock()
-				p.welcomesCut++
-				p.mu.Unlock()
-				// The connection ends here either way; whether the half
-				// reached the node is what a cut-off answer leaves open too.
-				_, _ = dst.Write(out[:len(out)/2])
-				return errProxyCut
-			}
-			if _, werr := dst.Write(out); werr != nil {
+			if _, werr := dst.Write(line); werr != nil {
 				return fmt.Errorf("%w: %w", errProxyWrite, werr)
 			}
 		}
@@ -413,86 +222,6 @@ func (p *legacyVersionProxy) recordOpening(line []byte) {
 	p.mu.Unlock()
 }
 
-// clientHellos is how many connections the node under test opened with a
-// TLS ClientHello so far.
-func (p *legacyVersionProxy) clientHellos() int {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.nodeClientHellos
-}
-
-// nodeHellos reports, per hello the node under test sent so far, whether it
-// carried an identity.
-func (p *legacyVersionProxy) nodeHellos() []bool {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return append([]bool(nil), p.nodeHelloIdentified...)
-}
-
-// cut is how many welcomes cutWelcome cut off, and intercepted how many
-// ClientHellos interceptTLS took over.
-func (p *legacyVersionProxy) cut() int {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.welcomesCut
-}
-
-func (p *legacyVersionProxy) intercepted() int {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.tlsIntercepted
-}
-
-// connections is how many connections the proxy has forwarded.
-func (p *legacyVersionProxy) connections() int {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return len(p.conns) / 2
-}
-
-// nodeSentFrame reports whether the node under test sent a frame of this type.
-func (p *legacyVersionProxy) nodeSentFrame(frameType string) bool {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	for _, t := range p.nodeFrameTypes {
-		if t == frameType {
-			return true
-		}
-	}
-	return false
-}
-
-// frameTypeOf is the type of a JSON frame line, or "" for anything else.
-func frameTypeOf(line []byte) string {
-	var head struct {
-		Type string `json:"type"`
-	}
-	if json.Unmarshal(line, &head) != nil {
-		return ""
-	}
-	return head.Type
-}
-
-func (p *legacyVersionProxy) announceOldVersion(line []byte) []byte {
-	if frameType := frameTypeOf(line); frameType != "hello" && frameType != "welcome" {
-		return line
-	}
-	if !p.verbatim {
-		current := []byte(fmt.Sprintf(`"version":%d`, config.ProtocolVersion))
-		line = bytes.Replace(line, current, []byte(fmt.Sprintf(`"version":%d`, p.version)), 1)
-	}
-	if p.victimAddress != "" {
-		line = legacyAddressField.ReplaceAll(line, []byte(fmt.Sprintf(`"address":%q`, p.victimAddress)))
-	}
-	if p.victim != nil {
-		line = legacyAddressField.ReplaceAll(line, []byte(fmt.Sprintf(`"address":%q`, p.victim.Address)))
-		line = legacyPubKeyField.ReplaceAll(line, []byte(fmt.Sprintf(`"pubkey":%q`, identity.PublicKeyBase64(p.victim.PublicKey))))
-		line = legacyBoxKeyField.ReplaceAll(line, []byte(fmt.Sprintf(`"boxkey":%q`, identity.BoxPublicKeyBase64(p.victim.BoxPublicKey))))
-		line = legacyBoxSigField.ReplaceAll(line, []byte(fmt.Sprintf(`"boxsig":%q`, identity.SignBoxKeyBinding(p.victim))))
-	}
-	return line
-}
-
 // drain stops accepting and waits until every forwarded connection has ended
 // on its own, i.e. both nodes closed it. Only then has every frame the node
 // under test wrote been read and recorded: closing the connections first
@@ -522,15 +251,4 @@ func (p *legacyVersionProxy) close() {
 	}
 	p.mu.Unlock()
 	p.done.Wait()
-}
-
-// releasedLegacyVersions are the versions of the released builds that speak
-// only v1 and that this build still serves: v28 (v1.0.64 … v2.1.67), v29
-// (v2.2.68), v30 (v2.3.69, v2.4.70).
-func releasedLegacyVersions() []int {
-	versions := make([]int, 0, config.ProtocolVersionSecureSession-config.MinimumProtocolVersion)
-	for version := config.MinimumProtocolVersion; version < config.ProtocolVersionSecureSession; version++ {
-		versions = append(versions, version)
-	}
-	return versions
 }

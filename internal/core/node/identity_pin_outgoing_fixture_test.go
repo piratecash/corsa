@@ -534,7 +534,7 @@ func TestR2aPositiveWriteTerminalAndFreezeLifecycle(t *testing.T) {
 		})
 	}
 }
-func TestR2aLegalUnsignedRestampUsesTheFirstActualFrame(t *testing.T) {
+func TestR2aOriginalTimestampReachesTheFirstActualFrame(t *testing.T) {
 	s, _, publication, _, _ := r2aManagedFixture(t)
 	recipient, err := identity.Generate()
 	if err != nil {
@@ -557,7 +557,7 @@ func TestR2aLegalUnsignedRestampUsesTheFirstActualFrame(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	waitForConditionMsg(t, 3*time.Second, "restamped actual write missing", func() bool { _, _, err := s.settleR2aOwnHop(t.Context(), result); return err == nil })
+	waitForConditionMsg(t, 3*time.Second, "actual write missing", func() bool { _, _, err := s.settleR2aOwnHop(t.Context(), result); return err == nil })
 	s.captureManager.StopByConnIDs([]domain.ConnID{publication.sealed.connID})
 	raw, err := os.ReadFile(capture.Started[0].FilePath)
 	if err != nil {
@@ -581,8 +581,8 @@ func TestR2aLegalUnsignedRestampUsesTheFirstActualFrame(t *testing.T) {
 	if frame.Body != string(e.Payload) || frame.TTLSeconds <= 0 || at.Add(time.Duration(frame.TTLSeconds)*time.Second).After(e.CreatedAt.Add(time.Duration(e.TTLSeconds)*time.Second)) {
 		t.Fatal("wire projection changed body or extended unsigned deadline")
 	}
-	if legacyTransitRestampNeeded() && !at.After(e.CreatedAt) {
-		t.Fatal("legal legacy restamp was disabled")
+	if !at.Equal(e.CreatedAt.Truncate(time.Second)) || frame.TTLSeconds != e.TTLSeconds {
+		t.Fatal("projection changed the original timestamp or TTL")
 	}
 	if !p.sealed.message.CreatedAt.Equal(e.CreatedAt) {
 		t.Fatal("projection mutated original recipient provenance")

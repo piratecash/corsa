@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -29,6 +30,7 @@ import (
 	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/netcore"
 	"github.com/piratecash/corsa/internal/core/protocol"
+	"github.com/piratecash/corsa/internal/core/sessionv2"
 	"github.com/piratecash/corsa/internal/core/transport"
 )
 
@@ -52,22 +54,21 @@ func TestSingleNodeJSONProtocolFlow(t *testing.T) {
 	})
 	defer stop()
 
-	// Handshake over unauthenticated TCP connection.
-	frames := exchangeFrames(t, svc.externalListenAddress(),
-		protocol.Frame{Type: "hello", Version: config.ProtocolVersion, MinimumProtocolVersion: config.MinimumProtocolVersion, Client: "test", ClientVersion: config.CorsaVersion},
-	)
+	conn, sessionPeer := dialTestTLSClientWithPeer(t, svc.externalListenAddress(), nil)
+	_ = conn.Close()
+	welcome := sessionPeer.Intro
 
-	if got := frames[0]; got.Type != "welcome" || got.Address != svc.Address() {
+	if got := welcome; got.Type != "welcome" || got.Address != svc.Address() {
 		t.Fatalf("unexpected welcome: %#v", got)
 	}
 	// The host is not carried on the wire — neighbours synthesise the
 	// dialable peer address from the observed TCP source host plus
 	// AdvertisePort. The listener flag signals "this peer accepts
 	// inbound" and AdvertisePort carries the listening port.
-	if got := frames[0]; got.Listener != "1" {
+	if got := welcome; got.Listener != "1" {
 		t.Fatalf("unexpected welcome listener fields: %#v", got)
 	}
-	if got := frames[0]; !got.AdvertisePort.IsValid() {
+	if got := welcome; !got.AdvertisePort.IsValid() {
 		t.Fatalf("welcome.advertise_port must be populated, got %d", got.AdvertisePort)
 	}
 
@@ -131,381 +132,6 @@ func TestClientWithoutListenerAnnouncesIdentityButNotDialAddress(t *testing.T) {
 		if peer == normalizeAddress(addressClient) {
 			t.Fatalf("listener-disabled client should not be advertised as dialable peer: %#v", peersReply.Peers)
 		}
-	}
-}
-
-func TestHandshakeRejectsIncompatibleProtocolRange(t *testing.T) {
-	t.Parallel()
-
-	address := freeAddress(t)
-	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:  address,
-		BootstrapPeers: []string{},
-	})
-	defer stop()
-
-	frames := exchangeFrames(t, svc.externalListenAddress(),
-		protocol.Frame{Type: "hello", Version: 0, Client: "test", ClientVersion: config.CorsaVersion},
-	)
-
-	if len(frames) != 1 {
-		t.Fatalf("unexpected frame count: %#v", frames)
-	}
-	if got := frames[0]; got.Type != "error" || got.Code != protocol.ErrCodeIncompatibleProtocol {
-		t.Fatalf("unexpected incompatible protocol reply: %#v", got)
-	}
-}
-
-// TestInboundIncompatibleProtocolEmitsPerPeerBannedNotice verifies that a
-// single incompatible hello produces both the protocol error frame and —
-// on the same live session, before teardown — a machine-readable
-// connection_notice{code=peer-banned, reason=peer-ban} so the dialler
-// can record THIS peer's ban window and stop hammering the bouncer.
-// Without this notice every retry would fan out into cm_session_setup_failed
-// events that churn the ebus.
-//
-// The notice reason is peer-ban (not blacklisted): a one-off incompatible
-// hello must not trip the 24-hour IP-wide blacklist, because NAT gateways,
-// VPN exits, Tor exits and multi-homed hosts share an egress IP across many
-// peers and punishing compatible siblings for one misconfigured neighbour
-// would be a wider blast radius than the misbehaviour justifies. The
-// transport-level IP blacklist remains graduated (banIncrementIncompatible
-// = 250, banThreshold = 1000, so 4 attempts are required); TestIncompatibleHelloIPWideBlacklistAfterFourAttempts
-// covers that safety net.
-//
-// A second TCP connection from the same IP after a single incompatible
-// hello is NOT silently dropped — the IP blacklist is not armed yet. The
-// storm-suppression is keyed on PeerAddress via the dialler-side gate 6c.2,
-// which the notice has already armed for this specific peer.
-func TestInboundIncompatibleProtocolEmitsPerPeerBannedNotice(t *testing.T) {
-	t.Parallel()
-
-	address := freeAddress(t)
-	svc, stop := startTestNodeWithoutDials(t, config.Node{
-		ListenAddress:  address,
-		BootstrapPeers: []string{},
-	})
-	defer stop()
-
-	// First connection: incompatible hello must produce both the error
-	// frame and, on the same session before close, the peer-banned notice
-	// with reason=peer-ban (per-peer scope, 24 h window).
-	conn, err := net.DialTimeout("tcp", svc.externalListenAddress(), 2*time.Second)
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-	defer func() { _ = conn.Close() }()
-
-	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
-	writeJSONFrame(t, conn, protocol.Frame{
-		Type:          "hello",
-		Version:       0,
-		Client:        "test",
-		ClientVersion: config.CorsaVersion,
-	})
-
-	reader := bufio.NewReader(conn)
-	errFrame := readJSONTestFrame(t, reader)
-	if errFrame.Type != "error" || errFrame.Code != protocol.ErrCodeIncompatibleProtocol {
-		t.Fatalf("expected incompatible-protocol error frame, got: %#v", errFrame)
-	}
-
-	noticeFrame := readJSONTestFrame(t, reader)
-	if noticeFrame.Type != protocol.FrameTypeConnectionNotice {
-		t.Fatalf("notice type = %q, want %q", noticeFrame.Type, protocol.FrameTypeConnectionNotice)
-	}
-	if noticeFrame.Code != protocol.ErrCodePeerBanned {
-		t.Fatalf("notice code = %q, want %q", noticeFrame.Code, protocol.ErrCodePeerBanned)
-	}
-	if noticeFrame.Status != protocol.ConnectionStatusClosing {
-		t.Fatalf("notice status = %q, want %q", noticeFrame.Status, protocol.ConnectionStatusClosing)
-	}
-	details, until, err := protocol.ParsePeerBannedDetails(noticeFrame.Details)
-	if err != nil {
-		t.Fatalf("parse peer-banned details: %v", err)
-	}
-	if until.IsZero() {
-		t.Fatal("peer-banned notice must carry a non-zero Until")
-	}
-	if details.Reason != protocol.PeerBannedReasonPeerBan {
-		t.Fatalf("notice reason = %q, want %q — per-peer scope, not IP-wide",
-			details.Reason, protocol.PeerBannedReasonPeerBan)
-	}
-	// The server's advertised Until mirrors peerBanIncompatible (24 h).
-	// Allow a generous tolerance for scheduling jitter between the server
-	// computing peerBannedUntil and the client parsing the frame.
-	wantUntil := time.Now().UTC().Add(peerBanIncompatible)
-	if delta := wantUntil.Sub(until); delta < -2*time.Second || delta > peerBanIncompatible {
-		t.Fatalf("peer-banned Until = %v, want ~now+%v (delta %v)", until, peerBanIncompatible, delta)
-	}
-
-	// Server tears the session down after emitting the notice.
-	if _, readErr := reader.ReadByte(); readErr == nil {
-		t.Fatal("expected connection to be closed by server after notice, but read succeeded")
-	}
-	_ = conn.Close()
-
-	// Critical invariant for the NAT/VPN/Tor-exit case: a single
-	// incompatible hello must NOT activate the IP-wide blacklist. A
-	// second TCP connection from the same IP is allowed to reach the
-	// handshake layer — compatible siblings behind the same egress IP
-	// must stay reachable. Proof: we get a welcome frame back rather
-	// than a silent close.
-	rawConn, err := net.DialTimeout("tcp", svc.externalListenAddress(), 2*time.Second)
-	if err != nil {
-		t.Fatalf("second dial should succeed at TCP level: %v", err)
-	}
-	defer func() { _ = rawConn.Close() }()
-
-	_ = rawConn.SetDeadline(time.Now().Add(2 * time.Second))
-	// Send a valid hello so we can confirm the handshake layer replied,
-	// not just that the TCP accept succeeded. A welcome or any managed
-	// frame returning before the deadline proves the IP is not blacklisted.
-	id, err := identity.Generate()
-	if err != nil {
-		t.Fatalf("generate identity: %v", err)
-	}
-	writeJSONFrame(t, rawConn, protocol.Frame{
-		Type:          "hello",
-		Version:       config.ProtocolVersion,
-		Client:        "node",
-		ClientVersion: config.CorsaVersion,
-		Address:       id.Address,
-		PubKey:        identity.PublicKeyBase64(id.PublicKey),
-		BoxKey:        identity.BoxPublicKeyBase64(id.BoxPublicKey),
-		BoxSig:        identity.SignBoxKeyBinding(id),
-	})
-	siblingReader := bufio.NewReader(rawConn)
-	welcome := readJSONTestFrame(t, siblingReader)
-	if welcome.Type != "welcome" {
-		t.Fatalf("sibling on same IP must reach the handshake layer, got frame: %#v", welcome)
-	}
-}
-
-// TestInboundIncompatibleProtocolKeyedByAdvertisePort verifies the
-// health-key shape on the incompatible-protocol inbound path: peer version
-// metadata MUST be stored under "<observed_TCP_IP>:<advertise_port>", not
-// under "<observed_TCP_IP>:<DefaultPeerPort>" or under the Ed25519 identity.
-//
-// Regression target: prior to the fix this branch built the key from the
-// hello's self-reported address fields through sanitizeInboundAddress, and
-// since the wire carries no host (Address is the identity, not host:port)
-// every peer collapsed onto "<observed_IP>:64646" — the per-peer version-gated
-// ban would aim at the wrong peer record on any node running with a
-// non-default advertise_port.
-//
-// We feed an incompatible hello carrying a non-default AdvertisePort and
-// then read svc.peerVersions: the right key must be populated, the wrong
-// one must stay empty. Reading peerVersions takes peerMu (canonical order
-// observed elsewhere in this file) so a concurrent map writer cannot race
-// with the assertion.
-func TestInboundIncompatibleProtocolKeyedByAdvertisePort(t *testing.T) {
-	t.Parallel()
-
-	address := freeAddress(t)
-	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:  address,
-		BootstrapPeers: []string{},
-	})
-	defer stop()
-
-	conn, err := net.DialTimeout("tcp", svc.externalListenAddress(), 2*time.Second)
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-	defer func() { _ = conn.Close() }()
-
-	const advertisePort = domain.PeerPort(64648)
-	const peerClientVersion = "0.99-incompat"
-
-	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
-	writeJSONFrame(t, conn, protocol.Frame{
-		Type:                   "hello",
-		Version:                0,
-		MinimumProtocolVersion: 0,
-		Client:                 "test",
-		ClientVersion:          peerClientVersion,
-		AdvertisePort:          advertisePort,
-	})
-
-	reader := bufio.NewReader(conn)
-	errFrame := readJSONTestFrame(t, reader)
-	if errFrame.Type != "error" || errFrame.Code != protocol.ErrCodeIncompatibleProtocol {
-		t.Fatalf("expected incompatible-protocol error frame, got: %#v", errFrame)
-	}
-	// Drain the connection_notice + EOF so the server-side goroutine has
-	// flushed peerVersions before we sample it.
-	noticeFrame := readJSONTestFrame(t, reader)
-	if noticeFrame.Type != protocol.FrameTypeConnectionNotice {
-		t.Fatalf("expected connection_notice, got: %#v", noticeFrame)
-	}
-	if _, readErr := reader.ReadByte(); readErr == nil {
-		t.Fatal("expected server to close after notice")
-	}
-	_ = conn.Close()
-
-	// The ephemeral source port the kernel picked for our outbound dial is
-	// not predictable, but the peerAddress derivation always uses the
-	// verified TCP source IP (127.0.0.1 here) plus the self-reported
-	// AdvertisePort. Build both candidate keys and assert exactly one
-	// of them is populated.
-	wantKey := domain.PeerAddress(net.JoinHostPort("127.0.0.1", strconv.Itoa(int(advertisePort))))
-	wrongKey := domain.PeerAddress(net.JoinHostPort("127.0.0.1", config.DefaultPeerPort))
-
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		svc.peerMu.RLock()
-		got := svc.peerVersions[wantKey]
-		wrong := svc.peerVersions[wrongKey]
-		svc.peerMu.RUnlock()
-
-		if got == peerClientVersion && wrong == "" {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("peerVersions[%q] = %q, peerVersions[%q] = %q; want %q at %q only",
-				wantKey, got, wrongKey, wrong, peerClientVersion, wantKey)
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-}
-
-func TestV2NodeHandshakeRequiresSignedAuth(t *testing.T) {
-	t.Parallel()
-
-	address := freeAddress(t)
-	svc, stop := startTestNode(t, config.Node{
-		ListenAddress: address,
-	})
-	defer stop()
-
-	id, err := identity.Generate()
-	if err != nil {
-		t.Fatalf("generate identity: %v", err)
-	}
-
-	conn, err := net.DialTimeout("tcp", svc.externalListenAddress(), 2*time.Second)
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-	defer func() { _ = conn.Close() }()
-	reader := bufio.NewReader(conn)
-
-	writeJSONFrame(t, conn, protocol.Frame{
-		Type:          "hello",
-		Version:       config.ProtocolVersion,
-		Client:        "node",
-		ClientVersion: config.CorsaVersion,
-		Address:       id.Address,
-		PubKey:        identity.PublicKeyBase64(id.PublicKey),
-		BoxKey:        identity.BoxPublicKeyBase64(id.BoxPublicKey),
-		BoxSig:        identity.SignBoxKeyBinding(id),
-	})
-	welcome := readJSONTestFrame(t, reader)
-	if welcome.Type != "welcome" || welcome.Challenge == "" {
-		t.Fatalf("expected welcome with challenge, got %#v", welcome)
-	}
-
-	writeJSONFrame(t, conn, protocol.Frame{
-		Type:      "auth_session",
-		Address:   id.Address,
-		Signature: identity.SignPayload(id, []byte("corsa-session-auth-v1|"+welcome.Challenge+"|"+id.Address)),
-	})
-	authOK := readJSONTestFrame(t, reader)
-	if authOK.Type != "auth_ok" {
-		t.Fatalf("expected auth_ok, got %#v", authOK)
-	}
-
-	// Verify authenticated connection works with a handshake command.
-	writeJSONFrame(t, conn, protocol.Frame{Type: "ping"})
-	pong := readJSONTestFrame(t, reader)
-	if pong.Type != "pong" {
-		t.Fatalf("expected pong after auth, got %#v", pong)
-	}
-}
-
-// From an external source. Loopback is the onion entry and is never banned by
-// its IP: TestALoopbackLegacyViolatorLosesItsConnectionAndBansNobody.
-func TestV2InvalidAuthSignatureAccumulatesBanScore(t *testing.T) {
-	t.Parallel()
-
-	address := freeAddress(t)
-	svc, stop := startTestNodeWithoutDials(t, config.Node{
-		ListenAddress: address,
-	})
-	defer stop()
-
-	id, err := identity.Generate()
-	if err != nil {
-		t.Fatalf("generate identity: %v", err)
-	}
-
-	// Each bad auth_session attempt costs banIncrementInvalidSig=100 points.
-	// The first nine attempts must reply with ErrCodeInvalidAuthSignature. The
-	// tenth attempt crosses banThreshold=1000 and transitions the IP to
-	// blacklisted. At that transition addBanScore emits a peer-banned
-	// connection_notice BEFORE the invalid-auth-signature error frame (see
-	// service.go handleAuthSession → addBanScore → emitPeerBannedNoticeByID),
-	// so the first frame readable on attempt 9 is the notice, not the error.
-	// We assert the transition explicitly; otherwise a regression that drops
-	// the peer-banned notice would go unnoticed.
-	const attempts = 10
-	for i := 0; i < attempts; i++ {
-		conn := dialFromSource(t, svc, testExternalIP)
-		reader := bufio.NewReader(conn)
-		writeJSONFrame(t, conn, protocol.Frame{
-			Type:          "hello",
-			Version:       config.ProtocolVersion,
-			Client:        "node",
-			ClientVersion: config.CorsaVersion,
-			Address:       id.Address,
-			PubKey:        identity.PublicKeyBase64(id.PublicKey),
-			BoxKey:        identity.BoxPublicKeyBase64(id.BoxPublicKey),
-			BoxSig:        identity.SignBoxKeyBinding(id),
-		})
-		welcome := readJSONTestFrame(t, reader)
-		if welcome.Type != "welcome" || welcome.Challenge == "" {
-			t.Fatalf("expected welcome challenge on attempt %d, got %#v", i, welcome)
-		}
-		writeJSONFrame(t, conn, protocol.Frame{
-			Type:      "auth_session",
-			Address:   id.Address,
-			Signature: "bad-signature",
-		})
-		reply := readJSONTestFrame(t, reader)
-		if i < attempts-1 {
-			if reply.Code != protocol.ErrCodeInvalidAuthSignature {
-				t.Fatalf("expected invalid auth signature on attempt %d, got %#v", i, reply)
-			}
-		} else {
-			// Ban-triggering attempt: expect the peer-banned connection_notice
-			// emitted on the justBlacklisted transition. The subsequent error
-			// frame is dropped when we close the connection below.
-			if reply.Type != protocol.FrameTypeConnectionNotice || reply.Code != protocol.ErrCodePeerBanned {
-				t.Fatalf("expected peer-banned connection_notice on attempt %d, got %#v", i, reply)
-			}
-			details, until, err := protocol.ParsePeerBannedDetails(reply.Details)
-			if err != nil {
-				t.Fatalf("parse peer-banned details on attempt %d: %v", i, err)
-			}
-			if details.Reason != protocol.PeerBannedReasonBlacklisted {
-				t.Fatalf("expected reason=%q on ban-triggering attempt, got %q", protocol.PeerBannedReasonBlacklisted, details.Reason)
-			}
-			if until.IsZero() || !until.After(time.Now().Add(-time.Minute)) {
-				t.Fatalf("expected ban expiration in the future, got %v", until)
-			}
-		}
-		_ = conn.Close()
-	}
-
-	svc.ipStateMu.RLock()
-	entry := svc.bans[testExternalIP]
-	svc.ipStateMu.RUnlock()
-	if entry.Score != 1000 {
-		t.Fatalf("expected ban score 1000, got %#v", entry)
-	}
-	if entry.Blacklisted.IsZero() {
-		t.Fatalf("expected blacklist expiration to be set, got %#v", entry)
 	}
 }
 
@@ -889,11 +515,10 @@ func TestSingleConnectionAndSeparateConnectionsBehaveTheSame(t *testing.T) {
 	})
 	defer stop()
 
-	// Part 1: TCP handshake + data-only queries via HandleLocalFrame.
-	tcpFrames := exchangeFrames(t, svc.externalListenAddress(),
-		protocol.Frame{Type: "hello", Version: config.ProtocolVersion, Client: "test", ClientVersion: config.CorsaVersion},
-	)
-	if got := tcpFrames[0]; got.Type != "welcome" || got.Address != svc.Address() {
+	// Prove the listener over TLS before using the in-process operator path.
+	conn, peer := dialTestTLSClientWithPeer(t, svc.externalListenAddress(), nil)
+	_ = conn.Close()
+	if got := peer.Intro; got.Type != "welcome" || got.Address != svc.Address() {
 		t.Fatalf("unexpected welcome: %#v", got)
 	}
 
@@ -917,11 +542,10 @@ func TestSingleConnectionAndSeparateConnectionsBehaveTheSame(t *testing.T) {
 		ID: "series-msg-1", Sender: svc.Address(), Recipient: "*", Flag: "immutable", CreatedAt: timestampA, TTLSeconds: 0, Body: "hello-series",
 	})
 
-	// Part 2: separate TCP handshake + repeated local queries.
-	step1 := exchangeFrames(t, svc.externalListenAddress(),
-		protocol.Frame{Type: "hello", Version: config.ProtocolVersion, Client: "test", ClientVersion: config.CorsaVersion},
-	)
-	if got := step1[0]; got.Type != "welcome" || got.Address != svc.Address() {
+	// Repeat the local queries after a separate TLS session.
+	conn, peer = dialTestTLSClientWithPeer(t, svc.externalListenAddress(), nil)
+	_ = conn.Close()
+	if got := peer.Intro; got.Type != "welcome" || got.Address != svc.Address() {
 		t.Fatalf("unexpected welcome over separate connection: %#v", got)
 	}
 
@@ -1182,164 +806,6 @@ func TestNetworkStatsIncludesTrafficAndKnownPeers(t *testing.T) {
 	}
 }
 
-// TestUnauthenticatedInboundTrafficNotAttributed verifies that an inbound
-// connection that claims a peer address via hello but fails auth_session
-// does NOT have its bytes attributed to that address in network_stats.
-// This is a regression test for the spoofed traffic attribution bug.
-func TestUnauthenticatedInboundTrafficNotAttributed(t *testing.T) {
-	t.Parallel()
-
-	address := freeAddress(t)
-	svc, stop := startTestNode(t, config.Node{
-		ListenAddress: address,
-	})
-	defer stop()
-
-	spoofedID, err := identity.Generate()
-	if err != nil {
-		t.Fatalf("generate identity: %v", err)
-	}
-
-	// Open connection, send hello claiming spoofedID (triggers session auth),
-	// then fail auth with a bad signature.
-	conn, err := net.DialTimeout("tcp", svc.externalListenAddress(), 2*time.Second)
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
-	reader := bufio.NewReader(conn)
-
-	writeJSONFrame(t, conn, protocol.Frame{
-		Type:          "hello",
-		Version:       config.ProtocolVersion,
-		Client:        "node",
-		ClientVersion: config.CorsaVersion,
-		Address:       spoofedID.Address,
-		PubKey:        identity.PublicKeyBase64(spoofedID.PublicKey),
-		BoxKey:        identity.BoxPublicKeyBase64(spoofedID.BoxPublicKey),
-		BoxSig:        identity.SignBoxKeyBinding(spoofedID),
-	})
-	welcome := readJSONTestFrame(t, reader)
-	if welcome.Type != "welcome" || welcome.Challenge == "" {
-		t.Fatalf("expected welcome with challenge, got %#v", welcome)
-	}
-
-	// Send bad auth — this will fail and the server will close the connection.
-	writeJSONFrame(t, conn, protocol.Frame{
-		Type:      "auth_session",
-		Address:   spoofedID.Address,
-		Signature: "deliberately-bad-signature",
-	})
-	reply := readJSONTestFrame(t, reader)
-	if reply.Code != protocol.ErrCodeInvalidAuthSignature {
-		t.Fatalf("expected invalid auth signature error, got %#v", reply)
-	}
-	_ = conn.Close()
-
-	// Give the server a moment to run accumulateInboundTraffic on close.
-	time.Sleep(200 * time.Millisecond)
-
-	// Verify: the spoofed address should NOT appear in network_stats.
-	statsReply := svc.HandleLocalFrame(protocol.Frame{Type: "fetch_network_stats"})
-	if statsReply.NetworkStats == nil {
-		t.Fatal("network_stats is nil")
-	}
-	for _, pt := range statsReply.NetworkStats.PeerTraffic {
-		if pt.Address == spoofedID.Address {
-			t.Errorf("spoofed address %s should not appear in peer_traffic, but found: sent=%d recv=%d",
-				spoofedID.Address, pt.BytesSent, pt.BytesReceived)
-		}
-	}
-
-	// Also verify via peer_health.
-	healthReply := svc.HandleLocalFrame(protocol.Frame{Type: "fetch_peer_health"})
-	for _, ph := range healthReply.PeerHealth {
-		if ph.Address == spoofedID.Address && (ph.BytesSent > 0 || ph.BytesReceived > 0) {
-			t.Errorf("spoofed address %s should not have traffic in peer_health, but found: sent=%d recv=%d",
-				spoofedID.Address, ph.BytesSent, ph.BytesReceived)
-		}
-	}
-}
-
-// TestUnauthenticatedPingDoesNotCreateHealth verifies that an inbound
-// connection that sends ping frames before completing authentication does not
-// create or refresh peerHealth entries for the claimed address.
-func TestUnauthenticatedPingDoesNotCreateHealth(t *testing.T) {
-	t.Parallel()
-
-	address := freeAddress(t)
-	svc, stop := startTestNode(t, config.Node{
-		ListenAddress: address,
-	})
-	defer stop()
-
-	spoofedID, err := identity.Generate()
-	if err != nil {
-		t.Fatalf("generate identity: %v", err)
-	}
-
-	conn, err := net.DialTimeout("tcp", svc.externalListenAddress(), 2*time.Second)
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-	_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
-	reader := bufio.NewReader(conn)
-
-	// Send hello as a node client (requires auth).
-	writeJSONFrame(t, conn, protocol.Frame{
-		Type:          "hello",
-		Version:       config.ProtocolVersion,
-		Client:        "node",
-		ClientVersion: config.CorsaVersion,
-		Address:       spoofedID.Address,
-		PubKey:        identity.PublicKeyBase64(spoofedID.PublicKey),
-		BoxKey:        identity.BoxPublicKeyBase64(spoofedID.BoxPublicKey),
-		BoxSig:        identity.SignBoxKeyBinding(spoofedID),
-	})
-	welcome := readJSONTestFrame(t, reader)
-	if welcome.Type != "welcome" || welcome.Challenge == "" {
-		t.Fatalf("expected welcome with challenge, got %#v", welcome)
-	}
-
-	// Instead of finishing auth, send ping frames. The server must reply
-	// with pong (protocol-level liveness) but must NOT create a health
-	// entry for the unverified claimed address.
-	writeJSONFrame(t, conn, protocol.Frame{Type: "ping"})
-	pong := readJSONTestFrame(t, reader)
-	if pong.Type != "pong" {
-		t.Fatalf("expected pong, got %#v", pong)
-	}
-
-	// Send a second ping to exercise the "refresh" path.
-	writeJSONFrame(t, conn, protocol.Frame{Type: "ping"})
-	pong2 := readJSONTestFrame(t, reader)
-	if pong2.Type != "pong" {
-		t.Fatalf("expected second pong, got %#v", pong2)
-	}
-
-	_ = conn.Close()
-	time.Sleep(200 * time.Millisecond)
-
-	// The spoofed address must not appear in peer_health at all.
-	healthReply := svc.HandleLocalFrame(protocol.Frame{Type: "fetch_peer_health"})
-	for _, ph := range healthReply.PeerHealth {
-		if ph.Address == spoofedID.Address {
-			t.Errorf("unauthenticated peer %s should not appear in peer_health (state=%s, direction=%s)",
-				spoofedID.Address, ph.State, ph.Direction)
-		}
-	}
-
-	// Also must not appear in network_stats peer_traffic.
-	statsReply := svc.HandleLocalFrame(protocol.Frame{Type: "fetch_network_stats"})
-	if statsReply.NetworkStats != nil {
-		for _, pt := range statsReply.NetworkStats.PeerTraffic {
-			if pt.Address == spoofedID.Address {
-				t.Errorf("unauthenticated peer %s should not appear in peer_traffic", spoofedID.Address)
-			}
-		}
-	}
-}
-
 // TestKnownPeersIncludesNonListenerClients verifies that known_peers counts
 // connected non-listener peers (e.g. desktop clients with Listener: "0") that
 // appear in peer_traffic but are not added to s.peers. This is a regression
@@ -1359,41 +825,9 @@ func TestKnownPeersIncludesNonListenerClients(t *testing.T) {
 		t.Fatalf("generate identity: %v", err)
 	}
 
-	// Connect as a non-listener node (Listener: "0").
-	conn, err := net.DialTimeout("tcp", svc.externalListenAddress(), 2*time.Second)
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
+	conn, _ := dialTestTLSClientAs(t, svc.externalListenAddress(), id, nil)
 	defer func() { _ = conn.Close() }()
-	_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
 	reader := bufio.NewReader(conn)
-
-	writeJSONFrame(t, conn, protocol.Frame{
-		Type:          "hello",
-		Version:       config.ProtocolVersion,
-		Client:        "node",
-		ClientVersion: config.CorsaVersion,
-		Address:       id.Address,
-		PubKey:        identity.PublicKeyBase64(id.PublicKey),
-		BoxKey:        identity.BoxPublicKeyBase64(id.BoxPublicKey),
-		BoxSig:        identity.SignBoxKeyBinding(id),
-		Listener:      "0",
-	})
-	welcome := readJSONTestFrame(t, reader)
-	if welcome.Type != "welcome" || welcome.Challenge == "" {
-		t.Fatalf("expected welcome with challenge, got %#v", welcome)
-	}
-
-	// Complete authentication.
-	writeJSONFrame(t, conn, protocol.Frame{
-		Type:      "auth_session",
-		Address:   id.Address,
-		Signature: identity.SignPayload(id, []byte("corsa-session-auth-v1|"+welcome.Challenge+"|"+id.Address)),
-	})
-	authOK := readJSONTestFrame(t, reader)
-	if authOK.Type != "auth_ok" {
-		t.Fatalf("expected auth_ok, got %#v", authOK)
-	}
 
 	// Exchange a frame to generate some traffic.
 	writeJSONFrame(t, conn, protocol.Frame{Type: "ping"})
@@ -3190,25 +2624,57 @@ func TestRetryableRelayReceiptsSkipsClearedReceiptState(t *testing.T) {
 	}
 }
 
-func exchangeFrames(t *testing.T, address string, frames ...protocol.Frame) []protocol.Frame {
+// dialTestTLSClient connects as a proved peer without optional capabilities.
+func dialTestTLSClient(t *testing.T, address string) net.Conn {
 	t.Helper()
+	conn, _ := dialTestTLSClientWithPeer(t, address, nil)
+	return conn
+}
 
-	conn, err := net.DialTimeout("tcp", address, 2*time.Second)
+func dialTestTLSClientWithPeer(t *testing.T, address string, capabilities []string) (net.Conn, sessionv2.Peer) {
+	t.Helper()
+	id, err := identity.Generate()
 	if err != nil {
-		t.Fatalf("dial %s: %v", address, err)
+		t.Fatal(err)
 	}
-	defer func() { _ = conn.Close() }()
+	return dialTestTLSClientAs(t, address, id, capabilities)
+}
 
-	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
-
-	reader := bufio.NewReader(conn)
-	replyFrames := make([]protocol.Frame, 0, len(frames))
-	for _, frame := range frames {
-		writeJSONFrame(t, conn, frame)
-		replyFrames = append(replyFrames, readJSONTestFrame(t, reader))
+func dialTestTLSClientAs(t *testing.T, address string, id *identity.Identity, capabilities []string) (net.Conn, sessionv2.Peer) {
+	t.Helper()
+	local, err := sessionv2.NewLocal(id, domain.NetworkID(networkName))
+	if err != nil {
+		t.Fatal(err)
 	}
-
-	return replyFrames
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	raw, err := (&net.Dialer{}).DialContext(ctx, "tcp", address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = raw.Close() })
+	hello := protocol.Frame{
+		Type: "hello", Version: config.ProtocolVersion, MinimumProtocolVersion: config.MinimumProtocolVersion,
+		Client: "node", Network: networkName, Address: id.Address,
+		PubKey: identity.PublicKeyBase64(id.PublicKey), BoxKey: identity.BoxPublicKeyBase64(id.BoxPublicKey),
+		BoxSig: identity.SignBoxKeyBinding(id), Capabilities: capabilities,
+	}
+	session, err := sessionv2.Dial(ctx, raw, local, hello, sessionv2.ExpectedPeer{}, sessionv2.DefaultTimeouts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, err := session.Conn()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	peer, err := session.Peer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return conn, peer
 }
 
 func waitForCondition(t *testing.T, timeout time.Duration, fn func() bool) {
@@ -6489,90 +5955,23 @@ func TestProtocolTraceLogging(t *testing.T) {
 		t.Fatalf("expected error for unknown command, got %q", resp.Type)
 	}
 
-	// --- Test TCP path (dispatchNetworkFrame) ---
-	_ = exchangeFrames(t, svc.externalListenAddress(),
-		protocol.Frame{Type: "hello", Version: config.ProtocolVersion, MinimumProtocolVersion: config.MinimumProtocolVersion, Client: "test", ClientVersion: config.CorsaVersion},
-		protocol.Frame{Type: "ping"},
-	)
-
-	// --- Test hello-after-auth rejection trace ---
-	// Re-hello on an authenticated connection must be logged with accepted=false.
-	// This covers the ErrCodeHelloAfterAuth path added to prevent mid-session
-	// identity spoofing.
-	func() {
-		id, err := identity.Generate()
-		if err != nil {
-			t.Fatalf("identity.Generate: %v", err)
-		}
-		conn, err := net.DialTimeout("tcp", svc.externalListenAddress(), 3*time.Second)
-		if err != nil {
-			t.Fatalf("dial for re-hello test: %v", err)
-		}
-		defer conn.Close() //nolint:errcheck
-		_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
-		reader := bufio.NewReader(conn)
-
-		// Complete auth handshake.
-		helloFrame := protocol.Frame{
-			Type:                   "hello",
-			Version:                config.ProtocolVersion,
-			MinimumProtocolVersion: config.MinimumProtocolVersion,
-			Client:                 "node",
-			ClientVersion:          config.CorsaVersion,
-			Address:                id.Address,
-			PubKey:                 identity.PublicKeyBase64(id.PublicKey),
-			BoxKey:                 identity.BoxPublicKeyBase64(id.BoxPublicKey),
-			BoxSig:                 identity.SignBoxKeyBinding(id),
-		}
-		writeJSONFrame(t, conn, helloFrame)
-		welcome := readJSONTestFrame(t, reader)
-		if welcome.Type != "welcome" || welcome.Challenge == "" {
-			t.Fatalf("re-hello test: expected welcome with challenge, got %#v", welcome)
-		}
-		writeJSONFrame(t, conn, protocol.Frame{
-			Type:      "auth_session",
-			Address:   id.Address,
-			Signature: identity.SignPayload(id, protocol.SessionAuthPayload(welcome.Challenge, id.Address)),
-		})
-		authOK := readJSONTestFrame(t, reader)
-		if authOK.Type != "auth_ok" {
-			t.Fatalf("re-hello test: expected auth_ok, got %#v", authOK)
-		}
-
-		// Send re-hello — should be rejected with hello-after-auth.
-		writeJSONFrame(t, conn, protocol.Frame{
-			Type:                   "hello",
-			Version:                config.ProtocolVersion,
-			MinimumProtocolVersion: config.MinimumProtocolVersion,
-			Client:                 "node",
-			ClientVersion:          config.CorsaVersion,
-		})
-		errResp := readJSONTestFrame(t, reader)
-		if errResp.Type != "error" || errResp.Code != protocol.ErrCodeHelloAfterAuth {
-			t.Fatalf("re-hello test: expected hello-after-auth error, got %#v", errResp)
-		}
-	}()
-
-	// --- Test non-JSON inbound line (P3: handleCommand before JSON parse) ---
-	func() {
-		conn, err := net.DialTimeout("tcp", svc.externalListenAddress(), 3*time.Second)
-		if err != nil {
-			t.Fatalf("dial for non-json test: %v", err)
-		}
-		defer conn.Close() //nolint:errcheck
-		_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
-		_, _ = conn.Write([]byte("THIS IS NOT JSON\n"))
-		// Read error response to confirm it was processed.
-		scanner := bufio.NewScanner(conn)
-		if scanner.Scan() {
-			var errFrame protocol.Frame
-			if err := json.Unmarshal([]byte(scanner.Text()), &errFrame); err == nil {
-				if errFrame.Type != "error" {
-					t.Errorf("expected error frame for non-json input, got %q", errFrame.Type)
-				}
-			}
-		}
-	}()
+	// Exercise the same command path on a proved TLS session.
+	conn := dialTestTLSClient(t, svc.externalListenAddress())
+	reader := bufio.NewReader(conn)
+	writeJSONFrame(t, conn, protocol.Frame{Type: "ping"})
+	if response := readJSONTestFrame(t, reader); response.Type != "pong" {
+		t.Fatalf("expected pong, got %+v", response)
+	}
+	writeJSONFrame(t, conn, protocol.Frame{Type: "hello"})
+	if response := readJSONTestFrame(t, reader); response.Code != protocol.ErrCodeHelloAfterAuth {
+		t.Fatalf("expected re-hello rejection, got %+v", response)
+	}
+	if _, err := conn.Write([]byte("THIS IS NOT JSON\n")); err != nil {
+		t.Fatal(err)
+	}
+	if response := readJSONTestFrame(t, reader); response.Type != "error" {
+		t.Fatalf("expected a malformed-frame error, got %+v", response)
+	}
 
 	// Allow handleConn goroutines to finish writing their log entries.
 	time.Sleep(50 * time.Millisecond)
@@ -6644,28 +6043,28 @@ func TestProtocolTraceLogging(t *testing.T) {
 		t.Error("expected protocol_trace for unknown command (accepted=false)")
 	}
 
-	// Verify TCP inbound hello was logged.
-	foundTCPHello := false
+	// Verify TCP inbound ping was logged.
+	foundTCPPing := false
 	for _, tr := range traces {
-		if tr.Protocol == "json/tcp" && tr.Command == "hello" && tr.Direction == "recv" && tr.Accepted {
-			foundTCPHello = true
+		if tr.Protocol == "json/tcp" && tr.Command == "ping" && tr.Direction == "recv" && tr.Accepted {
+			foundTCPPing = true
 			break
 		}
 	}
-	if !foundTCPHello {
-		t.Error("expected protocol_trace for TCP hello (recv, accepted=true)")
+	if !foundTCPPing {
+		t.Error("expected protocol_trace for TCP ping (recv, accepted=true)")
 	}
 
-	// Verify TCP outbound welcome response was logged.
-	foundTCPWelcome := false
+	// Verify TCP outbound pong response was logged.
+	foundTCPPong := false
 	for _, tr := range traces {
-		if tr.Protocol == "json/tcp" && tr.Command == "welcome" && tr.Direction == "send" && tr.Accepted {
-			foundTCPWelcome = true
+		if tr.Protocol == "json/tcp" && tr.Command == "pong" && tr.Direction == "send" && tr.Accepted {
+			foundTCPPong = true
 			break
 		}
 	}
-	if !foundTCPWelcome {
-		t.Error("expected protocol_trace for TCP welcome (send, accepted=true)")
+	if !foundTCPPong {
+		t.Error("expected protocol_trace for TCP pong (send, accepted=true)")
 	}
 
 	// Verify non-JSON inbound line was traced (P3 fix).
@@ -6782,7 +6181,7 @@ func TestAnnouncePeerOnAuth(t *testing.T) {
 	t.Parallel()
 
 	address := freeAddress(t)
-	svc, stop := startTestNode(t, config.Node{
+	svc, stop := startTestNodeWithoutDials(t, config.Node{
 		ListenAddress:  address,
 		BootstrapPeers: []string{},
 	})
@@ -6790,11 +6189,11 @@ func TestAnnouncePeerOnAuth(t *testing.T) {
 
 	// announce_peer requires authenticated peer, so we must complete
 	// the full auth handshake before sending it.
-	conn, reader, _ := authenticatedConn(t, svc)
+	conn, reader := authenticatedConn(t, svc)
 	defer func() { _ = conn.Close() }()
 
 	// Send announce_peer with a public address via the TCP protocol path.
-	writeJSONFrame(t, conn, protocol.Frame{Type: "announce_peer", Peers: []string{"83.172.44.178:64646"}, NodeType: "full"})
+	writeJSONFrame(t, conn, protocol.Frame{Type: "announce_peer", Peers: []string{"203.0.113.10:64646"}, NodeType: "full"})
 	ack := readJSONTestFrame(t, reader)
 	if ack.Type != "announce_peer_ack" {
 		t.Fatalf("expected announce_peer_ack, got %q (%s)", ack.Type, ack.Code)
@@ -6804,21 +6203,22 @@ func TestAnnouncePeerOnAuth(t *testing.T) {
 	svc.peerMu.RLock()
 	found := false
 	for _, p := range svc.peers {
-		if p.Address == "83.172.44.178:64646" {
+		if p.Address == "203.0.113.10:64646" {
 			found = true
 			break
 		}
 	}
+	_, retagged := svc.peerTypes[domain.PeerAddress("203.0.113.10:64646")]
 	svc.peerMu.RUnlock()
 	if !found {
 		t.Error("expected announced peer to be added to dial list")
 	}
-	if _, ok := svc.peerTypes[domain.PeerAddress("83.172.44.178:64646")]; ok {
+	if retagged {
 		t.Error("announce_peer must not set peer type for third-party address")
 	}
 
 	// Announce a local address — it should be ignored.
-	conn2, reader2, _ := authenticatedConn(t, svc)
+	conn2, reader2 := authenticatedConn(t, svc)
 	defer func() { _ = conn2.Close() }()
 
 	writeJSONFrame(t, conn2, protocol.Frame{Type: "announce_peer", Peers: []string{"192.168.1.100:64646"}, NodeType: "full"})
@@ -7337,18 +6737,18 @@ func TestConcurrentWriteJSONFrameAndPush(t *testing.T) {
 
 	address := freeAddress(t)
 
-	// The node identity acts as the DM recipient.
+	// The subscriber has a distinct TLS identity from the relay.
 	recipientID, err := identity.Generate()
 	if err != nil {
 		t.Fatalf("generate recipient identity: %v", err)
 	}
-	svc, stop := startTestNodeWithIdentity(t, config.Node{
+	svc, stop := startTestNode(t, config.Node{
 		ListenAddress:  address,
 		BootstrapPeers: []string{},
-	}, recipientID)
+	})
 	defer stop()
 
-	recipientAddr := svc.Address()
+	recipientAddr := recipientID.Address
 
 	// Create a sender identity and register it as a trusted contact on the node
 	// so that DM signature verification succeeds.
@@ -7390,75 +6790,15 @@ func TestConcurrentWriteJSONFrameAndPush(t *testing.T) {
 		ciphertexts[i] = ct
 	}
 
-	// --- subscriber connection: subscribes to own inbox and reads all frames ---
-	subConn, err := net.DialTimeout("tcp", svc.externalListenAddress(), 2*time.Second)
-	if err != nil {
-		t.Fatalf("dial subscriber: %v", err)
-	}
+	subConn, _ := dialTestTLSClientAs(t, svc.externalListenAddress(), recipientID, nil)
 	defer func() { _ = subConn.Close() }()
 	_ = subConn.SetDeadline(time.Now().Add(15 * time.Second))
 	subReader := bufio.NewReader(subConn)
+	waitForCondition(t, 5*time.Second, func() bool { return svc.SubscriberCount(recipientAddr) > 0 })
 
-	// handshake + auth — the responder auto-registers the inbox route for
-	// the authenticated identity at auth time (registerHelloRoute).
-	writeJSONFrame(t, subConn, protocol.Frame{
-		Type:                   "hello",
-		Version:                config.ProtocolVersion,
-		MinimumProtocolVersion: config.MinimumProtocolVersion,
-		Client:                 "node",
-		ClientVersion:          config.CorsaVersion,
-		Address:                recipientID.Address,
-		PubKey:                 identity.PublicKeyBase64(recipientID.PublicKey),
-		BoxKey:                 identity.BoxPublicKeyBase64(recipientID.BoxPublicKey),
-		BoxSig:                 identity.SignBoxKeyBinding(recipientID),
-	})
-	welcome := readJSONTestFrame(t, subReader)
-	if welcome.Type != "welcome" || welcome.Challenge == "" {
-		t.Fatalf("expected welcome with challenge, got %s", welcome.Type)
-	}
-
-	writeJSONFrame(t, subConn, protocol.Frame{
-		Type:      "auth_session",
-		Address:   recipientID.Address,
-		Signature: identity.SignPayload(recipientID, []byte("corsa-session-auth-v1|"+welcome.Challenge+"|"+recipientID.Address)),
-	})
-	authOK := readJSONTestFrame(t, subReader)
-	if authOK.Type != "auth_ok" {
-		t.Fatalf("expected auth_ok, got %s: %s", authOK.Type, authOK.Error)
-	}
-
-	// --- sender connection: authenticates then sends messages concurrently ---
-	senderConn, err := net.DialTimeout("tcp", svc.externalListenAddress(), 2*time.Second)
-	if err != nil {
-		t.Fatalf("dial sender: %v", err)
-	}
+	senderConn, _ := dialTestTLSClientAs(t, svc.externalListenAddress(), senderID, nil)
 	defer func() { _ = senderConn.Close() }()
 	_ = senderConn.SetDeadline(time.Now().Add(15 * time.Second))
-	senderReader := bufio.NewReader(senderConn)
-
-	writeJSONFrame(t, senderConn, protocol.Frame{
-		Type:                   "hello",
-		Version:                config.ProtocolVersion,
-		MinimumProtocolVersion: config.MinimumProtocolVersion,
-		Client:                 "node",
-		ClientVersion:          config.CorsaVersion,
-		Address:                senderID.Address,
-		PubKey:                 identity.PublicKeyBase64(senderID.PublicKey),
-		BoxKey:                 identity.BoxPublicKeyBase64(senderID.BoxPublicKey),
-		BoxSig:                 identity.SignBoxKeyBinding(senderID),
-	})
-	senderWelcome := readJSONTestFrame(t, senderReader)
-	if senderWelcome.Type != "welcome" || senderWelcome.Challenge == "" {
-		t.Fatalf("sender expected welcome with challenge, got %s", senderWelcome.Type)
-	}
-	writeJSONFrame(t, senderConn, protocol.Frame{
-		Type:      "auth_session",
-		Address:   senderID.Address,
-		Signature: identity.SignPayload(senderID, protocol.SessionAuthPayload(senderWelcome.Challenge, senderID.Address)),
-	})
-	if f := readJSONTestFrame(t, senderReader); f.Type != "auth_ok" {
-		t.Fatalf("sender expected auth_ok, got %s: %s", f.Type, f.Error)
-	}
 
 	// Concurrently: sender sends DMs AND subscriber sends ping requests.
 	// Both cause writes to subConn (push_message + pong response).
@@ -7537,101 +6877,6 @@ func TestConcurrentWriteJSONFrameAndPush(t *testing.T) {
 		t.Errorf("expected push_message frames, got none — messages not delivered in real-time")
 	}
 	t.Logf("received %d pongs, %d pushes (of %d sent)", pongs, pushes, messageCount)
-}
-
-// TestErrorPathTeardownDoesNotHang verifies that when a writer goroutine is
-// blocked on a slow peer and the protocol handler hits an error path (return
-// false), the handleConn teardown completes promptly instead of hanging until
-// the 30-second write deadline expires.
-//
-// Sequence:
-//  1. Connect and complete the hello handshake.
-//  2. Stop reading from the TCP connection to create back-pressure.
-//  3. Flood pings to fill the 128-slot send channel and TCP send buffer,
-//     which causes the writer goroutine to block in conn.Write.
-//  4. Send a malformed (non-JSON) line that triggers writeJSONFrameSync
-//     followed by return false.
-//  5. Assert the server closes the connection within a tight deadline.
-//
-// If the teardown hangs, the test will exceed the deadline and fail.
-func TestErrorPathTeardownDoesNotHang(t *testing.T) {
-	t.Parallel()
-
-	address := freeAddress(t)
-	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:  address,
-		BootstrapPeers: []string{},
-	})
-	defer stop()
-
-	conn, err := net.DialTimeout("tcp", svc.externalListenAddress(), 2*time.Second)
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-	defer func() { _ = conn.Close() }()
-
-	reader := bufio.NewReader(conn)
-
-	// Handshake so the connection gets a registered send channel.
-	writeJSONFrame(t, conn, protocol.Frame{
-		Type:                   "hello",
-		Version:                config.ProtocolVersion,
-		MinimumProtocolVersion: config.MinimumProtocolVersion,
-		Client:                 "test-teardown",
-		ClientVersion:          config.CorsaVersion,
-	})
-	welcome := readJSONTestFrame(t, reader)
-	if welcome.Type != "welcome" {
-		t.Fatalf("expected welcome, got %s", welcome.Type)
-	}
-
-	// Flood pings without reading responses. This fills the send channel
-	// (128 slots) and eventually the TCP send buffer, causing the writer
-	// goroutine to block in conn.Write.
-	for i := 0; i < 300; i++ {
-		_, err := fmt.Fprint(conn, `{"type":"ping"}`+"\n")
-		if err != nil {
-			break // server may have already closed
-		}
-	}
-
-	// Send a malformed line that is not valid JSON. This triggers the error
-	// path in handleCommand: writeJSONFrameSync → return false → teardown.
-	_, _ = fmt.Fprint(conn, "NOT-JSON\n")
-
-	// The server should close the connection promptly. If teardown hangs
-	// (blocked writer), this read will timeout after the deadline below.
-	// Use a generous margin over syncFlushTimeout (5s): the server must
-	// process up to 300 queued ping frames before reaching the malformed
-	// line, and goroutine scheduling / GC pauses add jitter.  The real
-	// assertion is "well under 30s connWriteTimeout", not "exactly 5s".
-	//
-	// readDeadline unblocks the drain loop if the server truly hangs.
-	// assertLimit is slightly larger to accommodate scheduling jitter
-	// between SetDeadline and time.Since — hitting the read deadline
-	// itself is acceptable, we're guarding against the 30s hang.
-	readDeadline := 10 * time.Second
-	assertLimit := 12 * time.Second
-	_ = conn.SetDeadline(time.Now().Add(readDeadline))
-
-	start := time.Now()
-
-	// Drain anything the server sends until we get EOF or an error.
-	for {
-		_, err := reader.ReadString('\n')
-		if err != nil {
-			break
-		}
-	}
-
-	elapsed := time.Since(start)
-
-	// The critical assertion: teardown must complete well under the 30s
-	// connWriteTimeout.
-	if elapsed > assertLimit {
-		t.Fatalf("teardown took %v, expected <%v — writer goroutine likely hung", elapsed, assertLimit)
-	}
-	t.Logf("connection closed after %v (limit was %v)", elapsed, assertLimit)
 }
 
 // TestEnqueueFrameSyncReturnsImmediatelyWhenWriterDead verifies that
@@ -8367,80 +7612,13 @@ func TestTransitDMLiveInboxRoute(t *testing.T) {
 		t.Fatalf("encrypt message: %v", err)
 	}
 
-	// --- Recipient connects and registers a live inbox route ---
-	recipConn, err := net.DialTimeout("tcp", svc.externalListenAddress(), 2*time.Second)
-	if err != nil {
-		t.Fatalf("dial recipient: %v", err)
-	}
+	recipConn, _ := dialTestTLSClientAs(t, svc.externalListenAddress(), recipientID, nil)
 	defer func() { _ = recipConn.Close() }()
-	_ = recipConn.SetDeadline(time.Now().Add(10 * time.Second))
 	recipReader := bufio.NewReader(recipConn)
+	waitForCondition(t, 5*time.Second, func() bool { return svc.SubscriberCount(recipientAddr) > 0 })
 
-	// hello + auth
-	writeJSONFrame(t, recipConn, protocol.Frame{
-		Type:                   "hello",
-		Version:                config.ProtocolVersion,
-		MinimumProtocolVersion: config.MinimumProtocolVersion,
-		Client:                 "node",
-		ClientVersion:          config.CorsaVersion,
-		Address:                recipientID.Address,
-		PubKey:                 identity.PublicKeyBase64(recipientID.PublicKey),
-		BoxKey:                 identity.BoxPublicKeyBase64(recipientID.BoxPublicKey),
-		BoxSig:                 identity.SignBoxKeyBinding(recipientID),
-	})
-	welcome := readJSONTestFrame(t, recipReader)
-	if welcome.Type != "welcome" || welcome.Challenge == "" {
-		t.Fatalf("expected welcome with challenge, got %s", welcome.Type)
-	}
-
-	writeJSONFrame(t, recipConn, protocol.Frame{
-		Type:      "auth_session",
-		Address:   recipientID.Address,
-		Signature: identity.SignPayload(recipientID, []byte("corsa-session-auth-v1|"+welcome.Challenge+"|"+recipientID.Address)),
-	})
-	authOK := readJSONTestFrame(t, recipReader)
-	if authOK.Type != "auth_ok" {
-		t.Fatalf("expected auth_ok, got %s: %s", authOK.Type, authOK.Error)
-	}
-
-	// The live inbox route was auto-registered at auth time
-	// (registerHelloRoute) — no explicit subscription round-trip exists.
-
-	// --- Sender authenticates on TCP and submits DM via push_message ---
-	// push_message is the P2P wire command for delivering messages between
-	// authenticated peers. send_message is local-only (RPC / HandleLocalFrame)
-	// and does not exist on the TCP wire.
-	senderConn, err := net.DialTimeout("tcp", svc.externalListenAddress(), 2*time.Second)
-	if err != nil {
-		t.Fatalf("dial sender: %v", err)
-	}
+	senderConn, _ := dialTestTLSClientAs(t, svc.externalListenAddress(), senderID, nil)
 	defer func() { _ = senderConn.Close() }()
-	_ = senderConn.SetDeadline(time.Now().Add(10 * time.Second))
-	senderReader := bufio.NewReader(senderConn)
-
-	writeJSONFrame(t, senderConn, protocol.Frame{
-		Type:                   "hello",
-		Version:                config.ProtocolVersion,
-		MinimumProtocolVersion: config.MinimumProtocolVersion,
-		Client:                 "node",
-		ClientVersion:          config.CorsaVersion,
-		Address:                senderID.Address,
-		PubKey:                 identity.PublicKeyBase64(senderID.PublicKey),
-		BoxKey:                 identity.BoxPublicKeyBase64(senderID.BoxPublicKey),
-		BoxSig:                 identity.SignBoxKeyBinding(senderID),
-	})
-	senderWelcome := readJSONTestFrame(t, senderReader)
-	if senderWelcome.Type != "welcome" || senderWelcome.Challenge == "" {
-		t.Fatalf("sender expected welcome with challenge, got %s", senderWelcome.Type)
-	}
-	writeJSONFrame(t, senderConn, protocol.Frame{
-		Type:      "auth_session",
-		Address:   senderID.Address,
-		Signature: identity.SignPayload(senderID, protocol.SessionAuthPayload(senderWelcome.Challenge, senderID.Address)),
-	})
-	if f := readJSONTestFrame(t, senderReader); f.Type != "auth_ok" {
-		t.Fatalf("sender expected auth_ok, got %s: %s", f.Type, f.Error)
-	}
 
 	ts := time.Now().UTC().Format(time.RFC3339)
 	writeJSONFrame(t, senderConn, protocol.Frame{
@@ -8492,10 +7670,13 @@ func TestTransitDMNotReplayedFromBacklog(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generate relay identity: %v", err)
 	}
-	svc, stop := startTestNodeWithIdentity(t, config.Node{
+	svc, stop := startTestNodeWithIdentityAndSetup(t, config.Node{
 		ListenAddress:  address,
 		BootstrapPeers: []string{},
-	}, relayID)
+	}, relayID, func(svc *Service) {
+		// Exercise reconnect replay independently of periodic forwarding retries.
+		svc.bootstrapTickOverride = make(chan time.Time)
+	})
 	defer stop()
 
 	senderID, err := identity.Generate()
@@ -8543,79 +7724,14 @@ func TestTransitDMNotReplayedFromBacklog(t *testing.T) {
 		t.Fatalf("encrypt message: %v", err)
 	}
 
-	// Step 1: recipient connects, subscribes, then disconnects.
-	recipConn1, err := net.DialTimeout("tcp", svc.externalListenAddress(), 2*time.Second)
-	if err != nil {
-		t.Fatalf("dial recipient (1st): %v", err)
-	}
-	_ = recipConn1.SetDeadline(time.Now().Add(10 * time.Second))
-	recipReader1 := bufio.NewReader(recipConn1)
-
-	writeJSONFrame(t, recipConn1, protocol.Frame{
-		Type:                   "hello",
-		Version:                config.ProtocolVersion,
-		MinimumProtocolVersion: config.MinimumProtocolVersion,
-		Client:                 "node",
-		ClientVersion:          config.CorsaVersion,
-		Address:                recipientID.Address,
-		PubKey:                 identity.PublicKeyBase64(recipientID.PublicKey),
-		BoxKey:                 identity.BoxPublicKeyBase64(recipientID.BoxPublicKey),
-		BoxSig:                 identity.SignBoxKeyBinding(recipientID),
-	})
-	welcome := readJSONTestFrame(t, recipReader1)
-	if welcome.Type != "welcome" {
-		t.Fatalf("expected welcome, got %s", welcome.Type)
-	}
-	writeJSONFrame(t, recipConn1, protocol.Frame{
-		Type:      "auth_session",
-		Address:   recipientID.Address,
-		Signature: identity.SignPayload(recipientID, []byte("corsa-session-auth-v1|"+welcome.Challenge+"|"+recipientID.Address)),
-	})
-	if f := readJSONTestFrame(t, recipReader1); f.Type != "auth_ok" {
-		t.Fatalf("expected auth_ok, got %s", f.Type)
-	}
-	// The live inbox route was auto-registered at auth time
-	// (registerHelloRoute) — no explicit subscription round-trip exists.
-
-	// Disconnect: route is gone.
+	// Establish the inbox route, then wait for its removal.
+	recipConn1, _ := dialTestTLSClientAs(t, svc.externalListenAddress(), recipientID, nil)
+	waitForCondition(t, 5*time.Second, func() bool { return svc.SubscriberCount(recipientAddr) > 0 })
 	_ = recipConn1.Close()
-	time.Sleep(50 * time.Millisecond) // let cleanup run
+	waitForCondition(t, 5*time.Second, func() bool { return svc.SubscriberCount(recipientAddr) == 0 })
 
-	// Step 2: sender sends DM (must authenticate first). The stale
-	// subscriber snapshot may be taken but the push will fail (conn
-	// closed). Gossip was skipped because snapshot was non-empty. The
-	// message must still be in topics/backlog.
-	senderConn, err := net.DialTimeout("tcp", svc.externalListenAddress(), 2*time.Second)
-	if err != nil {
-		t.Fatalf("dial sender: %v", err)
-	}
+	senderConn, _ := dialTestTLSClientAs(t, svc.externalListenAddress(), senderID, nil)
 	defer func() { _ = senderConn.Close() }()
-	_ = senderConn.SetDeadline(time.Now().Add(10 * time.Second))
-	senderReader := bufio.NewReader(senderConn)
-
-	writeJSONFrame(t, senderConn, protocol.Frame{
-		Type:                   "hello",
-		Version:                config.ProtocolVersion,
-		MinimumProtocolVersion: config.MinimumProtocolVersion,
-		Client:                 "node",
-		ClientVersion:          config.CorsaVersion,
-		Address:                senderID.Address,
-		PubKey:                 identity.PublicKeyBase64(senderID.PublicKey),
-		BoxKey:                 identity.BoxPublicKeyBase64(senderID.BoxPublicKey),
-		BoxSig:                 identity.SignBoxKeyBinding(senderID),
-	})
-	senderWelcome := readJSONTestFrame(t, senderReader)
-	if senderWelcome.Type != "welcome" || senderWelcome.Challenge == "" {
-		t.Fatalf("sender expected welcome with challenge, got %s", senderWelcome.Type)
-	}
-	writeJSONFrame(t, senderConn, protocol.Frame{
-		Type:      "auth_session",
-		Address:   senderID.Address,
-		Signature: identity.SignPayload(senderID, protocol.SessionAuthPayload(senderWelcome.Challenge, senderID.Address)),
-	})
-	if f := readJSONTestFrame(t, senderReader); f.Type != "auth_ok" {
-		t.Fatalf("sender expected auth_ok, got %s: %s", f.Type, f.Error)
-	}
 
 	// push_message is the correct P2P wire command for delivering messages
 	// between authenticated peers. send_message is local-only (RPC/HandleLocalFrame).
@@ -8633,54 +7749,35 @@ func TestTransitDMNotReplayedFromBacklog(t *testing.T) {
 			Body:      ct,
 		},
 	})
-	// push_message on inbound TCP is fire-and-forget: the relay stores the
-	// message internally. Give it a moment to complete the async store.
-	time.Sleep(100 * time.Millisecond)
+	// The per-hop acknowledgement follows admission. Keep the recipient
+	// offline until the live routing decision and initial forwarding have run.
+	ack, err := readSyncReply(t.Context(), bufio.NewReader(senderConn), "ack_delete", 16, func() {})
+	if err != nil || ack.Type != "ack_delete" || ack.ID != "backlog-msg-1" {
+		t.Fatalf("relay did not acknowledge transit admission: frame=%#v, err=%v", ack, err)
+	}
 
 	// Step 3: the recipient reconnects. The auth-time backlog replay must
 	// NOT serve the transit message — the relay is not its mailbox.
-	recipConn2, err := net.DialTimeout("tcp", svc.externalListenAddress(), 2*time.Second)
-	if err != nil {
-		t.Fatalf("dial recipient (2nd): %v", err)
-	}
+	recipConn2, _ := dialTestTLSClientAs(t, svc.externalListenAddress(), recipientID, nil)
 	defer func() { _ = recipConn2.Close() }()
-	_ = recipConn2.SetDeadline(time.Now().Add(10 * time.Second))
+	waitForCondition(t, 5*time.Second, func() bool { return svc.SubscriberCount(recipientAddr) > 0 })
 	recipReader2 := bufio.NewReader(recipConn2)
-
-	writeJSONFrame(t, recipConn2, protocol.Frame{
-		Type:                   "hello",
-		Version:                config.ProtocolVersion,
-		MinimumProtocolVersion: config.MinimumProtocolVersion,
-		Client:                 "node",
-		ClientVersion:          config.CorsaVersion,
-		Address:                recipientID.Address,
-		PubKey:                 identity.PublicKeyBase64(recipientID.PublicKey),
-		BoxKey:                 identity.BoxPublicKeyBase64(recipientID.BoxPublicKey),
-		BoxSig:                 identity.SignBoxKeyBinding(recipientID),
-	})
-	welcome2 := readJSONTestFrame(t, recipReader2)
-	if welcome2.Type != "welcome" {
-		t.Fatalf("expected welcome (2nd), got %s", welcome2.Type)
-	}
-	writeJSONFrame(t, recipConn2, protocol.Frame{
-		Type:      "auth_session",
-		Address:   recipientID.Address,
-		Signature: identity.SignPayload(recipientID, []byte("corsa-session-auth-v1|"+welcome2.Challenge+"|"+recipientID.Address)),
-	})
-	if f := readJSONTestFrame(t, recipReader2); f.Type != "auth_ok" {
-		t.Fatalf("expected auth_ok (2nd), got %s", f.Type)
-	}
 
 	// The responder auto-registers this node's inbox at auth and replays
 	// the backlog — which, under the forwarding-only contract, must not
 	// contain the transit message. Drain frames until the read deadline
 	// (reaching it IS the success path: nothing was replayed) and fail if
 	// the transit message leaks through.
-	_ = recipConn2.SetDeadline(time.Now().Add(2 * time.Second))
+	if err := recipConn2.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
 	for {
 		line, err := recipReader2.ReadString('\n')
+		if errors.Is(err, os.ErrDeadlineExceeded) {
+			break
+		}
 		if err != nil {
-			break // deadline or EOF — no backlog replay observed
+			t.Fatalf("recipient disconnected before the backlog check completed: %v", err)
 		}
 		f, err := protocol.ParseFrameLine(line[:len(line)-1])
 		if err != nil {
@@ -8692,273 +7789,37 @@ func TestTransitDMNotReplayedFromBacklog(t *testing.T) {
 	}
 }
 
-// TestCapabilityExchangeBetweenTwoNodes verifies that capabilities are sent in
-// hello and echoed in welcome during a live handshake between two nodes.
 func TestCapabilityExchangeBetweenTwoNodes(t *testing.T) {
 	t.Parallel()
 
-	addressA := freeAddress(t)
-	addressB := freeAddress(t)
-
-	_, stopA := startTestNode(t, config.Node{
-		ListenAddress:  addressA,
-		BootstrapPeers: []string{normalizeAddress(addressB)},
-		Type:           domain.NodeTypeFull,
-	})
-	defer stopA()
-
-	svcB, stopB := startTestNode(t, config.Node{
-		ListenAddress:  addressB,
-		BootstrapPeers: []string{normalizeAddress(addressA)},
-		Type:           domain.NodeTypeFull,
-	})
-	defer stopB()
-
-	// Connect to node B as a raw TCP client and send hello with capabilities.
-	frames := exchangeFrames(t, svcB.externalListenAddress(),
-		protocol.Frame{
-			Type:         "hello",
-			Version:      config.ProtocolVersion,
-			Client:       "test",
-			Capabilities: []string{"mesh_relay_v1", "mesh_routing_v1"},
-		},
-	)
-
-	welcome := frames[0]
-	if welcome.Type != "welcome" {
-		t.Fatalf("expected welcome, got %s", welcome.Type)
-	}
-
-	// In Iteration 0 localCapabilities() returns nil, so the welcome frame
-	// should have empty/nil capabilities. The important thing is that the
-	// field is present in the protocol and does not cause errors.
-	// When localCapabilities() returns tokens, they will appear here.
-	if len(welcome.Capabilities) > 0 {
-		// This is expected once capabilities are enabled; for now just
-		// verify the field round-trips without breaking the handshake.
-		t.Logf("welcome capabilities: %v", welcome.Capabilities)
-	}
-}
-
-// TestMixedVersionNodeWithoutCapabilitiesField verifies that a legacy node
-// (one that does not send the capabilities field) can successfully handshake
-// with a new node. The capabilities field is omitempty, so legacy frames
-// simply omit it; the new node must treat this as an empty capability set.
-func TestMixedVersionNodeWithoutCapabilitiesField(t *testing.T) {
-	t.Parallel()
-
-	address := freeAddress(t)
-	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:  address,
-		BootstrapPeers: []string{},
-		Type:           domain.NodeTypeFull,
-	})
+	svc, address, stop := listenerNode(t, nil)
 	defer stop()
-
-	// Send a hello frame WITHOUT the capabilities field — simulating a
-	// legacy node that predates capability negotiation.
-	frames := exchangeFrames(t, svc.externalListenAddress(),
-		protocol.Frame{
-			Type:    "hello",
-			Version: config.ProtocolVersion,
-			Client:  "test",
-			// Capabilities intentionally omitted (nil)
-		},
-	)
-
-	welcome := frames[0]
-	if welcome.Type != "welcome" {
-		t.Fatalf("expected welcome from new node, got %s", welcome.Type)
-	}
-	if welcome.Version != config.ProtocolVersion {
-		t.Fatalf("expected protocol version %d, got %d", config.ProtocolVersion, welcome.Version)
-	}
-	// Handshake must succeed — a missing capabilities field is not an error.
-}
-
-// TestMixedVersionLegacyPeerExchange verifies that a legacy node (no
-// capabilities field) can complete the full peer-exchange phase after
-// authentication: hello → welcome → auth_session → auth_ok → get_peers →
-// fetch_contacts. This is the exact sequence that syncPeer/syncPeerSession
-// execute on every peer session. Without this test, the handshake-only
-// coverage in TestMixedVersionNodeWithoutCapabilitiesField would pass
-// even if the post-handshake P2P protocol was broken.
-func TestMixedVersionLegacyPeerExchange(t *testing.T) {
-	t.Parallel()
-
-	addr := freeAddress(t)
-	tempDir := t.TempDir()
-
-	nodeID, err := identity.Generate()
-	if err != nil {
-		t.Fatalf("identity.Generate: %v", err)
-	}
-
-	svc := NewService(configtest.WithTempDataDirs(t, config.Node{
-		ListenAddress:  addr,
-		TrustStorePath: filepath.Join(tempDir, "trust.json"),
-		Type:           domain.NodeTypeFull,
-	}), nodeID, nil)
-	svc.disableRateLimiting = true
-
-	ctx, cancel := context.WithCancel(context.Background())
-	svc, stop := startTestService(t, ctx, cancel, svc)
-	defer stop()
-
-	// Generate identity for the "legacy" peer.
-	legacyID, err := identity.Generate()
-	if err != nil {
-		t.Fatalf("identity.Generate: %v", err)
-	}
-
-	conn, err := net.DialTimeout("tcp", svc.externalListenAddress(), 2*time.Second)
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
+	const capability = string(domain.CapMeshRelayV1)
+	conn, peer := dialTestTLSClientWithPeer(t, address, []string{capability})
 	defer func() { _ = conn.Close() }()
-	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+	if peer.Intro.Type != "welcome" || peer.Intro.Address != svc.Address() {
+		t.Fatalf("unexpected proved welcome: %#v", peer.Intro)
+	}
+	if !slices.Contains(peer.Intro.Capabilities, capability) {
+		t.Fatalf("capability missing from proved welcome: %v", peer.Intro.Capabilities)
+	}
+}
+
+func TestV31PeerExchangeWithoutCapabilities(t *testing.T) {
+	t.Parallel()
+
+	_, address, stop := listenerNode(t, nil)
+	defer stop()
+	conn := dialTestTLSClient(t, address)
+	defer func() { _ = conn.Close() }()
 	reader := bufio.NewReader(conn)
-
-	// Phase 1: hello WITHOUT capabilities — simulates legacy node.
-	writeJSONFrame(t, conn, protocol.Frame{
-		Type:                   "hello",
-		Version:                config.ProtocolVersion,
-		MinimumProtocolVersion: config.MinimumProtocolVersion,
-		Client:                 "node",
-		ClientVersion:          "0.9.0",
-		Address:                legacyID.Address,
-		PubKey:                 identity.PublicKeyBase64(legacyID.PublicKey),
-		BoxKey:                 identity.BoxPublicKeyBase64(legacyID.BoxPublicKey),
-		BoxSig:                 identity.SignBoxKeyBinding(legacyID),
-		// Capabilities intentionally omitted — legacy node.
-	})
-	welcome := readJSONTestFrame(t, reader)
-	if welcome.Type != "welcome" || welcome.Challenge == "" {
-		t.Fatalf("expected welcome with challenge, got %#v", welcome)
-	}
-
-	// Phase 2: auth_session — legacy node authenticates.
-	writeJSONFrame(t, conn, protocol.Frame{
-		Type:      "auth_session",
-		Address:   legacyID.Address,
-		Signature: identity.SignPayload(legacyID, protocol.SessionAuthPayload(welcome.Challenge, legacyID.Address)),
-	})
-	authReply := readJSONTestFrame(t, reader)
-	if authReply.Type != "auth_ok" {
-		t.Fatalf("expected auth_ok, got type=%q code=%s error=%q", authReply.Type, authReply.Code, authReply.Error)
-	}
-
-	// Phase 3: get_peers — the first step of syncPeer/syncPeerSession.
 	writeJSONFrame(t, conn, protocol.Frame{Type: "get_peers"})
-	peersReply := readJSONTestFrame(t, reader)
-	if peersReply.Type != "peers" {
-		t.Fatalf("legacy peer-exchange: get_peers should return peers, got type=%q code=%s error=%q",
-			peersReply.Type, peersReply.Code, peersReply.Error)
+	if reply := readJSONTestFrame(t, reader); reply.Type != "peers" {
+		t.Fatalf("get_peers: %s/%s", reply.Type, reply.Code)
 	}
-
-	// Phase 4: fetch_contacts — the second step of syncPeer/syncPeerSession.
 	writeJSONFrame(t, conn, protocol.Frame{Type: "fetch_contacts"})
-	contactsReply := readJSONTestFrame(t, reader)
-	if contactsReply.Type != "contacts" {
-		t.Fatalf("legacy peer-exchange: fetch_contacts should return contacts, got type=%q code=%s error=%q",
-			contactsReply.Type, contactsReply.Code, contactsReply.Error)
-	}
-}
-
-// TestUnauthenticatedPeerCannotSendRelayMessage verifies the trust boundary:
-// an inbound peer that sends hello with Client != "node"/"desktop" (thus
-// skipping auth_session) must NOT be able to send relay_message frames, even
-// if it advertises mesh_relay_v1 capability.
-//
-// Before the fix, the scope check returned true for nil connAuth,
-// and connHasCapability + inboundPeerAddress were populated from the
-// unauthenticated hello frame, allowing anyone to inject relay traffic.
-func TestUnauthenticatedPeerCannotSendRelayMessage(t *testing.T) {
-	t.Parallel()
-
-	addr := freeAddress(t)
-	id, err := identity.Generate()
-	if err != nil {
-		t.Fatalf("identity.Generate: %v", err)
-	}
-
-	tempDir := t.TempDir()
-	svc := NewService(configtest.WithTempDataDirs(t, config.Node{
-		ListenAddress:  addr,
-		TrustStorePath: filepath.Join(tempDir, "trust.json"),
-		Type:           domain.NodeTypeFull,
-	}), id, nil)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	svc, stop := startTestService(t, ctx, cancel, svc)
-	defer stop()
-
-	// Connect as an unauthenticated client (Client: "mobile" — does NOT
-	// trigger requiresSessionAuth, so no auth_session handshake).
-	conn, err := net.DialTimeout("tcp", svc.externalListenAddress(), 2*time.Second)
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-	defer func() { _ = conn.Close() }()
-	_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
-	reader := bufio.NewReader(conn)
-
-	// Send hello claiming mesh_relay_v1 capability.
-	writeJSONFrame(t, conn, protocol.Frame{
-		Type:                   "hello",
-		Version:                config.ProtocolVersion,
-		MinimumProtocolVersion: config.MinimumProtocolVersion,
-		Client:                 "mobile",
-		ClientVersion:          "1.0",
-		Address:                "fake-attacker-address",
-		Capabilities:           []string{"mesh_relay_v1"},
-	})
-	welcome := readJSONTestFrame(t, reader)
-	if welcome.Type != "welcome" {
-		t.Fatalf("expected welcome, got %q", welcome.Type)
-	}
-
-	// Attempt to send a relay_message without completing auth_session.
-	// Use topic "general" (not "dm") so the payload passes
-	// storeIncomingMessage — a DM would be rejected at the sender-key
-	// check, masking the real vulnerability. The attack vector is about
-	// the auth boundary, not payload validation.
-	writeJSONFrame(t, conn, protocol.Frame{
-		Type:        "relay_message",
-		ID:          "unauthenticated-relay-1",
-		Address:     "spoofed-origin-sender",
-		Recipient:   id.Address, // addressed to this node so it would be "delivered"
-		Topic:       "general",
-		Body:        "malicious-payload",
-		Flag:        string(protocol.MessageFlagImmutable),
-		CreatedAt:   time.Now().UTC().Format(time.RFC3339),
-		HopCount:    1,
-		MaxHops:     10,
-		PreviousHop: "10.0.0.99:64646",
-	})
-
-	// The relay_message should be rejected. We try to read a response with
-	// a short timeout — either we get an error frame, or no response at all
-	// (silent drop). Either way, the relay must NOT produce a hop-ack with
-	// "delivered"/"forwarded"/"stored" status.
-	_ = conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
-	line, err := reader.ReadString('\n')
-	if err != nil {
-		// Timeout or connection closed — acceptable, relay was rejected.
-		return
-	}
-
-	var response protocol.Frame
-	if jsonErr := json.Unmarshal([]byte(strings.TrimSpace(line)), &response); jsonErr != nil {
-		// Unparseable response — acceptable.
-		return
-	}
-
-	// If we got a relay_hop_ack with a success status, the trust boundary
-	// is broken — the unauthenticated peer was able to inject relay traffic.
-	if response.Type == "relay_hop_ack" {
-		t.Fatalf("SECURITY: unauthenticated peer received relay_hop_ack with status %q — "+
-			"relay_message must be rejected for non-authenticated connections", response.Status)
+	if reply := readJSONTestFrame(t, reader); reply.Type != "contacts" {
+		t.Fatalf("fetch_contacts: %s/%s", reply.Type, reply.Code)
 	}
 }
 
@@ -9464,49 +8325,28 @@ func TestHasOutboundSessionForInboundResolvesDialOrigin(t *testing.T) {
 func TestDuplicateInboundConnectionAllowed(t *testing.T) {
 	t.Parallel()
 
-	address := freeAddress(t)
-	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:  address,
-		BootstrapPeers: []string{},
-	})
+	peer, peerAddr, stopPeer := listenerNode(t, withoutOwnDials(nil))
+	defer stopPeer()
+	svc, stop := dialerNode(t, peerAddr, nil)
 	defer stop()
+	waitKinds(t, svc, "no proved outbound connection to peer", func(stats domain.SessionKindStats) bool {
+		return stats.OutboundV2 == 1
+	})
 
-	peerAddr := domain.PeerAddress("10.0.0.8:64646")
-
-	// Simulate an existing outbound session.
-	svc.peerMu.Lock()
-	svc.sessions[peerAddr] = &peerSession{address: peerAddr, sendCh: make(chan peerSendItem)}
-	svc.peerMu.Unlock()
-	svc.markPeerConnected(peerAddr, peerDirectionOutbound)
-
-	// Connect as an inbound peer with a hello that declares the same
-	// address. Use Client "cli" to skip session auth — this exercises
-	// the non-auth hello path where the duplicate check lives.
-	conn, err := net.Dial("tcp", address)
+	// The already-connected peer may dial back using the same identity and
+	// advertised listening port. Both directions still use ordinary TLS.
+	inbound, err := dialV2As(t, svc.externalListenAddress(), peer)
 	if err != nil {
-		t.Fatalf("dial: %v", err)
+		t.Fatalf("secure handshake for the reverse direction: %v", err)
 	}
-	defer func() { _ = conn.Close() }()
-
-	hello := protocol.Frame{
-		Type:          "hello",
-		Version:       config.ProtocolVersion,
-		Client:        "cli",
-		ClientVersion: "0.25-test",
-		Address:       string(peerAddr),
+	defer func() { _ = inbound.Close() }()
+	if !answersPing(t, inbound) {
+		t.Fatal("the reverse connection did not establish a usable session")
 	}
-	writeJSONFrame(t, conn, hello)
-
-	reader := bufio.NewReader(conn)
-	reply := readJSONTestFrame(t, reader)
-
-	// The node should accept the duplicate inbound with a welcome frame.
-	if reply.Type == "error" {
-		t.Fatalf("expected welcome frame, got error: code=%s msg=%s", reply.Code, reply.Error)
-	}
-	if reply.Type != "welcome" {
-		t.Fatalf("expected welcome frame, got %q", reply.Type)
-	}
+	waitForConditionMsg(t, 5*time.Second, "sessions in both directions did not coexist", func() bool {
+		stats := svc.SessionKindStats()
+		return stats.InboundV2 == 1 && stats.OutboundV2 == 1
+	})
 }
 
 // TestPeerHealthFramesSingleRowWithOutboundSession verifies that

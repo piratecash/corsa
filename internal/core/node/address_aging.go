@@ -96,7 +96,7 @@ type addressDialAttempt struct{ performed bool }
 // separate score policy in unchargedDialOutcomes.
 var localAddressDialOutcomes = []error{
 	context.Canceled,
-	errLegacyRefusedBackoff, errV2RetryHeld, errLegacyProbeLocalFailure,
+	errLegacyRefusedBackoff, errV2RetryHeld,
 	errDialAbortedLocally, errPinStoreFull, errPinProtectionLocalFailure, errPinRoomAwaited, domain.ErrIdentityPinRevisionExhausted,
 	errV2DialLocalFailure, errOldVersionAwaited,
 	errOverlayWithoutProxy, errProxyUnavailable, errInvalidOverlayAddress, errAddressRecheckHeld,

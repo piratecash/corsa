@@ -6,11 +6,7 @@
 // sendNoticeToPeer for push_message and push_notice delivery;
 // resolveRouteNextHopAddress as the hop-role-aware resolver wrapper.
 //
-// This file also owns the three §4.4 bootstrap handshake raw-write edges
-// inside sendNoticeToPeer (node-hello, auth challenge, challenge-response)
-// and is therefore in the §2.9 net-import whitelist enforced by
-// scripts/enforce-netcore-boundary.sh.
-//
+// The fresh notice dial owns one §4.4 raw write after its secure handshake.
 // This is the relay-plane counterpart to the announce-plane logic in
 // routing_announce.go. Address↔identity resolution lives in
 // routing_resolver.go, session-lifecycle hooks in routing_session.go,
@@ -22,7 +18,6 @@
 package node
 
 import (
-	"bufio"
 	"context"
 	"io"
 	"net"
@@ -1216,12 +1211,7 @@ func (s *Service) sendNoticeToPeer(address domain.PeerAddress, ttl time.Duration
 	// and ctx — the node's run context bounded by the handshake budget —
 	// ends the dial with the socket closed and the budget unit returned.
 	//
-	// The session kind follows the transport policy of every dial
-	// (dialPeerTransport): v2 first, and no v1 for an endpoint bound to v2,
-	// so this fallback cannot become the side door that still hands out a
-	// relayable v1 proof. Metered for the node-wide transport totals only,
-	// like syncPeer: a one-shot dial outside the per-peer health totals, but
-	// still bytes on the wire.
+	// Meter this one-shot secure dial for the node-wide totals.
 	ctx, cancel := context.WithTimeout(s.runCtx, syncHandshakeTimeout)
 	defer cancel()
 	transport, err := s.dialPeerTransport(ctx, address, domain.DialToAddress(), func(ctx context.Context) (net.Conn, error) {
@@ -1229,41 +1219,17 @@ func (s *Service) sendNoticeToPeer(address domain.PeerAddress, ttl time.Duration
 	})
 	if err != nil {
 		serviceDialNotice.ioFailure().Err(err).Str("peer", string(address)).Msg(serviceDialNotice.event("dial_failed"))
-		s.reactToIncompatibleDial(address, err)
+		if !s.tryApplySelfIdentityCooldown(address, err) {
+			s.reactToIncompatibleDial(address, err)
+		}
 		return
 	}
 	conn := transport.wire
 	defer func() { _ = conn.Close() }()
 
 	_ = conn.SetDeadline(time.Now().Add(syncHandshakeTimeout))
-	// The transport's reader: on a v1 connection the probe opened, it holds
-	// what the responder sent behind the probe's answer.
 	reader := transport.reader
-
-	welcome, ok := s.noticeDialWelcome(conn, reader, address, transport)
-	if !ok {
-		s.forgetLegacyObservedWithoutWelcome(address, transport)
-		return
-	}
-	// One gate for both session kinds, before auth_session is signed and
-	// before anything is recorded as an outbound success: the same welcome as
-	// the probe's answer on a v1 connection (refuseFullLegacyWelcome), then
-	// notice, non-welcome, v2 pin, floor, self identity
-	// (admitServiceDialWelcome); the v1 challenge is checked by
-	// authenticateServiceDial before it signs.
-	if err := s.refuseFullLegacyWelcome(address, transport, welcome); err != nil {
-		return
-	}
-	if err := s.admitServiceDialWelcome(serviceDialNotice, address, welcome, transport.proven != nil); err != nil {
-		return
-	}
-	// v2 proved the listener by session_proof; v1 needs auth_session.
-	writeLine := func(line string) error {
-		// netcore-migration: §4.4 bootstrap exception (see the note in noticeDialWelcome).
-		_, err := io.WriteString(conn, line)
-		return err
-	}
-	if transport.proven == nil && !s.authenticateServiceDial(ctx, serviceDialNotice, address, welcome, writeLine, reader, serviceDialDeadline(ctx, conn)) {
+	if err := s.admitServiceDialWelcome(serviceDialNotice, address, transport.proven.Intro); err != nil {
 		return
 	}
 	// Outbound convergence success hook: a proven or authenticated notice
@@ -1285,41 +1251,9 @@ func (s *Service) sendNoticeToPeer(address domain.PeerAddress, ttl time.Duration
 	if err != nil {
 		return
 	}
-	// netcore-migration: §4.4 bootstrap exception (see the note in noticeDialWelcome).
+	// netcore-migration: §4.4 one-shot notice send.
 	_, _ = io.WriteString(conn, line)
 	_, _ = readFrameLine(reader, maxResponseLineBytes)
-}
-
-// noticeDialWelcome is the welcome of a notice dial: the proven listener's
-// intro on v2; on v1 the answer to our hello, whatever it is — the caller
-// passes it through admitServiceDialWelcome before anything else is sent.
-func (s *Service) noticeDialWelcome(conn io.Writer, reader *bufio.Reader, address domain.PeerAddress, transport *dialledTransport) (protocol.Frame, bool) {
-	if transport.proven != nil {
-		return transport.proven.Intro, true
-	}
-	// netcore-migration: §4.4 bootstrap exception. This raw write pre-dates
-	// the NetCore managed-write path and is pending architectural review of
-	// the inbound-absent dial fallback itself. The notice dial has exactly
-	// three raw socket writes — this hello, the auth_session line and the
-	// push_notice, all in sendNoticeToPeer's dial — and
-	// scripts/enforce-netcore-boundary.sh pins their number for this file
-	// (gate 1), so a fourth fails the gate. The sentinel itself is a marker
-	// for readers, not something the script checks.
-	if _, err := io.WriteString(conn, s.nodeHelloJSONLine()); err != nil {
-		serviceDialNotice.ioFailure().Err(err).Str("peer", string(address)).Msg(serviceDialNotice.event("hello_write_failed"))
-		return protocol.Frame{}, false
-	}
-	welcomeLine, err := readFrameLine(reader, maxResponseLineBytes)
-	if err != nil {
-		serviceDialNotice.ioFailure().Err(err).Str("peer", string(address)).Msg(serviceDialNotice.event("welcome_read_failed"))
-		return protocol.Frame{}, false
-	}
-	welcome, err := protocol.ParseFrameLine(strings.TrimSpace(welcomeLine))
-	if err != nil {
-		serviceDialNotice.ioFailure().Err(err).Str("peer", string(address)).Msg(serviceDialNotice.event("welcome_parse_failed"))
-		return protocol.Frame{}, false
-	}
-	return welcome, true
 }
 
 // remoteAddrString is the host:port form of addr, or "" when there is none.

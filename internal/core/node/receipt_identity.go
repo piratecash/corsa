@@ -29,8 +29,7 @@ type receiptIdentity struct {
 	Recipient string
 	MessageID protocol.MessageID
 	Status    string
-	// Sender is who CLAIMS it — the peer that made the receipt. Absent
-	// only on an ack from a peer too old to carry it; see senderKnown.
+	// Sender is who authored the receipt.
 	Sender string
 }
 
@@ -60,8 +59,7 @@ func identityFromRelayFrame(frame protocol.Frame) receiptIdentity {
 // identityFromAck is the identity an ack_delete frame points at. The
 // acking peer is the receipt's RECIPIENT — it is their backlog entry —
 // and frame.Address is verified against the authenticated session before
-// this is called. ReceiptSender is empty when the acking peer predates
-// ProtocolVersionReceiptSenderAck.
+// this is called.
 func identityFromAck(frame protocol.Frame) receiptIdentity {
 	return receiptIdentity{
 		Recipient: frame.Address,
@@ -71,10 +69,6 @@ func identityFromAck(frame protocol.Frame) receiptIdentity {
 	}
 }
 
-// senderKnown reports whether the identity names its author. False only
-// for an ack from a peer that cannot carry the field, which is why the
-// backlog filter has an explicit rule for that case rather than a
-// silently wider match.
 func (id receiptIdentity) senderKnown() bool { return id.Sender != "" }
 
 // dedupKey is the key of the "already handled" set (seenReceipts).
@@ -92,15 +86,9 @@ func (id receiptIdentity) retryKey(signed bool) string {
 	return namespace + id.Recipient + "|" + string(id.MessageID) + "|" + id.Status + "|" + id.Sender
 }
 
-// matches reports whether the receipt IS the one this identity names. An
-// identity with no sender matches on the other three fields, so callers
-// must decide what an ambiguous match means before acting on it — see
-// deleteBacklogReceiptForRecipient.
+// matches reports whether the receipt has the same full identity.
 func (id receiptIdentity) matches(receipt protocol.DeliveryReceipt) bool {
-	if receipt.Recipient != id.Recipient || receipt.MessageID != id.MessageID || receipt.Status != id.Status {
-		return false
-	}
-	return !id.senderKnown() || receipt.Sender == id.Sender
+	return id == identityOf(receipt)
 }
 
 // receiptKeyOf is the dedup key of a receipt this node holds.
@@ -147,19 +135,5 @@ func ackDeleteForReceipt(receipt protocol.DeliveryReceipt) ackDelete {
 		Status:        receipt.Status,
 		ReceiptSender: receipt.Sender,
 		ReceiptProof:  receipt.Signature,
-	}
-}
-
-// ackDeleteFromFrame recovers the instruction a queued ack_delete frame
-// carries, so it can be re-stamped for the session it is finally written
-// to. A frame that sat in the pending queue across a reconnect was
-// signed for a peer that no longer exists.
-func ackDeleteFromFrame(frame protocol.Frame) ackDelete {
-	return ackDelete{
-		Type:          frame.AckType,
-		MessageID:     protocol.MessageID(frame.ID),
-		Status:        frame.Status,
-		ReceiptSender: frame.ReceiptSender,
-		ReceiptProof:  frame.ReceiptProof,
 	}
 }

@@ -72,7 +72,7 @@ func TestOwnedP0FullPopulationAndRegistryOverflow(t *testing.T) {
 		}
 	}
 	for i := full512F1Members; i < full512FixtureRegistryLimit; i++ {
-		dialOwnedPilotLegacyFrom(t, address, clientDialer(i), quota)
+		dialOwnedPilotUnnegotiated(t, s, address, clientDialer(i), quota)
 	}
 	var originals []findnode.Session
 	waitFor(t, 2*time.Second, "full512 original membership was not published", func() bool {
@@ -89,7 +89,7 @@ func TestOwnedP0FullPopulationAndRegistryOverflow(t *testing.T) {
 		return true
 	})
 	runOwnedMixedP0Phases(t, s, source, target, originals, func() net.Conn {
-		return dialOwnedPilotLegacyFrom(t, address, clientDialer(full512FixtureRegistryLimit), quota)
+		return dialOwnedPilotUnnegotiated(t, s, address, clientDialer(full512FixtureRegistryLimit), quota)
 	})
 }
 
@@ -109,7 +109,7 @@ func newOwnedFull512GuestRelay(t *testing.T, host netip.Addr) (*Service, string)
 	cfg.MaxTotalConnections = full512FixtureConnections + cfg.EffectiveOutboundConnectionReserve()
 	profile := ownedCutProfile()
 	profile.Capture = findNodeOwnedCaptureProfile{
-		Degree:   degreeProfile{MaxActive: full512F1Members},
+		Degree:   degreeProfile{MaxActive: full512FixtureConnections},
 		Priority: findNodePriorityProfile{MaxMembers: full512F1Members, MaxRegistryVisits: full512FixtureRegistryLimit},
 	}
 	profile.Intake = findnode.DormantIntakeProfile{

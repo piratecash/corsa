@@ -61,37 +61,37 @@ func (c full512AppConn) Read(data []byte) (int, error) {
 	return n, err
 }
 
-type full512LegacyDrain struct {
+type full512AppDrain struct {
 	net.Conn
 	cancel context.CancelFunc
 }
 
-func (c full512LegacyDrain) Close() error {
+func (c full512AppDrain) Close() error {
 	c.cancel()
 	return c.Conn.Close()
 }
 
-func drainFull512Legacy(t *testing.T, conn net.Conn, reader *bufio.Reader) net.Conn {
+func drainFull512Application(t *testing.T, conn net.Conn, reader *bufio.Reader) net.Conn {
 	t.Helper()
 	if err := conn.SetDeadline(time.Time{}); err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(t.Context())
-	client := full512LegacyDrain{Conn: conn, cancel: cancel}
+	client := full512AppDrain{Conn: conn, cancel: cancel}
 	done := make(chan struct{})
 	t.Cleanup(func() {
 		_ = client.Close()
 		select {
 		case <-done:
 		case <-time.After(2 * time.Second):
-			t.Error("legacy application reader did not join")
+			t.Error("application reader did not join")
 		}
 	})
 	go func() {
 		defer close(done)
 		report := func(err error) {
 			if ctx.Err() == nil {
-				t.Error("legacy application reader stopped", err)
+				t.Error("application reader stopped", err)
 			}
 		}
 		for {
@@ -196,7 +196,7 @@ func TestFull512ApplicationQuotaReadAndWrite(t *testing.T) {
 	}
 }
 
-func TestFull512ApplicationQuotaLegacyDrain(t *testing.T) {
+func TestFull512ApplicationQuotaDrain(t *testing.T) {
 	left, right := net.Pipe()
 	t.Cleanup(func() { _ = left.Close(); _ = right.Close() })
 	if err := right.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
@@ -204,7 +204,7 @@ func TestFull512ApplicationQuotaLegacyDrain(t *testing.T) {
 	}
 	q := &full512AppQuota{frameLimit: 2, payloadLimit: 100}
 	conn := full512AppConn{Conn: left, quota: q}
-	client := drainFull512Legacy(t, conn, bufio.NewReader(conn))
+	client := drainFull512Application(t, conn, bufio.NewReader(conn))
 	ping, err := protocol.MarshalFrameLine(protocol.Frame{Type: "ping"})
 	if err != nil {
 		t.Fatal(err)
@@ -218,10 +218,10 @@ func TestFull512ApplicationQuotaLegacyDrain(t *testing.T) {
 	}
 	frame, err := protocol.ParseFrameLine(pong[:len(pong)-1])
 	if err != nil || frame.Type != "pong" {
-		t.Fatal("legacy drain did not return pong", frame.Type, err)
+		t.Fatal("application drain did not return pong", frame.Type, err)
 	}
 	if frames, payload, exceeded := q.snapshot(); frames != 2 || payload != len(ping)+len(pong)-2 || exceeded {
-		t.Fatalf("legacy drain quota state = %d, %d, %v", frames, payload, exceeded)
+		t.Fatalf("application drain quota state = %d, %d, %v", frames, payload, exceeded)
 	}
 	if err := client.Close(); err != nil {
 		t.Fatal(err)

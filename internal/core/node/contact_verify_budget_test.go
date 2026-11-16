@@ -11,6 +11,7 @@ import (
 
 	"github.com/piratecash/corsa/internal/core/config"
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
@@ -29,8 +30,7 @@ import (
 // ---------------------------------------------------------------------------
 
 // serveContactsPerConnection answers every connection the listener accepts with
-// the syncPeer handshake of a current responder (v1HandshakeResponder: a challenging
-// welcome, auth_ok for a valid auth_session) and replies to each
+// a secure session and replies to each
 // fetch_contacts with the same contact array, until the listener closes.
 //
 // One connection per dial is the point: this is the attacker's shape, where the
@@ -48,12 +48,13 @@ func serveContactsPerConnection(t *testing.T, ln net.Listener, contacts []protoc
 		return
 	}
 
+	responder := newDialWelcomeResponder(t)
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
 			return
 		}
-		if err := serveOneContactsDial(conn, reply); err != nil {
+		if err := serveOneContactsDial(conn, responder, reply); err != nil {
 			t.Errorf("contacts dial: %v", err)
 			return
 		}
@@ -62,18 +63,16 @@ func serveContactsPerConnection(t *testing.T, ln net.Listener, contacts []protoc
 
 // serveOneContactsDial serves one dial and reports a handshake the responder
 // could not complete; a dialler that closes early is not an error.
-func serveOneContactsDial(conn net.Conn, reply string) error {
+func serveOneContactsDial(conn net.Conn, responder *identity.Identity, reply string) error {
 	defer func() { _ = conn.Close() }()
 
 	_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
-	reader := bufio.NewReader(conn)
-	responder, err := newV1HandshakeResponder()
+	wire, err := acceptSecureTestWire(conn, responder, currentSecureIntro())
 	if err != nil {
 		return err
 	}
-	if _, err := responder.answerHello(conn, reader); err != nil {
-		return err
-	}
+	defer func() { _ = wire.Close() }()
+	reader := bufio.NewReader(wire)
 	for {
 		line, err := reader.ReadString('\n')
 		if err != nil {
@@ -83,19 +82,10 @@ func serveOneContactsDial(conn net.Conn, reply string) error {
 		if err != nil {
 			continue
 		}
-		answer := ""
-		switch frame.Type {
-		case "auth_session":
-			if answer, err = protocol.MarshalFrameLine(responder.authReply(frame)); err != nil {
-				return err
+		if frame.Type == "fetch_contacts" {
+			if _, err := wire.Write([]byte(reply)); err != nil {
+				return nil
 			}
-		case "fetch_contacts":
-			answer = reply
-		default:
-			continue
-		}
-		if _, err := conn.Write([]byte(answer)); err != nil {
-			return nil
 		}
 	}
 }

@@ -13,8 +13,7 @@ import (
 )
 
 // connected_hosts_test.go pins which inbound connections reserve their host
-// against outbound dials: one that completed authentication (v1 auth_session
-// or v2 session_proof) does; a silent socket, a hello without auth and an
+// against outbound dials: one that completed its TLS session proof does; a silent socket, a hello without auth and an
 // unfinished handshake do not. Only the closing of a tracked connection can
 // wake the ConnectionManager (InboundClosed); a host excluded by anything
 // else stays excluded until the next periodic fill, thirty seconds later.
@@ -137,12 +136,10 @@ func TestOnlyAnAuthenticatedInboundConnectionReservesItsHost(t *testing.T) {
 	}
 }
 
-// The flake this pins: an old node's own readiness probe — or any
-// unauthenticated socket from the bootstrap peer's host — was registered when the
-// first fill ran. The fill dropped the bootstrap peer as "already connected",
-// the socket closed without waking the ConnectionManager, and nothing dialled
-// until the periodic fill thirty seconds later.
-func TestAnOldNodeDialsItsBootstrapPeerWhileASilentSocketFromItsHostIsOpen(t *testing.T) {
+// A TCP socket from the bootstrap peer's host holds an inbound capacity slot
+// during the first fill. Until its TLS proof, it cannot reserve the peer's host
+// or keep the legitimate bootstrap dial from establishing a session.
+func TestATLSNodeDialsBootstrapWhileASilentSocketFromItsHostIsOpen(t *testing.T) {
 	t.Parallel()
 
 	listener, address, stopListener := listenerNode(t, nil)
@@ -151,14 +148,11 @@ func TestAnOldNodeDialsItsBootstrapPeerWhileASilentSocketFromItsHostIsOpen(t *te
 	barrierReached := make(chan struct{})
 	releaseFill := make(chan struct{})
 
-	old, stopOld := startTestNodeWithSetup(t, config.Node{
+	dialer, stopDialer := startTestNodeWithSetup(t, config.Node{
 		ListenAddress:  freeAddress(t),
 		BootstrapPeers: []string{normalizeAddress(address)},
 		Type:           domain.NodeTypeFull,
 	}, func(svc *Service) {
-		// An old node registers an inbound socket before its first byte;
-		// a new one blocks on the peek and never registers a silent socket.
-		asOldNode(svc)
 		svc.bootstrapReadyBarrier = func() {
 			close(barrierReached)
 			// The node's own context ends the wait too, so a test that fails
@@ -169,38 +163,30 @@ func TestAnOldNodeDialsItsBootstrapPeerWhileASilentSocketFromItsHostIsOpen(t *te
 			}
 		}
 	})
-	defer stopOld()
+	defer stopDialer()
 
 	select {
 	case <-barrierReached:
 	case <-time.After(10 * time.Second):
 		t.Fatal("bootstrapLoop never reached the barrier before the first fill (waited 10s)")
 	}
-	silent, err := net.Dial("tcp", old.cfg.ListenAddress)
+	silent, err := net.Dial("tcp", dialer.cfg.ListenAddress)
 	if err != nil {
-		t.Fatalf("dial the old node: %v", err)
+		t.Fatalf("dial the node: %v", err)
 	}
 	defer func() { _ = silent.Close() }()
-	waitForConditionMsg(t, 5*time.Second, "the silent socket was never registered", func() bool {
-		return hasInboundFrom(old, silent.LocalAddr().String())
+	waitForConditionMsg(t, 5*time.Second, "the silent socket never reached the listener", func() bool {
+		return dialer.connBudget.Snapshot().Inbound == 1
 	})
+	dialer.peerMu.RLock()
+	registered := dialer.countInboundConnsLocked()
+	dialer.peerMu.RUnlock()
+	if registered != 0 {
+		t.Fatal("the silent socket entered the registry before TLS proof")
+	}
 
 	close(releaseFill)
-	waitForConditionMsg(t, 10*time.Second, "the old node never dialled its bootstrap peer", func() bool {
-		_, v1 := authenticatedInbound(listener)
-		return v1 > 0
+	waitForConditionMsg(t, 10*time.Second, "the node never dialled its bootstrap peer over TLS", func() bool {
+		return listener.SessionKindStats().InboundV2 > 0
 	})
-}
-
-// hasInboundFrom reports whether svc has registered an inbound connection
-// from remote, authenticated or not.
-func hasInboundFrom(svc *Service, remote string) bool {
-	svc.peerMu.RLock()
-	defer svc.peerMu.RUnlock()
-	found := false
-	svc.forEachInboundConnLocked(func(info connInfo) bool {
-		found = info.remoteAddr == remote
-		return !found
-	})
-	return found
 }

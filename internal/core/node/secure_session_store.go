@@ -2463,8 +2463,5 @@ func (s *Service) SecureSessionStoreStats() domain.SecureSessionStoreStats {
 	if s.secureSessions.store != nil {
 		stats = s.secureSessions.store.stats()
 	}
-	stats.TLSFirstDisabled = s.secureSessions.tlsFirstDisabled
-	stats.DialsOpenedByProbe = s.secureSessions.dialsOpenedByProbe.Load()
-	stats.V1RefusalsAfterV2Welcome = s.secureSessions.v1RefusalsAfterV2Welcome.Load()
 	return stats
 }

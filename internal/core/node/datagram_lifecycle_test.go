@@ -717,9 +717,8 @@ func TestRunWaitsForAGossipJobInFlight(t *testing.T) {
 // The observable is the inbound SOCKET. A lifecycle loop is parked, so the join
 // cannot complete; if the drain runs first the peer sees its connection closed
 // while that loop is still parked, and if the join runs first nothing closes the
-// connection until the test lets the loop go. Nothing else closes it in that
-// window: the handler's read loop watches no context, and no heartbeat is armed
-// for a socket that never sent a `hello`.
+// connection until the test lets the loop go. The proved connection is idle
+// with the ordinary heartbeat schedule, well within its read deadline.
 //
 // The mutation this kills: registering `defer s.stopRunLifecycle(runCancel)`
 // below the drain (or the drain above it), so the loops are joined first.
@@ -756,16 +755,14 @@ func TestTheInboundDrainRunsBeforeTheLifecycleJoin(t *testing.T) {
 	runDone := make(chan error, 1)
 	go func() { runDone <- svc.Run(parent) }()
 
-	client := dialWhenListening(t, address)
-	t.Cleanup(func() { _ = client.Close() })
-	// The node decides v1 or v2 by the first byte and registers nothing
-	// before it. One "{" without a newline makes this a v1 connection that is
-	// registered and sits in its read loop, still without a hello.
-	if _, err := client.Write([]byte("{")); err != nil {
-		t.Fatalf("write the first byte: %v", err)
+	client, err := dialV2As(t, address, newTestService(t, config.NodeTypeClient))
+	if err != nil {
+		t.Fatalf("secure handshake: %v", err)
 	}
-	waitForConditionMsg(t, 5*time.Second, "the node never registered the inbound connection", func() bool {
-		return inboundConnCount(svc) > 0
+	t.Cleanup(func() { _ = client.Close() })
+	waitForConditionMsg(t, 5*time.Second, "the node never registered the proved inbound connection", func() bool {
+		v2, _ := authenticatedInbound(svc)
+		return v2 == 1
 	})
 
 	// The peer's half: report the instant the node closes the socket.
@@ -814,9 +811,7 @@ func TestTheInboundDrainRunsBeforeTheLifecycleJoin(t *testing.T) {
 	}
 }
 
-// dialWhenListening opens one TCP connection to the node, retrying until its
-// listener is up. The connection is the test's own peer and stays raw: it sends
-// nothing, so no heartbeat is armed for it and only the shutdown drain closes it.
+// dialWhenListening opens a TCP connection once the node is listening.
 func dialWhenListening(t *testing.T, address string) net.Conn {
 	t.Helper()
 

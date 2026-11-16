@@ -235,9 +235,6 @@ func TestTheConnectionManagersReactionToAFailedDialNeverUndoesProtection(t *test
 			if !store.identityPinned(id) {
 				t.Fatalf("after %d failures the reaction had dropped the identity pin", total)
 			}
-			if svc.secureSessions.marks.legacyObserved(bound) {
-				t.Fatalf("after %d failures the reaction had marked the endpoint as a v1 node", total)
-			}
 		})
 	}
 }

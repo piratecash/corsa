@@ -2,137 +2,17 @@ package node
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"errors"
 	"io"
 	"net"
-	"sync"
 	"testing"
 	"testing/synctest"
 	"time"
 
-	"github.com/piratecash/corsa/internal/core/config"
 	"github.com/piratecash/corsa/internal/core/domain"
-	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
-
-// The real writer has sent auth_session, but its flush completion is withheld.
-// The reader can receive the expected auth_ok while the handshake owner cannot
-// apply it yet: a deterministic version of the production scheduling window.
-type pausedAuthFlushConn struct {
-	net.Conn
-	release       <-chan struct{}
-	authReplyRead chan struct{}
-	replyOnce     sync.Once
-}
-
-func (c *pausedAuthFlushConn) Write(p []byte) (int, error) {
-	n, err := c.Conn.Write(p)
-	if err == nil && bytes.Contains(p, []byte(`"type":"auth_session"`)) {
-		<-c.release
-	}
-	return n, err
-}
-
-func (c *pausedAuthFlushConn) Read(p []byte) (int, error) {
-	n, err := c.Conn.Read(p)
-	if bytes.Contains(p[:n], []byte(`"type":"auth_ok"`)) {
-		c.replyOnce.Do(func() { close(c.authReplyRead) })
-	}
-	return n, err
-}
-
-func TestLegacyAuthReplyPipelinedDatagramWaitsForValidatedReadiness(t *testing.T) {
-	synctest.Test(t, legacyAuthReplyPipelinedDatagram)
-}
-
-func legacyAuthReplyPipelinedDatagram(t *testing.T) {
-	svc := newDatagramLayerService(t, true)
-	registerFixtureDatagramTypes(t, svc)
-	legacySelfRecordFixture(t)(svc)
-	ctx, cancel := context.WithCancel(context.Background())
-	svc.runCtx = ctx
-	local, remote := net.Pipe()
-	release := make(chan struct{})
-	var releaseOnce sync.Once
-	unpause := func() { releaseOnce.Do(func() { close(release) }) }
-	wire := &pausedAuthFlushConn{Conn: local, release: release, authReplyRead: make(chan struct{})}
-	svc.peerTCPDial = func(context.Context, string, time.Duration) (net.Conn, error) { return wire, nil }
-	t.Cleanup(func() {
-		unpause()
-		cancel()
-		_ = remote.Close()
-		_ = local.Close()
-		svc.runLoopsWg.Wait()
-	})
-
-	peer, err := identity.Generate()
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, welcome := oldNodeWelcomes(t, peer, config.ProtocolVersion)
-	welcome.Capabilities = []string{domain.CapMeshDatagramV1.String()}
-	types := []string{fixtureDatagramTypes()[0].String()}
-	welcome.DTypes = &types
-	datagram := mustDatagramLine(t, newNodeDatagram(t, nil))
-	authOK, err := protocol.MarshalFrameLine(protocol.Frame{Type: "auth_ok"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	pipeline := authOK + datagram
-	if len(pipeline) >= 4096 {
-		t.Fatal("the deterministic pipeline must fit the reader's first buffer")
-	}
-	written := make(chan struct{})
-	peerDone := make(chan struct{})
-	go func() {
-		defer close(peerDone)
-		reader := bufio.NewReader(remote)
-		if _, err := reader.ReadString('\n'); err != nil || !writeFrameLine(remote, welcome) {
-			return
-		}
-		if _, err := reader.ReadString('\n'); err != nil {
-			return
-		}
-		if _, err := io.WriteString(remote, pipeline); err != nil {
-			return
-		}
-		close(written)
-		_, _ = io.Copy(io.Discard, reader)
-	}()
-	t.Cleanup(func() { _ = remote.Close(); <-peerDone })
-
-	type established struct {
-		session *peerSession
-		err     error
-	}
-	result := make(chan established, 1)
-	go func() {
-		session, err := svc.openPeerSessionForCM(ctx, "198.51.100.7:64646")
-		result <- established{session: session, err: err}
-	}()
-	awaitClosed(t, wire.authReplyRead, "auth_ok to be read from the wire")
-	awaitClosed(t, written, "the peer to pipeline its datagram behind auth_ok")
-	synctest.Wait()
-	if got := datagramObservedCount(svc); got != 0 {
-		t.Fatalf("unauthenticated waiter admitted %d datagrams before validation", got)
-	}
-	unpause()
-	select {
-	case got := <-result:
-		if got.err != nil {
-			t.Fatalf("handshake failed: %v", got.err)
-		}
-		t.Cleanup(func() { _ = got.session.Close() })
-	case <-time.After(2 * time.Second):
-		t.Fatal("handshake owner did not finish after its flush was released")
-	}
-	waitForConditionMsg(t, time.Second, "the valid pipelined datagram was lost while the auth waiter was pending", func() bool {
-		return datagramObservedCount(svc) == 1
-	})
-}
 
 func TestSessionReadinessCommittedReadyWinsLaterDialCancellation(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
@@ -306,7 +186,7 @@ func TestProvenSessionReaderAcceptsInitialRecordAfterDialCancellation(t *testing
 		_, _, exists := dialer.trust.recordFor(testRecordStoreNetwork, listenerID)
 		return exists
 	})
-	if _, err := dialer.peerSessionRequest(session, protocol.Frame{Type: "ping"}, "pong", false); err != nil {
+	if _, err := dialer.peerSessionRequest(session, protocol.Frame{Type: "ping"}, "pong"); err != nil {
 		t.Fatalf("successful dial cancellation closed the handed-off v2 session: %v", err)
 	}
 }

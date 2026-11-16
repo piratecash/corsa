@@ -102,7 +102,7 @@ func TestOutboundWriteActivityRequiresAcceptedWriteAndOriginalTransport(t *testi
 	if err := svc.sendSessionFrameViaNetwork(t.Context(), current, pong); err != nil {
 		t.Fatalf("best-effort drop returned an error: %v", err)
 	}
-	if _, err := svc.peerSessionRequest(current, protocol.Frame{Type: "ping"}, "pong", false); err == nil {
+	if _, err := svc.peerSessionRequest(current, protocol.Frame{Type: "ping"}, "pong"); err == nil {
 		t.Fatal("blocking ping unexpectedly sent on a closed gate")
 	}
 	if ping, after := timestamps(); !ping.IsZero() || after != useful {

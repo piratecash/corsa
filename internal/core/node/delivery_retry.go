@@ -3457,14 +3457,6 @@ func (s *Service) dispatchEnvelopeRetry(envelope protocol.Envelope, dispatchedAt
 	if directmsg.HasV2EnvelopePrefix(envelope.Payload) {
 		return s.dispatchDirectDMV2Retry(envelope, dispatchedAt)
 	}
-	// TODO(transit-age-restamp-removal): the legacy-ceiling date, decided
-	// ONCE for this dispatch so every copy it produces — the push, the
-	// directed relay, the gossip fan-out — carries the same one. See
-	// legacy_transit_restamp.go for why per-copy decisions kept failing.
-	// The caller's envelope is untouched: awaitingDelivered and the chatlog
-	// row keep the real date.
-	envelope = legacyTransitRestamp(envelope, dispatchedAt)
-
 	decision := s.router.Route(envelope)
 
 	// Sender-owned delivery emits ONLY when the recipient is reachable: a

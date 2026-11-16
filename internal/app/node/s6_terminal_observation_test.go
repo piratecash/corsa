@@ -11,9 +11,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/piratecash/corsa/internal/core/config"
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/identity"
 	corenode "github.com/piratecash/corsa/internal/core/node"
 	"github.com/piratecash/corsa/internal/core/protocol"
+	"github.com/piratecash/corsa/internal/core/sessionv2"
 	"github.com/piratecash/corsa/internal/core/trustedclock"
 )
 
@@ -101,12 +104,35 @@ func TestAppTerminalObservationActualRegistration(t *testing.T) {
 		client, dialErr = (&net.Dialer{Deadline: workEnd}).DialContext(ctx, "tcp", address)
 		return dialErr == nil
 	})
+	keys, err := identity.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	const network = domain.NetworkID("gazeta-devnet")
+	local, err := sessionv2.NewLocal(keys, network)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hello := protocol.Frame{
+		Type: "hello", Version: config.ProtocolVersion, MinimumProtocolVersion: config.MinimumProtocolVersion,
+		Client: "node", Network: network.String(), Address: keys.Address,
+		PubKey: identity.PublicKeyBase64(keys.PublicKey), BoxKey: identity.BoxPublicKeyBase64(keys.BoxPublicKey),
+		BoxSig: identity.SignBoxKeyBinding(keys),
+	}
+	peer := domain.PeerIdentityFromWire(a.service.Address())
+	session, err := sessionv2.Dial(ctx, client, local, hello, sessionv2.ExpectPeer(peer), sessionv2.DefaultTimeouts)
+	if err != nil {
+		t.Fatalf("prove the App's actual registration transport: %v", err)
+	}
+	wire, err := session.Conn()
+	if err != nil {
+		t.Fatal(err)
+	}
+	client = wire
 	if err := client.SetDeadline(workEnd); err != nil {
 		t.Fatal(err)
 	}
-	if n, err := client.Write([]byte("{")); err != nil || n != 1 {
-		t.Fatalf("legacy first byte: %d, %v", n, err)
-	}
+
 	waitAppTerminal(t, workEnd, func() bool {
 		v := o.Snapshot()
 		return v.Instance == baseline.Instance && v.Registered == 1 && v.Active == 1
@@ -115,7 +141,8 @@ func TestAppTerminalObservationActualRegistration(t *testing.T) {
 	if registered.Population != "RegisteredTransportInstance" || registered.Removed != 0 || registered.RegistrationSerial != 1 || registered.Version <= baseline.Version || registered.AttributionBound {
 		t.Fatalf("real registration not reflected by the bound handle: %+v", registered)
 	}
-	if n, err := client.Write([]byte("garbage\n")); err != nil || n != len("garbage\n") {
+	const malformed = "{garbage\n"
+	if n, err := client.Write([]byte(malformed)); err != nil || n != len(malformed) {
 		t.Fatalf("malformed line completion: %d, %v", n, err)
 	}
 	reader := bufio.NewReader(io.LimitReader(client, 64*1024+1))

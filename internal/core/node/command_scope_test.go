@@ -475,57 +475,6 @@ func TestIsConnAuthenticated_VerifiedAuth(t *testing.T) {
 	}
 }
 
-// --- isAuthInitiated tests ---
-
-// TestIsAuthInitiated_NilState ensures that a connection with no auth state
-// reports auth not initiated.
-func TestIsAuthInitiated_NilState(t *testing.T) {
-	t.Parallel()
-
-	svc := newTestServiceForAuth()
-	mc := newSimpleMockConn(t)
-	svc.setTestConnEntryLocked(mc, &connEntry{core: &netcore.NetCore{}})
-
-	id, _ := svc.connIDFor(mc)
-	if svc.isAuthInitiated(id) {
-		t.Error("isAuthInitiated should be false for nil auth state")
-	}
-}
-
-// TestIsAuthInitiated_PendingAuth ensures that a connection with a pending
-// auth state (challenge issued) reports auth initiated.
-func TestIsAuthInitiated_PendingAuth(t *testing.T) {
-	t.Parallel()
-
-	svc := newTestServiceForAuth()
-	mc := newSimpleMockConn(t)
-	nc := &netcore.NetCore{}
-	nc.SetAuth(&connauth.State{Verified: false, Challenge: "test-challenge"})
-	svc.setTestConnEntryLocked(mc, &connEntry{core: nc})
-
-	id, _ := svc.connIDFor(mc)
-	if !svc.isAuthInitiated(id) {
-		t.Error("isAuthInitiated should be true when challenge has been issued")
-	}
-}
-
-// TestIsAuthInitiated_CompletedAuth ensures that a connection with completed
-// auth reports auth initiated.
-func TestIsAuthInitiated_CompletedAuth(t *testing.T) {
-	t.Parallel()
-
-	svc := newTestServiceForAuth()
-	mc := newSimpleMockConn(t)
-	nc := &netcore.NetCore{}
-	nc.SetAuth(&connauth.State{Verified: true})
-	svc.setTestConnEntryLocked(mc, &connEntry{core: nc})
-
-	id, _ := svc.connIDFor(mc)
-	if !svc.isAuthInitiated(id) {
-		t.Error("isAuthInitiated should be true for completed auth")
-	}
-}
-
 // --- GAP-0 security: role does NOT depend on frame.Client ---
 
 // TestGAP0_ClientFieldDoesNotAffectAuth verifies the core GAP-0 fix:

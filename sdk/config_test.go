@@ -3,6 +3,7 @@ package sdk
 import (
 	"context"
 	"errors"
+	"reflect"
 	"testing"
 
 	"github.com/piratecash/corsa/internal/core/domain"
@@ -213,32 +214,15 @@ func TestNodeConfigProbeBackoffMapping(t *testing.T) {
 	}
 }
 
-// TestNodeConfigV2TLSFirstMapping pins the SDK boundary for the operator
-// TLS-first switch: nil → TLS-first on (the default), explicit false → off. The
-// SDK reads no environment: CORSA_V2_TLS_FIRST set in the embedder's process
-// changes nothing here.
-func TestNodeConfigV2TLSFirstMapping(t *testing.T) {
-	t.Setenv("CORSA_V2_TLS_FIRST", "false")
-
-	tr := true
-	fa := false
-	cases := []struct {
-		name         string
-		in           *bool
-		wantDisabled bool
-	}{
-		{name: "nil_keeps_tls_first_on", in: nil, wantDisabled: false},
-		{name: "explicit_true_keeps_it_on", in: &tr, wantDisabled: false},
-		{name: "explicit_false_switches_it_off", in: &fa, wantDisabled: true},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			cfg := DefaultConfig()
-			cfg.Node.V2TLSFirst = tc.in
-			if got := cfg.internal().Node.DisableV2TLSFirst; got != tc.wantDisabled {
-				t.Fatalf("DisableV2TLSFirst = %v, want %v", got, tc.wantDisabled)
-			}
-		})
+func TestDeprecatedV2TLSFirstDoesNotChangeConfiguration(t *testing.T) {
+	t.Parallel()
+	cfg := DefaultConfig()
+	want := cfg.internal().Node
+	for _, setting := range []bool{true, false} {
+		cfg.Node.V2TLSFirst = &setting
+		if !reflect.DeepEqual(cfg.internal().Node, want) {
+			t.Fatalf("deprecated V2TLSFirst=%v changed configuration", setting)
+		}
 	}
 }
 

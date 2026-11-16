@@ -3,8 +3,10 @@ package node
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"sync"
@@ -198,13 +200,13 @@ func TestANewOwnerOfAnEndpointInheritsNothingFromThePrevious(t *testing.T) {
 }
 
 // A change of owner that crashed between its temporary file and the rename
-// leaves the previous owner on disk, and one that got through leaves the new
-// one: both require v2, so after a restart a v1 answer on the endpoint is a
-// downgrade either way and the dialler does not follow it.
-func TestAnOwnerChangeInterruptedByACrashKeepsTheEndpointOnV2AfterARestart(t *testing.T) {
+// leaves the previous owner on disk. A completed change leaves the new owner.
+// After a restart a dial addressed to either stored owner still rejects a
+// different authenticated TLS identity.
+func TestEndpointOwnerChangeIsDurableAcrossARestart(t *testing.T) {
 	t.Parallel()
-	old, address, stopOld := listenerNode(t, withoutOwnDials(asOldNode))
-	defer stopOld()
+	other, address, stopOther := listenerNode(t, nil)
+	defer stopOther()
 	endpoint := domain.PeerAddress(normalizeAddress(address))
 	previous, owner := domain.PeerIdentity{0x83, 0x01}, domain.PeerIdentity{0x83, 0x02}
 	path := filepath.Join(t.TempDir(), "secure-sessions-64646.json")
@@ -239,12 +241,41 @@ func TestAnOwnerChangeInterruptedByACrashKeepsTheEndpointOnV2AfterARestart(t *te
 		t.Fatalf("after the rename: bound %v, owner %s, requires v2 %v; want the new owner, v2", bound, binding.identity, renamed.endpointRequiresV2(endpoint))
 	}
 
-	for name, restarted := range map[string]*secureSessionStore{"crashed before the rename": crashed, "renamed": renamed} {
-		dialer, stopDialer := dialerNode(t, address, func(svc *Service) {
-			svc.secureSessions.store = restarted
+	for _, tc := range []struct {
+		name     string
+		store    *secureSessionStore
+		expected domain.PeerIdentity
+	}{
+		{"crashed before rename", crashed, previous},
+		{"renamed", renamed, owner},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assertNamedTLSRefusalPreservesBinding(t, tc.store, endpoint, tc.expected, peerIdentityOf(t, other))
 		})
-		assertDowngradeRefused(t, dialer, old, endpoint, "an endpoint whose change of owner "+name)
-		stopDialer()
+	}
+}
+
+func assertNamedTLSRefusalPreservesBinding(t *testing.T, store *secureSessionStore, endpoint domain.PeerAddress, expected, other domain.PeerIdentity) {
+	t.Helper()
+	dialer, stop := startQuietNode(t, func(s *Service) {
+		s.secureSessions.store = store
+	})
+	defer stop()
+	intent, err := domain.DialToIdentity(expected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	transport, err := dialer.dialPeerTransport(ctx, endpoint, intent, func(ctx context.Context) (net.Conn, error) {
+		return dialer.dialPeerRawForCM(ctx, endpoint)
+	})
+	if transport != nil || !errors.Is(err, errEndpointOwnerMismatch) {
+		t.Fatalf("expected refusal of the other TLS identity: %v", err)
+	}
+	if !store.identityPinned(expected) || !store.endpointsBoundTo(expected).covers(endpoint) ||
+		store.identityPinned(other) || store.endpointsBoundTo(other).covers(endpoint) {
+		t.Fatal("refusal changed the persisted identity or endpoint owner")
 	}
 }
 

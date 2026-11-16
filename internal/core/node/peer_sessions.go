@@ -36,7 +36,6 @@ import (
 
 	"github.com/rs/zerolog/log"
 
-	"github.com/piratecash/corsa/internal/core/crashlog"
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/ebus"
 	"github.com/piratecash/corsa/internal/core/netcore"
@@ -56,18 +55,8 @@ import (
 // identity, and nothing the responder writes into its welcome can move
 // the registry away from the dialable address.
 //
-// This helper is pure metadata assignment: it does not touch
-// learnIdentityFromWelcome, peerHealth maps or welcomeMeta — each
-// outbound path (legacy openPeerSession vs CM openPeerSessionForCM)
-// decides separately when to run those side-effects because the CM path
-// defers them until the generation check passes.
-//
-// What it publishes is NEGOTIATED but not yet IN FORCE. auth_ok has not
-// arrived when this runs — both call sites invoke it one round trip earlier —
-// and readPeerSession has been dispatching since before the welcome. The
-// receive path therefore asks sessionHasCapability, which additionally requires
-// the completed handshake (markSessionHandshakeComplete); see its doc for the
-// window that would otherwise stay open between this write and auth_ok.
+// The connection manager publishes the welcome only after accepting the
+// slot generation. Receive capabilities take effect at handshake readiness.
 func applyWelcomeMetadata(session *peerSession, welcome protocol.Frame, local []domain.Capability) {
 	session.version = welcome.Version
 	session.peerIdentity = domain.PeerIdentityFromWire(welcome.Address)
@@ -115,7 +104,7 @@ func applyWelcomeMetadata(session *peerSession, welcome protocol.Frame, local []
 }
 
 // peerSessionSendBuffer / peerSessionInboxBuffer size the per-session
-// frame channels created by openPeerSession / openPeerSessionForCM.
+// frame channels created by finishPeerSessionForCM.
 //
 // sendCh overflow degrades gracefully — enqueuePeerFrame fast-fails and
 // the frame lands in the pending ring for a later retry — so it stays
@@ -139,7 +128,6 @@ const (
 //   - nil — a clean local shutdown. The ONLY nil-returning exits of
 //     servePeerSession are local context cancellation (the ctx.Done
 //     case, and the writerDone case re-checked against ctx.Err), and
-//     the runPeerSession cleanup never runs with a nil error at all.
 //     Without the nil→local mapping a node shutdown recorded a
 //     disconnect_storm event against every connected peer. (A CM session
 //     the ConnectionManager evicted or shut down is attributed from its
@@ -167,346 +155,6 @@ func sessionCloseProvidesPeerOfflineEvidence(err error) bool {
 		return false
 	}
 	return errors.Is(err, io.EOF)
-}
-
-func (s *Service) runPeerSession(ctx context.Context, address domain.PeerAddress) {
-	var adTicket *k3AdvertisedTicket
-	var adLocked bool
-	if s.k3Advertised != nil || s.k3Registered != nil {
-		defer func() {
-			if adLocked {
-				s.guardK3AdvertisedPeerLocked(adTicket)
-				s.peerMu.Unlock()
-			}
-		}()
-	}
-	defer crashlog.DeferRecover()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-		}
-
-		connected, err := s.openPeerSession(ctx, address)
-		if err != nil {
-			log.Trace().Str("site", "runPeerSession_cleanup").Str("phase", "lock_wait").Str("address", string(address)).Msg("peer_mu_writer")
-			s.peerMu.Lock()
-			adLocked = true
-			adTicket = s.beginK3AdvertisedPeerLocked()
-			log.Trace().Str("site", "runPeerSession_cleanup").Str("phase", "lock_held").Str("address", string(address)).Msg("peer_mu_writer")
-			closedSession := s.sessions[address]
-			var k3 k3RegisteredTicket
-			if s.k3Registered != nil {
-				k3 = s.k3BeginSessionLocked(address)
-			}
-			s.k3AdvertisedSessionChangingLocked(address, nil)
-			publication := s.beginRegistryPublication()
-			delete(s.sessions, address)
-			if publication != nil {
-				publication.Complete()
-			}
-			if s.k3Registered != nil {
-				s.k3FinishSessionLocked(k3)
-			}
-			s.finishK3AdvertisedPeerLocked(adTicket)
-			adTicket = nil
-			adLocked = false
-			s.peerMu.Unlock()
-			log.Trace().Str("site", "runPeerSession_cleanup").Str("phase", "lock_released").Str("address", string(address)).Msg("peer_mu_writer")
-
-			// Routing table: deregister direct peer on session close.
-			// The capability slice must match what was passed to
-			// onPeerSessionEstablished for balanced accounting — the session
-			// object still owns it here since we just removed it from
-			// s.sessions and no other goroutine mutates session.capabilities
-			// after applyWelcomeMetadata.
-			if closedSession != nil && !closedSession.peerIdentity.IsZero() {
-				s.onPeerSessionClosedWithError(closedSession.peerIdentity, closedSession.penaltySubject(), closedSession.capabilities, err)
-			}
-			// Self-identity short-circuit — must run BEFORE the generic
-			// markPeerDisconnected penalty. openPeerSession surfaces the
-			// self-loopback in two shapes: (a) *selfIdentityError when
-			// the welcome carries our Ed25519 address (line 1044), and
-			// (b) protocol.ErrSelfIdentity bubbled up from peerSessionRequest
-			// when the remote answered with connection_notice{peer-banned,
-			// reason=self-identity}. Both must land on
-			// applySelfIdentityCooldown (24h BannedUntil + LastErrorCode =
-			// self-identity) instead of the generic transient-disconnect
-			// penalty, and the loop must return so this address is NOT
-			// retried after 2s — the CM path and syncPeer already
-			// converge on this contract; runPeerSession was the last
-			// legacy path churning against self-aliases otherwise.
-			if s.tryApplySelfIdentityCooldown(address, err) {
-				log.Warn().Str("peer", string(address)).Msg("peer_session_stopped_self_identity")
-				return
-			}
-			// An end that says nothing against the address
-			// (isUnchargedDialRefusal: a refusal this node made, a held
-			// dial, a listener's refusal, another owner than the dial named,
-			// anything that ended before the peer was authenticated, a dial
-			// this node ended itself) is not a failure of the address
-			// (onCMDialFailed): nothing is charged, and the loop stops — a
-			// refusal by pin already holds the fall back to v1 at the
-			// address, and this path has no v2 to try instead.
-			if isUnchargedDialRefusal(err) {
-				log.Warn().Err(err).Str("peer", string(address)).Msg("peer_session_stopped_dial_refused_not_charged")
-				return
-			}
-			// Incompatible protocol — no point retrying until the peer
-			// upgrades. The reaction already ran where the version was
-			// read (reactToIncompatibleDial): a claimed version only paces
-			// the address and must not be charged here on top of it.
-			if errors.Is(err, errIncompatibleProtocol) {
-				log.Warn().Str("peer", string(address)).Msg("peer_session_stopped_incompatible_protocol")
-				return
-			}
-			// servePeerSession calls markPeerDisconnected before
-			// returning its error.  For all other error paths (dial
-			// failure, handshake, subscribe, sync) we must call it here
-			// so that Score decreases and cooldown engages.
-			if connected {
-				s.peerMu.RLock()
-				h := s.health[s.resolveHealthAddress(address)]
-				stillConnected := h != nil && h.Connected
-				s.peerMu.RUnlock()
-				if stillConnected {
-					s.markPeerDisconnected(address, err)
-				}
-			} else {
-				s.markPeerDisconnected(address, err)
-			}
-
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(2 * time.Second):
-			}
-			continue
-		}
-		return
-	}
-}
-
-func (s *Service) openPeerSession(ctx context.Context, address domain.PeerAddress) (connected bool, outcomeErr error) {
-	var adTicket *k3AdvertisedTicket
-	var adLocked bool
-	if s.k3Advertised != nil {
-		defer func() {
-			if adLocked {
-				s.guardK3AdvertisedPeerLocked(adTicket)
-				s.peerMu.Unlock()
-			}
-		}()
-	}
-	// Budgeted. This is the legacy session path (ensurePeerSessions), inert
-	// while the connection manager is wired — but a dial path that is dead
-	// today and unbudgeted tomorrow is how a ceiling quietly stops holding.
-	// It speaks v1 only, so on a node that speaks v2 it opens v1 only where
-	// the probe allows it (dialLegacyTransport), the full hello following on
-	// the probe's connection.
-	transport, err := s.dialLegacyTransport(ctx, address, s.budgetedSessionDialer(address))
-	if err != nil {
-		s.reactToIncompatibleDial(address, err)
-		return false, err
-	}
-	rawConn, conn := transport.raw, transport.metered
-	var session *peerSession
-	defer func() {
-		s.accumulateSessionTraffic(address, conn)
-		if session != nil {
-			_ = session.Close()
-			session.k10FinishReported(outcomeErr)
-			// The session ends here on every exit — an error, or the
-			// serve loop returning on a cancelled context — and this
-			// goroutine dispatched all of its frames, so the bucket they
-			// charged ends here too. See dropOutboundControlFrameBucket.
-			s.dropOutboundControlFrameBucket(session.connID)
-			return
-		}
-		_ = conn.Close()
-	}()
-	// Runs before session.Close above, which can reacquire peerMu. Install
-	// before both metadata and registered-session observation callbacks.
-	if s.k3Registered != nil || s.k3Advertised != nil {
-		defer func() {
-			if adLocked {
-				s.guardK3AdvertisedPeerLocked(adTicket)
-				adLocked = false
-				s.peerMu.Unlock()
-			}
-		}()
-	}
-	enableTCPKeepAlive(rawConn)
-
-	go func() {
-		<-ctx.Done()
-		_ = conn.Close()
-	}()
-
-	_ = conn.SetDeadline(time.Now().Add(handshakeTimeout))
-	session = &peerSession{
-		readiness:    newPeerSessionReadiness(ctx),
-		address:      address,
-		peerIdentity: domain.PeerIdentity{},
-		connID:       transport.connID,
-		conn:         conn,
-		metered:      conn,
-		sendCh:       make(chan peerSendItem, peerSessionSendBuffer),
-		inboxCh:      make(chan protocol.Frame, peerSessionInboxBuffer),
-		errCh:        make(chan error, 1),
-		// Owner-serialised contact sync (sender-key recovery). Unbuffered:
-		// see the peerSession field doc.
-		contactSyncCh: make(chan chan int),
-	}
-	s.observeSessionQueues(session)
-	if session.queueLifetime != nil {
-		session.beginSessionQueueUse(false)
-		defer session.endSessionQueueUse()
-	}
-	if err := s.attachOutboundNetCore(session); err != nil {
-		return false, err
-	}
-	session.beginSessionQueueUse(true)
-	go s.readPeerSession(transport.reader, session)
-
-	welcome, err := s.peerSessionRequest(session, protocol.Frame{}, "welcome", true)
-	if err != nil {
-		s.forgetLegacyObservedWithoutWelcome(address, transport)
-		return false, err
-	}
-	if err := s.refuseFullLegacyWelcome(address, transport, welcome); err != nil {
-		return false, err
-	}
-	// This path speaks v1 only, so every welcome it reads is a v1 welcome:
-	// one naming an identity that requires v2 is refused before anything is
-	// signed, as on the connection manager's path.
-	if err := s.refuseLegacyWelcome(address, domain.PeerIdentityFromWire(welcome.Address)); err != nil {
-		log.Warn().Err(err).Str("peer", string(address)).Msg("outbound_v1_refused_identity_pinned_to_v2")
-		return false, err
-	}
-	if err := s.refuseIncompatibleWelcome(address, welcome, versionClaimed); err != nil {
-		log.Warn().Err(err).Str("peer", string(address)).Int("version", welcome.Version).Msg("outbound_peer_protocol_too_old")
-		return false, err
-	}
-	// Self-loopback guard on the legacy outbound path. Deferred cleanup
-	// (session.Close via the defer block at the top of openPeerSession)
-	// owns wrapper teardown — returning here routes through session.Close()
-	// → NetCore.Close(), no raw socket operations. The typed error is
-	// propagated to the caller so health/peer_provider penalty paths can
-	// detect self-identity via errors.As and apply the cooldown.
-	if s.isSelfIdentity(domain.PeerIdentityFromWire(welcome.Address)) {
-		log.Warn().
-			Str("peer", string(address)).
-			Str("local_identity", s.identity.Address).
-			Msg("outbound_self_identity_rejected")
-		return false, s.newSelfIdentityError(address)
-	}
-	// peerMu around the metadata write, not just around the map insert below:
-	// readPeerSession is already running (it delivered the welcome that got us
-	// here) and reads the same fields on its capability gates, so a peer that
-	// pipelines a frame behind its own welcome puts a reader on
-	// session.capabilities at the instant this line assigns it. The field doc
-	// on peerSession already declares peerMu as its guard — this is the write
-	// side honouring it. The typed local set is resolved BEFORE the lock: it
-	// consults the datagram layer, and no domain mutex is held across that.
-	local := s.localHandshakeCapabilities()
-	s.peerMu.Lock()
-	adLocked = true
-	adTicket = s.beginK3AdvertisedPeerLocked()
-	if s.k3Advertised != nil {
-		s.applyK3AdvertisedWelcomeLocked(session, welcome, local)
-	} else {
-		applyWelcomeMetadata(session, welcome, local)
-	}
-	s.finishK3AdvertisedPeerLocked(adTicket)
-	adTicket = nil
-	adLocked = false
-	s.peerMu.Unlock()
-	_, proven := session.provenIdentity()
-	s.learnIdentityFromWelcome(welcome, address, identityOriginOf(proven))
-	// learnIdentityFromWelcome stores version/build keyed by the dial
-	// address (the only trusted host:port for the outbound side).
-	// Mirror them under the health-tracking key resolveHealthAddress
-	// returns so peerHealthFrames can always
-	// find the version — even for fallback-port dial variants whose
-	// canonical health key differs from the dial target.
-	s.peerMu.RLock()
-	healthKey := s.resolveHealthAddress(address)
-	s.peerMu.RUnlock()
-	s.addPeerID(healthKey, addressIdentity{identity: session.peerIdentity, origin: identityOriginOf(proven)})
-	s.addPeerVersion(healthKey, welcome.ClientVersion)
-	s.addPeerBuild(healthKey, welcome.ClientBuild)
-	if err := s.authenticatePeerSession(session, welcome); err != nil {
-		return false, err
-	}
-	// Record observed address only after authentication succeeds so that
-	// an unauthenticated responder cannot influence NAT consensus.
-	s.recordObservedAddress(domain.PeerIdentityFromWire(welcome.Address), welcome.ObservedAddress)
-
-	// Evaluate peer exchange policy BEFORE markPeerConnected so that the
-	// aggregate status snapshot does not yet include the peer being set up.
-	// This normalizes the decision with the CM path (initPeerSession),
-	// where the session is not yet registered either.
-	requestPeers := s.shouldRequestPeers()
-	if !requestPeers {
-		s.logPeerExchangeSkipped(peerExchangePathSessionOutbound, address, peerExchangeSkipByAggregateHealthy)
-	}
-
-	log.Trace().Str("site", "openPeerSession_register").Str("phase", "lock_wait").Str("address", string(address)).Msg("peer_mu_writer")
-	s.peerMu.Lock()
-	adLocked = true
-	adTicket = s.beginK3AdvertisedPeerLocked()
-	log.Trace().Str("site", "openPeerSession_register").Str("phase", "lock_held").Str("address", string(address)).Msg("peer_mu_writer")
-	var k3 k3RegisteredTicket
-	if s.k3Registered != nil {
-		k3 = s.k3BeginSessionLocked(address)
-	}
-	s.k3AdvertisedSessionChangingLocked(address, session)
-	publication := s.beginRegistryPublication()
-	s.sessions[address] = session
-	if publication != nil {
-		publication.Complete()
-	}
-	if s.k3Registered != nil {
-		s.k3FinishSessionLocked(k3)
-	}
-	s.finishK3AdvertisedPeerLocked(adTicket)
-	adTicket = nil
-	adLocked = false
-	s.peerMu.Unlock()
-	log.Trace().Str("site", "openPeerSession_register").Str("phase", "lock_released").Str("address", string(address)).Msg("peer_mu_writer")
-	s.markPeerConnected(address, peerDirectionOutbound)
-
-	// Inbox subscription is established by the responder at auth time
-	// (handleAuthSession → registerHelloRoute + backlog replay) — the
-	// MinimumProtocolVersion floor guarantees every peer supports it, so no
-	// explicit subscription round-trip happens here.
-	_ = conn.SetDeadline(time.Time{})
-
-	if err := s.syncPeerSession(session, requestPeers, peerExchangePathSessionOutbound); err != nil {
-		return true, err
-	}
-
-	s.flushPendingPeerFrames(address)
-
-	// Routing table: register direct peer. The hook itself decides which
-	// capabilities are actionable (relay-cap gates direct-route creation,
-	// the full list propagates into AnnouncePeerState for v2 mode
-	// decisions). session.capabilities is the authoritative set captured by
-	// applyWelcomeMetadata — passing it raw keeps CommandTable / RPC /
-	// wire semantics consistent across transport paths.
-	s.onPeerSessionEstablished(session.peerIdentity, session.capabilities)
-
-	// Send full table sync to the new peer (Phase 1.2: full sync on connect).
-	// Both capabilities required: mesh_routing_v1 (understands announce_routes)
-	// and mesh_relay_v1 (can carry relay traffic). A routing-only peer would
-	// learn routes it cannot deliver on the data plane.
-	if !session.peerIdentity.IsZero() && s.sessionHasCapability(session, domain.CapMeshRoutingV1) && s.sessionHasCapability(session, domain.CapMeshRelayV1) {
-		s.sendOutboundFullTableSync(ctx, session.peerIdentity, address)
-	}
-
-	return true, s.servePeerSession(ctx, session)
 }
 
 func (s *Service) servePeerSession(ctx context.Context, session *peerSession) error {
@@ -630,7 +278,7 @@ func (s *Service) servePeerSession(ctx context.Context, session *peerSession) er
 			}
 			reply <- imported
 		case <-pingTimer.C:
-			if _, err := s.peerSessionRequest(session, protocol.Frame{Type: "ping"}, "pong", false); err != nil {
+			if _, err := s.peerSessionRequest(session, protocol.Frame{Type: "ping"}, "pong"); err != nil {
 				session.endProofTransport()
 				log.Warn().Str("peer", string(session.address)).Str("recipient", s.identity.Address).Err(err).Msg("heartbeat failed, peer stalled")
 				s.retirePeerSession(session, err)
@@ -739,7 +387,7 @@ func (s *Service) servePeerSession(ctx context.Context, session *peerSession) er
 					s.retirePeerSession(session, writeErr)
 					return writeErr
 				}
-			} else if _, err := s.peerSessionRequestAt(session, outbound, expectedReplyType(outbound.Type), false, wireQueue, first); err != nil {
+			} else if _, err := s.peerSessionRequestAt(session, outbound, expectedReplyType(outbound.Type), wireQueue, first); err != nil {
 				if errors.Is(err, protocol.ErrFrameTooLarge) {
 					// Self-bug: our outbound frame exceeded the wire size budget.
 					// Disconnecting the peer would treat it as a flap and drag
@@ -794,26 +442,8 @@ func (session *peerSession) logFireAndForgetDrop(frameType string) {
 	session.ffDropsSinceWarn = 0
 }
 
-func (s *Service) authenticatePeerSession(session *peerSession, welcome protocol.Frame) error {
-	authSession, err := s.authSessionFor(welcome)
-	if err != nil {
-		return err
-	}
-	reply, err := s.peerSessionRequest(session, authSession, "auth_ok", false)
-	if err != nil {
-		return err
-	}
-	if reply.Type != "auth_ok" {
-		return protocol.ErrAuthRequired
-	}
-	return s.completeOutboundAuth(session)
-}
-
-// completeOutboundAuth is everything an outbound session gets once its peer
-// is proven — by auth_ok on v1 (authenticatePeerSession) or by session_proof
-// on v2 (openPeerSessionForCM): the negotiated welcome comes into force, the
-// success is recorded, and the initial push_identity and reaction re-offer
-// start.
+// completeOutboundAuth installs negotiated metadata and commits the proven
+// session's receive readiness.
 func (s *Service) completeOutboundAuth(session *peerSession) error {
 	if err := s.markSessionHandshakeComplete(session); err != nil {
 		return err
@@ -1265,9 +895,7 @@ func (s *Service) publishPeerDisconnected(address domain.PeerAddress, charge pee
 // externally visible mutations.
 func (s *Service) openPeerSessionForCM(ctx context.Context, address domain.PeerAddress) (*peerSession, error) {
 	ctx = beginFirstContactAttempt(ctx)
-	// TLS first; v1 only on the connection of a probe that allowed it
-	// (session_dial_choice.go). A transport error
-	// comes back wrapped in errPeerDialTransport, so rollout telemetry still
+	// A socket error is wrapped in errPeerDialTransport so rollout telemetry
 	// separates "never reached them" from a handshake refusal by type.
 	transport, err := s.dialPeerTransportForCM(ctx, address)
 	if err != nil {
@@ -1280,6 +908,10 @@ func (s *Service) openPeerSessionForCM(ctx context.Context, address domain.PeerA
 }
 
 func (s *Service) finishPeerSessionForCM(ctx context.Context, address domain.PeerAddress, transport *dialledTransport) (result *peerSession, outcomeErr error) {
+	if transport.proven == nil {
+		_ = transport.wire.Close()
+		return nil, errV1RefusedV2Only
+	}
 	var adTicket *k3AdvertisedTicket
 	var adLocked bool
 	if s.k3Advertised != nil {
@@ -1295,7 +927,6 @@ func (s *Service) finishPeerSessionForCM(ctx context.Context, address domain.Pee
 	if s.r2OwnDMOwner != nil {
 		outgoing, _ = s.captureR2aHopPublication(transport)
 	}
-	var err error
 	rawConn, metered, conn := transport.raw, transport.metered, transport.wire
 
 	// Guard goroutine: close the connection if the parent context is cancelled
@@ -1325,8 +956,6 @@ func (s *Service) finishPeerSessionForCM(ctx context.Context, address domain.Pee
 	enableTCPKeepAlive(rawConn)
 
 	_ = conn.SetDeadline(time.Now().Add(handshakeTimeout))
-	// The transport's reader: on a v1 connection the probe opened, it holds
-	// what the listener sent behind the probe's answer.
 	reader := transport.reader
 	session := &peerSession{
 		firstContact: firstContactFromContext(ctx),
@@ -1388,47 +1017,7 @@ func (s *Service) finishPeerSessionForCM(ctx context.Context, address domain.Pee
 		return nil, err
 	}
 
-	// The reader outlives this function: it serves the session for its whole
-	// life, and it does work of its own off the serve loop — file_command
-	// frames go straight to the file router, datagrams to the datagram plane.
-	// Run must therefore not return, nor stop the file-transfer subsystem,
-	// while it can still be inside one of those. It ends when the socket does,
-	// and every outbound session socket is closed by the time the join waits:
-	// the CM closes the sessions of its slots and of the dial results it
-	// discards in its own shutdown, and every error path above closes its own.
-	if transport.proven == nil {
-		session.beginSessionQueueUse(true)
-		s.goRunLoop(func() { s.readPeerSession(reader, session) })
-	}
-
-	// v1 asks for the welcome; v2 already holds it, verified, inside the
-	// proven session — the listener's intro.
-	var welcome protocol.Frame
-	if transport.proven != nil {
-		welcome = transport.proven.Intro
-	} else if welcome, err = s.peerSessionRequest(session, protocol.Frame{}, "welcome", true); err != nil {
-		closeOnError()
-		s.forgetLegacyObservedWithoutWelcome(address, transport)
-		return nil, err
-	} else if err := s.refuseFullLegacyWelcome(address, transport, welcome); err != nil {
-		closeOnError()
-		return nil, err
-	} else if err := s.refuseLegacyWelcome(address, domain.PeerIdentityFromWire(welcome.Address)); err != nil {
-		closeOnError()
-		log.Warn().Err(err).Str("peer", string(address)).Msg("outbound_v1_refused_identity_pinned_to_v2")
-		return nil, err
-	}
-	if err := validateProtocolHandshake(welcome); err != nil {
-		closeOnError()
-		log.Warn().Err(err).Str("peer", string(address)).Int("version", welcome.Version).Msg("outbound_peer_protocol_too_old")
-		// Do NOT react here — the caller (CM dial worker) propagates the
-		// error to onCMDialFailed, which reacts exactly once
-		// (reactToIncompatibleDial). The structured error carries the version
-		// evidence and what stands behind it: the intro of a proven v2
-		// session may set lockouts and feed the reporter set, a v1 welcome
-		// before auth_ok is a claim and only paces the address.
-		return nil, incompatibleVersionOf(welcome, versionEvidenceOf(transport.proven != nil), err)
-	}
+	welcome := transport.proven.Intro
 	// Self-loopback guard: if the welcome carries our own Ed25519
 	// identity we just dialled ourselves. Tear down the session
 	// through the wrapper (closeOnError → session.Close() → NetCore.Close())
@@ -1442,14 +1031,7 @@ func (s *Service) finishPeerSessionForCM(ctx context.Context, address domain.Pee
 			Msg("outbound_self_identity_rejected")
 		return nil, s.newSelfIdentityError(address)
 	}
-	// peerMu around the metadata write, not just around the map insert below:
-	// readPeerSession is already running (it delivered the welcome that got us
-	// here) and reads the same fields on its capability gates, so a peer that
-	// pipelines a frame behind its own welcome puts a reader on
-	// session.capabilities at the instant this line assigns it. The field doc
-	// on peerSession already declares peerMu as its guard — this is the write
-	// side honouring it. The typed local set is resolved BEFORE the lock: it
-	// consults the datagram layer, and no domain mutex is held across that.
+	// Resolve the local capability set before taking peerMu.
 	local := s.localHandshakeCapabilities()
 	s.peerMu.Lock()
 	adLocked = true
@@ -1473,20 +1055,15 @@ func (s *Service) finishPeerSessionForCM(ctx context.Context, address domain.Pee
 		observedAddress: welcome.ObservedAddress,
 	}
 
-	if transport.proven != nil {
-		// Proven intro and negotiated metadata are ready before its reader starts:
-		// the listener may pipeline data immediately behind session_proof.
-		if err := s.completeOutboundAuth(session); err != nil {
-			closeOnError()
-			return nil, err
-		}
-		session.selectedProof = s.captureSelectedProof(transport)
-		session.beginSessionQueueUse(true)
-		s.goRunLoop(func() { s.readPeerSession(reader, session) })
-	} else if err := s.authenticatePeerSession(session, welcome); err != nil {
+	// Install the negotiated metadata before starting the reader. A listener
+	// may pipeline data as soon as it has sent the secure proof.
+	if err := s.completeOutboundAuth(session); err != nil {
 		closeOnError()
 		return nil, err
 	}
+	session.selectedProof = s.captureSelectedProof(transport)
+	session.beginSessionQueueUse(true)
+	s.goRunLoop(func() { s.readPeerSession(reader, session) })
 
 	// Handshake succeeded — stop the guard goroutine without closing conn.
 	// From here on, the CM event loop owns session lifetime.
@@ -1907,41 +1484,23 @@ func (s *Service) publishAndServeCMSession(session *peerSession, slotAddress dom
 	// Register session in Service maps. This is the first point where
 	// the session becomes visible to routingTargets, enqueuePeerFrame,
 	// connectedHostsLocked, and other lookups.
+	_, proven := session.provenIdentity()
+	if !proven {
+		s.withdrawRefusedCMSession(session, slotAddress, slotGeneration, errV1RefusedV2Only)
+		return
+	}
+
 	if !s.registerCMSession(session, slotAddress) {
 		session.firstContact.recordPublication(session.connID, "registration_refused", 0, false)
 		s.abortLocallyEvictedCMSession(session, slotAddress, nil)
 		return
 	}
 
-	// The welcome was checked against the pin during the dial; the
-	// identity may have proved itself over v2 since, and the sweep that
-	// closes legacy sessions (v2_identity_claims.go) only sees sessions
-	// already registered. Checking AFTER registering leaves no window: a
-	// proof that came first is seen here, one that comes later sweeps
-	// this session. A refused session is withdrawn before anything is
-	// published for it, and charged to nobody (isUnchargedDialRefusal).
-	_, proven := session.provenIdentity()
-	if !proven {
-		if err := s.refuseLegacyWelcome(dialAddress, session.peerIdentity); err != nil {
-			session.firstContact.recordPublication(session.connID, "pin_refused", 0, false)
-			log.Warn().Err(err).Str("peer", string(dialAddress)).Msg("outbound_v1_refused_identity_proved_v2_during_setup")
-			s.recordAddressDialFailure(slotAddress)
-			s.withdrawRefusedCMSession(session, slotAddress, slotGeneration, err)
-			return
-		}
-	}
-
-	// Only a setup that ends with a published session proves the peer
-	// healthy, so the setup-failure counter is cleared once the session has
-	// passed the pin — a session refused above is not published.
+	// Clear previous setup failures only when this session is published.
 	s.peerMu.Lock()
 	s.clearSetupFailuresLocked(slotAddress)
 	s.peerMu.Unlock()
 
-	// The session counts as an outbound session of its kind only now that it
-	// is going to be published: a setup that failed, a slot the
-	// ConnectionManager evicted under the setup and a refusal by the pin
-	// above all end before this line, and none of them served the peer.
 	s.sessionKinds.outbound().note(proven, domain.ProtocolVersion(session.version))
 
 	// --- Phase 2: session is fully operational ---
@@ -1992,13 +1551,8 @@ func (s *Service) publishAndServeCMSession(session *peerSession, slotAddress dom
 	s.withdrawServedCMSession(session, slotAddress, slotGeneration, err)
 }
 
-// withdrawRefusedCMSession takes back a session that registerCMSession
-// entered and the pin then refused: its identity proved v2 between the dial
-// and the registration. Nothing else was published for it — no connected
-// health, no route, no sync — so only the registration is undone. The close
-// is recorded as this node's decision, and the loss is reported to the
-// ConnectionManager as a failed setup carrying the refusal, which
-// onCMDialFailed does not charge to the address.
+// withdrawRefusedCMSession takes back a registration without a usable
+// secure proof before it can publish health, routes, or sync traffic.
 func (s *Service) withdrawRefusedCMSession(session *peerSession, slotAddress domain.PeerAddress, slotGeneration uint64, refusal error) {
 	var adTicket *k3AdvertisedTicket
 	var adLocked, adDeliveryLocked bool

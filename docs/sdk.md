@@ -244,24 +244,9 @@ file there is a deliberately new database.
 
 `NodeConfig.IdentityIntentsPath` is an optional `*string`: nil retains the historical memory-only identity-intent store. Set it to a nonblank path in a private profile directory to persist background identity-resolution reasons across restarts. `NewWithContext` rejects an explicitly blank path before identity or database I/O. `NodeConfig.AllowPrivatePeers` defaults to false; isolated loopback functional profiles must explicitly opt in. Neither setting reads an environment variable. See [process stand infrastructure](loadstand-process.md) for the real SDK/SQLite functional child and remaining T5 work.
 
-### TLS-first switch
+### Secure peer transport
 
-`NodeConfig.V2TLSFirst` is the operator's TLS-first switch of the secure session v2.
-`nil` (the default) keeps TLS-first on: every dial opens with TLS. A pointer to
-`false` switches it off: a dial where v1 is not ruled out — an unpinned identity
-at an endpoint nothing binds — opens with the identity-less probe and no
-ClientHello; a v2 welcome to the probe still leads to TLS in the same dial, and
-a failure of that TLS attempt allows no v1. Pinned identities, bound endpoints
-and dials "to X" keep v2 either way. The switch does not get around a block of
-TLS to a node of v31 or later. The SDK never
-reads `CORSA_V2_TLS_FIRST`; this field is the only source of the value for an
-embedded runtime. See [session_v2.md](protocol/session_v2.md), "Switching
-TLS-first off".
-
-```go
-off := false
-cfg.Node.V2TLSFirst = &off
-```
+All outgoing peer connections begin with TLS. `NodeConfig.V2TLSFirst` is deprecated and has no effect.
 
 ### Идентификация
 
@@ -639,23 +624,9 @@ cfg.Node.StateDBPath = "/var/lib/corsa-bot/state.db"
 
 `NodeConfig.IdentityIntentsPath` — optional `*string`: nil сохраняет прежнее хранилище identity-intent только в памяти. Непустой путь в приватном каталоге профиля сохраняет причины фонового разрешения identity после перезапуска. `NewWithContext` отказывает при явно пустом пути до I/O identity или базы. `NodeConfig.AllowPrivatePeers` по умолчанию false; изолированный loopback-профиль должен явно разрешить private peers. Эти настройки не читают переменные окружения. Настоящий SDK/SQLite child и оставшаяся работа T5 описаны в [инфраструктуре process-стенда](loadstand-process.md).
 
-### Выключатель «TLS-первым»
+### Защищённый транспорт
 
-`NodeConfig.V2TLSFirst` — выключатель оператора «TLS-первым» защищённой сессии v2.
-`nil` (по умолчанию) оставляет «TLS-первым» включённым: каждый дозвон начинается
-с TLS. Указатель на `false` выключает его: дозвон, где v1 не исключён, —
-непрошитая identity на адресе, который ничем не привязан, — начинается с пробы
-без identity и без ClientHello; welcome v2 на пробу всё равно ведёт к TLS в том
-же дозвоне, а неудача этой попытки TLS v1 не разрешает. Закреплённые identity,
-привязанные адреса и дозвоны «к X» сохраняют v2 в любом случае. Выключатель не
-обходит блокировку TLS к узлу v31 и новее. SDK никогда не читает `CORSA_V2_TLS_FIRST`; для встроенного runtime это
-поле — единственный источник значения. См. [session_v2.md](protocol/session_v2.md),
-«Выключение TLS-первым».
-
-```go
-off := false
-cfg.Node.V2TLSFirst = &off
-```
+Все исходящие подключения к пирам начинаются с TLS. Поле `NodeConfig.V2TLSFirst` устарело и не влияет на подключения.
 
 ### Быстрый старт
 

@@ -196,16 +196,15 @@ func (s *Service) closeLegacyClaimsOf(ctx context.Context, id domain.PeerIdentit
 	})
 	s.peerMu.RUnlock()
 
-	// A dialled legacy session is closed as this node's decision, like a v1
-	// welcome refused by the pin: the address that answered it is not
-	// charged for the close, and the fall back to v1 there is held.
+	// Close the unproven session as a local decision and pace the next TLS
+	// dial without charging an address failure.
 	for _, session := range dialled {
-		hold := s.secureSessions.marks.noteLegacyRefused(session.address)
+		retry := s.secureSessions.marks.noteV2Unanswered(session.address)
 		log.Warn().
 			Str("peer", id.String()).
 			Str("address", string(session.address)).
 			Uint64("conn_id", uint64(session.connID)).
-			Dur("legacy_hold", hold).
+			Dur("v2_retry", retry).
 			Msg("legacy_session_closed_identity_requires_v2")
 		_ = session.closeAs(peerSessionClosedByLegacyRefusal)
 	}

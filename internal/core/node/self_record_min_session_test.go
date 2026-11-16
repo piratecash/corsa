@@ -15,83 +15,58 @@ import (
 	"github.com/piratecash/corsa/internal/core/sessionv2"
 )
 
-// The node's own record states the minimum session version, and each side
-// hands it to the other when a session is set up — over a secure session
-// and over a legacy one alike, since a neighbour still on legacy is exactly
-// the one the statement is for. The neighbour must end up holding the very
-// bytes the owner signed: a record that only the owner knows states nothing.
-//
-// The record must arrive by the initial push of the session, not by a
-// lookup: each side's push_identity handler accepted a push and neither
-// side's post_identity handler — the only other way a record gets in — ran
-// at all.
-//
-// The listener's record states min_session 2. Before Run, the legacy-only
-// fixture reissues its own statement without that field, as a real legacy
-// build does: otherwise the listener would correctly end its legacy session
-// as soon as it learned the contradictory min_session 2 statement.
+// The initial secure session setup exchanges both exact signed self records.
 func TestSessionSetupDeliversTheSelfRecordWithMinSession(t *testing.T) {
 	t.Parallel()
 
-	kinds := map[string]bool{"secure session": true, "legacy session": false}
-	for name, wantV2 := range kinds {
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
+	addrListener := freeAddress(t)
+	listener, stopListener := startEmptyRegistryDatagramNode(t, addrListener)
+	defer stopListener()
+	dialer, stopDialer := startDatagramNodeWithRegistry(t, freeAddress(t), nil, normalizeAddress(addrListener))
+	defer stopDialer()
 
-			addrListener := freeAddress(t)
-			listener, stopListener := startEmptyRegistryDatagramNode(t, addrListener)
-			defer stopListener()
-			var setup func(*Service)
-			if !wantV2 {
-				setup = legacySelfRecordFixture(t)
-			}
-			dialer, stopDialer := startDatagramNodeWithRegistry(t, freeAddress(t), setup, normalizeAddress(addrListener))
-			defer stopDialer()
+	listenerID := domain.PeerIdentityFromWire(listener.Address())
+	dialerID := domain.PeerIdentityFromWire(dialer.Address())
+	waitForConditionMsg(t, 25*time.Second, "the pair did not exchange the initial push_identity", func() bool {
+		_, _, dialerHolds := dialer.trust.recordFor(testRecordStoreNetwork, listenerID)
+		_, _, listenerHolds := listener.trust.recordFor(testRecordStoreNetwork, dialerID)
+		return dialerHolds && listenerHolds
+	})
 
-			listenerID := domain.PeerIdentityFromWire(listener.Address())
-			dialerID := domain.PeerIdentityFromWire(dialer.Address())
-			waitForConditionMsg(t, 25*time.Second, "the pair did not exchange the initial push_identity", func() bool {
-				_, _, dialerHolds := dialer.trust.recordFor(testRecordStoreNetwork, listenerID)
-				_, _, listenerHolds := listener.trust.recordFor(testRecordStoreNetwork, dialerID)
-				return dialerHolds && listenerHolds
-			})
+	for side, svc := range map[string]*Service{"listener": listener, "dialler": dialer} {
+		pushes, lookupAnswers := recordArrivalPaths(t, svc)
+		if pushes == 0 || lookupAnswers != 0 {
+			t.Fatalf("%s: %d accepted push_identity, %d post_identity calls; want the record by the initial push alone",
+				side, pushes, lookupAnswers)
+		}
+	}
 
-			for side, svc := range map[string]*Service{"listener": listener, "dialler": dialer} {
-				pushes, lookupAnswers := recordArrivalPaths(t, svc)
-				if pushes == 0 || lookupAnswers != 0 {
-					t.Fatalf("%s: %d accepted push_identity, %d post_identity calls; want the record by the initial push alone",
-						side, pushes, lookupAnswers)
-				}
-			}
+	v2, v1 := authenticatedInbound(listener)
+	if v2 == 0 || v1 != 0 {
+		t.Fatalf("listener sessions v2=%d v1=%d, want only secure sessions", v2, v1)
+	}
 
-			v2, v1 := authenticatedInbound(listener)
-			if wantV2 && (v2 == 0 || v1 != 0) || !wantV2 && (v1 == 0 || v2 != 0) {
-				t.Fatalf("listener sessions v2=%d v1=%d, want only the %s kind", v2, v1, name)
-			}
+	ownRecord, ownBody := listener.SelfIdentityRecord()
+	if version, declared := ownBody.MinSession.Version(); !declared || version != domain.SessionVersionSecure {
+		t.Fatalf("the listener's own record states min_session (%d, %v), want (2, true)", version, declared)
+	}
+	held, heldBody, found := dialer.trust.recordFor(testRecordStoreNetwork, listenerID)
+	if !found || held.Version != ownRecord.Version ||
+		!bytes.Equal(held.Body, ownRecord.Body) || !bytes.Equal(held.Sig, ownRecord.Sig) {
+		t.Fatal("the dialler does not hold the listener's exact signed record")
+	}
+	if version, declared := heldBody.MinSession.Version(); !declared || version != domain.SessionVersionSecure {
+		t.Fatalf("the dialler reads min_session (%d, %v) from the listener's record, want (2, true)", version, declared)
+	}
 
-			ownRecord, ownBody := listener.SelfIdentityRecord()
-			if version, declared := ownBody.MinSession.Version(); !declared || version != domain.SessionVersionSecure {
-				t.Fatalf("the listener's own record states min_session (%d, %v), want (2, true)", version, declared)
-			}
-			held, heldBody, found := dialer.trust.recordFor(testRecordStoreNetwork, listenerID)
-			if !found || held.Version != ownRecord.Version ||
-				!bytes.Equal(held.Body, ownRecord.Body) || !bytes.Equal(held.Sig, ownRecord.Sig) {
-				t.Fatal("the dialler does not hold the listener's exact signed record")
-			}
-			if version, declared := heldBody.MinSession.Version(); !declared || version != domain.SessionVersionSecure {
-				t.Fatalf("the dialler reads min_session (%d, %v) from the listener's record, want (2, true)", version, declared)
-			}
-
-			dialerRecord, dialerBody := dialer.SelfIdentityRecord()
-			if _, declared := dialerBody.MinSession.Version(); declared != wantV2 {
-				t.Fatalf("dialler record min_session declaration=%v, want %v", declared, wantV2)
-			}
-			heldByListener, _, found := listener.trust.recordFor(testRecordStoreNetwork, dialerID)
-			if !found || heldByListener.Version != dialerRecord.Version ||
-				!bytes.Equal(heldByListener.Body, dialerRecord.Body) || !bytes.Equal(heldByListener.Sig, dialerRecord.Sig) {
-				t.Fatal("the listener does not hold the dialler's exact signed record")
-			}
-		})
+	dialerRecord, dialerBody := dialer.SelfIdentityRecord()
+	if version, declared := dialerBody.MinSession.Version(); !declared || version != domain.SessionVersionSecure {
+		t.Fatalf("the dialler's own record states min_session (%d, %v), want (2, true)", version, declared)
+	}
+	heldByListener, _, found := listener.trust.recordFor(testRecordStoreNetwork, dialerID)
+	if !found || heldByListener.Version != dialerRecord.Version ||
+		!bytes.Equal(heldByListener.Body, dialerRecord.Body) || !bytes.Equal(heldByListener.Sig, dialerRecord.Sig) {
+		t.Fatal("the listener does not hold the dialler's exact signed record")
 	}
 }
 

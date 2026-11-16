@@ -43,7 +43,7 @@ type Frame struct {
 	// (AckType "receipt") refers to. Without it an ack names only
 	// recipient+id+status, which two receipts can share when one of them
 	// is forged — and the holder then deletes both, the genuine one
-	// included. Additive from ProtocolVersionReceiptSenderAck: senders
+	// included. Required for receipt acknowledgments: senders
 	// gate it on the peer advertising that version, because the field is
 	// covered by the signature and an older verifier computes the
 	// payload without it.
@@ -411,11 +411,7 @@ type AggregateStatusFrame struct {
 	// peers (runtime reporters + persisted lockouts). See domain.VersionPolicySnapshot.
 	MaxObservedPeerVersion int `json:"max_observed_peer_version,omitempty"`
 
-	// V2TLSFirst is the operator's TLS-first switch of the secure session v2
-	// (CORSA_V2_TLS_FIRST): true — the default — when every dial opens
-	// with TLS, false when a dial where v1 is not ruled out opens with the
-	// identity-less probe. Not omitempty: false is the state an operator
-	// must see, and an absent field would read as an older node.
+	// V2TLSFirst is always true on this build. Retained on the wire for clients.
 	V2TLSFirst bool `json:"v2_tls_first"`
 }
 

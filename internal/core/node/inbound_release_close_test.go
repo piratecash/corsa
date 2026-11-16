@@ -194,16 +194,8 @@ func TestAnInboundConnThatEndsDuringShutdownDoesNotLeakItsWriter(t *testing.T) {
 	stop := func() { stopOnce.Do(stopNode) }
 	defer stop()
 
-	first, err := net.Dial("tcp", cfg.ListenAddress)
-	if err != nil {
-		t.Fatalf("dial the first conn: %v", err)
-	}
+	first := dialTestTLSClient(t, cfg.ListenAddress)
 	t.Cleanup(func() { _ = first.Close() })
-	// One byte selects the v1 session and lets the handler register; with no
-	// newline the handler then waits in its read, writing nothing.
-	if _, err := first.Write([]byte("{")); err != nil {
-		t.Fatalf("write the first byte: %v", err)
-	}
 	var core *netcore.NetCore
 	waitFor(t, 10*time.Second, "the first conn registered", func() bool {
 		core = soleInboundCore(svc)

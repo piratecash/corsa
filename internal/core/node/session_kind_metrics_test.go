@@ -3,7 +3,6 @@ package node
 import (
 	"bufio"
 	"context"
-	"errors"
 	"io"
 	"net"
 	"testing"
@@ -50,78 +49,6 @@ func TestSessionKindsCountAV2SessionOnBothSides(t *testing.T) {
 	}
 	if out.LegacyAtClaimedV2 != 0 || in.LegacyAtClaimedV2 != 0 {
 		t.Fatalf("a v2 session was counted as legacy-at-claimed-v2: dialler %d, listener %d", out.LegacyAtClaimedV2, in.LegacyAtClaimedV2)
-	}
-}
-
-// A node of this build and an emulated old peer (version rewritten below 31)
-// count a legacy session each way, with the old version seen as pre-v2 and
-// never as legacy-at-claimed-v2.
-func TestSessionKindsCountLegacyWithAnOldPeerBothWays(t *testing.T) {
-	t.Parallel()
-	for _, version := range releasedLegacyVersions() {
-		version := version
-		t.Run(versionName(version), func(t *testing.T) {
-			t.Parallel()
-			pair := startLegacyPair(t, version)
-
-			out := waitKinds(t, pair.new, "no legacy outbound session with the old peer", func(s domain.SessionKindStats) bool {
-				return s.OutboundLegacy > 0 && s.InboundLegacy > 0
-			})
-			if out.OutboundV2 != 0 || out.InboundV2 != 0 {
-				t.Fatalf("v%d: a v2 session was counted with a v1-only peer: %+v", version, out)
-			}
-			if out.WelcomesBelowSecureVersion == 0 || out.HellosBelowSecureVersion == 0 {
-				t.Fatalf("v%d: the old peer's announced version was not seen as pre-v2: %+v", version, out)
-			}
-			if out.LegacyAtClaimedV2 != 0 {
-				t.Fatalf("v%d: a pre-v2 legacy session was counted as legacy-at-claimed-v2: %d", version, out.LegacyAtClaimedV2)
-			}
-		})
-	}
-}
-
-// A legacy session with a peer that announces this build's version — reached
-// over v1 but claiming v2 (a stripped ALPN, or a man in the middle) — is
-// counted as legacy-at-claimed-v2, not as an old peer below the v2 version.
-// These are the sessions raising the minimum would cut off despite the claim.
-// Such a session arises on accept only: a dialler of this build reads a v2
-// welcome to its probe as a v2 hint and never opens v1 to it.
-func TestSessionKindsCountALegacyPeerClaimingV2(t *testing.T) {
-	t.Parallel()
-	listener, address, stopListener := listenerNode(t, withoutOwnDials(nil))
-	defer stopListener()
-	_, stopOld := dialerNode(t, address, asOldNode)
-	defer stopOld()
-
-	in := waitKinds(t, listener, "no inbound legacy session from the v2-claiming old node", func(s domain.SessionKindStats) bool {
-		return s.InboundLegacy > 0
-	})
-	if in.InboundV2 != 0 {
-		t.Fatalf("a v2 session was counted with a v1-only node: %+v", in)
-	}
-	if in.HellosBelowSecureVersion != 0 {
-		t.Fatalf("a peer announcing this build's version was counted as pre-v2: %d", in.HellosBelowSecureVersion)
-	}
-	if in.LegacyAtClaimedV2 == 0 {
-		t.Fatal("a legacy session with a peer claiming v2 was not counted as legacy-at-claimed-v2")
-	}
-}
-
-// The dialling side of the same peer: its answer to the probe announces v2,
-// so the dial ends as a v2 hint and no outbound legacy session is counted.
-func TestTheDiallerOpensNoLegacySessionToAPeerClaimingV2(t *testing.T) {
-	t.Parallel()
-	_, address, stopOld := listenerNode(t, withoutOwnDials(asOldNode))
-	defer stopOld()
-	dialer, stopDialer := startQuietNode(t, nil)
-	defer stopDialer()
-
-	established, err := dialPastTransport(t, dialer, domain.PeerAddress(normalizeAddress(address)))
-	if established || !errors.Is(err, errLegacyProbeAnsweredV2) {
-		t.Fatalf("established=%v err=%v, want the probe's v2 hint", established, err)
-	}
-	if out := dialer.SessionKindStats(); out.OutboundLegacy != 0 || out.LegacyAtClaimedV2 != 0 {
-		t.Fatalf("the dialler counted a legacy session with a peer claiming v2: %+v", out)
 	}
 }
 
@@ -312,26 +239,16 @@ func dropOnFirstSetupRequest(remote net.Conn, _ chan<- protocol.Frame, errs chan
 	}
 }
 
-// A dialled legacy session whose identity proves v2 while its setup runs is
-// refused when it is about to be published and withdrawn. It never served
-// the peer, so it is not a legacy session of this node: counting it would
-// report a session the pin had already closed as legacy traffic.
+// An unproved session cannot be published even if application setup succeeds.
 func TestSessionKindsSkipADialledSessionRefusedBeforePublication(t *testing.T) {
 	release := make(chan struct{})
 	farEndDone := make(chan struct{})
 	rig := newEvictionRig(t, evictionRigOptions{farEnd: answerSetupOnceReleased(release, farEndDone)})
 	t.Cleanup(func() { close(farEndDone) })
 
-	if err := rig.svc.secureSessions.store.noteProvenInbound(rig.session.peerIdentity); err != nil {
-		t.Fatalf("pin: %v", err)
-	}
 	close(release)
 	rig.awaitSessionGoroutine(t)
-
-	if got := rig.svc.SecureSessionStoreStats().V1RefusalsIdentityPinned; got != 1 {
-		t.Fatalf("precondition: identity refusals = %d, want 1 — the setup did not reach the pin check before publication", got)
-	}
-	assertNoOutboundSessionCounted(t, rig.svc, "the dialled session was refused by the pin before publication")
+	assertNoOutboundSessionCounted(t, rig.svc, "the dialled session was not proved")
 }
 
 // A dialled session whose application-level setup fails on the peer's account

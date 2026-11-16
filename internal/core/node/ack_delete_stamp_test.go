@@ -21,77 +21,6 @@ func sessionAtVersion(address domain.PeerAddress, version int) *peerSession {
 	}
 }
 
-// A queued ack outlives the session it was built for: the peer goes away,
-// the frame waits, and the peer that comes back may be an older binary.
-// The author is inside the signed payload, so a v2 frame handed to such a
-// peer is not "a field it ignores" — it is a signature it cannot
-// reproduce, which is scored as forgery.
-func TestQueuedAckIsSignedForTheSessionThatFinallySendsIt(t *testing.T) {
-	t.Parallel()
-	svc := newTestService(t, config.NodeTypeFull)
-	receipt := receiptFrom("the-actual-recipient", svc.Address(), "queued-across-a-reconnect")
-
-	// Built when the peer was current: the full form, author included.
-	queued := svc.buildAckDeleteFrame(ackDeleteForReceipt(receipt))
-	if queued.ReceiptSender != receipt.Sender {
-		t.Fatalf("the queued frame lost the receipt's author: %+v", queued)
-	}
-
-	// The peer reconnects on an older binary.
-	older := sessionAtVersion("peer-that-came-back-older", config.ProtocolVersionReceiptSenderAck-1)
-	stamped := svc.stampAckDeleteForSession(older, legacyPeerSendItem(queued))
-	if stamped.ReceiptSender != "" {
-		t.Fatal("a v2 ack was handed to a peer that cannot verify it")
-	}
-	if err := identity.VerifyPayload(svc.identity.Address, identity.PublicKeyBase64(svc.identity.PublicKey),
-		ackDeletePayload(stamped.Address, stamped.AckType, stamped.ID, stamped.Status),
-		stamped.Signature); err != nil {
-		t.Errorf("the older peer cannot verify the stamped ack: %v", err)
-	}
-
-	// And one that comes back current still gets the author.
-	current := sessionAtVersion("peer-that-came-back-current", config.ProtocolVersionReceiptSenderAck)
-	stamped = svc.stampAckDeleteForSession(current, legacyPeerSendItem(queued))
-	if stamped.ReceiptSender != receipt.Sender {
-		t.Errorf("a current peer was not told which receipt the ack names: %+v", stamped.Frame)
-	}
-	if err := identity.VerifyPayload(svc.identity.Address, identity.PublicKeyBase64(svc.identity.PublicKey),
-		ackDeletePayloadForFrame(stamped.Frame), stamped.Signature); err != nil {
-		t.Errorf("the current peer cannot verify the stamped ack: %v", err)
-	}
-}
-
-// The stamp belongs to the door every session write passes, not to the
-// build site: a producer that queues a frame cannot know which session
-// will write it.
-func TestEverySessionWriteStampsTheAckItCarries(t *testing.T) {
-	t.Parallel()
-	svc := newTestService(t, config.NodeTypeFull)
-	receipt := receiptFrom("the-actual-recipient", svc.Address(), "through-the-door")
-	queued := svc.buildAckDeleteFrame(ackDeleteForReceipt(receipt))
-
-	older := sessionAtVersion("older-peer", config.ProtocolVersionReceiptSenderAck-1)
-	now := time.Now().UTC()
-	svc.peerMu.Lock()
-	svc.health[older.address] = &peerHealth{
-		Address: older.address, Connected: true, Direction: peerDirectionOutbound,
-		State: peerStateHealthy, LastConnectedAt: now, LastUsefulReceiveAt: now,
-	}
-	svc.sessions[older.address] = older
-	svc.peerMu.Unlock()
-	if !svc.enqueueSessionSendItem(older, legacyPeerSendItem(queued)) {
-		t.Fatal("the frame was not admitted to the session queue")
-	}
-	select {
-	case item := <-older.sendCh:
-		if item.ReceiptSender != "" {
-			t.Error("the send door let a v2 ack through to a pre-floor peer")
-		}
-	case <-time.After(time.Second):
-		t.Fatal("nothing reached the session queue")
-	}
-}
-
 // A frame somebody else signed is not ours to re-sign: re-stamping it
 // would replace their signature with one over our identity and turn a
 // relayed ack into a claim of our own.
@@ -107,7 +36,7 @@ func TestStampLeavesForeignFramesAlone(t *testing.T) {
 		ReceiptSender: "their-receipt-author",
 		Signature:     "their-signature",
 	}
-	stamped := svc.stampAckDeleteForSession(sessionAtVersion("older-peer", config.ProtocolVersionReceiptSenderAck-1), legacyPeerSendItem(foreign))
+	stamped := svc.gateAckDeleteForSession(sessionAtVersion("older-peer", config.ProtocolVersion), legacyPeerSendItem(foreign))
 	if stamped.Signature != foreign.Signature || stamped.ReceiptSender != foreign.ReceiptSender ||
 		stamped.Address != foreign.Address {
 		t.Errorf("a frame this node did not author was rewritten: %+v", stamped.Frame)
@@ -168,20 +97,15 @@ func setPeerSession(svc *Service, session *peerSession) {
 	svc.peerMu.Unlock()
 }
 
-// The bring-up ack path stamps for the session in front of it and parks
-// the frame when that session's queue is full. Parking the STAMPED copy
-// threw the receipt's author away permanently: the peer that drains the
-// queue can be a current one, and it would get an ack that cannot say
-// which receipt it holds — so with two contested receipts it deletes
-// neither and keeps re-pushing both.
-func TestAckParkedByAnOlderSessionStillNamesItsReceiptAfterTheUpgrade(t *testing.T) {
+// A full session can park a receipt acknowledgment until a later connection.
+func TestAckParkedByAFullSessionStillNamesItsReceiptAfterReconnect(t *testing.T) {
 	t.Parallel()
 	svc := newTestService(t, config.NodeTypeFull)
 	const address = domain.PeerAddress("peer-whose-queue-was-full")
-	receipt := receiptFrom("the-actual-recipient", svc.Address(), "parked-then-upgraded")
+	receipt := receiptFrom("the-actual-recipient", svc.Address(), "parked-then-reconnected")
 
-	// An older session whose queue cannot take the frame.
-	older := sessionAtVersion(address, config.ProtocolVersionReceiptSenderAck-1)
+	// The first session cannot take the frame.
+	older := sessionAtVersion(address, config.ProtocolVersion)
 	older.sendCh = make(chan peerSendItem)
 	setPeerSession(svc, older)
 	svc.enqueueAckDeleteOnSession(older, address, ackDeleteForReceipt(receipt))
@@ -196,8 +120,8 @@ func TestAckParkedByAnOlderSessionStillNamesItsReceiptAfterTheUpgrade(t *testing
 		t.Fatalf("the parked ack lost the receipt's author: %+v", parked[0].Frame)
 	}
 
-	// The peer comes back current, and the drain hands it the full ack.
-	current := sessionAtVersion(address, config.ProtocolVersionReceiptSenderAck)
+	// The peer reconnects, and the drain hands it the full ack.
+	current := sessionAtVersion(address, config.ProtocolVersion)
 	setPeerSession(svc, current)
 	svc.flushPendingPeerFrames(address)
 
@@ -231,7 +155,7 @@ func TestADrainThatFailsPutsTheFullAckBack(t *testing.T) {
 	svc.pendingKeys[pendingFrameKey(address, full)] = struct{}{}
 	svc.deliveryMu.Unlock()
 
-	older := sessionAtVersion(address, config.ProtocolVersionReceiptSenderAck-1)
+	older := sessionAtVersion(address, config.ProtocolVersion)
 	older.sendCh = make(chan peerSendItem) // nothing fits
 	setPeerSession(svc, older)
 	svc.flushPendingPeerFrames(address)

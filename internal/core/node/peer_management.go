@@ -826,105 +826,6 @@ func peerSource(id string) domain.PeerSource {
 	}
 }
 
-func (s *Service) ensurePeerSessions(ctx context.Context) {
-	var adTicket *k3AdvertisedTicket
-	var adLocked bool
-	if s.k3Advertised != nil {
-		defer func() {
-			if adLocked {
-				s.guardK3AdvertisedPeerLocked(adTicket)
-				s.peerMu.Unlock()
-			}
-		}()
-	}
-	for _, candidate := range s.peerDialCandidates() {
-		// Cross-domain: s.upstream lives under s.deliveryMu, s.dialOrigin
-		// under s.peerMu.  Canonical s.peerMu OUTER → s.deliveryMu INNER.
-		log.Trace().Str("site", "ensurePeerSessions_register").Str("phase", "lock_wait").Str("address", string(candidate.address)).Msg("peer_mu_writer")
-		s.peerMu.Lock()
-		adLocked = true
-		adTicket = s.beginK3AdvertisedPeerLocked()
-		log.Trace().Str("site", "ensurePeerSessions_register").Str("phase", "lock_held").Str("address", string(candidate.address)).Msg("peer_mu_writer")
-		s.deliveryMu.Lock()
-		if _, ok := s.upstream[candidate.address]; ok {
-			s.deliveryMu.Unlock()
-			s.finishK3AdvertisedPeerLocked(adTicket)
-			adTicket = nil
-			adLocked = false
-			s.peerMu.Unlock()
-			log.Trace().Str("site", "ensurePeerSessions_register").Str("phase", "lock_released_dup").Str("address", string(candidate.address)).Msg("peer_mu_writer")
-			continue
-		}
-		s.upstream[candidate.address] = struct{}{}
-		// Record the mapping from dial address to primary peer address
-		// so that health updates (markPeerConnected/Disconnected) always
-		// accumulate on the primary entry, even when a fallback port is used.
-		if candidate.primary != candidate.address {
-			s.dialOrigin[candidate.address] = candidate.primary
-		}
-		s.deliveryMu.Unlock()
-		s.finishK3AdvertisedPeerLocked(adTicket)
-		adTicket = nil
-		adLocked = false
-		s.peerMu.Unlock()
-		log.Trace().Str("site", "ensurePeerSessions_register").Str("phase", "lock_released").Str("address", string(candidate.address)).Msg("peer_mu_writer")
-		// lifecycle: NOT joined by Run — a known exception, listed in
-		// docs/locking.md. This is the legacy session path, inert while the
-		// ConnectionManager is wired; neither connWg nor the CM's dial group
-		// tracks it, and the caller is not on runLoopsWg, so it cannot be
-		// moved there without raising that group's counter from zero under
-		// stopRunLifecycle's Wait.
-		go func(c peerDialCandidate) {
-			defer func() {
-				var adTicket *k3AdvertisedTicket
-				var adLocked, adDeliveryLocked bool
-				if s.k3Advertised != nil || s.k3Registered != nil {
-					defer func() {
-						if adLocked {
-							if adDeliveryLocked {
-								s.deliveryMu.Unlock()
-								adDeliveryLocked = false
-							}
-							s.guardK3AdvertisedPeerLocked(adTicket)
-							s.peerMu.Unlock()
-						}
-					}()
-				}
-				log.Trace().Str("site", "ensurePeerSessions_cleanup").Str("phase", "lock_wait").Str("address", string(c.address)).Msg("peer_mu_writer")
-				s.peerMu.Lock()
-				adLocked = true
-				adTicket = s.beginK3AdvertisedPeerLocked()
-				log.Trace().Str("site", "ensurePeerSessions_cleanup").Str("phase", "lock_held").Str("address", string(c.address)).Msg("peer_mu_writer")
-				s.deliveryMu.Lock()
-				adDeliveryLocked = true
-				var k3 k3RegisteredTicket
-				if s.k3Registered != nil {
-					k3 = s.k3BeginSessionLocked(c.address)
-				}
-				s.k3AdvertisedSessionChangingLocked(c.address, nil)
-				publication := s.beginRegistryPublication()
-				delete(s.sessions, c.address)
-				delete(s.upstream, c.address)
-				delete(s.dialOrigin, c.address)
-				if publication != nil {
-					publication.Complete()
-				}
-				if s.k3Registered != nil {
-					s.k3FinishSessionLocked(k3)
-				}
-				adDeliveryLocked = false
-				s.deliveryMu.Unlock()
-				s.finishK3AdvertisedPeerLocked(adTicket)
-				adTicket = nil
-				adLocked = false
-				s.peerMu.Unlock()
-				log.Trace().Str("site", "ensurePeerSessions_cleanup").Str("phase", "lock_released").Str("address", string(c.address)).Msg("peer_mu_writer")
-			}()
-			s.runPeerSession(ctx, c.address)
-		}(candidate)
-	}
-}
-
 // connectedHostsLocked returns one snapshot of the hosts (IP addresses or
 // hostnames) this node holds a peer connection with, split by direction:
 // outbound peer sessions, and inbound connections that completed
@@ -1243,42 +1144,10 @@ func readSyncReply(ctx context.Context, reader *bufio.Reader, wantType string, b
 	}
 }
 
-// syncPeerWelcome is the welcome of a sync dial: the proven listener's intro
-// on v2; on v1 the answer to our hello, whatever it is — the caller passes it
-// through admitServiceDialWelcome before anything else is sent.
-func (s *Service) syncPeerWelcome(pc *netcore.NetCore, reader *bufio.Reader, address domain.PeerAddress, transport *dialledTransport) (protocol.Frame, bool) {
-	if transport.proven != nil {
-		return transport.proven.Intro, true
-	}
-	if st := pc.SendRawSyncBlocking([]byte(s.nodeHelloJSONLine())); st != netcore.SendOK {
-		log.Warn().Str("peer", string(address)).Str("status", st.String()).Msg(serviceDialSyncPeer.event("hello_write_failed"))
-		return protocol.Frame{}, false
-	}
-	welcomeLine, err := readFrameLine(reader, maxResponseLineBytes)
-	if err != nil {
-		log.Warn().Err(err).Str("peer", string(address)).Msg(serviceDialSyncPeer.event("welcome_read_failed"))
-		return protocol.Frame{}, false
-	}
-	welcome, err := protocol.ParseFrameLine(strings.TrimSpace(welcomeLine))
-	if err != nil {
-		log.Warn().Err(err).Str("peer", string(address)).Msg(serviceDialSyncPeer.event("welcome_parse_failed"))
-		return protocol.Frame{}, false
-	}
-	return welcome, true
-}
-
-// syncPeer opens a fresh TCP connection to the given address, performs
-// a full handshake (v2, or v1 hello → welcome → auth_session → auth_ok),
-// optionally requests the peer list (when requestPeers is true), fetches
-// contacts, and imports any verified contacts into local state. Returns the
-// number of contacts successfully imported.
+// syncPeer opens a secure connection, optionally requests peers and imports
+// verified contacts. It returns the number of imported contacts.
 //
-// The welcome is gated like a session's (service_dial_welcome.go): a
-// responder below MinimumProtocolVersion is refused and penalised, and a v1
-// welcome without a challenge ends the dial — nothing but the hello is ever
-// written to a responder that did not authenticate us.
-//
-// The requestPeers parameter is passed by the caller rather than derived
+// // The requestPeers parameter is passed by the caller rather than derived
 // internally from shouldRequestPeers(): forced-refresh paths (sender-key
 // recovery) deliberately skip peer exchange even when the aggregate status
 // would otherwise allow it, because those paths are a narrow contact/key
@@ -1309,11 +1178,6 @@ func (s *Service) syncPeerWithIntent(ctx context.Context, address domain.PeerAdd
 	// which is the point: recovering a sender key is worth a connection, but
 	// not worth exceeding the node's own limit (conn_budget_dial.go).
 	//
-	// The session kind follows the same transport policy as every other dial
-	// (dialPeerTransport): v2 first, and no v1 for an endpoint bound to v2 —
-	// a recovery dial must not become the side door that still hands a
-	// relayable v1 proof to whoever stands on the path.
-	//
 	// Metered for the node-wide transport totals only. This dial never becomes
 	// a session, so its bytes stay out of the per-peer health totals, exactly
 	// as before; what it must not do is cross the wire uncounted.
@@ -1322,14 +1186,14 @@ func (s *Service) syncPeerWithIntent(ctx context.Context, address domain.PeerAdd
 	})
 	if err != nil {
 		log.Warn().Err(err).Str("peer", string(address)).Msg(serviceDialSyncPeer.event("dial_failed"))
-		s.reactToIncompatibleDial(address, err)
+		if !s.tryApplySelfIdentityCooldown(address, err) {
+			s.reactToIncompatibleDial(address, err)
+		}
 		return 0
 	}
 	conn := transport.wire
 
 	_ = conn.SetDeadline(time.Now().Add(syncHandshakeTimeout))
-	// The transport's reader: on a v1 connection the probe opened, it holds
-	// what the responder sent behind the probe's answer.
 	reader := transport.reader
 
 	// Per-read idle-deadline refresh for the filtered reply reads
@@ -1367,45 +1231,17 @@ func (s *Service) syncPeerWithIntent(ctx context.Context, address domain.PeerAdd
 	// announce the one-shot dial and the responder honour it, so it is a
 	// both-ends change that needs a protocol version of its own; no
 	// version implements it yet.
-	welcome, ok := s.syncPeerWelcome(pc, reader, address, transport)
-	if !ok {
-		s.forgetLegacyObservedWithoutWelcome(address, transport)
+	welcome := transport.proven.Intro
+	if err := s.admitServiceDialWelcome(serviceDialSyncPeer, address, welcome); err != nil {
 		return 0
 	}
-	// One gate for both session kinds, before auth_session is signed and
-	// before learnIdentityFromWelcome runs: the same welcome as the probe's
-	// answer on a v1 connection (refuseFullLegacyWelcome), then notice,
-	// non-welcome, v2 pin, floor, self identity (admitServiceDialWelcome); the
-	// v1 challenge is checked by authenticateServiceDial before it signs.
-	// `defer pc.Close()` above tears the dial down through the NetCore
-	// wrapper.
-	if err := s.refuseFullLegacyWelcome(address, transport, welcome); err != nil {
-		return 0
-	}
-	if err := s.admitServiceDialWelcome(serviceDialSyncPeer, address, welcome, transport.proven != nil); err != nil {
-		return 0
-	}
-	writeLine := func(line string) error {
-		if st := pc.SendRawSyncBlocking([]byte(line)); st != netcore.SendOK {
-			return fmt.Errorf("send: %s", st)
-		}
-		return nil
-	}
-	if transport.proven == nil && !s.authenticateServiceDial(ctx, serviceDialSyncPeer, address, welcome, writeLine, reader, refreshSyncDeadline) {
-		return 0
-	}
-	// Outbound convergence success hook: proven by session_proof on v2, by
-	// auth_ok on v1. syncPeer completes the same exchange as the managed-
-	// session and raw/bootstrap paths; without this call, peers reached only
-	// through syncPeer would never get announce_state=announceable or a
-	// trusted advertise triple, so convergence state would depend on which
-	// outbound path happened to reach the peer.
+	// Convergence bookkeeping is shared with the managed path.
 	//
 	// pc is the bootstrap *netcore.NetCore wrapper created above; its
 	// RemoteAddr() is the same "host:port" form that the managed-session path
 	// feeds in, so both paths project onto persistedMeta through one writer.
 	s.recordOutboundAuthSuccess(address, pc.RemoteAddr())
-	s.learnIdentityFromWelcome(welcome, address, identityOriginOf(transport.proven != nil))
+	s.learnIdentityFromWelcome(welcome, address, domain.PeerIdentityProvenV2)
 	s.peerMu.RLock()
 	syncHealthKey := s.resolveHealthAddress(address)
 	s.peerMu.RUnlock()
@@ -3131,11 +2967,11 @@ func isUnsolicitedSessionFrame(frameType string) bool {
 		frameType == "announce_peer"
 }
 
-func (s *Service) peerSessionRequest(session *peerSession, frame protocol.Frame, expectedType string, hello bool) (protocol.Frame, error) {
-	return s.peerSessionRequestAt(session, frame, expectedType, hello, nil, 0)
+func (s *Service) peerSessionRequest(session *peerSession, frame protocol.Frame, expectedType string) (protocol.Frame, error) {
+	return s.peerSessionRequestAt(session, frame, expectedType, nil, 0)
 }
 
-func (s *Service) peerSessionRequestAt(session *peerSession, frame protocol.Frame, expectedType string, hello bool, wireQueue *routeWireSendQueue, first time.Duration) (protocol.Frame, error) {
+func (s *Service) peerSessionRequestAt(session *peerSession, frame protocol.Frame, expectedType string, wireQueue *routeWireSendQueue, first time.Duration) (protocol.Frame, error) {
 	// All outbound writes route through the managed single-writer path on
 	// NetCore so that deadline, back-pressure and ordering match inbound.
 	// SendRawSyncBlocking blocks until the writer goroutine flushes the
@@ -3154,25 +2990,14 @@ func (s *Service) peerSessionRequestAt(session *peerSession, frame protocol.Fram
 		// reply that overtakes the return of SendRawSyncBlocking still finds it.
 		defer session.admission.expectReply(expectedType)()
 	}
-	var payload []byte
-	writtenType := frame.Type
-	if hello {
-		payload = []byte(s.nodeHelloJSONLine())
-		writtenType = "hello"
-	} else {
-		// Peer-session write: receiver dispatches through readPeerSession
-		// bound by maxResponseLineBytes (8 MiB) — wider than the inbound
-		// command-plane budget because response frames legally batch
-		// many DM bodies (contacts, messages, inbox). Use the matching
-		// MaxResponseLine budget so legitimate batched responses pass
-		// while still rejecting genuinely oversize frames as a self-bug.
-		line, err := protocol.MarshalFrameLineWithLimit(frame, protocol.MaxResponseLine)
-		if err != nil {
-			wireQueue.retire(first, true, false)
-			return protocol.Frame{}, fmt.Errorf("peerSessionRequest: %w", err)
-		}
-		payload = []byte(line)
+	// Responses can batch large messages and contact lists, so use the
+	// response frame budget on the outbound connection.
+	line, err := protocol.MarshalFrameLineWithLimit(frame, protocol.MaxResponseLine)
+	if err != nil {
+		wireQueue.retire(first, true, false)
+		return protocol.Frame{}, fmt.Errorf("peerSessionRequest: %w", err)
 	}
+	payload := []byte(line)
 	// Outbound control-plane: block on full queue rather than fast-fail,
 	// so relay traffic backlog cannot starve handshake /
 	// heartbeat writes. Inbound error paths keep the fast-fail sendRawSync
@@ -3182,7 +3007,7 @@ func (s *Service) peerSessionRequestAt(session *peerSession, frame protocol.Fram
 	if st != netcore.SendOK {
 		return protocol.Frame{}, fmt.Errorf("peerSessionRequest: send failed: %s", st.String())
 	}
-	s.markSessionWrite(session, writtenType)
+	s.markSessionWrite(session, frame.Type)
 
 	// Use a longer read deadline for ping so that the heartbeat's pong
 	// stall bound governs stall detection instead of the generic
@@ -3219,9 +3044,7 @@ func (s *Service) peerSessionRequestAt(session *peerSession, frame protocol.Fram
 				// details.reason that discriminates how the caller must
 				// react: `self-identity` MUST route through
 				// applySelfIdentityCooldown (24h suppression) via the
-				// shared tryApplySelfIdentityCooldown helper consulted
-				// by every outbound failure hook (onCMDialFailed,
-				// runPeerSession), while `peer-ban` / `blacklisted` go
+				// shared tryApplySelfIdentityCooldown helper. Other bans go
 				// through the standard peer-ban cooldown path. Collapsing
 				// every reason to ErrPeerBanned (what ErrorFromCode would
 				// do) defeats the whole point of detecting self-loopback
@@ -3289,17 +3112,17 @@ func (s *Service) peerSessionRequestAt(session *peerSession, frame protocol.Fram
 // requestPeers controls whether get_peers is sent. The caller must evaluate
 // shouldRequestPeers() BEFORE any side-effects that alter the aggregate
 // status for the current connection (e.g. markPeerConnected). This ensures
-// both session-based call sites (openPeerSession / initPeerSession) see a
+// managed-session setup sees a
 // consistent aggregate snapshot that does not yet include the peer being
 // set up.
 //
 // path identifies the caller for observability (peerExchangePathSessionOutbound
-// for the legacy openPeerSession path, peerExchangePathSessionCM for the
+// for the managed session path. The old diagnostics tag remains stable.
 // ConnectionManager initPeerSession path). See
 // docs/peer-discovery-conditional-get-peers.ru.md Step 6.
 func (s *Service) syncPeerSession(session *peerSession, requestPeers bool, path peerExchangePath) error {
 	if requestPeers {
-		peersFrame, err := s.peerSessionRequest(session, protocol.Frame{Type: "get_peers"}, "peers", false)
+		peersFrame, err := s.peerSessionRequest(session, protocol.Frame{Type: "get_peers"}, "peers")
 		if err != nil {
 			return err
 		}
@@ -3345,7 +3168,7 @@ func (s *Service) syncPeerSession(session *peerSession, requestPeers bool, path 
 // for peers without the layer. TODO(fetch-contacts-floor): remove when
 // nothing is left to bridge — see docs/protocol/identity-lookup.md.
 func (s *Service) syncContactsViaSession(session *peerSession) (int, error) {
-	contactsFrame, err := s.peerSessionRequest(session, protocol.Frame{Type: "fetch_contacts"}, "contacts", false)
+	contactsFrame, err := s.peerSessionRequest(session, protocol.Frame{Type: "fetch_contacts"}, "contacts")
 	if err != nil {
 		return 0, err
 	}
@@ -4016,10 +3839,6 @@ func (s *Service) outboundControlFrameAllowed(session *peerSession) bool {
 //   - abortLocallyEvictedCMSession / failCMSessionSetup (CM sessions that
 //     end before they are published: frames dispatched during setup can
 //     already have created the bucket)
-//   - openPeerSession's deferred close (legacy path: the session lives and
-//     ends inside that call, on an error and on a cancelled context alike;
-//     dropping by the session's own connID, not through the session-map
-//     entry, cannot touch another session registered at the address)
 //
 // commandRateLimiter.sweepIdle, run on every bootstrapLoop tick, is
 // the bound behind these sites: a bucket some future path forgets is
@@ -4613,7 +4432,7 @@ func (s *Service) enqueueAckDeleteOnSession(session *peerSession, address domain
 	// enqueueSessionSendItem (see the comment above), so it applies the
 	// same stamp itself.
 	full := s.buildAckDeleteFrame(ack)
-	stamped := s.stampAckDeleteForSession(session, legacyPeerSendItem(full))
+	stamped := s.gateAckDeleteForSession(session, legacyPeerSendItem(full))
 	if stamped.Type == "" {
 		return
 	}
@@ -4629,14 +4448,7 @@ func (s *Service) enqueueAckDeleteOnSession(session *peerSession, address domain
 	}
 }
 
-// buildAckDeleteFrame constructs a signed ack_delete frame. Extracted from
-// sendAckDeleteToPeer so the same frame can be sent on either an outbound
-// session (enqueuePeerFrame) or an inbound connection (sendAckDeleteByID).
-// buildAckDeleteFrame builds the FULL ack — everything this node knows
-// about the receipt, signed. What a particular peer may receive is not
-// decided here: see stampAckDeleteForSession. Building the full form
-// keeps the author in the frame while it waits in the pending queue, so
-// a peer that turns out to support it still gets it.
+// buildAckDeleteFrame signs an acknowledgment with the full receipt identity.
 func (s *Service) buildAckDeleteFrame(ack ackDelete) protocol.Frame {
 	frame := protocol.Frame{
 		Type:          "ack_delete",
@@ -4651,41 +4463,16 @@ func (s *Service) buildAckDeleteFrame(ack ackDelete) protocol.Frame {
 	return frame
 }
 
-// stampAckDeleteForSession settles the SHAPE of one of our ack_delete
-// frames against the session it is about to be written to, and re-signs
-// it there.
-//
-// The version decides what is signed, not merely whether a field is set:
-// the receipt's author is inside the payload, so a peer that rebuilds the
-// older payload finds a signature it cannot reproduce and scores it as
-// forgery — ban points, not a warning. Deciding that where the frame is
-// BUILT was wrong twice over: a frame can wait in the pending queue
-// across a reconnect and be written to a session that did not exist when
-// it was signed, and the build site could only ask about the address,
-// while frames are written to a session.
-//
-// So the shape is settled at the one door every session write passes,
-// next to the delivery reference, and for the same reason: a producer
-// cannot forget what it never had to remember.
-func (s *Service) stampAckDeleteForSession(session *peerSession, item peerSendItem) peerSendItem {
+// gateAckDeleteForSession applies the optional signed-receipt capability
+// to frames leaving a pending queue after reconnect.
+func (s *Service) gateAckDeleteForSession(session *peerSession, item peerSendItem) peerSendItem {
 	if session == nil || item.Type != "ack_delete" || item.Address != s.identity.Address {
 		return item
 	}
 	if item.ReceiptProof != "" && !s.sessionHasCapability(session, domain.CapSignedReceiptAckV1) {
 		return peerSendItem{}
 	}
-	item.Frame = s.buildAckDeleteFrameFor(ackDeleteFromFrame(item.Frame), session.version >= config.ProtocolVersionReceiptSenderAck)
 	return item
-}
-
-// buildAckDeleteFrameFor is buildAckDeleteFrame narrowed to what one
-// destination can verify. Below the floor the frame is byte-identical to
-// what this node sent before the field existed.
-func (s *Service) buildAckDeleteFrameFor(ack ackDelete, peerCarriesReceiptSender bool) protocol.Frame {
-	if !peerCarriesReceiptSender && ack.ReceiptProof == "" {
-		ack.ReceiptSender = ""
-	}
-	return s.buildAckDeleteFrame(ack)
 }
 
 // sendAckDeleteByID writes an ack_delete frame directly on the inbound
@@ -4702,7 +4489,7 @@ func (s *Service) sendAckDeleteByID(connID domain.ConnID, ack ackDelete) {
 	if ack.ReceiptProof != "" && !core.HasCapability(domain.CapSignedReceiptAckV1) {
 		return
 	}
-	frame := s.buildAckDeleteFrameFor(ack, int(core.ProtocolVersion()) >= config.ProtocolVersionReceiptSenderAck)
+	frame := s.buildAckDeleteFrame(ack)
 	// Fire-and-forget inbound write — route through the Network interface
 	// so a test backend can intercept it. s.runCtx tracks Service lifecycle;
 	// see network_consumer.go for the full outcome-tree contract.
@@ -5877,8 +5664,8 @@ func (s *Service) enqueueSessionSendItem(session *peerSession, item peerSendItem
 	// could forget to pass.
 	item = s.withDeliveryRef(item, time.Now().UTC())
 	// An ack we authored is signed for the version of the session that
-	// actually writes it — see stampAckDeleteForSession.
-	item = s.stampAckDeleteForSession(session, item)
+	// actually writes it — see gateAckDeleteForSession.
+	item = s.gateAckDeleteForSession(session, item)
 	if item.Type == "" {
 		return false
 	}
@@ -7073,8 +6860,8 @@ func (s *Service) resolveSessionLocked(address domain.PeerAddress) *peerSession 
 //
 // When a fallback address succeeds, dialOrigin[fallback] = primary is
 // registered so resolveHealthAddress maps all health/metering operations
-// back to the single canonical entry. The legacy path (ensurePeerSessions)
-// does the same registration; without it markPeerConnected, peerHealthFrames
+// back to the single canonical entry. Without this registration,
+// markPeerConnected, peerHealthFrames
 // and ActiveSessionLost would all operate on the wrong key.
 func (s *Service) dialForCM(ctx context.Context, addresses []domain.PeerAddress) (result DialResult, err error) {
 	var adTicket *k3AdvertisedTicket

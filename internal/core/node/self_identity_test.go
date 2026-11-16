@@ -1,19 +1,16 @@
 package node
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"fmt"
 	"net"
-	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/config"
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/domain/domaintest"
-	"github.com/piratecash/corsa/internal/core/netcore"
 	"github.com/piratecash/corsa/internal/core/netcore/netcoretest"
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
@@ -33,84 +30,6 @@ import (
 // outcome leads to a reconnect loop against the local endpoint; the
 // self-identity notice is the only wire form that steers the dialler
 // into the address cooldown.
-func TestInboundHello_SelfIdentity_EmitsPeerBannedNotice(t *testing.T) {
-	t.Parallel()
-
-	backend := netcoretest.New()
-	t.Cleanup(backend.Shutdown)
-
-	svc := NewServiceWithNetwork(config.Node{
-		ListenAddress:  "127.0.0.1:0",
-		Type:           config.NodeTypeFull,
-		TrustStorePath: t.TempDir() + "/trust.json",
-	}, testIdentityForNetworkConsumerTest(t), backend)
-	t.Cleanup(svc.WaitBackground)
-
-	connID := netcore.ConnID(9500)
-	backend.Register(connID, netcore.Inbound, "10.0.0.42:64646")
-
-	// Craft a hello whose Address field matches the local identity. The
-	// PubKey / BoxKey / BoxSig values are filler — the guard runs BEFORE
-	// connauth.PrepareAuth so the cryptographic box-key binding is never
-	// checked on this path. That is deliberate: a valid binding is
-	// impossible when the remote is actually us (we would need our own
-	// private key on the remote side), so gating the guard on a crypto
-	// pre-check would make it unreachable in production.
-	//
-	// Listener="1" is critical: the guard is gated on the listener flag
-	// (the hello carries no host). Local
-	// subscribers (RPC clients using the node identity for
-	// self-subscription) never set Listener=1, and the guard must not
-	// break that flow. Every genuine self-loopback path surfaces
-	// Listener=1 because it originates from our own outbound dialler,
-	// which always reflects EffectiveListenerEnabled into the listener
-	// flag.
-	helloFrame := protocol.Frame{
-		Type:     "hello",
-		Version:  config.ProtocolVersion,
-		Client:   "node",
-		Address:  svc.identity.Address,
-		Listener: "1",
-		PubKey:   "filler-pubkey",
-		BoxKey:   "filler-boxkey",
-		BoxSig:   "filler-boxsig",
-	}
-	helloLine, err := protocol.MarshalFrameLine(helloFrame)
-	if err != nil {
-		t.Fatalf("MarshalFrameLine hello: %v", err)
-	}
-
-	if ok := svc.dispatchNetworkFrame(connID, helloLine); ok {
-		t.Fatalf("dispatchNetworkFrame(self-identity hello) returned true; expected accepted=false so handleConn tears down the socket via the Network wrapper")
-	}
-
-	select {
-	case data, open := <-backend.Outbound(connID):
-		if !open {
-			t.Fatal("backend.Outbound(connID) closed before self-identity notice arrived")
-		}
-		frame, err := parseFrameLineForTest(data)
-		if err != nil {
-			t.Fatalf("parse notice frame: %v (raw=%q)", err, data)
-		}
-		if frame.Type != protocol.FrameTypeConnectionNotice {
-			t.Fatalf("expected %q, got type=%q (raw=%q)", protocol.FrameTypeConnectionNotice, frame.Type, data)
-		}
-		if frame.Code != protocol.ErrCodePeerBanned {
-			t.Fatalf("expected code=%q, got %q", protocol.ErrCodePeerBanned, frame.Code)
-		}
-		details, _, err := protocol.ParsePeerBannedDetails(frame.Details)
-		if err != nil {
-			t.Fatalf("parse peer-banned details: %v (raw=%s)", err, string(frame.Details))
-		}
-		if details.Reason != protocol.PeerBannedReasonSelfIdentity {
-			t.Fatalf("expected reason=%q, got %q", protocol.PeerBannedReasonSelfIdentity, details.Reason)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for self-identity notice on backend.Outbound(connID)")
-	}
-}
-
 // TestLearnIdentityFromWelcome_SelfIdentity_SkipsIngest asserts that the
 // defence-in-depth guard inside learnIdentityFromWelcome drops a welcome
 // whose Address matches the local identity. Without the guard, the peer
@@ -396,32 +315,7 @@ func TestSyncPeer_SelfIdentityWelcome_AppliesCooldown(t *testing.T) {
 	svc := newSyncPeerTestService(t, domain.NetworkStatusHealthy)
 	peerAddr := domain.PeerAddress(ln.Addr().String())
 
-	// Mock peer: read hello, answer with a welcome whose Address matches
-	// the local identity. The guard triggers on the identity equality
-	// alone (syncPeer is always a P2P dial, never a subscriber probe, so
-	// the listener-flag gate that lives on the inbound hello path does
-	// not apply here).
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		conn, err := ln.Accept()
-		if err != nil {
-			return
-		}
-		defer func() { _ = conn.Close() }()
-		_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
-		reader := bufio.NewReader(conn)
-		if _, err := reader.ReadString('\n'); err != nil {
-			return
-		}
-		welcome, _ := protocol.MarshalFrameLine(protocol.Frame{
-			Type:                   "welcome",
-			Version:                config.ProtocolVersion,
-			MinimumProtocolVersion: config.MinimumProtocolVersion,
-			Address:                svc.identity.Address,
-		})
-		_, _ = conn.Write([]byte(welcome))
-	}()
+	done := serveV2Intro(ln, svc.identity, currentSecureIntro())
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -429,7 +323,7 @@ func TestSyncPeer_SelfIdentityWelcome_AppliesCooldown(t *testing.T) {
 	if got := svc.syncPeer(ctx, peerAddr, true); got != 0 {
 		t.Fatalf("syncPeer(self-identity welcome) imported %d; expected 0 on early abort", got)
 	}
-	<-done
+	awaitSelfDialRefusal(t, done)
 
 	svc.peerMu.RLock()
 	health, ok := svc.health[peerAddr]
@@ -629,109 +523,7 @@ func TestTryApplySelfIdentityCooldown_NilError_Miss(t *testing.T) {
 //   - health.BannedUntil must be stamped (~24h into the future);
 //   - health.LastErrorCode must equal ErrCodeSelfIdentity so the
 //     dial gate suppresses further attempts for the ban window.
-func TestRunPeerSession_SelfIdentity_AppliesCooldownAndExits(t *testing.T) {
-	svc := newTestService(t, config.NodeTypeFull)
-	asLegacyOnlyDialler(svc)
-
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("net.Listen: %v", err)
-	}
-	t.Cleanup(func() { _ = ln.Close() })
-
-	// Mock peer: accept connections, read hello, answer with a welcome
-	// whose Address matches the local identity. A retry loop would try
-	// to accept a second connection; the acceptCount assertion pins
-	// that path closed. The guard triggers on identity equality alone.
-	//
-	// acceptCount is observed AFTER runPeerSession returns; using
-	// atomic.Int32 (not a channel) avoids the close-while-producer-
-	// is-writing race — the accept goroutine exits only after
-	// ln.Close() is called by t.Cleanup, which happens after the test
-	// body drops all references.
-	peerAddr := domain.PeerAddress(ln.Addr().String())
-	var acceptCount atomic.Int32
-	go func() {
-		for {
-			c, err := ln.Accept()
-			if err != nil {
-				// ln.Close() is the expected exit path — t.Cleanup
-				// closes the listener at test teardown.
-				return
-			}
-			acceptCount.Add(1)
-			go func(conn net.Conn) {
-				defer func() { _ = conn.Close() }()
-				_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
-				reader := bufio.NewReader(conn)
-				if _, err := reader.ReadString('\n'); err != nil {
-					return
-				}
-				welcome, err := protocol.MarshalFrameLine(protocol.Frame{
-					Type:    "welcome",
-					Version: config.ProtocolVersion,
-					Address: svc.identity.Address,
-				})
-				if err != nil {
-					return
-				}
-				_, _ = conn.Write([]byte(welcome))
-			}(c)
-		}
-	}()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	runDone := make(chan struct{})
-	start := time.Now()
-	go func() {
-		defer close(runDone)
-		svc.runPeerSession(ctx, peerAddr)
-	}()
-
-	// The short-circuit must fire BEFORE the 2s retry sleep. A generous
-	// 1.5s ceiling proves the function returned directly from the
-	// tryApplySelfIdentityCooldown branch — not after one pass through
-	// the retry backoff (which would also pass the BannedUntil check
-	// below if the cooldown eventually lands, hiding the regression).
-	select {
-	case <-runDone:
-		if elapsed := time.Since(start); elapsed >= 1500*time.Millisecond {
-			t.Fatalf("runPeerSession returned after %v; must short-circuit before the 2s retry-sleep floor", elapsed)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("runPeerSession did not return within 5s — self-identity short-circuit missing, retry loop still active")
-	}
-
-	// Snapshot the accept count now that runPeerSession has returned.
-	// A retry would have redialled the listener and bumped the counter
-	// above 1 — the wire-level footprint of the regression described
-	// in the comment above.
-	if got := acceptCount.Load(); got != 1 {
-		t.Fatalf("listener saw %d accepts; want exactly 1 (retry loop still churning against self-alias)", got)
-	}
-
-	svc.peerMu.RLock()
-	health, ok := svc.health[peerAddr]
-	svc.peerMu.RUnlock()
-	if !ok {
-		t.Fatalf("applySelfIdentityCooldown was not reached: no peerHealth entry for %s", peerAddr)
-	}
-	if health.BannedUntil.IsZero() {
-		t.Fatal("BannedUntil not set — runPeerSession self-identity branch bypassed the cooldown (the bug this test pins)")
-	}
-	if got, want := health.LastErrorCode, protocol.ErrCodeSelfIdentity; got != want {
-		t.Fatalf("health.LastErrorCode = %q, want %q", got, want)
-	}
-	if health.LastError == "" {
-		t.Fatal("health.LastError is empty; applySelfIdentityCooldown must stamp the structured error message")
-	}
-	if minExpected := peerBanSelfIdentity - time.Minute; time.Until(health.BannedUntil) < minExpected {
-		t.Fatalf("BannedUntil too short: got %v until, want ≥ %v", time.Until(health.BannedUntil), minExpected)
-	}
-}
-
+//
 // TestApplySelfIdentityCooldown_NoAccumulation_WithinBanWindow pins the
 // documented "no accumulation" contract (peerBanSelfIdentity comment in
 // peer_state.go and onCMDialFailed comment): the address-level Score

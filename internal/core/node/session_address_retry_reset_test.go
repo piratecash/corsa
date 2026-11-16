@@ -9,7 +9,7 @@ import (
 // simultaneously open dials; no scheduler timing or remote TLS peer is needed
 // to reproduce the reset between stages of the older attempt.
 func TestLateDialStagePreservesConcurrentV2Success(t *testing.T) {
-	for _, event := range []string{"unanswered", "probe-v2-hint", "listener-refused"} {
+	for _, event := range []string{"unanswered", "listener-refused"} {
 		t.Run(event, func(t *testing.T) {
 			clock := newStoreClock()
 			marks := newSessionAddressMarks(clock.read)
@@ -22,13 +22,10 @@ func TestLateDialStagePreservesConcurrentV2Success(t *testing.T) {
 				if wait := marks.noteListenerRefused(dialChoiceAddress); wait != v2RetryBase {
 					t.Fatalf("initial refusal wait = %v, want %v", wait, v2RetryBase)
 				}
-				// B completes after A's first failure, before A's probe ends.
+				// B completes after A's first failure, before A's pending failure is handled.
 				marks.noteOutboundV2(dialChoiceAddress)
 				if !marks.v2Strong(dialChoiceAddress) || marks.v2RetryHeld(dialChoiceAddress) {
 					t.Fatal("successful outbound proof did not clear the retry")
-				}
-				if event == "probe-v2-hint" {
-					marks.noteV2Hint(dialChoiceAddress)
 				}
 				var wait time.Duration
 				if event == "listener-refused" {

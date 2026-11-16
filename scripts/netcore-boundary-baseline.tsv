@@ -23,8 +23,6 @@ conn	internal/core/node/service.go | func (s *Service) isBlacklistedConn(conn ne
 conn	internal/core/node/service.go | func (s *Service) registerInboundConn(conn net.Conn, reservation *connbudget.Reservation) error
 conn	internal/core/node/service.go | func (s *Service) unregisterInboundConn(conn net.Conn)
 conn	internal/core/node/session_liveness.go | func newInboundFrameDeadline(conn net.Conn, frameTimeout time.Duration) *inboundFrameDeadline
-conn	internal/core/node/session_probe.go | func armLegacyProbeDeadline(ctx context.Context, conn net.Conn, opts legacyProbeOptions) (func(), error)
-conn	internal/core/node/session_probe.go | func probeLegacy(ctx context.Context, conn net.Conn, opts legacyProbeOptions) (legacyProbeAnswer, error)
 entry	internal/core/node/resource_breakdown.go | func (s *Service) sessionsUsage() domain.SubsystemUsage | queued, capacity := entry.core.WriterQueue()
 entry	internal/core/node/rollout_metrics.go | func (s *Service) collectNeighbourComposition() domain.NeighbourComposition | _, proven := entry.core.Auth().ProvenIdentity()
 entry	internal/core/node/rollout_metrics.go | func (s *Service) collectNeighbourComposition() domain.NeighbourComposition | count(info.identity, advertisedNamesOf(entry.core.Declarations()), proven)
@@ -45,7 +43,6 @@ legacy_import	internal/core/node/routing_relay.go | "net"
 legacy_import	internal/core/node/secure_session_store.go | "net"
 legacy_import	internal/core/node/service.go | "net"
 legacy_import	internal/core/node/session_liveness.go | "net"
-legacy_import	internal/core/node/session_probe.go | "net"
 legacy_import	internal/core/node/session_secure.go | "net"
 legacy_import	internal/core/node/socks5.go | "net"
 readiness	internal/core/node/peer_session_readiness.go | func (b *peerSessionReadiness) stop() | b.state, b.failure = peerSessionReadClosed, net.ErrClosed

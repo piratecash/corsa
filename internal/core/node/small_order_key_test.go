@@ -1,7 +1,6 @@
 package node
 
 import (
-	"bufio"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -47,81 +46,17 @@ func forgedKeyBase64() string {
 // The peer's own key: refused with a ban
 // ---------------------------------------------------------------------------
 
-// TestHelloWithSmallOrderKeyIsRefusedWithBan is the new wire behaviour: a
-// hello whose identity fields are the self-consistent universal forgery used
-// to pass PrepareAuth (stdlib verified the box binding) and then auth_session
-// (stdlib verified the challenge), i.e. the connection authenticated as an
-// identity nobody holds a key for. It is now refused at hello with the same
-// error and the same 100 ban points as any other invalid binding.
-func TestHelloWithSmallOrderKeyIsRefusedWithBan(t *testing.T) {
+// A peer with ordinary keys can establish a TLS session without penalty.
+func TestSecureHandshakeWithHonestKeyIsUnaffected(t *testing.T) {
 	t.Parallel()
 	svc, stop := startTestNodeWithoutDials(t, config.Node{ListenAddress: freeAddress(t)})
 	defer stop()
 
-	// From an external source, whose IP the ban score keys; loopback is
-	// never scored by its IP (loopback_inbound.go).
-	conn := dialFromSource(t, svc, testExternalIP)
-	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
-	reader := bufio.NewReader(conn)
-
-	writeJSONFrame(t, conn, protocol.Frame{
-		Type:          "hello",
-		Version:       config.ProtocolVersion,
-		Client:        "node",
-		ClientVersion: config.CorsaVersion,
-		Address:       forgedIdentityAddress(),
-		PubKey:        forgedKeyBase64(),
-		BoxKey:        base64.StdEncoding.EncodeToString(make([]byte, 32)),
-		BoxSig:        base64.RawURLEncoding.EncodeToString(edforgery.UniversalSignature()),
-	})
-	reply := readJSONTestFrame(t, reader)
-	if reply.Type != "error" || reply.Code != protocol.ErrCodeInvalidAuthSignature {
-		t.Fatalf("hello with a small-order key: got %#v, want error %s", reply, protocol.ErrCodeInvalidAuthSignature)
-	}
-	if got := banScoreForIP(svc, testExternalIP); got != banIncrementInvalidSig {
-		t.Fatalf("ban score = %d, want %d: the key is the peer's own", got, banIncrementInvalidSig)
-	}
-}
-
-// TestHelloWithHonestKeyIsUnaffected is the compatibility control on the same
-// path: an honest identity of any build still gets its welcome, authenticates
-// and is charged nothing.
-func TestHelloWithHonestKeyIsUnaffected(t *testing.T) {
-	t.Parallel()
-	svc, stop := startTestNodeWithoutDials(t, config.Node{ListenAddress: freeAddress(t)})
-	defer stop()
-	id, err := identity.Generate()
-	if err != nil {
-		t.Fatalf("identity.Generate: %v", err)
-	}
-
-	// From an external source, whose IP the ban score keys; loopback is
-	// never scored by its IP (loopback_inbound.go).
-	conn := dialFromSource(t, svc, testExternalIP)
-	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
-	reader := bufio.NewReader(conn)
-
-	writeJSONFrame(t, conn, protocol.Frame{
-		Type:          "hello",
-		Version:       config.ProtocolVersion,
-		Client:        "node",
-		ClientVersion: config.CorsaVersion,
-		Address:       id.Address,
-		PubKey:        identity.PublicKeyBase64(id.PublicKey),
-		BoxKey:        identity.BoxPublicKeyBase64(id.BoxPublicKey),
-		BoxSig:        identity.SignBoxKeyBinding(id),
-	})
-	welcome := readJSONTestFrame(t, reader)
-	if welcome.Type != "welcome" || welcome.Challenge == "" {
-		t.Fatalf("expected welcome with challenge, got %#v", welcome)
-	}
-	writeJSONFrame(t, conn, protocol.Frame{
-		Type:      "auth_session",
-		Address:   id.Address,
-		Signature: identity.SignPayload(id, []byte("corsa-session-auth-v1|"+welcome.Challenge+"|"+id.Address)),
-	})
-	if authOK := readJSONTestFrame(t, reader); authOK.Type != "auth_ok" {
-		t.Fatalf("expected auth_ok, got %#v", authOK)
+	raw := dialFromSource(t, svc, testExternalIP)
+	conn := proveLoopbackFixtureConn(t, raw)
+	defer func() { _ = conn.Close() }()
+	if !answersPing(t, conn) {
+		t.Fatal("the proved session cannot exchange data")
 	}
 	if got := banScoreForIP(svc, testExternalIP); got != 0 {
 		t.Fatalf("ban score = %d for an honest handshake", got)

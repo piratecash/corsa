@@ -40,7 +40,7 @@ The S6 and D1 test infrastructure can now observe first-contact timing, durable 
 
 Direct DM v2 envelopes remain disabled in ordinary builds until the mixed-version delivery policy is approved. Ordinary delivery still uses DM v1. New DMs require signatures on `delivered`, `seen`, and `seen_ack` once the sender verifies the recipient's support. The confirmation can travel on a proved direct session or through a datagram relay. When confirmation is unavailable, the sender can still queue or send the message with ordinary receipts. The requirement stays with the message, and a signed receipt can pass through a legacy relay in an encrypted control DM. Messages sent without the negotiated requirement can still use ordinary receipts. If a protected message exceeds the relay limit with its encrypted reference, sending fails with an error so the sender can shorten the message.
 
-The preparation also exposed issues in existing paths, and their fixes are included here. Peer activity and route handling stay bound to the authenticated transport that produced them; inbound sessions retain verified endpoint metadata; receipt admission follows the same transport rules; rejected legacy sessions fully purge pending legacy routes; and stored DM v2 data is verified before any delivery retry is rebuilt. The full message-identity repair described above came from the same integration work and is active in this release.
+The preparation also exposed issues in existing paths, and their fixes are included here. Peer activity and route handling stay bound to the authenticated transport that produced them; inbound sessions retain verified endpoint metadata; receipt admission follows the same transport rules; and stored DM v2 data is verified before any delivery retry is rebuilt. The full message-identity repair described above came from the same integration work and is active in this release.
 
 ## Bounded Diagnostic and Notice Storage
 
@@ -54,7 +54,7 @@ When changing ports with default paths, rename all port-specific files together,
 
 Corsa refuses to start before opening a network listener if the pin store, its marker or their directories have unsafe ownership, permissions or links. For Docker, move the data together into a private subdirectory owned by the container user and mount it at the configured data path. The standard image uses UID/GID `10001:10001`. Use mode `0700` for the private directory and `0600` for the pin store and marker. The startup error gives the path, cause and process UID/GID.
 
-TLS-first is on by default. Setting `CORSA_V2_TLS_FIRST=off` on the daemon or `NodeConfig.V2TLSFirst` to a pointer to false in the SDK starts with an identity-less probe only where legacy is permitted. Endpoints and identities already required to use the secure session still require it. Switching off TLS-first retains the stored downgrade protection.
+The minimum peer protocol is now 31. All peer sessions use TLS 1.3 with the secure-session identity proof. The daemon and SDK initiate TLS even when an older configuration requests probe-first. A v2.5.71 peer on protocol 31 can still follow the server's protocol-31 discovery reply to TLS. Nodes on protocols 28–30 must upgrade before connecting.
 
 Rollback requires a build that supports the secure session and can read the current pin store format. Keep the current identity, pin store and marker together. After schema 9 commits, a build ending at schema 8 also requires the database from the consistent backup made before upgrading.
 
@@ -104,7 +104,7 @@ Identities с сохранёнными именами теперь остают�
 
 Direct DM v2 envelopes выключены в обычных сборках до утверждения политики доставки между версиями. Обычная доставка по-прежнему использует DM v1. Новые сообщения требуют подписи для `delivered`, `seen` и `seen_ack`, когда отправитель подтвердил поддержку у получателя. Подтверждение можно получить на прямой защищённой сессии или через datagram-реле. Пока подтверждение недоступно, сообщение можно отправить или поставить в очередь с обычными квитанциями. Требование сохраняется вместе с сообщением, а подписанная квитанция может пройти через старое реле внутри зашифрованного служебного DM. Сообщения без согласованного требования по-прежнему могут использовать обычные квитанции. Если защищённое сообщение с привязкой превышает лимит реле, отправитель получает ошибку и может сократить сообщение.
 
-Подготовительные работы также выявили проблемы в существующих путях, и исправления включены в релиз. Peer activity и обработка маршрутов остаются привязаны к тому authenticated transport, который их создал; входящие sessions сохраняют проверенные endpoint metadata; допуск receipts следует тем же transport rules; после отказа legacy-сессии полностью удаляются ожидающие legacy routes; сохранённые данные DM v2 проверяются до восстановления повторной доставки. Описанное выше разделение сообщений по полной identity появилось в рамках той же интеграции и активно в этом релизе.
+Подготовительные работы также выявили проблемы в существующих путях, и исправления включены в релиз. Peer activity и обработка маршрутов остаются привязаны к тому authenticated transport, который их создал; входящие sessions сохраняют проверенные endpoint metadata; допуск receipts следует тем же transport rules; сохранённые данные DM v2 проверяются до восстановления повторной доставки. Описанное выше разделение сообщений по полной identity появилось в рамках той же интеграции и активно в этом релизе.
 
 ## Ограниченное хранение диагностики и уведомлений
 
@@ -118,7 +118,7 @@ Traffic captures теперь соблюдают лимиты хранилища
 
 Corsa отказывается запускаться до открытия сетевого порта, если у pin store, маркера или их каталогов небезопасный владелец, права доступа или ссылки. В Docker перенесите данные вместе в приватный подкаталог пользователя контейнера и смонтируйте его по настроенному пути данных. Стандартный образ использует UID/GID `10001:10001`. Установите права `0700` на приватный каталог и `0600` на pin store и маркер. Сообщение об отказе указывает путь, причину и UID/GID процесса.
 
-Режим TLS-first включён по умолчанию. `CORSA_V2_TLS_FIRST=off` у демона или указатель на `false` в `NodeConfig.V2TLSFirst` у SDK включает пробное соединение без отправки identity только там, где разрешён старый протокол. Для адресов и identity с требованием защищённой сессии оно продолжает действовать. При выключении TLS-first сохранённая защита от понижения остаётся в силе.
+Минимальная версия протокола для соседних узлов теперь 31. Все сессии используют TLS 1.3 с подтверждением identity. Демон и SDK начинают с TLS даже при прежней настройке probe-first. Узел v2.5.71 на протоколе 31 может получить ответ обнаружения и затем подключиться по TLS. Узлам на протоколах 28–30 требуется обновление.
 
 Для отката нужна сборка с поддержкой защищённой сессии и текущего формата pin store. Сохраните текущие identity, pin store и маркер вместе. После применения schema 9 сборке с последней schema 8 также потребуется база из согласованной копии, сделанной до обновления.
 

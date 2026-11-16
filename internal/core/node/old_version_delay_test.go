@@ -65,40 +65,14 @@ func TestTheOldVersionDelayGrowsToSixHoursPerEndpoint(t *testing.T) {
 	}
 }
 
-// A dialler that tries every ten seconds for a day reaches an old release
-// below the floor a bounded number of times: the delay caps the redials, not
-// the connection manager's luck.
-func TestAnOldReleaseBelowTheFloorIsDialledBoundedTimesADay(t *testing.T) {
-	t.Parallel()
-	svc := newDialChoiceService(t)
-	clock := newStoreClock()
-	svc.secureSessions.marks = newSessionAddressMarks(clock.read)
-	answer := oldReleaseBelowFloor(t)
-	sockets := 0
-	for elapsed := time.Duration(0); elapsed < 24*time.Hour; elapsed += 10 * time.Second {
-		clock.now = clock.now.Add(10 * time.Second)
-		peer := newScriptedPeer(answerClientHello(v1ErrorLine), oldNodeSocket(answer, answer))
-		_, err := dialThrough(t, svc, oldVersionEndpoint, domain.DialToAddress(), peer)
-		sockets += len(peer.sockets(t))
-		svc.onCMDialFailed(oldVersionEndpoint, err, errors.Is(err, errIncompatibleProtocol))
-	}
-	// 13 attempts of two sockets each: 30 s doubling up to 6 h.
-	if sockets > 30 || sockets < 20 {
-		t.Fatalf("%d sockets in a day, want a bounded handful (20–30)", sockets)
-	}
-	assertNoVersionHarm(t, svc, oldVersionEndpoint)
-}
-
-// Not this reason: a probe nobody answers, a broken answer below the floor,
-// a TLS failure, a full pin store. None of them starts the delay.
-func TestOnlyACorrectOldAnswerStartsTheOldVersionDelay(t *testing.T) {
+// Unproved TLS outcomes do not create a claimed-old-version delay.
+func TestTLSFailuresDoNotStartClaimedOldVersionDelay(t *testing.T) {
 	t.Parallel()
 	for name, scripts := range map[string][]socketScript{
-		"a probe timeout":          {answerClientHello(v1ErrorLine), silentPeer},
-		"a broken answer":          {answerClientHello(v1ErrorLine), oldNodeSocket(forgedLowVersionAnswer(), forgedLowVersionAnswer())},
-		"a TLS failure":            {answerClientHello(tlsHandshakeGarbage)},
-		"a TLS alert":              {answerClientHello(sessionv2.RefusalAlert())},
-		"a v1 line, then an error": {answerClientHello(v1ErrorLine), answerClientHello(v1ErrorLine)},
+		"TLS timeout":     {silentPeer},
+		"TLS failure":     {answerClientHello(tlsHandshakeGarbage)},
+		"TLS alert":       {answerClientHello(sessionv2.RefusalAlert())},
+		"plaintext reply": {answerClientHello(v1ErrorLine)},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -213,7 +187,7 @@ func TestTheOperatorSeesAndRetriesAnOldVersionDelay(t *testing.T) {
 		t.Fatal("the retry lifted the endpoint's binding")
 	}
 	peer := newScriptedPeer(answerClientHello(v1ErrorLine))
-	if _, err := dialThrough(t, svc, oldVersionEndpoint, domain.DialToAddress(), peer); !errors.Is(err, errLegacyRefusedV2Bound) {
+	if _, err := dialThrough(t, svc, oldVersionEndpoint, domain.DialToAddress(), peer); !errors.Is(err, errV1RefusedV2Only) {
 		t.Fatalf("the dial after the retry: %v, want the downgrade still refused", err)
 	}
 	if err := svc.RetryEndpointDial(context.Background(), "198.51.100.42:64646"); !errors.Is(err, domain.ErrEndpointDialDelayNotFound) {

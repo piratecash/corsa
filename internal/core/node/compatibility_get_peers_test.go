@@ -1,16 +1,12 @@
 package node
 
 import (
-	"bufio"
 	"encoding/json"
-	"net"
 	"testing"
-	"time"
 
 	"github.com/piratecash/corsa/internal/core/config"
 	"github.com/piratecash/corsa/internal/core/connauth"
 	"github.com/piratecash/corsa/internal/core/domain"
-	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
@@ -35,33 +31,6 @@ func TestGetPeersUsesOriginalTransportGate(t *testing.T) {
 		t.Fatal("closed connection built a peer exchange reply")
 	}
 }
-
-// Compatibility tests for Step 7 of docs/peer-discovery-conditional-get-peers.ru.md.
-//
-// These tests protect wire compatibility of the get_peers command against the
-// conditional-get-peers policy change. The policy is a local-only initiator
-// behaviour change: the wire frames, the inbound handler and the response
-// shape MUST stay identical to what previous versions of the protocol
-// produce and accept.
-//
-// The guarantees being defended here are:
-//
-//   1. The inbound get_peers handler still returns a protocol-conformant
-//      peers frame (type + count + peers array).
-//   2. A legacy initiator (hello without capabilities) still interoperates
-//      with a new responder — covered by TestMixedVersionLegacyPeerExchange
-//      in service_test.go; this file adds an explicit step-7 cross-reference
-//      test that complements it by focusing on the peers response shape.
-//   3. The "known_only" semantics of the local/RPC get_peers — i.e. that
-//      candidates from PeerProvider continue to surface even when no live
-//      active connection is present — remain intact.
-//
-// The initiator side of get_peers (the syncPeer recovery dial importing a
-// responder's peers) is pinned by TestSyncPeer_RequestPeersTrue_SendsGetPeers
-// against a responder that authenticates like every node at or above
-// MinimumProtocolVersion; a responder that does not — the "legacy responder"
-// this suite once simulated — is refused at the welcome
-// (service_dial_welcome_gate_test.go).
 
 // TestCompatibility_InboundGetPeersFrameShape is the step-7 regression test
 // for the inbound get_peers wire contract. It authenticates against a running
@@ -98,110 +67,26 @@ func TestCompatibility_InboundGetPeersFrameShape(t *testing.T) {
 		svc.rebuildPeersExchangeSnapshot()
 	}
 
-	conn, reader, _ := authenticatedConn(t, svc)
+	conn, reader := authenticatedConn(t, svc)
 	defer func() { _ = conn.Close() }()
 
 	writeJSONFrame(t, conn, protocol.Frame{Type: "get_peers"})
-	resp := readJSONTestFrame(t, reader)
-
-	if resp.Type != "peers" {
-		t.Fatalf("inbound get_peers must return type=peers, got type=%q code=%s error=%q",
-			resp.Type, resp.Code, resp.Error)
-	}
-	if resp.Count != len(resp.Peers) {
-		t.Fatalf("peers.count must equal len(peers): count=%d len(peers)=%d",
-			resp.Count, len(resp.Peers))
-	}
-
-	// Re-encode the parsed frame to verify the JSON key shape survives a
-	// round-trip. This defends against accidental renames of the tag
-	// (`json:"peers"`) that would only break old parsers.
-	raw, err := json.Marshal(resp)
+	line, err := readFrameLine(reader, protocol.MaxFrameLine)
 	if err != nil {
-		t.Fatalf("marshal peers frame: %v", err)
+		t.Fatalf("read peers response: %v", err)
 	}
-	var obj map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &obj); err != nil {
-		t.Fatalf("unmarshal peers frame: %v", err)
+	var response struct {
+		Type  string   `json:"type"`
+		Count *int     `json:"count"`
+		Peers []string `json:"peers"`
 	}
-	if _, ok := obj["type"]; !ok {
-		t.Fatalf("peers frame missing top-level key %q: %s", "type", string(raw))
+	if err := json.Unmarshal([]byte(line), &response); err != nil {
+		t.Fatalf("decode peers response: %v", err)
 	}
-	if _, ok := obj["peers"]; !ok {
-		t.Fatalf("peers frame missing top-level key %q: %s", "peers", string(raw))
-	}
-}
-
-// TestCompatibility_LegacyInitiatorRespondedPeersShape is a narrow
-// regression test focused on what a legacy initiator sees on the wire when
-// it talks to a new node. TestMixedVersionLegacyPeerExchange covers the
-// full hello/auth/get_peers/fetch_contacts sequence; this test zooms in on
-// the peers frame itself and asserts the step-7 wire guarantees:
-//
-//   - frame type = "peers"
-//   - count field is present and equals len(peers)
-//   - peers is a (possibly empty) array
-//
-// If a future refactor accidentally renames the JSON field or stops
-// populating Count, this test will catch it before mixed-version networks
-// break.
-func TestCompatibility_LegacyInitiatorRespondedPeersShape(t *testing.T) {
-	t.Parallel()
-
-	svc, stop := newScopedTestService(t)
-	defer stop()
-
-	legacyID, err := identity.Generate()
-	if err != nil {
-		t.Fatalf("identity.Generate: %v", err)
+	if response.Type != "peers" || response.Count == nil || *response.Count != len(response.Peers) || len(response.Peers) == 0 {
+		t.Fatalf("unexpected peers wire shape: %s", line)
 	}
 
-	conn, err := net.DialTimeout("tcp", svc.externalListenAddress(), 2*time.Second)
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-	defer func() { _ = conn.Close() }()
-	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
-
-	// "Legacy" hello: valid identity but no Capabilities field at all.
-	writeJSONFrame(t, conn, protocol.Frame{
-		Type:                   "hello",
-		Version:                config.ProtocolVersion,
-		MinimumProtocolVersion: config.MinimumProtocolVersion,
-		Client:                 "node",
-		ClientVersion:          "0.9.0",
-		Address:                legacyID.Address,
-		PubKey:                 identity.PublicKeyBase64(legacyID.PublicKey),
-		BoxKey:                 identity.BoxPublicKeyBase64(legacyID.BoxPublicKey),
-		BoxSig:                 identity.SignBoxKeyBinding(legacyID),
-	})
-	reader := bufio.NewReader(conn)
-	welcome := readJSONTestFrame(t, reader)
-	if welcome.Type != "welcome" || welcome.Challenge == "" {
-		t.Fatalf("expected welcome with challenge, got %#v", welcome)
-	}
-
-	writeJSONFrame(t, conn, protocol.Frame{
-		Type:      "auth_session",
-		Address:   legacyID.Address,
-		Signature: identity.SignPayload(legacyID, protocol.SessionAuthPayload(welcome.Challenge, legacyID.Address)),
-	})
-	authReply := readJSONTestFrame(t, reader)
-	if authReply.Type != "auth_ok" {
-		t.Fatalf("expected auth_ok, got type=%q code=%s error=%q", authReply.Type, authReply.Code, authReply.Error)
-	}
-
-	writeJSONFrame(t, conn, protocol.Frame{Type: "get_peers"})
-	resp := readJSONTestFrame(t, reader)
-
-	if resp.Type != "peers" {
-		t.Fatalf("legacy initiator expected type=peers, got type=%q code=%s error=%q",
-			resp.Type, resp.Code, resp.Error)
-	}
-	if resp.Count != len(resp.Peers) {
-		t.Fatalf("legacy initiator expected count==len(peers): count=%d len=%d",
-			resp.Count, len(resp.Peers))
-	}
 }
 
 // TestCompatibility_LocalRPCGetPeersKeepsKnownCandidates verifies that the

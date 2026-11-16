@@ -13,6 +13,7 @@ import (
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 	"github.com/piratecash/corsa/internal/core/protocol"
+	"github.com/piratecash/corsa/internal/core/sessionv2"
 )
 
 // local_eviction_session_test.go pins what a LOCAL eviction of an outbound
@@ -55,6 +56,7 @@ type farEndFunc func(remote net.Conn, inbox chan<- protocol.Frame, errs chan<- e
 
 // evictionRigOptions configures newEvictionRig. Both fields are optional.
 type evictionRigOptions struct {
+	provenPeer *sessionv2.Peer
 	// beforeEstablished runs on the event loop ahead of the Service's
 	// onCMSessionEstablished, so a test can hold the loop there.
 	beforeEstablished func(SessionInfo)
@@ -97,6 +99,11 @@ func newEvictionRig(t *testing.T, opts evictionRigOptions) *evictionRig {
 	}
 	rig.maxSlots.Store(1)
 	rig.session = newEvictionSession()
+	if opts.provenPeer != nil {
+		rig.session.proven = opts.provenPeer
+		rig.session.peerIdentity = opts.provenPeer.Identity
+		rig.session.version = config.ProtocolVersion
+	}
 	rig.attachFarEnd(t, opts.farEnd)
 	rig.seedSetupFailures()
 

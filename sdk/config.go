@@ -121,13 +121,9 @@ type NodeConfig struct {
 	// CORSA_PROBE_BACKOFF. Set to a pointer to false to restore the flat
 	// 60/122/182s timeline for an embedded/SDK runtime.
 	ProbeBackoffEnabled *bool
-	// V2TLSFirst is the operator's TLS-first switch of the secure session v2.
-	// nil means "use the default", which is ENABLED — every dial opens with
-	// TLS. A pointer to false opens a dial where v1 is not ruled out with the
-	// identity-less probe instead; a v2 welcome to the probe still leads to
-	// TLS, and pinned identities and bound endpoints keep v2 either way. The
-	// SDK never reads CORSA_V2_TLS_FIRST: this field is the only source of the
-	// value for an embedded runtime.
+	// V2TLSFirst remains for source compatibility.
+	//
+	// Deprecated: All peer connections now start with TLS. This field has no effect.
 	V2TLSFirst *bool
 }
 
@@ -405,9 +401,6 @@ func (c Config) internal() coreconfig.Config {
 			EnvelopeRetentionEnabled: cfg.Node.EnvelopeRetentionEnabled == nil || *cfg.Node.EnvelopeRetentionEnabled,
 			PoisonBatchEnabled:       cfg.Node.PoisonBatchEnabled == nil || *cfg.Node.PoisonBatchEnabled,
 			ProbeBackoffEnabled:      cfg.Node.ProbeBackoffEnabled == nil || *cfg.Node.ProbeBackoffEnabled,
-			// TLS-first stays on unless the embedder explicitly switched it
-			// off with a non-nil pointer to false.
-			DisableV2TLSFirst: cfg.Node.V2TLSFirst != nil && !*cfg.Node.V2TLSFirst,
 			// BroadcastMaxAge left zero → the node-package default (24h)
 			// applies when retention is enabled. There is no transit
 			// counterpart: the transit age ceiling was removed with protocol

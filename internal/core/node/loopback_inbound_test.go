@@ -27,67 +27,42 @@ import (
 // connection here really arrives from 127.0.0.1 — the onion entry as the
 // listener sees it — and the node runs with its production bounds.
 
-// loopbackHelloWelcome opens a loopback v1 connection as a fresh identity,
-// sends its hello and returns the connection once the listener answered it
-// with a welcome: the connection was admitted and holds its slot of the
-// class.
-func loopbackHelloWelcome(t *testing.T, address string) net.Conn {
+// loopbackProvedSession opens a TLS connection as a fresh identity that
+// holds a slot of the running node's loopback class.
+func loopbackProvedSession(t *testing.T, address string) net.Conn {
+	t.Helper()
+	return proveLoopbackFixtureConn(t, dialWhenListening(t, address))
+}
+
+func proveLoopbackFixtureConn(t *testing.T, raw net.Conn) net.Conn {
 	t.Helper()
 	id, err := identity.Generate()
 	if err != nil {
-		t.Fatalf("generate identity: %v", err)
+		_ = raw.Close()
+		t.Fatal(err)
 	}
-	conn, err := net.DialTimeout("tcp", address, 2*time.Second)
+	local, err := sessionv2.NewLocal(id, domain.NetworkID(networkName))
 	if err != nil {
-		t.Fatalf("dial %s: %v", address, err)
+		_ = raw.Close()
+		t.Fatal(err)
 	}
-	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
-	writeJSONFrame(t, conn, legacyNodeHello(id))
-	line, err := bufio.NewReader(conn).ReadString('\n')
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	hello := protocol.Frame{
+		Version: config.ProtocolVersion, MinimumProtocolVersion: config.MinimumProtocolVersion,
+		Client: "node", Listener: "0", NodeType: string(domain.NodeTypeFull),
+	}
+	session, err := sessionv2.Dial(ctx, raw, local, hello, sessionv2.AnyPeer(), sessionv2.DefaultTimeouts)
 	if err != nil {
-		_ = conn.Close()
-		t.Fatalf("the listener did not answer the hello: %v", err)
+		_ = raw.Close()
+		t.Fatalf("open proved loopback session: %v", err)
 	}
-	frame, err := protocol.ParseFrameLine(strings.TrimSpace(line))
-	if err != nil || frame.Type != "welcome" {
-		_ = conn.Close()
-		t.Fatalf("answer to the hello: %q (%v), want a welcome", line, err)
-	}
-	_ = conn.SetDeadline(time.Time{})
-	return conn
-}
-
-// legacyNodeHello is the v1 hello of a node named id.
-func legacyNodeHello(id *identity.Identity) protocol.Frame {
-	return protocol.Frame{
-		Type:          "hello",
-		Version:       config.ProtocolVersion,
-		Client:        "node",
-		ClientVersion: config.CorsaVersion,
-		Address:       id.Address,
-		PubKey:        identity.PublicKeyBase64(id.PublicKey),
-		BoxKey:        identity.BoxPublicKeyBase64(id.BoxPublicKey),
-		BoxSig:        identity.SignBoxKeyBinding(id),
-	}
-}
-
-// legacyBadAuth runs one legacy session from loopback that names id and fails
-// its auth_session signature, and returns the frame the listener answered the
-// signature with and the reader positioned after it.
-func legacyBadAuth(t *testing.T, address string, id *identity.Identity) (net.Conn, *bufio.Reader, protocol.Frame) {
-	t.Helper()
-	conn, err := net.DialTimeout("tcp", address, 2*time.Second)
+	wire, err := session.Conn()
 	if err != nil {
-		t.Fatalf("dial: %v", err)
+		_ = raw.Close()
+		t.Fatal(err)
 	}
-	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
-	reader := bufio.NewReader(conn)
-	writeJSONFrame(t, conn, legacyNodeHello(id))
-	if welcome := readJSONTestFrame(t, reader); welcome.Type != "welcome" || welcome.Challenge == "" {
-		t.Fatalf("hello answered with %#v, want a welcome with a challenge", welcome)
-	}
-	writeJSONFrame(t, conn, protocol.Frame{Type: "auth_session", Address: id.Address, Signature: "bad-signature"})
-	return conn, reader, readJSONTestFrame(t, reader)
+	return wire
 }
 
 // endsWithin reports whether the listener ends conn within the bound.
@@ -97,44 +72,20 @@ func endsWithin(conn net.Conn, reader io.Reader, within time.Duration) bool {
 	return err == nil || errors.Is(err, syscall.ECONNRESET)
 }
 
-// A legacy peer that fails its signature again and again from loopback loses
-// only its own connections: each is closed after the error reply, loopback
-// is never scored or banned, and an honest loopback peer still gets in. The
-// identity the hellos claim is not charged either — nothing proved it.
-func TestALoopbackLegacyViolatorLosesItsConnectionAndBansNobody(t *testing.T) {
+func TestBelowFloorLoopbackRefusalDoesNotChargeOrBlockANewSession(t *testing.T) {
 	t.Parallel()
 	svc := refusingNode(t, config.Node{}, func(*Service) {})
-	id, err := identity.Generate()
-	if err != nil {
-		t.Fatalf("generate identity: %v", err)
-	}
-	// One more than it took to blacklist an IP: a ban would have landed.
-	attempts := banThreshold/banIncrementInvalidSig + 1
-	for i := range attempts {
-		conn, reader, reply := legacyBadAuth(t, svc.cfg.ListenAddress, id)
-		if reply.Code != protocol.ErrCodeInvalidAuthSignature {
-			_ = conn.Close()
-			t.Fatalf("attempt %d: reply %#v, want the invalid-signature error and no ban notice", i, reply)
-		}
-		if !endsWithin(conn, reader, 5*time.Second) {
-			_ = conn.Close()
-			t.Fatalf("attempt %d: the violating connection was not closed", i)
-		}
-		_ = conn.Close()
+	requireBelowFloorLineEOF(t, svc.cfg.ListenAddress, 30, nil)
+	assertNoBelowFloorSession(t, svc)
+	if stats := svc.LoopbackInboundStats(); stats.IdentitiesScored != 0 {
+		t.Fatalf("unproved below-floor peer charged an identity: %+v", stats)
 	}
 
-	svc.ipStateMu.RLock()
-	entry, scored := svc.bans["127.0.0.1"]
-	svc.ipStateMu.RUnlock()
-	if scored {
-		t.Fatalf("loopback was scored by its IP: %+v", entry)
+	honest := loopbackProvedSession(t, svc.cfg.ListenAddress)
+	defer func() { _ = honest.Close() }()
+	if !answersPing(t, honest) {
+		t.Fatal("the next honest TLS session could not use the loopback listener")
 	}
-	stats := svc.LoopbackInboundStats()
-	if stats.Refusals.ViolationsClosed != uint64(attempts) || stats.IdentitiesScored != 0 {
-		t.Fatalf("loopback stats = %+v, want %d connections closed and no identity charged", stats, attempts)
-	}
-	honest := loopbackHelloWelcome(t, svc.cfg.ListenAddress)
-	_ = honest.Close()
 }
 
 // Connections held at once: the class holds loopbackMaxActiveCeiling of them,
@@ -149,9 +100,13 @@ func TestTheLoopbackClassBoundsItsConnectionsHeldAtOnce(t *testing.T) {
 			_ = conn.Close()
 		}
 	})
-	for range loopbackMaxActiveCeiling {
-		held = append(held, loopbackHelloWelcome(t, svc.cfg.ListenAddress))
+	held = append(held, loopbackProvedSession(t, svc.cfg.ListenAddress))
+	for range loopbackMaxActiveCeiling - 1 {
+		held = append(held, dialWhenListening(t, svc.cfg.ListenAddress))
 	}
+	waitForConditionMsg(t, 5*time.Second, "accepted sockets did not fill the loopback class", func() bool {
+		return loopbackActive(svc) == loopbackMaxActiveCeiling
+	})
 	if got := dialAndRead(t, svc.cfg.ListenAddress); !bytes.Equal(got, sessionv2.RefusalAlert()) {
 		t.Fatalf("connection over the class bound read % x, want the alert", got)
 	}
@@ -164,20 +119,29 @@ func TestTheLoopbackClassBoundsItsConnectionsHeldAtOnce(t *testing.T) {
 	waitForConditionMsg(t, 5*time.Second, "a closed loopback connection kept its slot", func() bool {
 		return loopbackActive(svc) == loopbackMaxActiveCeiling-1
 	})
-	held = append(held, loopbackHelloWelcome(t, svc.cfg.ListenAddress))
+	held = append(held, loopbackProvedSession(t, svc.cfg.ListenAddress))
 }
 
-// Reconnecting in a loop opens no new budget: every connection is closed
-// right after its welcome, so the class never holds more than a few at once,
-// and still the connection after loopbackMaxNewPerWindow admissions within
-// the window is refused.
+// Reconnecting in a loop opens no new budget. A proved connection and each
+// subsequent accepted socket are closed, but every admission counts against
+// the same connection-rate window.
 func TestReconnectingFromLoopbackDoesNotEscapeTheRateOfTheClass(t *testing.T) {
 	t.Parallel()
 	svc := refusingNode(t, config.Node{}, func(*Service) {})
 	started := time.Now()
-	for range loopbackMaxNewPerWindow {
-		conn := loopbackHelloWelcome(t, svc.cfg.ListenAddress)
+	proved := loopbackProvedSession(t, svc.cfg.ListenAddress)
+	_ = proved.Close()
+	for admitted := uint64(2); admitted <= loopbackMaxNewPerWindow; admitted++ {
+		conn := dialWhenListening(t, svc.cfg.ListenAddress)
+		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+		err := awaitNodeState(ctx, svc.done, func() bool {
+			return svc.LoopbackInboundStats().Admitted == admitted
+		})
+		cancel()
 		_ = conn.Close()
+		if err != nil {
+			t.Fatalf("connection %d did not count towards the loopback rate: %v", admitted, err)
+		}
 	}
 	if elapsed := time.Since(started); elapsed >= loopbackNewWindow {
 		t.Skipf("the reconnect loop took %v, longer than the window %v: the bound cannot be observed", elapsed, loopbackNewWindow)
@@ -318,7 +282,7 @@ func TestStoppingTheNodeGivesBackTheLoopbackSlots(t *testing.T) {
 	svc, stop := startTestNodeWithSetup(t, config.Node{ListenAddress: listener, BootstrapPeers: []string{}, Type: config.NodeTypeFull}, withoutOwnDials(withProductionLimits))
 	held := make([]net.Conn, 0, 4)
 	for range 4 {
-		held = append(held, loopbackHelloWelcome(t, listener))
+		held = append(held, loopbackProvedSession(t, listener))
 	}
 	defer func() {
 		for _, conn := range held {
@@ -633,7 +597,7 @@ func TestARealIPv6LoopbackConnectionIsInTheClass(t *testing.T) {
 	_ = probe.Close()
 	svc, stop := startTestNodeWithSetup(t, config.Node{ListenAddress: address, BootstrapPeers: []string{}, Type: config.NodeTypeFull}, withoutOwnDials(withProductionLimits))
 	t.Cleanup(stop)
-	conn := loopbackHelloWelcome(t, address)
+	conn := loopbackProvedSession(t, address)
 	defer func() { _ = conn.Close() }()
 	if got := loopbackActive(svc); got != 1 {
 		t.Fatalf("a ::1 connection held %d loopback slots, want 1", got)
@@ -662,7 +626,7 @@ func TestAnExternalSourceKeepsItsPerIPCap(t *testing.T) {
 	if got := loopbackActive(svc); got != 0 {
 		t.Fatalf("external connections took %d loopback slots", got)
 	}
-	honest := loopbackHelloWelcome(t, svc.cfg.ListenAddress)
+	honest := loopbackProvedSession(t, svc.cfg.ListenAddress)
 	_ = honest.Close()
 }
 
@@ -673,7 +637,7 @@ func TestALoopbackBanEntryIsNotConsulted(t *testing.T) {
 	svc := refusingNode(t, config.Node{}, func(svc *Service) {
 		svc.bans["127.0.0.1"] = banEntry{Score: banThreshold, Blacklisted: time.Now().UTC().Add(time.Hour)}
 	})
-	conn := loopbackHelloWelcome(t, svc.cfg.ListenAddress)
+	conn := loopbackProvedSession(t, svc.cfg.ListenAddress)
 	_ = conn.Close()
 	if stats := svc.ListenerRefusalStats(); stats.Blacklisted != 0 {
 		t.Fatalf("stats = %+v, want no blacklist refusal", stats)

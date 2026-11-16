@@ -187,7 +187,7 @@ func TestAddressAgingCommonDialGateHoldsStaleCMRetry(t *testing.T) {
 }
 
 func TestAddressAgingEveryScoreRefusalClassified(t *testing.T) {
-	remote := []error{errV2RefusedByListener, errLegacyRefusedPinned, errLegacyRefusedV2Bound, errEndpointOwnerMismatch, errLegacyProbeAnsweredV2, errLegacyRefusedAfterV2Welcome, errLegacyProbeAdmittedNothing, errV2FailedBeforeProof}
+	remote := []error{errV2RefusedByListener, errLegacyRefusedPinned, errLegacyRefusedV2Bound, errEndpointOwnerMismatch, errV2FailedBeforeProof}
 	for _, outcome := range unchargedDialOutcomes {
 		classes := 0
 		if localAddressDialOutcome(outcome) {

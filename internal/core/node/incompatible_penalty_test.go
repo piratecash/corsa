@@ -1,17 +1,13 @@
 package node
 
 import (
-	"bufio"
-	"net"
 	"path/filepath"
-	"strconv"
 	"testing"
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/config"
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/domain/domaintest"
-	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
 // incompatibleBanState is everything penalizeOldProtocolPeer accumulates for
@@ -237,54 +233,6 @@ func TestIncompatiblePenalty_FallbackAlias_LockoutCarriesClientVersion(t *testin
 	}
 	if got := svc.peerVersions[fallback]; got != "" {
 		t.Fatalf("peerVersions[%s] = %q: the version went to the alias, not the health key", fallback, got)
-	}
-}
-
-// Same key on the inbound path: the health key built from the hello
-// (observed IP + advertise_port) may itself be a dial alias.
-func TestInboundIncompatibleHello_FallbackAlias_ClientVersionUnderHealthKey(t *testing.T) {
-	t.Parallel()
-	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:  freeAddress(t),
-		BootstrapPeers: []string{},
-	})
-	defer stop()
-
-	const advertisePort = domain.PeerPort(64649)
-	const peerClientVersion = "0.98-alias"
-	alias := domain.PeerAddress(net.JoinHostPort("127.0.0.1", strconv.Itoa(int(advertisePort))))
-	primary := domain.PeerAddress("127.0.0.1:7777")
-	svc.peerMu.Lock()
-	svc.dialOrigin[alias] = primary
-	svc.peerMu.Unlock()
-
-	conn, err := net.DialTimeout("tcp", svc.externalListenAddress(), 2*time.Second)
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-	defer func() { _ = conn.Close() }()
-	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
-	writeJSONFrame(t, conn, protocol.Frame{
-		Type:          "hello",
-		Version:       config.MinimumProtocolVersion - 1,
-		Client:        "test",
-		ClientVersion: peerClientVersion,
-		AdvertisePort: advertisePort,
-	})
-	reader := bufio.NewReader(conn)
-	if errFrame := readJSONTestFrame(t, reader); errFrame.Code != protocol.ErrCodeIncompatibleProtocol {
-		t.Fatalf("expected incompatible-protocol error, got %#v", errFrame)
-	}
-
-	waitForConditionMsg(t, 2*time.Second, "the refused hello's client version never reached the health key", func() bool {
-		svc.peerMu.RLock()
-		defer svc.peerMu.RUnlock()
-		return svc.peerVersions[primary] == peerClientVersion
-	})
-	svc.peerMu.RLock()
-	defer svc.peerMu.RUnlock()
-	if got := svc.peerVersions[alias]; got != "" {
-		t.Fatalf("peerVersions[%s] = %q: the version went to the alias, not the health key", alias, got)
 	}
 }
 

@@ -10,8 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/rs/zerolog/log"
-
 	"github.com/piratecash/corsa/internal/core/appdata"
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/protocol"
@@ -173,25 +171,6 @@ type Node struct {
 	// so onboarding is unaffected. ENABLED by default; CORSA_PROBE_BACKOFF is a
 	// kill-switch (set falsey to restore the flat 60/122/182s timeline).
 	ProbeBackoffEnabled bool
-
-	// DisableV2TLSFirst is the operator's TLS-first switch for the secure
-	// session v2 (docs/protocol/session_v2.md, "Switching TLS-first off"). The
-	// zero value — TLS-first ON — is the default, so a struct-literal
-	// config.Node keeps it on. Set, a dial where v1 is not ruled out — an
-	// endpoint nothing binds, without v2_strong, dialled by address — opens
-	// with the identity-less probe instead of a ClientHello; a v2 welcome to
-	// that probe still leads to TLS in the same dial, whose failure allows no
-	// v1, since the endpoint has shown it speaks v2. A pinned identity at such
-	// an endpoint is probed too: the identity is known only from the probe's
-	// answer, which is refused before this node's identity goes on the wire,
-	// and the hold that refusal starts makes the next dial there open with TLS.
-	// Where v2 is required before any answer — a bound endpoint, v2_strong, a
-	// dial "to X", a v2-only node — nothing changes. A manual measure, not an
-	// automatic rollback:
-	// the listener keeps accepting v2. Env: CORSA_V2_TLS_FIRST (falsey
-	// switches TLS-first off); the SDK reads no environment and has its own
-	// field (sdk.NodeConfig.V2TLSFirst).
-	DisableV2TLSFirst bool
 
 	// PoisonBatchEnabled makes poison-reverse fan-out use the batched
 	// route_poison_v2 frame (one frame per peer carrying the whole lost-identity
@@ -532,76 +511,16 @@ const (
 	ClientVersionMajor = 2
 	ClientVersionMinor = 6
 	ClientVersionBuild = 72
-	// ProtocolVersion is the wire version this build emits in hello/welcome.
-	// MinimumProtocolVersion is the floor below which inbound peers are
-	// rejected. Both are bumped only by an explicit wire/runtime contract
-	// change documented in docs/protocol/handshake.md. A feature that older
-	// peers cannot take is gated on its own ProtocolVersion<Feature>
-	// constant below; once the floor reaches that constant, the gate and
-	// the constant are deleted (TestFeatureVersionGatesAreAboveTheFloor
-	// fails until they are). ProtocolVersionSecureSession is the one
-	// exception: it is not a gate but the anchor of the session mode, so a
-	// floor that reaches it is not deleted — it switches sessionv2.ModeFor
-	// to ModeV2Only.
-	//
-	// v27: self-certifying sender keys on DM transport frames —
-	// relay_message / push_message carry the origin sender's PUBLIC key
-	// triple (pubkey/boxkey/boxsig, reusing the existing hello-frame
-	// fields), letting a first-contact recipient verify the envelope
-	// without an on-demand contact sync to hops that may not know the
-	// sender. The triple is best-effort, so the on-demand sync stays: a
-	// hop that rebuilds a frame from a stored envelope attaches only the
-	// keys its bounded key maps still hold, a transit hop drops oversized
-	// fields, and a hostile hop can strip them.
-	// v30: a relay no longer refuses a transit DM for being old. The 24-hour
-	// ceiling could not distinguish an envelope circulating on its own from
-	// a live sender re-sending an old message, and it refused both — with no
-	// hop-ack, so the sender read the refusal as a dead uplink. Advertising
-	// 30 is what tells the network this node carries an old DM like any
-	// other, which is what lets the sender-side re-stamp below be retired.
-	// v31: the secure session v2 (docs/protocol/session_v2.md). A node
-	// opens a session with TLS 1.3 and proves its identity over the
-	// connection's exporter, so a proof can no longer be relayed from one
-	// connection into another; an old node is still served over v1.
-	ProtocolVersion = 31
-	// MinimumProtocolVersion 28: the deployed nodes all run v28 or later,
-	// so pre-v28 builds are no longer served.
-	MinimumProtocolVersion = 28
-	// ProtocolVersionSecureSession is the version from which a node speaks
-	// the secure session v2 (docs/protocol/session_v2.md). The session mode
-	// of a build is derived from it and the two constants above
-	// (sessionv2.ModeFor): below it on ProtocolVersion — v1 only; at or
-	// above it — v2 first, legacy only for peers that never proved v2; once
-	// MinimumProtocolVersion reaches it — v2 only, the legacy path off. So
-	// the transition is the two version bumps and nothing else to remember;
-	// a node test refuses a bump whose mode the node paths do not implement.
+	// ProtocolVersion is the wire version advertised in hello and welcome.
+	// Version 31 uses TLS 1.3 and binds each identity proof to the session
+	// exporter. This build requires the secure session in both directions.
+	ProtocolVersion        = 31
+	MinimumProtocolVersion = 31
+	// ProtocolVersionSecureSession is the first version with the secure
+	// session and remains the compatibility anchor for the v2.5.71 probe.
 	ProtocolVersionSecureSession = 31
-	// ProtocolVersionNoTransitAgeCeiling is the version from which a relay
-	// forwards a transit DM regardless of the date inside it. Nodes below it
-	// still drop anything older than their own ceiling, and a sender cannot
-	// see how old the nodes further along a route are — so until the FLOOR
-	// reaches this value, an old DM is re-stamped with a fresh created_at
-	// before it is handed to transit (legacyTransitRestamp in
-	// internal/core/node/legacy_transit_restamp.go).
-	// TODO(transit-age-restamp-removal): delete this constant, the re-stamp
-	// and its tests once MinimumProtocolVersion reaches 30 — from then on
-	// every node on the network understands old dates and the envelope can
-	// travel with the date its author actually wrote it at.
-	ProtocolVersionNoTransitAgeCeiling = 30
-	// ProtocolVersionReceiptSenderAck is the version that added
-	// Frame.ReceiptSender to ack_delete, making an ack name WHICH receipt
-	// it holds rather than a recipient+id+status triple that two receipts
-	// can share. The field is inside the signed payload, so emission is
-	// gated on the peer advertising >= this version: an older verifier
-	// rebuilds the v1 payload, and a signature it cannot reproduce is
-	// scored as forgery, not as an unknown field.
-	// TODO(receipt-sender-ack-gate-removal): delete this constant and the
-	// gates in internal/core/node (buildAckDeleteFrame call sites) once
-	// MinimumProtocolVersion reaches it; the legacy ambiguity rule in
-	// deleteBacklogReceiptForRecipient goes with them.
-	ProtocolVersionReceiptSenderAck = 29
-	DefaultOutgoingPeers            = 8
-	DefaultPeerPort                 = "64646"
+	DefaultOutgoingPeers         = 8
+	DefaultPeerPort              = "64646"
 )
 
 // CorsaVersion is the canonical release version string ("MAJOR.MINOR.BUILD").
@@ -649,7 +568,6 @@ func Default() Config {
 	transitForwardOnce := transitForwardOnceFromEnv()
 	poisonBatchEnabled := poisonBatchEnabledFromEnv()
 	probeBackoffEnabled := probeBackoffEnabledFromEnv()
-	disableV2TLSFirst := v2TLSFirstDisabledFromEnv()
 
 	return Config{
 		App: App{
@@ -692,7 +610,6 @@ func Default() Config {
 			TransitForwardOnce:         transitForwardOnce,
 			PoisonBatchEnabled:         poisonBatchEnabled,
 			ProbeBackoffEnabled:        probeBackoffEnabled,
-			DisableV2TLSFirst:          disableV2TLSFirst,
 			MaxNextHopsPerOrigin:       maxNextHopsPerOrigin,
 			MaxSeqAdvancePerWindow:     maxSeqAdvancePerWindow,
 			SeqAdvanceWindow:           seqAdvanceWindow,
@@ -1267,39 +1184,6 @@ func probeBackoffEnabledFromEnv() bool {
 		return false
 	default:
 		return true
-	}
-}
-
-// v2TLSFirstDisabledFromEnv reads CORSA_V2_TLS_FIRST, the operator's
-// TLS-first switch. TLS-first stays ON unless the variable is explicitly falsey: an
-// unset, empty or unrecognised value must not quietly take the ClientHello
-// off every dial.
-//
-// An unrecognised value is said at Warn: an operator who meant to switch
-// TLS-first off and mistyped the value would otherwise find out only from
-// the dials.
-func v2TLSFirstDisabledFromEnv() bool {
-	raw := os.Getenv("CORSA_V2_TLS_FIRST")
-	disabled, recognised := parseV2TLSFirst(raw)
-	if !recognised {
-		log.Warn().Str("variable", "CORSA_V2_TLS_FIRST").Str("value", raw).
-			Str("accepted", "0, false, no, off to switch TLS-first off; 1, true, yes, on or unset to keep it on").
-			Msg("config_value_unrecognised_tls_first_kept_on")
-	}
-	return disabled
-}
-
-// parseV2TLSFirst reads a CORSA_V2_TLS_FIRST value: whether it switches
-// TLS-first off, and whether the value was recognised at all. An unset or
-// empty value is recognised as the default.
-func parseV2TLSFirst(raw string) (disabled, recognised bool) {
-	switch strings.ToLower(strings.TrimSpace(raw)) {
-	case "0", "false", "no", "off":
-		return true, true
-	case "", "1", "true", "yes", "on":
-		return false, true
-	default:
-		return false, false
 	}
 }
 

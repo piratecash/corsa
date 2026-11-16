@@ -140,11 +140,7 @@ expect_records() {
 # Gate 1: direct socket write outside transport owner.
 # Expected baseline after PR 9.6 / 10.x:
 #   service.go → 0, peer_management.go → 0,
-#   routing_relay.go → 3 (the notice dial's raw hello, auth_session and
-#                         push_notice writes — noticeDialWelcome and
-#                         sendNoticeToPeer; see the "internal/core/node/"
-#                         file map in docs/routing.md for the per-file scope
-#                         table),
+#   routing_relay.go → 1 (push_notice over a one-shot secure connection),
 #   socks5.go → 2 (SOCKS5 greeting + CONNECT).
 expect_count "direct socket write in service.go" 0 -- \
     rg -nH --glob '!**/*_test.go' 'conn\.Write\(|io\.WriteString\(' \
@@ -152,7 +148,7 @@ expect_count "direct socket write in service.go" 0 -- \
 expect_count "direct socket write in peer_management.go" 0 -- \
     rg -nH --glob '!**/*_test.go' 'conn\.Write\(|io\.WriteString\(' \
        internal/core/node/peer_management.go
-expect_count "direct socket write in routing_relay.go" 3 -- \
+expect_count "direct socket write in routing_relay.go" 1 -- \
     rg -nH --glob '!**/*_test.go' 'conn\.Write\(|io\.WriteString\(' \
        internal/core/node/routing_relay.go
 expect_count "direct socket write in socks5.go" 2 -- \

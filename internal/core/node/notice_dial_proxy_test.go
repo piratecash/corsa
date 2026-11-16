@@ -7,7 +7,6 @@ import (
 	"io"
 	"net"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -16,7 +15,6 @@ import (
 	"github.com/piratecash/corsa/internal/core/config"
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/identity"
-	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
 // notice_dial_proxy_test.go covers the notice fallback's socket: it is opened
@@ -239,9 +237,8 @@ func assertAuxiliaryBudgetReturned(t *testing.T, svc *Service) {
 // handed the onion NAME: nothing resolves it on this machine.
 func TestANoticeToAnOverlayPeerGoesThroughTheProxyByName(t *testing.T) {
 	t.Parallel()
-	probe, full := oldNodeWelcomes(t, generateProbeIdentity(t), config.MinimumProtocolVersion)
-	frames := &recordedLines{}
-	peer := startAnsweringOldNode(t, frames, probe, full, protocol.Frame{Type: "auth_ok"}, protocol.Frame{Type: "ok"})
+	ln, peer := listenForDialWelcome(t)
+	peerDone := serveV2Intro(ln, newDialWelcomeResponder(t), currentSecureIntro())
 	proxy := startForwardingSOCKS5(t, peer)
 	svc := newProxiedNoticeService(t, proxy.address())
 
@@ -252,13 +249,17 @@ func TestANoticeToAnOverlayPeerGoesThroughTheProxyByName(t *testing.T) {
 		t.Fatal("the notice to an onion peer never reached the proxy")
 	}
 	for i, connect := range connects {
-		if connect.addressType != 0x03 || connect.host != testV3Onion || strconv.Itoa(connect.port) != "64646" {
+		if connect.addressType != 0x03 || connect.host != testV3Onion || connect.port != 64646 {
 			t.Fatalf("CONNECT %d = %+v, want the onion name %s:64646 as a domain (ATYP 3)", i, connect, testV3Onion)
 		}
 	}
-	got := frames.all()
-	if len(got) == 0 || got[len(got)-1] != "push_notice" {
-		t.Fatalf("the peer behind the proxy read %v, want the exchange to end with push_notice", got)
+	select {
+	case result := <-peerDone:
+		if result.err != nil || len(result.received) != 1 || result.received[0] != "push_notice" {
+			t.Fatalf("the TLS peer behind the proxy read %+v, want one push_notice", result)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the TLS peer behind the proxy did not finish")
 	}
 	assertAuxiliaryBudgetReturned(t, svc)
 }
@@ -416,53 +417,32 @@ func TestAnOverlayDialWithoutAProxyIsRefused(t *testing.T) {
 	assertAuxiliaryBudgetReturned(t, svc)
 }
 
-// The v2 policy holds behind the proxy: an old release whose identity is
-// pinned hears only the identity-less probe, and an endpoint bound to v2 is
-// never probed at all — the notice ends at the TLS attempt.
-func TestANoticeThroughTheProxyRefusesLegacyForAPinnedPeer(t *testing.T) {
+// A TLS peer below the version floor is refused even on the proxied path.
+func TestANoticeThroughTheProxyRefusesABelowFloorPeer(t *testing.T) {
 	t.Parallel()
-	t.Run("identity pinned", func(t *testing.T) {
-		t.Parallel()
-		old := generateProbeIdentity(t)
-		probe, full := oldNodeWelcomes(t, old, config.MinimumProtocolVersion)
-		frames := &recordedLines{}
-		proxy := startForwardingSOCKS5(t, startLineRecordingOldNode(t, probe, full, frames))
-		svc := newProxiedNoticeService(t, proxy.address())
-		pinned, err := domain.ParsePeerIdentity(old.Address)
-		if err != nil {
-			t.Fatalf("identity: %v", err)
-		}
-		if err := svc.secureSessions.store.noteProvenInbound(pinned); err != nil {
-			t.Fatalf("pin: %v", err)
-		}
+	ln, peer := listenForDialWelcome(t)
+	intro := currentSecureIntro()
+	intro.Version, intro.MinimumProtocolVersion = config.MinimumProtocolVersion-1, config.MinimumProtocolVersion-1
+	peerDone := serveV2Intro(ln, newDialWelcomeResponder(t), intro)
+	proxy := startForwardingSOCKS5(t, peer)
+	svc := newProxiedNoticeService(t, proxy.address())
+	dials := spyOnPeerDials(svc)
 
-		svc.sendNoticeToPeer(overlayNoticeAddress, time.Minute, "pinned-peer-ciphertext")
-
-		if got := frames.all(); len(got) != 1 || got[0] != "hello" {
-			t.Fatalf("the pinned old release read %v, want the probe alone", got)
+	svc.sendNoticeToPeer(overlayNoticeAddress, time.Minute, "below-floor-notice")
+	select {
+	case result := <-peerDone:
+		if result.err != nil || len(result.received) != 0 {
+			t.Fatalf("refused TLS peer read notice traffic: %+v", result)
 		}
-		assertAuxiliaryBudgetReturned(t, svc)
-	})
-	t.Run("endpoint bound", func(t *testing.T) {
-		t.Parallel()
-		probe, full := oldNodeWelcomes(t, generateProbeIdentity(t), config.MinimumProtocolVersion)
-		frames := &recordedLines{}
-		proxy := startForwardingSOCKS5(t, startLineRecordingOldNode(t, probe, full, frames))
-		svc := newProxiedNoticeService(t, proxy.address())
-		if _, err := svc.secureSessions.store.noteProvenOutbound(dialledAt(overlayNoticeAddress), domain.PeerIdentity{1}, endpointProtectionNone()); err != nil {
-			t.Fatalf("bind: %v", err)
-		}
-
-		svc.sendNoticeToPeer(overlayNoticeAddress, time.Minute, "bound-endpoint-ciphertext")
-
-		if got := frames.all(); len(got) != 0 {
-			t.Fatalf("the endpoint bound to v2 read %v over v1, want nothing", got)
-		}
-		if connects := proxy.connectRequests(); len(connects) != 1 {
-			t.Fatalf("%d CONNECTs through the proxy, want the TLS attempt alone", len(connects))
-		}
-		assertAuxiliaryBudgetReturned(t, svc)
-	})
+	case <-time.After(5 * time.Second):
+		t.Fatal("the below-floor TLS peer did not finish")
+	}
+	connects := proxy.connectRequests()
+	if len(connects) != 1 || connects[0].addressType != 0x03 || connects[0].host != testV3Onion || connects[0].port != 64646 {
+		t.Fatalf("want exactly one CONNECT by name, got %+v", connects)
+	}
+	assertOnlyDialled(t, dials, proxy.address())
+	assertAuxiliaryBudgetReturned(t, svc)
 }
 
 // A dial cancelled while the proxy has not answered ends at once: its socket

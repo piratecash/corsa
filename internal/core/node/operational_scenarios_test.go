@@ -399,14 +399,14 @@ func TestScenario_IntermediateStates_KeepPeerExchangeEnabled(t *testing.T) {
 // mixed-version cross-link required by Step 8. The actual coverage lives
 // in compatibility_get_peers_test.go and the tests named below:
 //
-//   - TestSyncPeer_WelcomeBelowFloor_SendsOnlyHelloAndRecordsAClaim and
-//     TestSendNoticeToPeer_WelcomeBelowFloor_SendsOnlyHelloAndRecordsAClaim
+//   - TestSyncPeer_V2IntroBelowFloor_SendsNothingAndPaces and
+//     TestSendNoticeToPeer_V2IntroBelowFloor_WritesNothingAndPaces
 //     (service_dial_welcome_gate_test.go: new initiator → responder below
 //     MinimumProtocolVersion, refused at the welcome on both one-shot dials)
-//   - TestCompatibility_LegacyInitiatorRespondedPeersShape
-//     (legacy initiator → new responder)
-//   - TestMixedVersionLegacyPeerExchange (service_test.go)
-//     (full hello/auth/get_peers/fetch_contacts flow)
+//   - TestFloor31RefusesObsoleteProbeAndFullHello
+//     (obsolete plaintext attempts refused)
+//   - TestV31PeerExchangeWithoutCapabilities (service_test.go)
+//     (secure peer exchange without routing capabilities)
 //
 // Duplicating the wire-level assertions here would add maintenance cost
 // without adding coverage; keeping a single pointer test guarantees that
@@ -420,8 +420,8 @@ func TestScenario_MixedVersion_CoveredByCompatSuite(t *testing.T) {
 	// them, this test fails and forces the scenario list to be updated.
 	// We do this by name via reflection-free means: the test binary
 	// only links if the symbols are valid identifiers in this package.
-	_ = TestSyncPeer_WelcomeBelowFloor_SendsOnlyHelloAndRecordsAClaim
-	_ = TestSendNoticeToPeer_WelcomeBelowFloor_SendsOnlyHelloAndRecordsAClaim
-	_ = TestCompatibility_LegacyInitiatorRespondedPeersShape
-	_ = TestMixedVersionLegacyPeerExchange
+	_ = TestSyncPeer_V2IntroBelowFloor_SendsNothingAndPaces
+	_ = TestSendNoticeToPeer_V2IntroBelowFloor_WritesNothingAndPaces
+	_ = TestFloor31RefusesObsoleteProbeAndFullHello
+	_ = TestV31PeerExchangeWithoutCapabilities
 }
