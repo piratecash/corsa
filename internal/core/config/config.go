@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/piratecash/corsa/internal/core/appdata"
 	"github.com/piratecash/corsa/internal/core/domain"
@@ -46,8 +47,11 @@ type Node struct {
 	// out of 1..65535) collapses to nil at env-parse time.
 	AdvertisePort  *domain.PeerPort
 	BootstrapPeers []string
-	IdentityPath   string
-	TrustStorePath string
+	// ReservedPinPeers is an operator-authored list of exact peer identities
+	// that may use permanent pin capacity reserved above the ordinary limit.
+	ReservedPinPeers []string
+	IdentityPath     string
+	TrustStorePath   string
 	// IdentityIntentsPath is the durable identity-resolution intent table
 	// (env: CORSA_IDENTITY_INTENTS_PATH): the reasons a background identity
 	// lookup keeps running across restarts (docs/protocol/identity-lookup.md).
@@ -581,6 +585,7 @@ func Default() Config {
 			ListenAddress:              listenAddress,
 			AdvertisePort:              advertisePort,
 			BootstrapPeers:             bootstrapPeers,
+			ReservedPinPeers:           strings.FieldsFunc(os.Getenv("CORSA_RESERVED_PIN_PEERS"), func(c rune) bool { return c == ',' || unicode.IsSpace(c) }),
 			IdentityPath:               identityPath,
 			TrustStorePath:             trustStorePath,
 			IdentityIntentsPath:        identityIntentsPath,

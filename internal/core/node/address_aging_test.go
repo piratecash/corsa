@@ -345,15 +345,19 @@ func TestAddressAgingMemoryAndFileHaveSameAutomaticBudget(t *testing.T) {
 func TestAddressAgingTransportSuccessDoesNotResetAndFullPinStoreIsLocal(t *testing.T) {
 	listener, address, stopListener := listenerNode(t, withoutOwnDials(nil))
 	defer stopListener()
-	_ = listener
 	target := domain.PeerAddress(normalizeAddress(address))
 	for _, full := range []bool{false, true} {
 		t.Run(fmt.Sprintf("pin_store_full_%v", full), func(t *testing.T) {
-			dialer, stop := startQuietNode(t, func(svc *Service) {
+			dialer, stop := startTestNodeWithSetup(t, config.Node{
+				ListenAddress:    freeAddress(t),
+				BootstrapPeers:   []string{},
+				ReservedPinPeers: []string{listener.Address()},
+				Type:             domain.NodeTypeFull,
+			}, withoutOwnDials(func(svc *Service) {
 				if full {
 					fillPinStore(t, svc.secureSessions.store)
 				}
-			})
+			}))
 			defer stop()
 			dialer.recordAddedPeer(target, addPeerModeOperator)
 			dialer.peerMu.Lock()

@@ -217,6 +217,15 @@ func (m *sessionAddressMarks) noteOutboundV2(address domain.PeerAddress) {
 	})
 }
 
+// noteEphemeralV2 resets pacing after a verified session without publishing a
+// new durable address claim or erasing evidence from an earlier proof.
+func (m *sessionAddressMarks) noteEphemeralV2(address domain.PeerAddress) {
+	m.update(address, func(mark *sessionAddressMark, now time.Time) {
+		mark.v2Retry = nil
+		mark.pinRoom = nil
+	})
+}
+
 func (m *sessionAddressMarks) v2Strong(address domain.PeerAddress) bool {
 	return m.read(address, func(mark sessionAddressMark, now time.Time) bool { return mark.v2Strong.liveAt(now) })
 }

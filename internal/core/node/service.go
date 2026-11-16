@@ -2801,6 +2801,7 @@ func newServiceWithConstruction(cfg config.Node, id *identity.Identity, eventBus
 		guardObservation: construction.guardObservation,
 		ninElapsed:       inboundElapsed,
 		storePath:        secureSessionStorePath(cfg),
+		reservedPinPeers: cfg.ReservedPinPeers,
 		markerPath:       pinStoreMarkerPath(cfg),
 		clock:            time.Now,
 	})

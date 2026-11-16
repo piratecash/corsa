@@ -199,6 +199,7 @@ var identityStateInventory = map[string]identityStateEntry{
 	"unprovenRoutingWriters.drained":  {identityFromV2Proof, "waited on only by onIdentityProvenV2"},
 	"unprovenRoutingWriters.owed":     {identityFromV2Proof, "set only by onIdentityProvenV2 when its context ends"},
 
+	"secureSessions.reservedPinPeers": {identityNamedLocally, "bounded, exact identities read from operator configuration before networking starts"},
 	"secureSessionStore.endpoints":    {identityFromV2Proof, "last_identity and protected_by of a binding are written only from a proven outbound v2 session"},
 	"secureSessionStore.nonCanonical": {identityFromV2Proof, "bindings an earlier build wrote from v2 sessions, kept as read from the store's own file"},
 	"secureSessionFile.Endpoints":     {identityFromV2Proof, "the persisted form of the store's bindings"},

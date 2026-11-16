@@ -56,6 +56,9 @@ type NodeConfig struct {
 	// PeerPort.IsValid.
 	AdvertisePort  *uint16
 	BootstrapPeers []string
+	// ReservedPinPeers lists exact, operator-approved peer identities allowed
+	// to use reserved permanent pin capacity after their TLS proof verifies.
+	ReservedPinPeers []string
 	// EnableDatagramV1 mirrors the existing internal datagram transport choice.
 	// Zero and DefaultConfig keep it off; opting in does not enable own-DM R
 	// provenance or select an inactive D1 construction root.
@@ -378,6 +381,7 @@ func (c Config) internal() coreconfig.Config {
 			ListenAddress:       cfg.Node.ListenAddress,
 			AdvertisePort:       advertisePort,
 			BootstrapPeers:      append([]string(nil), cfg.Node.BootstrapPeers...),
+			ReservedPinPeers:    append([]string(nil), cfg.Node.ReservedPinPeers...),
 			EnableDatagramV1:    cfg.Node.EnableDatagramV1,
 			IdentityPath:        cfg.Node.IdentityPath,
 			IdentityIntentsPath: identityIntentsPath,

@@ -29,12 +29,13 @@ import (
 // The listener and dialler authenticate the peer on TLS before applying
 // that peer's identity, routes or session capabilities.
 type secureSessions struct {
-	mode         sessionv2.Mode
-	local        sessionv2.Local
-	certificates sessionv2.CertificateSource
-	store        *secureSessionStore
-	marks        *sessionAddressMarks
-	dialTimeouts sessionDialTimeouts
+	mode             sessionv2.Mode
+	local            sessionv2.Local
+	certificates     sessionv2.CertificateSource
+	store            *secureSessionStore
+	reservedPinPeers map[domain.PeerIdentity]struct{}
+	marks            *sessionAddressMarks
+	dialTimeouts     sessionDialTimeouts
 	// refusal is why the node must not start although its store, if any,
 	// would let it: the v2 state of a build with the secure session could
 	// not be built, or a v1-only build finds a pin store on disk. nil when
@@ -52,7 +53,8 @@ type secureSessionsOptions struct {
 	// ninElapsed is immutable before the store loads/anchors a journal.
 	ninElapsed func() (time.Duration, error)
 	// storePath is the downgrade-protection store's file.
-	storePath string
+	storePath        string
+	reservedPinPeers []string
 	// markerPath is the store's marker next to the identity
 	// (pinStoreMarkerPath).
 	markerPath string
@@ -106,6 +108,10 @@ func buildSecureSessions(id *identity.Identity, opts secureSessionsOptions, buil
 	if err != nil {
 		return unavailableSessions(opts, fmt.Errorf("certificate source: %w", err))
 	}
+	reservedPinPeers, err := approvedReservedPinPeers(opts.reservedPinPeers)
+	if err != nil {
+		return unavailableSessions(opts, err)
+	}
 	store := openSecureSessionStore(secureSessionStoreOptions{
 		bridgePublisher: opts.bridgePublisher,
 		pinMembership:   opts.pinMembership,
@@ -117,12 +123,13 @@ func buildSecureSessions(id *identity.Identity, opts secureSessionsOptions, buil
 		audit:           secretfile.AuditLocation,
 	})
 	return &secureSessions{
-		mode:         mode,
-		local:        local,
-		certificates: certificates,
-		store:        store,
-		marks:        newSessionAddressMarks(opts.clock),
-		dialTimeouts: defaultSessionDialTimeouts(),
+		mode:             mode,
+		local:            local,
+		certificates:     certificates,
+		store:            store,
+		reservedPinPeers: reservedPinPeers,
+		marks:            newSessionAddressMarks(opts.clock),
+		dialTimeouts:     defaultSessionDialTimeouts(),
 	}
 }
 
@@ -314,18 +321,19 @@ func (s *Service) acceptSecureInbound(metered *netcore.MeteredConn, reader *bufi
 		_ = conn.Close()
 		return nil, sessionv2.Peer{}, err
 	}
-	// Publish the original mandatory binding before this session counts, using
-	// its existing persistence contract (memory-only stores remain supported).
-	// This publication is not an N-in strict metadata/journal acknowledgment.
-	binding, pinErr := s.secureSessions.store.noteProvenInboundBinding(peer.Identity)
+	// A private producer needs the original pin incarnation. Ordinary relay
+	// traffic can use the authenticated channel alone once ordinary pin room
+	// runs out. This does not publish an N-in metadata or journal acknowledgment.
+	needsPin := s.inboundPins != nil || s.findNode != nil || s.degree != nil || s.hasContactRecordPushTransportCapability()
+	binding, pinErr := s.secureSessions.store.noteProvenInboundBinding(peer.Identity, s.secureSessions.sessionPinAdmission(peer.Identity, needsPin))
 	if pinErr != nil {
 		_ = conn.Close()
 		return nil, sessionv2.Peer{}, pinErr
 	}
-	if proof, ok := peer.Proof(); ok {
+	if proof, ok := peer.Proof(); ok && binding.owner != nil {
 		s.noteLocalContactProof(proof, binding)
 	}
-	if s.inboundPins != nil || s.findNode != nil || s.degree != nil || s.hasContactRecordPushTransportCapability() {
+	if needsPin {
 		l := &proofTransportLifetime{token: s.proofToken, bridgeTerminal: s.bridgeTerminal, role: sessionv2.RoleListener}
 		wire := &peekedConn{Conn: conn, reader: conn}
 		l.evidence = &proofTransportEvidence{session: session, protected: conn, raw: replayed, wire: wire, group: sourceGroup(resolveRemoteIPFromAddr(metered.RemoteAddr())), identity: peer.Identity}
@@ -769,7 +777,8 @@ func (s *Service) provenTransport(ctx context.Context, transport *dialledTranspo
 		_ = wire.Close()
 		return nil, incompatibleVersionOf(peer.Intro, versionProven, err)
 	}
-	result, err := s.secureSessions.store.noteProvenOutbound(outboundDialOf(address, transport.raw), peer.Identity, s.dialProtection(intent, peer.Identity))
+	needsPin := s.findNode != nil || s.degree != nil || s.hasContactRecordPushTransportCapability()
+	result, err := s.secureSessions.store.noteProvenOutbound(outboundDialOf(address, transport.raw), peer.Identity, s.dialProtection(intent, peer.Identity), s.secureSessions.sessionPinAdmission(peer.Identity, needsPin))
 	// A change of owner is made in memory even when its write failed, so it
 	// is journalled either way.
 	s.secureSessions.store.logOwnerChange(peer.Identity, result, transport.connID)
@@ -783,12 +792,16 @@ func (s *Service) provenTransport(ctx context.Context, transport *dialledTranspo
 			return nil, err
 		}
 	}
-	s.secureSessions.marks.noteOutboundV2(address)
-	if proof, ok := peer.Proof(); ok {
-		s.noteLocalContactProof(proof, result.pinBinding)
+	if result.pinBinding.owner != nil {
+		s.secureSessions.marks.noteOutboundV2(address)
+		if proof, ok := peer.Proof(); ok {
+			s.noteLocalContactProof(proof, result.pinBinding)
+		}
+	} else {
+		s.secureSessions.marks.noteEphemeralV2(address)
 	}
 	transport.pinBinding, transport.pinGroup = result.pinBinding, result.pinGroup
-	if (s.findNode != nil || s.degree != nil || s.hasContactRecordPushTransportCapability()) && transport.proofRaw != nil {
+	if needsPin && transport.proofRaw != nil {
 		l := &proofTransportLifetime{token: s.proofToken, bridgeTerminal: s.bridgeTerminal, role: sessionv2.RoleDialer, outbound: true, id: transport.connID}
 		wrapped := &peekedConn{Conn: wire, reader: wire}
 		l.evidence = &proofTransportEvidence{session: session, protected: wire, raw: transport.proofRaw, wire: wrapped, group: sourceGroup(resolveRemoteIPFromAddr(transport.raw.RemoteAddr())), identity: peer.Identity}

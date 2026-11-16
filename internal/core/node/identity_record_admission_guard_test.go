@@ -701,6 +701,13 @@ func contactPushTransportConditions(raw []byte) (map[string]ast.Expr, []string) 
 		if !tracked {
 			continue
 		}
+		if fn.Name.Name != "dialV2" {
+			conditions[fn.Name.Name] = contactPushCapturedTransportCondition(fn, want)
+			if conditions[fn.Name.Name] == nil {
+				failures = append(failures, "original K proof gate changed: "+fn.Name.Name)
+			}
+			continue
+		}
 		found := 0
 		ast.Inspect(fn.Body, func(n ast.Node) bool {
 			statement, ok := n.(*ast.IfStmt)
@@ -741,6 +748,89 @@ func contactPushTransportConditions(raw []byte) (map[string]ast.Expr, []string) 
 		}
 	}
 	return conditions, failures
+}
+
+// The accepted and bound-outbound paths capture the original transport
+// predicate once, before pin admission. The same unreassigned value must
+// govern both the pin requirement and the original transport branch.
+func contactPushCapturedTransportCondition(fn *ast.FuncDecl, want string) ast.Expr {
+	gateText := "needsPin"
+	pinMethod := "noteProvenInboundBinding"
+	if fn.Name.Name == "provenTransport" {
+		gateText += " && transport.proofRaw != nil"
+		pinMethod = "noteProvenOutbound"
+	}
+
+	text := func(node ast.Node) string {
+		var result bytes.Buffer
+		if format.Node(&result, token.NewFileSet(), node) != nil {
+			return ""
+		}
+		return strings.Join(strings.Fields(result.String()), " ")
+	}
+	var name *ast.Ident
+	var predicate ast.Expr
+	var gate *ast.IfStmt
+	var pinArg *ast.Ident
+	for _, statement := range fn.Body.List {
+		switch stmt := statement.(type) {
+		case *ast.AssignStmt:
+			if stmt.Tok == token.DEFINE && len(stmt.Lhs) == 1 && len(stmt.Rhs) == 1 {
+				if ident, ok := stmt.Lhs[0].(*ast.Ident); ok && ident.Name == "needsPin" {
+					name, predicate = ident, stmt.Rhs[0]
+				}
+			}
+			if len(stmt.Rhs) != 1 {
+				continue
+			}
+			call, ok := stmt.Rhs[0].(*ast.CallExpr)
+			if !ok || text(call.Fun) != "s.secureSessions.store."+pinMethod || len(call.Args) == 0 {
+				continue
+			}
+			admit, ok := call.Args[len(call.Args)-1].(*ast.CallExpr)
+			if !ok || text(admit) != "s.secureSessions.sessionPinAdmission(peer.Identity, needsPin)" || pinArg != nil {
+				return nil
+			}
+			pinArg, _ = admit.Args[1].(*ast.Ident)
+		case *ast.IfStmt:
+			if text(stmt.Cond) == gateText {
+				if gate != nil {
+					return nil
+				}
+				gate = stmt
+			}
+		}
+	}
+	if name == nil || name.Obj == nil || pinArg == nil || pinArg.Obj != name.Obj || gate == nil ||
+		predicate.Pos() >= pinArg.Pos() || pinArg.Pos() >= gate.Pos() {
+		return nil
+	}
+
+	uses := 0
+	ast.Inspect(fn.Body, func(node ast.Node) bool {
+		if id, ok := node.(*ast.Ident); ok && id.Name == name.Name {
+			uses++
+		}
+		return true
+	})
+	// Only the declaration, the pin argument and the original if may name
+	// this local. Extra assignments, shadowing and aliases are rejected.
+	if uses != 3 {
+		return nil
+	}
+	if condition, outbound := gate.Cond.(*ast.BinaryExpr); outbound {
+		gateName := condition.X.(*ast.Ident)
+		if gateName.Obj != name.Obj {
+			return nil
+		}
+		predicate = &ast.BinaryExpr{X: &ast.ParenExpr{X: predicate}, Op: condition.Op, Y: condition.Y}
+	} else if gate.Cond.(*ast.Ident).Obj != name.Obj {
+		return nil
+	}
+	if text(predicate) != want {
+		return nil
+	}
+	return predicate
 }
 
 // Evaluate only the explicitly enumerated actual predicate nodes. Unsupported
@@ -795,9 +885,12 @@ func TestContactPushThreeOriginalTransportGatesKeepKAndNinBoundaries(t *testing.
 		t.Fatal(failures)
 	}
 	cases := []struct{ name, old, next, diagnostic string }{
-		{"accepted-K-missing", "if s.inboundPins != nil || s.findNode != nil || s.degree != nil || s.hasContactRecordPushTransportCapability() {", "if s.inboundPins != nil || s.findNode != nil || s.degree != nil {", "acceptSecureInbound"},
+		{"accepted-K-missing", "needsPin := s.inboundPins != nil || s.findNode != nil || s.degree != nil || s.hasContactRecordPushTransportCapability()", "needsPin := s.inboundPins != nil || s.findNode != nil || s.degree != nil", "acceptSecureInbound"},
 		{"dial-raw-K-missing", "if s.findNode != nil || s.degree != nil || s.hasContactRecordPushTransportCapability() {", "if s.findNode != nil || s.degree != nil {", "dialV2"},
-		{"proven-bind-K-missing", "if (s.findNode != nil || s.degree != nil || s.hasContactRecordPushTransportCapability()) && transport.proofRaw != nil {", "if (s.findNode != nil || s.degree != nil) && transport.proofRaw != nil {", "provenTransport"},
+		{"proven-bind-K-missing", "needsPin := s.findNode != nil || s.degree != nil || s.hasContactRecordPushTransportCapability()", "needsPin := s.findNode != nil || s.degree != nil", "provenTransport"},
+		{"proven-bind-Raw-missing", "if needsPin && transport.proofRaw != nil {", "if needsPin {", "provenTransport"},
+		{"captured-pin-policy-ignored", "noteProvenInboundBinding(peer.Identity, s.secureSessions.sessionPinAdmission(peer.Identity, needsPin))", "noteProvenInboundBinding(peer.Identity, s.secureSessions.sessionPinAdmission(peer.Identity, false))", "acceptSecureInbound"},
+		{"captured-pin-policy-reassigned", "if needsPin && transport.proofRaw != nil {", "needsPin = true\n\tif needsPin && transport.proofRaw != nil {", "provenTransport"},
 		{"nin-outbound-overreach", "if s.findNode != nil || s.degree != nil || s.hasContactRecordPushTransportCapability() {", "if s.inboundPins != nil || s.findNode != nil || s.degree != nil || s.hasContactRecordPushTransportCapability() {", "dialV2"},
 	}
 	for _, test := range cases {

@@ -528,9 +528,14 @@ func (m *sessionAddressMarks) clearV2RetryWait(address domain.PeerAddress) {
 // dial goes ahead at once.
 func TestAFullPinStoreIsALocalRefusalRetriedWhenRoomFrees(t *testing.T) {
 	t.Parallel()
-	_, address, stopListener := listenerNode(t, withoutOwnDials(nil))
+	listener, address, stopListener := listenerNode(t, withoutOwnDials(nil))
 	defer stopListener()
-	dialer, stopDialer := startQuietNode(t, func(svc *Service) { fillPinStore(t, svc.secureSessions.store) })
+	dialer, stopDialer := startTestNodeWithSetup(t, config.Node{
+		ListenAddress:    freeAddress(t),
+		BootstrapPeers:   []string{},
+		ReservedPinPeers: []string{listener.Address()},
+		Type:             domain.NodeTypeFull,
+	}, withoutOwnDials(func(svc *Service) { fillPinStore(t, svc.secureSessions.store) }))
 	defer stopDialer()
 	target := domain.PeerAddress(normalizeAddress(address))
 

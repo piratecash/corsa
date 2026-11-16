@@ -6,17 +6,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/piratecash/corsa/internal/core/config"
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/identity"
 )
 
-// pin_store_full_test.go pins the behaviour of a full pin store
-// (docs/protocol/session_v2.md, "A full pin store"): existing protection is
-// never lost, because evicting a pin would reopen v1 for an identity that
-// proved v2; a NEW identity is not promised a pin — and a v2 session whose
-// mandatory pin could not be stored is not established, fails with
-// pin_store_full, and is not followed by an automatic v1 fallback in the same
-// attempt.
-
+// A full pin store refuses a new permanent pin and keeps its previous pins.
+// Transport tests use operator-approved identities so the peer needs a pin.
 // fillPinStore pins fake identities until the store is at its bound, and puts
 // them on disk.
 func fillPinStore(t *testing.T, store *secureSessionStore) {
@@ -89,50 +85,73 @@ func TestAFullPinStoreRefusesANewIdentityAndKeepsEveryExistingOne(t *testing.T) 
 	}
 }
 
-// The node: a new identity's v2 session to a node whose pin store is full is
-// not established — not even briefly as a v2 session — and the dialler does
-// not fall back to v1 in that attempt. An identity pinned earlier still
-// connects over v2.
+// A new approved identity is refused by a full listener. A peer pinned
+// earlier can still reconnect using a verified TLS session.
 func TestANodeWithAFullPinStoreRefusesANewIdentitysSession(t *testing.T) {
 	t.Parallel()
-	var pinnedEarlier domain.PeerIdentity
-	listener, address, stopListener := listenerNode(t, func(svc *Service) {
+	newID, err := identity.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	knownID, err := identity.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	address := freeAddress(t)
+	pinnedEarlier := domain.PeerIdentityFromWire(knownID.Address)
+	listener, stopListener := startTestNodeWithSetup(t, config.Node{
+		ListenAddress:    address,
+		BootstrapPeers:   []string{},
+		ReservedPinPeers: []string{newID.Address},
+		Type:             domain.NodeTypeFull,
+	}, withoutOwnDials(func(svc *Service) {
+		if err := svc.secureSessions.store.noteProvenInbound(pinnedEarlier); err != nil {
+			t.Fatalf("pin the known peer before filling: %v", err)
+		}
 		fillPinStore(t, svc.secureSessions.store)
-	})
+	}))
 	defer stopListener()
 
-	newcomer, stopNewcomer := dialerNode(t, address, nil)
-	defer stopNewcomer()
-	awaitV2RefusalOrAuthentication(t, newcomer, listener, domain.PeerAddress(normalizeAddress(address)))
-	if listener.SecureSessionStoreStats().PinRefusalsStoreFull == 0 {
-		t.Fatal("the newcomer's attempt failed, but not on the listener's full pin store")
+	startDialer := func(id *identity.Identity) (*Service, func()) {
+		return startTestNodeAs(t, config.Node{
+			ListenAddress:  freeAddress(t),
+			BootstrapPeers: []string{normalizeAddress(address)},
+			Type:           domain.NodeTypeFull,
+		}, id, nil)
 	}
-	if nodeAuthenticatedIdentity(listener, peerIdentityOf(t, newcomer)) {
-		t.Fatal("a session without a stored pin was established: the listener authenticated the newcomer")
+	_, stopNewcomer := startDialer(newID)
+	defer stopNewcomer()
+	newcomer := domain.PeerIdentityFromWire(newID.Address)
+	waitForConditionMsg(t, 10*time.Second, "approved peer did not attempt a session", func() bool {
+		return listener.SecureSessionStoreStats().PinRefusalsStoreFull > 0 ||
+			listener.identityHasProvenConnection(newcomer)
+	})
+	if listener.SecureSessionStoreStats().PinRefusalsStoreFull == 0 || listener.identityHasProvenConnection(newcomer) {
+		t.Fatal("the full listener admitted the approved peer without storing its pin")
+	}
+	if listener.secureSessions.store.identityPinned(newcomer) {
+		t.Fatal("the full listener added a permanent pin past the limit")
 	}
 
-	_, stopKnown := dialerNode(t, address, func(svc *Service) {
-		pinnedEarlier = peerIdentityOf(t, svc)
-		listener.secureSessions.store.mu.Lock()
-		listener.secureSessions.store.identities[pinnedEarlier] = identityPinEntry{pinnedAt: time.Now()}
-		listener.secureSessions.store.mu.Unlock()
-	})
+	_, stopKnown := startDialer(knownID)
 	defer stopKnown()
 	waitForConditionMsg(t, 10*time.Second, "an identity pinned before the store filled up could not connect", func() bool {
-		v2, _ := claimsOf(listener, pinnedEarlier)
-		return v2 > 0
+		return listener.identityHasProvenConnection(pinnedEarlier)
 	})
 }
 
-// The dialling side: a node whose own pin store is full does not establish a
-// v2 session with an identity it has not pinned, and does not fall back to v1.
+// The dialling side also refuses an approved identity's first permanent
+// pin at the hard limit and waits for room.
 func TestADiallerWithAFullPinStoreDoesNotEstablishOrFallBack(t *testing.T) {
 	t.Parallel()
-	_, address, stopListener := listenerNode(t, withoutOwnDials(nil))
+	listener, address, stopListener := listenerNode(t, withoutOwnDials(nil))
 	defer stopListener()
-	dialer, stopDialer := dialerNode(t, address, func(svc *Service) {
-		fillPinStore(t, svc.secureSessions.store)
-	})
+	dialer, stopDialer := startTestNodeWithSetup(t, config.Node{
+		ListenAddress:    freeAddress(t),
+		BootstrapPeers:   []string{normalizeAddress(address)},
+		ReservedPinPeers: []string{listener.Address()},
+		Type:             domain.NodeTypeFull,
+	}, func(svc *Service) { fillPinStore(t, svc.secureSessions.store) })
 	defer stopDialer()
 
 	// Refused by the connection manager's own attempts, the later ones after

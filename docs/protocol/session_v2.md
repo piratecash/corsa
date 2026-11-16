@@ -10,6 +10,10 @@ The [later owner decision](../operations/d1-release-decision-proposal.md#measure
 
 **Protocol floor 31.** Current peer sessions require TLS and the session proof. Outbound dials never fall back to plaintext. The listener still redirects v2.5.71’s identity-less protocol-31 probe to TLS, without opening a peer session. Descriptions of legacy admission below apply to the historical transition period. The stored identity and endpoint protections still apply.
 
+**Pin capacity on protocol 31.** The 20,000 permanent pins keep their existing protections. Once 16,000 places are used, an ordinary peer with a new identity can connect to a public relay with verified TLS for the lifetime of that connection. This does not create a pin, bind or replace an endpoint owner, or grant a feature that requires a pin incarnation. The node can reserve permanent pins for exact, locally approved identities via `CORSA_RESERVED_PIN_PEERS` or SDK `NodeConfig.ReservedPinPeers`. Their identity proof still has to verify. Once all 20,000 places are occupied, a new approved peer requiring a pin receives `pin_store_full`. The startup refusal over unsafe or unreadable storage still applies.
+
+An ephemeral-only identity has no persistent downgrade protection to take to a build from the legacy transition. Where that matters, keep protocol 31 as the minimum on the rollback target. Existing pins are retained.
+
 
 ### Status during the historical transition
 
@@ -506,6 +510,10 @@ Local business ports are implemented and tested separately. Public confirm and v
 ## Русский
 
 **Минимум протокола 31.** Для каждой пиринговой сессии требуются TLS и доказательство identity. При исходящем дозвоне возврата к plaintext нет. Слушатель всё ещё перенаправляет безымянную пробу v2.5.71 с версией 31 на TLS без открытия пиринговой сессии. Описания допуска legacy ниже относятся к переходному периоду. Сохранённые защиты identity и адресов продолжают действовать.
+
+**Ёмкость pin store при протоколе 31.** Общий лимит постоянных pins составляет 20 000. Начиная с 16 000 занятых мест, обычный пир с новой identity может пользоваться публичным реле до завершения проверенной TLS-сессии. Такая сессия не создаёт pin, не назначает владельца endpoint и не открывает функции, которым нужен экземпляр постоянного pin. В `CORSA_RESERVED_PIN_PEERS` или SDK `NodeConfig.ReservedPinPeers` оператор может перечислить точные identity для допуска в резерв после успешного TLS proof. При общем заполнении новая одобренная identity получает `pin_store_full`. Отказ запуска при небезопасном или нечитаемом хранилище сохраняется.
+
+Сессия без pin не создаёт постоянной защиты identity для отката на сборку переходного периода. Если нужна эта гарантия, используйте для отката сборку с минимальной версией протокола 31. Ранее записанные pins сохраняются.
 
 
 ### Статус

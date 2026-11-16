@@ -248,6 +248,8 @@ file there is a deliberately new database.
 
 All outgoing peer connections begin with TLS. `NodeConfig.V2TLSFirst` is deprecated and has no effect.
 
+`NodeConfig.ReservedPinPeers` lists exact 40-character lowercase peer identities approved to use reserved permanent pin capacity after TLS identity proof.
+
 ### Идентификация
 
 SDK никогда не создаёт identity автоматически. Каждый потребитель должен
@@ -627,6 +629,8 @@ cfg.Node.StateDBPath = "/var/lib/corsa-bot/state.db"
 ### Защищённый транспорт
 
 Все исходящие подключения к пирам начинаются с TLS. Поле `NodeConfig.V2TLSFirst` устарело и не влияет на подключения.
+
+В `NodeConfig.ReservedPinPeers` указываются точно одобренные оператором identity из 40 строчных шестнадцатеричных символов. Они могут использовать резерв постоянных pins после успешного TLS proof.
 
 ### Быстрый старт
 

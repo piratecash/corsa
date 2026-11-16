@@ -216,35 +216,6 @@ func TestUnprovenClaimOfAnUnpinnedIdentityKeepsItsRoutingRights(t *testing.T) {
 	}
 }
 
-// claimsOf reports how many connections of node name id, split by kind:
-// v2 (TLS) and legacy (the metered socket itself), both directions.
-func claimsOf(node *Service, id domain.PeerIdentity) (v2, legacy int) {
-	node.peerMu.RLock()
-	defer node.peerMu.RUnlock()
-	for _, session := range node.sessions {
-		if session.peerIdentity != id {
-			continue
-		}
-		if _, proven := session.provenIdentity(); proven {
-			v2++
-		} else {
-			legacy++
-		}
-	}
-	for _, entry := range node.conns {
-		core := entry.core
-		if core == nil || core.Dir() != netcore.Inbound || core.Identity() != id {
-			continue
-		}
-		if _, proven := core.Auth().ProvenIdentity(); proven {
-			v2++
-		} else {
-			legacy++
-		}
-	}
-	return v2, legacy
-}
-
 // RT-6: what an impostor's legacy session wrote about X BEFORE X proved
 // itself — a withdrawal with the largest SeqNo, a black-hole cooldown, a far
 // higher v3 epoch — is forgotten at the proof, so X's own announcements are

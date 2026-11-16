@@ -257,6 +257,9 @@ func (s *Service) recordAddressIdentityLocked(address domain.PeerAddress, record
 	if recorded.origin != domain.PeerIdentityProvenV2 && s.identityPinnedV2(recorded.identity) {
 		return false
 	}
+	if s.secureSessions != nil && s.secureSessions.store != nil && s.secureSessions.store.suppressesUnpinnedAddressIdentity(recorded.identity) {
+		return false
+	}
 	ticket := s.beginK3AdvertisedPeerLocked()
 	if ticket != nil {
 		defer s.guardK3AdvertisedPeerLocked(ticket)

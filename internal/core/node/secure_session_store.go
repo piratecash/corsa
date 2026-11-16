@@ -1434,9 +1434,50 @@ func (s *secureSessionStore) noteProvenInbound(id domain.PeerIdentity) error {
 	return err
 }
 
-func (s *secureSessionStore) noteProvenInboundBinding(id domain.PeerIdentity) (identityPinEntryBinding, error) {
+// sessionPinAdmission is local policy for a proof that has already completed.
+type sessionPinAdmission struct {
+	allowEphemeral bool
+	reserve        bool
+}
+
+// The ordinary budget bounds the number of pins a node can give to peers
+// without explicit approval. Existing pins also count, including on upgrade.
+const ordinarySessionPinLimit = 16000
+
+var (
+	errEphemeralPinEndpoint = errors.New("ephemeral secure session at an endpoint guarded by another identity")
+	errOrdinaryPinCapacity  = errors.New("ordinary identity pin capacity exhausted")
+)
+
+// aboveOrdinarySessionPinLimitLocked reports whether granting a new pin
+// requires access to the reserve. An existing pin or recovery reservation
+// for this exact identity has already used its place.
+func (s *secureSessionStore) aboveOrdinarySessionPinLimitLocked(id domain.PeerIdentity) bool {
+	if s.identityPinCapacityUsedLocked() < ordinarySessionPinLimit {
+		return false
+	}
+	if _, present := s.identities[id]; present {
+		return false
+	}
+	return s.pinRecovery == nil || s.pinRecovery.permit == nil || s.pinRecovery.permit.Binding.Identity != id
+}
+
+// sessionPinDispositionLocked handles a verified transport's pin admission
+// while the same store lock protects the next pin write. Callers that manage
+// permanent pins directly use the hard-cap-only helpers.
+func (s *secureSessionStore) sessionPinDispositionLocked(id domain.PeerIdentity, policy []sessionPinAdmission) (ephemeral bool, err error) {
+	if len(policy) == 0 || policy[0].reserve || !s.aboveOrdinarySessionPinLimitLocked(id) {
+		return false, nil
+	}
+	if !policy[0].allowEphemeral {
+		return false, errOrdinaryPinCapacity
+	}
+	return true, nil
+}
+
+func (s *secureSessionStore) noteProvenInboundBinding(id domain.PeerIdentity, policy ...sessionPinAdmission) (identityPinEntryBinding, error) {
 	var binding identityPinEntryBinding
-	err := s.pinOnly(id, func() { binding = s.pinEntryBindingLocked(id) })
+	err := s.pinOnly(id, func() { binding = s.pinEntryBindingLocked(id) }, policy...)
 	if err != nil {
 		return identityPinEntryBinding{}, err
 	}
@@ -1445,10 +1486,14 @@ func (s *secureSessionStore) noteProvenInboundBinding(id domain.PeerIdentity) (i
 
 // pinOnly pins id and binds nothing; alsoLocked runs under mu once the pin is
 // stored, for a counter of the caller's. An error is noteProvenInbound's.
-func (s *secureSessionStore) pinOnly(id domain.PeerIdentity, alsoLocked func()) error {
+func (s *secureSessionStore) pinOnly(id domain.PeerIdentity, alsoLocked func(), policy ...sessionPinAdmission) error {
 	var refused error
 	pinned := 0
-	err := s.updatePinProof(func(now time.Time) bool {
+	err := s.updatePinProof(len(policy) > 0, func(now time.Time) bool {
+		ephemeral, admissionErr := s.sessionPinDispositionLocked(id, policy)
+		if refused = admissionErr; refused != nil || ephemeral {
+			return false
+		}
 		added, pinErr := s.pinLocked(id, now)
 		refused, pinned = pinErr, len(s.identities)
 		if pinErr == nil {
@@ -1541,10 +1586,10 @@ func nameReachedAt(endpoint domain.CanonicalEndpoint, connected *netip.AddrPort)
 // operation that needed the protection that does not complete. An address
 // without a canonical form gets no binding, and the session stands on its
 // identity pin.
-func (s *secureSessionStore) noteProvenOutbound(dial outboundDial, id domain.PeerIdentity, protection endpointProtection) (endpointBindingResult, error) {
+func (s *secureSessionStore) noteProvenOutbound(dial outboundDial, id domain.PeerIdentity, protection endpointProtection, policy ...sessionPinAdmission) (endpointBindingResult, error) {
 	target, keyErr := bindingTargetOf(dial)
 	if keyErr != nil {
-		return s.noteProvenWithoutBinding(dial.address, id, keyErr)
+		return s.noteProvenWithoutBinding(dial.address, id, keyErr, protection, policy...)
 	}
 	if protection.asked() && !protection.pool.Valid() {
 		s.logger.Error().Str("peer", target.endpoint.String()).Str("pool", string(protection.pool)).Msg("secure_session_protection_with_unknown_pool_ignored")
@@ -1553,7 +1598,24 @@ func (s *secureSessionStore) noteProvenOutbound(dial outboundDial, id domain.Pee
 	result := endpointBindingResult{tier: bindingTierNone}
 	var refused error
 	pinned := 0
-	err := s.updatePinProof(func(now time.Time) bool {
+	err := s.updatePinProof(len(policy) > 0, func(now time.Time) bool {
+		ephemeral, admissionErr := s.sessionPinDispositionLocked(id, policy)
+		if refused = admissionErr; refused != nil {
+			return false
+		}
+		if ephemeral {
+			main := s.endpoints[target.endpoint]
+			if protection.kind == protectionRequired || (main.identity != id && main.live(now)) {
+				refused = errEphemeralPinEndpoint
+			}
+			if target.derived != nil {
+				derived := s.endpoints[*target.derived]
+				if derived.identity != id && derived.live(now) {
+					refused = errEphemeralPinEndpoint
+				}
+			}
+			return false
+		}
 		added, pinErr := s.pinLocked(id, now)
 		if pinErr != nil {
 			refused, pinned = pinErr, len(s.identities)
@@ -1585,9 +1647,12 @@ func (s *secureSessionStore) noteProvenOutbound(dial outboundDial, id domain.Pee
 // canonical form (reason) and so gets no binding: binding it under its raw
 // spelling would give one host two keys, the very gap canonicalEndpoint
 // closes. The session stands on the pin.
-func (s *secureSessionStore) noteProvenWithoutBinding(address domain.PeerAddress, id domain.PeerIdentity, reason error) (endpointBindingResult, error) {
+func (s *secureSessionStore) noteProvenWithoutBinding(address domain.PeerAddress, id domain.PeerIdentity, reason error, protection endpointProtection, policy ...sessionPinAdmission) (endpointBindingResult, error) {
 	var binding identityPinEntryBinding
-	err := s.pinOnly(id, func() { s.skippedNotCanonical++; binding = s.pinEntryBindingLocked(id) })
+	err := s.pinOnly(id, func() { s.skippedNotCanonical++; binding = s.pinEntryBindingLocked(id) }, policy...)
+	if err == nil && binding.owner == nil && (protection.kind == protectionRequired || s.endpointRequiresV2(address)) {
+		err = errEphemeralPinEndpoint
+	}
 	if errors.Is(err, errPinStoreFull) {
 		return endpointBindingResult{tier: bindingTierNone}, err
 	}
@@ -1803,20 +1868,24 @@ func (s *secureSessionStore) sweepExpiredWhenDueLocked(moment renewalFlushMoment
 }
 
 // updatePinProof serialises publication and its save with pin removal.
-// Caller holds no store mutex; change runs under mu.
-func (s *secureSessionStore) updatePinProof(change func(now time.Time) bool) error {
+// Live session admission requires a usable store. Storage-only notes on a
+// refused startup store retain the no-op behavior without touching the file.
+func (s *secureSessionStore) updatePinProof(requireUsable bool, change func(now time.Time) bool) error {
 	s.pinMutationGate.RLock()
 	defer s.pinMutationGate.RUnlock()
-	return s.update(change)
-}
-
-// update runs change under mu, then writes the store when the change — or an
-// earlier one that never reached the disk — calls for it.
-func (s *secureSessionStore) update(change func(now time.Time) bool) error {
 	s.mu.Lock()
+	if requireUsable {
+		refusal := s.pinMetadataMutationRefusalLocked()
+		if s.locationUnsafe {
+			refusal = domain.ErrIdentityPinStoreUnavailable
+		}
+		if refusal != nil {
+			s.mu.Unlock()
+			return refusal
+		}
+	}
 	if s.unreadable {
-		// The file could not be read; writing now would replace whatever
-		// protection it held with this process's partial view.
+		// Writing here would replace the protection that could not be loaded.
 		s.mu.Unlock()
 		return nil
 	}
