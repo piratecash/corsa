@@ -13,13 +13,15 @@ import (
 	"github.com/piratecash/corsa/internal/core/service"
 )
 
-func TestSDKDirectMessageSelectsNegotiatedSignedReceiptPolicy(t *testing.T) {
+func TestSDKDirectMessageRequiresSignedReceiptsBeforeAndAfterConnecting(t *testing.T) {
 	t.Setenv("CORSA_CONNECT_ONLY", "")
 	ctx := t.Context()
 	readerCfg := ownDMRuntimeConfig(t, []string{})
 	authorCfg := ownDMRuntimeConfig(t, []string{readerCfg.Node.ListenAddress})
 	ownDMRuntimeAssertLoopbackConfig(t, readerCfg, nil)
 	ownDMRuntimeAssertLoopbackConfig(t, authorCfg, []string{readerCfg.Node.ListenAddress})
+	readerCfg.Node.EnableDatagramV1 = false
+	authorCfg.Node.EnableDatagramV1 = false
 	reader, author := newReceiptSigningRuntime(t, readerCfg), newReceiptSigningRuntime(t, authorCfg)
 	ownDMRuntimeContact(t, author, reader)
 	refFor := func(id string) domain.MessageRef {
@@ -35,33 +37,38 @@ func TestSDKDirectMessageSelectsNegotiatedSignedReceiptPolicy(t *testing.T) {
 	}
 	authorStore := author.client.ChatlogGateway().Store()
 	readerStore := reader.client.ChatlogGateway().Store()
-	legacy := send("sealed before signed receipts were negotiated")
-	row, found, err := authorStore.EntryByRef(ctx, legacy)
-	if err != nil || !found || chatlog.NegotiatedSignedReceipts(row.Metadata) {
-		t.Fatalf("queued message must keep legacy receipt policy, found=%v err=%v", found, err)
+	queued := send("sealed before either endpoint starts")
+	row, found, err := authorStore.EntryByRef(ctx, queued)
+	if err != nil || !found || !chatlog.NegotiatedSignedReceipts(row.Metadata) {
+		t.Fatalf("queued message must require signed receipts, found=%v err=%v", found, err)
 	}
 	for _, runtime := range []*Runtime{reader, author} {
 		if err := runtime.Start(ctx); err != nil {
 			t.Fatal(err)
 		}
 	}
-	ownDMRuntimeWait(t, "SDK peers did not negotiate signed receipts", func() bool {
-		return author.nodeService.SupportsSignedReceipts(domain.PeerIdentityFromWire(reader.Address())) &&
-			reader.nodeService.SupportsSignedReceipts(domain.PeerIdentityFromWire(author.Address()))
+	ownDMRuntimeWait(t, "SDK peers did not establish their TLS session", func() bool {
+		return author.nodeService.SessionKindStats().OutboundV2 > 0 && reader.nodeService.SessionKindStats().InboundV2 > 0
 	})
-	protected := send("sealed after signed receipts were negotiated")
-	for _, store := range []*chatlog.Store{authorStore, readerStore} {
-		ownDMRuntimeWait(t, "SDK did not persist the protected delivery", func() bool {
-			row, found, err := store.EntryByRef(ctx, protected)
-			if err != nil {
-				t.Fatal(err)
-			}
-			return found && row.DeliveryStatus == chatlog.StatusDelivered && chatlog.NegotiatedSignedReceipts(row.Metadata)
-		})
+	connected := send("sealed after both endpoints connect")
+	_, readerRecord := reader.nodeService.SelfIdentityRecord()
+	network := domain.NetworkID(authorCfg.App.Network)
+	for _, ref := range []domain.MessageRef{queued, connected} {
+		waitForSDKSignedReceipt(t, author, network, ref, string(readerRecord.PubKey), protocol.ReceiptStatusDelivered)
+		for _, store := range []*chatlog.Store{authorStore, readerStore} {
+			ownDMRuntimeWait(t, "SDK did not persist the protected delivery", func() bool {
+				row, found, err := store.EntryByRef(ctx, ref)
+				if err != nil {
+					t.Fatal(err)
+				}
+				delivered := row.DeliveryStatus == chatlog.StatusDelivered || row.DeliveryStatus == chatlog.StatusSeen
+				return found && delivered && chatlog.NegotiatedSignedReceipts(row.Metadata)
+			})
+		}
 	}
 }
 
-func TestSDKFirstDirectMessageNegotiatesSignedReceiptsThroughRelay(t *testing.T) {
+func TestSDKFirstDirectMessageUsesSignedReceiptsThroughRelayWithoutDatagrams(t *testing.T) {
 	t.Setenv("CORSA_CONNECT_ONLY", "")
 	ctx, cancel := context.WithTimeout(t.Context(), 45*time.Second)
 	defer cancel()
@@ -82,11 +89,14 @@ func TestSDKFirstDirectMessageNegotiatesSignedReceiptsThroughRelay(t *testing.T)
 	ownDMRuntimeAssertLoopbackConfig(t, relayCfg, nil)
 	ownDMRuntimeAssertLoopbackConfig(t, authorCfg, seeds)
 	ownDMRuntimeAssertLoopbackConfig(t, readerCfg, seeds)
+	for _, cfg := range []*Config{&relayCfg, &authorCfg, &readerCfg} {
+		cfg.Node.EnableDatagramV1 = false
+	}
 	relay := newReceiptSigningRuntime(t, relayCfg)
 	author := newReceiptSigningRuntime(t, authorCfg)
 	reader := newReceiptSigningRuntime(t, readerCfg)
-	// The saved contact supplies ordinary encryption keys. It has no
-	// receipt capability assertion, and the clients have never connected.
+	// The saved contact supplies ordinary encryption keys, and the clients
+	// have never connected.
 	ownDMRuntimeContact(t, author, reader)
 	received := reader.SubscribeDirectMessages(ctx)
 	for _, runtime := range []*Runtime{relay, reader, author} {
@@ -134,13 +144,13 @@ func TestSDKFirstDirectMessageNegotiatesSignedReceiptsThroughRelay(t *testing.T)
 
 	_, readerRecord := reader.nodeService.SelfIdentityRecord()
 	network := domain.NetworkID(authorCfg.App.Network)
-	waitForSDKRelayReceipt(t, author, network, ref, string(readerRecord.PubKey), protocol.ReceiptStatusDelivered)
+	waitForSDKSignedReceipt(t, author, network, ref, string(readerRecord.PubKey), protocol.ReceiptStatusDelivered)
 	if err := reader.client.MarkConversationSeen(ctx, authorID, []service.DirectMessage{{
 		ID: ref.ID, Sender: authorID, Recipient: readerID, ReceiptStatus: protocol.ReceiptStatusDelivered,
 	}}); err != nil {
 		t.Fatalf("mark first relay message seen: %v", err)
 	}
-	waitForSDKRelayReceipt(t, author, network, ref, string(readerRecord.PubKey), protocol.ReceiptStatusSeen)
+	waitForSDKSignedReceipt(t, author, network, ref, string(readerRecord.PubKey), protocol.ReceiptStatusSeen)
 	ownDMRuntimeWait(t, "signed seen_ack did not commit for the first relay message", func() bool {
 		var confirmed int
 		err := reader.database.Executor().QueryRowContext(ctx,
@@ -173,7 +183,7 @@ func newReceiptSigningRuntime(t *testing.T, cfg Config) *Runtime {
 	return runtime
 }
 
-func waitForSDKRelayReceipt(t *testing.T, author *Runtime, network domain.NetworkID, ref domain.MessageRef, key, status string) {
+func waitForSDKSignedReceipt(t *testing.T, author *Runtime, network domain.NetworkID, ref domain.MessageRef, key, status string) {
 	t.Helper()
 	ownDMRuntimeWait(t, "missing signed "+status+" receipt", func() bool {
 		reply := author.nodeService.HandleLocalFrame(protocol.Frame{Type: "fetch_delivery_receipts", Recipient: ref.Sender})

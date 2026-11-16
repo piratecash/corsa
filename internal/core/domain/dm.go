@@ -61,7 +61,7 @@ type OutgoingDM struct {
 	// RetryOf marks a §4.10 recovery re-send: the id of the original
 	// message this envelope replaces. Travels INSIDE the encrypted part.
 	RetryOf MessageID
-	// RequireSignedReceipts carries a verified original's policy into key recovery.
+	// Deprecated: new DM v1 messages always require signed receipts from capable peers.
 	RequireSignedReceipts bool
 	// PresetID, when set, is used as the outgoing message id instead of a
 	// freshly minted one. Recovery re-sends pre-mint the id so the durable

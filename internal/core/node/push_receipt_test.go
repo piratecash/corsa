@@ -141,6 +141,29 @@ func TestPushDeliveryReceiptRejectsUnrelatedRecipient(t *testing.T) {
 	}
 }
 
+func signedDeliveredForLocalMessage(t *testing.T, svc *Service, messageID protocol.MessageID) protocol.DeliveryReceipt {
+	t.Helper()
+	author, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("generate receipt author: %v", err)
+	}
+	ref := deliveryMessageRef(svc.ownMessageIdentity(messageID, author.Address))
+	svc.sentDMIDs.Add(ref.Key())
+	receipt := protocol.DeliveryReceipt{
+		MessageID:       messageID,
+		Sender:          author.Address,
+		Recipient:       svc.Address(),
+		Status:          protocol.ReceiptStatusDelivered,
+		DeliveredAt:     time.Now().UTC().Truncate(time.Second),
+		SignerPublicKey: identity.PublicKeyBase64(author.PublicKey),
+	}
+	receipt.Signature, err = protocol.SignDeliveryReceipt(domain.NetworkID(networkName), ref, receipt, author)
+	if err != nil {
+		t.Fatalf("sign delivered receipt: %v", err)
+	}
+	return receipt
+}
+
 // TestPushDeliveryReceiptAcceptsOwnIdentity verifies that
 // handleInboundPushDeliveryReceipt stores a receipt whose Recipient matches
 // the local node identity.
@@ -158,18 +181,10 @@ func TestPushDeliveryReceiptAcceptsOwnIdentity(t *testing.T) {
 
 	conn := drainPipe(t)
 
-	svc.sentDMIDs.Add(deliveryMessageRef(svc.ownMessageIdentity("msg-2", "some-sender")).Key()) // we sent this message; the delivered receipt is solicited
-	receiptFrame := protocol.ReceiptFrame{
-		MessageID:   "msg-2",
-		Sender:      "some-sender",
-		Recipient:   id.Address,
-		Status:      "delivered",
-		DeliveredAt: time.Now().UTC().Format(time.RFC3339),
-	}
-
+	receipt := receiptFrame(signedDeliveredForLocalMessage(t, svc, "msg-2"))
 	svc.handleInboundPushDeliveryReceipt(mustConnIDForTest(svc, conn), protocol.Frame{
 		Type:    "push_delivery_receipt",
-		Receipt: &receiptFrame,
+		Receipt: &receipt,
 	})
 
 	svc.deliveryMu.RLock()
@@ -1094,18 +1109,9 @@ func TestRelayDeliveryReceiptAcceptsOwnIdentity(t *testing.T) {
 	svc.initMaps()
 	svc.identity = id
 
-	conn, _ := net.Pipe()
-	defer func() { _ = conn.Close() }()
-
-	svc.sentDMIDs.Add(deliveryMessageRef(svc.ownMessageIdentity("msg-relay-2", "some-sender")).Key()) // we sent this message; the delivered receipt is solicited
-	svc.handleInboundRelayDeliveryReceipt(mustConnIDForTest(svc, conn), protocol.Frame{
-		Type:        "relay_delivery_receipt",
-		ID:          "msg-relay-2",
-		Address:     "some-sender",
-		Recipient:   id.Address,
-		Status:      "delivered",
-		DeliveredAt: time.Now().UTC().Format(time.RFC3339),
-	})
+	conn := drainPipe(t)
+	receipt := signedDeliveredForLocalMessage(t, svc, "msg-relay-2")
+	svc.handleInboundRelayDeliveryReceipt(mustConnIDForTest(svc, conn), relayReceiptFrame(receipt))
 
 	svc.deliveryMu.RLock()
 	count := len(svc.receipts[id.Address])

@@ -26,7 +26,8 @@ func TestRelayReceiptCapabilityAcrossSecureRelease(t *testing.T) {
 			t.Fatalf("secure release binary reports %s, want 2.5.71", release.release)
 		}
 		t.Run("through_old_relay", func(t *testing.T) {
-			from, to := startMixedReceiptNodes(t, fuse, release)
+			const enableDatagrams = true
+			from, to := startMixedReceiptNodes(t, fuse, release, enableDatagrams)
 			target := domain.PeerIdentityFromWire(to.Address())
 			boxKey := identity.BoxPublicKeyBase64(to.identity.BoxPublicKey)
 			waitForConditionMsg(t, 10*time.Second, "missing live receipt capability through the released relay", func() bool {

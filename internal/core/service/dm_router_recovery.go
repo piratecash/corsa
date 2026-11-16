@@ -1239,11 +1239,10 @@ func (m *recoveryManager) tryResend(root domain.MessageRef) {
 		return
 	}
 	outgoing := domain.OutgoingDM{
-		RequireSignedReceipts: plain.SignedReceiptRequired,
-		Body:                  plain.Body,
-		ReplyTo:               domain.MessageID(plain.ReplyTo),
-		RetryOf:               domain.MessageID(entry.ID),
-		PresetID:              domain.MessageID(resend.replacementID),
+		Body:     plain.Body,
+		ReplyTo:  domain.MessageID(plain.ReplyTo),
+		RetryOf:  domain.MessageID(entry.ID),
+		PresetID: domain.MessageID(resend.replacementID),
 	}
 	echo, err := m.router.client.dm.SendDirectMessage(context.Background(), domain.PeerIdentityFromWire(resend.peer), outgoing)
 	if err != nil {

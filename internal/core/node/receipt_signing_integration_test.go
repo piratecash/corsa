@@ -1,8 +1,14 @@
 package node
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/rs/zerolog/log"
 
 	"github.com/piratecash/corsa/internal/core/directmsg"
 	"github.com/piratecash/corsa/internal/core/domain"
@@ -166,7 +172,7 @@ func waitForSignedReceipt(t *testing.T, from, to *Service, ref domain.MessageRef
 	})
 }
 
-func TestDeliveredReceiptSigningUsesOnlyNegotiatedProvedSessions(t *testing.T) {
+func TestHistoricalDMDeliveredReceiptIsSignedThroughProvedDirectSessions(t *testing.T) {
 	t.Parallel()
 
 	t.Run("signed in both session directions", func(t *testing.T) {
@@ -204,24 +210,58 @@ func TestDeliveredReceiptSigningUsesOnlyNegotiatedProvedSessions(t *testing.T) {
 			})
 		}
 	})
+}
 
-	t.Run("unnegotiated message keeps an unsigned receipt over TLS relay", func(t *testing.T) {
-		sender, _, recipient := startTLSRelayPair(t)
-		id, err := protocol.NewMessageID()
-		if err != nil {
-			t.Fatal(err)
+func TestHistoricalDMUnsignedReceiptThroughTLSRelayLeavesDeliveryPending(t *testing.T) {
+	output, err := os.Create(filepath.Join(t.TempDir(), "receipt-transport.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalLogger := log.Logger
+	log.Logger = originalLogger.Output(output)
+	t.Cleanup(func() {
+		log.Logger = originalLogger
+		if err := output.Close(); err != nil {
+			t.Error(err)
 		}
-		deliverDM(t, sender, recipient, string(id), "check ordinary receipt through a TLS relay")
-		waitForConditionMsg(t, 10*time.Second, "missing unsigned delivered receipt", func() bool {
-			for _, frame := range sender.fetchDeliveryReceiptsFrame(sender.Address()).Receipts {
-				if frame.MessageID == string(id) && frame.Status == protocol.ReceiptStatusDelivered {
-					if frame.Signature != "" || frame.SignerPublicKey != "" {
-						t.Fatal("unnegotiated receipt included signing fields")
-					}
-					return true
-				}
-			}
-			return false
-		})
 	})
+	sender, relay, recipient := startTLSRelayPair(t)
+	id, err := protocol.NewMessageID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	deliverDM(t, sender, recipient, string(id), "check historical DM delivery through a TLS relay")
+	waitForConditionMsg(t, 10*time.Second, "sender did not receive the historical DM receipt from the relay", func() bool {
+		contents, err := os.ReadFile(output.Name())
+		if err != nil {
+			return false
+		}
+		for line := range strings.SplitSeq(string(contents), "\n") {
+			var record struct {
+				Message   string `json:"message"`
+				Peer      string `json:"peer"`
+				MessageID string `json:"message_id"`
+				Recipient string `json:"recipient"`
+				Status    string `json:"status"`
+			}
+			if json.Unmarshal([]byte(line), &record) == nil &&
+				(record.Message == "received relay_delivery_receipt" || record.Message == "received pushed delivery receipt") &&
+				record.Peer == relay.cfg.ListenAddress && record.MessageID == string(id) && record.Recipient == sender.Address() &&
+				record.Status == protocol.ReceiptStatusDelivered {
+				return true
+			}
+		}
+		return false
+	})
+	for _, receipt := range sender.fetchDeliveryReceiptsFrame(sender.Address()).Receipts {
+		if receipt.MessageID == string(id) {
+			t.Fatalf("relayed receipt became authoritative for a historical message: %s", receipt.Status)
+		}
+	}
+	sender.deliveryMu.RLock()
+	pending := sender.awaitingDelivered[sender.ownMessageIdentity(id, recipient.Address())] != nil
+	sender.deliveryMu.RUnlock()
+	if !pending {
+		t.Fatal("relayed receipt stopped the historical DM delivery retry")
+	}
 }

@@ -3978,7 +3978,9 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *
 		}
 		// Acking tells the peer to delete their copy, and their copy is
 		// the only place this fact survives if our own write failed.
-		if outcome := s.storeDeliveryReceipt(receipt); outcome.ackable {
+		if outcome := s.storePeerDeliveryReceipt(receipt, func(legacyOnly bool) *netcore.NetCore {
+			return s.directReceiptOutboundWriterLocked(session, receipt.Sender, legacyOnly)
+		}); outcome.ackable {
 			s.enqueueAckDeleteOnSession(session, address, ackDeleteForReceipt(receipt))
 		} else {
 			log.Warn().Str("peer", string(address)).Str("message_id", string(receipt.MessageID)).
@@ -4000,7 +4002,9 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *
 		}
 		// Fast path: receipt is addressed to this node or an active subscriber.
 		if receipt.Recipient == s.identity.Address || s.hasSubscriber(receipt.Recipient) {
-			s.storeDeliveryReceipt(receipt)
+			s.storePeerDeliveryReceipt(receipt, func(legacyOnly bool) *netcore.NetCore {
+				return s.directReceiptOutboundWriterLocked(session, receipt.Sender, legacyOnly)
+			})
 			log.Info().Str("peer", string(address)).Str("message_id", string(receipt.MessageID)).Str("recipient", receipt.Recipient).Str("status", receipt.Status).Msg("received relay_delivery_receipt")
 			return
 		}

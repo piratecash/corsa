@@ -3,6 +3,15 @@ package sdk
 import (
 	"context"
 	"encoding/json"
+	"net"
+	"os"
+	"path/filepath"
+	"reflect"
+	"strconv"
+	"sync"
+	"testing"
+	"time"
+
 	"github.com/piratecash/corsa/internal/core/config"
 	"github.com/piratecash/corsa/internal/core/directmsg"
 	"github.com/piratecash/corsa/internal/core/domain"
@@ -10,13 +19,7 @@ import (
 	"github.com/piratecash/corsa/internal/core/identity"
 	corsanode "github.com/piratecash/corsa/internal/core/node"
 	"github.com/piratecash/corsa/internal/core/protocol"
-	"net"
-	"os"
-	"path/filepath"
-	"reflect"
-	"strconv"
-	"testing"
-	"time"
+	"github.com/piratecash/corsa/internal/core/service"
 )
 
 func ownDMRuntimeProfile() corsanode.OwnDMRuntimeProfile {
@@ -142,6 +145,31 @@ func ownDMRuntimeMetadata(t *testing.T, cfg Config) map[string]domain.IdentityPi
 	}
 	return image.Metadata
 }
+
+// ownDMReceiptBarrier holds X's own delivered status write, which is the
+// prerequisite for sending its final receipt. All storage still uses the
+// original chatlog and identity.
+type ownDMReceiptBarrier struct {
+	*service.MessageStoreAdapter
+	ctx     context.Context
+	author  string
+	entered chan protocol.DeliveryReceipt
+	release <-chan struct{}
+	once    sync.Once
+}
+
+func (s *ownDMReceiptBarrier) UpdateDeliveryStatus(receipt protocol.DeliveryReceipt) bool {
+	if receipt.Sender == s.author && receipt.Status == protocol.ReceiptStatusDelivered {
+		s.once.Do(func() { s.entered <- receipt })
+		select {
+		case <-s.release:
+		case <-s.ctx.Done():
+			return false
+		}
+	}
+	return s.MessageStoreAdapter.UpdateDeliveryStatus(receipt)
+}
+
 func TestOwnDMRuntimeOriginalSDKSQLiteAndNonContactHopR(t *testing.T) {
 	// No clock/record/route injection. X is ordinary K; Y is a genuine non-K
 	// next hop. The unchanged SDK send traverses the actual original Runtime.
@@ -160,6 +188,21 @@ func TestOwnDMRuntimeOriginalSDKSQLiteAndNonContactHopR(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = x.Close() })
+	xIdentity, err := identity.Load(xCfg.Node.IdentityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	releaseReceipt := make(chan struct{})
+	release := sync.OnceFunc(func() { close(releaseReceipt) })
+	defer release()
+	receiptBarrier := &ownDMReceiptBarrier{
+		MessageStoreAdapter: service.NewMessageStoreAdapter(x.client.ChatlogGateway(), xIdentity, nil, nil),
+		ctx:                 t.Context(),
+		author:              x.Address(),
+		entered:             make(chan protocol.DeliveryReceipt, 1),
+		release:             releaseReceipt,
+	}
+	x.nodeService.RegisterMessageStore(receiptBarrier)
 	if err := x.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -247,6 +290,16 @@ func TestOwnDMRuntimeOriginalSDKSQLiteAndNonContactHopR(t *testing.T) {
 		row, err := x.client.ChatlogGateway().Store().ReadLastEntry(t.Context(), "dm", domain.PeerIdentityFromWire(c.Address()))
 		return err == nil && row != nil && row.ID == sent.ID
 	})
+	select {
+	case receipt := <-receiptBarrier.entered:
+		if string(receipt.MessageID) != sent.ID || receipt.Recipient != c.Address() || receipt.Signature == "" {
+			t.Fatalf("unexpected original delivered receipt: %+v", receipt)
+		}
+	case <-t.Context().Done():
+		t.Fatal(t.Context().Err())
+	case <-time.After(10 * time.Second):
+		t.Fatal("X never reached the original delivered receipt write")
+	}
 	row, err := c.client.ChatlogGateway().Store().ReadLastEntry(t.Context(), "dm", target)
 	if err != nil || row == nil || row.ID != sent.ID || row.RowID <= 0 || row.Body == "" || row.Body == sent.Body {
 		t.Fatal("original sender SQLite/echo mismatch", err)
@@ -273,6 +326,28 @@ func TestOwnDMRuntimeOriginalSDKSQLiteAndNonContactHopR(t *testing.T) {
 	if metadata[target.String()].Relation.State != domain.IdentityPinAllocationAbsent {
 		t.Fatal("X K was falsely counted as outgoing R")
 	}
+	pending, err := c.client.ChatlogGateway().Store().ReadLastEntry(t.Context(), "dm", target)
+	if err != nil || pending == nil || pending.ID != sent.ID ||
+		pending.DeliveryStatus == protocol.ReceiptStatusDelivered || pending.DeliveryStatus == protocol.ReceiptStatusSeen {
+		t.Fatal("sender received delivery confirmation before X's receipt was released", err)
+	}
+	release()
+	waitForStatus := func(status string) {
+		t.Helper()
+		ownDMRuntimeWait(t, "original send did not reach "+status, func() bool {
+			row, err := c.client.ChatlogGateway().Store().ReadLastEntry(t.Context(), "dm", target)
+			return err == nil && row != nil && row.ID == sent.ID && row.DeliveryStatus == status
+		})
+	}
+	waitForStatus(protocol.ReceiptStatusDelivered)
+	sender := domain.PeerIdentityFromWire(c.Address())
+	if err := x.client.MarkConversationSeen(t.Context(), sender, []service.DirectMessage{{
+		ID: sent.ID, Sender: sender, Recipient: target, ReceiptStatus: protocol.ReceiptStatusDelivered,
+	}}); err != nil {
+		t.Fatalf("mark original message seen: %v", err)
+	}
+	waitForStatus(protocol.ReceiptStatusSeen)
+
 	if err := c.Close(); err != nil {
 		t.Fatal("original Runtime Close", err)
 	}

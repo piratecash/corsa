@@ -77,21 +77,21 @@ func (s *Service) rememberSentReceiptPolicyLocked(message protocol.Envelope) {
 // requiresLiveReceiptSignatureLocked covers in-memory delivery queues and
 // late receipts for recently sent messages.
 // The caller holds peerMu and deliveryMu.
-func (s *Service) requiresLiveReceiptSignatureLocked(receipt protocol.DeliveryReceipt) bool {
+func (s *Service) requiresLiveReceiptSignatureLocked(receipt protocol.DeliveryReceipt, provedLegacyDirect bool) bool {
 	id, ok := confirmedMessageOf(receipt)
 	if !ok {
 		return false
 	}
 	if receipt.Status == protocol.ReceiptStatusSeenAck {
 		entry := s.awaitingSeenAck[id]
-		return entry != nil && entry.Receipt.Signature != ""
+		return entry != nil && entry.Receipt.Signature != "" && (!provedLegacyDirect || !entry.Receipt.NegotiatedSignature)
 	}
 	if entry := s.awaitingDelivered[id]; entry != nil &&
-		(entry.Envelope.SignedReceiptRequired || directmsg.HasV2EnvelopePrefix(entry.Envelope.Payload)) {
+		(directmsg.HasV2EnvelopePrefix(entry.Envelope.Payload) || entry.Envelope.SignedReceiptRequired && !provedLegacyDirect) {
 		return true
 	}
 	_, required := s.signedSentDMIDs[deliveryMessageRef(id).Key()]
-	return required
+	return required && !provedLegacyDirect
 }
 
 func (s *Service) sendNegotiatedSignedReceipt(receipt protocol.DeliveryReceipt) {

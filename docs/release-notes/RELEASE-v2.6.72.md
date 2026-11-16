@@ -8,7 +8,7 @@ Receipts, retries, deletion, recovery and file-transfer state now follow that co
 
 Storage schema 9 applies this identity to the message database while preserving existing row order, message bodies and wire values. The migration is forward-only: after it is applied, a build whose migration catalog ends at schema 8 cannot open the database.
 
-New DM v1 messages can carry their topic, ID, sender and recipient inside both encrypted copies. Upgraded clients validate this reference when reading the message. Messages without a negotiated receipt signature requirement use the original encoding if the reference would push the body over the legacy relay's 64 KiB limit. Older releases can read both forms.
+New DM v1 messages from Desktop and the SDK carry their topic, ID, sender and recipient inside both encrypted copies. Updated clients validate this reference when reading the message. v2.5.71 can still read it. If the bound message exceeds the relay's 64 KiB limit, sending fails so the sender can shorten the message.
 
 ## Identity Recovery Preserves Existing State
 
@@ -38,7 +38,9 @@ This release contains extensive preparation for the future DHT, but it does not 
 
 The S6 and D1 test infrastructure can now observe first-contact timing, durable pin writes, datagram and gossip queue growth, session writer queues, clocks, route traffic and resource use. These probes are opt-in and bounded so that measurements do not create another unbounded source of state. The D1 load stand also gains RouteWire accounting, recovery checks and larger Full512 fixtures for later admission testing.
 
-Direct DM v2 envelopes remain disabled in ordinary builds until the mixed-version delivery policy is approved. Ordinary delivery still uses DM v1. New DMs require signatures on `delivered`, `seen`, and `seen_ack` once the sender verifies the recipient's support. The confirmation can travel on a proved direct session or through a datagram relay. When confirmation is unavailable, the sender can still queue or send the message with ordinary receipts. The requirement stays with the message, and a signed receipt can pass through a legacy relay in an encrypted control DM. Messages sent without the negotiated requirement can still use ordinary receipts. If a protected message exceeds the relay limit with its encrypted reference, sending fails with an error so the sender can shorten the message.
+Direct DM v2 remains disabled in ordinary builds. Each new DM v1 requests signed `delivered`, `seen`, and `seen_ack` without waiting for capability discovery or requiring datagrams. The requirement stays with the message. Signed receipts can travel in an encrypted control DM through a v2.5.71 relay.
+
+v2.5.71 receives messages through protocol 31 relays. An unsigned receipt counts only on the direct TLS session that proved the receipt author's identity. For a message requiring signatures, this exception applies to a peer that did not negotiate them. Relayed unsigned receipts leave the sender's status unconfirmed and do not stop retries, including for older messages. Other connection capabilities continue to negotiate as before.
 
 The preparation also exposed issues in existing paths, and their fixes are included here. Peer activity and route handling stay bound to the authenticated transport that produced them; inbound sessions retain verified endpoint metadata; receipt admission follows the same transport rules; and stored DM v2 data is verified before any delivery retry is rebuilt. The full message-identity repair described above came from the same integration work and is active in this release.
 
@@ -72,7 +74,7 @@ Wire message ID больше не считается глобально уник
 
 Storage schema 9 переносит это правило в базу сообщений, сохраняя существующий порядок строк, тела сообщений и wire values. Миграция однонаправленная: после её применения сборка, чей каталог миграций заканчивается на schema 8, не сможет открыть базу.
 
-Новые сообщения DM v1 могут содержать тему, ID, отправителя и получателя внутри обеих зашифрованных копий. Обновлённые клиенты проверяют эту ссылку при чтении сообщения. Сообщения без согласованного требования подписи используют исходное кодирование, если привязка увеличивает тело сверх лимита старых реле в 64 КиБ. Старые версии читают оба варианта.
+Новые сообщения DM v1 из Desktop и SDK содержат тему, ID, отправителя и получателя внутри обеих зашифрованных копий. Обновлённые клиенты проверяют эту ссылку при чтении сообщения. v2.5.71 по-прежнему читает такие сообщения. Если после добавления ссылки сообщение превышает лимит реле в 64 КиБ, отправка завершается ошибкой и сообщение можно сократить.
 
 ## Восстановление identity сохраняет прежнее состояние
 
@@ -102,7 +104,9 @@ Identities с сохранёнными именами теперь остают�
 
 Инфраструктура S6 и D1 теперь может измерять время первого контакта, durable-запись pins, рост очередей datagram и gossip, очереди session writers, часы, route traffic и потребление ресурсов. Эти probes включаются явно и имеют ограничения, чтобы сами измерения не создавали неограниченно растущее состояние. Load stand D1 также получил учёт RouteWire, проверки восстановления и увеличенные Full512 fixtures для будущей приёмки.
 
-Direct DM v2 envelopes выключены в обычных сборках до утверждения политики доставки между версиями. Обычная доставка по-прежнему использует DM v1. Новые сообщения требуют подписи для `delivered`, `seen` и `seen_ack`, когда отправитель подтвердил поддержку у получателя. Подтверждение можно получить на прямой защищённой сессии или через datagram-реле. Пока подтверждение недоступно, сообщение можно отправить или поставить в очередь с обычными квитанциями. Требование сохраняется вместе с сообщением, а подписанная квитанция может пройти через старое реле внутри зашифрованного служебного DM. Сообщения без согласованного требования по-прежнему могут использовать обычные квитанции. Если защищённое сообщение с привязкой превышает лимит реле, отправитель получает ошибку и может сократить сообщение.
+Прямой DM v2 остаётся выключенным в обычных сборках. Каждый новый DM v1 запрашивает подписанные `delivered`, `seen` и `seen_ack` без ожидания проверки capability и без поддержки datagram. Требование сохраняется вместе с сообщением. Подписанные квитанции могут пройти в зашифрованном служебном DM через реле v2.5.71.
+
+v2.5.71 получает сообщения через реле протокола 31. Неподписанная квитанция засчитывается только на той прямой TLS-сессии, которая подтвердила identity автора квитанции. Для сообщения, требующего подписи, исключение действует только для пира, с которым поддержка подписей не согласована. Неподписанные квитанции через реле оставляют статус у отправителя неподтверждённым и не останавливают повторы, в том числе для ранее отправленных сообщений. Остальные capability соединения согласуются по-прежнему.
 
 Подготовительные работы также выявили проблемы в существующих путях, и исправления включены в релиз. Peer activity и обработка маршрутов остаются привязаны к тому authenticated transport, который их создал; входящие sessions сохраняют проверенные endpoint metadata; допуск receipts следует тем же transport rules; сохранённые данные DM v2 проверяются до восстановления повторной доставки. Описанное выше разделение сообщений по полной identity появилось в рамках той же интеграции и активно в этом релизе.
 

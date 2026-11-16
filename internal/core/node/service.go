@@ -7287,7 +7287,7 @@ func (s *Service) storeDeliveryReceiptFrame(frame protocol.Frame) protocol.Frame
 		return protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidSendDeliveryReceipt}
 	}
 	receipt, err := receiptFromFrame(frame)
-	if err != nil {
+	if err != nil || receipt.Sender != s.identity.Address {
 		return protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidSendDeliveryReceipt}
 	}
 
@@ -8717,17 +8717,49 @@ func (s *Service) storeDeliveryReceipt(receipt protocol.DeliveryReceipt) receipt
 }
 
 func (s *Service) storeDeliveryReceiptWithSeenReply(receipt protocol.DeliveryReceipt, directReply func(protocol.DeliveryReceipt)) receiptOutcome {
+	return s.storeDeliveryReceiptFrom(receipt, directReply, nil)
+}
+
+// storePeerDeliveryReceipt admits unsigned local receipts only from the TLS
+// session that authenticated their author. Transit receipts are forwarded for
+// peers that still use the legacy wire format.
+func (s *Service) storePeerDeliveryReceipt(receipt protocol.DeliveryReceipt, receiptWriter func(legacyOnly bool) *netcore.NetCore) receiptOutcome {
+	if receipt.Signature != "" {
+		return s.storeDeliveryReceipt(receipt)
+	}
+	if receipt.Sender == s.identity.Address {
+		return receiptOutcome{}
+	}
+	if receipt.Recipient != s.identity.Address {
+		return s.storeDeliveryReceipt(receipt)
+	}
+	if receiptWriter == nil {
+		return receiptOutcome{}
+	}
+	s.peerMu.RLock()
+	proven := receiptWriter(false) != nil
+	s.peerMu.RUnlock()
+	if !proven {
+		return receiptOutcome{}
+	}
+	return s.storeDeliveryReceiptFrom(receipt, nil, receiptWriter)
+}
+
+// receiptWriter reads the authority of the exact delivering transport with
+// peerMu held. That transport is also the only return path for an old seen ack.
+func (s *Service) storeDeliveryReceiptFrom(receipt protocol.DeliveryReceipt, directReply func(protocol.DeliveryReceipt), receiptWriter func(legacyOnly bool) *netcore.NetCore) receiptOutcome {
 	if !s.authenticateReceiptSignature(receipt) {
 		return receiptOutcome{}
 	}
-	if receipt.Signature == "" && receipt.Recipient == s.identity.Address {
-		policy, hasPolicy := s.messageStore.(receiptSignaturePolicy)
-		id, confirms := confirmedMessageOf(receipt)
-		if hasPolicy && confirms {
-			required, err := policy.RequiresSignedReceipt(deliveryMessageRef(id))
-			if err != nil || required {
+	unsignedLocal := receipt.Signature == "" && receipt.Recipient == s.identity.Address
+	var requiredSignature bool
+	if unsignedLocal {
+		if id, confirms := confirmedMessageOf(receipt); confirms {
+			required, v1, err := s.localReceiptSignaturePolicy(deliveryMessageRef(id))
+			if err != nil || required && (receiptWriter == nil || !v1) {
 				return receiptOutcome{}
 			}
+			requiredSignature = required
 		}
 	}
 	// Stamped here because this is the one door: every receipt that gets
@@ -8746,10 +8778,29 @@ func (s *Service) storeDeliveryReceiptWithSeenReply(receipt protocol.DeliveryRec
 	log.Trace().Str("site", "storeDeliveryReceipt").Str("phase", "lock_wait").Str("msg_id", string(receipt.MessageID)).Msg("delivery_mu_writer")
 	s.deliveryMu.Lock()
 	log.Trace().Str("site", "storeDeliveryReceipt").Str("phase", "lock_held").Str("msg_id", string(receipt.MessageID)).Msg("delivery_mu_writer")
-	if receipt.Signature == "" && receipt.Recipient == s.identity.Address && s.requiresLiveReceiptSignatureLocked(receipt) {
+	if unsignedLocal && s.requiresLiveReceiptSignatureLocked(receipt, receiptWriter != nil) {
 		s.deliveryMu.Unlock()
 		s.peerMu.Unlock()
 		return receiptOutcome{}
+	}
+	if receiptWriter != nil {
+		legacyOnly := requiredSignature || s.requiresLiveReceiptSignatureLocked(receipt, false)
+		core := receiptWriter(legacyOnly)
+		if core == nil {
+			s.deliveryMu.Unlock()
+			s.peerMu.Unlock()
+			return receiptOutcome{}
+		}
+		directReply = func(ack protocol.DeliveryReceipt) {
+			s.peerMu.RLock()
+			defer s.peerMu.RUnlock()
+			if receiptWriter(legacyOnly) == core {
+				data, err := protocol.MarshalFrameLineBytes(relayReceiptFrame(ack))
+				if err == nil {
+					core.SendRaw(data)
+				}
+			}
+		}
 	}
 	if s.seenReceipts.Has(key) {
 		// The key is written by finishReceipt, so it is here only if a
@@ -10810,7 +10861,9 @@ func (s *Service) handleInboundPushDeliveryReceipt(connID domain.ConnID, frame p
 	// Acking tells the peer to delete their copy, and their copy is the
 	// only place this fact survives if our own write failed. Same rule as
 	// the outbound session path — this is the second door into it.
-	if outcome := s.storeDeliveryReceipt(receipt); !outcome.ackable {
+	if outcome := s.storePeerDeliveryReceipt(receipt, func(legacyOnly bool) *netcore.NetCore {
+		return s.directReceiptInboundWriterLocked(connID, receipt.Sender, legacyOnly)
+	}); !outcome.ackable {
 		log.Warn().Str("peer", string(peerAddr)).Str("message_id", string(receipt.MessageID)).
 			Msg("receipt not acked: its delivery status could not be recorded, so the peer must keep it")
 	} else if session := s.peerSession(peerAddr); session != nil && session.authOK {
@@ -10858,7 +10911,9 @@ func (s *Service) handleInboundRelayDeliveryReceipt(connID domain.ConnID, frame 
 
 	// Fast path: receipt is addressed to this node or an active subscriber.
 	if receipt.Recipient == s.identity.Address || s.hasSubscriber(receipt.Recipient) {
-		s.storeDeliveryReceipt(receipt)
+		s.storePeerDeliveryReceipt(receipt, func(legacyOnly bool) *netcore.NetCore {
+			return s.directReceiptInboundWriterLocked(connID, receipt.Sender, legacyOnly)
+		})
 		log.Info().Str("peer", string(peerAddr)).Str("message_id", string(receipt.MessageID)).Str("recipient", receipt.Recipient).Str("status", receipt.Status).Msg("received relay_delivery_receipt (inbound)")
 		return
 	}
