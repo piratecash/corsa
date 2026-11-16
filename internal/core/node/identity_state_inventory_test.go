@@ -225,6 +225,7 @@ var identityStateInventory = map[string]identityStateEntry{
 	"identityResolver.resolutions":             {identityNamedLocally, "resolutions this node started"},
 	"identityResolver.cooldownUntil":           {identityNamedLocally, "targets of our own resolutions"},
 	"identityResolver.attempts":                {identityNamedLocally, "our attempt label → our own lookup target"},
+	"relayReceiptProbes.pending":               {identityNamedLocally, "fresh attempt labels and the locally chosen DM recipient, kept only until live capability proof or cancellation"},
 	"presenceProber.nextDue":                   {identityNamedLocally, "trusted contacts"},
 	"presenceProber.attempts":                  {identityNamedLocally, "our probe label → a trusted contact"},
 	"announceRateLimiter.buckets":              {identityByOrigin, "announce-plane token buckets per penaltySubject"},

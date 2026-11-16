@@ -432,6 +432,15 @@ and dedups attempt labels for the window's length.
 uint16be(len(net)) || net || attempt_id(20) || issued_at(u64be) ||
 requester(20) || dst(20))` — addresses signed as raw bytes.
 
+**Signed receipt capability.** A DM sender can ask for
+`signed_direct_receipts_v1` in `required` along with `target_proof`.
+An endpoint with active DM receipt support answers with the ordinary
+target proof. The sender verifies the proof against the exact feature
+request, recipient identity and box key selected for the message. An
+older recipient stays silent for the unknown requirement. A stored
+identity record or an answer to an ordinary lookup alone does not
+confirm support for this request.
+
 **`sealed` — the liveness-probe claim.** Optional, opaque to transit, and it is
 what separates a presence probe from a public lookup. A request WITHOUT it is
 answered exactly as described above; a request WITH it is answered only if the
@@ -1221,6 +1230,14 @@ requester?, requester_issued_at?, requester_sig?}`): `v` обязателен и
 `requester_sig = ed25519(sk, "corsa-lookup-requester-v1" || 0x00 ||
 uint16be(len(net)) || net || attempt_id(20) || issued_at(u64be) ||
 requester(20) || dst(20))` — адреса подписываются сырыми байтами.
+
+**Поддержка подписанных квитанций.** Отправитель DM может включить
+`signed_direct_receipts_v1` в `required` вместе с `target_proof`.
+Адресат с активной поддержкой квитанций отвечает обычным target proof.
+Отправитель сверяет доказательство с точным запросом возможности,
+identity и box-ключом, выбранным для сообщения. Старый адресат молчит
+при неизвестном требовании. Сохранённой записи identity или ответа на
+обычный lookup недостаточно для подтверждения поддержки.
 
 **`sealed` — заявка liveness-пробы.** Опциональна, непрозрачна для транзита, и
 именно она отделяет пробу присутствия от публичного lookup. Запрос БЕЗ неё

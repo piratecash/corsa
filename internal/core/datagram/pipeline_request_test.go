@@ -3,6 +3,7 @@ package datagram
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/domain/domaintest"
@@ -362,6 +363,38 @@ func TestLocalRequestTakesTheLocalUpstreamMarker(t *testing.T) {
 	}
 	if record.DType() != dtypeQuery {
 		t.Fatalf("the record must store the REQUEST dtype, got %q", record.DType())
+	}
+}
+
+func TestCancelledLocalRequestFreesItsReverseSlot(t *testing.T) {
+	t.Parallel()
+	fixture := newRequestFixture(t)
+	label := newLabel(t, "cancelled")
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	outcome := fixture.origin.pipeline.SendLocal(ctx, testSender, LocalSendOpts{
+		Frame: requestFrame(t, requestOpts{label: label, dst: fixture.target.id}), CancelRequestOnContextDone: true,
+	})
+	if outcome.Kind() != SendQueued {
+		t.Fatalf("SendLocal: %s", outcome)
+	}
+	if _, live := fixture.origin.reverse.Lookup(label); !live {
+		t.Fatal("expected a live local reverse slot before cancellation")
+	}
+	cancel()
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	deadline := time.NewTimer(time.Second)
+	defer deadline.Stop()
+	for {
+		if _, live := fixture.origin.reverse.Lookup(label); !live {
+			return
+		}
+		select {
+		case <-ticker.C:
+		case <-deadline.C:
+			t.Fatal("cancelled request retained its local reverse slot")
+		}
 	}
 }
 

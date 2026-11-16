@@ -544,8 +544,8 @@ func degreeStatisticConstructionPins() map[string]string {
 		"internal/core/node/advertised_connection_observation.go":   "bb2338c2c968b0066f3e6a70e2d894981b5a105f3ea8b71e2a4f36d8efcb625e",
 		"internal/core/node/find_node_degree.go":                    "5fd8c8fd9700cb63fd238bd9fb3255c7e434081258e4448d3febb89f4e0e35ea",
 		"internal/core/node/datagram_runtime_state.go":              "62817ed3c561f3eedbaa8baca6ded4c3696b8595a5c3a5345e35faada9ebcf64",
-		"internal/core/node/datagram_layer.go":                      "30e0df7faf4e8f1aeeef0e6de63a2b29955118528d54dce4380bf59ab78ac4f4",
-		"internal/core/node/identity_discovery.go":                  "ba8d7a90b57d4199ac1dcf5a6546dc4633e621c601048f913562c3bf44cad44e",
+		"internal/core/node/datagram_layer.go":                      "5c8591bac75283ca0def3c2c389c9e94cbfb1f083915c94edf4119bf418c31c3",
+		"internal/core/node/identity_discovery.go":                  "d8ee7dab0789de12e2437ae614c0b62cfe743b63bec8cea7579eacf45aa256f2",
 		"internal/core/node/dm_control.go":                          "3470289331b561253bf32ce0b4d9f31be14589ca39e07f6e753e6707a986b89f",
 		"internal/core/node/dm_control_send.go":                     "753ba1612511586cb4d66a3dd4ab60d799596e3fbd615286e1747c72ce194144",
 		"internal/core/node/datagram_resolver.go":                   "ffa15909b4e84a29783f2ef30a29a46feaf97d32101010a3efc652dc6b5d87b0",
@@ -566,7 +566,7 @@ func degreeStatisticConstructionPins() map[string]string {
 		"internal/core/capture/manager.go":                          "e3c91e512ef6dc6279ad52512f442db12c010d24a416b59819fb0917672f2ceb",
 		"internal/core/routing/announce.go":                         "b42221e9fbe0674771b726fed1da696dce935c148a203094e4a0dbdf030a4423",
 		"internal/core/datagram/planner.go":                         "f2a9bc7737217e9e327efc6e8198296018de7514b63c632f9de3e3be1a280897",
-		"internal/core/datagram/pipeline.go":                        "6e7717927a897d753f0d62d0bc19047055699e8820431cbe30d5dd2074125303",
+		"internal/core/datagram/pipeline.go":                        "f3d376e67bd3fd23612b8b599127d8c6f05e68fb0730063d146383a8d9113281",
 		"internal/core/datagram/composite_resolver.go":              "ef0b69389cd4b078a0c71e4f7bb89807ad77fb285e25c3ffd7387aaf9b89ce55",
 	}
 }

@@ -244,10 +244,37 @@ func (d *DMCrypto) sendDirectMessageWithResidence(ctx, residence context.Context
 		return nil, err
 	}
 
-	// Reply-reference validation runs AFTER the contact fetch (the RPC
-	// round-trip that dominates this function's latency) and immediately
-	// before the reference is baked into the ciphertext. Checking at the
-	// top of the function left the full contact-fetch window for a
+	requireSignedReceipts := msg.RequireSignedReceipts
+	if d.dmV2SendTTL <= 0 && !requireSignedReceipts {
+		if local := d.rpc.LocalNode(); local != nil {
+			requireSignedReceipts = local.SupportsSignedReceipts(to)
+			// The opt-in OwnDM path still ties first-hop evidence to the
+			// pending delivery owner. A relayed final receipt can retire
+			// that owner before the evidence settles.
+			if !requireSignedReceipts && !d.ownDMPort.ValidFor(local, d.id) {
+				// Leave most of the caller's send budget for local
+				// persistence and dispatch, even if the recipient is old
+				// or offline and the capability request goes unanswered.
+				budget := 750 * time.Millisecond
+				if deadline, ok := ctx.Deadline(); ok {
+					budget = min(budget, time.Until(deadline)/4)
+				}
+				if budget > 0 {
+					probeCtx, cancel := context.WithTimeout(ctx, budget)
+					requireSignedReceipts = local.ProveRelaySignedReceipts(probeCtx, to, contact.BoxKey)
+					cancel()
+				}
+			}
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+	}
+
+	// Reply-reference validation runs after the contact fetch and receipt
+	// policy lookup, immediately before the reference is baked into the
+	// ciphertext. Checking at the top of the function left the discovery
+	// window for a
 	// concurrent message_delete / conversation wipe to remove the quoted
 	// row after it had already passed validation — the send would then
 	// carry a dead reply_to that the deleted-mid-compose degrade path
@@ -310,9 +337,7 @@ func (d *DMCrypto) sendDirectMessageWithResidence(ctx, residence context.Context
 			Command: string(msg.Command), CommandData: msg.CommandData, RetryOf: string(msg.RetryOf),
 		})
 	} else {
-		local := d.rpc.LocalNode()
-		required := msg.RequireSignedReceipts || (local != nil && local.SupportsSignedReceipts(to))
-		ciphertext, err = directmsg.EncryptForMessageWithSignedReceipts(d.id, recipient, msg, "dm", string(messageID), required)
+		ciphertext, err = directmsg.EncryptForMessageWithSignedReceipts(d.id, recipient, msg, "dm", string(messageID), requireSignedReceipts)
 	}
 	if err != nil {
 		return nil, err

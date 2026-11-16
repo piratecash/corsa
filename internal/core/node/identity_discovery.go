@@ -85,6 +85,7 @@ func registerIdentityDiscoveryTypes(types *datagram.TypeRegistry, svc *Service, 
 		AnswersTo:   []domain.DType{domain.DTypeGetIdentity},
 		Payload:     datagram.PayloadSchema{Name: identityLookupPayloadSchemaName, Version: domain.IdentityLookupSchemaVersion},
 		SenderProof: datagram.SenderProvenInPayload,
+		Authorizer:  &postIdentityAuthorizer{svc: svc},
 		Handler:     &postIdentityHandler{svc: svc},
 	}); err != nil {
 		return err
@@ -186,9 +187,13 @@ func (h *getIdentityHandler) Handle(_ context.Context, delivery datagram.Deliver
 		return datagram.RejectDelivery(errors.New("identity lookup: requirement not understood"))
 	}
 
-	record, _ := h.svc.SelfIdentityRecord()
+	record, body := h.svc.SelfIdentityRecord()
 	if record.Version == 0 {
 		return datagram.FailDelivery(errors.New("identity lookup: self record not issued"))
+	}
+	if request.RequiresSignedDirectReceipts() && (!request.RequiresTargetProof() || !body.DM ||
+		h.svc.cfg.DisableDirectMessages || h.svc.datagramLayer() == nil || h.svc.runCtx.Err() != nil) {
+		return datagram.RejectDelivery(errors.New("identity lookup: signed receipt capability unavailable"))
 	}
 
 	if !request.Requester.IsZero() {
@@ -416,11 +421,12 @@ func (h *postIdentityHandler) Handle(_ context.Context, delivery datagram.Delive
 	if !ok {
 		return datagram.RejectDelivery(errors.New("identity lookup: answer without a label"))
 	}
-	// Two initiators share this dtype, and the label says whose answer this
-	// is: the presence prober keeps its own attempts precisely so that a
-	// liveness question and a resolution do not consume each other's replies.
-	// It is asked first because its attempt set is the smaller and strictly
-	// private one — an answer it claims can never have been a resolution's.
+	// A receipt capability answer is verified before the reverse slot is
+	// claimed. Its label is independent of presence and resolution attempts.
+	if layer := h.svc.datagramLayer(); layer != nil && layer.relayReceiptProbes.complete(label.Raw()) {
+		return datagram.AcceptDelivery()
+	}
+	// A presence question and a resolution likewise keep independent labels.
 	if prober := h.svc.presenceProber; prober != nil && prober.HandleAnswer(label, payload) {
 		return datagram.AcceptDelivery()
 	}

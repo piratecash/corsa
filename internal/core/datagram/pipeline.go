@@ -1280,6 +1280,9 @@ type LocalSendOpts struct {
 	// docs/protocol/presence.md §4.2. It never reaches the wire, and it never
 	// removes a candidate: see PreferredFirstHops.
 	FirstHop PreferredFirstHops
+	// CancelRequestOnContextDone frees this local request's reverse slot
+	// when ctx ends. It leaves the normal remote reverse expiry unchanged.
+	CancelRequestOnContextDone bool
 }
 
 // SendLocal places a frame this node created.

@@ -22,10 +22,11 @@ import (
 // listed here that calls SendLocal fails the guard, and so does a listed file
 // that no longer calls it.
 var localSenderOfFile = map[string]string{
-	"identity_resolver.go":  "LocalSenderIdentityResolver",
-	"presence_prober.go":    "LocalSenderPresenceProber",
-	"identity_discovery.go": "LocalSenderIdentityDiscovery",
-	"dm_control_send.go":    "LocalSenderDMControl",
+	"identity_resolver.go":        "LocalSenderIdentityResolver",
+	"presence_prober.go":          "LocalSenderPresenceProber",
+	"relay_receipt_capability.go": "LocalSenderIdentityResolver",
+	"identity_discovery.go":       "LocalSenderIdentityDiscovery",
+	"dm_control_send.go":          "LocalSenderDMControl",
 }
 
 // TestEverySendLocalNamesItsOwnSender walks every non-test file of the package

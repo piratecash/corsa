@@ -30,10 +30,13 @@ const (
 	MaxPostIdentityPayloadBytes = 3276
 )
 
-// LookupRequirementTargetProof is the one requirement name this build
-// understands in a get_identity `required` list: the answer must carry a
-// live proof by the target, bound to this very attempt.
-const LookupRequirementTargetProof = "target_proof"
+const (
+	// LookupRequirementTargetProof demands a live proof bound to this attempt.
+	LookupRequirementTargetProof = "target_proof"
+	// LookupRequirementSignedDirectReceipts asks the target to prove that
+	// its running build accepts DMs with required receipt signatures.
+	LookupRequirementSignedDirectReceipts = string(CapSignedDirectReceiptsV1)
+)
 
 // IdentityLookupSchemaVersion is the discovery-payload schema version of
 // all three types — independent from the datagram header version and from

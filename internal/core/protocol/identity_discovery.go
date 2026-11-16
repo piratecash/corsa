@@ -253,7 +253,7 @@ func parseRequesterTriple(fields map[string]json.RawMessage, payload *GetIdentit
 // compliance.
 func (p GetIdentityPayload) UnderstoodRequirements() bool {
 	for _, name := range p.Required {
-		if name != domain.LookupRequirementTargetProof {
+		if name != domain.LookupRequirementTargetProof && name != domain.LookupRequirementSignedDirectReceipts {
 			return false
 		}
 	}
@@ -264,6 +264,11 @@ func (p GetIdentityPayload) UnderstoodRequirements() bool {
 // proof — demanded by the flag or by the requirement list.
 func (p GetIdentityPayload) RequiresTargetProof() bool {
 	return p.TargetProof || containsName(p.Required, domain.LookupRequirementTargetProof)
+}
+
+// RequiresSignedDirectReceipts identifies a live receipt capability question.
+func (p GetIdentityPayload) RequiresSignedDirectReceipts() bool {
+	return containsName(p.Required, domain.LookupRequirementSignedDirectReceipts)
 }
 
 // ---------------------------------------------------------------------------

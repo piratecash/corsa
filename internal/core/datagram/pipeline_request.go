@@ -316,6 +316,8 @@ func (p *Pipeline) sendLocalRequest(ctx context.Context, opts LocalSendOpts) Sen
 	placed := p.scheduler.dispatch(ctx, job, selection, p.requestPublisher(slot, frame, sendDeadlineFor(now)))
 	if placed.Kind() != SendQueued {
 		p.reverse.Rollback(slot)
+	} else if opts.CancelRequestOnContextDone {
+		context.AfterFunc(ctx, func() { p.reverse.Rollback(slot) })
 	}
 	return placed
 }

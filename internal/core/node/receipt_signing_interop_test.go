@@ -84,7 +84,7 @@ func startMixedReceiptNodes(t *testing.T, fuse networkFuse, release releaseUnder
 	start := func(address string) *Service {
 		svc, stop := startTestNodeWithSetup(t, config.Node{
 			ListenAddress: address, BootstrapPeers: []string{string(relay.listen)},
-			ConnectOnly: string(relay.listen), Type: config.NodeTypeFull,
+			ConnectOnly: string(relay.listen), Type: config.NodeTypeFull, EnableDatagramV1: true,
 		}, nil)
 		t.Cleanup(stop)
 		return svc

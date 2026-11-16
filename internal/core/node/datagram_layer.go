@@ -94,8 +94,9 @@ func (p datagramPlaneParts) maintenancePass() func(ctx context.Context) int {
 // synchronisation.
 type datagramLayer struct {
 	datagramPlaneParts
-	pipeline *datagram.Pipeline
-	outbound *datagram.ClassQueueEmitter
+	pipeline           *datagram.Pipeline
+	outbound           *datagram.ClassQueueEmitter
+	relayReceiptProbes relayReceiptProbes
 }
 
 // datagramQueueSweepInterval is how often expired frames are dropped from the
