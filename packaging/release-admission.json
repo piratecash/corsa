@@ -1,15 +1,22 @@
 {
   "schema": 2,
   "activation_protocol_version": 31,
-  "release_decision": null,
+  "release_decision": {
+    "number": 72,
+    "date": "2026-11-17",
+    "version": "2.6.72"
+  },
   "conditions": [
     {
       "id": "crypto_review",
       "condition": "Cryptographic security review of the secure session and its active consumers by Codex and Claude Fable. Cover the TLS exporter identity proof, label and context, domain separation, role binding, published vectors, and the active message and persistent trust paths.",
       "executor": "developer",
       "check": "The developer coordinates two separately attributed reports by Codex and Claude Fable on the same full release candidate commit. Record scope, findings by severity, reproductions and limitations. Reconcile differences against source and tests, fix every Critical finding, record the disposition of each High finding, and have both models re-review affected paths after fixes. Evidence names the checked candidate commit and references both reports and the disposition record.",
-      "evidence": null,
-      "status": "not_done"
+      "evidence": {
+        "report": "Separate reports by Codex and Claude Fable on 7b61f7d, with scope carried from their 01b680b reports. Review evidence: docs/_internal/d1-artifacts/2026-11-15/v2.6.72-admission/7b61f7d/codex-affected-paths-review.ru.md; docs/refactoring/report/corsa-crypto-review-7b61f7d-2026-11-16.ru.md; disposition and test reconciliation in docs/_internal/d1-artifacts/2026-11-15/v2.6.72-admission/7b61f7d/crypto-review-reconciliation.ru.md. MSG-2 High closed. TRUST-1 reduced to Medium in standard builds; at 16,000 ordinary pins, new peers can still connect over verified TLS, and persistent capacity is reserved for locally approved identities. No Critical or new High was reported. The owner deferred the remaining Medium findings until after v2.6.72. Coverage carries from audited source 7b61f7d5cdb35e47def44f26ab7ee4293280b5d7 to its child 60b501b1c575f9329efdca56ffcd3ee6dd78f4c7. A Git tree comparison found changes only in release-admission deferral and CLI test fixtures, with the reviewed code and its build configuration byte-identical.",
+        "commit": "60b501b1c575f9329efdca56ffcd3ee6dd78f4c7"
+      },
+      "status": "done"
     },
     {
       "id": "tor_phase_measurement",
@@ -27,8 +34,11 @@
       "condition": "Measure first-connection latency on real old releases over clearnet and choose the TLS probe timeout from those measurements; no value, including 30 s, counts as approved before it. The owner deferred real Tor measurements on 2026-10-23; clearnet results do not establish Tor bounds.",
       "executor": "developer",
       "check": "Measurement report (method, real releases, clearnet paths, first-connection distribution); the timeout and its derivation are in the candidate and session documentation. Real Tor timing remains UNVERIFIED and is deferred, not passed.",
-      "evidence": null,
-      "status": "not_done"
+      "evidence": {
+        "report": "Secure session timing for v2.6.72 is documented in docs/release-notes/RELEASE-v2.6.72.md#secure-session-timeouts-on-clearnet. Raw series and phase distributions are recorded in docs/_internal/d1-artifacts/2026-11-15/v2.6.72-admission/7b61f7d/first-contact/clearnet-report.ru.md. The exact candidate probe published 120 of 120 protocol-31 sessions on four IPv4 clearnet paths, including 60 contacts to released v2.5.71 on two paths. The observed maxima were 207.3 ms for TLS and 254.3 ms for identity proof. The release retains the direct TLS and proof budgets already in the candidate, 5 s and 3 s. The current outbound path opens no plaintext probe. Tor remains deferred and unverified.",
+        "commit": "7b61f7d5cdb35e47def44f26ab7ee4293280b5d7"
+      },
+      "status": "done"
     },
     {
       "id": "compat_real_releases",
@@ -45,7 +55,7 @@
       "id": "load_run_on_candidate",
       "condition": "Load run on the final candidate: handshake CPU under churn, pin store write cost and memory, compared with the same bench on the previous release.",
       "executor": "developer",
-      "check": "The run follows the agreed bench profile and is separately authorised; baseline and candidate share the bench configuration; the report names versions, commits and figures.",
+      "check": "The run follows the agreed bench profile and is separately authorised. Baseline and candidate share the bench configuration. For v2.6.72, the owner's decision of 2026-11-17 retains the accepted historical comparison and schedules the repeat comparison after publication.",
       "evidence": {
         "report": "Accepted separately owner-authorized matched Common32 and pin-write pairs on 2026-11-02: docs/operations/s6-common32-baseline-dev-2026-11-02.ru.md and docs/operations/s6-pin-write-baseline-dev-2026-11-02.ru.md. Baseline is rebuilt v2.5.71 (f8139aa949df89e3f51f0a240eaf440b6f171255), not the published K11 baseline. Common32 executes actual corsad with 32-to-16-to-32-to-0 TLSv2 sessions, 48 identities and 224 completed sequences on each side; inclusive service-cgroup CPU is an upper envelope containing node-side handshake work under churn, not isolated per-handshake CPU. Pin-write executes the original writers with 8 API operations, 3 main writes and 1 marker write at 0, 48 and 19,999 starting pins, full-store refusal and reload. Reports give absolute CPU, kernel charged group peaks and write spans, exact inputs, owner grants and independent tester/reviewer acceptance. Both use the same agreed bench configuration per pair. One pair establishes neither a statistical regression verdict nor full standalone corsad 512 MB, observation-source, S6 or D1 acceptance. Evidence applies to the named source; final_candidate_checks must reassess any affected production/module/toolchain/flags/profile change before carrying it to a final candidate.",
         "commit": "ac53899e47970217662f6e45fe199196ea184072"
@@ -156,24 +166,33 @@
       "condition": "The period and the success criteria of observing the release in the live network are fixed and approved before the release; the overlay role activates only in a following release, after that observation.",
       "executor": "owner",
       "check": "The owner approves the observation plan (period, metrics, thresholds, what stops the next activation) before the tag.",
-      "evidence": null,
-      "status": "not_done"
+      "evidence": {
+        "report": "Owner approval of 2026-11-16 for v2.6.72: observation-plan-for-approval.ru.md in the 7b61f7d admission evidence, SHA-256 d321d4c870c126a04208b6e6178e9a71814dcdfaf54a0282ad5a56fbccbafa2f. The plan sets the observation period, measures, thresholds, STOP and completion criteria. The owner will provide the seven-day measurement record separately and may submit it after v2.6.72. Completion and delivery of that record are no longer prerequisites for this tag. The hz1 and m1 pilot records cover short RPC and clock-source checks. Overlay activation remains a separate decision for a following release.",
+        "commit": null
+      },
+      "status": "done"
     },
     {
       "id": "final_candidate_checks",
       "condition": "All applicable checks above and tests of the emitted daemon and Desktop products pass on the final release candidate; any change after a check re-runs the affected checks. By the explicit owner scope, only internal/overlaysim is DEFERRED to D1, not PASS; the generic make test-all result is not green.",
       "executor": "developer",
       "check": "Builds, applicable unfiltered default/tagged tests and lint are green on the candidate commit for daemon and Desktop on Linux amd64, macOS arm64/amd64 and Windows amd64/arm64; Android APK/AAB are a separate later step. Preserve the recorded Windows runtime/DACL and real Tor DEFERRED/UNVERIFIED scope, without removing applicable build, proxy or authentication obligations. The integration tests for new to new and a mixed network pass on the candidate. The report lists the exact applicable package sets and the sole overlaysim deferral with its historical failure retained; no other package is excluded. All reports identify this candidate or explicitly justify unchanged-source carry and affected rechecks. The evidence names the full 40-character commit, which stays reachable from the tag; after it only the manifest, this version's release notes and the test pinning the manifest change (the gate checks this).",
-      "evidence": null,
-      "status": "not_done"
+      "evidence": {
+        "report": "Verified evidence on 7b61f7d is indexed in docs/_internal/d1-artifacts/2026-11-15/v2.6.72-admission/7b61f7d/final-candidate-readiness.ru.md. GitHub Candidate build run 43837240721 built and inspected daemon and Desktop packages on all five platforms. Checks run 43837241011 passed the 74-package Linux release suite, applicable tagged tests, lint and other CI checks. The 73-package macOS arm64 release suite, new-node integration and six-release protocol interop passed. Native Windows filesystem and logging CI passed in the recorded scope. The supplemental Rosetta suite failed on a shared test counter, and instrumentation attributed the counted dial to a background ConnectionManager reconnect. Those diagnostic runs remain recorded as failed. Only internal/overlaysim is deferred from the standard release suite. The owner approved publication of v2.6.72 on 2026-11-17 and scheduled repeated Common32 and pin-write measurements after release. The earlier measured figures remain associated with their original source commit. The final candidate 60b501b1c575f9329efdca56ffcd3ee6dd78f4c7 differs from 7b61f7d only in two release-admission test files. Both affected Go packages passed against the updated manifest and the test commit passed lint. The tag workflow still runs the complete release test scope, lint and all builds before publishing.",
+        "commit": "60b501b1c575f9329efdca56ffcd3ee6dd78f4c7"
+      },
+      "status": "done"
     },
     {
       "id": "release_notes",
       "condition": "Release notes at docs/release-notes/RELEASE-v<version>.md (a regular file, published as the release body) that do not claim the relayed-proof attack closed for the whole network; that state that a node with an unsafe pin store refuses to start and how to migrate (including Docker), that a rollback is possible only to a build that speaks the secure session, and how the TLS-first switch works.",
       "executor": "owner",
       "check": "The owner approves the release notes file committed for the tag.",
-      "evidence": null,
-      "status": "not_done"
+      "evidence": {
+        "report": "The owner approved docs/release-notes/RELEASE-v2.6.72.md for v2.6.72 on 2026-11-16. Approved file SHA-256: 95771ad4495301740b525b30d027b854a9c228f0e23e9031891dfa50eda607f5.",
+        "commit": null
+      },
+      "status": "done"
     }
   ]
 }

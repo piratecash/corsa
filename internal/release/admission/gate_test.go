@@ -25,6 +25,11 @@ const candidateCommit = "0123456789abcdef0123456789abcdef01234567"
 
 const candidateNotes = "docs/release-notes/RELEASE-v2.5.71.md"
 
+const (
+	reviewedReleaseSource = "7b61f7d5cdb35e47def44f26ab7ee4293280b5d7"
+	finalReleaseCandidate = "60b501b1c575f9329efdca56ffcd3ee6dd78f4c7"
+)
+
 func committedManifestPath() string {
 	return filepath.Join(repoRoot, filepath.FromSlash(ManifestPath))
 }
@@ -137,38 +142,53 @@ func openManifest(t *testing.T) Manifest {
 	return decodeDoc(t, validManifestDoc().markAllDone().withReleaseDecision())
 }
 
-// TestCommittedManifestKeepsReleaseClosed pins the state the repository is
-// in today: the secure session is active in the build and no condition of
-// its release has been met, so the gate refuses. Opening the gate therefore
-// takes a reviewed change to the manifest AND to this test, never an edit
-// of one file that slips through.
-func TestCommittedManifestKeepsReleaseClosed(t *testing.T) {
-	admission, err := Admit(context.Background(), committedManifestPath(), Request{Build: CurrentBuild()}, nil)
-	if !errors.Is(err, ErrAdmissionNotGranted) {
-		t.Fatalf("Admit(committed manifest, current build) error = %v, want ErrAdmissionNotGranted", err)
+// TestCommittedManifestAdmitsReviewedCandidate pins the reviewed release
+// decision and exercises the gate with that candidate's history.
+func TestCommittedManifestAdmitsReviewedCandidate(t *testing.T) {
+	f, err := os.Open(committedManifestPath())
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !admission.SessionV2Active {
-		t.Fatal("the current build is expected to run the secure session; the gate must be live for it")
+	defer func() { _ = f.Close() }()
+	manifest, err := DecodeManifest(f)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if admission.ReleaseDecision != nil {
-		t.Fatalf("committed manifest names release decision %+v; none has been taken", *admission.ReleaseDecision)
-	}
-	// The conditions met today: the owner's choice of release order, and the
-	// checks confirmed on the commit their evidence names. Closing another one
-	// is a deliberate edit here as well as in the manifest.
-	doneToday := []ConditionID{
-		"owner_release_shape", "owner_session_choices", "compat_real_releases",
-		"probe_per_contract", "tls_first_switch",
-		"pin_store_marker", "unsafe_pin_store_refusal", "dial_paths_unified", "self_record_min_session", "load_run_on_candidate", "loopback_inbound_class",
-	}
-	var want []ConditionID
-	for _, id := range RequiredConditions() {
-		if !slices.Contains(doneToday, id) && id != "tor_phase_measurement" {
-			want = append(want, id)
+	for _, condition := range manifest.Conditions {
+		switch condition.ID {
+		case "crypto_review", finalCandidateCondition:
+			if condition.Status != ConditionDone || condition.Evidence == nil || condition.Evidence.Commit == nil || *condition.Evidence.Commit != finalReleaseCandidate {
+				t.Fatalf("%s must cite final candidate %s", condition.ID, finalReleaseCandidate)
+			}
+		case "first_contact_latency":
+			if condition.Status != ConditionDone || condition.Evidence == nil || condition.Evidence.Commit == nil || *condition.Evidence.Commit != reviewedReleaseSource {
+				t.Fatalf("first-contact evidence must retain measured source %s", reviewedReleaseSource)
+			}
+		case "unsafe_pin_store_refusal":
+			if condition.Status != ConditionDone || condition.Evidence == nil || condition.Evidence.Commit == nil {
+				t.Fatal("POSIX refusal checks lost their candidate evidence", condition)
+			}
 		}
 	}
-	if !slices.Equal(admission.Outstanding, want) {
-		t.Fatalf("outstanding = %v, want %v", admission.Outstanding, want)
+	wantDecision := OwnerDecision{Number: 72, Date: "2026-11-17", Version: "2.6.72"}
+	if manifest.ReleaseDecision == nil || *manifest.ReleaseDecision != wantDecision {
+		t.Fatalf("release decision = %+v, want %+v", manifest.ReleaseDecision, wantDecision)
+	}
+	build := CurrentBuild()
+	notes := releaseNotesPath(build.Release)
+	info, err := os.Lstat(filepath.Join(repoRoot, filepath.FromSlash(notes)))
+	if err != nil || !info.Mode().IsRegular() {
+		t.Fatalf("release notes %s must be a regular file: %v", notes, err)
+	}
+	history := NewMockReleaseTree(t)
+	history.EXPECT().FilesChangedSince(mock.Anything, CommitHash(finalReleaseCandidate)).Return(nil, nil).Once()
+	history.EXPECT().IsRegularFile(mock.Anything, notes).Return(true, nil).Once()
+	admission, err := Evaluate(context.Background(), Request{Build: build, Tag: &build.Release}, manifest, history)
+	if err != nil || !admission.SessionV2Active || len(admission.Outstanding) != 0 {
+		t.Fatalf("release admission = %+v, error = %v", admission, err)
+	}
+	if !slices.Equal(admission.Deferred, []ConditionID{"tor_phase_measurement"}) {
+		t.Fatalf("deferred = %v, want only the recorded Tor deferral", admission.Deferred)
 	}
 }
 

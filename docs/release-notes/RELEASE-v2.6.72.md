@@ -58,6 +58,10 @@ Corsa refuses to start before opening a network listener if the pin store, its m
 
 The minimum peer protocol is now 31. All peer sessions use TLS 1.3 with the secure-session identity proof. The daemon and SDK initiate TLS even when an older configuration requests probe-first. A v2.5.71 peer on protocol 31 can still follow the server's protocol-31 discovery reply to TLS. Nodes on protocols 28–30 must upgrade before connecting.
 
+### Secure session timeouts on clearnet
+
+Direct connections retain the 5-second TLS handshake budget and the separate 3-second identity-proof budget. On candidate `7b61f7d`, all 120 first-contact attempts succeeded across four IPv4 routes, including 60 to v2.5.71. The longest TLS handshake was 207.3 ms and the longest identity proof was 254.3 ms. These results support keeping both existing budgets for this release. Tor timing remains unverified.
+
 After 16,000 permanent identity pins are in use, a public relay can still serve a newly seen peer over verified TLS. This session adds no permanent pin or endpoint binding. Operators can use `CORSA_RESERVED_PIN_PEERS` or SDK `NodeConfig.ReservedPinPeers` to approve exact identities for the remaining 4,000 places. Existing pins remain valid. When rolling back to a transitional build, peers that connected only over ephemeral TLS have no new durable pins on that node.
 
 Rollback requires a build that supports the secure session and can read the current pin store format. Keep the current identity, pin store and marker together. After schema 9 commits, a build ending at schema 8 also requires the database from the consistent backup made before upgrading.
@@ -125,6 +129,10 @@ Traffic captures теперь соблюдают лимиты хранилища
 Corsa отказывается запускаться до открытия сетевого порта, если у pin store, маркера или их каталогов небезопасный владелец, права доступа или ссылки. В Docker перенесите данные вместе в приватный подкаталог пользователя контейнера и смонтируйте его по настроенному пути данных. Стандартный образ использует UID/GID `10001:10001`. Установите права `0700` на приватный каталог и `0600` на pin store и маркер. Сообщение об отказе указывает путь, причину и UID/GID процесса.
 
 Минимальная версия протокола для соседних узлов теперь 31. Все сессии используют TLS 1.3 с подтверждением identity. Демон и SDK начинают с TLS даже при прежней настройке probe-first. Узел v2.5.71 на протоколе 31 может получить ответ обнаружения и затем подключиться по TLS. Узлам на протоколах 28–30 требуется обновление.
+
+### Таймауты защищённой сессии в clearnet
+
+Для прямых соединений сохранены 5 секунд на TLS и отдельные 3 секунды на подтверждение identity. На кандидате `7b61f7d` прошли все 120 попыток первого контакта на четырёх IPv4-маршрутах, включая 60 попыток к v2.5.71. Максимальная длительность TLS составила 207,3 мс, подтверждения identity — 254,3 мс. По этим замерам сохраняем действующие таймауты для релиза. Задержки Tor остаются непроверенными.
 
 После заполнения 16 000 постоянных identity pins публичное реле продолжает обслуживать новые identity по проверенному TLS. Такая сессия не создаёт постоянный pin или привязку адреса. Оператор может одобрить точные identity для резерва в 4 000 мест через `CORSA_RESERVED_PIN_PEERS` или SDK `NodeConfig.ReservedPinPeers`. Ранее записанные pins действуют. При откате на сборку переходного периода у пиров, подключавшихся только по TLS без записи pin, новых постоянных pins на этом узле нет.
 
