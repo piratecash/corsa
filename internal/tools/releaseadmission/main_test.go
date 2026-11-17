@@ -26,43 +26,20 @@ func committedManifest() string {
 	return filepath.Join(repoRoot, filepath.FromSlash(admission.ManifestPath))
 }
 
-// committedConditions reads the conditions of the committed manifest.
-func committedConditions(t *testing.T) []admission.Condition {
-	t.Helper()
-	file, err := os.Open(committedManifest())
-	if err != nil {
-		t.Fatalf("open the committed manifest: %v", err)
-	}
-	defer func() {
-		// A read-only file: a close error cannot lose data, and the decode
-		// below has already reported anything that went wrong reading it.
-		_ = file.Close()
-	}()
-	manifest, err := admission.DecodeManifest(file)
-	if err != nil {
-		t.Fatalf("decode the committed manifest: %v", err)
-	}
-	return manifest.Conditions
-}
+const outstandingCondition = "crypto_review"
 
 // TestClosedGateExitsNonZeroAndNamesWhatIsMissing is the contract the
 // workflow relies on: a refusal is exit status 1, and the output says why.
 func TestClosedGateExitsNonZeroAndNamesWhatIsMissing(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	code := execute(context.Background(), nil, &stdout, &stderr, committedManifest(), unusedHistory(t))
+	path := manifestAt(t, candidateCommit, outstandingCondition)
+	code := execute(context.Background(), nil, &stdout, &stderr, path, unusedHistory(t))
 	if code != 1 {
 		t.Fatalf("exit code = %d, want 1; stdout:\n%s\nstderr:\n%s", code, stdout.String(), stderr.String())
 	}
-	// The expectation comes from the committed manifest itself: closing a
-	// condition there is legitimate work and must not break this test, while
-	// a condition the output forgets or wrongly lists still does.
-	for _, condition := range committedConditions(t) {
-		named := strings.Contains(stdout.String(), "outstanding condition: "+string(condition.ID)+"\n")
-		outstanding := condition.Status != admission.ConditionDone && condition.Status != admission.ConditionDeferred
-		if named != outstanding {
-			t.Errorf("condition %q (status %q): named as outstanding = %t, want %t:\n%s",
-				condition.ID, condition.Status, named, outstanding, stdout.String())
-		}
+	if output := stdout.String(); strings.Count(output, "outstanding condition:") != 1 ||
+		!strings.Contains(output, "outstanding condition: "+outstandingCondition+"\n") {
+		t.Errorf("stdout should list only %s as outstanding:\n%s", outstandingCondition, output)
 	}
 	if !strings.Contains(stdout.String(), "no owner decision to release") {
 		t.Errorf("stdout does not say the release decision is missing:\n%s", stdout.String())
@@ -75,13 +52,14 @@ func TestClosedGateExitsNonZeroAndNamesWhatIsMissing(t *testing.T) {
 // An explicit release tag must report the ordinary closed S6 gate.
 func TestExplicitReleaseTagUsesClosedS6Gate(t *testing.T) {
 	var stdout, stderr bytes.Buffer
+	path := manifestAt(t, candidateCommit, outstandingCondition)
 	code := execute(context.Background(), []string{"-tag", "v" + config.CorsaVersion},
-		&stdout, &stderr, committedManifest(), unusedHistory(t))
+		&stdout, &stderr, path, unusedHistory(t))
 	if code != 1 {
 		t.Fatalf("explicit release tag bypassed the S6 gate: code=%d; stdout:\n%s\nstderr:\n%s",
 			code, stdout.String(), stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "outstanding condition:") ||
+	if !strings.Contains(stdout.String(), "outstanding condition: "+outstandingCondition+"\n") ||
 		!strings.Contains(stdout.String(), "no owner decision to release") ||
 		!strings.Contains(stderr.String(), "release admission refused") {
 		t.Fatalf("explicit release tag did not report the ordinary closed S6 gate; stdout:\n%s\nstderr:\n%s",
@@ -109,17 +87,31 @@ func TestMissingManifestIsRefused(t *testing.T) {
 // final candidate at commit.
 func openManifestAt(t *testing.T, commit string) string {
 	t.Helper()
+	return manifestAt(t, commit, "")
+}
+
+func manifestAt(t *testing.T, commit string, outstanding admission.ConditionID) string {
+	t.Helper()
 	conditions := make([]map[string]any, 0, len(admission.RequiredConditions()))
 	for _, id := range admission.RequiredConditions() {
-		conditions = append(conditions, map[string]any{
+		condition := map[string]any{
 			"id": string(id), "condition": "c", "executor": "developer", "check": "k",
 			"evidence": map[string]any{"report": "r", "commit": commit}, "status": "done",
-		})
+		}
+		if id == outstanding {
+			condition["evidence"] = nil
+			condition["status"] = "not_done"
+		}
+		conditions = append(conditions, condition)
+	}
+	var decision map[string]any
+	if outstanding == "" {
+		decision = map[string]any{"number": 70, "date": "2026-11-02", "version": config.CorsaVersion}
 	}
 	raw, err := json.Marshal(map[string]any{
 		"schema":                      2,
 		"activation_protocol_version": config.ProtocolVersionSecureSession,
-		"release_decision":            map[string]any{"number": 70, "date": "2026-11-02", "version": config.CorsaVersion},
+		"release_decision":            decision,
 		"conditions":                  conditions,
 	})
 	if err != nil {

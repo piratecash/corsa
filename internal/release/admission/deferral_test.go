@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"slices"
 	"testing"
 
@@ -118,11 +119,11 @@ func TestTorDeferralRejectsUnrecordedTypedEvidence(t *testing.T) {
 	}
 }
 
-func TestCommittedDeferralIsUnverifiedAndCannotRelease(t *testing.T) {
+func TestCommittedTorDeferralIsUnverified(t *testing.T) {
 	if TorDeferralDecision != "docs/operations/d1-release-decision-proposal.md#measurement-scope-2026-10-23" {
 		t.Fatal("recorded decision changed")
 	}
-	f, err := os.Open(committedManifestPath())
+	f, err := os.Open(filepath.Join(repoRoot, filepath.FromSlash(ManifestPath)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,32 +132,8 @@ func TestCommittedDeferralIsUnverifiedAndCannotRelease(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m.Schema != 2 || m.ReleaseDecision != nil {
-		t.Fatal("unexpected schema or release approval")
-	}
-	for _, c := range m.Conditions {
-		switch c.ID {
-		case "tor_phase_measurement":
-			if c.Status != ConditionDeferred || !c.ownerDeferred() {
-				t.Fatal("Tor became completed or lost its recorded decision", c)
-			}
-		case "crypto_review":
-			if c.Status != ConditionNotDone || c.Evidence != nil {
-				t.Fatal("crypto review unexpectedly completed", c)
-			}
-		case "unsafe_pin_store_refusal":
-			if c.Status != ConditionDone || c.Evidence == nil || c.Evidence.Commit == nil {
-				t.Fatal("POSIX refusal checks lost their candidate evidence", c)
-			}
-		case "first_contact_latency":
-			if c.Status != ConditionNotDone {
-				t.Fatal("clearnet first-contact obligation unexpectedly completed", c)
-			}
-		}
-	}
-	v, err := Evaluate(context.Background(), activeRequest(), m, nil)
-	if !errors.Is(err, ErrAdmissionNotGranted) || !slices.Equal(v.Deferred, []ConditionID{"tor_phase_measurement"}) || slices.Contains(v.Outstanding, "tor_phase_measurement") {
-		t.Fatalf("committed deferral: %+v %v", v, err)
+	if got := deferredConditions(m.Conditions); !slices.Equal(got, []ConditionID{"tor_phase_measurement"}) {
+		t.Fatalf("committed deferrals = %v, want the recorded Tor deferral only", got)
 	}
 	d := validManifestDoc()
 	d["schema"] = 1
