@@ -46,7 +46,11 @@ func (intake DormantIntake) OfferReceived(input OwnedReceivedRequest, target Ses
 		return ErrUnauthenticated
 	}
 	identity := cell.identity
-	if !owner.consumer.Matches(identity.stamp, identity.received) || !owner.consumer.Matches(sealed.stamp, sealed.at) || sealed.at.Elapsed() < identity.received.Elapsed() || !identity.source.valid() || identity.source.state.opened > Instant(identity.received.Elapsed()) || !target.valid() || target.Identity() != identity.request.Target || target == identity.source {
+	// The requester cannot be the target, even across two original sessions.
+	if !owner.consumer.Matches(identity.stamp, identity.received) || !owner.consumer.Matches(sealed.stamp, sealed.at) ||
+		sealed.at.Elapsed() < identity.received.Elapsed() || !identity.source.valid() ||
+		identity.source.state.opened > Instant(identity.received.Elapsed()) || !target.valid() ||
+		target.Identity() != identity.request.Target || identity.source.Identity() == identity.request.Target {
 		return ErrUnauthenticated
 	}
 	if !cell.consumed.CompareAndSwap(false, true) {

@@ -22,7 +22,7 @@ func pendingFixedSourceErrors(sources map[string][]byte) []string {
 	pins := map[string]string{"owned_bridge_local_target_timing.go": "69356ebd3196f7b042d465cb72eb880ded354cc49ed2e334c3aebb3f179e0a1d", "owned_bridge_bootstrap.go": "2ee7f6b13d859326bbd2fb00e487c9530737a2f722359d762202710d1a1cd827", "owned_resources.go": "7b3347cbe548e78ab4a92ebcf4c857545edd33d81d3a3af39c25a079b3aa036a", "owned_bridge_forward_answer.go": "c96366c955ce0c2ae5f90e1caee46c697d7672c7ed0bb7e852833bd97eb5e139", "owned_bridge_local_target.go": "0c317edc5b3de6f36014ff2a8c195fd786e03596615d9869d77149452f3a7ed5", "owned_bridge_local_target_stage.go": "39fde17cdadd3dfa02bc97ef40f9d21d37f18ca865abde2fed2005e680baa0c3", "owned_bridge_answer.go": "6cf27edfd3d0f5ce5595dd602cd8aac74f7848a3e85392dd20377affe8f6043e",
 		"owned_bridge_dispatch.go":       "6be09af532ba6091dfa860f9e8abd3f73a08ac7f4e8d436d30652832dd17455a",
 		"owned_bridge_round_dispatch.go": "b9128ec6284560aea84441eab2b8619ba08297b66133139af4030a39d4478fcf",
-		"owned_bridge_receive.go":        "5de62b53e6ae476daf7563e4cede1e95ed9e1e7f30fbc4de1e06947bc4144671",
+		"owned_bridge_receive.go":        "0c6bce8fde336d9da18d44408c4921706dfbb64f178e93880a5c22192a81c808",
 		"owned_bridge_round_execute.go":  "dedd956801a9a14580f4e22634d3a5eb579ebe22520eb45eedce564209d7eec4",
 		"owned_bridge_round_plan.go":     "8948ec210326d25339c8475b8d7a2889c01ab15dbf3b320d9be4ab65c403cb51",
 		"owned_bridge_commit.go":         "61dfd28229d06a03012b4a0276e1bf3961e7aa05a6aca80154ae672bd3be5255",

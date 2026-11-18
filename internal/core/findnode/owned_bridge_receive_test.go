@@ -73,6 +73,40 @@ func TestOwnedReceivedOfferRetainsOriginalProvisionalAndNoFinalDebt(t *testing.T
 		t.Fatal("accepted offer was discarded", err)
 	}
 }
+
+func TestOwnedReceivedRefusesRequesterIdentityAcrossOriginalSessions(t *testing.T) {
+	d, _, _ := ownedOriginalDomain(t)
+	intake, sink, err := NewDormantFixtureIntake(d.Consumer(), ownedBridgeProfile(), 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, remote := provenFixture(t, 1, domain.SourceGroupLoopback, 0)
+	other, _ := provenFixture(t, 2, domain.SourceGroupLoopback, 0, remote)
+	if source == other || source.ConnID() == other.ConnID() || source.Identity() != other.Identity() {
+		t.Fatal("expected distinct proven connections for the same identity")
+	}
+	stamp, at := ownedBridgePoint(t, d)
+	cut, err := sink.Seal(stamp, at, ownedBridgeBoundary(t, at, time.Second), []ObservedMember{
+		{Session: source, Class: ClassOrdinary}, {Session: other, Class: ClassOrdinary},
+	}, ObservedDegree{Incoming: 1, Window: 1})
+	if err != nil {
+		t.Fatalf("seal both original connections: %v", err)
+	}
+	before := intake.ResourceSnapshot().Intake
+	for _, target := range []Session{source, other} {
+		input := receivedRequest(t, sink, d, source, target, 17)
+		if err := intake.OfferReceived(input, target, cut); !errors.Is(err, ErrUnauthenticated) {
+			t.Fatalf("lookup of requester's own identity on connection %v: %v", target.ConnID(), err)
+		}
+		if input.receivedRequest.consumed.Load() {
+			t.Fatal("identity refusal consumed the request")
+		}
+	}
+	if got := intake.ResourceSnapshot().Intake; got != before || intake.OwnedRoundPending() {
+		t.Fatal("identity refusal admitted pending work", before, got)
+	}
+}
+
 func TestOwnedReceivedOfferUsesFreshPostWaitPointAtExactCollectionBoundary(t *testing.T) {
 	intake, sink, d, clock, source, target := receivedFixture(t)
 	input := receivedRequest(t, sink, d, source, target, 17)
