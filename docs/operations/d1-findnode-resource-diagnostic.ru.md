@@ -1,6 +1,6 @@
 # Закрытое диагностическое построение FindNode
 
-17 ноября 2026 прошли закрытые проверки small2 и churn8 на `dev`. Обычные сборки сохраняют штатное поведение. [English version](d1-findnode-resource-diagnostic.md)
+17 ноября 2026 прошли закрытые проверки small2, churn8 и churn32 на `dev`. Обычные сборки сохраняют штатное поведение. [English version](d1-findnode-resource-diagnostic.md)
 
 ## Small2 · полезная работа и память
 
@@ -39,6 +39,19 @@
 - SHA-256 драйвера `88a6ea6580ac2e213b86deebc4c9b13b7b28a968c99905fd7b977b174d976f40`
 
 [Журналы, обвязка и хеши](../_internal/d1-artifacts/2026-11-17/d1-churn8-d5d4934/SHA256SUMS) · [Квитанция замера](../_internal/d1-artifacts/2026-11-17/d1-churn8-d5d4934/run-fc02f47b15b5/result.json)
+
+## Churn32 · восстановление после смены 16 соединений
+
+Linux arm64/CGO0, Go 1.27.4, тег `d1_resource_probe`. Исходный срез — `dev` `5a4713c1a1c3d3ca60dc35de2fc3ad7500985c21` с локальным исправлением допуска по identity. Диагностическое наложение задаёт границы 32 active / 32 members / 64 visits. [Исходники и хеши](../_internal/d1-artifacts/2026-11-17/d1-churn32-after-g2-identity/SHA256SUMS)
+
+| Проверка | Результат |
+| --- | --- |
+| Смена соединений | Демон подтвердил **32 → 16 → 32 → 0** TLSv2/F1-сессий и **48** разных identity. Оставшиеся сессии сохранили ConnID, 16 замен получили новые ConnID. |
+| Полезная работа | **56** подписанных ответов прошли проверку подписи, target, challenge и исходного request ID. По этапам получено **16 → 8 → 32 → 0**. Intake зарегистрировал по 56 `Offered/Committed/Taken/Answered`, по нулю `Refused/Replaced/Violations`. |
+| Группа демона | **42 528 768 байт (40,56 MiB)** по `memory.peak` после выхода демона, вместе с keeper. Лимит **512 000 000 байт**, 1 CPU, 64 PID, `memory.swap.max=0`. События `max/oom/oom_kill` по нулю. |
+| Драйвер | Пик отдельной cgroup **39 698 432 байта (37,86 MiB)**, лимит 256 MiB без swap. Обе роли завершились с кодом 0. Собственные контейнеры удалены, heavy-lock освобождён. |
+
+Пик относится к этому сценарию и границе финального чтения. Поздний хвост keeper и атрибуция shared pages остаются UNKNOWN. Следующая ступень проверяет верхние границы покрытия 512/512/1024. [Квитанция замера и хеши ELF](../_internal/d1-artifacts/2026-11-17/d1-churn32-after-g2-identity/run-7888ec0d26ac/result.json)
 
 ## Выбор и принадлежность
 

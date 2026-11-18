@@ -1,6 +1,6 @@
 # Closed FindNode resource diagnostic construction
 
-Status: constructor, original-membership checkpoint and Source checks passed in separate scoped offline GoQA jobs. This supplies a deliberately selected diagnostic construction path; it does not enable FindNode in the stock CLI, run useful FindNode workload, measure daemon memory, approve G2 or authorize release. [Русская версия](d1-findnode-resource-diagnostic.ru.md).
+The closed Linux arm64 churn32 run on November 17 confirmed 32 → 16 → 32 → 0 TLSv2/F1 sessions, 48 distinct identities and 56 verified signed answers. The daemon and keeper peaked at 42,528,768 bytes under a 512,000,000-byte cgroup limit with swap disabled and no memory-limit or OOM events. The stock CLI keeps FIND_NODE off. Full D1 capacity, G2 and public activation remain open. [Detailed results in Russian](d1-findnode-resource-diagnostic.ru.md#churn32--восстановление-после-смены-16-соединений).
 
 ## Selection and ownership
 
