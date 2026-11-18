@@ -172,7 +172,10 @@ func TestM1ConnectivitySweep(t *testing.T) {
 	fmt.Fprintf(&out, "  seeds %v\n", sweepSeeds)
 	fmt.Fprintf(&out, "  quota swept 0..d inclusive\n\n")
 
-	for _, sh := range sweepShapes {
+	working := make([]map[int]bool, len(sweepShapes))
+	for shapeIndex, sh := range sweepShapes {
+		connectedQuotas := make(map[int]bool)
+		working[shapeIndex] = connectedQuotas
 		fmt.Fprintf(&out, "── %s ──────────────────────────────────────────────\n", sh.name)
 		out.WriteString(sweepHeader())
 
@@ -183,6 +186,7 @@ func TestM1ConnectivitySweep(t *testing.T) {
 
 		for quota := range sh.degree + 1 {
 			minShare, maxIsolated := 1.0, 0
+			allConnected := true
 			for _, seed := range sweepSeeds {
 				report := measure(sh, seed, quota, policyBaseline)
 
@@ -205,9 +209,13 @@ func TestM1ConnectivitySweep(t *testing.T) {
 				if report.Structural.Isolated > maxIsolated {
 					maxIsolated = report.Structural.Isolated
 				}
+				allConnected = allConnected && report.Structural.Components == 1
 
 				out.WriteString(formatSweepRow(report))
 				attribution.WriteString(formatAttributionRow(report))
+			}
+			if allConnected {
+				connectedQuotas[quota] = true
 			}
 			fmt.Fprintf(&out, "%5d %6s worst over seeds: Q share %.4f, isolated %d\n",
 				quota, "—", minShare, maxIsolated)
@@ -241,28 +249,12 @@ func TestM1ConnectivitySweep(t *testing.T) {
 	// every shape can be asked about, and take the smallest survivor.
 	fmt.Fprintf(&out, "quotas giving ONE structural component, per shape (all seeds):\n")
 
-	working := make([]map[int]bool, 0, len(sweepShapes))
 	limit := -1
-	for _, sh := range sweepShapes {
+	for shapeIndex, sh := range sweepShapes {
 		if limit == -1 || sh.degree < limit {
 			limit = sh.degree
 		}
-
-		ok := make(map[int]bool)
-		for quota := range sh.degree + 1 {
-			good := true
-			for _, seed := range sweepSeeds {
-				if measure(sh, seed, quota, policyBaseline).Structural.Components != 1 {
-					good = false
-					break
-				}
-			}
-			if good {
-				ok[quota] = true
-			}
-		}
-		working = append(working, ok)
-		fmt.Fprintf(&out, "  %-7s %s\n", sh.name, describeQuotaSet(ok, sh.degree))
+		fmt.Fprintf(&out, "  %-7s %s\n", sh.name, describeQuotaSet(working[shapeIndex], sh.degree))
 	}
 
 	if common, found := smallestCommonQuota(working, limit); found {

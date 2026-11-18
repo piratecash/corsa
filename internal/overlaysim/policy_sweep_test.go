@@ -315,6 +315,9 @@ func TestM1PolicyComparison(t *testing.T) {
 
 	for _, sh := range comparisonShapes() {
 		t.Run(sh.name, func(t *testing.T) {
+			// Each shape owns its graphs and report. The test runner limits how many run at once.
+			t.Parallel()
+
 			quotas, err := comparisonQuotas(sh)
 			if err != nil {
 				t.Fatalf("%s: %v", sh.name, err)

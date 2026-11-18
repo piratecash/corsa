@@ -98,11 +98,10 @@ func TestC1RepresentativeAgreesWithAFullScan(t *testing.T) {
 
 		for _, filter := range filters {
 			agreed, nonEmpty := 0, 0
-			scratch := make([]int32, 0, sh.nodes)
 			for owner := range min(sh.nodes, 120) {
 				for level := range sh.degree {
 					accept := filter.accept(int32(owner))
-					fromTrie := c1Representative(trie, ids, &scratch, int32(owner), level, accept)
+					fromTrie := c1Representative(trie, ids, int32(owner), level, accept)
 					fromScan := scanRepresentative(ids, int32(owner), level, accept)
 
 					if fromTrie != fromScan {

@@ -274,7 +274,7 @@ func (t *idTrie) forEachInBucket(target nodeID, level int, visit func(int32)) {
 
 // --- C1/v1: the bucket representative by hash -------------------------------
 
-// c1Rank is the published rule of
+// c1RankInput encodes the published rule of
 // docs/refactoring/dht/21-m1-candidate-c1.md §2.2, byte for byte:
 //
 //	H( "corsa/overlay/sim/pick/v1" ‖ NodeID(u) ‖ uint8(i) ‖ NodeID(c) )
@@ -285,20 +285,29 @@ func (t *idTrie) forEachInBucket(target nodeID, level int, visit func(int32)) {
 // node of a bucket would rank its members identically and they would all pick
 // the same representative — a hub by construction. Whether hubs appear anyway is
 // still measured (§5.4) rather than argued from this comment.
-func c1Rank(owner nodeID, level int, candidate nodeID) [sha256.Size]byte {
+type c1RankInput [len(c1PickSeparator) + nodeIDLen + 1 + nodeIDLen]byte
+
+func newC1RankInput(owner nodeID, level int) c1RankInput {
 	if level < 0 || level > 255 {
 		panic(fmt.Sprintf("C1/v1 ranks levels 0…255, got %d — the rule encodes the level as "+
 			"one byte and a wider level would silently alias", level))
 	}
 
-	var buf [len(c1PickSeparator) + nodeIDLen + 1 + nodeIDLen]byte
-	at := copy(buf[:], c1PickSeparator)
-	at += copy(buf[at:], owner[:])
-	buf[at] = uint8(level)
-	at++
-	copy(buf[at:], candidate[:])
+	var input c1RankInput
+	at := copy(input[:], c1PickSeparator)
+	at += copy(input[at:], owner[:])
+	input[at] = uint8(level)
+	return input
+}
 
-	return sha256.Sum256(buf[:])
+func (input *c1RankInput) rank(candidate nodeID) [sha256.Size]byte {
+	copy(input[len(*input)-nodeIDLen:], candidate[:])
+	return sha256.Sum256(input[:])
+}
+
+func c1Rank(owner nodeID, level int, candidate nodeID) [sha256.Size]byte {
+	input := newC1RankInput(owner, level)
+	return input.rank(candidate)
 }
 
 // c1Representative is the C1/v1 in-bucket choice: the accepted member of the
@@ -313,32 +322,27 @@ func c1Rank(owner nodeID, level int, candidate nodeID) [sha256.Size]byte {
 // hash order gives the walk no branch to prefer, so every member of the bucket
 // has to be ranked, and the level-0 bucket is half the network: the candidate is
 // quadratic in N where its base is not. Measured on four cores at 56 ns per
-// rank: 1k ≈ 70 ms per graph, 10k ≈ 6 s, and 64k extrapolates to ≈4.5 minutes.
+// rank in the original implementation: 1k ≈ 70 ms per graph, 10k ≈ 6 s, and
+// 64k extrapolates to ≈4.5 minutes.
 // Spreading the ranking over goroutines was tried and gave ≈1.2× end to end —
 // the walk and the filter cost as much as the hash — which does not pay for
 // concurrency inside a model whose value is that it can be read. The number
 // belongs in the run registry so the owner can plan around it.
 func c1Representative(
-	trie *idTrie, ids []nodeID, scratch *[]int32, owner int32, level int, accept func(int32) bool,
+	trie *idTrie, ids []nodeID, owner int32, level int, accept func(int32) bool,
 ) int32 {
-	// The scratch buffer is the caller's and is reused across picks: the
-	// builder is sequential, so the level-0 bucket is not re-allocated N times.
-	members := (*scratch)[:0]
-	trie.forEachInBucket(ids[owner], level, func(candidate int32) {
-		if accept(candidate) {
-			members = append(members, candidate)
-		}
-	})
-	*scratch = members
-
+	input := newC1RankInput(ids[owner], level)
 	best := int32(-1)
 	var bestRank [sha256.Size]byte
-	for _, candidate := range members {
-		rank := c1Rank(ids[owner], level, ids[candidate])
+	trie.forEachInBucket(ids[owner], level, func(candidate int32) {
+		if !accept(candidate) {
+			return
+		}
+		rank := input.rank(ids[candidate])
 		if best == -1 || bytes.Compare(rank[:], bestRank[:]) < 0 {
 			best, bestRank = candidate, rank
 		}
-	}
+	})
 	return best
 }
 
@@ -704,9 +708,6 @@ func buildGraphOnIDs(
 
 	trie := newIDTrie(ids)
 
-	// Owned by the builder, reused by every C1/v1 pick: see c1Representative.
-	c1Scratch := make([]int32, 0, sh.nodes)
-
 	g := &graph{
 		ids:                  ids,
 		roles:                roles,
@@ -714,10 +715,9 @@ func buildGraphOnIDs(
 		structuralNeighbours: make([]int, sh.nodes),
 		initiated:            make([]int, sh.nodes),
 	}
-	linked := make([]map[int32]struct{}, sh.nodes)
-	for i := range linked {
-		linked[i] = make(map[int32]struct{}, sh.degree)
-	}
+	// Reuse one set of neighbours for the node currently choosing edges.
+	// Adjacency already records both ends of every edge, including incoming ones.
+	linked := make([]bool, sh.nodes)
 
 	g.shortfall = make([]quotaShortfall, sh.nodes)
 
@@ -741,8 +741,7 @@ func buildGraphOnIDs(
 		g.initiated[u]++
 		g.adjacency[u] = append(g.adjacency[u], v)
 		g.adjacency[v] = append(g.adjacency[v], u)
-		linked[u][v] = struct{}{}
-		linked[v][u] = struct{}{}
+		linked[v] = true
 		if roles[v] == roleStructural {
 			g.structuralNeighbours[u]++
 		}
@@ -753,6 +752,9 @@ func buildGraphOnIDs(
 
 	for i := range sh.nodes {
 		u := int32(i)
+		for _, peer := range g.adjacency[u] {
+			linked[peer] = true
+		}
 
 		// Whether this node was already full BEFORE it looked at anyone. It
 		// has to be captured here: after the loop the two cases are
@@ -778,7 +780,7 @@ func buildGraphOnIDs(
 				if candidate == u {
 					return false
 				}
-				if _, already := linked[u][candidate]; already {
+				if linked[candidate] {
 					return false
 				}
 				return hasRoom(candidate)
@@ -795,7 +797,7 @@ func buildGraphOnIDs(
 				}
 				// ⚠️ The candidate differs from the base HERE and nowhere else.
 				if selection == policyCandidateC1 {
-					return c1Representative(trie, ids, &c1Scratch, u, level, accept)
+					return c1Representative(trie, ids, u, level, accept)
 				}
 				if found := trie.nearestInBucket(ids[u], level, 1, accept); len(found) == 1 {
 					return found[0]
@@ -839,8 +841,7 @@ func buildGraphOnIDs(
 					if candidate == u || roles[candidate] != roleStructural {
 						return false
 					}
-					_, already := linked[u][candidate]
-					return !already
+					return !linked[candidate]
 				})
 				if len(reachable) == 1 {
 					g.shortfall[u].CandidateAtBudget++
@@ -881,7 +882,7 @@ func buildGraphOnIDs(
 				if candidate == u {
 					return false
 				}
-				if _, already := linked[u][candidate]; already {
+				if linked[candidate] {
 					return false
 				}
 				return hasRoom(candidate)
@@ -907,6 +908,9 @@ func buildGraphOnIDs(
 			}
 			connect(u, found[0], edgeFromLeftover, -1)
 		}
+		for _, peer := range g.adjacency[u] {
+			linked[peer] = false
+		}
 	}
 
 	if selection == policySecondPass {
@@ -930,12 +934,15 @@ func secondPassForUnmetQuota(
 	sh shape,
 	trie *idTrie,
 	quota int,
-	linked []map[int32]struct{},
+	linked []bool,
 	hasRoom func(int32) bool,
 	connect func(u, v int32, origin edgeOrigin, level int),
 ) {
 	for i := range sh.nodes {
 		u := int32(i)
+		for _, peer := range g.adjacency[u] {
+			linked[peer] = true
+		}
 
 		if g.structuralNeighbours[u] < quota && !hasRoom(u) {
 			// Out of its OWN budget before the repair could start. Recorded
@@ -953,7 +960,7 @@ func secondPassForUnmetQuota(
 				if candidate == u || g.roles[candidate] != roleStructural {
 					return false
 				}
-				if _, already := linked[u][candidate]; already {
+				if linked[candidate] {
 					return false
 				}
 				return hasRoom(candidate)
@@ -972,6 +979,9 @@ func secondPassForUnmetQuota(
 			if g.structuralNeighbours[u] < quota && !hasRoom(u) {
 				g.shortfall[u].SecondPassOutOfBudget++
 			}
+		}
+		for _, peer := range g.adjacency[u] {
+			linked[peer] = false
 		}
 	}
 }
