@@ -1,14 +1,13 @@
-# FIND_NODE: inactive codec candidate
+# FIND_NODE: wire candidate
 
 ## English
 
-The frame codec, answer transcript/verification and inactive local state blocks, including a consumed-only
-target cache/signing coordinator, are implemented. See [local state boundaries](../design/inactive-find-node-state.md).
-These blocks are not connected to production. Production
-dispatchers do not accept these frames, no initiator is installed, and neither overlay capability is
-advertised. This is a partial implementation toward inactive PR-4, not completed PR-4/5, an approved
-G2 contract or permission to activate D1. See the [design decision](../design/overlay-design-decision.md),
-[admission proposal](../design/d1-admission-budget.md) and [release gates](../release.md).
+The codec, answer verification and bounded target and relay state are implemented. Closed diagnostic
+and test construction can exercise both peer read paths and the original transport writers over
+TLSv2. Standard nodes keep FIND_NODE inactive and advertise neither overlay capability. The
+initiator remains part of the test stand. G2 and public activation remain open.
+See the [local state boundaries](../design/inactive-find-node-state.md),
+[design decision](../design/overlay-design-decision.md) and [release gates](../release.md).
 
 ### Frame encoding
 
@@ -28,11 +27,12 @@ is exactly 32 bytes in canonical standard padded base64 (44 characters). `sig` i
 in canonical unpadded URL base64 (86 characters). There is no `issued_at`, address, record or box key.
 The target key must pass `identity.ParsePublicKey` and its fingerprint must equal `target`.
 
-The codec is stateless. It cannot establish fresh challenge generation, session rights, rate limits,
-deduplication, source-group fairness or deadlines. Before handling a future frame, **both** network
-dispatchers must also require an unambiguous named classifier result matching its parsed type,
-a valid proven v2 session, negotiated rights and resource admission. That integration is pending.
-In particular, ordinary JSON decoding alone does not grant overlay rights to legacy sessions.
+The codec is stateless. Challenge generation, session rights, rate limits, deduplication, fairness
+and deadlines belong to the calling path. The closed path in both peer readers uses the named
+frame classifier, original command limits and original proven TLSv2 session with negotiated
+rights. Request admission uses a complete eligible membership capture before retaining work.
+A forwarded request keeps a bounded pending entry tied to its original source and target sessions.
+A matching answer restores the original request ID and consumes that return path once.
 
 ### Answer transcript and verification
 
@@ -49,10 +49,10 @@ challenge and target, checks its request ID, validates the target key and calls 
 `PublicKey.Verify`. The caller must additionally correlate the original session; this pure function
 does not know the connection. Rejected forwarded target keys are not evidence against the neighbour.
 
-The inactive target coordinator provides immutable network/target/challenge inputs only after consuming
-actual local budgets. External signing uses `identity.SignPayload`, whose RawURL Base64 result is
-decoded to exactly 64 signature bytes. The coordinator accepts the future local signer's result; it
-does not itself cryptographically verify arbitrary completion bytes. The cached signed body is identical
+The closed target path supplies immutable network/target/challenge inputs after consuming
+local budgets. The local signer uses `identity.SignPayload`, whose RawURL Base64 result is
+decoded to exactly 64 signature bytes. The coordinator retains the original signer's completion.
+The initiator verifies the returned body against its retained request and session. The cached signed body is identical
 across up to three recipients, while each reply uses its own session's request ID. A local reservation,
 consumed permit or composed diagnostic sample is not AdmittedAtT or a network answer acknowledgement.
 
@@ -65,13 +65,12 @@ challenge, small-order keys, null/overflow fields, unknown fields and noncanonic
 
 ## Русский
 
-Реализованы кодек кадров, транскрипт/проверка ответа и неактивные локальные блоки состояния, включая
-target cache/signing coordinator с завершением только после Consume. См.
-[границы состояния](../design/inactive-find-node-state.md). К production они не подключены. Production-диспетчеры
-эти кадры не принимают, инициатор не подключён, обе overlay capability не объявляются. Это часть
-неактивного PR-4, а не завершённые PR-4/5, утверждённый G2 или разрешение активации D1. См.
-[решение D](../design/overlay-design-decision.md), [проект допуска](../design/d1-admission-budget.md)
-и [гейты выпуска](../release.md).
+Реализованы кодек, проверка ответа и ограниченное состояние цели и ретранслятора.
+Закрытая диагностическая и тестовая сборки могут проверять оба пути чтения и штатные writers
+поверх TLSv2. Штатные узлы оставляют FIND_NODE неактивным и не объявляют обе overlay capability.
+Инициатор остаётся частью стенда. G2 и публичная активация открыты.
+См. [границы состояния](../design/inactive-find-node-state.md),
+[решение D](../design/overlay-design-decision.md) и [порядок выпуска](../release.md).
 
 ### Кодирование кадров
 
@@ -91,11 +90,12 @@ target cache/signing coordinator с завершением только посл
 URL base64 без padding (86 символов). Полей `issued_at`, адреса, записи и box-ключа нет. Ключ цели
 проходит `identity.ParsePublicKey`, его fingerprint совпадает с `target`.
 
-Кодек не хранит состояния: свежесть вызова, права сессии, лимиты, дедуп, справедливость по группам
-и сроки им не обеспечиваются. Перед будущей обработкой **оба** сетевых диспетчера также обязаны
-проверить однозначный named-результат классификатора с тем же типом, доказанную v2-сессию,
-согласованные права и ресурсный допуск. Эта интеграция ещё не выполнена. Обычный JSON-разбор
-не даёт overlay-права legacy-сессии.
+Кодек не хранит состояния. Свежесть вызова, права сессии, лимиты, дедуп, справедливость по группам и
+сроки относятся к вызывающему пути. Закрытый путь в обоих peer readers использует классификатор
+именованных кадров, штатные лимиты команд и исходную доказанную TLSv2-сессию с согласованными
+правами. До приёма работы нужен полный снимок подходящих сессий. Для пересланного запроса
+ограниченная pending-запись сохраняет исходные сессии источника и цели. Совпавший ответ
+восстанавливает исходный ID запроса и использует обратный путь один раз.
 
 ### Транскрипт ответа и проверка
 
@@ -112,10 +112,10 @@ URL base64 без padding (86 символов). Полей `issued_at`, адр�
 сопоставляет исходную сессию: чистая функция соединения не знает. Неверный пересланный ключ цели
 не является доказательством нарушения соседа.
 
-Неактивный target coordinator выдаёт неизменяемые network/target/challenge только после списания
-фактических локальных бюджетов. Внешняя подпись использует `identity.SignPayload`: RawURL Base64
-декодируется в ровно 64 байта. Coordinator принимает результат будущего локального signer, но не
-проверяет криптографически произвольные completion bytes. Подписанное cached body одинаково у максимум
+Закрытый путь цели передаёт неизменяемые network/target/challenge после списания
+локальных бюджетов. Локальная подпись использует `identity.SignPayload`: RawURL Base64
+декодируется в ровно 64 байта. Coordinator сохраняет завершение исходной подписи.
+Инициатор проверяет тело по сохранённому запросу и исходной сессии. Подписанное cached body одинаково у максимум
 трёх получателей, envelope ID каждого ответа соответствует его сессии. Локальный reservation,
 consumed permit или diagnostic snapshot не являются AdmittedAtT либо сетевым подтверждением ответа.
 

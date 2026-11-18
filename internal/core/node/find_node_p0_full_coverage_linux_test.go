@@ -23,6 +23,64 @@ import (
 const full512F1Members = 512
 
 func TestOwnedP0FullPopulationAndRegistryOverflow(t *testing.T) {
+	planned, quota := prepareOwnedFull512Guest(t)
+	s, address := newOwnedFull512GuestRelay(t, planned[0].Addr(), full512FixtureConnections)
+
+	var source, target *ownedBareV2PilotClient
+	identities := make(map[domain.PeerIdentity]bool, full512F1Members)
+	for i := 0; i < full512F1Members; i++ {
+		client := dialOwnedBareV2PilotClientFrom(t, s, address, true, full512GuestClientDialer(planned, i), quota)
+		if identities[client.id] {
+			t.Fatal("repeated F1 client identity", i)
+		}
+		identities[client.id] = true
+		switch i {
+		case 0:
+			source = client
+		case 1:
+			target = client
+		}
+	}
+	for i := full512F1Members; i < full512FixtureRegistryLimit; i++ {
+		dialOwnedPilotUnnegotiated(t, s, address, full512GuestClientDialer(planned, i), quota)
+	}
+	var originals []findnode.Session
+	waitFor(t, 2*time.Second, "full512 original membership was not published", func() bool {
+		facts, err := s.collectOwnedFindNodeRawFacts(t.Context(), s.bridgeCapture.priority)
+		if err != nil || len(facts.allOriginal) != len(identities) {
+			return false
+		}
+		for _, original := range facts.allOriginal {
+			if !identities[original.Identity()] {
+				return false
+			}
+		}
+		originals = facts.allOriginal
+		return true
+	})
+	runOwnedMixedP0Phases(t, s, source, target, originals, func() net.Conn {
+		return dialOwnedPilotUnnegotiated(t, s, address, full512GuestClientDialer(planned, full512FixtureRegistryLimit), quota)
+	})
+}
+
+func TestOwnedP0FullActiveCapacityAndRecovery(t *testing.T) {
+	planned, quota := prepareOwnedFull512Guest(t)
+	s, address := newOwnedFull512GuestRelay(t, planned[0].Addr(), full512F1Members)
+	clients := make([]*ownedBareV2PilotClient, full512F1Members)
+	for i := range clients {
+		clients[i] = dialOwnedBareV2PilotClientFrom(t, s, address, true, full512GuestClientDialer(planned, i), quota)
+	}
+	runOwnedActiveCapacityPhases(t, s, clients, func() *ownedBareV2PilotClient {
+		return dialOwnedBareV2PilotClientFrom(t, s, address, false, full512GuestClientDialer(planned, len(clients)), quota)
+	})
+}
+
+func full512GuestClientDialer(planned []netip.Prefix, index int) net.Dialer {
+	return net.Dialer{LocalAddr: &net.TCPAddr{IP: net.IP(planned[index+1].Addr().AsSlice())}}
+}
+
+func prepareOwnedFull512Guest(t *testing.T) ([]netip.Prefix, *full512AppQuota) {
+	t.Helper()
 	if os.Getenv("CORSA_D1_FULL512_NATIVE") != "1" {
 		t.Skip("requires the separately admitted Full512 guest")
 	}
@@ -51,51 +109,12 @@ func TestOwnedP0FullPopulationAndRegistryOverflow(t *testing.T) {
 			t.Error(errFull512AppQuota)
 		}
 	})
-	s, address := newOwnedFull512GuestRelay(t, planned[0].Addr())
-	clientDialer := func(index int) net.Dialer {
-		return net.Dialer{LocalAddr: &net.TCPAddr{IP: net.IP(planned[index+1].Addr().AsSlice())}}
-	}
-
-	var source, target *ownedBareV2PilotClient
-	identities := make(map[domain.PeerIdentity]bool, full512F1Members)
-	for i := 0; i < full512F1Members; i++ {
-		client := dialOwnedBareV2PilotClientFrom(t, s, address, true, clientDialer(i), quota)
-		if identities[client.id] {
-			t.Fatal("repeated F1 client identity", i)
-		}
-		identities[client.id] = true
-		switch i {
-		case 0:
-			source = client
-		case 1:
-			target = client
-		}
-	}
-	for i := full512F1Members; i < full512FixtureRegistryLimit; i++ {
-		dialOwnedPilotUnnegotiated(t, s, address, clientDialer(i), quota)
-	}
-	var originals []findnode.Session
-	waitFor(t, 2*time.Second, "full512 original membership was not published", func() bool {
-		facts, err := s.collectOwnedFindNodeRawFacts(t.Context(), s.bridgeCapture.priority)
-		if err != nil || len(facts.allOriginal) != len(identities) {
-			return false
-		}
-		for _, original := range facts.allOriginal {
-			if !identities[original.Identity()] {
-				return false
-			}
-		}
-		originals = facts.allOriginal
-		return true
-	})
-	runOwnedMixedP0Phases(t, s, source, target, originals, func() net.Conn {
-		return dialOwnedPilotUnnegotiated(t, s, address, clientDialer(full512FixtureRegistryLimit), quota)
-	})
+	return planned, quota
 }
 
 // The full guest fixture owns an inbound-only listener and preserves the
 // normal connection, handshake, command and F1 admission paths.
-func newOwnedFull512GuestRelay(t *testing.T, host netip.Addr) (*Service, string) {
+func newOwnedFull512GuestRelay(t *testing.T, host netip.Addr, maxActive int) (*Service, string) {
 	t.Helper()
 	id, err := identity.Generate()
 	if err != nil {
@@ -109,7 +128,7 @@ func newOwnedFull512GuestRelay(t *testing.T, host netip.Addr) (*Service, string)
 	cfg.MaxTotalConnections = full512FixtureConnections + cfg.EffectiveOutboundConnectionReserve()
 	profile := ownedCutProfile()
 	profile.Capture = findNodeOwnedCaptureProfile{
-		Degree:   degreeProfile{MaxActive: full512FixtureConnections},
+		Degree:   degreeProfile{MaxActive: maxActive},
 		Priority: findNodePriorityProfile{MaxMembers: full512F1Members, MaxRegistryVisits: full512FixtureRegistryLimit},
 	}
 	profile.Intake = findnode.DormantIntakeProfile{

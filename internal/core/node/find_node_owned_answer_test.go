@@ -3,16 +3,19 @@ package node
 import (
 	"bufio"
 	"crypto/ed25519"
+	"encoding/json"
 	"errors"
+	"reflect"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/piratecash/corsa/internal/core/datagram"
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/findnode"
 	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/netcore"
 	"github.com/piratecash/corsa/internal/core/protocol"
-	"reflect"
-	"sync/atomic"
-	"testing"
-	"time"
 )
 
 type ownedAnswerCapture struct{ replies chan bool }
@@ -90,6 +93,7 @@ func TestOwnedAnswerThreeNodeOriginalRequestRelayAndSignedReturn(t *testing.T) {
 	target, _, _ := ownedCaptureTestService(t, 8, 8, 16)
 	sourceWire, _ := ownedRawAccepted(t, relay, initiator)
 	targetWire, targetSession := ownedRawAccepted(t, relay, target)
+	reverseBefore := ownedAnswerDatagramReverse(t, relay)
 	clock.Store(int64(3 * time.Second))
 	wire, request := ownedReceiveWire(t, targetSession.Identity())
 	if status := sourceWire.outbound.netCore.SendRaw([]byte(wire + "\n")); status != netcore.SendOK {
@@ -102,6 +106,29 @@ func TestOwnedAnswerThreeNodeOriginalRequestRelayAndSignedReturn(t *testing.T) {
 	forwarded := ownedExecutingReadForward(t, targetWire, targetSession.Identity())
 	if forwarded.ID != 0 || forwarded.Target != request.Target || forwarded.Challenge != request.Challenge {
 		t.Fatal("R did not retain exact request with only envelope ID rewritten")
+	}
+	// Admit an ordinary get_identity request while the FIND_NODE return is pending.
+	payload, err := protocol.BuildGetIdentityPayload(protocol.GetIdentityPayload{
+		V: domain.IdentityLookupSchemaVersion, TargetProof: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	addDirectViaIdentity(t, relay, targetSession.Identity())
+	identityRequest := protocol.DatagramFrame{
+		Version: domain.DatagramHeaderVersion, Mode: domain.DatagramModeRequest,
+		Class: domain.DatagramClassControl, DType: domain.DTypeGetIdentity,
+		Src: randomAttemptLabel(t), Dst: targetSession.Identity(),
+		TTL: domain.DatagramDefaultMaxHops, RoutePolicy: domain.RoutePolicyBest, Payload: payload,
+	}
+	outcome := relay.datagramLayer().pipeline.SendLocal(t.Context(), datagram.LocalSenderIdentityResolver,
+		datagram.LocalSendOpts{Frame: identityRequest})
+	if nextHop, ok := outcome.NextHop(); outcome.Kind() != datagram.SendQueued || !ok || nextHop != targetSession.Identity() {
+		t.Fatal("ordinary get_identity did not acquire a route and queue slot", outcome)
+	}
+	reversePending := ownedAnswerDatagramReverse(t, relay)
+	if reversePending.LocalSlots != reverseBefore.LocalSlots+1 {
+		t.Fatal("ordinary get_identity did not acquire a reverse slot", reverseBefore, reversePending)
 	}
 	answer := ownedAnswerSignedBody(t, target, forwarded)
 	raw, err := protocol.MarshalFindNodeAnswer(answer)
@@ -123,12 +150,40 @@ func TestOwnedAnswerThreeNodeOriginalRequestRelayAndSignedReturn(t *testing.T) {
 	if err := protocol.VerifyFindNodeAnswer(returned, request, domain.NetworkID(networkName)); err != nil {
 		t.Fatal("retained original challenge verification failed", err)
 	}
+	reverseAfter := ownedAnswerDatagramReverse(t, relay)
+	dtype := domain.DTypeGetIdentity.String()
+	if reverseAfter.LocalSlots != reversePending.LocalSlots ||
+		reverseAfter.LocalRefusals[dtype] != reverseBefore.LocalRefusals[dtype] {
+		t.Fatal("FIND_NODE disturbed the ordinary get_identity quota", reverseBefore, reversePending, reverseAfter)
+	}
+	t.Logf("get_identity reverse slots: %d → %d → %d, refusal delta: 0",
+		reverseBefore.LocalSlots, reversePending.LocalSlots, reverseAfter.LocalSlots)
 	wrong := request
 	wrong.Challenge[0] ^= 1
 	if err := protocol.VerifyFindNodeAnswer(returned, wrong, domain.NetworkID(networkName)); err == nil {
 		t.Fatal("initiator accepted answer to another retained challenge")
 	}
 }
+
+func ownedAnswerDatagramReverse(t *testing.T, s *Service) datagram.ReverseDiagnostics {
+	t.Helper()
+	summary, err := s.FetchDatagramSummary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var evidence struct {
+		Enabled bool
+		Reverse *datagram.ReverseDiagnostics
+	}
+	if err := json.Unmarshal(summary, &evidence); err != nil {
+		t.Fatal(err)
+	}
+	if !evidence.Enabled || evidence.Reverse == nil || evidence.Reverse.LocalRefusals == nil {
+		t.Fatal("missing active datagram reverse diagnostics")
+	}
+	return *evidence.Reverse
+}
+
 func TestOwnedOutboundCommandGateRefusesBeforeRequestOrAnswerParse(t *testing.T) {
 	for _, kind := range []string{protocol.FindNodeFrameType, protocol.FindNodeAnswerFrameType} {
 		t.Run(kind, func(t *testing.T) {

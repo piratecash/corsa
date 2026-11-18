@@ -32,10 +32,13 @@ import (
 
 // This is an explicit TEST-ONLY opt-in, not stock/default overlay admission.
 // All operational R objects come from its original Service.Run handlers.
-func newOwnedBareV2PilotRelay(t *testing.T, maxMembers int) (*Service, string) {
+func newOwnedBareV2PilotRelay(t *testing.T, maxMembers, maxActive int) (*Service, string) {
 	t.Helper()
 	if maxMembers != 1 && maxMembers != 2 {
 		t.Fatal("pilot member profile outside closed small2 cases")
+	}
+	if maxActive != 5 && (maxActive != 2 || maxMembers != 2) {
+		t.Fatal("pilot active profile outside closed small2 cases")
 	}
 	id, err := identity.Generate()
 	if err != nil {
@@ -48,7 +51,7 @@ func newOwnedBareV2PilotRelay(t *testing.T, maxMembers int) (*Service, string) {
 	profile := ownedCutProfile()
 	profile.Capture = findNodeOwnedCaptureProfile{
 		// The degree owner also counts proved peers without the pilot capability.
-		Degree:   degreeProfile{MaxActive: 5},
+		Degree:   degreeProfile{MaxActive: maxActive},
 		Priority: findNodePriorityProfile{MaxMembers: maxMembers, MaxRegistryVisits: 4},
 	}
 	// Copy the existing explicit P0 timing tuple; no production/default change.
@@ -364,7 +367,7 @@ func TestOwnedBareV2PilotStockAdvertisementUnchanged(t *testing.T) {
 }
 
 func TestOwnedBareV2PilotOriginalMembershipAndForward(t *testing.T) {
-	s, address := newOwnedBareV2PilotRelay(t, 2)
+	s, address := newOwnedBareV2PilotRelay(t, 2, 5)
 	from := dialOwnedBareV2PilotClient(t, s, address, true)
 	target := dialOwnedBareV2PilotClient(t, s, address, true)
 	if from.id == target.id || from.id == domain.PeerIdentityFromWire(s.identity.Address) || target.id == domain.PeerIdentityFromWire(s.identity.Address) {
@@ -616,7 +619,7 @@ func TestOwnedBareV2PilotRefusalsDoNotAdmit(t *testing.T) {
 			if kind == "partial-member-coverage" {
 				maxMembers = 1
 			}
-			s, address := newOwnedBareV2PilotRelay(t, maxMembers)
+			s, address := newOwnedBareV2PilotRelay(t, maxMembers, 5)
 			from := dialOwnedBareV2PilotClient(t, s, address, kind != "unnegotiated-source")
 			target := dialOwnedBareV2PilotClient(t, s, address, true)
 			if kind == "unnegotiated-source" {
@@ -672,11 +675,14 @@ func bareV2PilotSourceErrors(sources map[string][]byte) []string {
 	const fullFile = "find_node_p0_full_coverage_linux_test.go"
 	const fullFactory = "newOwnedFull512GuestRelay"
 	const fullEntry = "TestOwnedP0FullPopulationAndRegistryOverflow"
+	const fullActiveEntry = "TestOwnedP0FullActiveCapacityAndRecovery"
+	const smallActiveSite = "find_node_p0_active_capacity_test.go:TestOwnedP0SmallActiveCapacityAndRecovery"
+	const mixedExchangeSite = "find_node_mixed_peer_exchange_test.go:TestOwnedFindNodeMixedV2KeepsPeerExchange"
 	var failures []string
 	if !qualifiedD1DiagnosticSource(sources["find_node_resource_diagnostic.go"]) {
 		failures = append(failures, "pilot diagnostic tagged Source changed")
 	}
-	if fmt.Sprintf("%x", sha256.Sum256(sources[fullFile])) != "92eb5d96f6b9070fe0c43b81abbbd5700c4b70c3504f71a84f38cebba67e9721" {
+	if fmt.Sprintf("%x", sha256.Sum256(sources[fullFile])) != "7e61bbf7b9e15bebb54450bd61274234436a8d77904f7298cf8cc8a7cc923cc6" {
 		failures = append(failures, "pilot Full512 Linux fixture source changed")
 	}
 	declared, read, written, called, factories := 0, 0, 0, 0, 0
@@ -697,7 +703,7 @@ func bareV2PilotSourceErrors(sources map[string][]byte) []string {
 				if fn.Name.Name == factory {
 					factories++
 					allowed[fn.Name] = true
-					if site != "find_node_bare_v2_pilot_test.go:"+factory || fmt.Sprintf("%x", sha256.Sum256(raw[int(fn.Pos())-1:int(fn.End())-1])) != "eef051cb73e4ce8f54ad2e691cf2b5beeb51efb261d22ce18c3af87fa5b4734f" {
+					if site != "find_node_bare_v2_pilot_test.go:"+factory || fmt.Sprintf("%x", sha256.Sum256(raw[int(fn.Pos())-1:int(fn.End())-1])) != "6b642a192c7bf8bc6f247b305e76a2c4f0cd1ab556bf61984895c7abf8b4c9f5" {
 						failures = append(failures, "pilot fixed factory changed")
 					}
 				}
@@ -761,14 +767,14 @@ func bareV2PilotSourceErrors(sources map[string][]byte) []string {
 					if name, ok := n.Fun.(*ast.Ident); ok && name.Name == factory {
 						allowed[name] = true
 						called++
-						if site != "find_node_bare_v2_pilot_test.go:TestOwnedBareV2PilotOriginalMembershipAndForward" && site != "find_node_bare_v2_pilot_test.go:TestOwnedBareV2PilotRefusalsDoNotAdmit" {
+						if site != "find_node_bare_v2_pilot_test.go:TestOwnedBareV2PilotOriginalMembershipAndForward" && site != "find_node_bare_v2_pilot_test.go:TestOwnedBareV2PilotRefusalsDoNotAdmit" && site != smallActiveSite && site != mixedExchangeSite {
 							failures = append(failures, "pilot factory call escaped")
 						}
 					}
 					if name, ok := n.Fun.(*ast.Ident); ok && name.Name == fullFactory {
 						allowed[name] = true
 						fullCalled++
-						if site != fullFile+":"+fullEntry {
+						if site != fullFile+":"+fullEntry && site != fullFile+":"+fullActiveEntry {
 							failures = append(failures, "pilot Full512 factory call escaped")
 						}
 					}
@@ -788,7 +794,7 @@ func bareV2PilotSourceErrors(sources map[string][]byte) []string {
 			})
 		}
 	}
-	if declared != 1 || read != 1 || written != 5 || called != 2 || factories != 1 || fullCalled != 1 || fullFactories != 1 {
+	if declared != 1 || read != 1 || written != 5 || called != 4 || factories != 1 || fullCalled != 2 || fullFactories != 1 {
 		failures = append(failures, "pilot exact declaration/read/write/call inventory")
 	}
 	return failures
@@ -813,6 +819,8 @@ func TestOwnedBareV2PilotAdvertisementSourceControls(t *testing.T) {
 		{"reflection-name", "pilot_escape.go", "package node\nfunc pilotEscape(){_=reflect.ValueOf(Service{}).FieldByName(\"ownedFindNodeAdvertiseTest\")}\n", "reflection/string escape"},
 		{"factory-value-escape", "pilot_escape_test.go", "package node\nvar pilotEscape=newOwnedBareV2PilotRelay\n", "unclosed field/factory reference"},
 		{"full512-factory-value-escape", "pilot_escape_test.go", "package node\nvar pilotEscape=newOwnedFull512GuestRelay\n", "unclosed field/factory reference"},
+		{"active-factory-call-escape", "pilot_escape_test.go", "package node\nfunc pilotEscape(){newOwnedBareV2PilotRelay(nil,2,2)}\n", "pilot factory call escaped"},
+		{"full512-active-factory-call-escape", "pilot_escape_test.go", "package node\nfunc pilotEscape(){newOwnedFull512GuestRelay(nil,host,512)}\n", "pilot Full512 factory call escaped"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			sources := map[string][]byte{}
