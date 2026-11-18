@@ -434,7 +434,8 @@ dist/corsa-windows-amd64.zip
 dist/corsa-windows-arm64.zip`
 
 const (
-	releasePreflightCommand = `python scripts/test-test-release.py
+	releaseOverlaySimCommand = "go test -count=1 -timeout=15m ./internal/overlaysim"
+	releasePreflightCommand  = `python scripts/test-test-release.py
 python scripts/test-report-candidate-artifacts.py
 python scripts/test-report-linux-desktop-cgo.py`
 	releaseTestDependenciesCommand = `sudo apt-get update
@@ -460,14 +461,14 @@ sudo apt-get install -y \
 // Every release tag must run the same unconditional setup/test steps.
 // No version, environment or notice may replace actual test execution.
 func releaseTestPolicyProblems(file string, job map[string]*yaml.Node) []string {
+	allowedCommands := []string{releaseTestDependenciesCommand, releasePreflightCommand,
+		"make test-release", releaseOverlaySimCommand, "make test-s6-observation", "make test-cgo"}
 	steps := job["steps"]
-	if steps == nil || steps.Kind != yaml.SequenceNode || len(steps.Content) != 8 {
-		return []string{file + ": release tests must retain checkout and all seven unconditional setup/test steps"}
+	if steps == nil || steps.Kind != yaml.SequenceNode || len(steps.Content) != 3+len(allowedCommands) {
+		return []string{file + ": release tests must retain checkout, toolchain setup and all unconditional test steps"}
 	}
 	var problems []string
 	checkout, setupGo, setupPython := 0, 0, 0
-	allowedCommands := []string{releaseTestDependenciesCommand, releasePreflightCommand,
-		"make test-release", "make test-s6-observation", "make test-cgo"}
 	for i, node := range steps.Content {
 		step, ok := mappingOf(node)
 		where := fmt.Sprintf("%s: release test policy step %d", file, i)
@@ -635,6 +636,7 @@ func releaseCheckProblems(file, text string, w workflow) []string {
 	requireCommand("lint", "make lint")
 	requireCommand("tests", releasePreflightCommand)
 	requireCommand("tests", "make test-release")
+	requireCommand("tests", releaseOverlaySimCommand)
 	requireCommand("tests", "make test-s6-observation")
 	requireCommand("tests", "make test-cgo")
 	requireCommand("build-linux", linuxDesktopCGOCommand)
@@ -1042,6 +1044,9 @@ func TestReleaseChecksAndPlatformCoverageCannotBeBypassed(t *testing.T) {
 		{"release accepts other tags", "      - \"v*\"", "      - \"*\""},
 		{"missing tests job", jobBlock("tests"), "\n"},
 		{"default tests skipped", "run: make test-release", "run: echo skipped"},
+		{"overlaysim skipped", "run: " + releaseOverlaySimCommand, "run: echo skipped"},
+		{"overlaysim step disabled", "run: " + releaseOverlaySimCommand, "run: " + releaseOverlaySimCommand + "\n        if: false"},
+		{"overlaysim shortened", "run: " + releaseOverlaySimCommand, "run: " + releaseOverlaySimCommand + " -short"},
 		{"tagged S6 tests skipped", "run: make test-s6-observation", "run: echo skipped"},
 		{"tagged S6 failure swallowed", "run: make test-s6-observation", "run: make test-s6-observation || true"},
 		{"tagged S6 step disabled", "run: make test-s6-observation", "run: make test-s6-observation\n        if: false"},

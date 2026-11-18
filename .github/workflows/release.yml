@@ -121,8 +121,11 @@ jobs:
           python scripts/test-report-candidate-artifacts.py
           python scripts/test-report-linux-desktop-cgo.py
 
-      - name: Run applicable release tests (overlaysim deferred to D1)
+      - name: Run product release tests
         run: make test-release
+
+      - name: Run overlaysim release regression
+        run: go test -count=1 -timeout=15m ./internal/overlaysim
 
       - name: Run tagged S6 observation entry tests
         run: make test-s6-observation
