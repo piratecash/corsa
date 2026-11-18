@@ -678,6 +678,7 @@ func bareV2PilotSourceErrors(sources map[string][]byte) []string {
 	const fullActiveEntry = "TestOwnedP0FullActiveCapacityAndRecovery"
 	const smallActiveSite = "find_node_p0_active_capacity_test.go:TestOwnedP0SmallActiveCapacityAndRecovery"
 	const mixedExchangeSite = "find_node_mixed_peer_exchange_test.go:TestOwnedFindNodeMixedV2KeepsPeerExchange"
+	const mixedDMSite = "find_node_mixed_peer_exchange_test.go:TestOwnedFindNodeMixedV2KeepsEncryptedDirectMessages"
 	var failures []string
 	if !qualifiedD1DiagnosticSource(sources["find_node_resource_diagnostic.go"]) {
 		failures = append(failures, "pilot diagnostic tagged Source changed")
@@ -767,7 +768,7 @@ func bareV2PilotSourceErrors(sources map[string][]byte) []string {
 					if name, ok := n.Fun.(*ast.Ident); ok && name.Name == factory {
 						allowed[name] = true
 						called++
-						if site != "find_node_bare_v2_pilot_test.go:TestOwnedBareV2PilotOriginalMembershipAndForward" && site != "find_node_bare_v2_pilot_test.go:TestOwnedBareV2PilotRefusalsDoNotAdmit" && site != smallActiveSite && site != mixedExchangeSite {
+						if site != "find_node_bare_v2_pilot_test.go:TestOwnedBareV2PilotOriginalMembershipAndForward" && site != "find_node_bare_v2_pilot_test.go:TestOwnedBareV2PilotRefusalsDoNotAdmit" && site != smallActiveSite && site != mixedExchangeSite && site != mixedDMSite {
 							failures = append(failures, "pilot factory call escaped")
 						}
 					}
@@ -794,7 +795,7 @@ func bareV2PilotSourceErrors(sources map[string][]byte) []string {
 			})
 		}
 	}
-	if declared != 1 || read != 1 || written != 5 || called != 4 || factories != 1 || fullCalled != 2 || fullFactories != 1 {
+	if declared != 1 || read != 1 || written != 5 || called != 5 || factories != 1 || fullCalled != 2 || fullFactories != 1 {
 		failures = append(failures, "pilot exact declaration/read/write/call inventory")
 	}
 	return failures
