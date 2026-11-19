@@ -1,0 +1,5 @@
+base=5a4713c1a1c3d3ca60dc35de2fc3ad7500985c21
+base_tree=edd3baaf2a03649617295911daf33010f1b535b0
+go version go1.27.4 darwin/arm64
+GOOS=linux GOARCH=arm64 CGO_ENABLED=0 GOMAXPROCS=2
+go test -mod=readonly -p=2 -trimpath -buildvcs=false -tags=d1_full512_native -c ./internal/core/node

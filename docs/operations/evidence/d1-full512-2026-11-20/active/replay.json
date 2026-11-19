@@ -1,0 +1,64 @@
+{
+  "console_sha256": "b4dd84247ee52788c48054d7b7c0d7b205fd236dfcffcbfaa1b275f9fbe94251",
+  "go": {
+    "active": [
+      512,
+      513,
+      512
+    ],
+    "application_quota": {
+      "exceeded": false,
+      "frames": 1037,
+      "payload_bytes": 38186
+    },
+    "go_log_sha256": "fb62c7a061aa220d74bb4ca7c75d97f18d27d8df16d7b1eff3ff4c0c2455c65e",
+    "profile": "full512-active-v1",
+    "refused_before_intake": 1,
+    "scope": "go-test-phase-evidence",
+    "signed_answers": 2,
+    "test": "TestOwnedP0FullActiveCapacityAndRecovery"
+  },
+  "guest_descriptor_snapshot": {
+    "hard_fd": 4096,
+    "observed_fd": 6,
+    "snapshot_slack": 2040,
+    "soft_fd": 4096
+  },
+  "inputs": {
+    "attempt_id": "9b5e77a06fd34aabb13e26c264550b16",
+    "initrd_sha256": "7646e0c54495d74fc970a15c317760660313d5835b2e307dfa6120603a8db790",
+    "kernel_sha256": "6b7aa1f9357bc94136c67888f4a9c09643c462bcd5bae31a643f7d62ca51ab41",
+    "launcher_sha256": "35a0a654c7e5fe4e51ec4b3495bbe29a3b621f7d54e276dace446c985da41e6d"
+  },
+  "native_events": [
+    {
+      "attempt_id": "9b5e77a06fd34aabb13e26c264550b16",
+      "elapsed_ns": 322429000,
+      "event": "ready",
+      "seq": 1
+    },
+    {
+      "attempt_id": "9b5e77a06fd34aabb13e26c264550b16",
+      "elapsed_ns": 437553000,
+      "event": "start_ok",
+      "seq": 2
+    },
+    {
+      "attempt_id": "9b5e77a06fd34aabb13e26c264550b16",
+      "elapsed_ns": 1812415000,
+      "event": "guest_stopped",
+      "guest_error": null,
+      "seq": 3
+    },
+    {
+      "attempt_id": "9b5e77a06fd34aabb13e26c264550b16",
+      "elapsed_ns": 1812474000,
+      "event": "stop_complete",
+      "final_state": "stopped",
+      "seq": 4
+    }
+  ],
+  "native_sha256": "cc329bebdc20e296fe244305f60e7dfbf7e964af03563b4d50c8e9034e7e85bf",
+  "scope": "full512-offline-evidence-replay",
+  "worker_reaped_ns": 1840144000
+}

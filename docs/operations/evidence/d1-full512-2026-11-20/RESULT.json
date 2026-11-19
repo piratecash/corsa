@@ -1,0 +1,72 @@
+{
+  "date": "2026-11-20",
+  "scope": "Frozen diagnostic Service + synthetic TLSv2 clients in NativeVZ; no standalone corsad memory acceptance",
+  "source_base_commit": "5a4713c1a1c3d3ca60dc35de2fc3ad7500985c21",
+  "source_base_tree": "edd3baaf2a03649617295911daf33010f1b535b0",
+  "overlay_manifest": "SOURCE-CHANGES.sha256",
+  "test_elf_sha256": "fcf024d7381319b851e45933fa28f215df8d006172401a60072688c73dbf43b6",
+  "kernel_sha256": "6b7aa1f9357bc94136c67888f4a9c09643c462bcd5bae31a643f7d62ca51ab41",
+  "worker_sha256": "35a0a654c7e5fe4e51ec4b3495bbe29a3b621f7d54e276dace446c985da41e6d",
+  "profile": {
+    "guest_vcpus": 2,
+    "guest_memory_mib": 1536,
+    "nic": false,
+    "disks": false,
+    "host_sharing": false,
+    "virtio_entropy": true,
+    "host_work_cleanup_kill_reap_seconds": [
+      360,
+      380,
+      398,
+      400
+    ],
+    "console_limit_bytes": 4194304,
+    "native_limit_bytes": 16384,
+    "host_hard_caps": "NOT_ENFORCED",
+    "host_no_swap": "NOT_GUARANTEED",
+    "physical_xpc_release": "UNKNOWN"
+  },
+  "results": {
+    "active": {
+      "attempt_id": "9b5e77a06fd34aabb13e26c264550b16",
+      "verdict": "PASS",
+      "coverage": [
+        512,
+        513,
+        512
+      ],
+      "signed_answers": 2,
+      "refused_before_intake": 1,
+      "go_test_seconds": 1.13
+    },
+    "mixed": {
+      "attempt_id": "ad48d000516f4b5bb80cd7ab402a2544",
+      "verdict": "PASS",
+      "registry": [
+        1024,
+        1025,
+        1024
+      ],
+      "complete_originals": [
+        512,
+        0,
+        512
+      ],
+      "admitted_counters": [
+        1,
+        1,
+        2
+      ],
+      "retained_answer_at_overflow": true,
+      "go_test_seconds": 2.58
+    }
+  },
+  "remaining": [
+    "Final PR-6 source/artifact recheck",
+    "O-1a original windows and final comparison",
+    "Full standalone useful workload under 512000000 bytes",
+    "G2 contract/public activation decisions",
+    "S6 observation for public activation"
+  ],
+  "qualification": "Functional capacity and recovery only; no RSS/cgroup memory or physical latency guarantee. Same frozen ELF used in both runs; overlays listed exactly, not an arbitrary current HEAD."
+}

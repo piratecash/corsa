@@ -1,0 +1,4 @@
+{"attempt_id":"ad48d000516f4b5bb80cd7ab402a2544","elapsed_ns":298595000,"event":"ready","seq":1}
+{"attempt_id":"ad48d000516f4b5bb80cd7ab402a2544","elapsed_ns":407096000,"event":"start_ok","seq":2}
+{"attempt_id":"ad48d000516f4b5bb80cd7ab402a2544","elapsed_ns":3220928000,"event":"guest_stopped","guest_error":null,"seq":3}
+{"attempt_id":"ad48d000516f4b5bb80cd7ab402a2544","elapsed_ns":3220982000,"event":"stop_complete","final_state":"stopped","seq":4}

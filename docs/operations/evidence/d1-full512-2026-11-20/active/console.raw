@@ -1,0 +1,10 @@
+D1_FULL512_GUEST_TOPOLOGY_V1 count=1026 plan_sha256=3c32db78e3f732d43959cfe4f84c9ed9cbb318acd3d692698a9771b807a45dab
+=== RUN   TestOwnedP0FullActiveCapacityAndRecovery
+    find_node_p0_full_coverage_linux_test.go:67: D1_P0_GUEST_PREFLIGHT_V1 {"soft_fd":4096,"hard_fd":4096,"observed_fd":6,"snapshot_slack":2040}
+    find_node_p0_full_coverage_linux_test.go:73: active=512→513→512 signed_answers=2 refused_before_intake=1
+    find_node_p0_full_coverage_linux_test.go:107: D1_P0_FULL512_QUOTA_V1 {"frames":1037,"payload_bytes":38186,"exceeded":false}
+--- PASS: TestOwnedP0FullActiveCapacityAndRecovery (1.13s)
+=== NAME  
+PASS
+D1_FULL512_GUEST_CHILD_V1 {"state":"test_exit_zero","reaped":true,"exit":0,"term_sent":false,"kill_sent":false}
+D1_FULL512_GUEST_INIT_V1 supervisor_exit=0 action=poweroff

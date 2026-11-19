@@ -1,6 +1,18 @@
 # Closed FindNode resource diagnostic construction
 
-The closed Linux arm64 churn32 run on November 17 confirmed 32 → 16 → 32 → 0 TLSv2/F1 sessions, 48 distinct identities and 56 verified signed answers. The daemon and keeper peaked at 42,528,768 bytes under a 512,000,000-byte cgroup limit with swap disabled and no memory-limit or OOM events. The stock CLI keeps FIND_NODE off. Full D1 capacity, G2 and public activation remain open. [Detailed results in Russian](d1-findnode-resource-diagnostic.ru.md#churn32--восстановление-после-смены-16-соединений).
+The closed Linux arm64 churn32 run on November 17 confirmed 32 → 16 → 32 → 0 TLSv2/F1 sessions, 48 distinct identities and 56 verified signed answers. The daemon and keeper peaked at 42,528,768 bytes under a 512,000,000-byte cgroup limit with swap disabled and no memory-limit or OOM events. The stock CLI keeps FIND_NODE off. [Detailed churn32 results](d1-findnode-resource-diagnostic.ru.md#churn32--восстановление-после-смены-16-соединений).
+
+## Full512 functional coverage — November 20
+
+Two separate NativeVZ runs passed on one frozen Linux arm64/CGO0 test ELF (Go 1.27.4, base `5a4713c1a1c3d3ca60dc35de2fc3ad7500985c21` plus the [nine-file overlay manifest](evidence/d1-full512-2026-11-20/SOURCE-CHANGES.sha256)). Active verified 512→513→512, two signed answers and refusal before intake (Go PASS 1.13 s). Mixed verified registry/TLSv2 1024→1025→1024, complete originals 512→0→512, no admission during overflow, a retained signed answer, and exactly one new admission on recovery (Go PASS 2.58 s). Application quotas were 1037 frames/38,186 bytes and 1035 frames/37,699 bytes, respectively, without exceeding their limits.
+
+Each guest had **2 vCPU and 1536 MiB**, with Service and synthetic clients together, no NIC/disks/host sharing. This does not measure standalone corsad under 512,000,000 bytes. Host work/cleanup/kill/reap fences stayed 360/380/398/400 seconds; console/native caps were 4 MiB/16 KiB. No aggregate host hard caps or guaranteed host no-swap apply. All RAW/input hashes, normal VM stop, worker reap and owned process absence were independently checked; exact owned locks were released after ROOT/TESTER/REVIEWER review. Physical release of all XPC resources remains UNKNOWN.
+
+Preserved preparation failures identified a missing initramfs `/dev/null` and a later startup timeout. A bounded diagnostic demonstrated unready guest entropy; adding the standard virtio entropy device made `getrandom` ready and the same test started. No product RNG was replaced; the exact originally blocked stack was not captured. The replay's stale preflight filename was corrected to the exact frozen caller selected by `t.Helper()`, with strict negative checks retained. The v8 replay/admission QA suite passed all 21 tests.
+
+[Result and scope](evidence/d1-full512-2026-11-20/RESULT.json) · [Active replay](evidence/d1-full512-2026-11-20/active/replay.json) · [Mixed replay](evidence/d1-full512-2026-11-20/mixed/replay.json) · [RAW hashes](evidence/d1-full512-2026-11-20/SHA256SUMS). Historical HANDOFF paths record input provenance, not instructions to rerun.
+
+O‑1a, full useful standalone workload under 512,000,000 bytes, final PR‑6 rechecks and G2/public activation decisions remain open. S6 observation runs in parallel and is required for public activation.
 
 ## Selection and ownership
 

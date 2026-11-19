@@ -1,0 +1,23 @@
+{
+  "attempt_id": "9b5e77a06fd34aabb13e26c264550b16",
+  "console": {
+    "eof": true,
+    "received": 813,
+    "retained": 813,
+    "sha256": "b4dd84247ee52788c48054d7b7c0d7b205fd236dfcffcbfaa1b275f9fbe94251"
+  },
+  "controller_stop": false,
+  "initrd_sha256": "7646e0c54495d74fc970a15c317760660313d5835b2e307dfa6120603a8db790",
+  "input_recheck": true,
+  "kernel_sha256": "6b7aa1f9357bc94136c67888f4a9c09643c462bcd5bae31a643f7d62ca51ab41",
+  "launcher_sha256": "35a0a654c7e5fe4e51ec4b3495bbe29a3b621f7d54e276dace446c985da41e6d",
+  "native": {
+    "eof": true,
+    "received": 452,
+    "retained": 452,
+    "sha256": "cc329bebdc20e296fe244305f60e7dfbf7e964af03563b4d50c8e9034e7e85bf"
+  },
+  "worker_exit": 0,
+  "worker_reaped": true,
+  "worker_reaped_ns": 1840144000
+}

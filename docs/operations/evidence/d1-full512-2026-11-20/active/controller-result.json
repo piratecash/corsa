@@ -1,0 +1,31 @@
+{
+  "capture_complete": true,
+  "captures": {
+    "console": {
+      "eof": true,
+      "received": 813,
+      "retained": 813,
+      "sha256": "b4dd84247ee52788c48054d7b7c0d7b205fd236dfcffcbfaa1b275f9fbe94251"
+    },
+    "native": {
+      "eof": true,
+      "received": 452,
+      "retained": 452,
+      "sha256": "cc329bebdc20e296fe244305f60e7dfbf7e964af03563b4d50c8e9034e7e85bf"
+    },
+    "stderr": {
+      "eof": true,
+      "received": 0,
+      "retained": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  },
+  "controller_stop": false,
+  "outer_kill": false,
+  "owned_group_absent": true,
+  "stop_reason": null,
+  "worker_exit": 0,
+  "worker_pid": 88103,
+  "worker_reaped": true,
+  "worker_reaped_ns": 1840144000
+}

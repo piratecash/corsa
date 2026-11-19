@@ -1,0 +1,12 @@
+{
+  "attempt_id": "ad48d000516f4b5bb80cd7ab402a2544",
+  "ack": "normal_exit0_stopped_reaped",
+  "reviews": {
+    "ROOT": "Strict original Full512 mixed replay accepted; rechecking exact custody/inputRAW/currentPIDgroups before ownlockrelease.",
+    "TESTER": "Independent mixed DATA PASS: all three exact phases/counters/retainedanswer/FD/quota/GoPASS and fullRAW/inputSHA/normal0/reap. ACK accepted.",
+    "REVIEWER": "Independent mixed DATA PASS; fullRAW/SHA/phase/counters/lifecycle, fresh PID/PGID88231/88232 absent; normal0ACK accepted."
+  },
+  "physical_xpc_release": "UNKNOWN",
+  "fresh_owned_pid_and_group_absent": true,
+  "functional_verdict_file": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-full512-mixed-result-v8/replay.json"
+}

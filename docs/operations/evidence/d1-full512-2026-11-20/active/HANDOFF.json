@@ -1,0 +1,24 @@
+{
+  "files": {
+    "capture_worker.py": "d6433a52bef7a32faa8d333d1e0d306a9b9bdc20531c07d88524145b10f9ee0a",
+    "launch.py": "6a1cea06319793bf3a3a1b19212ed8b1c60babaf1dc7d2bba2d88f50f80a8cbe",
+    "verify_phases.py": "1e0958f3ad27d4461250a2b0e954e50e4f38362e283195c0827c62ee60545b8c",
+    "verify_run.py": "0e032081bdb1d51fcff30eae016b3275d10713e33559df9dd210fa856230d91b"
+  },
+  "inputs": {
+    "initrd": {
+      "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-full512-devnull-fix-v1/active-initrd.cpio.gz",
+      "sha256": "7646e0c54495d74fc970a15c317760660313d5835b2e307dfa6120603a8db790"
+    },
+    "kernel": {
+      "path": "/private/tmp/corsa-d1-full512-native-image-5f46faa7b6b048c6a9b63ac09e65c18b/work/result/Image",
+      "sha256": "6b7aa1f9357bc94136c67888f4a9c09643c462bcd5bae31a643f7d62ca51ab41"
+    },
+    "launcher": {
+      "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-native-entropy-worker-v1/native-worker-arm64",
+      "sha256": "35a0a654c7e5fe4e51ec4b3495bbe29a3b621f7d54e276dace446c985da41e6d"
+    }
+  },
+  "profile": "d1-full512-native-v8-entropy",
+  "workload": "full512-active-v1"
+}

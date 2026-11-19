@@ -1,0 +1,12 @@
+{
+  "attempt_id": "9b5e77a06fd34aabb13e26c264550b16",
+  "ack": "normal_exit0_stopped_reaped",
+  "reviews": {
+    "ROOT": "Strict host replay accepted full active; helper independently rechecks current custody/inputs/RAW/processabsence.",
+    "TESTER": "Independent DATA PASS: full512active/signed2/refusal/quota/FD/GoPASS/fullRAW+inputs, normal0/reap; ACK accepted.",
+    "REVIEWER": "Independent DATA PASS, exact activefacts/GoPASS/RAW/inputSHA/lifecycle, fresh PID+PGID88102/88103 absent; normal0ACK accepted."
+  },
+  "physical_xpc_release": "UNKNOWN",
+  "fresh_owned_pid_and_group_absent": true,
+  "functional_verdict_file": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-full512-active-result-v8/replay.json"
+}

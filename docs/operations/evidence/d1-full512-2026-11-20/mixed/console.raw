@@ -1,0 +1,13 @@
+D1_FULL512_GUEST_TOPOLOGY_V1 count=1026 plan_sha256=3c32db78e3f732d43959cfe4f84c9ed9cbb318acd3d692698a9771b807a45dab
+=== RUN   TestOwnedP0FullPopulationAndRegistryOverflow
+    find_node_p0_full_coverage_linux_test.go:26: D1_P0_GUEST_PREFLIGHT_V1 {"soft_fd":4096,"hard_fd":4096,"observed_fd":6,"snapshot_slack":2040}
+    find_node_p0_full_coverage_linux_test.go:61: D1_P0_MIXED_PHASE_V2 {"profile":"full512-mixed-v2","phase":"POSITIVE","tls_v2":1024,"without_pilot":512,"registry":1024,"complete_originals":512,"request_id":18,"forwarded":true,"offered":1,"committed":1,"taken":1}
+    find_node_p0_full_coverage_linux_test.go:61: D1_P0_MIXED_PHASE_V2 {"profile":"full512-mixed-v2","phase":"OVERFLOW","tls_v2":1025,"without_pilot":513,"registry":1025,"complete_originals":0,"request_id":19,"forwarded":false,"offered":1,"committed":1,"taken":1}
+    find_node_p0_full_coverage_linux_test.go:61: D1_P0_RETAINED_ANSWER_V2 {"registry":1025,"request_id":18,"answered_before":0,"answered_after":1}
+    find_node_p0_full_coverage_linux_test.go:61: D1_P0_MIXED_PHASE_V2 {"profile":"full512-mixed-v2","phase":"RECOVERY","tls_v2":1024,"without_pilot":512,"registry":1024,"complete_originals":512,"request_id":20,"forwarded":true,"offered":2,"committed":2,"taken":2}
+    find_node_p0_full_coverage_linux_test.go:107: D1_P0_FULL512_QUOTA_V1 {"frames":1035,"payload_bytes":37699,"exceeded":false}
+--- PASS: TestOwnedP0FullPopulationAndRegistryOverflow (2.58s)
+=== NAME  
+PASS
+D1_FULL512_GUEST_CHILD_V1 {"state":"test_exit_zero","reaped":true,"exit":0,"term_sent":false,"kill_sent":false}
+D1_FULL512_GUEST_INIT_V1 supervisor_exit=0 action=poweroff

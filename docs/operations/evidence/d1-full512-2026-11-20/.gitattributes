@@ -1,0 +1,4 @@
+# Preserve the original byte receipts, including console CRLF and Go metadata.
+* -text
+**/*.raw binary
+BUILDINFO.txt binary

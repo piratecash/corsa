@@ -1,0 +1,6 @@
+{
+  "attempt_id": "ad48d000516f4b5bb80cd7ab402a2544",
+  "initrd_sha256": "56f7b25b03f5bad0d456d8e8280292e6c8bd22cead95a2506e39cb993c582e2c",
+  "kernel_sha256": "6b7aa1f9357bc94136c67888f4a9c09643c462bcd5bae31a643f7d62ca51ab41",
+  "launcher_sha256": "35a0a654c7e5fe4e51ec4b3495bbe29a3b621f7d54e276dace446c985da41e6d"
+}
