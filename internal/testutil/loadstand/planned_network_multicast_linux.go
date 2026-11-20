@@ -236,45 +236,54 @@ func plannedMulticastSame(actual, expected []plannedMulticastRoute) bool {
 }
 
 func reconcilePlannedMulticast(ctx context.Context, s plannedMulticastSocket, owned []plannedKernelLink) error {
+	_, err := reconcilePlannedMulticastSnapshot(ctx, s, owned)
+	return err
+}
+
+// Returns only an ACTUAL complete IPv6 dump: the original qualified dump for
+// zero candidates, or the exact post-delete readback after the last deletion.
+// It does not promise that the kernel cannot change after this snapshot.
+func reconcilePlannedMulticastSnapshot(ctx context.Context, s plannedMulticastSocket, owned []plannedKernelLink) ([]plannedMulticastRoute, error) {
 	if _, ok := ctx.Deadline(); !ok {
-		return ErrLinuxOwnerBound
+		return nil, ErrLinuxOwnerBound
 	}
 	if err := ctx.Err(); err != nil {
-		return err
+		return nil, err
 	}
 	links, err := s.links(ctx)
 	if err != nil {
-		return plannedNetworkPhaseError("multicast-owned-links", err)
+		return nil, plannedNetworkPhaseError("multicast-owned-links", err)
 	}
 	if err = plannedMulticastOwnership(links, owned); err != nil {
-		return plannedNetworkPhaseError("multicast-ownership", err)
+		return nil, plannedNetworkPhaseError("multicast-ownership", err)
 	}
 	rows, err := plannedMulticastRead(ctx, s)
 	if err != nil {
-		return plannedNetworkPhaseError("multicast-complete-dump", err)
+		return nil, plannedNetworkPhaseError("multicast-complete-dump", err)
 	}
 	candidates, err := plannedMulticastCandidates(rows, owned)
 	if err != nil {
-		return plannedNetworkPhaseError("multicast-qualify-entire-dump", err)
+		return nil, plannedNetworkPhaseError("multicast-qualify-entire-dump", err)
 	}
+	actualSnapshot := rows
 	remaining := append([]plannedMulticastRoute(nil), rows...)
 	for _, target := range candidates {
 		if err = ctx.Err(); err != nil {
-			return err
+			return nil, err
 		}
 		links, err = s.links(ctx)
 		if err != nil {
-			return plannedNetworkPhaseError("multicast-predelete-links", err)
+			return nil, plannedNetworkPhaseError("multicast-predelete-links", err)
 		}
 		if err = plannedMulticastOwnership(links, owned); err != nil {
-			return plannedNetworkPhaseError("multicast-predelete-ownership", err)
+			return nil, plannedNetworkPhaseError("multicast-predelete-ownership", err)
 		}
 		replies, deleteErr := s.exchange(ctx, unix.RTM_DELROUTE, unix.NLM_F_ACK, plannedMulticastDelete(target), false)
 		if deleteErr != nil {
-			return plannedNetworkPhaseError(fmt.Sprintf("multicast-delete index=%d", target.index), deleteErr)
+			return nil, plannedNetworkPhaseError(fmt.Sprintf("multicast-delete index=%d", target.index), deleteErr)
 		}
 		if len(replies) != 0 {
-			return plannedNetworkPhaseError("multicast-unexpected-delete-data", errPlannedNetwork)
+			return nil, plannedNetworkPhaseError("multicast-unexpected-delete-data", errPlannedNetwork)
 		}
 		for i, r := range remaining {
 			if r == target {
@@ -284,11 +293,12 @@ func reconcilePlannedMulticast(ctx context.Context, s plannedMulticastSocket, ow
 		}
 		actual, readErr := plannedMulticastRead(ctx, s)
 		if readErr != nil {
-			return plannedNetworkPhaseError("multicast-readback", readErr)
+			return nil, plannedNetworkPhaseError("multicast-readback", readErr)
 		}
 		if !plannedMulticastSame(actual, remaining) {
-			return plannedNetworkPhaseError("multicast-readback-difference", errPlannedNetwork)
+			return nil, plannedNetworkPhaseError("multicast-readback-difference", errPlannedNetwork)
 		}
+		actualSnapshot = actual
 	}
-	return nil
+	return actualSnapshot, nil
 }

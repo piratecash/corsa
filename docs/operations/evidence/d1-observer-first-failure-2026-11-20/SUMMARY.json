@@ -1,0 +1,59 @@
+{
+  "QA_failed_v1": "14 outer PASS; selected-probe QA stimulus used unselected route_probe; legacy groups NOT_STARTED",
+  "QA_passed_v2": {
+    "child": 147,
+    "outer": 36,
+    "production_delta_from_v1": 0
+  },
+  "artifact_stand": {
+    "files": 708,
+    "sha256": "982764418fc1cf30f59ff1b9bb71399763a91295bfd0c30b941e48f6cf1813b2"
+  },
+  "changed_private_Core": {
+    "files": 640,
+    "sha256": "9fb7bba6dd77a128a634f0d6d26e67485b07f1178b9361166a754e0fb7d1268e"
+  },
+  "exporter": "Exact 7ef3 binary reused by unchanged compiled dependency closure; not rebuilt",
+  "fixture_repair": {
+    "Linux_unit_child": 84,
+    "Linux_unit_outer": 17,
+    "actual_fixed_VM": "NOT_RUN",
+    "compile_source_files": 2704,
+    "exact_kernel_event_cause": "NOT_PROVEN",
+    "lint_status": "LINUX_FIXTURE_LINT_PASS",
+    "source_manifest_sha256": "165b98bfeb864392e2ff90e323de39eaef94e7d504bd52e28c87ae8f54b1594d",
+    "subject": "e4b51cc plus three fixture production files and one new pure test; Core/App unchanged",
+    "unit_inputs_including_test_ELF": 2705,
+    "unit_result_sha256": "b4cde865aa24f57ec43bb7799b54c9d56d533b89e81a97d7cd5571e1950c752a"
+  },
+  "four_ELFs": "Compile-only, 17 normal commands including fresh original Source API; 2450 artifact paths exclude two QA-only files",
+  "native": {
+    "Go": "FAIL0.13s before journal",
+    "attempt": "9b75ce742acfaaa725eb667c3521e520",
+    "observer_first_failure_family": "NOT_REACHED",
+    "physical_XPC": "UNKNOWN",
+    "stage": "setup-apply full-000 plannedInNamespace guard4 ff00::/8 configure=true",
+    "stopped_only_ACK": "COMPLETE; functional failure unchanged",
+    "test_exit": 1,
+    "worker_exit": 0
+  },
+  "old_30s_and_480s_observer_inner_cause": "UNKNOWN",
+  "original_periodic_reconnect_metric_acceptance": "NOT_ESTABLISHED",
+  "prior_committed_reference": {
+    "commit": "a6a9fdc90d02134f5995df412a304f9e49201aa5",
+    "evidence": "docs/operations/evidence/d1-census-diagnostic-2026-11-20",
+    "reason": "Original 4fcc+3finalizer+9census source/helper/controller lineage retained there; unchanged base trees and old binaries are not duplicated."
+  },
+  "production_worktree_modified_by_observer": false,
+  "raw": {
+    "members": 210,
+    "payload_bytes": 8892439,
+    "sha256": "4609091db980f2358f7997d0351124622928f84ffe4073ebc22c1b539947f44c"
+  },
+  "scope": "DISPOSABLE_OBSERVER_DIAGNOSTIC_EARLY_SETUP_FAILURE_NOT_BASELINE_NOT_METRIC_NO512",
+  "source": {
+    "members": 165,
+    "payload_bytes": 5634665,
+    "sha256": "22232ab06a29e77684a6e2cbe23ac5c8db060a6b575b18a318a27a40e80a1604"
+  }
+}

@@ -1,0 +1,39 @@
+{
+  "applications_executed": false,
+  "attempt_id": "957bbe9c21ce4509a3dbc538a648c927",
+  "data": {
+    "reconnect": {
+      "attempt_id": "9b75ce742acfaaa725eb667c3521e520",
+      "config_sha256": "9cd0a5959ab7baead6e78ac543e1e7bfb7b22be0d0cd3d683c51c89764c1e52f",
+      "handoff_sha256": "0cfbcce07b10d9f7553bb4c17abf0340ea59904644f64fbdd000159964f944dc",
+      "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-observer-first-failure-runtime-v1"
+    }
+  },
+  "error": null,
+  "lock_retained": false,
+  "raw_bytes": 363,
+  "status": "DISPOSABLE_OBSERVER_RUNTIME_DATA_PREPARED",
+  "steps": [
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1)(allow default)(deny network*)",
+        "/usr/bin/python3",
+        "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-observer-first-failure-rebind-v1/prepare.py",
+        "/private/tmp/corsa-d1-full512-native-image-491774c50f4c4a04b80e10095acfb152/result.json",
+        "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-observer-first-failure-initrd-v1/PACK-RESULT.json"
+      ],
+      "exit": 0,
+      "owned_group_absent": true,
+      "phase": "prepare",
+      "pid": 72160,
+      "pipe_threads_finished": true,
+      "reason": null,
+      "stderr": "/private/tmp/corsa-d1-o1a-observer-first-failure-runtime-data-957bbe9c21ce4509a3dbc538a648c927/01-prepare.stderr",
+      "stdout": "/private/tmp/corsa-d1-o1a-observer-first-failure-runtime-data-957bbe9c21ce4509a3dbc538a648c927/01-prepare.stdout"
+    }
+  ],
+  "unknown": false,
+  "work": "/private/tmp/corsa-d1-o1a-observer-first-failure-runtime-data-957bbe9c21ce4509a3dbc538a648c927"
+}

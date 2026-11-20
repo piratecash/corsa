@@ -1,0 +1,381 @@
+{
+  "status": "BUILT_NOT_EXECUTED",
+  "subject": "DISPOSABLE_PRIVATE_OBSERVER_INSTRUMENTED_NOT_BASELINE_NOT_METRIC_NO512",
+  "commit": "4fcc2f7245095fc43d2225f0f0065f4ce3b26113",
+  "request": "cf3dfa8889c39c22269d10e849d777fdbdefa57f543e37be77ae523690913290",
+  "artifacts": {
+    "node.test": {
+      "sha256": "679eec078c1ff7c17e6a8b155b1db8ce99691276c9af64e0481a8f6dbefd3257",
+      "bytes": 68929975
+    },
+    "loadstand-full": {
+      "sha256": "8adc8f21f4443521878e63086ad366f839482fa93baed48568f8dc118d3bd048",
+      "bytes": 30917517
+    },
+    "loadstand-linuxhelper": {
+      "sha256": "454ca7cf4f5f91505a82a38ac4f3feed59f06bd5bb7b35a8a1f4244346895576",
+      "bytes": 10832722
+    },
+    "loadstand-sdkedge": {
+      "sha256": "54bde7365ee9c0f032dfec49eca47c0c058b05d1f0c64a256ab9ca7b360ff316",
+      "bytes": 33519787
+    }
+  },
+  "source_groups_original_Go_API": {
+    "measured": {
+      "files": 640,
+      "manifest_bytes_equal": true,
+      "sha256": "9fb7bba6dd77a128a634f0d6d26e67485b07f1178b9361166a754e0fb7d1268e",
+      "stamp": "9fb7bba6dd77a128",
+      "verify_tree": "PASS"
+    },
+    "stand": {
+      "files": 708,
+      "manifest_bytes_equal": true,
+      "sha256": "982764418fc1cf30f59ff1b9bb71399763a91295bfd0c30b941e48f6cf1813b2",
+      "stamp": "982764418fc1cf30",
+      "verify_tree": "PASS"
+    }
+  },
+  "fresh_original_Go_API": {
+    "groups": {
+      "measured": {
+        "files": 640,
+        "manifest_bytes_equal": true,
+        "sha256": "9fb7bba6dd77a128a634f0d6d26e67485b07f1178b9361166a754e0fb7d1268e",
+        "stamp": "9fb7bba6dd77a128",
+        "verify_tree": "PASS"
+      },
+      "stand": {
+        "files": 708,
+        "manifest_bytes_equal": true,
+        "sha256": "982764418fc1cf30f59ff1b9bb71399763a91295bfd0c30b941e48f6cf1813b2",
+        "stamp": "982764418fc1cf30",
+        "verify_tree": "PASS"
+      }
+    },
+    "service_or_ELF_execution": false,
+    "status": "ORIGINAL_GO_SOURCE_API_MATCH"
+  },
+  "QA_artifact_manifest_sha256": "98859ec02ac3fcf6dabb6fadce7680ff99054030bc0985fefc53d869154d9f46",
+  "source_before_sha256": "98859ec02ac3fcf6dabb6fadce7680ff99054030bc0985fefc53d869154d9f46",
+  "source_after_sha256": "98859ec02ac3fcf6dabb6fadce7680ff99054030bc0985fefc53d869154d9f46",
+  "commands": [
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath \"/private/tmp/corsa-o1a-observer-first-failure-elf-build-3e7567a7e3df45319f3abf139a6bdc4f\") (literal \"/dev/null\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-observer-first-failure-elf-build-3e7567a7e3df45319f3abf139a6bdc4f/source\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-observer-first-failure-elf-build-3e7567a7e3df45319f3abf139a6bdc4f/source-api-module\"))",
+        "/usr/local/go/bin/go",
+        "list",
+        "-mod=readonly",
+        "-trimpath",
+        "-buildvcs=false",
+        "-deps",
+        "-json",
+        "-test",
+        "./internal/core/node"
+      ],
+      "closure": "CONFIRMED_ABSENT",
+      "pgid": 64891,
+      "pid": 64891,
+      "returncode": 0
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath \"/private/tmp/corsa-o1a-observer-first-failure-elf-build-3e7567a7e3df45319f3abf139a6bdc4f\") (literal \"/dev/null\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-observer-first-failure-elf-build-3e7567a7e3df45319f3abf139a6bdc4f/source\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-observer-first-failure-elf-build-3e7567a7e3df45319f3abf139a6bdc4f/source-api-module\"))",
+        "/usr/local/go/bin/go",
+        "list",
+        "-mod=readonly",
+        "-trimpath",
+        "-buildvcs=false",
+        "-deps",
+        "-json",
+        "-test",
+        "./internal/core/node"
+      ],
+      "closure": "CONFIRMED_ABSENT",
+      "pgid": 63945,
+      "pid": 63945,
+      "returncode": 0
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath \"/private/tmp/corsa-o1a-observer-first-failure-elf-build-3e7567a7e3df45319f3abf139a6bdc4f\") (literal \"/dev/null\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-observer-first-failure-elf-build-3e7567a7e3df45319f3abf139a6bdc4f/source\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-observer-first-failure-elf-build-3e7567a7e3df45319f3abf139a6bdc4f/source-api-module\"))",
+        "/usr/local/go/bin/go",
+        "test",
+        "-c",
+        "-p=1",
+        "-mod=readonly",
+        "-trimpath",
+        "-buildvcs=false",
+        "-o",
+        "/private/tmp/corsa-o1a-observer-first-failure-elf-build-3e7567a7e3df45319f3abf139a6bdc4f/node.test",
+        "./internal/core/node"
+      ],
+      "closure": "CONFIRMED_ABSENT",
+      "pgid": 63953,
+      "pid": 63953,
+      "returncode": 0
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath \"/private/tmp/corsa-o1a-observer-first-failure-elf-build-3e7567a7e3df45319f3abf139a6bdc4f\") (literal \"/dev/null\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-observer-first-failure-elf-build-3e7567a7e3df45319f3abf139a6bdc4f/source\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-observer-first-failure-elf-build-3e7567a7e3df45319f3abf139a6bdc4f/source-api-module\"))",
+        "/usr/local/go/bin/go",
+        "version",
+        "-m",
+        "/private/tmp/corsa-o1a-observer-first-failure-elf-build-3e7567a7e3df45319f3abf139a6bdc4f/node.test"
+      ],
+      "closure": "CONFIRMED_ABSENT",
+      "pgid": 64890,
+      "pid": 64890,
+      "returncode": 0
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath \"/private/tmp/corsa-o1a-observer-first-failure-elf-build-3e7567a7e3df45319f3abf139a6bdc4f\") (literal \"/dev/null\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-observer-first-failure-elf-build-3e7567a7e3df45319f3abf139a6bdc4f/source\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-observer-first-failure-elf-build-3e7567a7e3df45319f3abf139a6bdc4f/source-api-module\"))",
+        "/usr/local/go/bin/go",
+        "list",
+        "-mod=readonly",
+        "-trimpath",
+        "-buildvcs=false",
+        "-deps",
+        "-json",
+        "./internal/testutil/loadstand/fullnode"
+      ],
+      "closure": "CONFIRMED_ABSENT",
+      "pgid": 64911,
+      "pid": 64911,
+      "returncode": 0
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath \"/private/tmp/corsa-o1a-observer-first-failure-elf-build-3e7567a7e3df45319f3abf139a6bdc4f\") (literal \"/dev/null\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-observer-first-failure-elf-build-3e7567a7e3df45319f3abf139a6bdc4f/source\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-observer-first-failure-elf-build-3e7567a7e3df45319f3abf139a6bdc4f/source-api-module\"))",
+        "/usr/local/go/bin/go",
+        "list",
+        "-mod=readonly",
+        "-trimpath",
+        "-buildvcs=false",
+        "-deps",
+        "-json",
+        "./internal/testutil/loadstand/fullnode"
+      ],
+      "closure": "CONFIRMED_ABSENT",
+      "pgid": 64895,
+      "pid": 64895,
+      "returncode": 0
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath \"/private/tmp/corsa-o1a-observer-first-failure-elf-build-3e7567a7e3df45319f3abf139a6bdc4f\") (literal \"/dev/null\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-observer-first-failure-elf-build-3e7567a7e3df45319f3abf139a6bdc4f/source\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-observer-first-failure-elf-build-3e7567a7e3df45319f3abf139a6bdc4f/source-api-module\"))",
+        "/usr/local/go/bin/go",
+        "build",
+        "-p=1",
+        "-mod=readonly",
+        "-trimpath",
+        "-buildvcs=false",
+        "-o",
+        "/private/tmp/corsa-o1a-observer-first-failure-elf-build-3e7567a7e3df45319f3abf139a6bdc4f/loadstand-full",
+        "./internal/testutil/loadstand/fullnode"
+      ],
+      "closure": "CONFIRMED_ABSENT",
+      "pgid": 64899,
+      "pid": 64899,
+      "returncode": 0
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath \"/private/tmp/corsa-o1a-observer-first-failure-elf-build-3e7567a7e3df45319f3abf139a6bdc4f\") (literal \"/dev/null\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-observer-first-failure-elf-build-3e7567a7e3df45319f3abf139a6bdc4f/source\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-observer-first-failure-elf-build-3e7567a7e3df45319f3abf139a6bdc4f/source-api-module\"))",
+        "/usr/local/go/bin/go",
+        "version",
+        "-m",
+        "/private/tmp/corsa-o1a-observer-first-failure-elf-build-3e7567a7e3df45319f3abf139a6bdc4f/loadstand-full"
+      ],
+      "closure": "CONFIRMED_ABSENT",
+      "pgid": 64910,
+      "pid": 64910,
+      "returncode": 0
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath \"/private/tmp/corsa-o1a-observer-first-failure-elf-build-3e7567a7e3df45319f3abf139a6bdc4f\") (literal \"/dev/null\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-observer-first-failure-elf-build-3e7567a7e3df45319f3abf139a6bdc4f/source\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-observer-first-failure-elf-build-3e7567a7e3df45319f3abf139a6bdc4f/source-api-module\"))",
+        "/usr/local/go/bin/go",
+        "list",
+        "-mod=readonly",
+        "-trimpath",
+        "-buildvcs=false",
+        "-deps",
+        "-json",
+        "./internal/testutil/loadstand/linuxhelper"
+      ],
+      "closure": "CONFIRMED_ABSENT",
+      "pgid": 64926,
+      "pid": 64926,
+      "returncode": 0
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath \"/private/tmp/corsa-o1a-observer-first-failure-elf-build-3e7567a7e3df45319f3abf139a6bdc4f\") (literal \"/dev/null\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-observer-first-failure-elf-build-3e7567a7e3df45319f3abf139a6bdc4f/source\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-observer-first-failure-elf-build-3e7567a7e3df45319f3abf139a6bdc4f/source-api-module\"))",
+        "/usr/local/go/bin/go",
+        "list",
+        "-mod=readonly",
+        "-trimpath",
+        "-buildvcs=false",
+        "-deps",
+        "-json",
+        "./internal/testutil/loadstand/linuxhelper"
+      ],
+      "closure": "CONFIRMED_ABSENT",
+      "pgid": 64915,
+      "pid": 64915,
+      "returncode": 0
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath \"/private/tmp/corsa-o1a-observer-first-failure-elf-build-3e7567a7e3df45319f3abf139a6bdc4f\") (literal \"/dev/null\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-observer-first-failure-elf-build-3e7567a7e3df45319f3abf139a6bdc4f/source\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-observer-first-failure-elf-build-3e7567a7e3df45319f3abf139a6bdc4f/source-api-module\"))",
+        "/usr/local/go/bin/go",
+        "build",
+        "-p=1",
+        "-mod=readonly",
+        "-trimpath",
+        "-buildvcs=false",
+        "-o",
+        "/private/tmp/corsa-o1a-observer-first-failure-elf-build-3e7567a7e3df45319f3abf139a6bdc4f/loadstand-linuxhelper",
+        "./internal/testutil/loadstand/linuxhelper"
+      ],
+      "closure": "CONFIRMED_ABSENT",
+      "pgid": 64919,
+      "pid": 64919,
+      "returncode": 0
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath \"/private/tmp/corsa-o1a-observer-first-failure-elf-build-3e7567a7e3df45319f3abf139a6bdc4f\") (literal \"/dev/null\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-observer-first-failure-elf-build-3e7567a7e3df45319f3abf139a6bdc4f/source\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-observer-first-failure-elf-build-3e7567a7e3df45319f3abf139a6bdc4f/source-api-module\"))",
+        "/usr/local/go/bin/go",
+        "version",
+        "-m",
+        "/private/tmp/corsa-o1a-observer-first-failure-elf-build-3e7567a7e3df45319f3abf139a6bdc4f/loadstand-linuxhelper"
+      ],
+      "closure": "CONFIRMED_ABSENT",
+      "pgid": 64925,
+      "pid": 64925,
+      "returncode": 0
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath \"/private/tmp/corsa-o1a-observer-first-failure-elf-build-3e7567a7e3df45319f3abf139a6bdc4f\") (literal \"/dev/null\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-observer-first-failure-elf-build-3e7567a7e3df45319f3abf139a6bdc4f/source\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-observer-first-failure-elf-build-3e7567a7e3df45319f3abf139a6bdc4f/source-api-module\"))",
+        "/usr/local/go/bin/go",
+        "run",
+        "-mod=readonly",
+        "-buildvcs=false",
+        "-p=1",
+        "./cmd/source-api-readback",
+        "--source-tree",
+        "/private/tmp/corsa-o1a-observer-first-failure-elf-build-3e7567a7e3df45319f3abf139a6bdc4f/source",
+        "--manifests",
+        "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-observer-first-failure-elf-build-v1"
+      ],
+      "closure": "CONFIRMED_ABSENT",
+      "pgid": 63752,
+      "pid": 63752,
+      "returncode": 0
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath \"/private/tmp/corsa-o1a-observer-first-failure-elf-build-3e7567a7e3df45319f3abf139a6bdc4f\") (literal \"/dev/null\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-observer-first-failure-elf-build-3e7567a7e3df45319f3abf139a6bdc4f/source\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-observer-first-failure-elf-build-3e7567a7e3df45319f3abf139a6bdc4f/source-api-module\"))",
+        "/usr/local/go/bin/go",
+        "list",
+        "-mod=readonly",
+        "-trimpath",
+        "-buildvcs=false",
+        "-deps",
+        "-json",
+        "./internal/testutil/loadstand/sdkedge"
+      ],
+      "closure": "CONFIRMED_ABSENT",
+      "pgid": 64942,
+      "pid": 64942,
+      "returncode": 0
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath \"/private/tmp/corsa-o1a-observer-first-failure-elf-build-3e7567a7e3df45319f3abf139a6bdc4f\") (literal \"/dev/null\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-observer-first-failure-elf-build-3e7567a7e3df45319f3abf139a6bdc4f/source\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-observer-first-failure-elf-build-3e7567a7e3df45319f3abf139a6bdc4f/source-api-module\"))",
+        "/usr/local/go/bin/go",
+        "list",
+        "-mod=readonly",
+        "-trimpath",
+        "-buildvcs=false",
+        "-deps",
+        "-json",
+        "./internal/testutil/loadstand/sdkedge"
+      ],
+      "closure": "CONFIRMED_ABSENT",
+      "pgid": 64930,
+      "pid": 64930,
+      "returncode": 0
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath \"/private/tmp/corsa-o1a-observer-first-failure-elf-build-3e7567a7e3df45319f3abf139a6bdc4f\") (literal \"/dev/null\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-observer-first-failure-elf-build-3e7567a7e3df45319f3abf139a6bdc4f/source\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-observer-first-failure-elf-build-3e7567a7e3df45319f3abf139a6bdc4f/source-api-module\"))",
+        "/usr/local/go/bin/go",
+        "build",
+        "-p=1",
+        "-mod=readonly",
+        "-trimpath",
+        "-buildvcs=false",
+        "-o",
+        "/private/tmp/corsa-o1a-observer-first-failure-elf-build-3e7567a7e3df45319f3abf139a6bdc4f/loadstand-sdkedge",
+        "./internal/testutil/loadstand/sdkedge"
+      ],
+      "closure": "CONFIRMED_ABSENT",
+      "pgid": 64934,
+      "pid": 64934,
+      "returncode": 0
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath \"/private/tmp/corsa-o1a-observer-first-failure-elf-build-3e7567a7e3df45319f3abf139a6bdc4f\") (literal \"/dev/null\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-observer-first-failure-elf-build-3e7567a7e3df45319f3abf139a6bdc4f/source\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-observer-first-failure-elf-build-3e7567a7e3df45319f3abf139a6bdc4f/source-api-module\"))",
+        "/usr/local/go/bin/go",
+        "version",
+        "-m",
+        "/private/tmp/corsa-o1a-observer-first-failure-elf-build-3e7567a7e3df45319f3abf139a6bdc4f/loadstand-sdkedge"
+      ],
+      "closure": "CONFIRMED_ABSENT",
+      "pgid": 64941,
+      "pid": 64941,
+      "returncode": 0
+    }
+  ]
+}

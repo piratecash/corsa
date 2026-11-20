@@ -1,0 +1,84 @@
+{
+  "Linux_or_app_ELF": "NOT_BUILT_NOT_EXECUTED",
+  "QA_snapshot_files": 2452,
+  "QA_source_manifest_sha256": "8aba2ba1277926539b7d9bd5b137796ec419c9142dd5b0aeafd0911dbb33103c",
+  "artifact_snapshot_files": 2450,
+  "artifact_source_manifest_sha256": "98859ec02ac3fcf6dabb6fadce7680ff99054030bc0985fefc53d869154d9f46",
+  "attempt_id": "01c7ed4e7ca545db9632580f8bfecd4e",
+  "base_actual_source_manifest_sha256": "1a4d80bf5a8861e032bb344b2ca5e9d4b6a2e67f24b40731e915c5c976b1e5a3",
+  "cleanup_seconds": 30,
+  "error": "RuntimeError('command failed: node-observer')",
+  "lock_retained": false,
+  "original_Go_source_API": "NOT_RUN_CHANGED_CORE_REQUIRES_FRESH_READBACK_LATER",
+  "raw_bytes": 65733,
+  "scope": "HOST_TESTS_ONLY_CHANGED_CORE_NOT_BASELINE_NOT_METRIC_NO512",
+  "status": "STOP",
+  "steps": [
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1)(allow default)(deny network*)(deny file-write* (subpath \"/Users/hades/Documents/repos/corsa\"))(deny file-write* (subpath \"/private/tmp/corsa-d1-o1a-observer-first-failure-goqa-01c7ed4e7ca545db9632580f8bfecd4e/source\"))",
+        "/usr/local/go/bin/go",
+        "version"
+      ],
+      "exit": 0,
+      "owned_group_absent": true,
+      "phase": "version",
+      "pid": 58528,
+      "pipe_threads_finished": true,
+      "reason": null,
+      "stderr": "/private/tmp/corsa-d1-o1a-observer-first-failure-goqa-01c7ed4e7ca545db9632580f8bfecd4e/01-version.stderr",
+      "stdout": "/private/tmp/corsa-d1-o1a-observer-first-failure-goqa-01c7ed4e7ca545db9632580f8bfecd4e/01-version.stdout"
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1)(allow default)(deny network*)(deny file-write* (subpath \"/Users/hades/Documents/repos/corsa\"))(deny file-write* (subpath \"/private/tmp/corsa-d1-o1a-observer-first-failure-goqa-01c7ed4e7ca545db9632580f8bfecd4e/source\"))",
+        "/usr/local/go/bin/go",
+        "mod",
+        "verify"
+      ],
+      "exit": 0,
+      "owned_group_absent": true,
+      "phase": "module-verify",
+      "pid": 58530,
+      "pipe_threads_finished": true,
+      "reason": null,
+      "stderr": "/private/tmp/corsa-d1-o1a-observer-first-failure-goqa-01c7ed4e7ca545db9632580f8bfecd4e/02-module-verify.stderr",
+      "stdout": "/private/tmp/corsa-d1-o1a-observer-first-failure-goqa-01c7ed4e7ca545db9632580f8bfecd4e/02-module-verify.stdout"
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1)(allow default)(deny network*)(deny file-write* (subpath \"/Users/hades/Documents/repos/corsa\"))(deny file-write* (subpath \"/private/tmp/corsa-d1-o1a-observer-first-failure-goqa-01c7ed4e7ca545db9632580f8bfecd4e/source\"))",
+        "/usr/local/go/bin/go",
+        "test",
+        "-mod=readonly",
+        "-buildvcs=false",
+        "-p=1",
+        "-parallel=1",
+        "-count=1",
+        "-timeout=180s",
+        "-json",
+        "-run=^(TestLoadStandRouteWireLargeProjectionAndReceiverReceipt|TestLoadStandRouteWireFullReceiptRecordsOnlyStableClaimsWithinBudget|TestLoadStandRouteWireReaderFillIntervals|TestLoadStandRouteWireFullReceiptRefillContrast|TestLoadStandRouteWireReaderClosedWithPartialFrame|TestLoadStandRouteWireWindowExcludesOutsideFrames|TestLoadStandRouteWireWindowRefusals|TestLoadStandRouteWireQueueDisposition|TestLoadStandRouteWireUpperQueueHandoff|TestLoadStandRouteWireUpperQueueDrain|TestLoadStandRouteWireFullSendMatchesOriginalWriter|TestLoadStandRouteWireFullPassRefusesConnectionOrBoundaryChange|TestLoadStandRouteWireFirstFailureStickyIdleRead|TestLoadStandRouteWireFirstFailureCaptureAndReceive|TestLoadStandRouteWireFirstFailureClosedTransport)$",
+        "./internal/core/node"
+      ],
+      "exit": 1,
+      "owned_group_absent": true,
+      "phase": "node-observer",
+      "pid": 58531,
+      "pipe_threads_finished": true,
+      "reason": null,
+      "stderr": "/private/tmp/corsa-d1-o1a-observer-first-failure-goqa-01c7ed4e7ca545db9632580f8bfecd4e/03-node-observer.stderr",
+      "stdout": "/private/tmp/corsa-d1-o1a-observer-first-failure-goqa-01c7ed4e7ca545db9632580f8bfecd4e/03-node-observer.stdout"
+    }
+  ],
+  "subject_manifest_sha256": "9b6bef3ec0bb7ae1f7c5023111dc3c049c0f2833d95e77cacf01dbd9aeeb7757",
+  "tests": {},
+  "unknown": false,
+  "work": "/private/tmp/corsa-d1-o1a-observer-first-failure-goqa-01c7ed4e7ca545db9632580f8bfecd4e",
+  "work_seconds": 600
+}

@@ -1,0 +1,188 @@
+{
+  "Linux_or_app_ELF": "NOT_BUILT_NOT_EXECUTED",
+  "QA_snapshot_files": 2452,
+  "QA_source_manifest_sha256": "8453709c14d692d26afeb84414e4f8771612d11ea0fa63fff62116f528f7897f",
+  "artifact_snapshot_files": 2450,
+  "artifact_source_manifest_sha256": "98859ec02ac3fcf6dabb6fadce7680ff99054030bc0985fefc53d869154d9f46",
+  "attempt_id": "d2b17d5e44a04f03bfd954bd9aad7e74",
+  "base_actual_source_manifest_sha256": "1a4d80bf5a8861e032bb344b2ca5e9d4b6a2e67f24b40731e915c5c976b1e5a3",
+  "cleanup_seconds": 30,
+  "error": null,
+  "lock_retained": false,
+  "original_Go_source_API": "NOT_RUN_CHANGED_CORE_REQUIRES_FRESH_READBACK_LATER",
+  "raw_bytes": 188587,
+  "scope": "HOST_TESTS_ONLY_CHANGED_CORE_NOT_BASELINE_NOT_METRIC_NO512",
+  "status": "DISPOSABLE_OBSERVER_PURE_GO_QA_PASS",
+  "steps": [
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1)(allow default)(deny network*)(deny file-write* (subpath \"/Users/hades/Documents/repos/corsa\"))(deny file-write* (subpath \"/private/tmp/corsa-d1-o1a-observer-first-failure-goqa-d2b17d5e44a04f03bfd954bd9aad7e74/source\"))",
+        "/usr/local/go/bin/go",
+        "version"
+      ],
+      "exit": 0,
+      "owned_group_absent": true,
+      "phase": "version",
+      "pid": 60012,
+      "pipe_threads_finished": true,
+      "reason": null,
+      "stderr": "/private/tmp/corsa-d1-o1a-observer-first-failure-goqa-d2b17d5e44a04f03bfd954bd9aad7e74/01-version.stderr",
+      "stdout": "/private/tmp/corsa-d1-o1a-observer-first-failure-goqa-d2b17d5e44a04f03bfd954bd9aad7e74/01-version.stdout"
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1)(allow default)(deny network*)(deny file-write* (subpath \"/Users/hades/Documents/repos/corsa\"))(deny file-write* (subpath \"/private/tmp/corsa-d1-o1a-observer-first-failure-goqa-d2b17d5e44a04f03bfd954bd9aad7e74/source\"))",
+        "/usr/local/go/bin/go",
+        "mod",
+        "verify"
+      ],
+      "exit": 0,
+      "owned_group_absent": true,
+      "phase": "module-verify",
+      "pid": 60014,
+      "pipe_threads_finished": true,
+      "reason": null,
+      "stderr": "/private/tmp/corsa-d1-o1a-observer-first-failure-goqa-d2b17d5e44a04f03bfd954bd9aad7e74/02-module-verify.stderr",
+      "stdout": "/private/tmp/corsa-d1-o1a-observer-first-failure-goqa-d2b17d5e44a04f03bfd954bd9aad7e74/02-module-verify.stdout"
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1)(allow default)(deny network*)(deny file-write* (subpath \"/Users/hades/Documents/repos/corsa\"))(deny file-write* (subpath \"/private/tmp/corsa-d1-o1a-observer-first-failure-goqa-d2b17d5e44a04f03bfd954bd9aad7e74/source\"))",
+        "/usr/local/go/bin/go",
+        "test",
+        "-mod=readonly",
+        "-buildvcs=false",
+        "-p=1",
+        "-parallel=1",
+        "-count=1",
+        "-timeout=180s",
+        "-json",
+        "-run=^(TestLoadStandRouteWireLargeProjectionAndReceiverReceipt|TestLoadStandRouteWireFullReceiptRecordsOnlyStableClaimsWithinBudget|TestLoadStandRouteWireReaderFillIntervals|TestLoadStandRouteWireFullReceiptRefillContrast|TestLoadStandRouteWireReaderClosedWithPartialFrame|TestLoadStandRouteWireWindowExcludesOutsideFrames|TestLoadStandRouteWireWindowRefusals|TestLoadStandRouteWireQueueDisposition|TestLoadStandRouteWireUpperQueueHandoff|TestLoadStandRouteWireUpperQueueDrain|TestLoadStandRouteWireFullSendMatchesOriginalWriter|TestLoadStandRouteWireFullPassRefusesConnectionOrBoundaryChange|TestLoadStandRouteWireFirstFailureStickyIdleRead|TestLoadStandRouteWireFirstFailureCaptureAndReceive|TestLoadStandRouteWireFirstFailureClosedTransport)$",
+        "./internal/core/node"
+      ],
+      "exit": 0,
+      "owned_group_absent": true,
+      "phase": "node-observer",
+      "pid": 60015,
+      "pipe_threads_finished": true,
+      "reason": null,
+      "stderr": "/private/tmp/corsa-d1-o1a-observer-first-failure-goqa-d2b17d5e44a04f03bfd954bd9aad7e74/03-node-observer.stderr",
+      "stdout": "/private/tmp/corsa-d1-o1a-observer-first-failure-goqa-d2b17d5e44a04f03bfd954bd9aad7e74/03-node-observer.stdout"
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1)(allow default)(deny network*)(allow network-inbound (local ip \"localhost:*\"))(allow network-outbound (remote ip \"localhost:*\"))(deny file-write* (subpath \"/Users/hades/Documents/repos/corsa\"))(deny file-write* (subpath \"/private/tmp/corsa-d1-o1a-observer-first-failure-goqa-d2b17d5e44a04f03bfd954bd9aad7e74/source\"))",
+        "/usr/local/go/bin/go",
+        "test",
+        "-mod=readonly",
+        "-buildvcs=false",
+        "-p=1",
+        "-parallel=1",
+        "-count=1",
+        "-timeout=180s",
+        "-json",
+        "-run=^(TestRouteWireDiagnosticUnavailableOnlyAndLegacyAbsence|TestRouteWireWitnessPreservesTypedStagesAndDropsRawCause|TestRouteWireDiagnosticParentKeepsPreciseCauseAndErrorIs|TestRouteWireWitnessFiniteFaultStages|TestRouteWireRPCStageMappingOnlyOnOwnCensus503|TestRouteWireCensusWitnessBindsRegistryToLaunch|TestRouteWireCensusWorkReply|TestRouteWireCommitmentFitsControlPacketAndBindsExactCensus|TestHeadlessRouteWireReportBindsBootBounds|TestHeadlessRouteWireFullReceiveReceipt|TestSealedHeadlessRouteWireReportRejectsSubstitutedBytes|TestHeadlessRouteWireReportBindsWindowAndCensus|TestHeadlessRouteWireReportRejectsInvalidEvidence|TestHeadlessRouteWireReportRejectsMissingNullAndDuplicateCounters|TestLinuxRPCActualTransportCarriesFiniteDialBound|TestLinuxRPCDirectParentBoundsAndCancellation|TestLinuxRPCTransportParentCancellationJoinsDial|TestLinuxRPCRequestReturnDoesNotInventHeldDialJoin|TestLinuxRPCAdapterCancelDoesNotCloseTransferredConnection)$",
+        "./internal/testutil/loadstand"
+      ],
+      "exit": 0,
+      "owned_group_absent": true,
+      "phase": "census-parent-and-original",
+      "pid": 61007,
+      "pipe_threads_finished": true,
+      "reason": null,
+      "stderr": "/private/tmp/corsa-d1-o1a-observer-first-failure-goqa-d2b17d5e44a04f03bfd954bd9aad7e74/04-census-parent-and-original.stderr",
+      "stdout": "/private/tmp/corsa-d1-o1a-observer-first-failure-goqa-d2b17d5e44a04f03bfd954bd9aad7e74/04-census-parent-and-original.stdout"
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1)(allow default)(deny network*)(deny file-write* (subpath \"/Users/hades/Documents/repos/corsa\"))(deny file-write* (subpath \"/private/tmp/corsa-d1-o1a-observer-first-failure-goqa-d2b17d5e44a04f03bfd954bd9aad7e74/source\"))",
+        "/usr/local/go/bin/go",
+        "test",
+        "-mod=readonly",
+        "-buildvcs=false",
+        "-p=1",
+        "-parallel=1",
+        "-count=1",
+        "-timeout=180s",
+        "-json",
+        "-run=^(TestCensusDiagnosticClosedStagesAndUnwrap|TestCensusRPCPublishesOnlyTypedClosedDiagnostic)$",
+        "./internal/testutil/loadstand/fullwitness"
+      ],
+      "exit": 0,
+      "owned_group_absent": true,
+      "phase": "census-server",
+      "pid": 61030,
+      "pipe_threads_finished": true,
+      "reason": null,
+      "stderr": "/private/tmp/corsa-d1-o1a-observer-first-failure-goqa-d2b17d5e44a04f03bfd954bd9aad7e74/05-census-server.stderr",
+      "stdout": "/private/tmp/corsa-d1-o1a-observer-first-failure-goqa-d2b17d5e44a04f03bfd954bd9aad7e74/05-census-server.stdout"
+    }
+  ],
+  "subject_manifest_sha256": "a8c0e8c3d4fb8ad31ea1109f670d03eadec4f2125c5992e90004d794c2af0a1c",
+  "tests": {
+    "census-parent-and-original": {
+      "child_passes": 69,
+      "passed": [
+        "TestRouteWireCommitmentFitsControlPacketAndBindsExactCensus",
+        "TestHeadlessRouteWireReportBindsBootBounds",
+        "TestHeadlessRouteWireFullReceiveReceipt",
+        "TestSealedHeadlessRouteWireReportRejectsSubstitutedBytes",
+        "TestHeadlessRouteWireReportBindsWindowAndCensus",
+        "TestHeadlessRouteWireReportRejectsInvalidEvidence",
+        "TestHeadlessRouteWireReportRejectsMissingNullAndDuplicateCounters",
+        "TestLinuxRPCActualTransportCarriesFiniteDialBound",
+        "TestLinuxRPCDirectParentBoundsAndCancellation",
+        "TestLinuxRPCTransportParentCancellationJoinsDial",
+        "TestLinuxRPCRequestReturnDoesNotInventHeldDialJoin",
+        "TestLinuxRPCAdapterCancelDoesNotCloseTransferredConnection",
+        "TestRouteWireDiagnosticUnavailableOnlyAndLegacyAbsence",
+        "TestRouteWireWitnessPreservesTypedStagesAndDropsRawCause",
+        "TestRouteWireDiagnosticParentKeepsPreciseCauseAndErrorIs",
+        "TestRouteWireWitnessFiniteFaultStages",
+        "TestRouteWireRPCStageMappingOnlyOnOwnCensus503",
+        "TestRouteWireCensusWitnessBindsRegistryToLaunch",
+        "TestRouteWireCensusWorkReply"
+      ]
+    },
+    "census-server": {
+      "child_passes": 29,
+      "passed": [
+        "TestCensusDiagnosticClosedStagesAndUnwrap",
+        "TestCensusRPCPublishesOnlyTypedClosedDiagnostic"
+      ]
+    },
+    "node-observer": {
+      "child_passes": 49,
+      "passed": [
+        "TestLoadStandRouteWireFirstFailureStickyIdleRead",
+        "TestLoadStandRouteWireFirstFailureCaptureAndReceive",
+        "TestLoadStandRouteWireFirstFailureClosedTransport",
+        "TestLoadStandRouteWireFullSendMatchesOriginalWriter",
+        "TestLoadStandRouteWireFullPassRefusesConnectionOrBoundaryChange",
+        "TestLoadStandRouteWireLargeProjectionAndReceiverReceipt",
+        "TestLoadStandRouteWireFullReceiptRecordsOnlyStableClaimsWithinBudget",
+        "TestLoadStandRouteWireFullReceiptRefillContrast",
+        "TestLoadStandRouteWireUpperQueueHandoff",
+        "TestLoadStandRouteWireUpperQueueDrain",
+        "TestLoadStandRouteWireWindowExcludesOutsideFrames",
+        "TestLoadStandRouteWireWindowRefusals",
+        "TestLoadStandRouteWireReaderFillIntervals",
+        "TestLoadStandRouteWireReaderClosedWithPartialFrame",
+        "TestLoadStandRouteWireQueueDisposition"
+      ]
+    }
+  },
+  "unknown": false,
+  "work": "/private/tmp/corsa-d1-o1a-observer-first-failure-goqa-d2b17d5e44a04f03bfd954bd9aad7e74",
+  "work_seconds": 600
+}

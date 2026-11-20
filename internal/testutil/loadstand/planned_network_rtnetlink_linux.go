@@ -329,8 +329,14 @@ func (s *plannedRouteSocket) address(ctx context.Context, index int, address net
 	return err
 }
 func (s *plannedRouteSocket) routes(ctx context.Context) ([]plannedNetworkRoute, error) {
+	return s.routesForFamilies(ctx, []byte{unix.AF_INET, unix.AF_INET6})
+}
+func (s *plannedRouteSocket) routesIPv4(ctx context.Context) ([]plannedNetworkRoute, error) {
+	return s.routesForFamilies(ctx, []byte{unix.AF_INET})
+}
+func (s *plannedRouteSocket) routesForFamilies(ctx context.Context, families []byte) ([]plannedNetworkRoute, error) {
 	var result []plannedNetworkRoute
-	for _, family := range []byte{unix.AF_INET, unix.AF_INET6} {
+	for _, family := range families {
 		body := make([]byte, unix.SizeofRtMsg)
 		body[0] = family
 		messages, err := s.exchange(ctx, unix.RTM_GETROUTE, unix.NLM_F_DUMP, body, true)

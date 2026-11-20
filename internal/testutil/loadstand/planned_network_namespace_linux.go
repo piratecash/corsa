@@ -142,6 +142,7 @@ func (n *OwnedNetNS) plannedInNamespace(ctx context.Context, op *linuxPlannedNam
 		}
 		return finalizePlannedNamespaceSetup(ctx, socket, op, actual, claimed)
 	}
+	var routes []plannedNetworkRoute
 	if op.mode == plannedNamespaceConfigure {
 		for _, link := range links {
 			if err = socket.disableIPv6(ctx, link.index); err != nil {
@@ -157,13 +158,15 @@ func (n *OwnedNetNS) plannedInNamespace(ctx context.Context, op *linuxPlannedNam
 		// Initial setup cleanup is retained. The distinct final setup pass
 		// handles later carrier events; read-only/postflight never mutate.
 		owned := []plannedKernelLink{{index: peer, name: op.member.peerLink, alias: plannedNetworkAlias(op.plan.nonce)}}
-		if err = reconcilePlannedMulticast(ctx, socket, owned); err != nil {
-			return plannedNetworkPhaseError("namespace-owned-multicast", err)
+		routes, err = initialPlannedNamespaceRoutes(ctx, socket, owned)
+	} else {
+		routes, err = socket.routes(ctx)
+		if err != nil {
+			return plannedNetworkPhaseError("namespace-routes", err)
 		}
 	}
-	routes, err := socket.routes(ctx)
 	if err != nil {
-		return plannedNetworkPhaseError("namespace-routes", err)
+		return err
 	}
 	if err = validatePlannedNamespaceRoutes(op, routes, peer); err != nil {
 		return err
@@ -193,6 +196,30 @@ func (n *OwnedNetNS) plannedInNamespace(ctx context.Context, op *linuxPlannedNam
 	op.links = links
 	op.routes = routes
 	return nil
+}
+
+// The initial route oracle consumes the SAME qualified/read-back IPv6 dump as
+// cleanup. A second independent dump could observe a later kernel event between
+// cleanup and validation. Post-carrier readonly/postflight still take fresh dumps.
+type plannedNamespaceInitialSocket interface {
+	plannedMulticastSocket
+	routesIPv4(context.Context) ([]plannedNetworkRoute, error)
+}
+
+func initialPlannedNamespaceRoutes(ctx context.Context, socket plannedNamespaceInitialSocket, owned []plannedKernelLink) ([]plannedNetworkRoute, error) {
+	// Preserve the original general route observation order: IPv4 then IPv6.
+	routes, err := socket.routesIPv4(ctx)
+	if err != nil {
+		return nil, plannedNetworkPhaseError("namespace-routes", err)
+	}
+	ipv6, err := reconcilePlannedMulticastSnapshot(ctx, socket, owned)
+	if err != nil {
+		return nil, plannedNetworkPhaseError("namespace-owned-multicast", err)
+	}
+	for _, route := range ipv6 {
+		routes = append(routes, plannedNetworkRoute{prefix: route.destination})
+	}
+	return routes, nil
 }
 
 // Reuses the exact strict multicast selector/deleter. There is no general

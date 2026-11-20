@@ -1,0 +1,121 @@
+{
+  "ACK_scope": "Separate exact-owned normal-stop cleanup only; does not convert GoFAIL toPASS",
+  "all_RAW_EOF_hashes": {
+    "console": {
+      "eof": true,
+      "received": 1950,
+      "retained": 1950,
+      "sha256": "9a3014b38dca1b458f0a0dc872e44a1661c5a207dbe992e9b7e4a2e121dc3bf6"
+    },
+    "native": {
+      "eof": true,
+      "received": 992,
+      "retained": 992,
+      "sha256": "755232398d09b91b3c770d6eee1f7d1e86cc81e517bdedf973bb1f5fe13bb930"
+    },
+    "stderr": {
+      "eof": true,
+      "received": 0,
+      "retained": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  },
+  "all_original_and_copied_inputs_SHA_MATCH": true,
+  "attempt_id": "9b75ce742acfaaa725eb667c3521e520",
+  "exact_own_lock_custody_matches": true,
+  "expected_sha256": "fdd85ac705b3fdb2a7fe323aced5d8db6585c8c733a44329cc31354be2efcc00",
+  "fresh_PID_PGID_ESRCH": [
+    72213,
+    72215
+  ],
+  "functional_outcome": "FAIL before journal/network setup: plannedInNamespace guard4 rejects ff00::/8 in configure=true; Go0.13s",
+  "guest": {
+    "all_children_reaped": true,
+    "attempt_id": "9b75ce742acfaaa725eb667c3521e520",
+    "config_sha256": "9cd0a5959ab7baead6e78ac543e1e7bfb7b22be0d0cd3d683c51c89764c1e52f",
+    "export": {
+      "all_children_reaped": false,
+      "exit": -1,
+      "kill_sent": false,
+      "log_complete": false,
+      "log_overflow": false,
+      "normal": false,
+      "pid": 0,
+      "reaped": false,
+      "term_sent": false
+    },
+    "export_started": false,
+    "guest_elapsed_ns": 235552083,
+    "initial_lo_checked": true,
+    "input_files": 1366,
+    "inputs_verified": true,
+    "poweroff_attempt": true,
+    "profile_sha256": "f84856cfa6f3c3d39f4f5d69487c5d968106aeea77b16f8a3d7bf864266e7369",
+    "source_commit": "4fcc2f7245095fc43d2225f0f0065f4ce3b26113",
+    "stage": "journal-existence",
+    "state": "FAIL",
+    "test": {
+      "all_children_reaped": true,
+      "exit": 1,
+      "kill_sent": false,
+      "log_complete": true,
+      "log_overflow": false,
+      "normal": true,
+      "pid": 65,
+      "reaped": true,
+      "term_sent": false
+    },
+    "workload": "reconnect"
+  },
+  "handoff_sha256": "fc7d10f123a406708155b85d466fc1edccd9f5fa6d1ccbf017f0a6cc317f620e",
+  "lock_owner_sha256": "890c9ca1c9e14cca6615d8684fc7232bec03e125fd5130f07c5effa1c269f7f7",
+  "metrics_D1_512_baseline": "NOT_EVALUATED",
+  "native_events": [
+    {
+      "attempt_id": "9b75ce742acfaaa725eb667c3521e520",
+      "config_sha256": "9cd0a5959ab7baead6e78ac543e1e7bfb7b22be0d0cd3d683c51c89764c1e52f",
+      "elapsed_ns": 532056000,
+      "event": "ready",
+      "profile": "d1-o1a-native-v1",
+      "seq": 1,
+      "workload": "reconnect"
+    },
+    {
+      "attempt_id": "9b75ce742acfaaa725eb667c3521e520",
+      "config_sha256": "9cd0a5959ab7baead6e78ac543e1e7bfb7b22be0d0cd3d683c51c89764c1e52f",
+      "elapsed_ns": 651967000,
+      "event": "start_ok",
+      "profile": "d1-o1a-native-v1",
+      "seq": 2,
+      "workload": "reconnect"
+    },
+    {
+      "attempt_id": "9b75ce742acfaaa725eb667c3521e520",
+      "config_sha256": "9cd0a5959ab7baead6e78ac543e1e7bfb7b22be0d0cd3d683c51c89764c1e52f",
+      "elapsed_ns": 1378224000,
+      "event": "guest_stopped",
+      "guest_error": null,
+      "profile": "d1-o1a-native-v1",
+      "seq": 3,
+      "workload": "reconnect"
+    },
+    {
+      "attempt_id": "9b75ce742acfaaa725eb667c3521e520",
+      "config_sha256": "9cd0a5959ab7baead6e78ac543e1e7bfb7b22be0d0cd3d683c51c89764c1e52f",
+      "elapsed_ns": 1378284000,
+      "event": "stop_complete",
+      "final_state": "stopped",
+      "profile": "d1-o1a-native-v1",
+      "seq": 4,
+      "workload": "reconnect"
+    }
+  ],
+  "observer_first_family": "NOT_REACHED",
+  "physical_XPC": "UNKNOWN",
+  "purpose": "DISPOSABLE_OBSERVER_FIRST_FAILURE_DIAGNOSTIC",
+  "receipt_sha256": "6e7fe37a7e30ef37049aae5cae2d4dcf2781c1c2146018dfde04e212b5e5843b",
+  "reviewer_actions": "Readonly DATA plus this review file; no signal/lock removal/resources/retry",
+  "status": "ACCEPTED_VM_STOPPED_ONLY",
+  "worker_normal_exit": 0,
+  "worker_reaped_ns": 1404545000
+}
