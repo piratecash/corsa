@@ -1,0 +1,31 @@
+{
+  "FAIL_SKIP_missing_extra": false,
+  "Go_source_count": 2104,
+  "Go_source_sha256": "12eec09a638e6d6f9d38cecf3f22cd9a2039475e435e29b330870800747cc21c",
+  "all_current_Go_and_passed_copy_bytes_rehashed_equal": true,
+  "child_pass": 2,
+  "commands_normal0": 1,
+  "fresh_PID_PGID_ESRCH": [
+    66265
+  ],
+  "outer_pass": [
+    "TestCandidateInactiveCallGraphAndInventories",
+    "TestCandidateSourceCompanionClosedRoots",
+    "TestCandidateSourceTypeReferencesAndDeclarations",
+    "TestCandidateCapacityClosedRootsAndLogicalBoundary",
+    "TestCandidateCapacityGuardRejectsActivationAndMissingFinalCheck"
+  ],
+  "raw": {
+    "01-five-source-guards.stderr": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "01-five-source-guards.stdout": {
+      "bytes": 7451,
+      "sha256": "17f103386bab5636cc3c319ddb89b8eb455d0bb87d1b0ecf31d2f9521191a5f7"
+    }
+  },
+  "result_sha256": "db4a0c5d7b620fbd66675f27bd910b3a167089431bfac4377084fdccdbbf5576",
+  "scope": "Sourceguard-only; two test changes; no production delta; no latency/load/D1 metric claim; isolated passed source excludes ignored artifact copies",
+  "status": "ACCEPTED_FIVE_SOURCE_GUARDS_CURRENT_APPLIED_T7_TESTS"
+}

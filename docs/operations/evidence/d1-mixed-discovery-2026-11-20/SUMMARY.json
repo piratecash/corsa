@@ -1,0 +1,102 @@
+{
+  "13b_load_latency_resource_matrix": "NOT_MEASURED",
+  "D1_admission": "NOT_ESTABLISHED",
+  "Hmix_and_T7_are_separate_invocations": true,
+  "base_code_commit": "a6a9fdc90d02134f5995df412a304f9e49201aa5",
+  "final_source_manifest_sha256": "c3aea5015be9871c7578f620dc7ec48c88e6e16bc66748ec3a3ed080038016e8",
+  "final_test_posts": 2,
+  "production_delta": 0,
+  "public_activation": "NONE",
+  "raw": {
+    "members": 27,
+    "payload_bytes": 102591,
+    "sha256": "96536beb205dbe8e1fde4ab871f347ff33416bc8d8a8cb4aaaf1b7205ac8445d"
+  },
+  "released_old_protocol31_binary_delivery": "NOT_RUN",
+  "runs": {
+    "final-guards": {
+      "attempt_id": "994fb5b3e2b6439c9417497dde5f5de0",
+      "child_pass": 2,
+      "command_exit": 0,
+      "outer_pass": [
+        "TestCandidateInactiveCallGraphAndInventories",
+        "TestCandidateSourceCompanionClosedRoots",
+        "TestCandidateSourceTypeReferencesAndDeclarations",
+        "TestCandidateCapacityClosedRootsAndLogicalBoundary",
+        "TestCandidateCapacityGuardRejectsActivationAndMissingFinalCheck"
+      ],
+      "raw_bytes": 7451,
+      "result_sha256": "db4a0c5d7b620fbd66675f27bd910b3a167089431bfac4377084fdccdbbf5576",
+      "review_sha256": "086afb0410cc33e2431c0b96744fb6b9a9e20ceb08736487549133ddc287fac2",
+      "status": "T7_FINAL_SOURCE_GUARDS_PASS"
+    },
+    "hmix": {
+      "attempt_id": "849357d5ee1349928e2ff52fc2d6c676",
+      "child_pass": 3,
+      "command_exit": 0,
+      "outer_pass": [
+        "TestOwnedBareV2PilotRefusalsDoNotAdmit",
+        "TestOwnedFindNodeMixedV2KeepsPeerExchange",
+        "TestOwnedFindNodeMixedV2KeepsEncryptedDirectMessages",
+        "TestOwnedAnswerThreeNodeOriginalRequestRelayAndSignedReturn"
+      ],
+      "raw_bytes": 7498,
+      "result_sha256": "fb159bbfc05b867fc3a85455d2fa54501dc6a55579c5fd674001978176440181",
+      "review_sha256": "bb710bd0c6c70e2c27546493dc2fe0d2a03e4c0a4e3f4e4d15b09111211fe12a",
+      "status": "HMIX_EXISTING_FOUR_PASS"
+    },
+    "t7-v1": {
+      "attempt_id": "8fcf13814b7949949d96e6c9a91b1f45",
+      "child_pass": 15,
+      "command_exit": 1,
+      "outer_pass": [
+        "TestOwnedBareV2PilotRefusalsDoNotAdmit",
+        "TestOwnedBareV2PilotClosedTestOnlyAdvertisement",
+        "TestOwnedBareV2PilotAdvertisementSourceControls",
+        "TestOwnedFindNodeMixedV2KeepsPeerExchange",
+        "TestOwnedFindNodeMixedV2KeepsEncryptedDirectMessages",
+        "TestOwnedAnswerThreeNodeOriginalRequestRelayAndSignedReturn"
+      ],
+      "raw_bytes": 23245,
+      "result_sha256": "c96c3aa438b9b9645ef899385308fad9d280becdcb18f2bfa94322b583d18d4c",
+      "review_sha256": "77d5e5d655a32ab200b8e8bc1d34d379016c2ebb963f203ae8f2c3e16e83423b",
+      "status": "STOP"
+    },
+    "t7-v2": {
+      "attempt_id": "8f4cfc7f33bc4298961617ae7f465c7c",
+      "child_pass": 12,
+      "command_exit": 1,
+      "outer_pass": [
+        "TestOwnedBareV2PilotClosedTestOnlyAdvertisement",
+        "TestOwnedBareV2PilotAdvertisementSourceControls"
+      ],
+      "raw_bytes": 19683,
+      "result_sha256": "deafc914ed001a8eab05673a75af9b260fd00f553c8b6d8ba3c76c58e22bd2d9",
+      "review_sha256": "08988d57b5841f6a5c5065cb0e3d8731ba3201a9f24905fc55e789784360678b",
+      "status": "STOP"
+    },
+    "t7-v3": {
+      "attempt_id": "4f2cc32456334c1b93c99742414f27ba",
+      "child_pass": 12,
+      "command_exit": 0,
+      "outer_pass": [
+        "TestOwnedBareV2PilotClosedTestOnlyAdvertisement",
+        "TestOwnedBareV2PilotAdvertisementSourceControls",
+        "TestOwnedFindNodeT7RealIdentityAndPresenceWhilePending"
+      ],
+      "raw_bytes": 18208,
+      "result_sha256": "536263ff473b7a8969ca0dd6cd3edaec9e54017282cfa82ccdc7c4cde81f5d3a",
+      "review_sha256": "b25df81d41cc8a0bb15bc7413ff809331b061870da1594049c191fa621ad3ae5",
+      "status": "T7_REAL_IDENTITY_PRESENCE_FUNCTIONAL_PASS"
+    }
+  },
+  "scope": "CURRENT_PROTOCOL31_FUNCTIONAL_HMIX_AND_T7_SLICE_ONLY",
+  "source": {
+    "members": 43,
+    "payload_bytes": 2040853,
+    "sha256": "7de3ce6e8bc27cb2d5d4eff543d351ae61d20b9f5b51e2214a9c2657f3b09135"
+  },
+  "v1_failure_cause": "UNKNOWN; generic resolver wait, no retained state",
+  "v2_diagnostic": "Initial canAttempt=false/noRoute=true/gen0; deferred success/authoritative gen1>0 after original wait failed; Pending1/refusals0",
+  "v3_fix": "Await natural resolver cached-route readiness during setup before held FIND_NODE; proof/intake budgets unchanged"
+}

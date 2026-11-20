@@ -1,0 +1,54 @@
+{
+  "Go_modsum_files": 2104,
+  "actual_initial_diagnostic": "can_attempt=true; current_gen1/accepted1/proof_required1/Pending1/refusals0",
+  "all_copied_bytes_rehashed_readonly": true,
+  "base_Go_modsum_files": 2103,
+  "child_pass": 12,
+  "commands_normal0": 1,
+  "copied_total_files": 2660,
+  "fresh_PID_PGID_ESRCH": [
+    65062
+  ],
+  "manifest_sha256": "c3aea5015be9871c7578f620dc7ec48c88e6e16bc66748ec3a3ed080038016e8",
+  "noFAIL_SKIP_missing_extra": true,
+  "outer_pass": [
+    "TestOwnedBareV2PilotClosedTestOnlyAdvertisement",
+    "TestOwnedBareV2PilotAdvertisementSourceControls",
+    "TestOwnedFindNodeT7RealIdentityAndPresenceWhilePending"
+  ],
+  "prior_failures_preserved": [
+    "v1 genericfreshresolverwaitFAIL causeUNKNOWN",
+    "v2 canAttemptfalse setup and late proven success; original waitFAIL retained"
+  ],
+  "raw": {
+    "01-functional-and-pilot-guards.stderr": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "01-functional-and-pilot-guards.stdout": {
+      "bytes": 18208,
+      "sha256": "e1be267ff65ef6afc0bdad51a2fed3b56e236931d5a214abc9aaa4e6c67f0285"
+    }
+  },
+  "result_sha256": "536263ff473b7a8969ca0dd6cd3edaec9e54017282cfa82ccdc7c4cde81f5d3a",
+  "reviewer_actions": "Read-only source/data and this review file; no tests/resources/signals/lock mutation",
+  "scope": {
+    "all13b_or_D1": "NOT_ADMITTED",
+    "load_latency_metrics": "NOT_MEASURED",
+    "production_delta": 0,
+    "real_localhost_current_TCP_TLS_protocol31": true,
+    "released_old31_binary_delivery": "NOT_RUN"
+  },
+  "source_bound_assertions": [
+    "Original natural cached resolver canAttempt and datagram reachability complete setup before held FIND_NODE",
+    "Ordinary public NewService stays Off and no rate-limit bypass",
+    "A fresh exact returned resolution succeeds Authoritative with AnswerAttemptGen>watermark",
+    "Independent real presence probe produces fresh target proof and drains exact sentAt attempt; no prior proof accepted",
+    "Both original local producers increase Attempts/Queued with zero quota/gate refusal delta",
+    "FIND_NODE ResourceSnapshot.Pending1 and Taken1/Answered0 retained through both proof exchanges",
+    "Original target signs returned FIND_NODE answer; original opaque Sessions/ConnIDs remain equal"
+  ],
+  "source_snapshot_sha256": "0c81ce975d08c6634966a161ed08a9b0f499a2445d673b16095651c5fbbe5bfe",
+  "status": "ACCEPTED_CURRENT_PROTOCOL31_FUNCTIONAL_T7_ONLY",
+  "two_exact_test_posts": true
+}

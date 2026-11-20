@@ -1,0 +1,47 @@
+{
+  "attempt_id": "849357d5ee1349928e2ff52fc2d6c676",
+  "base_code_commit": "a6a9fdc90d02134f5995df412a304f9e49201aa5",
+  "error": null,
+  "lock_retained": false,
+  "published_old31_binary_delivery": "NOT_RUN",
+  "raw_bytes": 7498,
+  "real_presence_prober_while_FIND_NODE_pending": "NOT_COVERED",
+  "scope": "REAL_LOCALHOST_TLS_CURRENT_F1_NONF1_DELIVERY_AND_RESOLVER_ONLY",
+  "source_manifest_sha256": "b8f6e7025224919975484b70ce8a22c643aae59a52ea229f3dc67da42e69efd3",
+  "source_snapshot": "21b146 tracked files +gofmt test; exactall2103Go/modsum equalcurrenta6",
+  "standalone_corsad_VM_piratecashd_executed": false,
+  "status": "HMIX_EXISTING_FOUR_PASS",
+  "steps": [
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1)(allow default)(deny network*)(allow network-inbound (local ip \"localhost:*\"))(allow network-outbound (remote ip \"localhost:*\"))(deny file-write* (subpath \"/private/tmp/corsa-d1-o1a-full-receipt-clean-findnode-guards-0216a464d806404aa07a2d8cc5acb633/source\"))(deny file-write* (subpath \"/Users/hades/Documents/repos/corsa\"))",
+        "/usr/local/go/bin/go",
+        "test",
+        "-mod=readonly",
+        "-p=1",
+        "-parallel=1",
+        "-count=1",
+        "-timeout=180s",
+        "-json",
+        "-run=^(TestOwnedAnswerThreeNodeOriginalRequestRelayAndSignedReturn|TestOwnedBareV2PilotRefusalsDoNotAdmit|TestOwnedFindNodeMixedV2KeepsEncryptedDirectMessages|TestOwnedFindNodeMixedV2KeepsPeerExchange)$",
+        "./internal/core/node"
+      ],
+      "exit": 0,
+      "owned_group_absent": true,
+      "phase": "four-real-node-tests",
+      "pid": 56214,
+      "pipe_threads_finished": true,
+      "reason": null,
+      "stderr": "/private/tmp/corsa-d1-o1a-hmix-existing-four-goqa-849357d5ee1349928e2ff52fc2d6c676/01-four-real-node-tests.stderr",
+      "stdout": "/private/tmp/corsa-d1-o1a-hmix-existing-four-goqa-849357d5ee1349928e2ff52fc2d6c676/01-four-real-node-tests.stdout"
+    }
+  ],
+  "tests": {
+    "child": 3,
+    "outer": 4
+  },
+  "unknown": false,
+  "work": "/private/tmp/corsa-d1-o1a-hmix-existing-four-goqa-849357d5ee1349928e2ff52fc2d6c676"
+}

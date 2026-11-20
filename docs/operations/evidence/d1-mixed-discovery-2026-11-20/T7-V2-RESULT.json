@@ -1,0 +1,44 @@
+{
+  "D1_load_latency_metrics": "NOT_MEASURED",
+  "attempt_id": "8f4cfc7f33bc4298961617ae7f465c7c",
+  "base_code_commit": "a6a9fdc90d02134f5995df412a304f9e49201aa5",
+  "error": "command failed: functional-and-pilot-guards",
+  "lock_retained": false,
+  "manifest_sha256": "7bdd92055209afc81c45ce3c7471c921750d9101fbd3d0088ac7c01ce90e0168",
+  "old_published31_binary_delivery": "NOT_RUN",
+  "raw_bytes": 19683,
+  "scope": "T7_SCALAR_DIAGNOSTIC_ONLY_NOT_ADMISSION",
+  "source_snapshot": "Exacta6Go2103+two test-onlyposts; trackedmetadatafrompriorclean21bcopy",
+  "standalone_corsad_VM_piratecashd_executed": false,
+  "status": "STOP",
+  "steps": [
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1)(allow default)(deny network*)(allow network-inbound (local ip \"localhost:*\"))(allow network-outbound (remote ip \"localhost:*\"))(deny file-write* (subpath \"/private/tmp/corsa-d1-o1a-t7-resolver-diagnostic-goqa-8f4cfc7f33bc4298961617ae7f465c7c/source\"))(deny file-write* (subpath \"/Users/hades/Documents/repos/corsa\"))",
+        "/usr/local/go/bin/go",
+        "test",
+        "-mod=readonly",
+        "-p=1",
+        "-parallel=1",
+        "-count=1",
+        "-timeout=180s",
+        "-json",
+        "-run=^(TestOwnedBareV2PilotAdvertisementSourceControls|TestOwnedBareV2PilotClosedTestOnlyAdvertisement|TestOwnedFindNodeT7RealIdentityAndPresenceWhilePending)$",
+        "./internal/core/node"
+      ],
+      "exit": 1,
+      "owned_group_absent": true,
+      "phase": "functional-and-pilot-guards",
+      "pid": 62703,
+      "pipe_threads_finished": true,
+      "reason": null,
+      "stderr": "/private/tmp/corsa-d1-o1a-t7-resolver-diagnostic-goqa-8f4cfc7f33bc4298961617ae7f465c7c/01-functional-and-pilot-guards.stderr",
+      "stdout": "/private/tmp/corsa-d1-o1a-t7-resolver-diagnostic-goqa-8f4cfc7f33bc4298961617ae7f465c7c/01-functional-and-pilot-guards.stdout"
+    }
+  ],
+  "tests": null,
+  "unknown": false,
+  "work": "/private/tmp/corsa-d1-o1a-t7-resolver-diagnostic-goqa-8f4cfc7f33bc4298961617ae7f465c7c"
+}

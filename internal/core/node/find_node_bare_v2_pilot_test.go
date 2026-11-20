@@ -32,8 +32,12 @@ import (
 
 // This is an explicit TEST-ONLY opt-in, not stock/default overlay admission.
 // All operational R objects come from its original Service.Run handlers.
-func newOwnedBareV2PilotRelay(t *testing.T, maxMembers, maxActive int) (*Service, string) {
+func newOwnedBareV2PilotRelay(t *testing.T, maxMembers, maxActive int, datagramEnabled ...bool) (*Service, string) {
 	t.Helper()
+	if len(datagramEnabled) > 1 {
+		t.Fatal("pilot permits only one explicit datagram test option")
+	}
+	withDatagram := len(datagramEnabled) == 1 && datagramEnabled[0]
 	if maxMembers != 1 && maxMembers != 2 {
 		t.Fatal("pilot member profile outside closed small2 cases")
 	}
@@ -47,6 +51,7 @@ func newOwnedBareV2PilotRelay(t *testing.T, maxMembers, maxActive int) (*Service
 	cfg := configtest.WithTempDataDirs(t, config.Node{
 		ListenAddress: "127.0.0.1:0", ListenerSet: true, ListenerEnabled: true,
 		Type: domain.NodeTypeFull, BootstrapPeers: []string{},
+		EnableDatagramV1: withDatagram, AllowPrivatePeers: withDatagram,
 	})
 	profile := ownedCutProfile()
 	profile.Capture = findNodeOwnedCaptureProfile{
@@ -681,6 +686,7 @@ func bareV2PilotSourceErrors(sources map[string][]byte) []string {
 	const smallActiveSite = "find_node_p0_active_capacity_test.go:TestOwnedP0SmallActiveCapacityAndRecovery"
 	const mixedExchangeSite = "find_node_mixed_peer_exchange_test.go:TestOwnedFindNodeMixedV2KeepsPeerExchange"
 	const mixedDMSite = "find_node_mixed_peer_exchange_test.go:TestOwnedFindNodeMixedV2KeepsEncryptedDirectMessages"
+	const t7Site = "find_node_t7_identity_presence_test.go:TestOwnedFindNodeT7RealIdentityAndPresenceWhilePending"
 	var failures []string
 	if !qualifiedD1DiagnosticSource(sources["find_node_resource_diagnostic.go"]) {
 		failures = append(failures, "pilot diagnostic tagged Source changed")
@@ -706,7 +712,7 @@ func bareV2PilotSourceErrors(sources map[string][]byte) []string {
 				if fn.Name.Name == factory {
 					factories++
 					allowed[fn.Name] = true
-					if site != "find_node_bare_v2_pilot_test.go:"+factory || fmt.Sprintf("%x", sha256.Sum256(raw[int(fn.Pos())-1:int(fn.End())-1])) != "6b642a192c7bf8bc6f247b305e76a2c4f0cd1ab556bf61984895c7abf8b4c9f5" {
+					if site != "find_node_bare_v2_pilot_test.go:"+factory || fmt.Sprintf("%x", sha256.Sum256(raw[int(fn.Pos())-1:int(fn.End())-1])) != "f1ddf5e1aa903fa75b05a25730aea1c5f3f88bcb23e06a3d335c6c297f8feb33" {
 						failures = append(failures, "pilot fixed factory changed")
 					}
 				}
@@ -770,7 +776,7 @@ func bareV2PilotSourceErrors(sources map[string][]byte) []string {
 					if name, ok := n.Fun.(*ast.Ident); ok && name.Name == factory {
 						allowed[name] = true
 						called++
-						if site != "find_node_bare_v2_pilot_test.go:TestOwnedBareV2PilotOriginalMembershipAndForward" && site != "find_node_bare_v2_pilot_test.go:TestOwnedBareV2PilotRefusalsDoNotAdmit" && site != smallActiveSite && site != mixedExchangeSite && site != mixedDMSite {
+						if site != "find_node_bare_v2_pilot_test.go:TestOwnedBareV2PilotOriginalMembershipAndForward" && site != "find_node_bare_v2_pilot_test.go:TestOwnedBareV2PilotRefusalsDoNotAdmit" && site != smallActiveSite && site != mixedExchangeSite && site != mixedDMSite && site != t7Site {
 							failures = append(failures, "pilot factory call escaped")
 						}
 					}
@@ -797,7 +803,7 @@ func bareV2PilotSourceErrors(sources map[string][]byte) []string {
 			})
 		}
 	}
-	if declared != 1 || read != 1 || written != 4 || called != 5 || factories != 1 || fullCalled != 2 || fullFactories != 1 {
+	if declared != 1 || read != 1 || written != 4 || called != 6 || factories != 1 || fullCalled != 2 || fullFactories != 1 {
 		failures = append(failures, "pilot exact declaration/read/write/call inventory")
 	}
 	return failures
@@ -823,6 +829,7 @@ func TestOwnedBareV2PilotAdvertisementSourceControls(t *testing.T) {
 		{"factory-value-escape", "pilot_escape_test.go", "package node\nvar pilotEscape=newOwnedBareV2PilotRelay\n", "unclosed field/factory reference"},
 		{"full512-factory-value-escape", "pilot_escape_test.go", "package node\nvar pilotEscape=newOwnedFull512GuestRelay\n", "unclosed field/factory reference"},
 		{"active-factory-call-escape", "pilot_escape_test.go", "package node\nfunc pilotEscape(){newOwnedBareV2PilotRelay(nil,2,2)}\n", "pilot factory call escaped"},
+		{"t7-same-name-wrong-file-call-escape", "pilot_t7_escape_test.go", "package node\nfunc TestOwnedFindNodeT7RealIdentityAndPresenceWhilePending(){newOwnedBareV2PilotRelay(nil,2,5,true)}\n", "pilot factory call escaped"},
 		{"full512-active-factory-call-escape", "pilot_escape_test.go", "package node\nfunc pilotEscape(){newOwnedFull512GuestRelay(nil,host,512)}\n", "pilot Full512 factory call escaped"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

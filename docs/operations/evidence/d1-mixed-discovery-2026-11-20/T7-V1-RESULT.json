@@ -1,0 +1,44 @@
+{
+  "D1_load_latency_metrics": "NOT_MEASURED",
+  "attempt_id": "8fcf13814b7949949d96e6c9a91b1f45",
+  "base_code_commit": "a6a9fdc90d02134f5995df412a304f9e49201aa5",
+  "error": "command failed: functional-and-pilot-guards",
+  "lock_retained": false,
+  "manifest_sha256": "9eca6843c8919ab83139ebce6c115c485e807a1d40fffa4c7434caa0870d4510",
+  "old_published31_binary_delivery": "NOT_RUN",
+  "raw_bytes": 23245,
+  "scope": "CURRENT_PROTOCOL31_FUNCTIONAL_T7_AND_EXISTING_HMIX_ONLY",
+  "source_snapshot": "Exacta6Go2103+two test-onlyposts; trackedmetadatafrompriorclean21bcopy",
+  "standalone_corsad_VM_piratecashd_executed": false,
+  "status": "STOP",
+  "steps": [
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1)(allow default)(deny network*)(allow network-inbound (local ip \"localhost:*\"))(allow network-outbound (remote ip \"localhost:*\"))(deny file-write* (subpath \"/private/tmp/corsa-d1-o1a-t7-identity-presence-goqa-8fcf13814b7949949d96e6c9a91b1f45/source\"))(deny file-write* (subpath \"/Users/hades/Documents/repos/corsa\"))",
+        "/usr/local/go/bin/go",
+        "test",
+        "-mod=readonly",
+        "-p=1",
+        "-parallel=1",
+        "-count=1",
+        "-timeout=180s",
+        "-json",
+        "-run=^(TestOwnedAnswerThreeNodeOriginalRequestRelayAndSignedReturn|TestOwnedBareV2PilotAdvertisementSourceControls|TestOwnedBareV2PilotClosedTestOnlyAdvertisement|TestOwnedBareV2PilotRefusalsDoNotAdmit|TestOwnedFindNodeMixedV2KeepsEncryptedDirectMessages|TestOwnedFindNodeMixedV2KeepsPeerExchange|TestOwnedFindNodeT7RealIdentityAndPresenceWhilePending)$",
+        "./internal/core/node"
+      ],
+      "exit": 1,
+      "owned_group_absent": true,
+      "phase": "functional-and-pilot-guards",
+      "pid": 61315,
+      "pipe_threads_finished": true,
+      "reason": null,
+      "stderr": "/private/tmp/corsa-d1-o1a-t7-identity-presence-goqa-8fcf13814b7949949d96e6c9a91b1f45/01-functional-and-pilot-guards.stderr",
+      "stdout": "/private/tmp/corsa-d1-o1a-t7-identity-presence-goqa-8fcf13814b7949949d96e6c9a91b1f45/01-functional-and-pilot-guards.stdout"
+    }
+  ],
+  "tests": null,
+  "unknown": false,
+  "work": "/private/tmp/corsa-d1-o1a-t7-identity-presence-goqa-8fcf13814b7949949d96e6c9a91b1f45"
+}

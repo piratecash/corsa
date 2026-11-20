@@ -1,0 +1,174 @@
+{
+  "REFERENCE-PINS.json": {
+    "bytes": 1506,
+    "sha256": "01944f9308a70fdb679dd71ef75d3cf57bb9ab45f6444fd535c995ba501d86f5"
+  },
+  "base-references/internal/core/datagram/metrics.go": {
+    "bytes": 22872,
+    "sha256": "166cf9bf6024d413e2b137f840fcf5ed79aaa36e8db842c3c7c2972ba6e3b8e8"
+  },
+  "base-references/internal/core/node/connection_manager_test.go": {
+    "bytes": 63930,
+    "sha256": "67455a793350b76f18d237467cffd354ac692fe9139440ac7ba702d5f0120a66"
+  },
+  "base-references/internal/core/node/datagram_e2e_test.go": {
+    "bytes": 15527,
+    "sha256": "9e5dccc5d11af02cbc015cb775aeacc95a93cbed1f5e5497f1bc17ea5f25cd2b"
+  },
+  "base-references/internal/core/node/find_node_bare_v2_pilot_test.go": {
+    "bytes": 34072,
+    "sha256": "fdea7551b04ea3ce9c730044ffce08bb92f6eee383357b921d26eec7d2e96471"
+  },
+  "base-references/internal/core/node/find_node_mixed_peer_exchange_test.go": {
+    "bytes": 7059,
+    "sha256": "0beb34e67ebf86b426f96037b08a9b33d4d4e7cfdadd2d20430797db42a31763"
+  },
+  "base-references/internal/core/node/find_node_owned_answer_test.go": {
+    "bytes": 16515,
+    "sha256": "d48f39e2efbdc4b05b5fdc4d19d1111daee7d3ed81f67fd3b194c3b3ed423803"
+  },
+  "base-references/internal/core/node/hot_reads_refresh.go": {
+    "bytes": 11545,
+    "sha256": "807669b4fdbad77fdb3cc0a4addb57ed1c0c4cd1590245923ed4ec02584102eb"
+  },
+  "base-references/internal/core/node/identity_discovery.go": {
+    "bytes": 38245,
+    "sha256": "d8ee7dab0789de12e2437ae614c0b62cfe743b63bec8cea7579eacf45aa256f2"
+  },
+  "base-references/internal/core/node/identity_resolver.go": {
+    "bytes": 42382,
+    "sha256": "322c967d128f7a8e71bdde362d2a8be0ce29aecb0fe066e86003c67cc1ef337c"
+  },
+  "base-references/internal/core/node/presence_prober.go": {
+    "bytes": 29363,
+    "sha256": "4e1e4c45738af4efcf5f364bc2a9078bf6e196d6a12d23f261eb87993cc4361e"
+  },
+  "base-references/internal/core/node/presence_service.go": {
+    "bytes": 42681,
+    "sha256": "4287e841ba0f842b8c72cba1e5b16ff682473049e9b0f19d353cf805b956e282"
+  },
+  "base-references/internal/core/node/routing_provider.go": {
+    "bytes": 8803,
+    "sha256": "2c3c80477b2831cbede0c8b0e0a8565b6b91b4533f78e9035d4d191489137886"
+  },
+  "base-references/internal/core/node/routing_snapshot.go": {
+    "bytes": 21612,
+    "sha256": "94ead9d1691f925041981d49248449752b2c1238c501293f2f9420464a81d89c"
+  },
+  "controllers/common.py": {
+    "bytes": 6223,
+    "sha256": "5667d2772248c892b31bb4eb321f4ad72507f9f9556a34b562f6708fd496507d"
+  },
+  "controllers/final-guards.py": {
+    "bytes": 2612,
+    "sha256": "4a3967e8385fd954e4969ce33135065d1c8e4f97b9c87f872b00615a6695a2c9"
+  },
+  "controllers/hmix.py": {
+    "bytes": 2956,
+    "sha256": "0ef855410a12623467b255d63814c5f0deb61a8cc78443390f85dbabe4425cb0"
+  },
+  "controllers/t7-v1.py": {
+    "bytes": 4058,
+    "sha256": "8a9cec2df61f08ccd413132750746faec8a2f4ad03bf88cc6c0d8bae025a81dc"
+  },
+  "controllers/t7-v2.py": {
+    "bytes": 3844,
+    "sha256": "0230ff5e3746e78bee579341d1d760bb7364090b0e4f19af12ffbedd233ea77c"
+  },
+  "controllers/t7-v3.py": {
+    "bytes": 3867,
+    "sha256": "b0b19b2c48402d67665f0b4d2e3295199b79f9aacfd6c6bacff064ebaa56ad2b"
+  },
+  "source-hashes/final-guards-GO-SOURCE.json": {
+    "bytes": 249848,
+    "sha256": "12eec09a638e6d6f9d38cecf3f22cd9a2039475e435e29b330870800747cc21c"
+  },
+  "source-hashes/hmix-GO-SOURCE.json": {
+    "bytes": 249717,
+    "sha256": "b8f6e7025224919975484b70ce8a22c643aae59a52ea229f3dc67da42e69efd3"
+  },
+  "source-hashes/t7-v1-SOURCE-MANIFEST.json": {
+    "bytes": 318877,
+    "sha256": "b262dc9f297d63cc2def9cba2a2b4cfc8b48b69a0c56762d8930c61247086ae6"
+  },
+  "source-hashes/t7-v2-SOURCE-MANIFEST.json": {
+    "bytes": 318877,
+    "sha256": "8d00c31ee8abd5823def4bc8023e1ef375b8b30ebd1624d12f2e81a0ab5a5d51"
+  },
+  "source-hashes/t7-v3-SOURCE-MANIFEST.json": {
+    "bytes": 318877,
+    "sha256": "0c81ce975d08c6634966a161ed08a9b0f499a2445d673b16095651c5fbbe5bfe"
+  },
+  "t7-v1/MANIFEST.json": {
+    "bytes": 1540,
+    "sha256": "9eca6843c8919ab83139ebce6c115c485e807a1d40fffa4c7434caa0870d4510"
+  },
+  "t7-v1/README.md": {
+    "bytes": 2926,
+    "sha256": "3bc6f18b818b4945a34379ae697655ab55f1b0ada638c232eca6b4f4f0e7a6e0"
+  },
+  "t7-v1/SOURCE.diff": {
+    "bytes": 12851,
+    "sha256": "241d47f172efc669f6ad51959c887c8994c23e6ae460c1122d008be61b4dda2d"
+  },
+  "t7-v1/posts/internal/core/node/find_node_bare_v2_pilot_test.go": {
+    "bytes": 34680,
+    "sha256": "7cf6c0c43ea3f622950b4a1c7929f18e8613ddd806f2d660201a0f3ba221f06b"
+  },
+  "t7-v1/posts/internal/core/node/find_node_t7_identity_presence_test.go": {
+    "bytes": 8071,
+    "sha256": "975e95b51d140c2de92f578f166f265cc8c18db2859880aa3a887dfd938b94e9"
+  },
+  "t7-v2/DELTA-v1.diff": {
+    "bytes": 3849,
+    "sha256": "0c62aa59d8c9bf2866b5433b0ad8926048cf769f6bd5e1973b406c69aec58a33"
+  },
+  "t7-v2/MANIFEST.json": {
+    "bytes": 1841,
+    "sha256": "7bdd92055209afc81c45ce3c7471c921750d9101fbd3d0088ac7c01ce90e0168"
+  },
+  "t7-v2/README.md": {
+    "bytes": 3650,
+    "sha256": "89fd04d8608167d95b2cef3904178a50955f904ea97f2579274186ecbefa02a7"
+  },
+  "t7-v2/SOURCE.diff": {
+    "bytes": 15888,
+    "sha256": "7ad0c456b1abb735c48b6d7d7b1d8e71a3009142d121cd8cda3d5380ee156187"
+  },
+  "t7-v2/posts/internal/core/node/find_node_bare_v2_pilot_test.go": {
+    "bytes": 34680,
+    "sha256": "7cf6c0c43ea3f622950b4a1c7929f18e8613ddd806f2d660201a0f3ba221f06b"
+  },
+  "t7-v2/posts/internal/core/node/find_node_t7_identity_presence_test.go": {
+    "bytes": 11045,
+    "sha256": "f1b58671dce0a841a6ff52840e3f341c671f655b91bb04286b991e8cfa77e1e5"
+  },
+  "t7-v3/DELTA-v1.diff": {
+    "bytes": 3849,
+    "sha256": "0c62aa59d8c9bf2866b5433b0ad8926048cf769f6bd5e1973b406c69aec58a33"
+  },
+  "t7-v3/DELTA-v2.diff": {
+    "bytes": 1288,
+    "sha256": "ea04bb2c82337f3a671b8a60d369dc34d4c551b9e85a5d6d15de9a8b1c004df7"
+  },
+  "t7-v3/MANIFEST.json": {
+    "bytes": 1870,
+    "sha256": "c3aea5015be9871c7578f620dc7ec48c88e6e16bc66748ec3a3ed080038016e8"
+  },
+  "t7-v3/README.md": {
+    "bytes": 4589,
+    "sha256": "fe1b2ed9ea862a0cbed264a5f3e03ec8044ed583c2cb0c8def3e722d46a4f4b2"
+  },
+  "t7-v3/SOURCE.diff": {
+    "bytes": 16268,
+    "sha256": "7723d2535c81f352c2916b91981cd24a840a40abcb82d0707c42f8a571fc2d84"
+  },
+  "t7-v3/posts/internal/core/node/find_node_bare_v2_pilot_test.go": {
+    "bytes": 34680,
+    "sha256": "7cf6c0c43ea3f622950b4a1c7929f18e8613ddd806f2d660201a0f3ba221f06b"
+  },
+  "t7-v3/posts/internal/core/node/find_node_t7_identity_presence_test.go": {
+    "bytes": 11420,
+    "sha256": "0fa843d0f919ed2d85aa1d504162bb739c7d3478b38ff6eaeb24b99d0219265e"
+  }
+}

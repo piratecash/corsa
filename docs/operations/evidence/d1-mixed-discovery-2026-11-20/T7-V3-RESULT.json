@@ -1,0 +1,47 @@
+{
+  "D1_load_latency_metrics": "NOT_MEASURED",
+  "attempt_id": "4f2cc32456334c1b93c99742414f27ba",
+  "base_code_commit": "a6a9fdc90d02134f5995df412a304f9e49201aa5",
+  "error": null,
+  "lock_retained": false,
+  "manifest_sha256": "c3aea5015be9871c7578f620dc7ec48c88e6e16bc66748ec3a3ed080038016e8",
+  "old_published31_binary_delivery": "NOT_RUN",
+  "raw_bytes": 18208,
+  "scope": "FUNCTIONAL_T7_NATURAL_PRODUCER_READINESS_ORIGINAL_REQUEST_BUDGETS",
+  "source_snapshot": "Exacta6Go2103+two test-onlyposts; trackedmetadatafrompriorclean21bcopy",
+  "standalone_corsad_VM_piratecashd_executed": false,
+  "status": "T7_REAL_IDENTITY_PRESENCE_FUNCTIONAL_PASS",
+  "steps": [
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1)(allow default)(deny network*)(allow network-inbound (local ip \"localhost:*\"))(allow network-outbound (remote ip \"localhost:*\"))(deny file-write* (subpath \"/private/tmp/corsa-d1-o1a-t7-producer-readiness-goqa-4f2cc32456334c1b93c99742414f27ba/source\"))(deny file-write* (subpath \"/Users/hades/Documents/repos/corsa\"))",
+        "/usr/local/go/bin/go",
+        "test",
+        "-mod=readonly",
+        "-p=1",
+        "-parallel=1",
+        "-count=1",
+        "-timeout=180s",
+        "-json",
+        "-run=^(TestOwnedBareV2PilotAdvertisementSourceControls|TestOwnedBareV2PilotClosedTestOnlyAdvertisement|TestOwnedFindNodeT7RealIdentityAndPresenceWhilePending)$",
+        "./internal/core/node"
+      ],
+      "exit": 0,
+      "owned_group_absent": true,
+      "phase": "functional-and-pilot-guards",
+      "pid": 65062,
+      "pipe_threads_finished": true,
+      "reason": null,
+      "stderr": "/private/tmp/corsa-d1-o1a-t7-producer-readiness-goqa-4f2cc32456334c1b93c99742414f27ba/01-functional-and-pilot-guards.stderr",
+      "stdout": "/private/tmp/corsa-d1-o1a-t7-producer-readiness-goqa-4f2cc32456334c1b93c99742414f27ba/01-functional-and-pilot-guards.stdout"
+    }
+  ],
+  "tests": {
+    "child": 12,
+    "outer": 3
+  },
+  "unknown": false,
+  "work": "/private/tmp/corsa-d1-o1a-t7-producer-readiness-goqa-4f2cc32456334c1b93c99742414f27ba"
+}

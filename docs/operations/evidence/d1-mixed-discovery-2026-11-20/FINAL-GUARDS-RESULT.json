@@ -1,0 +1,43 @@
+{
+  "Go_source_count": 2104,
+  "Go_test_only": true,
+  "T7_manifest_sha256": "c3aea5015be9871c7578f620dc7ec48c88e6e16bc66748ec3a3ed080038016e8",
+  "attempt_id": "994fb5b3e2b6439c9417497dde5f5de0",
+  "error": null,
+  "lock_retained": false,
+  "raw_bytes": 7451,
+  "scope": "FIVE_SOURCE_GUARDS_CURRENT_APPLIED_TESTS_NO_PROD_OR_VM",
+  "status": "T7_FINAL_SOURCE_GUARDS_PASS",
+  "steps": [
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1)(allow default)(deny network*)(deny file-write* (subpath \"/private/tmp/corsa-d1-o1a-t7-producer-readiness-goqa-4f2cc32456334c1b93c99742414f27ba/source\"))(deny file-write* (subpath \"/Users/hades/Documents/repos/corsa\"))",
+        "/usr/local/go/bin/go",
+        "test",
+        "-mod=readonly",
+        "-p=1",
+        "-count=1",
+        "-timeout=90s",
+        "-json",
+        "-run=^(TestCandidateInactiveCallGraphAndInventories|TestCandidateSourceCompanionClosedRoots|TestCandidateSourceTypeReferencesAndDeclarations|TestCandidateCapacityClosedRootsAndLogicalBoundary|TestCandidateCapacityGuardRejectsActivationAndMissingFinalCheck)$",
+        "./internal/core/findnode"
+      ],
+      "exit": 0,
+      "owned_group_absent": true,
+      "phase": "five-source-guards",
+      "pid": 66265,
+      "pipe_threads_finished": true,
+      "reason": null,
+      "stderr": "/private/tmp/corsa-d1-o1a-t7-final-findnode-guards-994fb5b3e2b6439c9417497dde5f5de0/01-five-source-guards.stderr",
+      "stdout": "/private/tmp/corsa-d1-o1a-t7-final-findnode-guards-994fb5b3e2b6439c9417497dde5f5de0/01-five-source-guards.stdout"
+    }
+  ],
+  "tests": {
+    "child": 2,
+    "outer": 5
+  },
+  "unknown": false,
+  "work": "/private/tmp/corsa-d1-o1a-t7-final-findnode-guards-994fb5b3e2b6439c9417497dde5f5de0"
+}
