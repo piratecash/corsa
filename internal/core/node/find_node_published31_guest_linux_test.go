@@ -47,12 +47,12 @@ type published31GuestInputs struct {
 	PublishedSHA string `json:"published_sha256"`
 }
 
-func published31GuestFileSHA(path string, limit int64) (string, error) {
+func published31GuestFileSHA(path string, limit int64) (sum string, err error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return "", err
 	}
-	defer file.Close()
+	defer func() { err = errors.Join(err, file.Close()) }()
 	info, err := file.Stat()
 	if err != nil || !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > limit {
 		return "", errors.New("guest file metadata")
@@ -86,7 +86,11 @@ func published31GuestInputsForTest(t *testing.T) (published31GuestInputs, string
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer file.Close()
+	defer func() {
+		if err := file.Close(); err != nil {
+			t.Fatal("close owned guest descriptor", err)
+		}
+	}()
 	info, err := file.Stat()
 	if err != nil || !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > 4096 || info.Mode().Perm() != 0o444 {
 		t.Fatal("owned guest descriptor metadata")
@@ -264,12 +268,12 @@ func TestOwnedFindNodePublished31GuestDelivery(t *testing.T) {
 	}
 }
 
-func published31GuestRead(path string, limit int64) ([]byte, error) {
+func published31GuestRead(path string, limit int64) (data []byte, err error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer func() { err = errors.Join(err, f.Close()) }()
 	b, err := io.ReadAll(io.LimitReader(f, limit+1))
 	if err != nil || int64(len(b)) > limit {
 		return nil, errors.New("bounded guest proc read")
@@ -298,7 +302,7 @@ func published31GuestStartTicks(pid int) (string, error) {
 
 // Same proc TCP/owned-inode proof as S6 collector.listener_sample, scoped to
 // this one live child. No lsof/sandbox-exec emulation or external network probe.
-func published31GuestListener(pid int, port string, namespace string) bool {
+func published31GuestListener(pid int, port string, namespace string) (owned bool) {
 	ns, err := os.Readlink(fmt.Sprintf("/proc/%d/ns/net", pid))
 	if err != nil || ns != namespace {
 		return false
@@ -319,7 +323,11 @@ func published31GuestListener(pid int, port string, namespace string) bool {
 	if err != nil {
 		return false
 	}
-	defer dir.Close()
+	defer func() {
+		if err := dir.Close(); err != nil {
+			owned = false
+		}
+	}()
 	names, err := dir.Readdirnames(4097)
 	if (err != nil && err != io.EOF) || len(names) > 4096 {
 		return false

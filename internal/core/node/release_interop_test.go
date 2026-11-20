@@ -653,21 +653,6 @@ func (n *releasedNode) start(t *testing.T, fuse networkFuse, release releaseUnde
 	n.awaitReady(t)
 }
 
-// restart stops the release, checks and keeps the logs of the run that
-// ended — the next start truncates its stdout — and starts it again on the
-// same data directory, identity and ports. A group that is not confirmed
-// gone stops the test: a second process on the same directory and port
-// beside a survivor of the first is not the release restarting.
-func (n *releasedNode) restart(t *testing.T, fuse networkFuse, release releaseUnderTest, peer string) {
-	t.Helper()
-	if !n.process.stop(t) {
-		t.Fatalf("the release's process group %d did not end: not restarting it on its directory and port", n.process.group)
-	}
-	n.requireOnlyLoopbackInLogs(t)
-	n.keepLogs(t, n.runs)
-	n.start(t, fuse, release, peer)
-}
-
 func requireLoopbackPeer(t *testing.T, peer string) {
 	t.Helper()
 	host, _, err := net.SplitHostPort(peer)
@@ -805,29 +790,6 @@ func (n *releasedNode) rpc(command string, args map[string]any) (json.RawMessage
 		return nil, fmt.Errorf("rpc %s: status %d", command, response.StatusCode)
 	}
 	return raw, nil
-}
-
-// hasDM reports whether the old node stored the DM with this id.
-func (n *releasedNode) hasDM(id string) bool {
-	raw, err := n.rpc("fetchMessages", map[string]any{"topic": "dm"})
-	if err != nil {
-		return false
-	}
-	var reply releaseMessages
-	if json.Unmarshal(raw, &reply) != nil {
-		return false
-	}
-	return slices.ContainsFunc(reply.Messages, func(m releaseMessage) bool { return m.ID == id })
-}
-
-// releaseMessages is the part of a release's fetchMessages answer this test
-// reads.
-type releaseMessages struct {
-	Messages []releaseMessage `json:"messages"`
-}
-
-type releaseMessage struct {
-	ID string `json:"id"`
 }
 
 var (
