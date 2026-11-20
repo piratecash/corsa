@@ -1,0 +1,11 @@
+{
+  "attempt_id": "0a66a114a62a5cbcbd6dd4a671288ee4",
+  "config_sha256": "6ce3c34b16349b0f27e051d6d4cd14e581210d5953ac741d95635b850e5e6843",
+  "handoff_sha256": "e73a88c0967bed377a1da8e2a0f2dd4779877a7eeb0d53374a4f99f7c4cae453",
+  "initrd_sha256": "340e1ed40dcb3804c2a77a833e5d0e985c7340db83c426550eff30ff095a58a9",
+  "kernel_sha256": "9ffeb24f4131ec4c5177b83c4a74ed8af699553c00a6b0d7f0d0ff4e98970c73",
+  "launcher_sha256": "7b75f39616b5a77a2127510ecc1c65184f77f0b10e5fc16f3f80abc24449713c",
+  "profile": "d1-o1a-native-v1",
+  "purpose": "COMPONENT_CENSUS_DIAGNOSTIC",
+  "workload": "reconnect"
+}

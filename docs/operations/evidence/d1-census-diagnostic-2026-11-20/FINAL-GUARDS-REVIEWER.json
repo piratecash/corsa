@@ -1,0 +1,95 @@
+{
+  "Go_source_snapshot_scope": "2100 previously trackedGo+newtest+go.mod+go.sum",
+  "RAW": {
+    "clean/01-findnode-guards.stderr": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "clean/01-findnode-guards.stdout": {
+      "bytes": 7447,
+      "sha256": "a23cc3087475d4367887e6593154ef5f2d9362cd1099854b539c8c5a1d448c1f"
+    },
+    "partial/01-selected-tests.stderr": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "partial/01-selected-tests.stdout": {
+      "bytes": 118681,
+      "sha256": "60cb48e9771e39e7d6da00315cc46aa211d58e785841864b3c19b7e952b60b42"
+    },
+    "partial/02-findnode-guards.stderr": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "partial/02-findnode-guards.stdout": {
+      "bytes": 69287,
+      "sha256": "d16d903744409cc3a4ed288efd70f600cc1de993032130c79f105b9f888b2380"
+    }
+  },
+  "actor": "REVIEWER",
+  "clean_result_sha256": "a062a25ae3d90c2010814ee9bd8ac570fde0adf473b19dbdc635b28f64827c84",
+  "clean_source_exact_base_tracked_plus_formatted_test": true,
+  "clean_source_files": 2659,
+  "failure_evidence": "original scanner encountered ignored docs/_internal production source copies; exactfailure preserved, scanner unchanged, isolated tracked source PASS",
+  "first_ignored_copy_example": "intake_call_guard_test.go:96: production import: ../../../docs/_internal/d1-artifacts/2026-10-28/ci-final-checked-source-qa-v1/checkout/internal/core/netcore/owned_findnode_answer_write.go",
+  "format_proof": {
+    "VM_or_app_execution": false,
+    "actual_pre_format_QA_result": "/private/tmp/corsa-d1-o1a-full-receipt-refill-unit-69df6a2f07774901843a77d1b3e40b74/RESULT.json",
+    "after_sha256": "3d619b111bb04a6a8809ae91d8f93c4bb2af8e16730c4522d25b3297eb1ecebd",
+    "before_sha256": "43d086281d99cbea5d1c908bc138fba6ae982bf319671cd3b9f0f9747f4f0e73",
+    "formatter": "/usr/local/go/bin/gofmt",
+    "new_Go_QA": "NOT_RUN",
+    "previous_actual_cases": "4outer/11child PASS including existing controls; newunit1outer/2child",
+    "proof": "gofmt(old) byte-equal new; cmp exit0",
+    "scope": "GOFMT_ONLY_NO_PRODUCT_EDITS"
+  },
+  "formatted_post_matches_actual_tree": true,
+  "formatted_test_sha256": "3d619b111bb04a6a8809ae91d8f93c4bb2af8e16730c4522d25b3297eb1ecebd",
+  "original_unit_test_sha256": "43d086281d99cbea5d1c908bc138fba6ae982bf319671cd3b9f0f9747f4f0e73",
+  "own_original_PID_PGID_absent": [
+    53520,
+    54492,
+    54618
+  ],
+  "partial_before_and_clean_after_equal_records": 2103,
+  "partial_failed_work": "/private/tmp/corsa-d1-o1a-full-receipt-source-guards-d5e71e2487904b8bb441a96c25db2740",
+  "partial_result_sha256": "1c8b18fb3d08c6904e808b6ed24138631abd1a79656e5f3849016608d599ef03",
+  "relevant_files_match_actual_diagnostic_subject": 35,
+  "scope": "20Node/105childPASS and later5findnode/2childPASS are separate invocations. Original partialrunner FAILED; original4/11refill mechanism result preserved. No production edits, app/VM/ELF run or cause/metric admission claim.",
+  "stats": {
+    "clean/findnode-guards": {
+      "child_pass": 2,
+      "command_exit": 0,
+      "failed_tests": [],
+      "outer_pass": 5,
+      "package_events": [
+        "start",
+        "pass"
+      ]
+    },
+    "partial/findnode-guards": {
+      "child_pass": 2,
+      "command_exit": 1,
+      "failed_tests": [
+        "TestCandidateInactiveCallGraphAndInventories"
+      ],
+      "outer_pass": 4,
+      "package_events": [
+        "start",
+        "fail"
+      ]
+    },
+    "partial/selected-tests": {
+      "child_pass": 105,
+      "command_exit": 0,
+      "failed_tests": [],
+      "outer_pass": 20,
+      "package_events": [
+        "start",
+        "pass"
+      ]
+    }
+  },
+  "status": "ACCEPTED_SPLIT_FINAL_SOURCE_GUARDS_WITH_PRIOR_FAIL_PRESERVED",
+  "work": "/private/tmp/corsa-d1-o1a-full-receipt-clean-findnode-guards-0216a464d806404aa07a2d8cc5acb633"
+}

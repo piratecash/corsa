@@ -1,0 +1,357 @@
+{
+  "attempt_id": "0a66a114a62a5cbcbd6dd4a671288ee4",
+  "go_fail_preserved": true,
+  "guest_result": "FAIL",
+  "guest_stage": "functional-or-export-failure",
+  "lock_binding": {
+    "directory_stamp": [
+      16777232,
+      285532064,
+      501,
+      0,
+      16832,
+      96,
+      1795165201542595839,
+      1795165201542595839
+    ],
+    "owner_sha256": "3957528e3edefd9cbf0a3703bc9bd20520825ab4b0bc0bc923ba4c71951648f4",
+    "owner_stamp": [
+      16777232,
+      285532065,
+      501,
+      0,
+      33152,
+      165,
+      1795165201544024804,
+      1795165201544024804
+    ]
+  },
+  "own_original_groups_absent": [
+    51689,
+    51690
+  ],
+  "own_original_pids_absent": [
+    51689,
+    51690
+  ],
+  "physical_XPC_resources": "UNKNOWN",
+  "reviews": {
+    "REVIEWER": {
+      "actor": "REVIEWER",
+      "attempt_id": "0a66a114a62a5cbcbd6dd4a671288ee4",
+      "capsule": {
+        "failed_record": {
+          "body_bytes": 0,
+          "bytes": 2906,
+          "outcome": "failed",
+          "path": "loadstand-functional-lifecycle-headless-sdk-fa93a3897ed46202.attempt-ff6d010714345717.failed",
+          "sha256": "a18d35c9a8305d601560f25a91107f91e33b58ba89313aeb697448e5b6282dc1"
+        },
+        "files": 1351,
+        "manifests": 2,
+        "source_bytes_match_compiled_subject": true,
+        "source_files": 1348
+      },
+      "captures": {
+        "console": {
+          "eof": true,
+          "received": 6920465,
+          "retained": 6920465,
+          "sha256": "4e3a87bc46cc7badc12ba69ef91a72660b99c104a4fd5f0175ef51e0afaead7f"
+        },
+        "native": {
+          "eof": true,
+          "received": 994,
+          "retained": 994,
+          "sha256": "f1995b3fb73177b3bf2d8deb36e0bc59732e5c526fff6364b0491a3fad26bb5a"
+        },
+        "stderr": {
+          "eof": true,
+          "received": 0,
+          "retained": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      },
+      "exact_lock_custody_verified": true,
+      "first_component_failure_stage": "full_receipt",
+      "functional_result": "NO_METRIC_PASS",
+      "guest": {
+        "all_children_reaped": true,
+        "attempt_id": "0a66a114a62a5cbcbd6dd4a671288ee4",
+        "config_sha256": "6ce3c34b16349b0f27e051d6d4cd14e581210d5953ac741d95635b850e5e6843",
+        "export": {
+          "all_children_reaped": true,
+          "exit": 0,
+          "kill_sent": false,
+          "log_complete": true,
+          "log_overflow": false,
+          "normal": true,
+          "pid": 118,
+          "reaped": true,
+          "term_sent": false
+        },
+        "export_started": true,
+        "guest_elapsed_ns": 31009276140,
+        "initial_lo_checked": true,
+        "input_files": 1366,
+        "inputs_verified": true,
+        "poweroff_attempt": true,
+        "profile_sha256": "f84856cfa6f3c3d39f4f5d69487c5d968106aeea77b16f8a3d7bf864266e7369",
+        "source_commit": "4fcc2f7245095fc43d2225f0f0065f4ce3b26113",
+        "stage": "functional-or-export-failure",
+        "state": "FAIL",
+        "test": {
+          "all_children_reaped": true,
+          "exit": 1,
+          "kill_sent": false,
+          "log_complete": true,
+          "log_overflow": false,
+          "normal": true,
+          "pid": 65,
+          "reaped": true,
+          "term_sent": false
+        },
+        "workload": "reconnect"
+      },
+      "handoff_sha256": "e73a88c0967bed377a1da8e2a0f2dd4779877a7eeb0d53374a4f99f7c4cae453",
+      "inputs": {
+        "initrd": "340e1ed40dcb3804c2a77a833e5d0e985c7340db83c426550eff30ff095a58a9",
+        "kernel": "9ffeb24f4131ec4c5177b83c4a74ed8af699553c00a6b0d7f0d0ff4e98970c73",
+        "launcher": "7b75f39616b5a77a2127510ecc1c65184f77f0b10e5fc16f3f80abc24449713c"
+      },
+      "lock_binding": {
+        "directory_stamp": [
+          16777232,
+          285532064,
+          501,
+          0,
+          16832,
+          96,
+          1795165201542595839,
+          1795165201542595839
+        ],
+        "owner_sha256": "3957528e3edefd9cbf0a3703bc9bd20520825ab4b0bc0bc923ba4c71951648f4",
+        "owner_stamp": [
+          16777232,
+          285532065,
+          501,
+          0,
+          33152,
+          165,
+          1795165201544024804,
+          1795165201544024804
+        ]
+      },
+      "native": [
+        {
+          "attempt_id": "0a66a114a62a5cbcbd6dd4a671288ee4",
+          "config_sha256": "6ce3c34b16349b0f27e051d6d4cd14e581210d5953ac741d95635b850e5e6843",
+          "elapsed_ns": 599970000,
+          "event": "ready",
+          "profile": "d1-o1a-native-v1",
+          "seq": 1,
+          "workload": "reconnect"
+        },
+        {
+          "attempt_id": "0a66a114a62a5cbcbd6dd4a671288ee4",
+          "config_sha256": "6ce3c34b16349b0f27e051d6d4cd14e581210d5953ac741d95635b850e5e6843",
+          "elapsed_ns": 716616000,
+          "event": "start_ok",
+          "profile": "d1-o1a-native-v1",
+          "seq": 2,
+          "workload": "reconnect"
+        },
+        {
+          "attempt_id": "0a66a114a62a5cbcbd6dd4a671288ee4",
+          "config_sha256": "6ce3c34b16349b0f27e051d6d4cd14e581210d5953ac741d95635b850e5e6843",
+          "elapsed_ns": 32188033000,
+          "event": "guest_stopped",
+          "guest_error": null,
+          "profile": "d1-o1a-native-v1",
+          "seq": 3,
+          "workload": "reconnect"
+        },
+        {
+          "attempt_id": "0a66a114a62a5cbcbd6dd4a671288ee4",
+          "config_sha256": "6ce3c34b16349b0f27e051d6d4cd14e581210d5953ac741d95635b850e5e6843",
+          "elapsed_ns": 32188102000,
+          "event": "stop_complete",
+          "final_state": "stopped",
+          "profile": "d1-o1a-native-v1",
+          "seq": 4,
+          "workload": "reconnect"
+        }
+      ],
+      "original480s_failure_cause": "UNKNOWN_NOT_PROVEN_SAME",
+      "original_Go_result": "FAIL30.65s",
+      "own_original_PGID_absent": [
+        51689,
+        51690
+      ],
+      "own_original_PID_absent": [
+        51689,
+        51690
+      ],
+      "physical_XPC_resources": "UNKNOWN",
+      "purpose": "COMPONENT_CENSUS_DIAGNOSTIC",
+      "scope": "Independent stopped-only review supports exactownlock three-roleACK only; no lock/signals/resource mutation. Component GoFAIL and old480sfailure preserved; no retry/reconnect/metric/O1a/D1/G2 admission.",
+      "status": "ACCEPTED_VM_STOPPED_ONLY",
+      "work": "/private/tmp/corsa-d1-o1a-native-0a66a114a62a5cbcbd6dd4a671288ee4"
+    },
+    "ROOT": {
+      "capsule_files": 1351,
+      "first_failure_stage": "full_receipt",
+      "guest_state": "FAIL",
+      "historical_periodic_inner_cause": "UNKNOWN",
+      "metric_admission": false,
+      "native_events": 4,
+      "native_stop_ns": 32188102000,
+      "physical_XPC_resources": "UNKNOWN",
+      "raw": {
+        "console": {
+          "bytes": 6920465,
+          "sha256": "4e3a87bc46cc7badc12ba69ef91a72660b99c104a4fd5f0175ef51e0afaead7f"
+        },
+        "native": {
+          "bytes": 994,
+          "sha256": "f1995b3fb73177b3bf2d8deb36e0bc59732e5c526fff6364b0491a3fad26bb5a"
+        },
+        "stderr": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      },
+      "scope": "COMPONENT_DIAGNOSTIC_GO_FAIL_PRESERVED_NORMAL_VM_STOP_ONLY",
+      "status": "ACCEPTED_VM_STOPPED_ONLY",
+      "work": "/private/tmp/corsa-d1-o1a-native-0a66a114a62a5cbcbd6dd4a671288ee4"
+    },
+    "TESTER": {
+      "all_three_RAW_full_SHA_received_retained_EOF": {
+        "console": {
+          "bytes": 6920465,
+          "sha256": "4e3a87bc46cc7badc12ba69ef91a72660b99c104a4fd5f0175ef51e0afaead7f"
+        },
+        "native": {
+          "bytes": 994,
+          "sha256": "f1995b3fb73177b3bf2d8deb36e0bc59732e5c526fff6364b0491a3fad26bb5a"
+        },
+        "stderr": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      },
+      "attempt_id": "0a66a114a62a5cbcbd6dd4a671288ee4",
+      "capsule_files_fully_decoded": 1351,
+      "capsule_source_groups_exact": {
+        "measured": {
+          "files": 640,
+          "sha256": "b70de373d032b8fed471c6b93bba6d034d932b322495866d40766e7c746fcd9c"
+        },
+        "stand": {
+          "files": 708,
+          "sha256": "6aacd581b6ee23fe91004f08d64e9a4ba1898e3659a6881d17901b41fbdd1b84"
+        }
+      },
+      "controller_receipt_sha256": "56f6fa50f799969123b755d37f9903c16697dc2f187847938b5986843d4264dd",
+      "exact_own_lock_custody_verified_retained": true,
+      "failed_journal_file": {
+        "bytes": 2906,
+        "name": "loadstand-functional-lifecycle-headless-sdk-fa93a3897ed46202.attempt-ff6d010714345717.failed",
+        "sha256": "a18d35c9a8305d601560f25a91107f91e33b58ba89313aeb697448e5b6282dc1"
+      },
+      "first_specific_diagnostic": "fixture census unavailable: stage=full_receipt",
+      "guest": {
+        "all_children_reaped": true,
+        "attempt_id": "0a66a114a62a5cbcbd6dd4a671288ee4",
+        "config_sha256": "6ce3c34b16349b0f27e051d6d4cd14e581210d5953ac741d95635b850e5e6843",
+        "export": {
+          "all_children_reaped": true,
+          "exit": 0,
+          "kill_sent": false,
+          "log_complete": true,
+          "log_overflow": false,
+          "normal": true,
+          "pid": 118,
+          "reaped": true,
+          "term_sent": false
+        },
+        "export_started": true,
+        "guest_elapsed_ns": 31009276140,
+        "initial_lo_checked": true,
+        "input_files": 1366,
+        "inputs_verified": true,
+        "poweroff_attempt": true,
+        "profile_sha256": "f84856cfa6f3c3d39f4f5d69487c5d968106aeea77b16f8a3d7bf864266e7369",
+        "source_commit": "4fcc2f7245095fc43d2225f0f0065f4ce3b26113",
+        "stage": "functional-or-export-failure",
+        "state": "FAIL",
+        "test": {
+          "all_children_reaped": true,
+          "exit": 1,
+          "kill_sent": false,
+          "log_complete": true,
+          "log_overflow": false,
+          "normal": true,
+          "pid": 65,
+          "reaped": true,
+          "term_sent": false
+        },
+        "workload": "reconnect"
+      },
+      "handoff_sha256": "e73a88c0967bed377a1da8e2a0f2dd4779877a7eeb0d53374a4f99f7c4cae453",
+      "input_original_and_copy_hashes_exact": true,
+      "native_events_exact_four": [
+        {
+          "attempt_id": "0a66a114a62a5cbcbd6dd4a671288ee4",
+          "config_sha256": "6ce3c34b16349b0f27e051d6d4cd14e581210d5953ac741d95635b850e5e6843",
+          "elapsed_ns": 599970000,
+          "event": "ready",
+          "profile": "d1-o1a-native-v1",
+          "seq": 1,
+          "workload": "reconnect"
+        },
+        {
+          "attempt_id": "0a66a114a62a5cbcbd6dd4a671288ee4",
+          "config_sha256": "6ce3c34b16349b0f27e051d6d4cd14e581210d5953ac741d95635b850e5e6843",
+          "elapsed_ns": 716616000,
+          "event": "start_ok",
+          "profile": "d1-o1a-native-v1",
+          "seq": 2,
+          "workload": "reconnect"
+        },
+        {
+          "attempt_id": "0a66a114a62a5cbcbd6dd4a671288ee4",
+          "config_sha256": "6ce3c34b16349b0f27e051d6d4cd14e581210d5953ac741d95635b850e5e6843",
+          "elapsed_ns": 32188033000,
+          "event": "guest_stopped",
+          "guest_error": null,
+          "profile": "d1-o1a-native-v1",
+          "seq": 3,
+          "workload": "reconnect"
+        },
+        {
+          "attempt_id": "0a66a114a62a5cbcbd6dd4a671288ee4",
+          "config_sha256": "6ce3c34b16349b0f27e051d6d4cd14e581210d5953ac741d95635b850e5e6843",
+          "elapsed_ns": 32188102000,
+          "event": "stop_complete",
+          "final_state": "stopped",
+          "profile": "d1-o1a-native-v1",
+          "seq": 4,
+          "workload": "reconnect"
+        }
+      ],
+      "original_Go_result": "FAIL_30.65s_FIXTURE_CENSUS_UNAVAILABLE_STAGE_FULL_RECEIPT",
+      "own_PID_PGID_fresh_absent": [
+        51689,
+        51690
+      ],
+      "physical_XPC_resources": "UNKNOWN",
+      "resource_execution_by_reviewer": false,
+      "role": "TESTER",
+      "scope": "Normal stopped/reaped component VM only. Original Go FAIL preserved; no metric O1a/D1/G2/release PASS, no retry or lock mutation. Root may separately perform exact ACK release after fresh checks and all3roles.",
+      "status": "ACCEPTED_VM_STOPPED_ONLY",
+      "work": "/private/tmp/corsa-d1-o1a-native-0a66a114a62a5cbcbd6dd4a671288ee4"
+    }
+  },
+  "scope": "NORMAL_VM_STOP_ACK_ONLY"
+}

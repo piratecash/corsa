@@ -1,0 +1,145 @@
+{
+  "O1a_rates": "UNKNOWN_NOT_ACCEPTED",
+  "VM": "NORMAL_STOPPED_WORKER_EXIT0_ALL_GUEST_CHILDREN_REAPED",
+  "accepted_only": [
+    "source QA",
+    "compile metadata",
+    "data assembly",
+    "normal VM stop and exact-own-lock ACK"
+  ],
+  "archives": {
+    "RAW": {
+      "members": 167,
+      "payload_bytes": 15842572,
+      "sha256": "54ebd29c261b6657e2f3464be0382b3a809e3651ff704ee6311eb59ba3079e2c"
+    },
+    "SOURCE": {
+      "members": 184,
+      "payload_bytes": 3932738,
+      "sha256": "fed99660c230c14ae07e6c30e3a9620be3ccbf4671a202ef9150d1d9aa499c2a"
+    }
+  },
+  "attempt_id": "0a66a114a62a5cbcbd6dd4a671288ee4",
+  "capsule": {
+    "failed_record_body_bytes": 0,
+    "failed_record_bytes": 2906,
+    "failed_records": 1,
+    "files": 1351,
+    "manifests": 2,
+    "source_files": 1348
+  },
+  "captures": {
+    "console": {
+      "eof": true,
+      "received": 6920465,
+      "retained": 6920465,
+      "sha256": "4e3a87bc46cc7badc12ba69ef91a72660b99c104a4fd5f0175ef51e0afaead7f"
+    },
+    "native": {
+      "eof": true,
+      "received": 994,
+      "retained": 994,
+      "sha256": "f1995b3fb73177b3bf2d8deb36e0bc59732e5c526fff6364b0491a3fad26bb5a"
+    },
+    "stderr": {
+      "eof": true,
+      "received": 0,
+      "retained": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  },
+  "component_profile": {
+    "C_timeout_seconds": 120,
+    "Go_timeout_seconds": 90,
+    "begin_seconds": 2,
+    "disconnect_seconds": 6,
+    "duration_seconds": 20,
+    "end_seconds": 15,
+    "purpose": "COMPONENT_CENSUS_DIAGNOSTIC",
+    "startup_lead_seconds": 10,
+    "transport_workload": "reconnect"
+  },
+  "exact_inner_predicate": "UNKNOWN",
+  "first_specific_stage": "full_receipt",
+  "formatted_regression_final_guards": {
+    "Go_snapshot_scope": "2100 previously tracked Go files plus formatted new test and go.mod/go.sum",
+    "format_proof": "v2 FORMAT.json: gofmt(original43d) equals formatted3d619; no production changes",
+    "formatted_test_sha256": "3d619b111bb04a6a8809ae91d8f93c4bb2af8e16730c4522d25b3297eb1ecebd",
+    "isolated_RAW_bytes": 7447,
+    "isolated_findnode_status": "PASS_IN_SEPARATE_LATER_INVOCATION",
+    "isolated_findnode_tests": {
+      "child_PASS": 2,
+      "outer_PASS": 5
+    },
+    "isolated_tracked_source_files_plus_new_test": 2659,
+    "not_one_combined_green_run": true,
+    "original_43d_unit_result_preserved": true,
+    "partial_RAW_bytes": 187968,
+    "partial_before_equals_clean_after_Go_source_records": 2103,
+    "partial_findnode_failure": "TestCandidateInactiveCallGraphAndInventories sees ignored docs/_internal production copies; original scanner unchanged",
+    "partial_node_tests": {
+      "child_PASS": 105,
+      "outer_PASS": 20
+    },
+    "partial_runner_status": "FAILED_PRESERVED"
+  },
+  "four_ELF_source": "4fcc2f7245095fc43d2225f0f0065f4ce3b26113 plus three finalizer and nine census diagnostic posts",
+  "historical_480_second_failure_inner_cause": "UNKNOWN_NOT_PROVEN_SAME",
+  "identical_retry": false,
+  "not_accepted": [
+    "O1a metrics",
+    "standalone 512MB",
+    "D1",
+    "G2",
+    "public activation",
+    "release"
+  ],
+  "original_periodic_or_reconnect_repeated": false,
+  "physical_XPC_resources": "UNKNOWN",
+  "refill_unit": {
+    "VM_or_ServiceRun": false,
+    "child_PASS": 11,
+    "contrast": {
+      "16s": {
+        "accepted": 3200,
+        "strict_full_receipt": false,
+        "wire_claims": 10000,
+        "wire_frames": 100
+      },
+      "50s": {
+        "accepted": 10000,
+        "strict_full_receipt": true,
+        "wire_claims": 10000,
+        "wire_frames": 100
+      }
+    },
+    "controls": "original handler/identity-keyed limiter/withdrawal; valid newer replacement sequence; complete observer; manual clock; no limiter reset or oracle relaxation",
+    "old_30s_or_480s_inner_cause": "UNKNOWN_NOT_PROVEN_BY_THIS_UNIT",
+    "outer_PASS": 4,
+    "product_change": false,
+    "relevant_files_byte_equal_actual_diagnostic_subject": 35,
+    "single_test_source_sha256": "43d086281d99cbea5d1c908bc138fba6ae982bf319671cd3b9f0f9747f4f0e73",
+    "source_snapshot_records": 2102,
+    "source_snapshot_scope": "2100 tracked Go files plus go.mod/go.sum; not a whole-tree 2642-file snapshot",
+    "status": "MECHANISM_ONLY_NOT_SAVED_RUNTIME_CAUSE_PROOF"
+  },
+  "scope": "COMPONENT_CENSUS_DIAGNOSTIC_ONLY_NO_METRIC_ADMISSION",
+  "source_QA": {
+    "child_PASS": 98,
+    "outer_PASS": 21,
+    "scope": "targeted source tests and compile only"
+  },
+  "source_groups": {
+    "measured": {
+      "files": 640,
+      "sha256": "b70de373d032b8fed471c6b93bba6d034d932b322495866d40766e7c746fcd9c",
+      "stamp": "b70de373d032b8fe"
+    },
+    "stand": {
+      "files": 708,
+      "sha256": "6aacd581b6ee23fe91004f08d64e9a4ba1898e3659a6881d17901b41fbdd1b84",
+      "stamp": "6aacd581b6ee23fe"
+    }
+  },
+  "status": "ORIGINAL_GO_FAIL_30_65_SECONDS_STAGE_FULL_RECEIPT"
+}

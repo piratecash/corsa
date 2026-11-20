@@ -1,0 +1,72 @@
+{
+  "app_or_Linux_ELF_executed": false,
+  "attempt_id": "d5e71e2487904b8bb441a96c25db2740",
+  "base": "21b146e076789c551a95a82d759f96557de09167",
+  "error": "command failed: findnode-guards",
+  "lock_retained": false,
+  "manifest_sha256": "d5a9465abef44ef3a058447f868a16ff9b5a5779e3e165ee5afc344186890758",
+  "overlay_sha256": "3d619b111bb04a6a8809ae91d8f93c4bb2af8e16730c4522d25b3297eb1ecebd",
+  "raw_bytes": 187968,
+  "scope": "FORMATTED_TEST_AND_SOURCE_INVENTORY_QA_ONLY",
+  "status": "FAILED",
+  "steps": [
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1)(allow default)(deny network*)(deny file-write* (subpath \"/Users/hades/Documents/repos/corsa\"))",
+        "/usr/local/go/bin/go",
+        "test",
+        "-overlay=/private/tmp/corsa-d1-o1a-full-receipt-source-guards-d5e71e2487904b8bb441a96c25db2740/overlay.json",
+        "-mod=readonly",
+        "-p=1",
+        "-count=1",
+        "-timeout=90s",
+        "-json",
+        "-tags=d1_resource_probe",
+        "./internal/core/node",
+        "-run",
+        "^(TestD1FindNodeResourceDiagnosticExistingGuardBoundaries|TestD1FindNodeResourceDiagnosticSourceClosure|TestFindNodeLocalRoleClosedSource|TestFindNodeLocalRoleSourceControls|TestOwnedAnswerClosedSource|TestOwnedAnswerSourceControls|TestOwnedAutomaticEndpointTraceClosedSource|TestOwnedAutomaticEndpointTraceSourceControls|TestOwnedBareV2PilotAdvertisementSourceControls|TestOwnedFlowClosedSource|TestOwnedFlowSourceControls|TestOwnedLocalNodeClosedSource|TestOwnedLocalNodeSourceControls|TestOwnedNodeObservationClosedSource|TestOwnedNodeObservationSourceControls|TestOwnedNodeReceiveClosedSource|TestOwnedNodeReceiveSourceControls|TestOwnedReadyClosedSource|TestOwnedReadySourceControls|TestOwnedTerminalClosedSourceContract)$"
+      ],
+      "exit": 0,
+      "owned_group_absent": true,
+      "phase": "selected-tests",
+      "pid": 53520,
+      "pipe_threads_finished": true,
+      "reason": null,
+      "stderr": "/private/tmp/corsa-d1-o1a-full-receipt-source-guards-d5e71e2487904b8bb441a96c25db2740/01-selected-tests.stderr",
+      "stdout": "/private/tmp/corsa-d1-o1a-full-receipt-source-guards-d5e71e2487904b8bb441a96c25db2740/01-selected-tests.stdout"
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1)(allow default)(deny network*)(deny file-write* (subpath \"/Users/hades/Documents/repos/corsa\"))",
+        "/usr/local/go/bin/go",
+        "test",
+        "-mod=readonly",
+        "-p=1",
+        "-count=1",
+        "-timeout=90s",
+        "-json",
+        "-run=^(TestCandidateInactiveCallGraphAndInventories|TestCandidateSourceCompanionClosedRoots|TestCandidateSourceTypeReferencesAndDeclarations|TestCandidateCapacityClosedRootsAndLogicalBoundary|TestCandidateCapacityGuardRejectsActivationAndMissingFinalCheck)$",
+        "./internal/core/findnode"
+      ],
+      "exit": 1,
+      "owned_group_absent": true,
+      "phase": "findnode-guards",
+      "pid": 54492,
+      "pipe_threads_finished": true,
+      "reason": null,
+      "stderr": "/private/tmp/corsa-d1-o1a-full-receipt-source-guards-d5e71e2487904b8bb441a96c25db2740/02-findnode-guards.stderr",
+      "stdout": "/private/tmp/corsa-d1-o1a-full-receipt-source-guards-d5e71e2487904b8bb441a96c25db2740/02-findnode-guards.stdout"
+    }
+  ],
+  "tests": {
+    "child": 105,
+    "outer": 20
+  },
+  "unknown": false,
+  "virtual_test_path": "internal/core/node/loadstand_route_wire_refill_component_test.go",
+  "work": "/private/tmp/corsa-d1-o1a-full-receipt-source-guards-d5e71e2487904b8bb441a96c25db2740"
+}

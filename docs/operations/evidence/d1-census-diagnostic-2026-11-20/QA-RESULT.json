@@ -1,0 +1,516 @@
+{
+  "status": "CENSUS_DIAGNOSTIC_QA_AND_COMPILE_PASS",
+  "error": null,
+  "attempt_id": "67b5e77b36a348158c4e3c0c046974b5",
+  "work": "/private/tmp/corsa-d1-census-diagnostic-goqa-67b5e77b36a348158c4e3c0c046974b5",
+  "base_commit": "4fcc2f7245095fc43d2225f0f0065f4ce3b26113",
+  "role_manifest_sha256": "f83819d0d4c30bd2592b0b2f792646664cb75ea82fd771fb38ea50dd92bc3750",
+  "steps": [
+    {
+      "phase": "archive",
+      "argv": [
+        "/usr/bin/git",
+        "archive",
+        "--format=tar",
+        "--output=/private/tmp/corsa-d1-census-diagnostic-goqa-67b5e77b36a348158c4e3c0c046974b5/base.tar",
+        "4fcc2f7245095fc43d2225f0f0065f4ce3b26113"
+      ],
+      "pid": 41391,
+      "exit": 0,
+      "stdout": "/private/tmp/corsa-d1-census-diagnostic-goqa-67b5e77b36a348158c4e3c0c046974b5/archive.stdout",
+      "stderr": "/private/tmp/corsa-d1-census-diagnostic-goqa-67b5e77b36a348158c4e3c0c046974b5/archive.stderr"
+    },
+    {
+      "phase": "go-version",
+      "argv": [
+        "/usr/local/go/bin/go",
+        "version"
+      ],
+      "pid": 41394,
+      "exit": 0,
+      "stdout": "/private/tmp/corsa-d1-census-diagnostic-goqa-67b5e77b36a348158c4e3c0c046974b5/go-version.stdout",
+      "stderr": "/private/tmp/corsa-d1-census-diagnostic-goqa-67b5e77b36a348158c4e3c0c046974b5/go-version.stderr"
+    },
+    {
+      "phase": "modules",
+      "argv": [
+        "/usr/local/go/bin/go",
+        "mod",
+        "verify"
+      ],
+      "pid": 41395,
+      "exit": 0,
+      "stdout": "/private/tmp/corsa-d1-census-diagnostic-goqa-67b5e77b36a348158c4e3c0c046974b5/modules.stdout",
+      "stderr": "/private/tmp/corsa-d1-census-diagnostic-goqa-67b5e77b36a348158c4e3c0c046974b5/modules.stderr"
+    },
+    {
+      "phase": "census-parent-and-original",
+      "argv": [
+        "/usr/local/go/bin/go",
+        "test",
+        "-mod=readonly",
+        "-buildvcs=false",
+        "-p=1",
+        "-parallel=1",
+        "-count=1",
+        "-timeout=300s",
+        "-json",
+        "-run=^(TestRouteWireDiagnosticUnavailableOnlyAndLegacyAbsence|TestRouteWireWitnessPreservesTypedStagesAndDropsRawCause|TestRouteWireDiagnosticParentKeepsPreciseCauseAndErrorIs|TestRouteWireWitnessFiniteFaultStages|TestRouteWireRPCStageMappingOnlyOnOwnCensus503|TestRouteWireCensusWitnessBindsRegistryToLaunch|TestRouteWireCensusWorkReply|TestRouteWireCommitmentFitsControlPacketAndBindsExactCensus|TestHeadlessRouteWireReportBindsBootBounds|TestHeadlessRouteWireFullReceiveReceipt|TestSealedHeadlessRouteWireReportRejectsSubstitutedBytes|TestHeadlessRouteWireReportBindsWindowAndCensus|TestHeadlessRouteWireReportRejectsInvalidEvidence|TestHeadlessRouteWireReportRejectsMissingNullAndDuplicateCounters|TestLinuxRPCActualTransportCarriesFiniteDialBound|TestLinuxRPCDirectParentBoundsAndCancellation|TestLinuxRPCTransportParentCancellationJoinsDial|TestLinuxRPCRequestReturnDoesNotInventHeldDialJoin|TestLinuxRPCAdapterCancelDoesNotCloseTransferredConnection)$",
+        "./internal/testutil/loadstand"
+      ],
+      "pid": 41396,
+      "exit": 0,
+      "stdout": "/private/tmp/corsa-d1-census-diagnostic-goqa-67b5e77b36a348158c4e3c0c046974b5/census-parent-and-original.stdout",
+      "stderr": "/private/tmp/corsa-d1-census-diagnostic-goqa-67b5e77b36a348158c4e3c0c046974b5/census-parent-and-original.stderr",
+      "tests": {
+        "passed": [
+          "TestRouteWireCommitmentFitsControlPacketAndBindsExactCensus",
+          "TestHeadlessRouteWireReportBindsBootBounds",
+          "TestHeadlessRouteWireFullReceiveReceipt",
+          "TestSealedHeadlessRouteWireReportRejectsSubstitutedBytes",
+          "TestHeadlessRouteWireReportBindsWindowAndCensus",
+          "TestHeadlessRouteWireReportRejectsInvalidEvidence",
+          "TestHeadlessRouteWireReportRejectsMissingNullAndDuplicateCounters",
+          "TestLinuxRPCActualTransportCarriesFiniteDialBound",
+          "TestLinuxRPCDirectParentBoundsAndCancellation",
+          "TestLinuxRPCTransportParentCancellationJoinsDial",
+          "TestLinuxRPCRequestReturnDoesNotInventHeldDialJoin",
+          "TestLinuxRPCAdapterCancelDoesNotCloseTransferredConnection",
+          "TestRouteWireDiagnosticUnavailableOnlyAndLegacyAbsence",
+          "TestRouteWireWitnessPreservesTypedStagesAndDropsRawCause",
+          "TestRouteWireDiagnosticParentKeepsPreciseCauseAndErrorIs",
+          "TestRouteWireWitnessFiniteFaultStages",
+          "TestRouteWireRPCStageMappingOnlyOnOwnCensus503",
+          "TestRouteWireCensusWitnessBindsRegistryToLaunch",
+          "TestRouteWireCensusWorkReply"
+        ],
+        "child_passes": 69
+      }
+    },
+    {
+      "phase": "census-server",
+      "argv": [
+        "/usr/local/go/bin/go",
+        "test",
+        "-mod=readonly",
+        "-buildvcs=false",
+        "-p=1",
+        "-parallel=1",
+        "-count=1",
+        "-timeout=300s",
+        "-json",
+        "-run=^(TestCensusDiagnosticClosedStagesAndUnwrap|TestCensusRPCPublishesOnlyTypedClosedDiagnostic)$",
+        "./internal/testutil/loadstand/fullwitness"
+      ],
+      "pid": 42315,
+      "exit": 0,
+      "stdout": "/private/tmp/corsa-d1-census-diagnostic-goqa-67b5e77b36a348158c4e3c0c046974b5/census-server.stdout",
+      "stderr": "/private/tmp/corsa-d1-census-diagnostic-goqa-67b5e77b36a348158c4e3c0c046974b5/census-server.stderr",
+      "tests": {
+        "passed": [
+          "TestCensusDiagnosticClosedStagesAndUnwrap",
+          "TestCensusRPCPublishesOnlyTypedClosedDiagnostic"
+        ],
+        "child_passes": 29
+      }
+    },
+    {
+      "phase": "loadstand-linux-compile",
+      "argv": [
+        "/usr/local/go/bin/go",
+        "test",
+        "-mod=readonly",
+        "-buildvcs=false",
+        "-p=1",
+        "-trimpath",
+        "-c",
+        "-o",
+        "/private/tmp/corsa-d1-census-diagnostic-goqa-67b5e77b36a348158c4e3c0c046974b5/artifacts/loadstand.test",
+        "./internal/testutil/loadstand"
+      ],
+      "pid": 42339,
+      "exit": 0,
+      "stdout": "/private/tmp/corsa-d1-census-diagnostic-goqa-67b5e77b36a348158c4e3c0c046974b5/loadstand-linux-compile.stdout",
+      "stderr": "/private/tmp/corsa-d1-census-diagnostic-goqa-67b5e77b36a348158c4e3c0c046974b5/loadstand-linux-compile.stderr"
+    },
+    {
+      "phase": "loadstand-metadata",
+      "argv": [
+        "/usr/local/go/bin/go",
+        "version",
+        "-m",
+        "/private/tmp/corsa-d1-census-diagnostic-goqa-67b5e77b36a348158c4e3c0c046974b5/artifacts/loadstand.test"
+      ],
+      "pid": 43197,
+      "exit": 0,
+      "stdout": "/private/tmp/corsa-d1-census-diagnostic-goqa-67b5e77b36a348158c4e3c0c046974b5/loadstand-metadata.stdout",
+      "stderr": "/private/tmp/corsa-d1-census-diagnostic-goqa-67b5e77b36a348158c4e3c0c046974b5/loadstand-metadata.stderr"
+    },
+    {
+      "phase": "fullwitness-linux-compile",
+      "argv": [
+        "/usr/local/go/bin/go",
+        "test",
+        "-mod=readonly",
+        "-buildvcs=false",
+        "-p=1",
+        "-trimpath",
+        "-c",
+        "-o",
+        "/private/tmp/corsa-d1-census-diagnostic-goqa-67b5e77b36a348158c4e3c0c046974b5/artifacts/fullwitness.test",
+        "./internal/testutil/loadstand/fullwitness"
+      ],
+      "pid": 43198,
+      "exit": 0,
+      "stdout": "/private/tmp/corsa-d1-census-diagnostic-goqa-67b5e77b36a348158c4e3c0c046974b5/fullwitness-linux-compile.stdout",
+      "stderr": "/private/tmp/corsa-d1-census-diagnostic-goqa-67b5e77b36a348158c4e3c0c046974b5/fullwitness-linux-compile.stderr"
+    },
+    {
+      "phase": "fullwitness-metadata",
+      "argv": [
+        "/usr/local/go/bin/go",
+        "version",
+        "-m",
+        "/private/tmp/corsa-d1-census-diagnostic-goqa-67b5e77b36a348158c4e3c0c046974b5/artifacts/fullwitness.test"
+      ],
+      "pid": 43209,
+      "exit": 0,
+      "stdout": "/private/tmp/corsa-d1-census-diagnostic-goqa-67b5e77b36a348158c4e3c0c046974b5/fullwitness-metadata.stdout",
+      "stderr": "/private/tmp/corsa-d1-census-diagnostic-goqa-67b5e77b36a348158c4e3c0c046974b5/fullwitness-metadata.stderr"
+    },
+    {
+      "phase": "linuxhelper-linux-compile",
+      "argv": [
+        "/usr/local/go/bin/go",
+        "build",
+        "-mod=readonly",
+        "-buildvcs=false",
+        "-p=1",
+        "-trimpath",
+        "-o",
+        "/private/tmp/corsa-d1-census-diagnostic-goqa-67b5e77b36a348158c4e3c0c046974b5/artifacts/linuxhelper.test",
+        "./internal/testutil/loadstand/linuxhelper"
+      ],
+      "pid": 43210,
+      "exit": 0,
+      "stdout": "/private/tmp/corsa-d1-census-diagnostic-goqa-67b5e77b36a348158c4e3c0c046974b5/linuxhelper-linux-compile.stdout",
+      "stderr": "/private/tmp/corsa-d1-census-diagnostic-goqa-67b5e77b36a348158c4e3c0c046974b5/linuxhelper-linux-compile.stderr"
+    },
+    {
+      "phase": "linuxhelper-metadata",
+      "argv": [
+        "/usr/local/go/bin/go",
+        "version",
+        "-m",
+        "/private/tmp/corsa-d1-census-diagnostic-goqa-67b5e77b36a348158c4e3c0c046974b5/artifacts/linuxhelper.test"
+      ],
+      "pid": 43217,
+      "exit": 0,
+      "stdout": "/private/tmp/corsa-d1-census-diagnostic-goqa-67b5e77b36a348158c4e3c0c046974b5/linuxhelper-metadata.stdout",
+      "stderr": "/private/tmp/corsa-d1-census-diagnostic-goqa-67b5e77b36a348158c4e3c0c046974b5/linuxhelper-metadata.stderr"
+    }
+  ],
+  "artifacts": {
+    "loadstand": {
+      "path": "/private/tmp/corsa-d1-census-diagnostic-goqa-67b5e77b36a348158c4e3c0c046974b5/artifacts/loadstand.test",
+      "sha256": "2f49b6d29fb2429339575e0058fc22e4775e8c70c30e70ec0dc2a23a257717bc",
+      "bytes": 29594758,
+      "static_linux_arm64": true,
+      "executed": false,
+      "dependencies": [
+        [
+          "github.com/dustin/go-humanize",
+          "v1.1.0",
+          "h1:dbKTrvD0klcbBV/h4AWJdMuZogJACoMlvWIWZ5b2xWg="
+        ],
+        [
+          "github.com/gofiber/fiber/v3",
+          "v3.7.0",
+          "h1:aF+GfB7nP9Dd0wVsv6wmr8675v66OGfjSyoDhPmvKEo="
+        ],
+        [
+          "github.com/gofiber/schema",
+          "v1.9.4",
+          "h1:IVNXN2WyVHmUn/S186e/rdnGlb1LFrhZ1hjndTYvn8w="
+        ],
+        [
+          "github.com/gofiber/utils/v2",
+          "v2.6.5",
+          "h1:rU+8ao6LKi3fKOA3sEjfLv1T+2C2IwomeVmEKaqkr4A="
+        ],
+        [
+          "github.com/google/uuid",
+          "v1.6.0",
+          "h1:NIvaJDMOsjHA8n1jAhLSgzrAzy1Hgr+hNrb57e+94F0="
+        ],
+        [
+          "github.com/klauspost/compress",
+          "v1.20.4",
+          "h1:dD0v/bvxtjCBqQu6sx1TNWkalEY5lNTIe+HY9w8TeNI="
+        ],
+        [
+          "github.com/mattn/go-colorable",
+          "v0.1.16",
+          "h1:+2YjeAe7xP1OQbZW1jERPWWCDLlNqFNCvjiqGiAt84A="
+        ],
+        [
+          "github.com/mattn/go-isatty",
+          "v0.0.24",
+          "h1:tGZZoVgT/KiqK1c8ocVLeDS8BSWMRd47J3Lbz7vsReI="
+        ],
+        [
+          "github.com/molecule-man/go-brrr",
+          "v1.3.1",
+          "h1:EwaJUzRIlp/dFmIpzq4J17CA5Zi5OHo2vOGmu09hF1w="
+        ],
+        [
+          "github.com/philhofer/fwd",
+          "v1.2.1",
+          "h1:UtpS73q8bFgy/yH3gCq8LSNvj5gv/FowNOiWZa7uKwQ="
+        ],
+        [
+          "github.com/remyoudompheng/bigfft",
+          "v0.0.0-20230129092748-24d4a6f8daec",
+          "h1:W09IVJc94icq4NjY3clb7Lk8O1qJ8BdBEF8z0ibU0rE="
+        ],
+        [
+          "github.com/rs/zerolog",
+          "v1.35.1",
+          "h1:m7xQeoiLIiV0BCEY4Hs+j2NG4Gp2o2KPKmhnnLiazKI="
+        ],
+        [
+          "github.com/stretchr/objx",
+          "v0.8.0",
+          "h1:rm9oMkeprG/wHifkZP4EuDww9S0mvEaQ/p9cXTNT4cw="
+        ],
+        [
+          "github.com/stretchr/testify",
+          "v1.12.1",
+          "h1:EuwCh5fleGS7H32xRwO3wRGT7DxrDhLAT6FF8MpWDWE="
+        ],
+        [
+          "github.com/tinylib/msgp",
+          "v1.6.5",
+          "h1:iAH6XTP7BpzErjBZlujJQXxA+GmRi2YWs6M4KdLtNbE="
+        ],
+        [
+          "github.com/valyala/bytebufferpool",
+          "v1.0.0",
+          "h1:GqA5TC/0021Y/b9FG4Oi9Mr3q7XYx6KllzawFIhcdPw="
+        ],
+        [
+          "github.com/valyala/fasthttp",
+          "v1.78.0",
+          "h1:tKfLdx7cD8HZOTP1wc2OpbQMbgO1HP12J0y/XMdyW6Q="
+        ],
+        [
+          "go.yaml.in/yaml/v3",
+          "v3.0.6",
+          "h1:zcDfvjXEqTQmpjniUBLc91xYJMB2c4QOFxEF/LCEckM="
+        ],
+        [
+          "golang.org/x/crypto",
+          "v0.59.0",
+          "h1:xS2jhqYbzNrpvkWP2YTDf4TJwBy3ykR03i8vFDxEc7c="
+        ],
+        [
+          "golang.org/x/net",
+          "v0.62.0",
+          "h1:18ELalfM5+XNRwzM2nYqXsZQ9ByS1uhj2O/U7+5jqRY="
+        ],
+        [
+          "golang.org/x/sys",
+          "v0.50.0",
+          "h1:dkKZEFTEKaLr1sjhs0WiKqoi8Jj5nHbS3Njmx1UoMJs="
+        ],
+        [
+          "golang.org/x/text",
+          "v0.44.0",
+          "h1:YItdp/mQNGnsmrgpcdA5yQ3bnRxCfo/Tj/iByGW9GGo="
+        ],
+        [
+          "modernc.org/libc",
+          "v1.81.0",
+          "h1:Kx11pb+4ETDPgkN9P6nHNTeVfrS+1w46LoIDbYcZEtM="
+        ],
+        [
+          "modernc.org/mathutil",
+          "v1.7.1",
+          "h1:GCZVGXdaN8gTqB1Mf/usp1Y/hSqgI2vAGGP4jZMCxOU="
+        ],
+        [
+          "modernc.org/memory",
+          "v1.12.1",
+          "h1:nFMiWrpStgZczNl6XI9GnIk/rWhYIyHGUaR04pGbp9g="
+        ],
+        [
+          "modernc.org/sqlite",
+          "v1.62.0",
+          "h1:gMaCjSM1qpl+iOjiWhR1LYP3zqrYDI+5GYLGt6veP2g="
+        ]
+      ]
+    },
+    "fullwitness": {
+      "path": "/private/tmp/corsa-d1-census-diagnostic-goqa-67b5e77b36a348158c4e3c0c046974b5/artifacts/fullwitness.test",
+      "sha256": "99b0be13204b4d96d2b98a964c86e3f225e9f29f4d91e342e6ffab0ab3157e2f",
+      "bytes": 18029734,
+      "static_linux_arm64": true,
+      "executed": false,
+      "dependencies": [
+        [
+          "github.com/dustin/go-humanize",
+          "v1.1.0",
+          "h1:dbKTrvD0klcbBV/h4AWJdMuZogJACoMlvWIWZ5b2xWg="
+        ],
+        [
+          "github.com/gofiber/fiber/v3",
+          "v3.7.0",
+          "h1:aF+GfB7nP9Dd0wVsv6wmr8675v66OGfjSyoDhPmvKEo="
+        ],
+        [
+          "github.com/gofiber/schema",
+          "v1.9.4",
+          "h1:IVNXN2WyVHmUn/S186e/rdnGlb1LFrhZ1hjndTYvn8w="
+        ],
+        [
+          "github.com/gofiber/utils/v2",
+          "v2.6.5",
+          "h1:rU+8ao6LKi3fKOA3sEjfLv1T+2C2IwomeVmEKaqkr4A="
+        ],
+        [
+          "github.com/google/uuid",
+          "v1.6.0",
+          "h1:NIvaJDMOsjHA8n1jAhLSgzrAzy1Hgr+hNrb57e+94F0="
+        ],
+        [
+          "github.com/klauspost/compress",
+          "v1.20.4",
+          "h1:dD0v/bvxtjCBqQu6sx1TNWkalEY5lNTIe+HY9w8TeNI="
+        ],
+        [
+          "github.com/mattn/go-colorable",
+          "v0.1.16",
+          "h1:+2YjeAe7xP1OQbZW1jERPWWCDLlNqFNCvjiqGiAt84A="
+        ],
+        [
+          "github.com/mattn/go-isatty",
+          "v0.0.24",
+          "h1:tGZZoVgT/KiqK1c8ocVLeDS8BSWMRd47J3Lbz7vsReI="
+        ],
+        [
+          "github.com/molecule-man/go-brrr",
+          "v1.3.1",
+          "h1:EwaJUzRIlp/dFmIpzq4J17CA5Zi5OHo2vOGmu09hF1w="
+        ],
+        [
+          "github.com/philhofer/fwd",
+          "v1.2.1",
+          "h1:UtpS73q8bFgy/yH3gCq8LSNvj5gv/FowNOiWZa7uKwQ="
+        ],
+        [
+          "github.com/remyoudompheng/bigfft",
+          "v0.0.0-20230129092748-24d4a6f8daec",
+          "h1:W09IVJc94icq4NjY3clb7Lk8O1qJ8BdBEF8z0ibU0rE="
+        ],
+        [
+          "github.com/rs/zerolog",
+          "v1.35.1",
+          "h1:m7xQeoiLIiV0BCEY4Hs+j2NG4Gp2o2KPKmhnnLiazKI="
+        ],
+        [
+          "github.com/tinylib/msgp",
+          "v1.6.5",
+          "h1:iAH6XTP7BpzErjBZlujJQXxA+GmRi2YWs6M4KdLtNbE="
+        ],
+        [
+          "github.com/valyala/bytebufferpool",
+          "v1.0.0",
+          "h1:GqA5TC/0021Y/b9FG4Oi9Mr3q7XYx6KllzawFIhcdPw="
+        ],
+        [
+          "github.com/valyala/fasthttp",
+          "v1.78.0",
+          "h1:tKfLdx7cD8HZOTP1wc2OpbQMbgO1HP12J0y/XMdyW6Q="
+        ],
+        [
+          "golang.org/x/crypto",
+          "v0.59.0",
+          "h1:xS2jhqYbzNrpvkWP2YTDf4TJwBy3ykR03i8vFDxEc7c="
+        ],
+        [
+          "golang.org/x/net",
+          "v0.62.0",
+          "h1:18ELalfM5+XNRwzM2nYqXsZQ9ByS1uhj2O/U7+5jqRY="
+        ],
+        [
+          "golang.org/x/sys",
+          "v0.50.0",
+          "h1:dkKZEFTEKaLr1sjhs0WiKqoi8Jj5nHbS3Njmx1UoMJs="
+        ],
+        [
+          "golang.org/x/text",
+          "v0.44.0",
+          "h1:YItdp/mQNGnsmrgpcdA5yQ3bnRxCfo/Tj/iByGW9GGo="
+        ],
+        [
+          "modernc.org/libc",
+          "v1.81.0",
+          "h1:Kx11pb+4ETDPgkN9P6nHNTeVfrS+1w46LoIDbYcZEtM="
+        ],
+        [
+          "modernc.org/mathutil",
+          "v1.7.1",
+          "h1:GCZVGXdaN8gTqB1Mf/usp1Y/hSqgI2vAGGP4jZMCxOU="
+        ],
+        [
+          "modernc.org/memory",
+          "v1.12.1",
+          "h1:nFMiWrpStgZczNl6XI9GnIk/rWhYIyHGUaR04pGbp9g="
+        ],
+        [
+          "modernc.org/sqlite",
+          "v1.62.0",
+          "h1:gMaCjSM1qpl+iOjiWhR1LYP3zqrYDI+5GYLGt6veP2g="
+        ]
+      ]
+    },
+    "linuxhelper": {
+      "path": "/private/tmp/corsa-d1-census-diagnostic-goqa-67b5e77b36a348158c4e3c0c046974b5/artifacts/linuxhelper.test",
+      "sha256": "667ddcbb16748b908abf92cbcabfe287e877379708f0310f3fd7ccb754c676c8",
+      "bytes": 10832126,
+      "static_linux_arm64": true,
+      "executed": false,
+      "dependencies": [
+        [
+          "github.com/mattn/go-colorable",
+          "v0.1.16",
+          "h1:+2YjeAe7xP1OQbZW1jERPWWCDLlNqFNCvjiqGiAt84A="
+        ],
+        [
+          "github.com/mattn/go-isatty",
+          "v0.0.24",
+          "h1:tGZZoVgT/KiqK1c8ocVLeDS8BSWMRd47J3Lbz7vsReI="
+        ],
+        [
+          "github.com/rs/zerolog",
+          "v1.35.1",
+          "h1:m7xQeoiLIiV0BCEY4Hs+j2NG4Gp2o2KPKmhnnLiazKI="
+        ],
+        [
+          "golang.org/x/crypto",
+          "v0.59.0",
+          "h1:xS2jhqYbzNrpvkWP2YTDf4TJwBy3ykR03i8vFDxEc7c="
+        ],
+        [
+          "golang.org/x/sys",
+          "v0.50.0",
+          "h1:dkKZEFTEKaLr1sjhs0WiKqoi8Jj5nHbS3Njmx1UoMJs="
+        ]
+      ]
+    }
+  },
+  "cleanup_confirmed": true,
+  "linux_ELF_executed": false,
+  "work_limit_s": 600,
+  "cleanup_end_s": 630
+}

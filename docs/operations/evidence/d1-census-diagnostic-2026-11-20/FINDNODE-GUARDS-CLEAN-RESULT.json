@@ -1,0 +1,45 @@
+{
+  "app_or_VM_executed": false,
+  "attempt_id": "0216a464d806404aa07a2d8cc5acb633",
+  "base": "21b146e076789c551a95a82d759f96557de09167",
+  "error": null,
+  "isolated_source_files": 2659,
+  "lock_retained": false,
+  "new_test_sha256": "3d619b111bb04a6a8809ae91d8f93c4bb2af8e16730c4522d25b3297eb1ecebd",
+  "original_scanner_unchanged": true,
+  "raw_bytes": 7447,
+  "scope": "ONLY_FAILED_GUARDS_RERUN_ON_EXACT_TRACKED_SOURCE_WITHOUT_IGNORED_ARTIFACTS",
+  "status": "CLEAN_FINDNODE_SOURCE_GUARDS_PASS",
+  "steps": [
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1)(allow default)(deny network*)(deny file-write* (subpath \"/private/tmp/corsa-d1-o1a-full-receipt-clean-findnode-guards-0216a464d806404aa07a2d8cc5acb633/source\"))(deny file-write* (subpath \"/Users/hades/Documents/repos/corsa\"))",
+        "/usr/local/go/bin/go",
+        "test",
+        "-mod=readonly",
+        "-p=1",
+        "-count=1",
+        "-timeout=90s",
+        "-json",
+        "-run=^(TestCandidateInactiveCallGraphAndInventories|TestCandidateSourceCompanionClosedRoots|TestCandidateSourceTypeReferencesAndDeclarations|TestCandidateCapacityClosedRootsAndLogicalBoundary|TestCandidateCapacityGuardRejectsActivationAndMissingFinalCheck)$",
+        "./internal/core/findnode"
+      ],
+      "exit": 0,
+      "owned_group_absent": true,
+      "phase": "findnode-guards",
+      "pid": 54618,
+      "pipe_threads_finished": true,
+      "reason": null,
+      "stderr": "/private/tmp/corsa-d1-o1a-full-receipt-clean-findnode-guards-0216a464d806404aa07a2d8cc5acb633/01-findnode-guards.stderr",
+      "stdout": "/private/tmp/corsa-d1-o1a-full-receipt-clean-findnode-guards-0216a464d806404aa07a2d8cc5acb633/01-findnode-guards.stdout"
+    }
+  ],
+  "tests": {
+    "child": 2,
+    "outer": 5
+  },
+  "unknown": false,
+  "work": "/private/tmp/corsa-d1-o1a-full-receipt-clean-findnode-guards-0216a464d806404aa07a2d8cc5acb633"
+}

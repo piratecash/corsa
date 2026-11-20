@@ -1,0 +1,227 @@
+{
+  "four_ELF": {
+    "loadstand-full": {
+      "bytes": 30912950,
+      "sha256": "713021317c6abd127192cde0307c53cc0a8c94820439daac263c29ca2b511c3b"
+    },
+    "loadstand-linuxhelper": {
+      "bytes": 10832126,
+      "sha256": "667ddcbb16748b908abf92cbcabfe287e877379708f0310f3fd7ccb754c676c8"
+    },
+    "loadstand-sdkedge": {
+      "bytes": 33516985,
+      "sha256": "5bfa8c246ad1e193bce7035240fe59b69bad8266390a5023c44961efa825a9b3"
+    },
+    "node.test": {
+      "bytes": 68925720,
+      "sha256": "5da6bf18e2869c770be78f3307ddb9c7fbc769c63f162c65d9de8168e592a92c"
+    }
+  },
+  "helper_sources": {
+    "capexec-source": {
+      "source_files": {
+        "PURE-QA.stderr": {
+          "bytes": 727,
+          "sha256": "8d7f5b0a2161da618f9f68749ffe9864537f130fa0166a4f89b978c332b79391"
+        },
+        "PURE-QA.stdout": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "README.ru.md": {
+          "bytes": 2412,
+          "sha256": "f3e0506eb55420bbd4da6a330d582a79bd5ce5516457e329711a0998557ca9f8"
+        },
+        "capexec.c": {
+          "bytes": 8841,
+          "sha256": "6c14d128c61898fc99daa921a5114154b4224a0e66fa09979d021dec9909a524"
+        },
+        "capexec.diff": {
+          "bytes": 8515,
+          "sha256": "58f4f83bc9fcd77d7f5db6d19ec97f25118f7d171526b673ca0ae58c4b43d802"
+        },
+        "frozen_inputs.h": {
+          "bytes": 2449,
+          "sha256": "67b094b662e26c6478334805c9569ec609c739e54b5a85c0fc30b48bb40ac0e2"
+        },
+        "guest_policy.h": {
+          "bytes": 5496,
+          "sha256": "699c0a05f15cdf93c620326a2bc1112b53932f06dc08bd6a343076b22416162c"
+        },
+        "policy_data.py": {
+          "bytes": 4331,
+          "sha256": "a1183d16fabbd6e1b224fcbd73cb0f0124a1218b3d5bc679ac7e3fb52d75249a"
+        },
+        "policy_dump.c": {
+          "bytes": 778,
+          "sha256": "b2e3f24032cfc8a0c1616e0de26df1a82ef2fba7a2549eda082f55692308c276"
+        },
+        "test_policy_data.py": {
+          "bytes": 1895,
+          "sha256": "5da863dc5f79b37896e4d8d30f5d2e2f56dd6750f0926040af244df70d92dead"
+        },
+        "test_source_binding.py": {
+          "bytes": 1613,
+          "sha256": "e4ed4a6b3e36588ee27d0e6ff3f3928d0b7474b8737c393aed1f36cd2fb1b94f"
+        }
+      },
+      "source_path": "/private/tmp/corsa-o1a-census-component-inputs-8eba82dda57843b99ff3999bd4ee91ee/capexec-source",
+      "source_sums_sha256": "156fbdf52dcbebee34503f44e7f2ef614f96092bc5d441df07fb80bb58aa9e9b"
+    },
+    "pid1-source": {
+      "source_files": {
+        "BOOT-CONFIG.TEMPLATE.json": {
+          "bytes": 249313,
+          "sha256": "5b045450dacf54b189ebd1cbd1c6e1ebc4c49c65fe62e40c768a53fa366f7ede"
+        },
+        "PYTHON-QA.stderr": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "PYTHON-QA.stdout": {
+          "bytes": 168,
+          "sha256": "3ca180875c896a27f414b3a461e528ddffd7b1aaa093914d6a45343c323fae9d"
+        },
+        "README.ru.md": {
+          "bytes": 12445,
+          "sha256": "031c3d3820391d6f77a88de6d9bd8ba6133d388363155c503ee4f0ab8d20bb07"
+        },
+        "RESULT.json": {
+          "bytes": 1140,
+          "sha256": "403c70390e405b2837e986fc80cbfe9e5ce5a58397b09fe41cfe1709d3165315"
+        },
+        "capexec.c": {
+          "bytes": 6188,
+          "sha256": "478be8f4c191c964c328dd49f0c3bbad70962f223d63435f35f5e384f3e97cc4"
+        },
+        "capsule/capsule.go": {
+          "bytes": 8086,
+          "sha256": "66497e304b0fbee5dbcc2239f93b21d16fe972cac9c55a2c0c0af61c766c44de"
+        },
+        "capsule/capsule_test.go": {
+          "bytes": 4664,
+          "sha256": "311ad41aa0f4f2d27d371e9405662e66bdb8e49d67132afd6330517750aa6771"
+        },
+        "capsule/inventory_linux.go": {
+          "bytes": 2926,
+          "sha256": "5ad7ba78def4c29e003d3274f8ff70f02affc278c214588ba7ab45422685b5d4"
+        },
+        "capsule/inventory_linux_test.go": {
+          "bytes": 745,
+          "sha256": "e06f09f8bb316500904bd5eb457522dad01f66c526442024aac8d75e341fe907"
+        },
+        "check_cross_language.py": {
+          "bytes": 1403,
+          "sha256": "406385901d8f0dda7e8d34fe80528b86318254ca78a478516b626d6fcf183038"
+        },
+        "cmd/journal-export/main.go": {
+          "bytes": 1624,
+          "sha256": "322d33c2cb546746ceac98ea9f8adf4eb98dd3c1a10a60e3d33967cb9fe46a2a"
+        },
+        "cmd/o1a-init/children_linux.go": {
+          "bytes": 3395,
+          "sha256": "c45dc25a05d4179a0c0e84293b4429908ef0cd7a1dbda5d27f2f75ae5e9dafc3"
+        },
+        "cmd/o1a-init/config.go": {
+          "bytes": 5651,
+          "sha256": "a66ec7e56462eae19e8873b8651b5c66b88bc16e2dd4194332589f82e9b920fb"
+        },
+        "cmd/o1a-init/config_test.go": {
+          "bytes": 3041,
+          "sha256": "f61d9887894e01d04f1e31a04a49b51f9a276b91c94240d8d088c1bf029b5e33"
+        },
+        "cmd/o1a-init/device_modes.go": {
+          "bytes": 817,
+          "sha256": "7b67fd01ab3945d4efcdd552851bcbd493c4dcacd2e860cf7f0b3f562eb1beed"
+        },
+        "cmd/o1a-init/device_modes_test.go": {
+          "bytes": 1521,
+          "sha256": "307283b365723c349be3baf644a989ba4f69529700ffd85835cf58786a8bec63"
+        },
+        "cmd/o1a-init/frozen.go": {
+          "bytes": 2783,
+          "sha256": "258f9045576bf946af4757e8c7649ed36a1f8ca845cadfb8c244ae07245d0a6b"
+        },
+        "cmd/o1a-init/main_linux.go": {
+          "bytes": 12634,
+          "sha256": "11e8b2a1e27b520ee20f8d33449205694aebacb9b983980b2dd914d9adfef708"
+        },
+        "cmd/o1a-init/root_mode.go": {
+          "bytes": 526,
+          "sha256": "a401a8c7f345f3f60c5fb6266dd29d933c8a4d9e3c6db376ad7f43d0aadaf22b"
+        },
+        "cmd/o1a-init/root_mode_test.go": {
+          "bytes": 1617,
+          "sha256": "6c2783000727d74f6a4f961d4ca5afba8ab34670e4023a3a613a344da66ed9fe"
+        },
+        "fixtures/canonical.json": {
+          "bytes": 67,
+          "sha256": "a1401a277bff2e7ee9c54c914c05615e8a62ddf2497560c1cf56453125660b97"
+        },
+        "fixtures/journal/record.json": {
+          "bytes": 45,
+          "sha256": "c8af16dfec428cf9fadef68a7bee5311797619561d32356d7846ce05a8f64b0d"
+        },
+        "fixtures/journal/sources/measured-b70de373d032b8fe/one.go": {
+          "bytes": 12,
+          "sha256": "185155e8c14b8352dabda728b250bb43695ea0e769986e31eca0ed72e666f451"
+        },
+        "fixtures/journal/sources/stand-921f04b57c4f869b/other.go": {
+          "bytes": 14,
+          "sha256": "a8dc1654ea9b95fc9bf25e0b1c8f67f64c0d1d5107df07769be5684bd8db09d4"
+        },
+        "fixtures/python.archive.gz": {
+          "bytes": 635,
+          "sha256": "06a185f4f7827ae80ffdbd86fdbd0d1e7ab559ae172be8fa1b43810122f325e5"
+        },
+        "fixtures/python.console": {
+          "bytes": 1636,
+          "sha256": "a1635cb58fa980edca5c45fd4ba821cf9df52b442ec24f3a9c35ad9db4eda15b"
+        },
+        "fixtures/vector.json": {
+          "bytes": 498,
+          "sha256": "5cc6d92af380f86c9e59e4c7d4240dad3a155176b53e12c9d1e129bcecb7a7c9"
+        },
+        "frozen_inputs.h": {
+          "bytes": 2438,
+          "sha256": "21b65b92d54a4bdb69ebad49efbdeaffb709bd987eda78fcd7325e020c84c90d"
+        },
+        "go.mod": {
+          "bytes": 46,
+          "sha256": "218fb01d0d3c71867e025deb9d39007937cb2fb21b24c4ece2170b100a2d55af"
+        }
+      },
+      "source_path": "/private/tmp/corsa-o1a-census-component-inputs-8eba82dda57843b99ff3999bd4ee91ee/pid1-source",
+      "source_sums_sha256": "d8fb215f204e60c2fd3f3e14fd7cc486743bdd7528eff7ab051a6233b012a6c0"
+    }
+  },
+  "helpers": "NOT_BUILT",
+  "input_sha256": "b1639c8488b383e7b2c738bad43ad5550979ad73219035751c90a88767087c6c",
+  "original_Go_source_API": "ACTUAL_PASS_REUSED_BY_EXACT_SUBJECT",
+  "profile": {
+    "bytes": 862,
+    "path": "/private/tmp/corsa-o1a-census-component-inputs-8eba82dda57843b99ff3999bd4ee91ee/component.json",
+    "sha256": "f84856cfa6f3c3d39f4f5d69487c5d968106aeea77b16f8a3d7bf864266e7369"
+  },
+  "resource_execution": false,
+  "runtime_ready": false,
+  "scope": "COMPONENT_CENSUS_DIAGNOSTIC_NO_METRIC_ADMISSION",
+  "source_archive": {
+    "bytes": 4919940,
+    "path": "/private/tmp/corsa-o1a-census-component-inputs-8eba82dda57843b99ff3999bd4ee91ee/guest-sources.tar.gz",
+    "sha256": "c60ffa453333212940c3e332275b450fdda87266301577e55d3abda440879c22"
+  },
+  "source_groups": {
+    "measured": {
+      "files": 640,
+      "sha256": "b70de373d032b8fed471c6b93bba6d034d932b322495866d40766e7c746fcd9c",
+      "stamp": "b70de373d032b8fe"
+    },
+    "stand": {
+      "files": 708,
+      "sha256": "6aacd581b6ee23fe91004f08d64e9a4ba1898e3659a6881d17901b41fbdd1b84",
+      "stamp": "6aacd581b6ee23fe"
+    }
+  },
+  "status": "COMPONENT_INPUTS_SOURCE_ONLY_NOT_HELPERS_OR_RUNTIME"
+}

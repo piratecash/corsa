@@ -1,0 +1,47 @@
+{
+  "app_or_Linux_ELF_executed": false,
+  "attempt_id": "69df6a2f07774901843a77d1b3e40b74",
+  "base": "21b146e076789c551a95a82d759f96557de09167",
+  "error": null,
+  "lock_retained": false,
+  "manifest_sha256": "1c3c61d8043b160e86cf76988a8c3581337efd9a594ad0c2ff86edc9fa48249a",
+  "overlay_sha256": "43d086281d99cbea5d1c908bc138fba6ae982bf319671cd3b9f0f9747f4f0e73",
+  "raw_bytes": 17021,
+  "scope": "UNIT_MECHANISM_ONLY_NOT_NATIVE_CAUSE_PROOF",
+  "status": "REFILL_UNIT_MECHANISM_PASS",
+  "steps": [
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1)(allow default)(deny network*)(deny file-write* (subpath \"/Users/hades/Documents/repos/corsa\"))",
+        "/usr/local/go/bin/go",
+        "test",
+        "-overlay=/private/tmp/corsa-d1-o1a-full-receipt-refill-unit-69df6a2f07774901843a77d1b3e40b74/overlay.json",
+        "-mod=readonly",
+        "-p=1",
+        "-count=1",
+        "-timeout=90s",
+        "-json",
+        "./internal/core/node",
+        "-run",
+        "^TestLoadStandRouteWire(LargeProjectionAndReceiverReceipt|FullReceiptRecordsOnlyStableClaimsWithinBudget|ReaderFillIntervals|FullReceiptRefillContrast)$"
+      ],
+      "exit": 0,
+      "owned_group_absent": true,
+      "phase": "selected-tests",
+      "pid": 52279,
+      "pipe_threads_finished": true,
+      "reason": null,
+      "stderr": "/private/tmp/corsa-d1-o1a-full-receipt-refill-unit-69df6a2f07774901843a77d1b3e40b74/01-selected-tests.stderr",
+      "stdout": "/private/tmp/corsa-d1-o1a-full-receipt-refill-unit-69df6a2f07774901843a77d1b3e40b74/01-selected-tests.stdout"
+    }
+  ],
+  "tests": {
+    "child": 11,
+    "outer": 4
+  },
+  "unknown": false,
+  "virtual_test_path": "internal/core/node/loadstand_route_wire_refill_component_test.go",
+  "work": "/private/tmp/corsa-d1-o1a-full-receipt-refill-unit-69df6a2f07774901843a77d1b3e40b74"
+}

@@ -1,0 +1,41 @@
+{
+  "attempt_id": "0a66a114a62a5cbcbd6dd4a671288ee4",
+  "capture_complete": true,
+  "captures": {
+    "console": {
+      "eof": true,
+      "received": 6920465,
+      "retained": 6920465,
+      "sha256": "4e3a87bc46cc7badc12ba69ef91a72660b99c104a4fd5f0175ef51e0afaead7f"
+    },
+    "native": {
+      "eof": true,
+      "received": 994,
+      "retained": 994,
+      "sha256": "f1995b3fb73177b3bf2d8deb36e0bc59732e5c526fff6364b0491a3fad26bb5a"
+    },
+    "stderr": {
+      "eof": true,
+      "received": 0,
+      "retained": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  },
+  "config_sha256": "6ce3c34b16349b0f27e051d6d4cd14e581210d5953ac741d95635b850e5e6843",
+  "controller_stop": false,
+  "handoff_sha256": "e73a88c0967bed377a1da8e2a0f2dd4779877a7eeb0d53374a4f99f7c4cae453",
+  "initrd_sha256": "340e1ed40dcb3804c2a77a833e5d0e985c7340db83c426550eff30ff095a58a9",
+  "input_recheck": true,
+  "kernel_sha256": "9ffeb24f4131ec4c5177b83c4a74ed8af699553c00a6b0d7f0d0ff4e98970c73",
+  "launcher_sha256": "7b75f39616b5a77a2127510ecc1c65184f77f0b10e5fc16f3f80abc24449713c",
+  "outer_kill": false,
+  "owned_group_absent": true,
+  "profile": "d1-o1a-native-v1",
+  "purpose": "COMPONENT_CENSUS_DIAGNOSTIC",
+  "stop_reason": null,
+  "worker_exit": 0,
+  "worker_pid": 51690,
+  "worker_reaped": true,
+  "worker_reaped_ns": 32215790000,
+  "workload": "reconnect"
+}

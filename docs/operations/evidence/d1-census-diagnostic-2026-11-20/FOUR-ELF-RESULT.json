@@ -1,0 +1,339 @@
+{
+  "status": "BUILT_NOT_EXECUTED",
+  "subject": "COMPONENT_ONLY_BASELINE_PLUS_EXACT_FINALIZER_AND_CLOSED_CENSUS_DIAGNOSTICS",
+  "commit": "4fcc2f7245095fc43d2225f0f0065f4ce3b26113",
+  "request": "20f2882cf7525868a7c557e957436e843b24f0b0ea3f82247bee2254ab8cbd02",
+  "artifacts": {
+    "node.test": {
+      "sha256": "5da6bf18e2869c770be78f3307ddb9c7fbc769c63f162c65d9de8168e592a92c",
+      "bytes": 68925720
+    },
+    "loadstand-full": {
+      "sha256": "713021317c6abd127192cde0307c53cc0a8c94820439daac263c29ca2b511c3b",
+      "bytes": 30912950
+    },
+    "loadstand-linuxhelper": {
+      "sha256": "667ddcbb16748b908abf92cbcabfe287e877379708f0310f3fd7ccb754c676c8",
+      "bytes": 10832126
+    },
+    "loadstand-sdkedge": {
+      "sha256": "5bfa8c246ad1e193bce7035240fe59b69bad8266390a5023c44961efa825a9b3",
+      "bytes": 33516985
+    }
+  },
+  "source_groups_original_Go_API": {
+    "measured": {
+      "files": 640,
+      "manifest_bytes_equal": true,
+      "sha256": "b70de373d032b8fed471c6b93bba6d034d932b322495866d40766e7c746fcd9c",
+      "stamp": "b70de373d032b8fe",
+      "verify_tree": "PASS"
+    },
+    "stand": {
+      "files": 708,
+      "manifest_bytes_equal": true,
+      "sha256": "6aacd581b6ee23fe91004f08d64e9a4ba1898e3659a6881d17901b41fbdd1b84",
+      "stamp": "6aacd581b6ee23fe",
+      "verify_tree": "PASS"
+    }
+  },
+  "source_before_sha256": "209dc56dfce71ab5bbc26e009aaff1b757bb018e40068d1a259a74801712eb01",
+  "source_after_sha256": "1a4d80bf5a8861e032bb344b2ca5e9d4b6a2e67f24b40731e915c5c976b1e5a3",
+  "commands": [
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath \"/private/tmp/corsa-o1a-census-diagnostic-elf-build-1ad46baec0ab43c5b702dad5e8c7ead3\") (literal \"/dev/null\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-census-diagnostic-elf-build-1ad46baec0ab43c5b702dad5e8c7ead3/source\"))",
+        "/usr/local/go/bin/go",
+        "list",
+        "-mod=readonly",
+        "-trimpath",
+        "-buildvcs=false",
+        "-deps",
+        "-json",
+        "-test",
+        "./internal/core/node"
+      ],
+      "closure": "CONFIRMED_ABSENT",
+      "pgid": 47953,
+      "pid": 47953,
+      "returncode": 0
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath \"/private/tmp/corsa-o1a-census-diagnostic-elf-build-1ad46baec0ab43c5b702dad5e8c7ead3\") (literal \"/dev/null\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-census-diagnostic-elf-build-1ad46baec0ab43c5b702dad5e8c7ead3/source\"))",
+        "/usr/local/go/bin/go",
+        "list",
+        "-mod=readonly",
+        "-trimpath",
+        "-buildvcs=false",
+        "-deps",
+        "-json",
+        "-test",
+        "./internal/core/node"
+      ],
+      "closure": "CONFIRMED_ABSENT",
+      "pgid": 47058,
+      "pid": 47058,
+      "returncode": 0
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath \"/private/tmp/corsa-o1a-census-diagnostic-elf-build-1ad46baec0ab43c5b702dad5e8c7ead3\") (literal \"/dev/null\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-census-diagnostic-elf-build-1ad46baec0ab43c5b702dad5e8c7ead3/source\"))",
+        "/usr/local/go/bin/go",
+        "test",
+        "-c",
+        "-p=1",
+        "-mod=readonly",
+        "-trimpath",
+        "-buildvcs=false",
+        "-o",
+        "/private/tmp/corsa-o1a-census-diagnostic-elf-build-1ad46baec0ab43c5b702dad5e8c7ead3/node.test",
+        "./internal/core/node"
+      ],
+      "closure": "CONFIRMED_ABSENT",
+      "pgid": 47064,
+      "pid": 47064,
+      "returncode": 0
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath \"/private/tmp/corsa-o1a-census-diagnostic-elf-build-1ad46baec0ab43c5b702dad5e8c7ead3\") (literal \"/dev/null\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-census-diagnostic-elf-build-1ad46baec0ab43c5b702dad5e8c7ead3/source\"))",
+        "/usr/local/go/bin/go",
+        "version",
+        "-m",
+        "/private/tmp/corsa-o1a-census-diagnostic-elf-build-1ad46baec0ab43c5b702dad5e8c7ead3/node.test"
+      ],
+      "closure": "CONFIRMED_ABSENT",
+      "pgid": 47952,
+      "pid": 47952,
+      "returncode": 0
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath \"/private/tmp/corsa-o1a-census-diagnostic-elf-build-1ad46baec0ab43c5b702dad5e8c7ead3\") (literal \"/dev/null\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-census-diagnostic-elf-build-1ad46baec0ab43c5b702dad5e8c7ead3/source\"))",
+        "/usr/local/go/bin/go",
+        "list",
+        "-mod=readonly",
+        "-trimpath",
+        "-buildvcs=false",
+        "-deps",
+        "-json",
+        "./internal/testutil/loadstand/fullnode"
+      ],
+      "closure": "CONFIRMED_ABSENT",
+      "pgid": 47975,
+      "pid": 47975,
+      "returncode": 0
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath \"/private/tmp/corsa-o1a-census-diagnostic-elf-build-1ad46baec0ab43c5b702dad5e8c7ead3\") (literal \"/dev/null\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-census-diagnostic-elf-build-1ad46baec0ab43c5b702dad5e8c7ead3/source\"))",
+        "/usr/local/go/bin/go",
+        "list",
+        "-mod=readonly",
+        "-trimpath",
+        "-buildvcs=false",
+        "-deps",
+        "-json",
+        "./internal/testutil/loadstand/fullnode"
+      ],
+      "closure": "CONFIRMED_ABSENT",
+      "pgid": 47957,
+      "pid": 47957,
+      "returncode": 0
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath \"/private/tmp/corsa-o1a-census-diagnostic-elf-build-1ad46baec0ab43c5b702dad5e8c7ead3\") (literal \"/dev/null\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-census-diagnostic-elf-build-1ad46baec0ab43c5b702dad5e8c7ead3/source\"))",
+        "/usr/local/go/bin/go",
+        "build",
+        "-p=1",
+        "-mod=readonly",
+        "-trimpath",
+        "-buildvcs=false",
+        "-o",
+        "/private/tmp/corsa-o1a-census-diagnostic-elf-build-1ad46baec0ab43c5b702dad5e8c7ead3/loadstand-full",
+        "./internal/testutil/loadstand/fullnode"
+      ],
+      "closure": "CONFIRMED_ABSENT",
+      "pgid": 47961,
+      "pid": 47961,
+      "returncode": 0
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath \"/private/tmp/corsa-o1a-census-diagnostic-elf-build-1ad46baec0ab43c5b702dad5e8c7ead3\") (literal \"/dev/null\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-census-diagnostic-elf-build-1ad46baec0ab43c5b702dad5e8c7ead3/source\"))",
+        "/usr/local/go/bin/go",
+        "version",
+        "-m",
+        "/private/tmp/corsa-o1a-census-diagnostic-elf-build-1ad46baec0ab43c5b702dad5e8c7ead3/loadstand-full"
+      ],
+      "closure": "CONFIRMED_ABSENT",
+      "pgid": 47974,
+      "pid": 47974,
+      "returncode": 0
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath \"/private/tmp/corsa-o1a-census-diagnostic-elf-build-1ad46baec0ab43c5b702dad5e8c7ead3\") (literal \"/dev/null\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-census-diagnostic-elf-build-1ad46baec0ab43c5b702dad5e8c7ead3/source\"))",
+        "/usr/local/go/bin/go",
+        "list",
+        "-mod=readonly",
+        "-trimpath",
+        "-buildvcs=false",
+        "-deps",
+        "-json",
+        "./internal/testutil/loadstand/linuxhelper"
+      ],
+      "closure": "CONFIRMED_ABSENT",
+      "pgid": 47993,
+      "pid": 47993,
+      "returncode": 0
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath \"/private/tmp/corsa-o1a-census-diagnostic-elf-build-1ad46baec0ab43c5b702dad5e8c7ead3\") (literal \"/dev/null\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-census-diagnostic-elf-build-1ad46baec0ab43c5b702dad5e8c7ead3/source\"))",
+        "/usr/local/go/bin/go",
+        "list",
+        "-mod=readonly",
+        "-trimpath",
+        "-buildvcs=false",
+        "-deps",
+        "-json",
+        "./internal/testutil/loadstand/linuxhelper"
+      ],
+      "closure": "CONFIRMED_ABSENT",
+      "pgid": 47980,
+      "pid": 47980,
+      "returncode": 0
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath \"/private/tmp/corsa-o1a-census-diagnostic-elf-build-1ad46baec0ab43c5b702dad5e8c7ead3\") (literal \"/dev/null\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-census-diagnostic-elf-build-1ad46baec0ab43c5b702dad5e8c7ead3/source\"))",
+        "/usr/local/go/bin/go",
+        "build",
+        "-p=1",
+        "-mod=readonly",
+        "-trimpath",
+        "-buildvcs=false",
+        "-o",
+        "/private/tmp/corsa-o1a-census-diagnostic-elf-build-1ad46baec0ab43c5b702dad5e8c7ead3/loadstand-linuxhelper",
+        "./internal/testutil/loadstand/linuxhelper"
+      ],
+      "closure": "CONFIRMED_ABSENT",
+      "pgid": 47986,
+      "pid": 47986,
+      "returncode": 0
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath \"/private/tmp/corsa-o1a-census-diagnostic-elf-build-1ad46baec0ab43c5b702dad5e8c7ead3\") (literal \"/dev/null\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-census-diagnostic-elf-build-1ad46baec0ab43c5b702dad5e8c7ead3/source\"))",
+        "/usr/local/go/bin/go",
+        "version",
+        "-m",
+        "/private/tmp/corsa-o1a-census-diagnostic-elf-build-1ad46baec0ab43c5b702dad5e8c7ead3/loadstand-linuxhelper"
+      ],
+      "closure": "CONFIRMED_ABSENT",
+      "pgid": 47992,
+      "pid": 47992,
+      "returncode": 0
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath \"/private/tmp/corsa-o1a-census-diagnostic-elf-build-1ad46baec0ab43c5b702dad5e8c7ead3\") (literal \"/dev/null\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-census-diagnostic-elf-build-1ad46baec0ab43c5b702dad5e8c7ead3/source\"))",
+        "/usr/local/go/bin/go",
+        "list",
+        "-mod=readonly",
+        "-trimpath",
+        "-buildvcs=false",
+        "-deps",
+        "-json",
+        "./internal/testutil/loadstand/sdkedge"
+      ],
+      "closure": "CONFIRMED_ABSENT",
+      "pgid": 48009,
+      "pid": 48009,
+      "returncode": 0
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath \"/private/tmp/corsa-o1a-census-diagnostic-elf-build-1ad46baec0ab43c5b702dad5e8c7ead3\") (literal \"/dev/null\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-census-diagnostic-elf-build-1ad46baec0ab43c5b702dad5e8c7ead3/source\"))",
+        "/usr/local/go/bin/go",
+        "list",
+        "-mod=readonly",
+        "-trimpath",
+        "-buildvcs=false",
+        "-deps",
+        "-json",
+        "./internal/testutil/loadstand/sdkedge"
+      ],
+      "closure": "CONFIRMED_ABSENT",
+      "pgid": 47997,
+      "pid": 47997,
+      "returncode": 0
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath \"/private/tmp/corsa-o1a-census-diagnostic-elf-build-1ad46baec0ab43c5b702dad5e8c7ead3\") (literal \"/dev/null\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-census-diagnostic-elf-build-1ad46baec0ab43c5b702dad5e8c7ead3/source\"))",
+        "/usr/local/go/bin/go",
+        "build",
+        "-p=1",
+        "-mod=readonly",
+        "-trimpath",
+        "-buildvcs=false",
+        "-o",
+        "/private/tmp/corsa-o1a-census-diagnostic-elf-build-1ad46baec0ab43c5b702dad5e8c7ead3/loadstand-sdkedge",
+        "./internal/testutil/loadstand/sdkedge"
+      ],
+      "closure": "CONFIRMED_ABSENT",
+      "pgid": 48001,
+      "pid": 48001,
+      "returncode": 0
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath \"/private/tmp/corsa-o1a-census-diagnostic-elf-build-1ad46baec0ab43c5b702dad5e8c7ead3\") (literal \"/dev/null\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-census-diagnostic-elf-build-1ad46baec0ab43c5b702dad5e8c7ead3/source\"))",
+        "/usr/local/go/bin/go",
+        "version",
+        "-m",
+        "/private/tmp/corsa-o1a-census-diagnostic-elf-build-1ad46baec0ab43c5b702dad5e8c7ead3/loadstand-sdkedge"
+      ],
+      "closure": "CONFIRMED_ABSENT",
+      "pgid": 48008,
+      "pid": 48008,
+      "returncode": 0
+    }
+  ]
+}

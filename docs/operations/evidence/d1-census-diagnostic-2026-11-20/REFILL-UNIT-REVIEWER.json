@@ -1,0 +1,32 @@
+{
+  "FAIL_SKIP": "NONE",
+  "RAW": {
+    "stderr": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "stdout": {
+      "bytes": 17021,
+      "sha256": "00fd604992ad731640c6cc544ba84f040064895b8f7abdff08a78f6c5e4b916b"
+    }
+  },
+  "actor": "REVIEWER",
+  "child_PASS": 11,
+  "command_normal0": true,
+  "contrast": [
+    "16s wire_frames=100 wire_claims=10000 accepted=3200 full_receipt=false",
+    "50s wire_frames=100 wire_claims=10000 accepted=10000 full_receipt=true"
+  ],
+  "outer_PASS": 4,
+  "own_original_PID_PGID_absent": 52279,
+  "post_manifest_sha256": "1c3c61d8043b160e86cf76988a8c3581337efd9a594ad0c2ff86edc9fa48249a",
+  "relevant_source_bytes_equal_actual_diagnostic_subject": 35,
+  "result_sha256": "347313e09cef1661c09d0bad4b027250b98f55da9a0fee5a82faa64c434dbfe7",
+  "scope": "Deterministic original handler/limiter/withdrawal/strictreceipt mechanism only; manualclock+newer-than-actualwithdrawn-watermark replacement, complete100frames10000claims observer. No productchange, Service.Run/socket/sleep/VM, limiterreset/relaxation. Does NOT prove saved30s or480s inner cause; stagefull_receipt remains only native fact. No O1a metric admission.",
+  "single_test_post_sha256": "43d086281d99cbea5d1c908bc138fba6ae982bf319671cd3b9f0f9747f4f0e73",
+  "source_after_sha256": "8c76208905182cbdc6f38116d3f63127dde82b9ce455ae21f6d40cb02416ea38",
+  "source_before_sha256": "8c76208905182cbdc6f38116d3f63127dde82b9ce455ae21f6d40cb02416ea38",
+  "status": "ACCEPTED_UNIT_REFILL_MECHANISM_ONLY",
+  "unchanged_original_source_hashes": 2102,
+  "work": "/private/tmp/corsa-d1-o1a-full-receipt-refill-unit-69df6a2f07774901843a77d1b3e40b74"
+}
