@@ -17,12 +17,13 @@ func findNodeLocalRoleSourceErrors(sources map[string][]byte) []string {
 	pins := map[string]string{
 		"find_node_local_role.go":          "783cd95a4c74a9e0461c5befef72da6b5ed33bc2ace1b9376d3d3df567d4b466",
 		"find_node_bridge_construction.go": "8aea4067463cb259a8829b41d6bd18e58c920927f90f84fb2a0187c5d03762be",
-		"find_node_ready_construction.go":  "bddfb4bb52e603d57769e55fa0fc4f86a4dec0ee5175579e56959d19c617c9f8",
-		"service.go":                       "db3c6ab49afae46703dae27a18d8f8a3cc960a0405c6c98949dd94b2babf114f",
+		"find_node_ready_construction.go":  "79872a3bf79626c6ca5071ae2dbfc8cd6451d955a3d7eeaeeb45d20b92c17db5",
+		"service.go":                       "7f3a84af24a53296b4ddbb8331f653a1eed05adc3af2a4968e827d33ec597aa4",
 		"capabilities.go":                  "78d8d37d7afa6fb5ca4cc1b77cd45b9ee306d1c1f05991aa1ea3aa152fff8137",
 		"find_node_owned_receive.go":       "90106224706f71d3a660a2e5d3ef6a77ae5357c1f38e4a110e938cc02b695e51",
 		"find_node_resource_diagnostic.go": "e97c7f60a858b6380569d957646ab4338cc16a1bd638dcb25494924b66e91556",
 	}
+	pins["find_node_native_full_responder.go"] = "47d19a41bc3201e30a601ebb764d0e207d67bb379954746fdb8805c6f54dba3e"
 	tracked := map[string]bool{"findNodeLocalRole": true, "findNodeRoleOff": true, "findNodeRoleTarget": true, "findNodeRoleResponder": true, "localFindNodeRole": true, "LocalRole": true, "localRole": true, "originalLocalRole": true}
 	var failures []string
 	for path, want := range pins {

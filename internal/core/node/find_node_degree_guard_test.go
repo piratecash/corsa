@@ -75,6 +75,7 @@ func degreeSourceErrors(sources map[string][]byte) []string {
 	expected["degreeOwner"]["find_node_resource_diagnostic.go:<package>"] = 1
 	expected["degreeWitness"]["find_node_membership_checkpoint.go:<package>"] = 1
 	expected["degreeWitness"]["find_node_membership_checkpoint.go:CheckpointForService"] = 1
+	expected["degreeProfile"]["find_node_native_full_responder.go:NewD1NativeFullResponderWithRouteWireCensus"] = 1
 	actual := map[string]map[string]int{}
 	for name := range expected {
 		actual[name] = map[string]int{}

@@ -1,0 +1,437 @@
+{
+  "base_commit": "2188dfb8fcb74174fa4d1df2084784bd07d436bf",
+  "base_tar_sha256": "cb04afdabea95fadba24bc17c60e629336c29268efc54727ff90d86692c489d4",
+  "role_manifest_sha256": "7fd5863447ec0b527e4a3f41e6776a4758f6e3bec3dc8a4e5b1215e6a826acb3",
+  "role": {
+    "Go_QA": "NOT_RUN_ROOT_COORDINATES",
+    "base_commit": "2188dfb8fcb74174fa4d1df2084784bd07d436bf",
+    "candidate_ELF": "NOT_BUILT",
+    "candidate_source_counts": "NOT_INVENTED_REQUIRES_ACTUAL_NEW_SUBJECT_MANIFEST",
+    "diff_sha256": "9dac3b8111071924279e731e8af5a4fa939ee12bc6bd6d604cec75147093a9f9",
+    "files": {
+      "internal/core/findnode/intake_call_guard_test.go": {
+        "after_sha256": "c77dedd300d8e30d62bd6026c2275f7b910c943c650d4e1f01d1edea50b0508a",
+        "before_sha256": "273a7e4b0110d7fe3bd74220e15263805eda1e3fbe2193e952f7346cffafe5cd",
+        "bytes": 26784
+      },
+      "internal/core/node/find_node_automatic_endpoint_trace_guard_test.go": {
+        "after_sha256": "3a5afc1663b6f7de9dc97290be03f4421150ec977a35de8470ad652b820a7cf0",
+        "before_sha256": "ccbf1323397840c304dcc32b562ddbfe581c209389179e9524c313b42c401d35",
+        "bytes": 4178
+      },
+      "internal/core/node/find_node_bridge_capture_guard_test.go": {
+        "after_sha256": "05baac6fd3b6af8f0422ae07e0ccd5028bda03a27b0c76215c3fdd3b969eb1f5",
+        "before_sha256": "b5775f4f3b4d40abad52a5f26ce279bec11ae5d57656dceb45d3715b08815a7b",
+        "bytes": 19851
+      },
+      "internal/core/node/find_node_degree_guard_test.go": {
+        "after_sha256": "380dd02a90a984127d3d2dff2c248cea0e446b694775e5d2c58e28b518746729",
+        "before_sha256": "792b3e051adcdf20b11115167a2d3e81f7a1847c48602943575a593b1f50322f",
+        "bytes": 44304
+      },
+      "internal/core/node/find_node_local_role_guard_test.go": {
+        "after_sha256": "eb2a909f6accb2e283f4910f1de4149d824145f82863d743fa5d047633a9c943",
+        "before_sha256": "3a060b0088e3d1c40c557051d0fe6fa5a5ad0f23c9e2093f5895351b537a2c3c",
+        "bytes": 4447
+      },
+      "internal/core/node/find_node_native_full_responder.go": {
+        "after_sha256": "47d19a41bc3201e30a601ebb764d0e207d67bb379954746fdb8805c6f54dba3e",
+        "before_sha256": null,
+        "bytes": 7027
+      },
+      "internal/core/node/find_node_native_full_responder_guard_test.go": {
+        "after_sha256": "ca7df29c4e50200be12ed365ecd7bb74b1bd9ec4e6b3026b4bcdc3fcfae45894",
+        "before_sha256": null,
+        "bytes": 4626
+      },
+      "internal/core/node/find_node_native_full_responder_test.go": {
+        "after_sha256": "4e21909e8ad7913e98c66c64629f0cc8b7b043b50d501386dded9d524de180fc",
+        "before_sha256": null,
+        "bytes": 6369
+      },
+      "internal/core/node/find_node_owned_capture_guard_test.go": {
+        "after_sha256": "70dd25bd45b474ab90233756939c3ffcb9fe7279038fc57d1e8cf84dea63be05",
+        "before_sha256": "1fa86d00bbe84e2214cae1bab493ce3cd92bc0d47f3fe7e158d68f3291d3d198",
+        "bytes": 9247
+      },
+      "internal/core/node/find_node_owned_flow_guard_test.go": {
+        "after_sha256": "3c2073cd56c6bb20945191873d42ad070ceee744d5cf70aca941f24e7a5bc9d3",
+        "before_sha256": "ef7ea9bf70af5939602b2d1346de0e997bc4b5fd96a6c518b2fe677ceace7325",
+        "bytes": 8002
+      },
+      "internal/core/node/find_node_owned_local_target_guard_test.go": {
+        "after_sha256": "fb9e420965c6a978853f78da87ef4b533165727c4c10b5b53b611d92dad25dfd",
+        "before_sha256": "29c49e574161b7b367941357ed9268df01908b6b47b488bf03f5149e40b3bb49",
+        "bytes": 4913
+      },
+      "internal/core/node/find_node_owned_receive_guard_test.go": {
+        "after_sha256": "bcc0b8e51d5fdaeece6f9b77943a6b9e31dd465e46cce912ce4b398166c18ce2",
+        "before_sha256": "c3c85649c46f75a97c1ea7d50c65b24861c6d32dc8c70be6e97390442aa8d4de",
+        "bytes": 7154
+      },
+      "internal/core/node/find_node_priority_guard_test.go": {
+        "after_sha256": "98671528d0992cb08e87076bad4c2a0229fa553644955c2399684daadfeea58a",
+        "before_sha256": "d80fc75ec3b6942c27144200ded9ccb45575d256e64a1afd7d9acb1ca739805d",
+        "bytes": 7540
+      },
+      "internal/core/node/find_node_ready_construction.go": {
+        "after_sha256": "79872a3bf79626c6ca5071ae2dbfc8cd6451d955a3d7eeaeeb45d20b92c17db5",
+        "before_sha256": "bddfb4bb52e603d57769e55fa0fc4f86a4dec0ee5175579e56959d19c617c9f8",
+        "bytes": 22099
+      },
+      "internal/core/node/find_node_ready_construction_guard_test.go": {
+        "after_sha256": "bfc8352b314a05a7071c25448be08581958bc4cf012ad412c914670a9d94d81e",
+        "before_sha256": "9489704e5c8ceca096cd7168e542ea9176a60eb4195c03bcab5c7322d56865dc",
+        "bytes": 33916
+      },
+      "internal/core/node/find_node_ready_registered_test.go": {
+        "after_sha256": "11b6fbe7eb5d7d2f33785dd7e5040e5b11c3dde3af36597337d2c6aa19bd8630",
+        "before_sha256": null,
+        "bytes": 6306
+      },
+      "internal/core/node/identity_pin_inbound_producer_guard_test.go": {
+        "after_sha256": "4b15c7d04dd8d8cc688147f95d04280decc19883ec2b6cd86e7f3c4ddb10317f",
+        "before_sha256": "54ef5d5541c2e52ed5bcefaf1b087680fb0c70d12318871f76875ceabd90bff3",
+        "bytes": 62664
+      },
+      "internal/core/node/identity_pin_own_dm_guard_test.go": {
+        "after_sha256": "dbba140246d5c5a755be0d5a994ef04319e591c1de03c83b344ead0e0ea88c44",
+        "before_sha256": "b9e101c28add9318481739769718f49207052f411a8939d48617ef256f23b4cb",
+        "bytes": 12748
+      },
+      "internal/core/node/identity_pin_own_dm_runtime_guard_test.go": {
+        "after_sha256": "1951f01548df11f2e169747026d311bd70ca96434d15307ed7f8a89a50fae6ab",
+        "before_sha256": "e1c08f1aa3c48442fc47fdb9119b36f0c87576ac648e6d04530ce7ee1caf1cb2",
+        "bytes": 3510
+      },
+      "internal/core/node/peer_state_degree_statistic_test.go": {
+        "after_sha256": "ed2ea6a00d7ccd1532f876207ed71295fa29cd62aff0c918daaf5275c8877fc0",
+        "before_sha256": "462af6c423d75c6b2a9bcdc5d1aeb9a87b36daa815c81e34938218db631e64b1",
+        "bytes": 29904
+      },
+      "internal/core/node/service.go": {
+        "after_sha256": "7f3a84af24a53296b4ddbb8331f653a1eed05adc3af2a4968e827d33ec597aa4",
+        "before_sha256": "db3c6ab49afae46703dae27a18d8f8a3cc960a0405c6c98949dd94b2babf114f",
+        "bytes": 552008
+      },
+      "internal/testutil/loadstand/c2driver/main_test.go": {
+        "after_sha256": "2c06663de389529e15c2baa5be24a7548d81879e91ad55d29c3e6e08b209fef3",
+        "before_sha256": "5a3fcf9bc438bc652bbbb705d4f70f660d8a53604b61ad66d1f16ab5e5d98a11",
+        "bytes": 21325
+      },
+      "internal/testutil/loadstand/full_public_witness_linux_test.go": {
+        "after_sha256": "b09f549856a84b46e75fca3cdd5f1332a8fcd68865e5ef174c02e5ccfc6cdba3",
+        "before_sha256": "66e0f2728c9875b0cc98b28fbb171fcc823409b9879dc9e5db7bd4d53dacc4f1",
+        "bytes": 9743
+      },
+      "internal/testutil/loadstand/fullnode/main.go": {
+        "after_sha256": "7bebd79ba4f3cad76487f694d3b392122c94aa141622943d576967c6b7fe5eec",
+        "before_sha256": "e373dbfbb9232607c94543857a8d363c45ad961947a23b6dfe67ab3e7fd7fabb",
+        "bytes": 10730
+      },
+      "internal/testutil/loadstand/fullnode/route_wire_factory_responder.go": {
+        "after_sha256": "965dbb9338ffb3e827ddb103635d4e266393bfa9b2f1bb282bb12a6ca6ebc139",
+        "before_sha256": null,
+        "bytes": 1128
+      },
+      "internal/testutil/loadstand/fullnode/route_wire_factory_stock.go": {
+        "after_sha256": "2402c39d8be8a7ee9af1c0b022bfbec404023c472a24211a92734dbf7fecaa42",
+        "before_sha256": null,
+        "bytes": 907
+      }
+    },
+    "forwarding": "NOT_EXERCISED_QUIET_WORKLOAD",
+    "new_tests": {
+      "internal/core/node/find_node_native_full_responder_guard_test.go": [
+        "TestNativeFullResponderTaggedFactorySourceClosure"
+      ],
+      "internal/core/node/find_node_native_full_responder_test.go": [
+        "TestNativeFullResponderOriginalReadyProfileAndDefaults",
+        "TestNativeFullResponderGuardGenuineF1NoPeerRAndRetirement",
+        "TestNativeFullResponderGuardRejectsForeignOriginalBindings",
+        "TestNativeFullResponderGuardNoNegotiatedF1IsUnavailable",
+        "TestNativeFullResponderRejectsForeignNativePlanBeforeConstruction"
+      ],
+      "internal/core/node/find_node_ready_registered_test.go": [
+        "TestOwnedReadyRegisteredCopiedBeforeCallbacks",
+        "TestOwnedReadyRegisteredRejectsReplacementAndRecapture",
+        "TestOwnedReadyRegisteredOrdinaryReadyRemainsAbsent",
+        "TestOwnedReadyRegisteredInvalidTupleRefusedBeforeFirstService",
+        "TestOwnedReadyRegisteredUnrequestedSourceRefusalStaysSticky"
+      ]
+    },
+    "prior_QA": {
+      "Linux_compiles": "NOT_RUN",
+      "cause": "unrebound service.go:newServiceWithConstruction raw body pin; two failing old tests share it",
+      "new_candidate_tests": "NOT_RUN",
+      "status": "STOP_PRESERVED",
+      "work": "/private/tmp/corsa-d1-native-responder-goqa-d95b503510e34389a4690d45a33d0e74"
+    },
+    "prior_QA_v2": {
+      "failed": "TestCandidateInactiveCallGraphAndInventories: exact importer inventory lacked new native tagged root",
+      "new_11_tests_App_Linux_build": "NOT_RUN",
+      "passed_outer_groups": {
+        "findnode_guards": 4,
+        "old_default_regressions": 50,
+        "old_default_roles": 10,
+        "old_tagged_node": 62
+      },
+      "status": "STOP_PRESERVED",
+      "work": "/private/tmp/corsa-d1-native-responder-goqa-c5d95226d3bb4fd8821e5d558ef0a353"
+    },
+    "production_files": 6,
+    "resources_executed": false,
+    "revision": 6,
+    "revision_delta": "Remove instrumentation-only connection.go hash/flags/hasher and shape overlay; reuse original published F1 and immutable Ready. Exact connection pins restored to base; exact new Native source pins rebound. No lifecycle, wire, RPC, traffic or workload expansion.",
+    "runtime_per_session_R_wire": "UNKNOWN_NOT_SAMPLED",
+    "scope": "SOURCE_ONLY_ENABLED_IDLE_CONSTRUCTION_COST_NOT_PUBLIC_ACTIVATION",
+    "source_guards": "NARROW_CAUSAL_UPDATES_PREPARED_PENDING_ACTUAL_GO_READBACK",
+    "supersedes_manifest_sha256": "b677e19ee245cc21607dca65d8e9de309b99f1ed479521d8f4ed65307b73669e",
+    "v4_QA": "NOT_STARTED_SOURCE_PRESERVED",
+    "v5_QA": "NOT_STARTED_FROZEN_SOURCE_PRESERVED"
+  },
+  "tests": {
+    "node-new-default": {
+      "package": "./internal/core/node",
+      "tags": [],
+      "tests": [
+        "TestFindNodeLocalRoleConstructionAndProjection",
+        "TestFindNodeF1OnlyTargetAnswersOwnIdentity",
+        "TestFindNodeF1OnlyTargetCannotForwardOrBorrowPeerR",
+        "TestFindNodeResponderForwardsToF1OnlyTargetInbound",
+        "TestFindNodeResponderToF1OnlyTargetOriginalOutboundCM",
+        "TestFindNodeNoF1AndUnprovenClaimsCannotAdmit",
+        "TestFindNodeLocalRoleBoundToOriginalReadyConstruction",
+        "TestFindNodeRoleDoesNotReviveEndedOriginalF1",
+        "TestFindNodeLocalRoleClosedSource",
+        "TestFindNodeLocalRoleSourceControls"
+      ]
+    },
+    "node-regressions-default": {
+      "package": "./internal/core/node",
+      "tags": [],
+      "tests": [
+        "TestD1FindNodeResourceDiagnosticExistingGuardBoundaries",
+        "TestD1FindNodeResourceDiagnosticOrdinaryFactoriesOff",
+        "TestD1FindNodeResourceDiagnosticSourceClosure",
+        "TestD1OriginalInitiatorReadyRelayReadyTargetChain",
+        "TestDegreeStatisticClosedProducerClockProjectionAndWriter",
+        "TestDegreeStatisticConstructorGraphCannotEscapeBeforeOwner",
+        "TestDegreeStatisticGuardRejectsEarlyOverwriteAndClockEscape",
+        "TestFindNodeActualDefaultCapsWithholdSeed",
+        "TestFindNodeOrdinaryConstructorRemainsInactive",
+        "TestFindNodeOriginalProofCanonicalAcceptedAndCM",
+        "TestOwnDMRuntimeClosedOriginalComposition",
+        "TestOwnDMRuntimeRejectsDefaultActivationAndAlternateMint",
+        "TestOwnedAnswerClosedSource",
+        "TestOwnedAnswerSourceControls",
+        "TestOwnedAutomaticEndpointTraceClosedSource",
+        "TestOwnedAutomaticEndpointTraceSourceControls",
+        "TestOwnedBareV2PilotAdvertisementSourceControls",
+        "TestOwnedBareV2PilotClosedTestOnlyAdvertisement",
+        "TestOwnedBareV2PilotStockAdvertisementUnchanged",
+        "TestOwnedFlowClosedSource",
+        "TestOwnedFlowSourceControls",
+        "TestOwnedLocalNodeClosedSource",
+        "TestOwnedLocalNodeRuntimeConstructionDoesNotEnableReady",
+        "TestOwnedLocalNodeSelfRequestUsesOriginalSignedAnswerWriter",
+        "TestOwnedLocalNodeSourceControls",
+        "TestOwnedNodeCutCancellationAndRealEnd",
+        "TestOwnedNodeCutGenuineListenerAndActualCM",
+        "TestOwnedNodeCutOriginalTupleBeforeBuilderAndRuntimeOff",
+        "TestOwnedNodeObservationClosedSource",
+        "TestOwnedNodeObservationSourceControls",
+        "TestOwnedNodeReceiveClosedSource",
+        "TestOwnedNodeReceiveSourceControls",
+        "TestOwnedReadyCancellationAndPanicJoinOriginalLifecycle",
+        "TestOwnedReadyClosedSource",
+        "TestOwnedReadyContactReconciliationCallbackCleanup",
+        "TestOwnedReadyContactReconciliationLoadedRefusal",
+        "TestOwnedReadyContactReconciliationOptionsAndPublicDefaults",
+        "TestOwnedReadyContactReconciliationOriginalTuple",
+        "TestOwnedReadyDecodedHintPreservesOriginalDateAndNoSecondRead",
+        "TestOwnedReadyLoadedInboundCallbackRefusalJoinsOriginal",
+        "TestOwnedReadyLoadedInboundFinalizationRejectsTupleReplacement",
+        "TestOwnedReadyLoadedInboundRecoveryGuardRefusesBeforeSeal",
+        "TestOwnedReadyOriginalStoreAndFinalizationOrderStayExact",
+        "TestOwnedReadyRuntimeFinalizationAndOriginalGenuineCut",
+        "TestOwnedReadySourceControls",
+        "TestOwnedRoundCandidateRuntimeStillConstructing",
+        "TestOwnedRoundLoopIdleLastRequestReachesOriginalWriter",
+        "TestOwnedRoundLoopRefusedProtectedNewcomerClosesEmptyInterval",
+        "TestOwnedTerminalClosedSourceContract",
+        "TestOwnedTerminalGuardRejectsForeignOriginLateBindingAndClockFallback"
+      ]
+    },
+    "node-selected-tagged": {
+      "package": "./internal/core/node",
+      "tags": [
+        "d1_resource_probe"
+      ],
+      "tests": [
+        "TestD1FindNodeResourceDiagnosticActualConstruction",
+        "TestD1FindNodeResourceDiagnosticExistingGuardBoundaries",
+        "TestD1FindNodeResourceDiagnosticOrdinaryFactoriesOff",
+        "TestD1FindNodeResourceDiagnosticSourceClosure",
+        "TestD1FindNodeResourceDiagnosticWrongOwnerAndClosed",
+        "TestD1OriginalInitiatorReadyRelayReadyTargetChain",
+        "TestDegreeStatisticClosedProducerClockProjectionAndWriter",
+        "TestDegreeStatisticConstructorGraphCannotEscapeBeforeOwner",
+        "TestDegreeStatisticGuardRejectsEarlyOverwriteAndClockEscape",
+        "TestFindNodeActualDefaultCapsWithholdSeed",
+        "TestFindNodeF1OnlyTargetAnswersOwnIdentity",
+        "TestFindNodeF1OnlyTargetCannotForwardOrBorrowPeerR",
+        "TestFindNodeLocalRoleBoundToOriginalReadyConstruction",
+        "TestFindNodeLocalRoleClosedSource",
+        "TestFindNodeLocalRoleConstructionAndProjection",
+        "TestFindNodeLocalRoleSourceControls",
+        "TestFindNodeNoF1AndUnprovenClaimsCannotAdmit",
+        "TestFindNodeOrdinaryConstructorRemainsInactive",
+        "TestFindNodeOriginalProofCanonicalAcceptedAndCM",
+        "TestFindNodeResponderForwardsToF1OnlyTargetInbound",
+        "TestFindNodeResponderToF1OnlyTargetOriginalOutboundCM",
+        "TestFindNodeRoleDoesNotReviveEndedOriginalF1",
+        "TestOwnDMRuntimeClosedOriginalComposition",
+        "TestOwnDMRuntimeRejectsDefaultActivationAndAlternateMint",
+        "TestOwnedAnswerClosedSource",
+        "TestOwnedAnswerSourceControls",
+        "TestOwnedAutomaticEndpointTraceClosedSource",
+        "TestOwnedAutomaticEndpointTraceSourceControls",
+        "TestOwnedBareV2PilotAdvertisementSourceControls",
+        "TestOwnedBareV2PilotClosedTestOnlyAdvertisement",
+        "TestOwnedBareV2PilotStockAdvertisementUnchanged",
+        "TestOwnedFlowClosedSource",
+        "TestOwnedFlowSourceControls",
+        "TestOwnedLocalNodeClosedSource",
+        "TestOwnedLocalNodeRuntimeConstructionDoesNotEnableReady",
+        "TestOwnedLocalNodeSelfRequestUsesOriginalSignedAnswerWriter",
+        "TestOwnedLocalNodeSourceControls",
+        "TestOwnedNodeCutCancellationAndRealEnd",
+        "TestOwnedNodeCutGenuineListenerAndActualCM",
+        "TestOwnedNodeCutOriginalTupleBeforeBuilderAndRuntimeOff",
+        "TestOwnedNodeObservationClosedSource",
+        "TestOwnedNodeObservationSourceControls",
+        "TestOwnedNodeReceiveClosedSource",
+        "TestOwnedNodeReceiveSourceControls",
+        "TestOwnedReadyCancellationAndPanicJoinOriginalLifecycle",
+        "TestOwnedReadyClosedSource",
+        "TestOwnedReadyContactReconciliationCallbackCleanup",
+        "TestOwnedReadyContactReconciliationLoadedRefusal",
+        "TestOwnedReadyContactReconciliationOptionsAndPublicDefaults",
+        "TestOwnedReadyContactReconciliationOriginalTuple",
+        "TestOwnedReadyDecodedHintPreservesOriginalDateAndNoSecondRead",
+        "TestOwnedReadyLoadedInboundCallbackRefusalJoinsOriginal",
+        "TestOwnedReadyLoadedInboundFinalizationRejectsTupleReplacement",
+        "TestOwnedReadyLoadedInboundRecoveryGuardRefusesBeforeSeal",
+        "TestOwnedReadyOriginalStoreAndFinalizationOrderStayExact",
+        "TestOwnedReadyRuntimeFinalizationAndOriginalGenuineCut",
+        "TestOwnedReadySourceControls",
+        "TestOwnedRoundCandidateRuntimeStillConstructing",
+        "TestOwnedRoundLoopIdleLastRequestReachesOriginalWriter",
+        "TestOwnedRoundLoopRefusedProtectedNewcomerClosesEmptyInterval",
+        "TestOwnedTerminalClosedSourceContract",
+        "TestOwnedTerminalGuardRejectsForeignOriginLateBindingAndClockFallback"
+      ]
+    },
+    "findnode-guards": {
+      "package": "./internal/core/findnode",
+      "tags": [],
+      "tests": [
+        "TestCandidateInactiveCallGraphAndInventories",
+        "TestCandidateSourceCompanionClosedRoots",
+        "TestCandidateSourceTypeReferencesAndDeclarations",
+        "TestCandidateCapacityClosedRootsAndLogicalBoundary",
+        "TestCandidateCapacityGuardRejectsActivationAndMissingFinalCheck"
+      ]
+    },
+    "bridge-guards": {
+      "package": "./internal/core/findnodebridge",
+      "tags": [],
+      "tests": [
+        "TestDomainClosedSourceContract",
+        "TestDomainGuardRejectsCriticalOwnershipEscapes",
+        "TestDomainHasNoExistingProductionImporter",
+        "TestDomainGuardRejectsLateCommitLeaseAllocation"
+      ]
+    },
+    "c2driver-guard": {
+      "package": "./internal/testutil/loadstand/c2driver",
+      "tags": [],
+      "tests": [
+        "TestStockSourceClosure"
+      ]
+    },
+    "app-binding-tagged": {
+      "package": "./internal/app/node",
+      "tags": [
+        "d1_resource_probe"
+      ],
+      "tests": [
+        "TestD1FindNodeResourceDiagnosticAppBinding"
+      ]
+    },
+    "node-read-offer-default": {
+      "package": "./internal/core/node",
+      "tags": [],
+      "tests": [
+        "TestOwnedReceiveGenuineOriginalPointAndSingleUse",
+        "TestOwnedReceiveStrictParserReturnsNoPartialIngress",
+        "TestOwnedReceiveForeignOwnerAndEndedOriginalRefuse",
+        "TestOwnedReceiveCancellationRetiresOriginalEnvelope",
+        "TestOwnedInboundReadToOfferRetainsOriginalRow",
+        "TestOwnedOutboundReadToOfferUsesActualCMAcceptedOriginal",
+        "TestOwnedOutboundReceivePointPrecedesOriginalAdmissionMutexWait"
+      ]
+    },
+    "node-read-offer-tagged": {
+      "package": "./internal/core/node",
+      "tags": [
+        "d1_resource_probe"
+      ],
+      "tests": [
+        "TestOwnedReceiveGenuineOriginalPointAndSingleUse",
+        "TestOwnedReceiveStrictParserReturnsNoPartialIngress",
+        "TestOwnedReceiveForeignOwnerAndEndedOriginalRefuse",
+        "TestOwnedReceiveCancellationRetiresOriginalEnvelope",
+        "TestOwnedInboundReadToOfferRetainsOriginalRow",
+        "TestOwnedOutboundReadToOfferUsesActualCMAcceptedOriginal",
+        "TestOwnedOutboundReceivePointPrecedesOriginalAdmissionMutexWait"
+      ]
+    },
+    "candidate-new-default": {
+      "package": "./internal/core/node",
+      "tags": [],
+      "tests": [
+        "TestNativeFullResponderTaggedFactorySourceClosure",
+        "TestOwnedReadyRegisteredCopiedBeforeCallbacks",
+        "TestOwnedReadyRegisteredRejectsReplacementAndRecapture",
+        "TestOwnedReadyRegisteredOrdinaryReadyRemainsAbsent",
+        "TestOwnedReadyRegisteredInvalidTupleRefusedBeforeFirstService",
+        "TestOwnedReadyRegisteredUnrequestedSourceRefusalStaysSticky"
+      ]
+    },
+    "candidate-new-tagged": {
+      "package": "./internal/core/node",
+      "tags": [
+        "d1_resource_probe",
+        "d1_o1a_native_responder"
+      ],
+      "tests": [
+        "TestNativeFullResponderTaggedFactorySourceClosure",
+        "TestNativeFullResponderOriginalReadyProfileAndDefaults",
+        "TestNativeFullResponderGuardGenuineF1NoPeerRAndRetirement",
+        "TestNativeFullResponderGuardRejectsForeignOriginalBindings",
+        "TestNativeFullResponderGuardNoNegotiatedF1IsUnavailable",
+        "TestNativeFullResponderRejectsForeignNativePlanBeforeConstruction",
+        "TestOwnedReadyRegisteredCopiedBeforeCallbacks",
+        "TestOwnedReadyRegisteredRejectsReplacementAndRecapture",
+        "TestOwnedReadyRegisteredOrdinaryReadyRemainsAbsent",
+        "TestOwnedReadyRegisteredInvalidTupleRefusedBeforeFirstService",
+        "TestOwnedReadyRegisteredUnrequestedSourceRefusalStaysSticky"
+      ]
+    }
+  },
+  "helper_sha256": "1e703c9856b281979bb63f12df11a7c5f0d50152001ff8a557f1b44289a669cc",
+  "common_sha256": "2fa268e62081939cd4632b8a8deb59b2fe7d29e859b53769d59f552305a1ef33",
+  "seatbelt": "(version 1)(allow default)(deny network*)(allow network-inbound (local ip \"localhost:*\"))(allow network-outbound (remote ip \"localhost:*\"))(deny file-write* (subpath \"/private/tmp/corsa-d1-native-responder-goqa-bbc0b7455f5a4a269692df9953b0c93f/source\"))"
+}

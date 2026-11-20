@@ -88,6 +88,7 @@ func run(ctx context.Context) (result error) {
 	var service *node.Service
 	var census *node.RegisteredProvenV2Observation
 	var unstartedCleanup context.CancelFunc
+	var candidateLiveGuard func([]node.RouteWireCensusEndpoint, time.Duration, time.Duration) error
 	var bounds loadstand.RouteWireWindowBounds
 	if plan.RouteWire != nil {
 		bounds = plan.RouteWire.Bounds
@@ -95,7 +96,7 @@ func run(ctx context.Context) (result error) {
 	if bounds == (loadstand.RouteWireWindowBounds{}) {
 		service, unstartedCleanup = node.NewServiceForRuntime(cfg, own, ebus.New())
 	} else {
-		service, census, unstartedCleanup, err = node.NewLoadstandFullNodeWithRouteWireCensus(cfg, own, ebus.New(), plan.RouteWire.MaxEndpoints, [32]byte(plan.RouteWire.Window), plan.RouteWire.SeedRoutes, plan.RouteWire.DialRole)
+		service, census, unstartedCleanup, candidateLiveGuard, err = newRouteWireFullNode(cfg, own, ebus.New(), plan.RouteWire.MaxEndpoints, [32]byte(plan.RouteWire.Window), plan.RouteWire.SeedRoutes, plan.RouteWire.DialRole)
 		if err != nil {
 			return err
 		}
@@ -147,6 +148,11 @@ func run(ctx context.Context) (result error) {
 			rows, err := census.RouteWireCensus(bounds.Begin, bounds.End)
 			if err != nil {
 				return nil, err
+			}
+			if candidateLiveGuard != nil {
+				if err := candidateLiveGuard(rows, bounds.Begin, bounds.End); err != nil {
+					return nil, err
+				}
 			}
 			if plan.RouteWire.FullReceiptRouteBudget > 0 {
 				if err := service.CaptureLoadstandRouteWireFullReceipts(); err != nil {

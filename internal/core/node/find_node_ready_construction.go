@@ -16,7 +16,15 @@ import (
 // once; the builder may order its peers, but never rereads/renews the hint.
 // Copied selection is immutable through finalization. The optional clock uses
 // only the existing pre-store constructor seam; production leaves it absent.
+// Closed copied allocation tuple. No clock, callback, Service or external authority.
+type findNodeReadyRegistered struct {
+	OwnerCapacity, HistoryCapacity int
+	Instance                       [16]byte
+	Window                         [32]byte
+}
+
 type findNodeReadyOptions struct {
+	registered            *findNodeReadyRegistered
 	ownDM                 *ownDMRuntimeConstruction
 	loadedInbound         bool
 	contactReconciliation bool
@@ -24,38 +32,47 @@ type findNodeReadyOptions struct {
 }
 
 type findNodeReadyConstruction struct {
-	localRole                findNodeLocalRole
-	originalLocalRole        findNodeLocalRole
-	bridge                   *findNodeTerminalConstruction
-	originalContext          context.Context
-	originalCancel           context.CancelFunc
-	originalCapture          findNodeBridgeCaptureContext
-	originalTerminal         *findNodeBridgeTerminal
-	originalPublisher        findnodebridge.Publisher
-	originalOwner            *degreeOwner
-	originalToken            *proofTransportServiceToken
-	originalStatistic        *ownedDegreeStatisticProducer
-	peerState                peerStateFile
-	service                  *Service
-	trust                    *trustStore
-	store                    *secureSessionStore
-	sessions                 *secureSessions
-	failure                  error
-	checked                  bool
-	finalized                bool
-	ownDMRuntime             *ownDMRuntimeConstruction
-	originalOwnDMRuntime     ownDMRuntimeConstruction
-	options                  findNodeReadyOptions
-	originalOptions          findNodeReadyOptions
-	originalInbound          *inboundPinProducer
-	originalInboundService   *Service
-	originalInboundStore     *secureSessionStore
-	originalInboundWake      chan struct{}
-	originalContactResolver  *identityResolver
-	originalContactAdmission *relationRecordAdmission
-	originalContactProducer  *contactPinProducer
-	originalContactService   *Service
-	originalContactWake      chan struct{}
+	originalRegisteredIdentity *identity.Identity
+	originalRegisteredAddress  string
+	originalRegisteredDone     <-chan struct{}
+	registeredCaptured         bool
+	registeredCaptureFailed    bool
+	originalRegisteredValue    findNodeReadyRegistered
+	registeredRequest          *k3RegisteredRequest
+	originalRegisteredSource   *k3RegisteredSource
+	originalRegisteredService  *Service
+	localRole                  findNodeLocalRole
+	originalLocalRole          findNodeLocalRole
+	bridge                     *findNodeTerminalConstruction
+	originalContext            context.Context
+	originalCancel             context.CancelFunc
+	originalCapture            findNodeBridgeCaptureContext
+	originalTerminal           *findNodeBridgeTerminal
+	originalPublisher          findnodebridge.Publisher
+	originalOwner              *degreeOwner
+	originalToken              *proofTransportServiceToken
+	originalStatistic          *ownedDegreeStatisticProducer
+	peerState                  peerStateFile
+	service                    *Service
+	trust                      *trustStore
+	store                      *secureSessionStore
+	sessions                   *secureSessions
+	failure                    error
+	checked                    bool
+	finalized                  bool
+	ownDMRuntime               *ownDMRuntimeConstruction
+	originalOwnDMRuntime       ownDMRuntimeConstruction
+	options                    findNodeReadyOptions
+	originalOptions            findNodeReadyOptions
+	originalInbound            *inboundPinProducer
+	originalInboundService     *Service
+	originalInboundStore       *secureSessionStore
+	originalInboundWake        chan struct{}
+	originalContactResolver    *identityResolver
+	originalContactAdmission   *relationRecordAdmission
+	originalContactProducer    *contactPinProducer
+	originalContactService     *Service
+	originalContactWake        chan struct{}
 }
 
 func prepareFindNodeReadyConstruction(cfg config.Node, id *identity.Identity, profile findNodeBridgeProfile, signing findnode.SigningProfile, timing ...findnode.OwnedTargetTimingProfile) (*findNodeReadyConstruction, error) {
@@ -181,6 +198,17 @@ func (r *findNodeReadyConstruction) buildWithOptions(cfg config.Node, id *identi
 	if options.signingGate != nil && !options.signingGate.bindings() {
 		return nil, findnode.ErrInvalid
 	}
+	// Copy the private scalar tuple BEFORE the first Service/observer callback.
+	if options.registered != nil {
+		value := *options.registered
+		if value.OwnerCapacity < 1 || value.OwnerCapacity > k3RegisteredMaxOwners || value.HistoryCapacity < 1 || value.HistoryCapacity > k3RegisteredMaxHistory || value.Instance == ([16]byte{}) || value.Window == ([32]byte{}) || r.localRole != findNodeRoleResponder || cfg.Type != config.NodeTypeFull {
+			return nil, findnode.ErrInvalid
+		}
+		options.registered = &value
+		r.originalRegisteredValue = value
+		// nil elapsed deliberately selects original trustedclock.SinceBoot.
+		r.registeredRequest = &k3RegisteredRequest{OwnerCapacity: value.OwnerCapacity, HistoryCapacity: value.HistoryCapacity, Instance: value.Instance, routeWireScope: value.Window}
+	}
 	r.options, r.originalOptions = options, options
 	r.bridge.capture.localLoop.signingGate = options.signingGate
 	r.ownDMRuntime = options.ownDM
@@ -191,7 +219,7 @@ func (r *findNodeReadyConstruction) buildWithOptions(cfg config.Node, id *identi
 	if options.contactReconciliation {
 		record = recordAdmissionConstruction{classes: recordAdmissionImmediateK, kSource: contactRecordReconciliationSource}
 	}
-	s := newServiceWithConstruction(cfg, id, bus, nil, constructor, serviceConstruction{record: record, bridge: r.bridge, ready: r, localFindNodeRole: r.localRole}, clocks...)
+	s := newServiceWithConstruction(cfg, id, bus, nil, constructor, serviceConstruction{record: record, bridge: r.bridge, ready: r, localFindNodeRole: r.localRole, k3Registered: r.registeredRequest}, clocks...)
 	if r.failure != nil {
 		return nil, r.failure
 	}
@@ -223,6 +251,9 @@ func (r *findNodeReadyConstruction) bindings(s *Service) bool {
 		return false
 	}
 	if r.localRole != r.originalLocalRole || !r.localRole.validFor(s.cfg.Type) || s.localFindNodeRole != r.localRole || r.bridge.capture == nil || r.bridge.capture.localLoop == nil || r.options != r.originalOptions || r.ownDMRuntime != r.originalOptions.ownDM || r.bridge.capture.localLoop.signingGate != r.originalOptions.signingGate || (r.originalOptions.signingGate != nil && !r.originalOptions.signingGate.bindings()) {
+		return false
+	}
+	if !r.registeredBindings(s) {
 		return false
 	}
 	if r.originalOptions.contactReconciliation {
@@ -257,6 +288,52 @@ func (r *findNodeReadyConstruction) bindings(s *Service) bool {
 		return false
 	}
 	return b.ctx == r.originalContext && *c == r.originalCapture && b.terminal == r.originalTerminal && b.terminal.publisher == r.originalPublisher && b.owner == r.originalOwner && b.token == r.originalToken && b.statistic == r.originalStatistic && s == r.service && s.runCtx == b.ctx && s.runCtx.Done() == b.ctx.Done() && s.runCancel != nil && s.proofToken == b.token && s.degree == b.owner && s.bridgeTerminal == b.terminal && b.owner.token == b.token && b.owner.bridgePublisher == b.terminal.publisher && b.terminal.owner == b.owner && b.terminal.token == b.token && s.findNode == b.findNode && s.findNode.owned.done == b.ctx.Done() && s.findNode.owned.terminal == b.terminal && s.bridgeCapture == c && c.terminal == b.terminal && c.consumer.IsRuntime() && c.observer != (findnodebridge.Observer{}) && c.intake != (findnode.DormantIntake{}) && c.sink != (findnode.ObservationSink{}) && c.roundLoop != nil && c.roundLoop.done == b.ctx.Done() && c.localLoop != nil && c.localLoop.done == b.ctx.Done() && c.localTarget != (findnode.OwnedLocalTarget{}) && s.findNode.owned.retirement == c.intake && s.findNode.owned.localRetirement == c.localTarget && s.ownedDegreeStatisticProducer == b.statistic && b.statistic.owner == b.owner && b.statistic.publisher == b.terminal.publisher && s.trust != nil && s.trust == r.trust && s.trust.trustPublisher == b.terminal.publisher && s.secureSessions != nil && s.secureSessions == r.sessions && s.secureSessions.store != nil && s.secureSessions.store == r.store && s.secureSessions.store.pinPublisher == b.terminal.publisher
+}
+
+// Captures only the source installed in the original first-Service path, before
+// any builder callback. This does not allocate/install a second observer.
+func (r *findNodeReadyConstruction) captureRegisteredSource(s *Service) {
+	if r == nil {
+		return
+	}
+	if s == nil || s != r.service || r.registeredCaptured || r.originalRegisteredSource != nil || r.originalRegisteredService != nil {
+		r.registeredCaptureFailed = true
+		r.failure = findnode.ErrNotReady
+		return
+	}
+	r.registeredCaptured = true
+	if r.originalOptions.registered == nil {
+		if s.k3Registered != nil {
+			r.registeredCaptureFailed = true
+			r.failure = findnode.ErrNotReady
+		}
+		return
+	}
+	if s.identity == nil || s.identity.Address == "" || s.runCtx == nil || s.runCtx != r.originalContext || s.runCtx.Done() == nil {
+		r.registeredCaptureFailed = true
+		r.failure = findnode.ErrNotReady
+		return
+	}
+	r.originalRegisteredIdentity, r.originalRegisteredAddress, r.originalRegisteredDone = s.identity, s.identity.Address, s.runCtx.Done()
+	r.originalRegisteredSource, r.originalRegisteredService = s.k3Registered, s
+	if !r.registeredBindings(s) {
+		r.registeredCaptureFailed = true
+		r.failure = findnode.ErrNotReady
+	}
+}
+func (r *findNodeReadyConstruction) registeredBindings(s *Service) bool {
+	if r == nil || s == nil || !r.registeredCaptured || r.registeredCaptureFailed {
+		return false
+	}
+	if r.originalOptions.registered == nil {
+		return r.options.registered == nil && r.originalRegisteredValue == (findNodeReadyRegistered{}) && r.registeredRequest == nil && r.originalRegisteredSource == nil && r.originalRegisteredService == nil && r.originalRegisteredIdentity == nil && r.originalRegisteredAddress == "" && r.originalRegisteredDone == nil && s.k3Registered == nil
+	}
+	if r.options.registered == nil {
+		return false
+	}
+	v := r.originalRegisteredValue
+	q, source := r.registeredRequest, r.originalRegisteredSource
+	return r.originalRegisteredIdentity != nil && s.identity == r.originalRegisteredIdentity && s.identity.Address == r.originalRegisteredAddress && r.originalRegisteredDone != nil && s.runCtx != nil && s.runCtx == r.originalContext && s.runCtx.Done() == r.originalRegisteredDone && r.originalContext.Done() == r.originalRegisteredDone && r.options.registered == r.originalOptions.registered && *r.options.registered == v && q != nil && q.elapsed == nil && q.OwnerCapacity == v.OwnerCapacity && q.HistoryCapacity == v.HistoryCapacity && q.Instance == v.Instance && q.routeWireScope == v.Window && source != nil && r.originalRegisteredService == s && s.k3Registered == source && source.instance == v.Instance && source.routeWireScope == v.Window && source.ownerCapacity == v.OwnerCapacity && len(source.history) == v.HistoryCapacity
 }
 
 // Called after ordinary constructor callbacks and BEFORE statistic install.

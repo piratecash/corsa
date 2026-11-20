@@ -18,7 +18,7 @@ import (
 var ownDMClosedReferences = map[string]map[r2aReferenceSite]int{
 	"NewInactiveOwnDMProvenanceCandidate": {},
 	"NewServiceForRuntime":                {{"sdk/runtime.go", "newWithContext"}: 1},
-	"newUnstartedRuntimeCleanup":          {{"node/runtime_unstarted_cleanup.go", "NewServiceForRuntime"}: 1, {"node/runtime_unstarted_cleanup.go", "NewLoadstandFullNodeWithRouteWireCensus"}: 1, {"node/identity_pin_own_dm_runtime.go", "NewInactiveOwnDMRuntimeCandidate"}: 1},
+	"newUnstartedRuntimeCleanup":          {{"node/runtime_unstarted_cleanup.go", "NewServiceForRuntime"}: 1, {"node/runtime_unstarted_cleanup.go", "NewLoadstandFullNodeWithRouteWireCensus"}: 1, {"node/find_node_native_full_responder.go", "NewD1NativeFullResponderWithRouteWireCensus"}: 1, {"node/identity_pin_own_dm_runtime.go", "NewInactiveOwnDMRuntimeCandidate"}: 1},
 	"NewInactiveOwnDMRuntimeCandidate":    {{"sdk/runtime.go", "newWithContext"}: 1},
 	"newOwnDMAdmissionPort":               {{"node/identity_record_admission_own_dm.go", "NewInactiveOwnDMAdmissionCandidate"}: 1, {"node/identity_pin_own_dm_runtime.go", "install"}: 1},
 	"newWithOwnDMRuntime":                 {},

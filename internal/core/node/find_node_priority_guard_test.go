@@ -26,6 +26,7 @@ func c5SourceErrors(sources map[string][]byte) []string {
 	}
 	expected["findNodePriorityProfile"]["identity_pin_own_dm_runtime.go:NewInactiveOwnDMRuntimeCandidate"] = 1
 	expected["findNodePriorityProfile"]["find_node_resource_diagnostic.go:NewD1FindNodeResourceDiagnostic"] = 1
+	expected["findNodePriorityProfile"]["find_node_native_full_responder.go:NewD1NativeFullResponderWithRouteWireCensus"] = 1
 	actual := map[string]map[string]int{}
 	for name := range expected {
 		actual[name] = map[string]int{}

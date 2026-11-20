@@ -1,0 +1,866 @@
+{
+  "FAIL_SKIP": "NONE",
+  "RAW": [
+    {
+      "bytes": 0,
+      "file": "archive.stdout",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 0,
+      "file": "archive.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 33,
+      "file": "go-version.stdout",
+      "sha256": "c6f1c8d54aedc3afa72560d934397ad6c33b28f1b4d3546ec53176439b2397d5"
+    },
+    {
+      "bytes": 0,
+      "file": "go-version.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 21,
+      "file": "modules.stdout",
+      "sha256": "b4537ed75f533f993f371954de47e42a793b8e5b0587577de7e27fb3e50696bd"
+    },
+    {
+      "bytes": 0,
+      "file": "modules.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 27710,
+      "file": "node-new-default.stdout",
+      "sha256": "2db83ca196f1e699dddf2c5882964b2023d5258df29d17b39731a7fcf8a72d5d"
+    },
+    {
+      "bytes": 0,
+      "file": "node-new-default.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 174100,
+      "file": "node-regressions-default.stdout",
+      "sha256": "aeb90a639baceb37be7e776bf84addb671639f3657302b04cc108b4c7dbf6cf5"
+    },
+    {
+      "bytes": 0,
+      "file": "node-regressions-default.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 203088,
+      "file": "node-selected-tagged.stdout",
+      "sha256": "4a4f1155b39931c4a9cbdc42b961c8ec5ee8dcdf597869f527f4d80898efe15d"
+    },
+    {
+      "bytes": 0,
+      "file": "node-selected-tagged.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 7445,
+      "file": "findnode-guards.stdout",
+      "sha256": "e982a9790c6f8652438b601189876f7efe2390404675e1568acab9da4764b522"
+    },
+    {
+      "bytes": 0,
+      "file": "findnode-guards.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 15760,
+      "file": "bridge-guards.stdout",
+      "sha256": "0f59afd54a5d536da87fd7615c9a26d7fd8df8ec1b4c27d5cf2f2a2c770dafba"
+    },
+    {
+      "bytes": 0,
+      "file": "bridge-guards.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 1530,
+      "file": "c2driver-guard.stdout",
+      "sha256": "cbeea75e75ffe865f920783ec4319bdb3ef357fee0043e28a715c95a65864811"
+    },
+    {
+      "bytes": 0,
+      "file": "c2driver-guard.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 1919,
+      "file": "app-binding-tagged.stdout",
+      "sha256": "1436486803cd7efa46071129ee9b04ad0d631a107d2c7cb2c558bf44e0ad899e"
+    },
+    {
+      "bytes": 0,
+      "file": "app-binding-tagged.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 7215,
+      "file": "node-read-offer-default.stdout",
+      "sha256": "5ce39b2d36fc22e234ea3034cbb4c225799b1d1558ceb176aaf328ee2954c043"
+    },
+    {
+      "bytes": 0,
+      "file": "node-read-offer-default.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 7218,
+      "file": "node-read-offer-tagged.stdout",
+      "sha256": "c8f730a7ddcc3710a1706cdc87e812f6cfc866cecbb8a2031026f5fa5d1e3ab2"
+    },
+    {
+      "bytes": 0,
+      "file": "node-read-offer-tagged.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 19742,
+      "file": "candidate-new-default.stdout",
+      "sha256": "45aef872f1093fbbc7396542ed865130bdc3643ba4d934b03c5bcb9fa5c580a1"
+    },
+    {
+      "bytes": 0,
+      "file": "candidate-new-default.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 41397,
+      "file": "candidate-new-tagged.stdout",
+      "sha256": "9de9e0bc1684f79aafd7983bb9ea89476547b765269347951250b59422502e35"
+    },
+    {
+      "bytes": 0,
+      "file": "candidate-new-tagged.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 0,
+      "file": "node-linux-compile.stdout",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 0,
+      "file": "node-linux-compile.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 2646,
+      "file": "node-metadata.stdout",
+      "sha256": "e68b30312dcd6993329fcbce6ac4839a6295fd61747fd2a66b9974a7fa367e5b"
+    },
+    {
+      "bytes": 0,
+      "file": "node-metadata.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 0,
+      "file": "app-linux-compile.stdout",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 0,
+      "file": "app-linux-compile.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 2391,
+      "file": "app-metadata.stdout",
+      "sha256": "63b1cf7414821179c21e43bb86dc2e973d21c66f3de0ef8806a8a950ee4c7d0a"
+    },
+    {
+      "bytes": 0,
+      "file": "app-metadata.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 0,
+      "file": "fullnode-linux-compile.stdout",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 0,
+      "file": "fullnode-linux-compile.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 2410,
+      "file": "fullnode-metadata.stdout",
+      "sha256": "680ee38ddab15e418861556101e8aaae864d09a898316abb454082e10a3c42f0"
+    },
+    {
+      "bytes": 0,
+      "file": "fullnode-metadata.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  ],
+  "actor": "REVIEWER",
+  "artifacts": {
+    "app": {
+      "actual_embedded_dependencies": [
+        [
+          "github.com/dustin/go-humanize",
+          "v1.1.0",
+          "h1:dbKTrvD0klcbBV/h4AWJdMuZogJACoMlvWIWZ5b2xWg="
+        ],
+        [
+          "github.com/gofiber/fiber/v3",
+          "v3.7.0",
+          "h1:aF+GfB7nP9Dd0wVsv6wmr8675v66OGfjSyoDhPmvKEo="
+        ],
+        [
+          "github.com/gofiber/schema",
+          "v1.9.4",
+          "h1:IVNXN2WyVHmUn/S186e/rdnGlb1LFrhZ1hjndTYvn8w="
+        ],
+        [
+          "github.com/gofiber/utils/v2",
+          "v2.6.5",
+          "h1:rU+8ao6LKi3fKOA3sEjfLv1T+2C2IwomeVmEKaqkr4A="
+        ],
+        [
+          "github.com/google/uuid",
+          "v1.6.0",
+          "h1:NIvaJDMOsjHA8n1jAhLSgzrAzy1Hgr+hNrb57e+94F0="
+        ],
+        [
+          "github.com/klauspost/compress",
+          "v1.20.4",
+          "h1:dD0v/bvxtjCBqQu6sx1TNWkalEY5lNTIe+HY9w8TeNI="
+        ],
+        [
+          "github.com/mattn/go-colorable",
+          "v0.1.16",
+          "h1:+2YjeAe7xP1OQbZW1jERPWWCDLlNqFNCvjiqGiAt84A="
+        ],
+        [
+          "github.com/mattn/go-isatty",
+          "v0.0.24",
+          "h1:tGZZoVgT/KiqK1c8ocVLeDS8BSWMRd47J3Lbz7vsReI="
+        ],
+        [
+          "github.com/molecule-man/go-brrr",
+          "v1.3.1",
+          "h1:EwaJUzRIlp/dFmIpzq4J17CA5Zi5OHo2vOGmu09hF1w="
+        ],
+        [
+          "github.com/philhofer/fwd",
+          "v1.2.1",
+          "h1:UtpS73q8bFgy/yH3gCq8LSNvj5gv/FowNOiWZa7uKwQ="
+        ],
+        [
+          "github.com/remyoudompheng/bigfft",
+          "v0.0.0-20230129092748-24d4a6f8daec",
+          "h1:W09IVJc94icq4NjY3clb7Lk8O1qJ8BdBEF8z0ibU0rE="
+        ],
+        [
+          "github.com/rs/zerolog",
+          "v1.35.1",
+          "h1:m7xQeoiLIiV0BCEY4Hs+j2NG4Gp2o2KPKmhnnLiazKI="
+        ],
+        [
+          "github.com/tinylib/msgp",
+          "v1.6.5",
+          "h1:iAH6XTP7BpzErjBZlujJQXxA+GmRi2YWs6M4KdLtNbE="
+        ],
+        [
+          "github.com/valyala/bytebufferpool",
+          "v1.0.0",
+          "h1:GqA5TC/0021Y/b9FG4Oi9Mr3q7XYx6KllzawFIhcdPw="
+        ],
+        [
+          "github.com/valyala/fasthttp",
+          "v1.78.0",
+          "h1:tKfLdx7cD8HZOTP1wc2OpbQMbgO1HP12J0y/XMdyW6Q="
+        ],
+        [
+          "golang.org/x/crypto",
+          "v0.59.0",
+          "h1:xS2jhqYbzNrpvkWP2YTDf4TJwBy3ykR03i8vFDxEc7c="
+        ],
+        [
+          "golang.org/x/net",
+          "v0.62.0",
+          "h1:18ELalfM5+XNRwzM2nYqXsZQ9ByS1uhj2O/U7+5jqRY="
+        ],
+        [
+          "golang.org/x/sys",
+          "v0.50.0",
+          "h1:dkKZEFTEKaLr1sjhs0WiKqoi8Jj5nHbS3Njmx1UoMJs="
+        ],
+        [
+          "golang.org/x/text",
+          "v0.44.0",
+          "h1:YItdp/mQNGnsmrgpcdA5yQ3bnRxCfo/Tj/iByGW9GGo="
+        ],
+        [
+          "modernc.org/libc",
+          "v1.81.0",
+          "h1:Kx11pb+4ETDPgkN9P6nHNTeVfrS+1w46LoIDbYcZEtM="
+        ],
+        [
+          "modernc.org/mathutil",
+          "v1.7.1",
+          "h1:GCZVGXdaN8gTqB1Mf/usp1Y/hSqgI2vAGGP4jZMCxOU="
+        ],
+        [
+          "modernc.org/memory",
+          "v1.12.1",
+          "h1:nFMiWrpStgZczNl6XI9GnIk/rWhYIyHGUaR04pGbp9g="
+        ],
+        [
+          "modernc.org/sqlite",
+          "v1.62.0",
+          "h1:gMaCjSM1qpl+iOjiWhR1LYP3zqrYDI+5GYLGt6veP2g="
+        ]
+      ],
+      "bytes": 33483142,
+      "dependency_count": 23,
+      "executed": false,
+      "go_version": "go1.27.4",
+      "sha256": "7f1907f620746cf4efa29a74e616c03320c9ee7d2cbdc07d199b9746d7bf399c",
+      "static_linux_arm64": true
+    },
+    "fullnode": {
+      "actual_embedded_dependencies": [
+        [
+          "github.com/dustin/go-humanize",
+          "v1.1.0",
+          "h1:dbKTrvD0klcbBV/h4AWJdMuZogJACoMlvWIWZ5b2xWg="
+        ],
+        [
+          "github.com/gofiber/fiber/v3",
+          "v3.7.0",
+          "h1:aF+GfB7nP9Dd0wVsv6wmr8675v66OGfjSyoDhPmvKEo="
+        ],
+        [
+          "github.com/gofiber/schema",
+          "v1.9.4",
+          "h1:IVNXN2WyVHmUn/S186e/rdnGlb1LFrhZ1hjndTYvn8w="
+        ],
+        [
+          "github.com/gofiber/utils/v2",
+          "v2.6.5",
+          "h1:rU+8ao6LKi3fKOA3sEjfLv1T+2C2IwomeVmEKaqkr4A="
+        ],
+        [
+          "github.com/google/uuid",
+          "v1.6.0",
+          "h1:NIvaJDMOsjHA8n1jAhLSgzrAzy1Hgr+hNrb57e+94F0="
+        ],
+        [
+          "github.com/klauspost/compress",
+          "v1.20.4",
+          "h1:dD0v/bvxtjCBqQu6sx1TNWkalEY5lNTIe+HY9w8TeNI="
+        ],
+        [
+          "github.com/mattn/go-colorable",
+          "v0.1.16",
+          "h1:+2YjeAe7xP1OQbZW1jERPWWCDLlNqFNCvjiqGiAt84A="
+        ],
+        [
+          "github.com/mattn/go-isatty",
+          "v0.0.24",
+          "h1:tGZZoVgT/KiqK1c8ocVLeDS8BSWMRd47J3Lbz7vsReI="
+        ],
+        [
+          "github.com/molecule-man/go-brrr",
+          "v1.3.1",
+          "h1:EwaJUzRIlp/dFmIpzq4J17CA5Zi5OHo2vOGmu09hF1w="
+        ],
+        [
+          "github.com/philhofer/fwd",
+          "v1.2.1",
+          "h1:UtpS73q8bFgy/yH3gCq8LSNvj5gv/FowNOiWZa7uKwQ="
+        ],
+        [
+          "github.com/remyoudompheng/bigfft",
+          "v0.0.0-20230129092748-24d4a6f8daec",
+          "h1:W09IVJc94icq4NjY3clb7Lk8O1qJ8BdBEF8z0ibU0rE="
+        ],
+        [
+          "github.com/rs/zerolog",
+          "v1.35.1",
+          "h1:m7xQeoiLIiV0BCEY4Hs+j2NG4Gp2o2KPKmhnnLiazKI="
+        ],
+        [
+          "github.com/tinylib/msgp",
+          "v1.6.5",
+          "h1:iAH6XTP7BpzErjBZlujJQXxA+GmRi2YWs6M4KdLtNbE="
+        ],
+        [
+          "github.com/valyala/bytebufferpool",
+          "v1.0.0",
+          "h1:GqA5TC/0021Y/b9FG4Oi9Mr3q7XYx6KllzawFIhcdPw="
+        ],
+        [
+          "github.com/valyala/fasthttp",
+          "v1.78.0",
+          "h1:tKfLdx7cD8HZOTP1wc2OpbQMbgO1HP12J0y/XMdyW6Q="
+        ],
+        [
+          "golang.org/x/crypto",
+          "v0.59.0",
+          "h1:xS2jhqYbzNrpvkWP2YTDf4TJwBy3ykR03i8vFDxEc7c="
+        ],
+        [
+          "golang.org/x/net",
+          "v0.62.0",
+          "h1:18ELalfM5+XNRwzM2nYqXsZQ9ByS1uhj2O/U7+5jqRY="
+        ],
+        [
+          "golang.org/x/sys",
+          "v0.50.0",
+          "h1:dkKZEFTEKaLr1sjhs0WiKqoi8Jj5nHbS3Njmx1UoMJs="
+        ],
+        [
+          "golang.org/x/text",
+          "v0.44.0",
+          "h1:YItdp/mQNGnsmrgpcdA5yQ3bnRxCfo/Tj/iByGW9GGo="
+        ],
+        [
+          "modernc.org/libc",
+          "v1.81.0",
+          "h1:Kx11pb+4ETDPgkN9P6nHNTeVfrS+1w46LoIDbYcZEtM="
+        ],
+        [
+          "modernc.org/mathutil",
+          "v1.7.1",
+          "h1:GCZVGXdaN8gTqB1Mf/usp1Y/hSqgI2vAGGP4jZMCxOU="
+        ],
+        [
+          "modernc.org/memory",
+          "v1.12.1",
+          "h1:nFMiWrpStgZczNl6XI9GnIk/rWhYIyHGUaR04pGbp9g="
+        ],
+        [
+          "modernc.org/sqlite",
+          "v1.62.0",
+          "h1:gMaCjSM1qpl+iOjiWhR1LYP3zqrYDI+5GYLGt6veP2g="
+        ]
+      ],
+      "bytes": 31312125,
+      "dependency_count": 23,
+      "executed": false,
+      "go_version": "go1.27.4",
+      "sha256": "9c640b24008e5ea7bb82a613affb075839e26a7b7ad8744ef04a35536999fbeb",
+      "static_linux_arm64": true
+    },
+    "node": {
+      "actual_embedded_dependencies": [
+        [
+          "github.com/dustin/go-humanize",
+          "v1.1.0",
+          "h1:dbKTrvD0klcbBV/h4AWJdMuZogJACoMlvWIWZ5b2xWg="
+        ],
+        [
+          "github.com/gofiber/fiber/v3",
+          "v3.7.0",
+          "h1:aF+GfB7nP9Dd0wVsv6wmr8675v66OGfjSyoDhPmvKEo="
+        ],
+        [
+          "github.com/gofiber/schema",
+          "v1.9.4",
+          "h1:IVNXN2WyVHmUn/S186e/rdnGlb1LFrhZ1hjndTYvn8w="
+        ],
+        [
+          "github.com/gofiber/utils/v2",
+          "v2.6.5",
+          "h1:rU+8ao6LKi3fKOA3sEjfLv1T+2C2IwomeVmEKaqkr4A="
+        ],
+        [
+          "github.com/google/uuid",
+          "v1.6.0",
+          "h1:NIvaJDMOsjHA8n1jAhLSgzrAzy1Hgr+hNrb57e+94F0="
+        ],
+        [
+          "github.com/klauspost/compress",
+          "v1.20.4",
+          "h1:dD0v/bvxtjCBqQu6sx1TNWkalEY5lNTIe+HY9w8TeNI="
+        ],
+        [
+          "github.com/mattn/go-colorable",
+          "v0.1.16",
+          "h1:+2YjeAe7xP1OQbZW1jERPWWCDLlNqFNCvjiqGiAt84A="
+        ],
+        [
+          "github.com/mattn/go-isatty",
+          "v0.0.24",
+          "h1:tGZZoVgT/KiqK1c8ocVLeDS8BSWMRd47J3Lbz7vsReI="
+        ],
+        [
+          "github.com/molecule-man/go-brrr",
+          "v1.3.1",
+          "h1:EwaJUzRIlp/dFmIpzq4J17CA5Zi5OHo2vOGmu09hF1w="
+        ],
+        [
+          "github.com/philhofer/fwd",
+          "v1.2.1",
+          "h1:UtpS73q8bFgy/yH3gCq8LSNvj5gv/FowNOiWZa7uKwQ="
+        ],
+        [
+          "github.com/remyoudompheng/bigfft",
+          "v0.0.0-20230129092748-24d4a6f8daec",
+          "h1:W09IVJc94icq4NjY3clb7Lk8O1qJ8BdBEF8z0ibU0rE="
+        ],
+        [
+          "github.com/rs/zerolog",
+          "v1.35.1",
+          "h1:m7xQeoiLIiV0BCEY4Hs+j2NG4Gp2o2KPKmhnnLiazKI="
+        ],
+        [
+          "github.com/stretchr/objx",
+          "v0.8.0",
+          "h1:rm9oMkeprG/wHifkZP4EuDww9S0mvEaQ/p9cXTNT4cw="
+        ],
+        [
+          "github.com/stretchr/testify",
+          "v1.12.1",
+          "h1:EuwCh5fleGS7H32xRwO3wRGT7DxrDhLAT6FF8MpWDWE="
+        ],
+        [
+          "github.com/tinylib/msgp",
+          "v1.6.5",
+          "h1:iAH6XTP7BpzErjBZlujJQXxA+GmRi2YWs6M4KdLtNbE="
+        ],
+        [
+          "github.com/valyala/bytebufferpool",
+          "v1.0.0",
+          "h1:GqA5TC/0021Y/b9FG4Oi9Mr3q7XYx6KllzawFIhcdPw="
+        ],
+        [
+          "github.com/valyala/fasthttp",
+          "v1.78.0",
+          "h1:tKfLdx7cD8HZOTP1wc2OpbQMbgO1HP12J0y/XMdyW6Q="
+        ],
+        [
+          "go.yaml.in/yaml/v3",
+          "v3.0.6",
+          "h1:zcDfvjXEqTQmpjniUBLc91xYJMB2c4QOFxEF/LCEckM="
+        ],
+        [
+          "golang.org/x/crypto",
+          "v0.59.0",
+          "h1:xS2jhqYbzNrpvkWP2YTDf4TJwBy3ykR03i8vFDxEc7c="
+        ],
+        [
+          "golang.org/x/net",
+          "v0.62.0",
+          "h1:18ELalfM5+XNRwzM2nYqXsZQ9ByS1uhj2O/U7+5jqRY="
+        ],
+        [
+          "golang.org/x/sys",
+          "v0.50.0",
+          "h1:dkKZEFTEKaLr1sjhs0WiKqoi8Jj5nHbS3Njmx1UoMJs="
+        ],
+        [
+          "golang.org/x/text",
+          "v0.44.0",
+          "h1:YItdp/mQNGnsmrgpcdA5yQ3bnRxCfo/Tj/iByGW9GGo="
+        ],
+        [
+          "modernc.org/libc",
+          "v1.81.0",
+          "h1:Kx11pb+4ETDPgkN9P6nHNTeVfrS+1w46LoIDbYcZEtM="
+        ],
+        [
+          "modernc.org/mathutil",
+          "v1.7.1",
+          "h1:GCZVGXdaN8gTqB1Mf/usp1Y/hSqgI2vAGGP4jZMCxOU="
+        ],
+        [
+          "modernc.org/memory",
+          "v1.12.1",
+          "h1:nFMiWrpStgZczNl6XI9GnIk/rWhYIyHGUaR04pGbp9g="
+        ],
+        [
+          "modernc.org/sqlite",
+          "v1.62.0",
+          "h1:gMaCjSM1qpl+iOjiWhR1LYP3zqrYDI+5GYLGt6veP2g="
+        ]
+      ],
+      "bytes": 69268352,
+      "dependency_count": 26,
+      "executed": false,
+      "go_version": "go1.27.4",
+      "sha256": "dd941d69cfb289ab028703435dad4b625ebba7c9878900881d979b87dd7205f3",
+      "static_linux_arm64": true
+    }
+  },
+  "base_commit": "2188dfb8fcb74174fa4d1df2084784bd07d436bf",
+  "child_pass": 353,
+  "cleanup_confirmed": true,
+  "commands_exit0": 20,
+  "exact_posts": 26,
+  "named_tests": {
+    "app-binding-tagged": {
+      "child": 0,
+      "names": [
+        "TestD1FindNodeResourceDiagnosticAppBinding"
+      ],
+      "outer": 1
+    },
+    "bridge-guards": {
+      "child": 11,
+      "names": [
+        "TestDomainClosedSourceContract",
+        "TestDomainGuardRejectsCriticalOwnershipEscapes",
+        "TestDomainGuardRejectsLateCommitLeaseAllocation",
+        "TestDomainHasNoExistingProductionImporter"
+      ],
+      "outer": 4
+    },
+    "c2driver-guard": {
+      "child": 0,
+      "names": [
+        "TestStockSourceClosure"
+      ],
+      "outer": 1
+    },
+    "candidate-new-default": {
+      "child": 13,
+      "names": [
+        "TestNativeFullResponderTaggedFactorySourceClosure",
+        "TestOwnedReadyRegisteredCopiedBeforeCallbacks",
+        "TestOwnedReadyRegisteredInvalidTupleRefusedBeforeFirstService",
+        "TestOwnedReadyRegisteredOrdinaryReadyRemainsAbsent",
+        "TestOwnedReadyRegisteredRejectsReplacementAndRecapture",
+        "TestOwnedReadyRegisteredUnrequestedSourceRefusalStaysSticky"
+      ],
+      "outer": 6
+    },
+    "candidate-new-tagged": {
+      "child": 29,
+      "names": [
+        "TestNativeFullResponderGuardGenuineF1NoPeerRAndRetirement",
+        "TestNativeFullResponderGuardNoNegotiatedF1IsUnavailable",
+        "TestNativeFullResponderGuardRejectsForeignOriginalBindings",
+        "TestNativeFullResponderOriginalReadyProfileAndDefaults",
+        "TestNativeFullResponderRejectsForeignNativePlanBeforeConstruction",
+        "TestNativeFullResponderTaggedFactorySourceClosure",
+        "TestOwnedReadyRegisteredCopiedBeforeCallbacks",
+        "TestOwnedReadyRegisteredInvalidTupleRefusedBeforeFirstService",
+        "TestOwnedReadyRegisteredOrdinaryReadyRemainsAbsent",
+        "TestOwnedReadyRegisteredRejectsReplacementAndRecapture",
+        "TestOwnedReadyRegisteredUnrequestedSourceRefusalStaysSticky"
+      ],
+      "outer": 11
+    },
+    "findnode-guards": {
+      "child": 2,
+      "names": [
+        "TestCandidateCapacityClosedRootsAndLogicalBoundary",
+        "TestCandidateCapacityGuardRejectsActivationAndMissingFinalCheck",
+        "TestCandidateInactiveCallGraphAndInventories",
+        "TestCandidateSourceCompanionClosedRoots",
+        "TestCandidateSourceTypeReferencesAndDeclarations"
+      ],
+      "outer": 5
+    },
+    "node-new-default": {
+      "child": 19,
+      "names": [
+        "TestFindNodeF1OnlyTargetAnswersOwnIdentity",
+        "TestFindNodeF1OnlyTargetCannotForwardOrBorrowPeerR",
+        "TestFindNodeLocalRoleBoundToOriginalReadyConstruction",
+        "TestFindNodeLocalRoleClosedSource",
+        "TestFindNodeLocalRoleConstructionAndProjection",
+        "TestFindNodeLocalRoleSourceControls",
+        "TestFindNodeNoF1AndUnprovenClaimsCannotAdmit",
+        "TestFindNodeResponderForwardsToF1OnlyTargetInbound",
+        "TestFindNodeResponderToF1OnlyTargetOriginalOutboundCM",
+        "TestFindNodeRoleDoesNotReviveEndedOriginalF1"
+      ],
+      "outer": 10
+    },
+    "node-read-offer-default": {
+      "child": 0,
+      "names": [
+        "TestOwnedInboundReadToOfferRetainsOriginalRow",
+        "TestOwnedOutboundReadToOfferUsesActualCMAcceptedOriginal",
+        "TestOwnedOutboundReceivePointPrecedesOriginalAdmissionMutexWait",
+        "TestOwnedReceiveCancellationRetiresOriginalEnvelope",
+        "TestOwnedReceiveForeignOwnerAndEndedOriginalRefuse",
+        "TestOwnedReceiveGenuineOriginalPointAndSingleUse",
+        "TestOwnedReceiveStrictParserReturnsNoPartialIngress"
+      ],
+      "outer": 7
+    },
+    "node-read-offer-tagged": {
+      "child": 0,
+      "names": [
+        "TestOwnedInboundReadToOfferRetainsOriginalRow",
+        "TestOwnedOutboundReadToOfferUsesActualCMAcceptedOriginal",
+        "TestOwnedOutboundReceivePointPrecedesOriginalAdmissionMutexWait",
+        "TestOwnedReceiveCancellationRetiresOriginalEnvelope",
+        "TestOwnedReceiveForeignOwnerAndEndedOriginalRefuse",
+        "TestOwnedReceiveGenuineOriginalPointAndSingleUse",
+        "TestOwnedReceiveStrictParserReturnsNoPartialIngress"
+      ],
+      "outer": 7
+    },
+    "node-regressions-default": {
+      "child": 130,
+      "names": [
+        "TestD1FindNodeResourceDiagnosticExistingGuardBoundaries",
+        "TestD1FindNodeResourceDiagnosticOrdinaryFactoriesOff",
+        "TestD1FindNodeResourceDiagnosticSourceClosure",
+        "TestD1OriginalInitiatorReadyRelayReadyTargetChain",
+        "TestDegreeStatisticClosedProducerClockProjectionAndWriter",
+        "TestDegreeStatisticConstructorGraphCannotEscapeBeforeOwner",
+        "TestDegreeStatisticGuardRejectsEarlyOverwriteAndClockEscape",
+        "TestFindNodeActualDefaultCapsWithholdSeed",
+        "TestFindNodeOrdinaryConstructorRemainsInactive",
+        "TestFindNodeOriginalProofCanonicalAcceptedAndCM",
+        "TestOwnDMRuntimeClosedOriginalComposition",
+        "TestOwnDMRuntimeRejectsDefaultActivationAndAlternateMint",
+        "TestOwnedAnswerClosedSource",
+        "TestOwnedAnswerSourceControls",
+        "TestOwnedAutomaticEndpointTraceClosedSource",
+        "TestOwnedAutomaticEndpointTraceSourceControls",
+        "TestOwnedBareV2PilotAdvertisementSourceControls",
+        "TestOwnedBareV2PilotClosedTestOnlyAdvertisement",
+        "TestOwnedBareV2PilotStockAdvertisementUnchanged",
+        "TestOwnedFlowClosedSource",
+        "TestOwnedFlowSourceControls",
+        "TestOwnedLocalNodeClosedSource",
+        "TestOwnedLocalNodeRuntimeConstructionDoesNotEnableReady",
+        "TestOwnedLocalNodeSelfRequestUsesOriginalSignedAnswerWriter",
+        "TestOwnedLocalNodeSourceControls",
+        "TestOwnedNodeCutCancellationAndRealEnd",
+        "TestOwnedNodeCutGenuineListenerAndActualCM",
+        "TestOwnedNodeCutOriginalTupleBeforeBuilderAndRuntimeOff",
+        "TestOwnedNodeObservationClosedSource",
+        "TestOwnedNodeObservationSourceControls",
+        "TestOwnedNodeReceiveClosedSource",
+        "TestOwnedNodeReceiveSourceControls",
+        "TestOwnedReadyCancellationAndPanicJoinOriginalLifecycle",
+        "TestOwnedReadyClosedSource",
+        "TestOwnedReadyContactReconciliationCallbackCleanup",
+        "TestOwnedReadyContactReconciliationLoadedRefusal",
+        "TestOwnedReadyContactReconciliationOptionsAndPublicDefaults",
+        "TestOwnedReadyContactReconciliationOriginalTuple",
+        "TestOwnedReadyDecodedHintPreservesOriginalDateAndNoSecondRead",
+        "TestOwnedReadyLoadedInboundCallbackRefusalJoinsOriginal",
+        "TestOwnedReadyLoadedInboundFinalizationRejectsTupleReplacement",
+        "TestOwnedReadyLoadedInboundRecoveryGuardRefusesBeforeSeal",
+        "TestOwnedReadyOriginalStoreAndFinalizationOrderStayExact",
+        "TestOwnedReadyRuntimeFinalizationAndOriginalGenuineCut",
+        "TestOwnedReadySourceControls",
+        "TestOwnedRoundCandidateRuntimeStillConstructing",
+        "TestOwnedRoundLoopIdleLastRequestReachesOriginalWriter",
+        "TestOwnedRoundLoopRefusedProtectedNewcomerClosesEmptyInterval",
+        "TestOwnedTerminalClosedSourceContract",
+        "TestOwnedTerminalGuardRejectsForeignOriginLateBindingAndClockFallback"
+      ],
+      "outer": 50
+    },
+    "node-selected-tagged": {
+      "child": 149,
+      "names": [
+        "TestD1FindNodeResourceDiagnosticActualConstruction",
+        "TestD1FindNodeResourceDiagnosticExistingGuardBoundaries",
+        "TestD1FindNodeResourceDiagnosticOrdinaryFactoriesOff",
+        "TestD1FindNodeResourceDiagnosticSourceClosure",
+        "TestD1FindNodeResourceDiagnosticWrongOwnerAndClosed",
+        "TestD1OriginalInitiatorReadyRelayReadyTargetChain",
+        "TestDegreeStatisticClosedProducerClockProjectionAndWriter",
+        "TestDegreeStatisticConstructorGraphCannotEscapeBeforeOwner",
+        "TestDegreeStatisticGuardRejectsEarlyOverwriteAndClockEscape",
+        "TestFindNodeActualDefaultCapsWithholdSeed",
+        "TestFindNodeF1OnlyTargetAnswersOwnIdentity",
+        "TestFindNodeF1OnlyTargetCannotForwardOrBorrowPeerR",
+        "TestFindNodeLocalRoleBoundToOriginalReadyConstruction",
+        "TestFindNodeLocalRoleClosedSource",
+        "TestFindNodeLocalRoleConstructionAndProjection",
+        "TestFindNodeLocalRoleSourceControls",
+        "TestFindNodeNoF1AndUnprovenClaimsCannotAdmit",
+        "TestFindNodeOrdinaryConstructorRemainsInactive",
+        "TestFindNodeOriginalProofCanonicalAcceptedAndCM",
+        "TestFindNodeResponderForwardsToF1OnlyTargetInbound",
+        "TestFindNodeResponderToF1OnlyTargetOriginalOutboundCM",
+        "TestFindNodeRoleDoesNotReviveEndedOriginalF1",
+        "TestOwnDMRuntimeClosedOriginalComposition",
+        "TestOwnDMRuntimeRejectsDefaultActivationAndAlternateMint",
+        "TestOwnedAnswerClosedSource",
+        "TestOwnedAnswerSourceControls",
+        "TestOwnedAutomaticEndpointTraceClosedSource",
+        "TestOwnedAutomaticEndpointTraceSourceControls",
+        "TestOwnedBareV2PilotAdvertisementSourceControls",
+        "TestOwnedBareV2PilotClosedTestOnlyAdvertisement",
+        "TestOwnedBareV2PilotStockAdvertisementUnchanged",
+        "TestOwnedFlowClosedSource",
+        "TestOwnedFlowSourceControls",
+        "TestOwnedLocalNodeClosedSource",
+        "TestOwnedLocalNodeRuntimeConstructionDoesNotEnableReady",
+        "TestOwnedLocalNodeSelfRequestUsesOriginalSignedAnswerWriter",
+        "TestOwnedLocalNodeSourceControls",
+        "TestOwnedNodeCutCancellationAndRealEnd",
+        "TestOwnedNodeCutGenuineListenerAndActualCM",
+        "TestOwnedNodeCutOriginalTupleBeforeBuilderAndRuntimeOff",
+        "TestOwnedNodeObservationClosedSource",
+        "TestOwnedNodeObservationSourceControls",
+        "TestOwnedNodeReceiveClosedSource",
+        "TestOwnedNodeReceiveSourceControls",
+        "TestOwnedReadyCancellationAndPanicJoinOriginalLifecycle",
+        "TestOwnedReadyClosedSource",
+        "TestOwnedReadyContactReconciliationCallbackCleanup",
+        "TestOwnedReadyContactReconciliationLoadedRefusal",
+        "TestOwnedReadyContactReconciliationOptionsAndPublicDefaults",
+        "TestOwnedReadyContactReconciliationOriginalTuple",
+        "TestOwnedReadyDecodedHintPreservesOriginalDateAndNoSecondRead",
+        "TestOwnedReadyLoadedInboundCallbackRefusalJoinsOriginal",
+        "TestOwnedReadyLoadedInboundFinalizationRejectsTupleReplacement",
+        "TestOwnedReadyLoadedInboundRecoveryGuardRefusesBeforeSeal",
+        "TestOwnedReadyOriginalStoreAndFinalizationOrderStayExact",
+        "TestOwnedReadyRuntimeFinalizationAndOriginalGenuineCut",
+        "TestOwnedReadySourceControls",
+        "TestOwnedRoundCandidateRuntimeStillConstructing",
+        "TestOwnedRoundLoopIdleLastRequestReachesOriginalWriter",
+        "TestOwnedRoundLoopRefusedProtectedNewcomerClosesEmptyInterval",
+        "TestOwnedTerminalClosedSourceContract",
+        "TestOwnedTerminalGuardRejectsForeignOriginLateBindingAndClockFallback"
+      ],
+      "outer": 62
+    }
+  },
+  "outer_pass": 164,
+  "own_original_PID_PGID_absent": [
+    44563,
+    44564,
+    44565,
+    44566,
+    45583,
+    45592,
+    45616,
+    45626,
+    45636,
+    45646,
+    45672,
+    45679,
+    45686,
+    45693,
+    45712,
+    46736,
+    46737,
+    46763,
+    46764,
+    46771
+  ],
+  "post_manifest_sha256": "7fd5863447ec0b527e4a3f41e6776a4758f6e3bec3dc8a4e5b1215e6a826acb3",
+  "result_sha256": "4827fb9e8122694ae5a2fb42afed5574ac34de134bb4af51c77a573ca743facd",
+  "scope": "Real native loopback unit/targeted regression plus Linux compile-only; ordinary constructors stay Off. No live candidate VM, per-session runtime wireR UNKNOWN, forwarding NOT_EXERCISED; no O1a/D1/G2/activation/release admission.",
+  "source_files": 2642,
+  "source_manifest_sha256": "4e63c5ca35557ab701dfed2a0270d42d912f50a6a4ffb2d34482310d9f37ec20",
+  "source_unchanged": true,
+  "status": "ACCEPTED_TARGETED_QA_AND_COMPILE_ONLY",
+  "work": "/private/tmp/corsa-d1-native-responder-goqa-bbc0b7455f5a4a269692df9953b0c93f"
+}

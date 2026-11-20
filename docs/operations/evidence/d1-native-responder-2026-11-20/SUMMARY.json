@@ -1,0 +1,40 @@
+{
+  "FAIL_SKIP": 0,
+  "FN_forwarding": "NOT_EXERCISED",
+  "Linux_ELF_executed": false,
+  "RAW": {
+    "members": 73,
+    "payload_bytes": 2209858,
+    "sha256": "cac51e24b696d0f6e8cf61667187d9c1ad5925f39b47fc6b29301c2cffa90053"
+  },
+  "SOURCE": {
+    "members": 46,
+    "payload_bytes": 1366546,
+    "sha256": "2a92f77012bfabcb43381d658a45005e994ca92ff2badfe8590b943f761214e1"
+  },
+  "base_commit": "2188dfb8fcb74174fa4d1df2084784bd07d436bf",
+  "child_PASS": 353,
+  "commands_exit0": 20,
+  "files": 26,
+  "intro_persistent_state": "NOT_ADDED_ORIGINAL_CONNECTION_BYTES_RESTORED",
+  "manifest_sha256": "7fd5863447ec0b527e4a3f41e6776a4758f6e3bec3dc8a4e5b1215e6a826acb3",
+  "native_profile": {
+    "active": 512,
+    "dial_slots": 1,
+    "listener_dial_slots": 0,
+    "members": 512,
+    "registry_visits": 1024,
+    "routes": 10000
+  },
+  "ordinary_constructors": "OFF_UNCHANGED",
+  "outer_PASS": 164,
+  "production_files": 6,
+  "remaining": [
+    "O1a baseline diagnostics and final candidate measurement",
+    "remaining13bD1",
+    "G2",
+    "public activation/release decision"
+  ],
+  "runtime_per_session_wire_R": "UNKNOWN_NOT_SAMPLED",
+  "scope": "CLOSED_TAGGED_ENABLED_IDLE_CONSTRUCTION_QA_NOT_ACTIVATION"
+}

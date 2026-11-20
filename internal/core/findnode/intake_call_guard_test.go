@@ -15,19 +15,23 @@ import (
 	"testing"
 )
 
-// Only these two exact tagged diagnostic bodies may extend the importer set.
+// Only these exact tagged diagnostic bodies may extend the importer set.
 // A tag alone, another path, or a changed body does not admit a production root.
 func candidateDiagnosticImporter(rel string, raw []byte) bool {
 	var want string
+	tag := "d1_resource_probe"
 	switch rel {
 	case "internal/core/node/find_node_resource_diagnostic.go":
 		want = "e97c7f60a858b6380569d957646ab4338cc16a1bd638dcb25494924b66e91556"
 	case "internal/core/node/find_node_membership_checkpoint.go":
 		want = "39209defff20031f7f093ec2bd86c2c956e105b3699fa70a8963b522290186d8"
+	case "internal/core/node/find_node_native_full_responder.go":
+		want = "47d19a41bc3201e30a601ebb764d0e207d67bb379954746fdb8805c6f54dba3e"
+		tag = "d1_o1a_native_responder"
 	default:
 		return false
 	}
-	return strings.HasPrefix(string(raw), "//go:build d1_resource_probe\n\npackage node\n") && fmt.Sprintf("%x", sha256.Sum256(raw)) == want
+	return strings.HasPrefix(string(raw), "//go:build "+tag+"\n\npackage node\n") && fmt.Sprintf("%x", sha256.Sum256(raw)) == want
 }
 
 // This is a reviewed call/field inventory, not universal dataflow verification.
@@ -35,7 +39,7 @@ func TestCandidateInactiveCallGraphAndInventories(t *testing.T) {
 	root := filepath.Join("..", "..", "..")
 	// Exercise the same predicate used below, including default activation and
 	// an OTHERFILE copy. These do not exempt any additional importer or caller.
-	for _, rel := range []string{"internal/core/node/find_node_resource_diagnostic.go", "internal/core/node/find_node_membership_checkpoint.go"} {
+	for _, rel := range []string{"internal/core/node/find_node_resource_diagnostic.go", "internal/core/node/find_node_membership_checkpoint.go", "internal/core/node/find_node_native_full_responder.go"} {
 		raw, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(rel)))
 		if err != nil {
 			t.Fatal(err)
@@ -43,9 +47,13 @@ func TestCandidateInactiveCallGraphAndInventories(t *testing.T) {
 		if !candidateDiagnosticImporter(rel, raw) {
 			t.Fatal("reviewed diagnostic importer changed", rel)
 		}
+		tag := "d1_resource_probe"
+		if rel == "internal/core/node/find_node_native_full_responder.go" {
+			tag = "d1_o1a_native_responder"
+		}
 		for _, changed := range [][]byte{
-			[]byte(strings.Replace(string(raw), "//go:build d1_resource_probe\n\n", "", 1)),
-			[]byte(strings.Replace(string(raw), "d1_resource_probe", "other_probe", 1)),
+			[]byte(strings.Replace(string(raw), "//go:build "+tag+"\n\n", "", 1)),
+			[]byte(strings.Replace(string(raw), tag, "other_probe", 1)),
 			append(append([]byte(nil), raw...), '\n'),
 		} {
 			if candidateDiagnosticImporter(rel, changed) {

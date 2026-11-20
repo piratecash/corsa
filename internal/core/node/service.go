@@ -2417,6 +2417,7 @@ func newServiceWithConstruction(cfg config.Node, id *identity.Identity, eventBus
 	if construction.ready != nil {
 		// Retain cleanup custody before the first builder callback can escape.
 		construction.ready.service, construction.ready.trust = svc, trust
+		construction.ready.captureRegisteredSource(svc)
 	}
 	// Initialize PeerProvider (Stage 3: connection management integration).
 	svc.peerClock = time.Now

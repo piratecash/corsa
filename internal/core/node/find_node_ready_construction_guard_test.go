@@ -46,7 +46,7 @@ func ownedReadySources(t *testing.T) map[string][]byte {
 	return sources
 }
 func ownedReadySourceErrors(sources map[string][]byte) []string {
-	pins := map[string]string{"internal/core/node/find_node_owned_local_target.go": "3f72673fd435bb363ff434ef5fb728d61fc151e06f85b72a9e1a303599983915", "internal/core/node/find_node_ready_target_timing.go": "515455541e482579332a42535b4ed58ddab7633a8ef52a50e0c23138285d7667", "internal/core/node/identity_pin_own_dm_runtime.go": "39b178ddcdeb0ee8979a264484dd2f5eea37e3f9a869e9568a768a965a194abb", "internal/core/findnode/owned_bridge.go": "b88656fb08a5dd33b0f2bdb7b9e52f636eb1b320291e1a390c2c9b683a593f57", "internal/core/findnode/owned_bridge_bootstrap.go": "2ee7f6b13d859326bbd2fb00e487c9530737a2f722359d762202710d1a1cd827", "internal/core/node/find_node_bridge_construction.go": "8aea4067463cb259a8829b41d6bd18e58c920927f90f84fb2a0187c5d03762be", "internal/core/node/find_node_ready_construction.go": "bddfb4bb52e603d57769e55fa0fc4f86a4dec0ee5175579e56959d19c617c9f8", "internal/core/node/service.go": "db3c6ab49afae46703dae27a18d8f8a3cc960a0405c6c98949dd94b2babf114f"}
+	pins := map[string]string{"internal/core/node/find_node_owned_local_target.go": "3f72673fd435bb363ff434ef5fb728d61fc151e06f85b72a9e1a303599983915", "internal/core/node/find_node_ready_target_timing.go": "515455541e482579332a42535b4ed58ddab7633a8ef52a50e0c23138285d7667", "internal/core/node/identity_pin_own_dm_runtime.go": "39b178ddcdeb0ee8979a264484dd2f5eea37e3f9a869e9568a768a965a194abb", "internal/core/findnode/owned_bridge.go": "b88656fb08a5dd33b0f2bdb7b9e52f636eb1b320291e1a390c2c9b683a593f57", "internal/core/findnode/owned_bridge_bootstrap.go": "2ee7f6b13d859326bbd2fb00e487c9530737a2f722359d762202710d1a1cd827", "internal/core/node/find_node_bridge_construction.go": "8aea4067463cb259a8829b41d6bd18e58c920927f90f84fb2a0187c5d03762be", "internal/core/node/find_node_ready_construction.go": "79872a3bf79626c6ca5071ae2dbfc8cd6451d955a3d7eeaeeb45d20b92c17db5", "internal/core/node/service.go": "7f3a84af24a53296b4ddbb8331f653a1eed05adc3af2a4968e827d33ec597aa4"}
 	pins["internal/core/node/s6_handshake_construction.go"] = "a9a411fedcafa9fc55636d028c56eec33f7ce10946b5661d25454881aeb80cd8"
 	pins["internal/core/node/s6_terminal_construction.go"] = "15b8372ad55d93cb1140952d09e6a38d984d71ce73050e8422add519403c1a34"
 	pins["internal/core/node/handshake_node_full_observation.go"] = "4278f2e98fcf9016c2db2602eab3daf618b1def9a6e888943c0721bb3d85c258"
@@ -67,6 +67,7 @@ func ownedReadySourceErrors(sources map[string][]byte) []string {
 	pins["internal/core/node/k5_handshake_past.go"] = "36ffbc5fce20f06ba9fcaacce2c93b49aaa94840732a278def000617b1267aba"
 	pins["internal/core/connbudget/total_past.go"] = "22a97c21abe2bf31c7d29236266f6415acb9d689a3e53259ba99967d9a466a09"
 	pins["internal/core/node/find_node_resource_diagnostic.go"] = "e97c7f60a858b6380569d957646ab4338cc16a1bd638dcb25494924b66e91556"
+	pins["internal/core/node/find_node_native_full_responder.go"] = "47d19a41bc3201e30a601ebb764d0e207d67bb379954746fdb8805c6f54dba3e"
 	closed := map[string]bool{"ownedFindNodeSigningTestGate": true, "signingGate": true, "newFindNodeReadyTimedLoadedInboundCandidateService": true, "prepareFindNodeReadyTimedTestConstruction": true, "newFindNodeReadyLoadedContactReconciliationCandidateService": true, "captureContactReconciliationResolver": true, "captureContactReconciliationProducer": true, "contactReconciliation": true, "originalContactResolver": true, "originalContactAdmission": true, "originalContactProducer": true, "originalContactService": true, "originalContactWake": true, "findNodeReadyConstruction": true, "findNodeReadyOptions": true, "buildWithOptions": true, "installLoadedInbound": true, "newFindNodeReadyLoadedInboundCandidateService": true, "ownDMRuntimeConstruction": true, "prepareFindNodeReadyConstruction": true, "newFindNodeReadyCandidateService": true, "NewExecutingBootstrapIntake": true, "newDormantIntakeAt": true}
 	tracked := map[string]bool{"newFindNodeReadyLoadedContactReconciliationCandidateService": true, "captureContactReconciliationResolver": true, "captureContactReconciliationProducer": true, "newFindNodeReadyTimedLoadedInboundCandidateService": true, "prepareFindNodeReadyTimedTestConstruction": true, "buildWithOptions": true, "installLoadedInbound": true, "newFindNodeReadyLoadedInboundCandidateService": true, "prepareFindNodeReadyConstruction": true, "newFindNodeReadyCandidateService": true, "NewExecutingBootstrapIntake": true, "newDormantIntakeAt": true}
 	// The original gate factory now delegates through one pinned typed wrapper.
@@ -117,6 +118,10 @@ func ownedReadySourceErrors(sources map[string][]byte) []string {
 	closed["HandshakePastReader"] = true
 	closed["OpenTotalPast"], tracked["OpenTotalPast"] = true, true
 	closed["TotalPastReader"] = true
+	for _, name := range []string{"findNodeReadyRegistered", "registeredRequest", "registeredCaptured", "registeredCaptureFailed", "originalRegisteredValue", "originalRegisteredSource", "originalRegisteredService", "originalRegisteredIdentity", "originalRegisteredAddress", "originalRegisteredDone", "NewD1NativeFullResponderWithRouteWireCensus", "D1NativeFullResponderReadout", "captureRegisteredSource", "registeredBindings"} {
+		closed[name] = true
+	}
+	tracked["captureRegisteredSource"], tracked["registeredBindings"], tracked["NewD1NativeFullResponderWithRouteWireCensus"] = true, true, true
 	calls := map[string]int{}
 	declarations := map[string]string{}
 	var failures []string
@@ -196,6 +201,11 @@ func ownedReadySourceErrors(sources map[string][]byte) []string {
 		"newDormantIntakeAt:internal/core/findnode/owned_bridge_bootstrap.go:NewExecutingBootstrapIntake":                                                 1,
 		"SealConstruction:internal/core/node/find_node_ready_construction.go:finalize":                                                                    1,
 	}
+	wantCalls["prepareFindNodeReadyConstruction:internal/core/node/find_node_native_full_responder.go:NewD1NativeFullResponderWithRouteWireCensus"] = 1
+	wantCalls["buildWithOptions:internal/core/node/find_node_native_full_responder.go:NewD1NativeFullResponderWithRouteWireCensus"] = 1
+	wantCalls["captureRegisteredSource:internal/core/node/service.go:newServiceWithConstruction"] = 1
+	wantCalls["registeredBindings:internal/core/node/find_node_ready_construction.go:captureRegisteredSource"] = 1
+	wantCalls["registeredBindings:internal/core/node/find_node_ready_construction.go:bindings"] = 1
 	wantDeclarations := map[string]string{
 		"newFindNodeReadyLoadedContactReconciliationCandidateService": "internal/core/node/find_node_ready_construction.go:newFindNodeReadyLoadedContactReconciliationCandidateService",
 		"captureContactReconciliationResolver":                        "internal/core/node/find_node_ready_construction.go:captureContactReconciliationResolver",
@@ -210,6 +220,9 @@ func ownedReadySourceErrors(sources map[string][]byte) []string {
 		"NewExecutingBootstrapIntake":                   "internal/core/findnode/owned_bridge_bootstrap.go:NewExecutingBootstrapIntake",
 		"newDormantIntakeAt":                            "internal/core/findnode/owned_bridge.go:newDormantIntakeAt",
 	}
+	wantDeclarations["captureRegisteredSource"] = "internal/core/node/find_node_ready_construction.go:captureRegisteredSource"
+	wantDeclarations["registeredBindings"] = "internal/core/node/find_node_ready_construction.go:registeredBindings"
+	wantDeclarations["NewD1NativeFullResponderWithRouteWireCensus"] = "internal/core/node/find_node_native_full_responder.go:NewD1NativeFullResponderWithRouteWireCensus"
 	wantCalls["newGate:internal/core/node/service.go:newServiceWithConstruction"] = 1
 	wantCalls["prepareHandshakeObservation:internal/core/node/s6_terminal_construction.go:newServiceWithObservations"] = 1
 	wantCalls["validHandshakeObservationKey:internal/core/node/s6_terminal_construction.go:newServiceWithObservations"] = 2

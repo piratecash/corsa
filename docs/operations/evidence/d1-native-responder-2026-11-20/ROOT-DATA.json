@@ -1,0 +1,29 @@
+{
+  "status": "ACCEPTED_QA_AND_COMPILE_ONLY",
+  "work": "/private/tmp/corsa-d1-native-responder-goqa-bbc0b7455f5a4a269692df9953b0c93f",
+  "result_sha256": "4827fb9e8122694ae5a2fb42afed5574ac34de134bb4af51c77a573ca743facd",
+  "files": 2642,
+  "outer": 164,
+  "child": 353,
+  "commands": 20,
+  "artifacts": {
+    "node": {
+      "bytes": 69268352,
+      "sha256": "dd941d69cfb289ab028703435dad4b625ebba7c9878900881d979b87dd7205f3",
+      "deps": 26,
+      "executed": false
+    },
+    "app": {
+      "bytes": 33483142,
+      "sha256": "7f1907f620746cf4efa29a74e616c03320c9ee7d2cbdc07d199b9746d7bf399c",
+      "deps": 23,
+      "executed": false
+    },
+    "fullnode": {
+      "bytes": 31312125,
+      "sha256": "9c640b24008e5ea7bb82a613affb075839e26a7b7ad8744ef04a35536999fbeb",
+      "deps": 23,
+      "executed": false
+    }
+  }
+}

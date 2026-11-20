@@ -573,12 +573,19 @@ func ninN1SourceErrors(sources map[string][]byte) []string {
 	expected["inboundPins"]["find_node_ready_construction.go:installLoadedInbound"] = 1
 	expected["inboundPinClock"]["find_node_ready_construction.go:buildWithOptions"] = 1
 	expected["attachInboundPinCandidate"]["find_node_ready_construction.go:installLoadedInbound"] = 1
+
+	// Closed native candidate: exact read-only diagnostic and pre-callback sites.
+	expected["findnode"]["find_node_ready_construction.go:captureRegisteredSource"] = 4
+	expected["findnode"]["find_node_native_full_responder.go:NewD1NativeFullResponderWithRouteWireCensus"] = 6
+	expected["findnode"]["find_node_native_full_responder.go:GuardCurrentForService"] = 8
+	expected["proofToken"]["find_node_native_full_responder.go:GuardCurrentForService"] = 1
+	expected["findNode"]["find_node_native_full_responder.go:GuardCurrentForService"] = 1
 	// Exact private Ready constructor sites; all existing closures stay strict.
 	expected["proofTransportServiceToken"]["find_node_ready_construction.go:<package>"] = 1
 	expected["findNode"]["find_node_ready_construction.go:prepareFindNodeReadyConstruction"] = 2
 	expected["findnode"]["find_node_ready_construction.go:prepareFindNodeReadyConstruction"] = 7
 	expected["findnode"]["find_node_ready_construction.go:newFindNodeReadyCandidateService"] = 1
-	expected["findnode"]["find_node_ready_construction.go:buildWithOptions"] = 5
+	expected["findnode"]["find_node_ready_construction.go:buildWithOptions"] = 6
 	expected["findnode"]["find_node_ready_construction.go:installLoadedInbound"] = 3
 	expected["findnode"]["find_node_ready_construction.go:newFindNodeReadyLoadedInboundCandidateService"] = 1
 	expected["findnode"]["find_node_ready_construction.go:newFindNodeReadyLoadedContactReconciliationCandidateService"] = 1

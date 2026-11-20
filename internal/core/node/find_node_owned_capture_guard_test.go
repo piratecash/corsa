@@ -36,6 +36,7 @@ func ownedRawF1SourceErrors(sources map[string][]byte) []string {
 		"findNodePriorityClassLocked":         {"find_node_connection.go:captureFindNodePriorityClasses": 1, "find_node_connection.go:collectOwnedFindNodeRawClasses": 1},
 	}
 	expected["collectOwnedFindNodeRawMemberLocked"]["find_node_membership_checkpoint.go:CheckpointForService"] = 1
+	expected["collectOwnedFindNodeRawMemberLocked"]["find_node_native_full_responder.go:GuardCurrentForService"] = 1
 	functions := map[string]bool{"collectOwnedFindNodeRawFacts": true, "collectOwnedFindNodeRawMemberLocked": true, "collectOwnedFindNodeRawClasses": true, "findNodePriorityClassLocked": true}
 	actual := map[string]map[string]int{}
 	for name := range expected {
