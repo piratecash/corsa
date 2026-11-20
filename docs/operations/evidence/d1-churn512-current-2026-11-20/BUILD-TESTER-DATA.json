@@ -1,0 +1,68 @@
+{
+  "RAW_bytes": 2425,
+  "artifact_bytes": 32424079,
+  "artifact_sha256": "4010d5907a55c4a701b115a295e5320300239e1ff8d2b6752403061a9b4fb969",
+  "build_cleanup_confirmed": true,
+  "commands": 4,
+  "committed_code_lineage": "Root independently confirmed all2093Go files of signed08c3c5ea equal tested subject before these5privateposts; this review verifies fullcompiled2498snapshot.",
+  "compiled_source_manifest_sha256": "f1a5c5b4470adb57dd5ebcd3125316cf779635f9a4b8237a4ae216e8162685d2",
+  "embedded_and_saved_BuildInfo_dependencies_identical": 23,
+  "embedded_go_version": "go1.27.4",
+  "exact_sources": 2498,
+  "own_pids_groups_absent": [
+    24703,
+    24704,
+    24705,
+    25150
+  ],
+  "private_overlay_manifest_sha256": "34f62955a6aef4931053171a1887e81a15254f490daeb08b8991137f884418ee",
+  "raw": {
+    "daemon-build": {
+      "stderr": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "stdout": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    "daemon-metadata": {
+      "stderr": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "stdout": {
+        "bytes": 2371,
+        "sha256": "66cbef856fb8b90d8e84eda3422716aa1f98988977e075c5f427dddef9546abd"
+      }
+    },
+    "go-version": {
+      "stderr": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "stdout": {
+        "bytes": 33,
+        "sha256": "c6f1c8d54aedc3afa72560d934397ad6c33b28f1b4d3546ec53176439b2397d5"
+      }
+    },
+    "modules": {
+      "stderr": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "stdout": {
+        "bytes": 21,
+        "sha256": "b4537ed75f533f993f371954de47e42a793b8e5b0587577de7e27fb3e50696bd"
+      }
+    }
+  },
+  "result_path": "/private/tmp/corsa-d1-sg512-closed-role-daemon-6b8d1342e1e0425a8ac3d9fa9a453280/result.json",
+  "result_sha256": "3adddae9f6a00d90cacd06ffdf5c8d3423e711227f84b576519fc98cafbb58a8",
+  "role_manifest_sha256": "fdd45820d3af22e46101ba3b7e9212cfdf59cfcaa1232b5169e59aba6a90dd7e",
+  "scope": "READ_ONLY_ACTUAL_BYTES_NO_TARGET_EXECUTION_NO_SIGNAL",
+  "static_ELF": "LinuxAArch64ET_EXEC/noPT_INTERP/noPT_DYNAMIC",
+  "status": "INDEPENDENT_TESTER_CLI_BUILD_DATA_ACCEPTED",
+  "target_ELF_executed_by_reviewer": false
+}

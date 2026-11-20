@@ -1,0 +1,66 @@
+{
+  "ELF_execution": false,
+  "base_commit": "1b97da9a8c581f7a40664aa5b5eb78c59f104f3c",
+  "build_executed": false,
+  "builds": [
+    "one-current-Linuxarm64-CGO0-corsad-diagnostic"
+  ],
+  "cleanup_end_seconds": 630,
+  "files": {
+    "MANIFEST.json": {
+      "bytes": 1216,
+      "sha256": "930403f572ec9804d930347fe8515e0cba68f3bf13222ccb408dab9060ba75a1"
+    },
+    "PROFILE.ru.md": {
+      "bytes": 2225,
+      "sha256": "0e06c0ead6ba10a98761970af08625cd883f461351b13d2827b89053e466677b"
+    },
+    "V1-v2-CONTROLLER.diff": {
+      "bytes": 5366,
+      "sha256": "972fdfa83b87262cbf395ddcd89edba0796ddda29eda02245c937ce7cc3a2740"
+    },
+    "build_daemon.py": {
+      "bytes": 10672,
+      "sha256": "2376374aba49360f0912eb65168bf0fa1c9faec26fb0f6bd22f3c07abdb9f796"
+    },
+    "test_closure.py": {
+      "bytes": 1533,
+      "sha256": "023d657fba0d086fd9471ce3a9d44564b121cc75ff22c44b66a4f8d9c089719d"
+    },
+    "test_preparation.py": {
+      "bytes": 3024,
+      "sha256": "8ded662209d23c9b2a75f1e4f0261f3ae2b8321e4dd98e3b762914de37bd5c03"
+    }
+  },
+  "private_overlay_files": 5,
+  "pure_tests": 7,
+  "readiness": {
+    "CODE": false,
+    "PURE_QA": true,
+    "ROOT": false
+  },
+  "reuse": [
+    "accepted-driver6505bd13",
+    "accepted-topology873b7fc6",
+    "unchanged-runtime-v7"
+  ],
+  "reuse_abi": {
+    "bytes": 21681,
+    "sha256": "92c12b5121e6b4616e16cbd46c55d89896dddd74ebe87f8acb9f03b4389b0873"
+  },
+  "role_files": 34,
+  "role_manifest_sha256": "fdd45820d3af22e46101ba3b7e9212cfdf59cfcaa1232b5169e59aba6a90dd7e",
+  "runtime_execution": false,
+  "scope": "SOURCE_ONLY_ONE_CURRENT_CLI_COMPILE_PREPARATION",
+  "source_manifest": {
+    "bytes": 2621,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-sg512-closed-role-daemon-source-v2/MANIFEST.json",
+    "sha256": "34f62955a6aef4931053171a1887e81a15254f490daeb08b8991137f884418ee"
+  },
+  "source_sums": {
+    "bytes": 1352,
+    "sha256": "4259fb2745822e7a58e27acc473c60e50cc0b96f76f03f2eb34e73880403a1cd"
+  },
+  "subject_files": 2498,
+  "work_seconds": 600
+}

@@ -1,0 +1,34 @@
+{
+  "causal_or_statistical_CPU_conclusion": false,
+  "current_commit": "08c3c5ea0c7d6bc34c634060d1a5990d0ca745a6",
+  "old_evidence": "../d1-churn512-2026-11-20",
+  "rows": [
+    {
+      "current": 210948096,
+      "delta": -18821120,
+      "delta_percent": -8.191314888762122,
+      "metric": "service inclusive cgroup peak bytes",
+      "old": 229769216
+    },
+    {
+      "current": 8653066,
+      "delta": -129490,
+      "delta_percent": -1.474399935508524,
+      "metric": "service inclusive cgroup CPU usec",
+      "old": 8782556
+    },
+    {
+      "current": 92295168,
+      "delta": -2134016,
+      "metric": "driver peak bytes",
+      "old": 94429184
+    },
+    {
+      "current": 1336855,
+      "delta": 31379,
+      "metric": "driver inclusive CPU usec",
+      "old": 1305476
+    }
+  ],
+  "scope": "TWO_RETAINED_SINGLE_SAMPLE_RESULTS_NOT_PAIRED_REPEAT"
+}

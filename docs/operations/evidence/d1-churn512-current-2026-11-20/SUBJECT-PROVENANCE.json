@@ -1,0 +1,14 @@
+{
+  "five_private_posts_byte_identical": true,
+  "no_build_no_runtime": true,
+  "only_subject_delta": {
+    "internal/core/node/find_node_owned_receive_test.go": {
+      "after": "2c2409e55a4f8239f0bb8372b83b8fd013827ff8e32d720f72a61ef892c23c8e",
+      "before": "0fedc1d82bc80dce1cb88312cf14dafdf090896f2273d744f57160ebf9ef6c1f"
+    }
+  },
+  "scope": "SOURCE_PROVENANCE_ONLY_V3_SUBJECT_REBIND",
+  "seven_role_production_files_unchanged": true,
+  "v1_status": "NOT_BUILT",
+  "v3_status": "CLOSED_ROLE_QA_AND_COMPILE_PASS"
+}

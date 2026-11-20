@@ -1,0 +1,37 @@
+{
+  "ELF_executed": false,
+  "copy": {
+    "bytes": 32424079,
+    "device": 16777232,
+    "gid": 20,
+    "inode": 285307658,
+    "mode": "0o444",
+    "nlink": 1,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-sg512-closed-role-runtime-v2/public-inputs/corsad",
+    "sha256": "4010d5907a55c4a701b115a295e5320300239e1ff8d2b6752403061a9b4fb969",
+    "uid": 501
+  },
+  "directory": {
+    "device": 16777232,
+    "empty": false,
+    "gid": 20,
+    "inode": 285307657,
+    "mode": "0o700",
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-sg512-closed-role-runtime-v2/public-inputs",
+    "uid": 501
+  },
+  "original": {
+    "bytes": 32424079,
+    "device": 16777232,
+    "gid": 0,
+    "inode": 285304787,
+    "mode": "0o700",
+    "nlink": 1,
+    "path": "/private/tmp/corsa-d1-sg512-closed-role-daemon-6b8d1342e1e0425a8ac3d9fa9a453280/artifacts/corsad-diagnostic",
+    "sha256": "4010d5907a55c4a701b115a295e5320300239e1ff8d2b6752403061a9b4fb969",
+    "uid": 501
+  },
+  "original_bytes_unchanged": true,
+  "original_metadata_unchanged": true,
+  "scope": "PUBLIC_CLI_COPY_ONLY_NOT_EXECUTED"
+}

@@ -1,0 +1,77 @@
+{
+  "cli_sha256": "4010d5907a55c4a701b115a295e5320300239e1ff8d2b6752403061a9b4fb969",
+  "driver_measurement": {
+    "driver_exit_tail": "UNKNOWN",
+    "driver_inclusive_cpu_usec": 1336855,
+    "driver_peak_bytes": 92295168
+  },
+  "facts": {
+    "RAW_attachments_normal0_EOF": true,
+    "all_four_container_roles_normal0_noOOM": true,
+    "all_owned_resources_removed_as_saved_final_queries": true,
+    "answers": 896,
+    "cgroup_events_no_max_OOM_PID": true,
+    "commands_exit0": 66,
+    "complete_service_membership_ConnIDs": true,
+    "distinct_signing_targets": 512,
+    "full_phases": [
+      "initial",
+      "survivors",
+      "replacement",
+      "closed"
+    ],
+    "lock_absent_fresh": true,
+    "max_sample_gap_ns": 538766084,
+    "participants": 768,
+    "proc_exe_bound": true,
+    "role_noSwap": true,
+    "service_samples": 202,
+    "source_inputs_exact": true
+  },
+  "handoff_sha256": "fc173967a28dd8291160e39d0ee6224b10eb925a35d10e1f003f40bdb54c5b4b",
+  "limitations": [
+    "One current shoulder against retained old result; no paired rerun or statistical cost/session conclusion.",
+    "Inclusive service peak/CPU, no subtractions; keeper exit-tail/shared-page attribution/process RSS/preparer/topology cost remain UNKNOWN.",
+    "No Docker/resource commands by reviewer; removal established by saved final exact-ID and owner-label queries, not fresh Docker enumeration.",
+    "This is selected F1/churn qualification, not O1a/whole D1/G2/public activation."
+  ],
+  "measurement": {
+    "inclusive_group_cpu_usec": 8653066,
+    "keeper_exit_tail": "UNKNOWN",
+    "service_peak_bytes": 210948096,
+    "shared_page_attribution": "UNKNOWN"
+  },
+  "old_current_single_sample": [
+    {
+      "current": 210948096,
+      "delta": -18821120,
+      "delta_percent": -8.191314888762122,
+      "metric": "service inclusive cgroup peak bytes",
+      "old": 229769216
+    },
+    {
+      "current": 8653066,
+      "delta": -129490,
+      "delta_percent": -1.474399935508524,
+      "metric": "service inclusive cgroup CPU usec",
+      "old": 8782556
+    },
+    {
+      "current": 92295168,
+      "delta": -2134016,
+      "metric": "driver peak bytes",
+      "old": 94429184
+    },
+    {
+      "current": 1336855,
+      "delta": 31379,
+      "metric": "driver inclusive CPU usec",
+      "old": 1305476
+    }
+  ],
+  "result_sha256": "ec526f149dbf0a54808e0ea1f000ccb79872c945af652b6890ba5e316866dc74",
+  "role": "TESTER",
+  "source_commit": "08c3c5ea0c7d6bc34c634060d1a5990d0ca745a6",
+  "status": "INDEPENDENT_SCOPED_SG512_DATA_ACCEPTED",
+  "work": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-sg512-closed-role-runtime-v2/runs/churn512-fc5972f14bf92d0070146d76c3270c0e"
+}

@@ -1,0 +1,82 @@
+{
+  "status": "DAEMON_BUILT",
+  "attempt_id": "6b8d1342e1e0425a8ac3d9fa9a453280",
+  "work": "/private/tmp/corsa-d1-sg512-closed-role-daemon-6b8d1342e1e0425a8ac3d9fa9a453280",
+  "error": null,
+  "cleanup_confirmed": true,
+  "steps": [
+    {
+      "phase": "go-version",
+      "argv": [
+        "/usr/local/go/bin/go",
+        "version"
+      ],
+      "pid": 24703,
+      "exit": 0,
+      "stdout": "/private/tmp/corsa-d1-sg512-closed-role-daemon-6b8d1342e1e0425a8ac3d9fa9a453280/go-version.stdout",
+      "stderr": "/private/tmp/corsa-d1-sg512-closed-role-daemon-6b8d1342e1e0425a8ac3d9fa9a453280/go-version.stderr",
+      "pgid": 24703
+    },
+    {
+      "phase": "modules",
+      "argv": [
+        "/usr/local/go/bin/go",
+        "mod",
+        "verify"
+      ],
+      "pid": 24704,
+      "exit": 0,
+      "stdout": "/private/tmp/corsa-d1-sg512-closed-role-daemon-6b8d1342e1e0425a8ac3d9fa9a453280/modules.stdout",
+      "stderr": "/private/tmp/corsa-d1-sg512-closed-role-daemon-6b8d1342e1e0425a8ac3d9fa9a453280/modules.stderr",
+      "pgid": 24704
+    },
+    {
+      "phase": "daemon-build",
+      "argv": [
+        "/usr/local/go/bin/go",
+        "build",
+        "-mod=readonly",
+        "-buildvcs=false",
+        "-p=1",
+        "-trimpath",
+        "-tags=d1_resource_probe",
+        "-o",
+        "/private/tmp/corsa-d1-sg512-closed-role-daemon-6b8d1342e1e0425a8ac3d9fa9a453280/artifacts/corsad-diagnostic",
+        "./cmd/corsa-node"
+      ],
+      "pid": 24705,
+      "exit": 0,
+      "stdout": "/private/tmp/corsa-d1-sg512-closed-role-daemon-6b8d1342e1e0425a8ac3d9fa9a453280/daemon-build.stdout",
+      "stderr": "/private/tmp/corsa-d1-sg512-closed-role-daemon-6b8d1342e1e0425a8ac3d9fa9a453280/daemon-build.stderr",
+      "pgid": 24705
+    },
+    {
+      "phase": "daemon-metadata",
+      "argv": [
+        "/usr/local/go/bin/go",
+        "version",
+        "-m",
+        "/private/tmp/corsa-d1-sg512-closed-role-daemon-6b8d1342e1e0425a8ac3d9fa9a453280/artifacts/corsad-diagnostic"
+      ],
+      "pid": 25150,
+      "exit": 0,
+      "stdout": "/private/tmp/corsa-d1-sg512-closed-role-daemon-6b8d1342e1e0425a8ac3d9fa9a453280/daemon-metadata.stdout",
+      "stderr": "/private/tmp/corsa-d1-sg512-closed-role-daemon-6b8d1342e1e0425a8ac3d9fa9a453280/daemon-metadata.stderr",
+      "pgid": 25150
+    }
+  ],
+  "artifact": {
+    "path": "/private/tmp/corsa-d1-sg512-closed-role-daemon-6b8d1342e1e0425a8ac3d9fa9a453280/artifacts/corsad-diagnostic",
+    "sha256": "4010d5907a55c4a701b115a295e5320300239e1ff8d2b6752403061a9b4fb969",
+    "bytes": 32424079,
+    "static_linux_arm64": true,
+    "executed": false
+  },
+  "ELF_executed": false,
+  "base_commit": "1b97da9a8c581f7a40664aa5b5eb78c59f104f3c",
+  "role_manifest_sha256": "fdd45820d3af22e46101ba3b7e9212cfdf59cfcaa1232b5169e59aba6a90dd7e",
+  "overlay_manifest_sha256": "34f62955a6aef4931053171a1887e81a15254f490daeb08b8991137f884418ee",
+  "source_file_count": 2498,
+  "work_limit_s": 600,
+  "cleanup_end_s": 630
+}

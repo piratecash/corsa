@@ -22,11 +22,26 @@ The subject is base `93eb8fe75d2a90710d21409c535276c6c7ed28f2` plus the exact pr
 
 The preserved v6 failed after 512 answers on the 513th new target in one source group. Disconnect does not erase its ten-minute target history. Reversing only the first block's request directions retained 896 operations and 768 participants while limiting distinct targets to 512; policy caps and deadlines were unchanged. The verifier additionally requires that exact target union. A separate Go temporary-file accounting race was fixed in the build wrapper; 19 fixture/build and 61 runtime checks passed.
 
-This qualifies the **selected F1/churn resource workload**. Late keeper tail, shared-page attribution, process RSS and preparer costs remain UNKNOWN. It does not establish mixed1024 memory, every D1 workload, Responder authorization or final PR‑6 readiness. [Closed role enforcement now has a separate source/QA result](d1-findnode-local-role.md); it is a newer subject than this resource measurement. O‑1a, evidence applicability and remaining final-candidate 13b-D1 checks, G2 and public activation decisions remain open. S6 observation runs in parallel for public activation.
+This qualifies the **selected F1/churn resource workload**. Late keeper tail, shared-page attribution, process RSS and preparer costs remain UNKNOWN. It does not establish mixed1024 memory, every D1 workload, Responder authorization or final PR‑6 readiness. [Closed role enforcement has a separate source/QA result](d1-findnode-local-role.md) and the current-subject repeat below. O‑1a, evidence applicability and remaining final-candidate 13b-D1 checks, G2 and public activation decisions remain open. S6 observation runs in parallel for public activation.
+
+## Current closed-role Churn512 — November 20
+
+One current shoulder on signed Go commit `08c3c5ea0c7d6bc34c634060d1a5990d0ca745a6` plus five private diagnostic posts repeated the **same** workload, driver, topology and limits: **512→256→512→0**, **768 participants**, **896 verified answers**, **512 distinct signing targets**. The typed closed FullResponder role was retained; ordinary constructors stay Off. The complete 2498-file build snapshot retains ancillary files from base `1b97da9`, with exact before/after manifests and CLI SHA `4010d590…`. [Portable evidence](evidence/d1-churn512-current-2026-11-20/README.md).
+
+| Inclusive measurement | Retained old | Current | Difference |
+| --- | ---: | ---: | ---: |
+| Service-group peak, bytes | 229,769,216 | **210,948,096** | −18,821,120 |
+| Service-group CPU, µs | 8,782,556 | **8,653,066** | −129,490 |
+| Driver peak, bytes | 94,429,184 | 92,295,168 | −2,134,016 |
+| Driver CPU, µs | 1,305,476 | 1,336,855 | +31,379 |
+
+These are two retained single observations; the old shoulder was not rerun. They establish no causal saving, statistical CPU change or cost per session. All202 samples were retained (maximum gap0.538766084s), four complete membership/ConnID and STATE phases passed, intake counters were896 with zero refusals/violations, and no memory max/OOM/PID-limit events occurred. Actual `/proc` executable hashing bound the CLI. Daemon/sampler reap preceded the final inclusive peak/CPU read; final keeper membership was `[1]`. Both streams reached EOF/normal0. Four owned containers, three volumes and the heavy-lock were removed; ROOT/TESTER/REVIEWER accepted retained inputs, RAW and cleanup evidence.
+
+Only a public0444 copy fixed an input-staging permission issue before execution; original build permissions, all eight reused inputs, CHOWN-only preparer and oracles stayed unchanged. Preparer/topology cost, process RSS, shared-page attribution and late keeper tail remain UNKNOWN. This updates applicability for the selected closed-role F1/churn workload; O‑1a, remaining13b-D1 scenarios, G2/public activation and parallel S6 observation remain separate. [Result](evidence/d1-churn512-current-2026-11-20/result.json) · [Hashes and complete RAW](evidence/d1-churn512-current-2026-11-20/SHA256SUMS).
 
 ## Selection and ownership
 
-The Core and headless App constructors named `NewD1FindNodeResourceDiagnostic` exist only with the exact `d1_resource_probe` build tag. There is no configuration flag, mutable capability setter, generic construction callback, caller clock, or clock-authority export. The ordinary Core/App constructors and stock `cmd/corsa-node` remain F1-off, including when the tag is present. There is no diagnostic CLI or external request driver in this slice.
+The Core and headless App constructors named `NewD1FindNodeResourceDiagnostic` exist only with the exact `d1_resource_probe` build tag. There is no configuration flag, mutable capability setter, generic construction callback, caller clock, or clock-authority export. The ordinary Core/App constructors and stock `cmd/corsa-node` remain F1-off, including when the tag is present. The ordinary tracked small2 source has no diagnostic CLI or external request driver; the private measurement overlays above are separate.
 
 The closed constructor uses the existing real RuntimeDomain → Ready construction → original checked bindings → original Seal path. F1 is selected before the new Service escapes or a handshake starts. It does not select FixtureDomain, signing test gate, loaded N-in, contact reconciliation or own-DM runtime. It requires a full node, enabled listener, literal127.0.0.1 listen/bootstrap addresses, at most one bootstrap endpoint, and no proxy or connect-only configuration; invalid configuration is refused rather than silently rewritten. Construction alone does not start Run/listen.
 

@@ -1,0 +1,141 @@
+{
+  "actual_build_result": {
+    "bytes": 2969,
+    "path": "/private/tmp/corsa-d1-sg512-closed-role-daemon-6b8d1342e1e0425a8ac3d9fa9a453280/result.json",
+    "sha256": "3adddae9f6a00d90cacd06ffdf5c8d3423e711227f84b576519fc98cafbb58a8"
+  },
+  "actual_testerdatapath": {
+    "bytes": 2505,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-sg512-closed-role-build-actual-tester-v2/REVIEW.json",
+    "sha256": "a0e5a76856273c573ffb96749077fb2c3b2c8c0395b8c37841c33190db6a9f34"
+  },
+  "build_handoff": {
+    "bytes": 2066,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-sg512-closed-role-daemon-build-v2/HANDOFF.json",
+    "sha256": "cfb75946d373942b93b0a62cbbb4dc0df3cb9549eec2a38da5a558a43bb2881f"
+  },
+  "cli": {
+    "bytes": 32424079,
+    "executed": false,
+    "path": "/private/tmp/corsa-d1-sg512-closed-role-daemon-6b8d1342e1e0425a8ac3d9fa9a453280/artifacts/corsad-diagnostic",
+    "sha256": "4010d5907a55c4a701b115a295e5320300239e1ff8d2b6752403061a9b4fb969",
+    "static_linux_arm64": true
+  },
+  "commit": "08c3c5ea0c7d6bc34c634060d1a5990d0ca745a6",
+  "compiled_manifest": {
+    "bytes": 295180,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-sg512-closed-role-daemon-source-v2/SOURCE-MANIFEST.AFTER.json",
+    "sha256": "f1a5c5b4470adb57dd5ebcd3125316cf779635f9a4b8237a4ae216e8162685d2"
+  },
+  "legacy_handoff": {
+    "bytes": 4288,
+    "path": "/Users/hades/Documents/repos/corsa/docs/operations/evidence/d1-churn512-2026-11-20/HANDOFF.json",
+    "sha256": "b1abc1ca112fd200e27c5fedc8a6e1da235405b44473344fd2d09c1562698a99"
+  },
+  "private_overlay": {
+    "bytes": 2621,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-sg512-closed-role-daemon-source-v2/MANIFEST.json",
+    "sha256": "34f62955a6aef4931053171a1887e81a15254f490daeb08b8991137f884418ee"
+  },
+  "reused_rows": {
+    "c2driver": {
+      "bytes": 69146176,
+      "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-churn512-runtime-inert-v7/public-inputs/c2driver",
+      "sha256": "6505bd130485342c572f2bc0890ed5f143cf87ee392c87adf9675d6bc32b305e"
+    },
+    "clockprobe.py": {
+      "bytes": 13982,
+      "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-churn512-runtime-inert-v7/public-inputs/clockprobe.py",
+      "sha256": "c58fee4558ba4f4e5952be72ad581d1085382453ab9a914bb7fc5a931295f3f6"
+    },
+    "netprofile.py": {
+      "bytes": 12161,
+      "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-churn512-runtime-inert-v7/public-inputs/netprofile.py",
+      "sha256": "0c53d153475fad6e1b6d1ed6defbe2691ef1bc89032999947b08d0a6d2a1da9e"
+    },
+    "network-profile.json": {
+      "bytes": 46783,
+      "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-churn512-runtime-inert-v7/public-inputs/network-profile.json",
+      "sha256": "b96b63e1ec5ce0a73e71320bf7e37bc458c0ca4407d40b2b81182ee5eb4981f0"
+    },
+    "sg32_common.py": {
+      "bytes": 28607,
+      "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-churn512-runtime-inert-v7/public-inputs/sg32_common.py",
+      "sha256": "2fa268e62081939cd4632b8a8deb59b2fe7d29e859b53769d59f552305a1ef33"
+    },
+    "sg32_service.py": {
+      "bytes": 51979,
+      "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-churn512-runtime-inert-v7/public-inputs/sg32_service.py",
+      "sha256": "a9ec6bf5a22b0764d3ddaf7866b7eafc893a86c438aba3dbe20a12e9de9d65ab"
+    },
+    "topology": {
+      "bytes": 4824804,
+      "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-churn512-runtime-inert-v7/public-inputs/topology",
+      "sha256": "873b7fc6411541659c3375ef7572e627f245a918a187fcd0295ee1df59f447d5"
+    },
+    "worker.py": {
+      "bytes": 20099,
+      "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-churn512-runtime-inert-v7/public-inputs/worker.py",
+      "sha256": "84b9fcbf63ecc2072c6f1124282fa4d724a060542ad002be40a3dbb0d9dc3a42"
+    }
+  },
+  "runtime_files": {
+    "canonical/clockprobe.py": {
+      "bytes": 13982,
+      "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-churn512-runtime-inert-v7/canonical/clockprobe.py",
+      "sha256": "c58fee4558ba4f4e5952be72ad581d1085382453ab9a914bb7fc5a931295f3f6"
+    },
+    "canonical/sg32_common.py": {
+      "bytes": 28607,
+      "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-churn512-runtime-inert-v7/canonical/sg32_common.py",
+      "sha256": "2fa268e62081939cd4632b8a8deb59b2fe7d29e859b53769d59f552305a1ef33"
+    },
+    "canonical/sg32_host.py": {
+      "bytes": 32964,
+      "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-churn512-runtime-inert-v7/canonical/sg32_host.py",
+      "sha256": "184f597b8907a71e110f76c06a94aae06c742129b16913bfa636822de2879481"
+    },
+    "canonical/sg32_service.py": {
+      "bytes": 51979,
+      "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-churn512-runtime-inert-v7/canonical/sg32_service.py",
+      "sha256": "a9ec6bf5a22b0764d3ddaf7866b7eafc893a86c438aba3dbe20a12e9de9d65ab"
+    },
+    "host.py": {
+      "bytes": 29856,
+      "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-churn512-runtime-inert-v7/host.py",
+      "sha256": "16f004f26115235bf803e808bf846e2f1352165d57324d9e867e65a067b94010"
+    },
+    "netprofile.py": {
+      "bytes": 12161,
+      "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-churn512-runtime-inert-v7/netprofile.py",
+      "sha256": "0c53d153475fad6e1b6d1ed6defbe2691ef1bc89032999947b08d0a6d2a1da9e"
+    },
+    "network-profile.json": {
+      "bytes": 46783,
+      "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-churn512-runtime-inert-v7/network-profile.json",
+      "sha256": "b96b63e1ec5ce0a73e71320bf7e37bc458c0ca4407d40b2b81182ee5eb4981f0"
+    },
+    "run_host.py": {
+      "bytes": 340,
+      "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-churn512-runtime-inert-v7/run_host.py",
+      "sha256": "200a60a9bd1178f5befad614e47e97d2ad5395d17cfc43d7920c1fd92f929edc"
+    },
+    "verify_churn.py": {
+      "bytes": 4489,
+      "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-churn512-runtime-inert-v7/verify_churn.py",
+      "sha256": "bb2b81189e338e663a269082962ee92eac6e65f502f72d8d5f364899a4db29a6"
+    },
+    "worker.py": {
+      "bytes": 20099,
+      "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-churn512-runtime-inert-v7/worker.py",
+      "sha256": "84b9fcbf63ecc2072c6f1124282fa4d724a060542ad002be40a3dbb0d9dc3a42"
+    }
+  },
+  "runtime_root": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-churn512-runtime-inert-v7",
+  "scope": "SINGLE_CURRENT_SOURCE_AND_DATA_BINDING_ONLY",
+  "subject_manifest": {
+    "bytes": 295180,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-sg512-closed-role-daemon-source-v2/SOURCE-MANIFEST.BEFORE.json",
+    "sha256": "7a025cd075cc42ed6ddd669b553b3a41c3c6cb90cc1f008f907328ae917f322f"
+  }
+}

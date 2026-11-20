@@ -1,0 +1,134 @@
+{
+  "actual_result_sha256": "ec526f149dbf0a54808e0ea1f000ccb79872c945af652b6890ba5e316866dc74",
+  "actual_work": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-sg512-closed-role-runtime-v2/runs/churn512-fc5972f14bf92d0070146d76c3270c0e",
+  "attempt_id": "fc5972f14bf92d0070146d76c3270c0e",
+  "cleanup": {
+    "exact_four_CIDs_removed_and_final_empty": true,
+    "exact_three_volumes_removed_and_final_empty": true,
+    "final_owner_label_container_and_volume_lists_empty": true,
+    "heavy_lock_absent_at_review": true,
+    "physical_closure": "KNOWN"
+  },
+  "comparison": {
+    "current_service_inclusive_cpu_usec": 8653066,
+    "current_service_peak_bytes": 210948096,
+    "observed_cpu_difference_usec": -129490,
+    "observed_peak_difference_bytes": -18821120,
+    "prior_scope": "Previous rebuilt private diagnostic SG512 shoulder; unchanged driver/topology/profile, not published K11.",
+    "prior_service_inclusive_cpu_usec": 8782556,
+    "prior_service_peak_bytes": 229769216,
+    "statistical_regression_or_improvement_threshold": "NOT_ESTABLISHED_BY_SINGLE_PAIR"
+  },
+  "handoff_sha256": "fc173967a28dd8291160e39d0ee6224b10eb925a35d10e1f003f40bdb54c5b4b",
+  "inputs": {
+    "actual_node_proc_exe_sha256": "4010d5907a55c4a701b115a295e5320300239e1ff8d2b6752403061a9b4fb969",
+    "all_nine_manifest_rows_and_actual_bytes_verified": true,
+    "node_incarnation": {
+      "pid": 8,
+      "ppid": 1,
+      "start_ticks": 4843582
+    },
+    "unchanged_driver_sha256": "6505bd130485342c572f2bc0890ed5f143cf87ee392c87adf9675d6bc32b305e",
+    "unchanged_topology_sha256": "873b7fc6411541659c3375ef7572e627f245a918a187fcd0295ee1df59f447d5"
+  },
+  "limitations": [
+    "Keeper exit-tail/shared-page attribution/RSS remain UNKNOWN; peak is charged service group without subtractions.",
+    "Preparer and topology cost remain UNKNOWN; driver has a separate resource budget.",
+    "No standalone corsad<=512MB, published K11, fullD1/S6/G2, public activation or release claim.",
+    "Finite inert-tunnel offline namespace profile is distinct from the earlier strict-lo-only S6 profile."
+  ],
+  "measurement": {
+    "actual_four_created_metadata_strict_replayed": true,
+    "all_memory_max_oom_oomkill_pidsmax_events_zero": true,
+    "driver_group": {
+      "charged_peak_bytes": 92295168,
+      "cpu": 1,
+      "inclusive_cpu_usec": 1336855,
+      "memory_limit_bytes": 268435456,
+      "pids_limit": 32,
+      "swap_limit_bytes": 0
+    },
+    "final_cgroup_members": [
+      1
+    ],
+    "final_state_walk_before_final_peak_read": true,
+    "fixed_cgroup_file_and_namespace_identities": true,
+    "live_first_to_last_ns": 101307155755,
+    "maximum_after_edge_gap_ns": 538766084,
+    "peak_after_actual_node_and_sampler_reap": true,
+    "sample_ordinals": [
+      0,
+      201
+    ],
+    "sampler_exit": 0,
+    "sampler_final_ordinal": 202,
+    "samples": 202,
+    "service_exit": 0,
+    "service_group": {
+      "charged_peak_bytes": 210948096,
+      "cpu": 1,
+      "inclusive_cpu_usec": 8653066,
+      "memory_limit_bytes": 512000000,
+      "pids_limit": 64,
+      "swap_limit_bytes": 0
+    }
+  },
+  "raw": {
+    "all_LOG_frame_bytes_and_hashes_verified": 1215,
+    "all_command_exit_zero_and_saved_stdout_stderr_exact": true,
+    "bounded_cli_commands": 66,
+    "command_raw_bytes": 71085,
+    "driver": {
+      "eof": true,
+      "exit": 0,
+      "raw_prefix": "child-39",
+      "stderr_retained": 0,
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_retained": 197384,
+      "stdout_sha256": "d257728462930d126b1f5b59f6c71e0d6488be0d3c856cd999152cd3d6f02fa4"
+    },
+    "service": {
+      "eof": true,
+      "exit": 0,
+      "raw_prefix": "child-25",
+      "stderr_retained": 0,
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_retained": 23993529,
+      "stdout_sha256": "1c35b3903d8ca929302f8a9e3fd2555e6bce1fca17dc8e3cf37a162bca18dbe5"
+    }
+  },
+  "review_role": "REVIEWER",
+  "source_commit": "08c3c5ea0c7d6bc34c634060d1a5990d0ca745a6",
+  "status": "ACCEPTED_SCOPED_CURRENT_SG512_DATA",
+  "workload": {
+    "all_fixed512rows_and_zero_tail_verified": true,
+    "answers_by_phase": {
+      "closed": 0,
+      "initial": 256,
+      "replacement": 512,
+      "survivors": 128
+    },
+    "complete_original_membership_by_phase": [
+      512,
+      256,
+      512,
+      0
+    ],
+    "distinct_original_TLS_participants": 768,
+    "distinct_query_sources": 768,
+    "distinct_signed_targets": 512,
+    "final_intake": {
+      "Answered": 896,
+      "Committed": 896,
+      "Offered": 896,
+      "Refused": 0,
+      "Replaced": 0,
+      "Saturated": false,
+      "Taken": 896,
+      "Violations": 0
+    },
+    "original_Go_test_PASS_seconds": 101.44,
+    "protocol_verified_answers": 896,
+    "retained_ConnIDs_stable_and_replacement_ConnIDs_fresh": true
+  }
+}

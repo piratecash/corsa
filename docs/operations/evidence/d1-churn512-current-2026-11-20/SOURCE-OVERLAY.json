@@ -1,0 +1,49 @@
+{
+  "after_manifest_sha256": "f1a5c5b4470adb57dd5ebcd3125316cf779635f9a4b8237a4ae216e8162685d2",
+  "base_commit": "1b97da9a8c581f7a40664aa5b5eb78c59f104f3c",
+  "overlay_files": {
+    "cmd/corsa-node/main.go": {
+      "after_sha256": "673d79a69ce8ad446f6e4574ad3d760aa1c6ddc700e0d063f77f3533aefeb59e",
+      "before_sha256": "83bb8d81a90371a79b917348f554d1b7775161e9877430bb27f2d5a2a5a5655e",
+      "bytes": 5438
+    },
+    "internal/app/node/d1_membership_checkpoint.go": {
+      "after_sha256": "ba3e811ed0dfe5392d9645517ba60c079f021e39da780148e7639033ab053a94",
+      "before_sha256": "871774d6e716f9120db1da47684238fa0d2c90e5e9e8f85c3b1f8c6fe0e629dc",
+      "bytes": 792
+    },
+    "internal/app/node/d1_resource_diagnostic.go": {
+      "after_sha256": "cc062b80a6b3d1b029a52eaee0edb65a50c492cc747eec2dd7bc83a193a2c393",
+      "before_sha256": "ad89647006826542e67057dd0142b76b6f3fe82de3d8fa18b85981a6b90fb3ef",
+      "bytes": 1898
+    },
+    "internal/core/node/find_node_membership_checkpoint.go": {
+      "after_sha256": "7bfde565fb9c6caea5d6a811d8e02653de62a30da1c7b3b063dc05bb7e416087",
+      "before_sha256": "39209defff20031f7f093ec2bd86c2c956e105b3699fa70a8963b522290186d8",
+      "bytes": 6180
+    },
+    "internal/core/node/find_node_resource_diagnostic.go": {
+      "after_sha256": "b273df422e9182138921fcb9b49c3e71d05e3ed6d04f6dc086d8376c150d0414",
+      "before_sha256": "e97c7f60a858b6380569d957646ab4338cc16a1bd638dcb25494924b66e91556",
+      "bytes": 6791
+    }
+  },
+  "overlay_patch_sha256": "3b7c3b6badfc5ff798c846a957426fdc54c0a980c73f9b6f11e9736b8039d18f",
+  "reused_input_report_sha256": "92c12b5121e6b4616e16cbd46c55d89896dddd74ebe87f8acb9f03b4389b0873",
+  "role_files": 34,
+  "role_manifest_sha256": "fdd45820d3af22e46101ba3b7e9212cfdf59cfcaa1232b5169e59aba6a90dd7e",
+  "scope": "SOURCE_ONLY_CLI_BUILD_PREPARATION_NO_BUILD_NO_RUNTIME",
+  "subject_file_count": 2498,
+  "subject_manifest_path": "/private/tmp/corsa-d1-closed-role-goqa-603de9b66d0b45e7be054a3e2f8aa56d/SOURCE-MANIFEST.json",
+  "subject_manifest_sha256": "7a025cd075cc42ed6ddd669b553b3a41c3c6cb90cc1f008f907328ae917f322f",
+  "subject_qa_result": {
+    "child_pass": 311,
+    "outer_pass": 147,
+    "path": "/private/tmp/corsa-d1-closed-role-goqa-603de9b66d0b45e7be054a3e2f8aa56d/result.json",
+    "sha256": "67f099bc65cec3239713aeab2045079fdc00dd8887146f7e0b7bfb9d19eeec7d",
+    "source_file_count": 2498,
+    "status": "CLOSED_ROLE_QA_AND_COMPILE_PASS"
+  },
+  "subject_source_path": "/private/tmp/corsa-d1-closed-role-goqa-603de9b66d0b45e7be054a3e2f8aa56d/source",
+  "unchanged_go_elf_runtime": "driver6505bd13/topology873b7fc6"
+}

@@ -1,0 +1,27 @@
+{
+  "status": "ROOT_SCOPED_RESOURCE_DATA_ACCEPTED",
+  "result_sha256": "ec526f149dbf0a54808e0ea1f000ccb79872c945af652b6890ba5e316866dc74",
+  "service_peak_bytes": 210948096,
+  "inclusive_cpu_usec": 8653066,
+  "signed_answers": 896,
+  "participants": 768,
+  "samples": 202,
+  "commands": 66,
+  "phases": [
+    "initial",
+    "survivors",
+    "replacement",
+    "closed"
+  ],
+  "old_service_peak_bytes": 229769216,
+  "peak_delta_bytes": -18821120,
+  "cpu_delta_usec": -129490,
+  "limits": "service1CPU/512000000B/64PID/noSwap;driverseparate1CPU/256MiB/32PID",
+  "unverified": [
+    "late keeper tail",
+    "shared-page attribution",
+    "RSS",
+    "preparer/topology costs"
+  ],
+  "scope": "one current closedRoleF1/churn512 workload only; not fullD1/G2/publicactivation"
+}
