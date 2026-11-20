@@ -1,0 +1,17 @@
+{
+  "D1": "NOT_PASS",
+  "Linux_lint": "LINUX_FIXTURE_LINT_PASS; golangci-lint v2.14.0, 0 issues, target linux/arm64 CGO0",
+  "base_commit": "c8e77b8f6723cf928e2d4465c9a4c17e535846e6",
+  "carrier_diagnostic": "NOT_REPRODUCED; one exactly owned route deletion and clean readback; no original causal inference",
+  "child_pass": 74,
+  "fixture_manifest_sha256": "4de340d3569291039351d8af29c2e9a80219cae8af28ff3c97c8123ceeccf203",
+  "normal_corsad_behavior_changed": false,
+  "old_O1a_subject": "4fcc (unchanged historical application ELF); not this fixture unit subject",
+  "original_Go_O1a": "NOT_PASS",
+  "outer_pass": 14,
+  "subject": "CURRENT_c8e77b8_PLUS_FOUR_FIXTURE_FILES",
+  "test_ELF_bytes": 29588402,
+  "test_ELF_sha256": "a63f22316bd7b01cbd8eb550507a755273e706e7df6a378bc26f5782b9400b5a",
+  "toolchain": "go1.27.4 Linux arm64 CGO0",
+  "unit_status": "FOURTEEN_FIXTURE_TESTS_PASSED"
+}

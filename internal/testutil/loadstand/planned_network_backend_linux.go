@@ -20,6 +20,7 @@ import (
 type linuxPlannedResource struct {
 	handle            plannedNetworkHandle
 	kernelIndex       int
+	peerIndex         int // original configured member-side index, not a name lookup
 	namespace         *OwnedNetNS
 	namespaceIdentity linuxNamespaceIdentity
 	nftHandle         uint64
@@ -277,7 +278,17 @@ func (b *linuxPlannedNetworkBackend) apply(ctx context.Context, op plannedNetwor
 		err = plannedNetworkPhaseError(fmt.Sprintf("move-netns index=%d", peer.index), b.socket.setLink(ctx, peer.index, unix.IFLA_NET_NS_FD, uint32(fd)))
 		err = errors.Join(err, plannedNetworkPhaseError("move-close-namespace-fd", unix.Close(fd)))
 	case plannedAddress:
-		_, err = ns.namespace.plannedOperation(ctx, b.plan, op.member, true)
+		if ns.peerIndex != 0 {
+			return plannedNetworkHandle{}, errPlannedNetwork
+		}
+		var configured *linuxPlannedNamespaceOperation
+		configured, err = ns.namespace.plannedOperation(ctx, b.plan, op.member, true)
+		if err == nil {
+			if configured.identity != ns.namespaceIdentity || configured.peerIndex <= 0 {
+				return plannedNetworkHandle{}, errPlannedNetwork
+			}
+			ns.peerIndex = configured.peerIndex
+		}
 	default:
 		err = errPlannedNetwork
 	}
@@ -321,6 +332,9 @@ func (b *linuxPlannedNetworkBackend) verify(ctx context.Context, p plannedNetwor
 			return errors.Join(errPlannedNetwork, e)
 		}
 		owned = append(owned, plannedKernelLink{index: veth.kernelIndex, name: member.hostLink, alias: plannedNetworkAlias(p.nonce)})
+		if e := ns.namespace.plannedSetupFinalize(ctx, p, member, ns.namespaceIdentity, ns.peerIndex); e != nil {
+			return plannedNetworkPhaseError("verify-member-finalize", e)
+		}
 		if _, e := ns.namespace.plannedOperation(ctx, p, member, false); e != nil {
 			return e
 		}

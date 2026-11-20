@@ -1,0 +1,239 @@
+{
+  "attempt_id": "3946b0d62a9c4221ba4205db21dcb42e",
+  "guest_parent": {
+    "all_children_reaped": "1",
+    "attempt": "3946b0d62a9c4221ba4205db21dcb42e",
+    "child_reaped": "1",
+    "exit": "0",
+    "killed": "0",
+    "normal_exit": "1",
+    "scope": "DIAGNOSTIC_ONLY_NOT_O1A_PASS"
+  },
+  "lock_binding": {
+    "directory_stamp": [
+      16777232,
+      285343802,
+      501,
+      0,
+      16832,
+      96,
+      1795155594401066208,
+      1795155594401066208
+    ],
+    "owner_sha256": "93b62b1ebe33a80cfc220c3bd226f4010093cb781cefce5e8d894e19e7f30004",
+    "owner_stamp": [
+      16777232,
+      285343803,
+      501,
+      0,
+      33152,
+      183,
+      1795155594401627586,
+      1795155594401627586
+    ]
+  },
+  "own_groups_absent": [
+    30900,
+    30901
+  ],
+  "own_pids_absent": [
+    30900,
+    30901
+  ],
+  "physical_XPC_resources": "UNKNOWN",
+  "reviews": {
+    "REVIEWER": {
+      "actual_owned_deletions": 1,
+      "actual_seccomp_mode": "NOT_SAMPLED",
+      "attempt_id": "3946b0d62a9c4221ba4205db21dcb42e",
+      "diagnostic_outcome": "NOT_REPRODUCED_IN_FIXED_WINDOW",
+      "early_routes": [
+        {
+          "classification": "ORIGINAL_CANDIDATE",
+          "datagram": 49,
+          "destination": "ff00::/8",
+          "failed_predicates": [],
+          "flags": 0,
+          "index": 3,
+          "kind": 5,
+          "metric": 256,
+          "preference": 0,
+          "protocol": 2,
+          "scope": 0,
+          "source": "::/0",
+          "stage": "member-predelete-qualify",
+          "table": 255
+        }
+      ],
+      "exact_lock_owner_sha256": "93b62b1ebe33a80cfc220c3bd226f4010093cb781cefce5e8d894e19e7f30004",
+      "fresh_own_PID_and_PGID_ESRCH": [
+        30900,
+        30901
+      ],
+      "fresh_ownership_body_ACK_remaining_readback_verified": true,
+      "guest_parent": {
+        "all_children_reaped": "1",
+        "attempt": "3946b0d62a9c4221ba4205db21dcb42e",
+        "child_reaped": "1",
+        "exit": "0",
+        "killed": "0",
+        "normal_exit": "1",
+        "scope": "DIAGNOSTIC_ONLY_NOT_O1A_PASS"
+      },
+      "handoff_sha256": "c8b338bd68bc16e52ec3768cd59f8401289820072a2ed0f84408ba3a69d17f32",
+      "late_owned_routes": [],
+      "lock_mutated": false,
+      "native_events": [
+        {
+          "attempt_id": "3946b0d62a9c4221ba4205db21dcb42e",
+          "elapsed_ns": 400229000,
+          "event": "ready",
+          "seq": 1
+        },
+        {
+          "attempt_id": "3946b0d62a9c4221ba4205db21dcb42e",
+          "elapsed_ns": 507917000,
+          "event": "start_ok",
+          "seq": 2
+        },
+        {
+          "attempt_id": "3946b0d62a9c4221ba4205db21dcb42e",
+          "elapsed_ns": 876203000,
+          "event": "guest_stopped",
+          "guest_error": null,
+          "seq": 3
+        },
+        {
+          "attempt_id": "3946b0d62a9c4221ba4205db21dcb42e",
+          "elapsed_ns": 876306000,
+          "event": "stop_complete",
+          "final_state": "stopped",
+          "seq": 4
+        }
+      ],
+      "original_failure_causality": "NOT_PROVEN; not reproduced in finite simplified window",
+      "physical_XPC_resources": "UNKNOWN",
+      "raw": {
+        "console": {
+          "bytes": 135531,
+          "eof": true,
+          "sha256": "1fc8e495f67eb003e7f998c5985bfd8911e9011fa25437679982023e34e55d5e"
+        },
+        "native": {
+          "bytes": 450,
+          "eof": true,
+          "sha256": "d13b9bbd1b5c4af3669fbb64e43e90ff6e255232b8954d73ab062954fcfa0832"
+        },
+        "stderr": {
+          "bytes": 0,
+          "eof": true,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      },
+      "role": "REVIEWER",
+      "scope": "Finite standalone C kernel diagnostic only, no Go apps/O1a PASS. No identical repeat authorized by this review.",
+      "signals_sent": false,
+      "source_input_original_and_copy_hashes_verified": true,
+      "source_installs_seccomp_filter": false,
+      "status": "ACCEPTED_VM_STOPPED_ONLY",
+      "timed_snapshots": [
+        {
+          "attempt": "3946b0d62a9c4221ba4205db21dcb42e",
+          "begin_ns": "57915749",
+          "bridge_up_ns": "57839416",
+          "end_ns": "58334041",
+          "scheduled_offset_ms": "0",
+          "stage": "member-post-bridge-0ms"
+        },
+        {
+          "attempt": "3946b0d62a9c4221ba4205db21dcb42e",
+          "begin_ns": "83674499",
+          "bridge_up_ns": "57839416",
+          "end_ns": "84162791",
+          "scheduled_offset_ms": "25",
+          "stage": "member-post-bridge-25ms"
+        },
+        {
+          "attempt": "3946b0d62a9c4221ba4205db21dcb42e",
+          "begin_ns": "167920374",
+          "bridge_up_ns": "57839416",
+          "end_ns": "168371166",
+          "scheduled_offset_ms": "100",
+          "stage": "member-post-bridge-100ms"
+        },
+        {
+          "attempt": "3946b0d62a9c4221ba4205db21dcb42e",
+          "begin_ns": "317954916",
+          "bridge_up_ns": "57839416",
+          "end_ns": "320015583",
+          "scheduled_offset_ms": "250",
+          "stage": "member-post-bridge-250ms"
+        }
+      ],
+      "work": "/private/tmp/corsa-d1-o1a-carrier-native-3946b0d62a9c4221ba4205db21dcb42e",
+      "worker_exit": 0,
+      "worker_reaped_ns": 904081000
+    },
+    "ROOT": {
+      "actual_deletions": 1,
+      "data_sha256": "93388cfb0162a8737731933c48cab292b634f3f0622cefda1fc7e1a6360d613c",
+      "original_failed_cause": "UNKNOWN_NOT_REPRODUCED",
+      "outcome": "NOT_REPRODUCED_IN_FIXED_WINDOW",
+      "physical_XPC_resources": "UNKNOWN",
+      "role": "ROOT",
+      "status": "ACCEPTED_VM_STOPPED_ONLY",
+      "work": "/private/tmp/corsa-d1-o1a-carrier-native-3946b0d62a9c4221ba4205db21dcb42e"
+    },
+    "TESTER": {
+      "all_RAW": {
+        "console": {
+          "eof": true,
+          "received": 135531,
+          "retained": 135531,
+          "sha256": "1fc8e495f67eb003e7f998c5985bfd8911e9011fa25437679982023e34e55d5e"
+        },
+        "native": {
+          "eof": true,
+          "received": 450,
+          "retained": 450,
+          "sha256": "d13b9bbd1b5c4af3669fbb64e43e90ff6e255232b8954d73ab062954fcfa0832"
+        },
+        "stderr": {
+          "eof": true,
+          "received": 0,
+          "retained": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      },
+      "all_original_and_saved_input_hashes_exact": true,
+      "attempt_id": "3946b0d62a9c4221ba4205db21dcb42e",
+      "diagnostic_summary": {
+        "actual_seccomp_mode": "NOT_SAMPLED",
+        "clean_remaining_readback": true,
+        "deletions": 1,
+        "early_candidates": 1,
+        "four_fixed_snapshots_clean": true,
+        "outcome": "NOT_REPRODUCED_IN_FIXED_WINDOW",
+        "source_installs_seccomp_filter": false
+      },
+      "exact_own_lock_custody_unchanged": true,
+      "fresh_own_PID_PGID_absent": [
+        30900,
+        30901
+      ],
+      "full_independent_review_sha256": "9da0b45ea5b2edabcfb19e095d2eb6ee4517bd7082dff49bab8a7603277cfc7e",
+      "functional_scope": "FINITE_SIMPLIFIED_DIAGNOSTIC_NOT_REPRODUCED_NOT_O1A_PASS",
+      "handoff_sha256": "c8b338bd68bc16e52ec3768cd59f8401289820072a2ed0f84408ba3a69d17f32",
+      "limitations": [
+        "No late route creation/recreation observed in these four snapshots; no causal confirmation or general disproof.",
+        "Actual seccomp mode not sampled; C source installs no filter, unlike original Go.",
+        "Original651767 failure/event remains UNKNOWN and is preserved; no identical probe/main retry.",
+        "No lock mutation/signals/resource commands by reviewer; physical XPC release remains UNKNOWN."
+      ],
+      "role": "TESTER",
+      "status": "ACCEPTED_VM_STOPPED_ONLY",
+      "work": "/private/tmp/corsa-d1-o1a-carrier-native-3946b0d62a9c4221ba4205db21dcb42e"
+    }
+  },
+  "scope": "NORMAL_VM_STOP_ACK_ONLY_NOT_O1A_PASS"
+}

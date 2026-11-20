@@ -12,17 +12,45 @@ import (
 
 // A closed typed operation, not a callback on the namespace worker. All fields
 // are copied before submission. The worker alone publishes the observation.
+type plannedNamespaceMode uint8
+
+const (
+	plannedNamespaceReadOnly plannedNamespaceMode = iota
+	plannedNamespaceConfigure
+	plannedNamespaceSetupFinalize
+)
+
 type linuxPlannedNamespaceOperation struct {
 	probes    *LinuxIsolationProbes
 	identity  linuxNamespaceIdentity
 	member    plannedNetworkMember
 	plan      plannedNetworkPlan
-	configure bool
+	mode      plannedNamespaceMode
+	peerIndex int // exact original namespace peer index; never re-adopted in finalize
 	links     []plannedKernelLink
 	routes    []plannedNetworkRoute
 }
 
 func (n *OwnedNetNS) plannedOperation(ctx context.Context, p plannedNetworkPlan, m plannedNetworkMember, configure bool) (*linuxPlannedNamespaceOperation, error) {
+	mode := plannedNamespaceReadOnly
+	if configure {
+		mode = plannedNamespaceConfigure
+	}
+	return n.plannedRequest(ctx, p, m, mode, linuxNamespaceIdentity{}, 0)
+}
+
+// This distinct closed setup operation runs only before a fixture claims the
+// original namespace, after every carrier is UP; it never assigns addresses or
+// raises links. The original configuration result supplies its exact peer index.
+func (n *OwnedNetNS) plannedSetupFinalize(ctx context.Context, p plannedNetworkPlan, m plannedNetworkMember, expected linuxNamespaceIdentity, peerIndex int) error {
+	_, err := n.plannedRequest(ctx, p, m, plannedNamespaceSetupFinalize, expected, peerIndex)
+	return err
+}
+
+func (n *OwnedNetNS) plannedRequest(ctx context.Context, p plannedNetworkPlan, m plannedNetworkMember, mode plannedNamespaceMode, expected linuxNamespaceIdentity, peerIndex int) (*linuxPlannedNamespaceOperation, error) {
+	if mode != plannedNamespaceReadOnly && mode != plannedNamespaceConfigure && mode != plannedNamespaceSetupFinalize {
+		return nil, errPlannedNetwork
+	}
 	if _, ok := ctx.Deadline(); !ok {
 		return nil, ErrLinuxOwnerBound
 	}
@@ -45,10 +73,13 @@ func (n *OwnedNetNS) plannedOperation(ctx context.Context, p plannedNetworkPlan,
 	n.mu.Unlock()
 	// Configuration is before the fixture claims its original namespace. A
 	// read-only postflight can run later through the same one-operation worker.
-	if configure && claimed {
+	if mode != plannedNamespaceReadOnly && claimed {
 		return nil, plannedNetworkPhaseError("planned_network_namespace_linux:plannedOperation:guard2", errPlannedNetwork)
 	}
-	request := &linuxPlannedNamespaceOperation{identity: identity, member: m, plan: copy, configure: configure}
+	if mode == plannedNamespaceSetupFinalize && (identity != expected || expected == (linuxNamespaceIdentity{}) || peerIndex <= 0) {
+		return nil, errPlannedNetwork
+	}
+	request := &linuxPlannedNamespaceOperation{identity: identity, member: m, plan: copy, mode: mode, peerIndex: peerIndex}
 	op := linuxNamespaceOperation{ctx: ctx, planned: request, result: make(chan error, 1)}
 	if err = n.submit(ctx, op); err != nil {
 		return nil, err
@@ -66,6 +97,16 @@ func (n *OwnedNetNS) plannedInNamespace(ctx context.Context, op *linuxPlannedNam
 	actual, err := namespaceIdentity(n.fd)
 	if err != nil || actual != op.identity || actual != n.identity {
 		return errors.Join(errPlannedNetwork, err)
+	}
+	if op.mode != plannedNamespaceReadOnly && op.mode != plannedNamespaceConfigure && op.mode != plannedNamespaceSetupFinalize {
+		return errPlannedNetwork
+	}
+	// submit's busy lease prevents a concurrent fixture claim until restoration.
+	n.mu.Lock()
+	claimed, busy, unavailable := n.claimed, n.busy, n.closed || n.poisoned
+	n.mu.Unlock()
+	if op.mode != plannedNamespaceReadOnly && (claimed || !busy || unavailable) {
+		return errPlannedNetwork
 	}
 	if op.probes != nil {
 		return plannedUnreachable(ctx, *op.probes)
@@ -95,7 +136,13 @@ func (n *OwnedNetNS) plannedInNamespace(ctx context.Context, op *linuxPlannedNam
 	if peer == 0 {
 		return plannedNetworkPhaseError("planned_network_namespace_linux:plannedInNamespace:guard3", errPlannedNetwork)
 	}
-	if op.configure {
+	if op.mode == plannedNamespaceSetupFinalize {
+		if peer != op.peerIndex {
+			return plannedNetworkPhaseError("namespace-finalize-original-peer-index", errPlannedNetwork)
+		}
+		return finalizePlannedNamespaceSetup(ctx, socket, op, actual, claimed)
+	}
+	if op.mode == plannedNamespaceConfigure {
 		for _, link := range links {
 			if err = socket.disableIPv6(ctx, link.index); err != nil {
 				return plannedNetworkPhaseError(fmt.Sprintf("namespace-disable-ipv6 index=%d", link.index), err)
@@ -107,8 +154,8 @@ func (n *OwnedNetNS) plannedInNamespace(ctx context.Context, op *linuxPlannedNam
 		if err = socket.up(ctx, peer); err != nil {
 			return plannedNetworkPhaseError(fmt.Sprintf("namespace-up index=%d", peer), err)
 		}
-		// Only this setup operation reconciles the kernel-created multicast
-		// route. configure=false/postflight remain strictly read-only.
+		// Initial setup cleanup is retained. The distinct final setup pass
+		// handles later carrier events; read-only/postflight never mutate.
 		owned := []plannedKernelLink{{index: peer, name: op.member.peerLink, alias: plannedNetworkAlias(op.plan.nonce)}}
 		if err = reconcilePlannedMulticast(ctx, socket, owned); err != nil {
 			return plannedNetworkPhaseError("namespace-owned-multicast", err)
@@ -118,24 +165,8 @@ func (n *OwnedNetNS) plannedInNamespace(ctx context.Context, op *linuxPlannedNam
 	if err != nil {
 		return plannedNetworkPhaseError("namespace-routes", err)
 	}
-	connected := false
-	for _, route := range routes {
-		if plannedLoopbackRoute(route.prefix) {
-			continue
-		}
-		// Every selected-prefix subroute stays in240/4; no gateway/default or
-		// arbitrary public range can become namespace routing authority.
-		if !plannedApprovedPrefix(route.prefix) || route.prefix.Bits() < op.plan.prefix.Bits() || !op.plan.prefix.Contains(route.prefix.Addr()) {
-			return plannedNetworkPhaseError(fmt.Sprintf(
-				"planned_network_namespace_linux:plannedInNamespace:guard4 rejected_prefix=%s selected_prefix=%s configure=%t peer_ifindex=%d",
-				route.prefix, op.plan.prefix, op.configure, peer), errPlannedNetwork)
-		}
-		if route.prefix == op.plan.prefix {
-			connected = true
-		}
-	}
-	if !connected {
-		return plannedNetworkPhaseError("planned_network_namespace_linux:plannedInNamespace:guard5", errPlannedNetwork)
+	if err = validatePlannedNamespaceRoutes(op, routes, peer); err != nil {
+		return err
 	}
 	addresses, err := socket.addresses(ctx)
 	if err != nil {
@@ -158,8 +189,56 @@ func (n *OwnedNetNS) plannedInNamespace(ctx context.Context, op *linuxPlannedNam
 	if addressCount != 1 {
 		return plannedNetworkPhaseError("planned_network_namespace_linux:plannedInNamespace:guard9", errPlannedNetwork)
 	}
+	op.peerIndex = peer
 	op.links = links
 	op.routes = routes
+	return nil
+}
+
+// Reuses the exact strict multicast selector/deleter. There is no general
+// namespace callback and no socket address/up methods on this narrow boundary.
+func finalizePlannedNamespaceSetup(ctx context.Context, socket plannedMulticastSocket, op *linuxPlannedNamespaceOperation, actual linuxNamespaceIdentity, claimed bool) error {
+	if op == nil || op.mode != plannedNamespaceSetupFinalize || claimed || actual == (linuxNamespaceIdentity{}) || actual != op.identity || op.peerIndex <= 0 {
+		return errPlannedNetwork
+	}
+	plan, err := copyPlannedNetwork(op.plan)
+	if err != nil {
+		return err
+	}
+	found := false
+	for _, member := range plan.members {
+		if member == op.member {
+			found = true
+		}
+	}
+	if !found {
+		return errPlannedNetwork
+	}
+	owned := []plannedKernelLink{{index: op.peerIndex, name: op.member.peerLink, alias: plannedNetworkAlias(plan.nonce)}}
+	return reconcilePlannedMulticast(ctx, socket, owned)
+}
+
+// The original read-only route oracle, unchanged by setup finalization.
+func validatePlannedNamespaceRoutes(op *linuxPlannedNamespaceOperation, routes []plannedNetworkRoute, peer int) error {
+	connected := false
+	for _, route := range routes {
+		if plannedLoopbackRoute(route.prefix) {
+			continue
+		}
+		// Every selected-prefix subroute stays in240/4; no gateway/default or
+		// arbitrary public range can become namespace routing authority.
+		if !plannedApprovedPrefix(route.prefix) || route.prefix.Bits() < op.plan.prefix.Bits() || !op.plan.prefix.Contains(route.prefix.Addr()) {
+			return plannedNetworkPhaseError(fmt.Sprintf(
+				"planned_network_namespace_linux:plannedInNamespace:guard4 rejected_prefix=%s selected_prefix=%s configure=%t peer_ifindex=%d",
+				route.prefix, op.plan.prefix, op.mode == plannedNamespaceConfigure, peer), errPlannedNetwork)
+		}
+		if route.prefix == op.plan.prefix {
+			connected = true
+		}
+	}
+	if !connected {
+		return plannedNetworkPhaseError("planned_network_namespace_linux:plannedInNamespace:guard5", errPlannedNetwork)
+	}
 	return nil
 }
 

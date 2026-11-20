@@ -1,0 +1,41 @@
+{
+  "all_RAW_finished_and_command_groups_absent": true,
+  "all_build_commands_exit0": 5,
+  "all_original_and_copied_inputs_rehashed": 2592,
+  "all_unit_commands_exit0": 8,
+  "apps_executed": false,
+  "base_commit": "c8e77b8f6723cf928e2d4465c9a4c17e535846e6",
+  "build_result_sha256": "0b877975027471dd26c2062872034eb9ef717e50d94d4811d22c2f92c4a75c27",
+  "child_tests_PASS": 74,
+  "exact_resources_independently_read": {
+    "CPU": 1,
+    "capabilities": "ALL_DROPPED",
+    "memory_bytes": 512000000,
+    "memory_swap_bytes": 512000000,
+    "network": "none",
+    "pids": 64
+  },
+  "outer_test_names": [
+    "TestLinuxRuntimeClosedAuthorityInventory",
+    "TestLinuxRuntimeClosedAuthorityNegativeReferences",
+    "TestPlannedNamespaceSetupFinalizerLateCarrierRoute",
+    "TestPlannedNamespaceSetupFinalizerRejectsForeignBinding",
+    "TestPlannedNamespaceSetupFinalizerStrictDumpAndReadback",
+    "TestPlannedNamespaceReadonlyRouteOracleStillRejectsMulticast",
+    "TestPlannedNamespaceSetupFinalizeSequenceSource",
+    "TestPlannedMulticastExactOwnedBatch",
+    "TestPlannedMulticastWholeDumpRefusesBeforeDelete",
+    "TestPlannedMulticastOwnershipRevalidated",
+    "TestPlannedMulticastFailuresPreserveErrorAndStop",
+    "TestPlannedMulticastReadbackIsExactRemainder",
+    "TestPlannedMulticastCacheCountersAreNotAuthority",
+    "TestPlannedMulticastRequestHasOnlyExactSelector"
+  ],
+  "outer_tests_PASS": 14,
+  "owned_container_removed": true,
+  "role": "TESTER",
+  "scope": "Fake regression/source-guard tests on current c8e77b8 plus exact four-file patch. Carrier diagnostic did not reproduce the original Go failure. No O1a/D1/G2/public activation acceptance.",
+  "source_overlay_manifest_sha256": "4de340d3569291039351d8af29c2e9a80219cae8af28ff3c97c8123ceeccf203",
+  "status": "ACCEPTED_SCOPED_FIXTURE_UNIT_DATA",
+  "unit_result_sha256": "cee464c9a9ccdfea20bfc5dbe238942305d36ddb8d498ca3d75ac7680d92dd6e"
+}

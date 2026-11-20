@@ -1,0 +1,138 @@
+{
+  "actual-build/BUILD-INPUTS.json": {
+    "bytes": 3521,
+    "sha256": "03b359e79ab9c7f686503d08e7c9ba894c2a82ceb4b9315d6f252f509eff852e"
+  },
+  "actual-build/SOURCE-MANIFEST.json": {
+    "bytes": 410825,
+    "sha256": "e29fcc7cb84556df36097f6a2fe72c1459d22e4380a1a0bf72fce3b58df034c9"
+  },
+  "carrier-runtime/BUILD-BINDING.json": {
+    "bytes": 837,
+    "sha256": "6fe26019595590232071cee4f35d414f155ead1e85c7a35da2bae8af3773b55c"
+  },
+  "carrier-runtime/HANDOFF.json": {
+    "bytes": 1818,
+    "sha256": "c8b338bd68bc16e52ec3768cd59f8401289820072a2ed0f84408ba3a69d17f32"
+  },
+  "carrier-runtime/SOURCE-DATA.json": {
+    "bytes": 1856,
+    "sha256": "2354838ed75b13ce847dbb7e666bcf23443a9f85b04f667247d5f454fb777789"
+  },
+  "carrier-runtime/ack.py": {
+    "bytes": 3653,
+    "sha256": "61c01369733c471f7c4dbe4e7d207d4f5b1b2310b54e2b1c3e482ac17ef9b628"
+  },
+  "carrier-runtime/capture_worker.py": {
+    "bytes": 8439,
+    "sha256": "d6433a52bef7a32faa8d333d1e0d306a9b9bdc20531c07d88524145b10f9ee0a"
+  },
+  "carrier-runtime/decode_diag.py": {
+    "bytes": 18126,
+    "sha256": "f60f2f4695bd33cd6664e3225dd5a5d42318db9eeac0c7342fac8390fe0851a3"
+  },
+  "carrier-runtime/launch.py": {
+    "bytes": 6134,
+    "sha256": "edf17291b80b38d938c3f5895be2b7beb3074414c8df4ddeb787344f418965ba"
+  },
+  "carrier-runtime/support.py": {
+    "bytes": 4162,
+    "sha256": "47a9a7444b41e32ccbff4db7fbb720a47f94d767db23c29e6282a9cbb2b46917"
+  },
+  "carrier-runtime/test_runtime.py": {
+    "bytes": 5310,
+    "sha256": "bbd289da2a7eee8541ddcaece4b7d5a69c4b00db8163bd26f37d901a5a7a2eec"
+  },
+  "carrier-runtime/verify.py": {
+    "bytes": 4153,
+    "sha256": "ec62846db1b47ae882017dcf72ef7ad7dfdd1c683701bd617ea21def7e367077"
+  },
+  "carrier-source/BASELINE-REFERENCES.json": {
+    "bytes": 1414,
+    "sha256": "6a01452211949720b96fe28d0072da70158b487a9acc3725f42bd446a71d685a"
+  },
+  "carrier-source/KERNEL-SOURCE-REFERENCE.json": {
+    "bytes": 640,
+    "sha256": "907bd136bda407abebff5cd0fa9b6bc63ec71b369fd25127e0de1f9d40e8dea4"
+  },
+  "carrier-source/SOURCE-FROZEN.json": {
+    "bytes": 1289,
+    "sha256": "e26b3d3e5ba3d8029a34f0404ebc75c0e71dbb99dca9bf328aaab9410a59da1f"
+  },
+  "carrier-source/decode.py": {
+    "bytes": 18126,
+    "sha256": "f60f2f4695bd33cd6664e3225dd5a5d42318db9eeac0c7342fac8390fe0851a3"
+  },
+  "carrier-source/init.c": {
+    "bytes": 30768,
+    "sha256": "19de3be8b472903e61e8f300f7626e2aeed75ada777fe8277c63fbb3d50f9115"
+  },
+  "controller/d1-namespace-finalize-qa-v1/BUILD-INPUTS.json": {
+    "bytes": 3521,
+    "sha256": "03b359e79ab9c7f686503d08e7c9ba894c2a82ceb4b9315d6f252f509eff852e"
+  },
+  "controller/d1-namespace-finalize-qa-v1/common.py": {
+    "bytes": 6223,
+    "sha256": "5667d2772248c892b31bb4eb321f4ad72507f9f9556a34b562f6708fd496507d"
+  },
+  "controller/d1-namespace-finalize-qa-v1/qa_build.py": {
+    "bytes": 5844,
+    "sha256": "296207eda42fa888b2c6072a6c6447365fd03b5771ded8da699a6a9fd89a2a62"
+  },
+  "controller/d1-namespace-finalize-qa-v1/test_overlay.py": {
+    "bytes": 1692,
+    "sha256": "70a7ad5f1944f12e62cd19048c3b97f1474392e94be44a1e40ea9ffca0004f0e"
+  },
+  "controller/d1-namespace-finalize-unit-v1/FROZEN.json": {
+    "bytes": 845667,
+    "sha256": "15c37f7ee999630a0d2de10b852e8fd11ee05b080d00ee116b7c50fae5ae6e65"
+  },
+  "controller/d1-namespace-finalize-unit-v1/common.py": {
+    "bytes": 6223,
+    "sha256": "5667d2772248c892b31bb4eb321f4ad72507f9f9556a34b562f6708fd496507d"
+  },
+  "controller/d1-namespace-finalize-unit-v1/controller.diff": {
+    "bytes": 11129,
+    "sha256": "c32a5325fee21bfea7f7d60de8d4f8bdf76515bbe2482f508cda2c26a4d54db3"
+  },
+  "controller/d1-namespace-finalize-unit-v1/test_unit.py": {
+    "bytes": 2060,
+    "sha256": "fa96f41d250e9573c5c5ab3b946ba434c25060fac2203aa10d5823f180e3d28c"
+  },
+  "controller/d1-namespace-finalize-unit-v1/unit_run.py": {
+    "bytes": 9775,
+    "sha256": "45321d91d1d3dbb9c727dfb051c27e4c3b2ebbdb188d458de4985d13a384cdc0"
+  },
+  "controller/linux-lint.py": {
+    "bytes": 1892,
+    "sha256": "191b5445a2fe348bb27c7b6a1d35410f737126f2f0595c2d85648f6077f9c2b1"
+  },
+  "fix/CHANGE.diff": {
+    "bytes": 19091,
+    "sha256": "4c5a0b4955059e7052566d5726821e422d5e0e10ecfb19bd2e8908b0952c00ba"
+  },
+  "fix/MANIFEST.json": {
+    "bytes": 2098,
+    "sha256": "4de340d3569291039351d8af29c2e9a80219cae8af28ff3c97c8123ceeccf203"
+  },
+  "fix/README.md": {
+    "bytes": 2303,
+    "sha256": "e018d5ee07fbbf5ae99be0daa316176667bb9327b50d017206209ee181db5e19"
+  },
+  "fix/posts/internal/testutil/loadstand/linux_runtime_start_linux_test.go": {
+    "bytes": 46986,
+    "sha256": "1d83ba9f57d5386a5035e544320e8dccbfd0fdd0c5128d6ab3af3b52982f9e58"
+  },
+  "fix/posts/internal/testutil/loadstand/planned_network_backend_linux.go": {
+    "bytes": 16440,
+    "sha256": "c1aafd3e09f02bc63d5890cb2d605e60337430f8b7f5125389714e657c2ac0ab"
+  },
+  "fix/posts/internal/testutil/loadstand/planned_network_finalize_linux_test.go": {
+    "bytes": 6437,
+    "sha256": "b5d472b6d4b95e00533d5e21b35d605646df5a42c455e7f47b3078f336773b81"
+  },
+  "fix/posts/internal/testutil/loadstand/planned_network_namespace_linux.go": {
+    "bytes": 10234,
+    "sha256": "697a1680ccaf6517ac25160330a7a7378a43a7aba7c9d5ddcd93a16f666c1f9f"
+  }
+}

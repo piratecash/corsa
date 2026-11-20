@@ -1,0 +1,44 @@
+{
+  "scope": "CLOSED_LINUX_LOADSTAND_FIXTURE_SETUP_ONLY_NO_NORMAL_CORSA_CHANGE",
+  "files": {
+    "internal/testutil/loadstand/planned_network_backend_linux.go": {
+      "before_sha256": "6dff1b276cc01ba57961e98567b05f54779e566bcde024c1958dd98525a823bd",
+      "after_sha256": "c1aafd3e09f02bc63d5890cb2d605e60337430f8b7f5125389714e657c2ac0ab"
+    },
+    "internal/testutil/loadstand/planned_network_finalize_linux_test.go": {
+      "before_sha256": null,
+      "after_sha256": "b5d472b6d4b95e00533d5e21b35d605646df5a42c455e7f47b3078f336773b81"
+    },
+    "internal/testutil/loadstand/planned_network_namespace_linux.go": {
+      "before_sha256": "c8bb202a00e84162053ec824a30d189268f3db2cc89ddecbfc1c295f71fd2dc8",
+      "after_sha256": "697a1680ccaf6517ac25160330a7a7378a43a7aba7c9d5ddcd93a16f666c1f9f"
+    },
+    "internal/testutil/loadstand/linux_runtime_start_linux_test.go": {
+      "before_sha256": "68c27cd34949a850f0f2c06712774a67a58f69e337724a4f8f28644cb2a8708c",
+      "after_sha256": "1d83ba9f57d5386a5035e544320e8dccbfd0fdd0c5128d6ab3af3b52982f9e58"
+    }
+  },
+  "new_tests": [
+    "TestPlannedNamespaceSetupFinalizerLateCarrierRoute",
+    "TestPlannedNamespaceSetupFinalizerRejectsForeignBinding",
+    "TestPlannedNamespaceSetupFinalizerStrictDumpAndReadback",
+    "TestPlannedNamespaceReadonlyRouteOracleStillRejectsMulticast",
+    "TestPlannedNamespaceSetupFinalizeSequenceSource"
+  ],
+  "legacy_tests": [
+    "TestPlannedMulticastExactOwnedBatch",
+    "TestPlannedMulticastWholeDumpRefusesBeforeDelete",
+    "TestPlannedMulticastOwnershipRevalidated",
+    "TestPlannedMulticastFailuresPreserveErrorAndStop",
+    "TestPlannedMulticastReadbackIsExactRemainder",
+    "TestPlannedMulticastCacheCountersAreNotAuthority",
+    "TestPlannedMulticastRequestHasOnlyExactSelector"
+  ],
+  "QA": "NOT_RUN_ROOT_COORDINATES",
+  "actual_carrier_proof": "PENDING_ROOT_ARCHITECT_DATA",
+  "diff_sha256": "4c5a0b4955059e7052566d5726821e422d5e0e10ecfb19bd2e8908b0952c00ba",
+  "guard_tests": [
+    "TestLinuxRuntimeClosedAuthorityInventory",
+    "TestLinuxRuntimeClosedAuthorityNegativeReferences"
+  ]
+}

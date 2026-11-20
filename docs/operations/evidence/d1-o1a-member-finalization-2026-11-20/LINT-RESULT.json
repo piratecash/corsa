@@ -1,0 +1,39 @@
+{
+  "app_or_test_ELF_executed": false,
+  "attempt_id": "12b8ba4b02c049d78a5da69a15ca12a1",
+  "error": null,
+  "lint_tool_host": "darwin/arm64",
+  "lock_retained": false,
+  "raw_bytes": 10,
+  "source_manifest_sha256": "4de340d3569291039351d8af29c2e9a80219cae8af28ff3c97c8123ceeccf203",
+  "status": "LINUX_FIXTURE_LINT_PASS",
+  "steps": [
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1)(allow default)(deny network*)",
+        "/usr/local/go/bin/go",
+        "run",
+        "-exec=/usr/bin/env GOOS=linux GOARCH=arm64 CGO_ENABLED=0",
+        "github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0",
+        "run",
+        "./internal/testutil/loadstand",
+        "--timeout=7m",
+        "--color=never",
+        "--allow-serial-runners"
+      ],
+      "exit": 0,
+      "owned_group_absent": true,
+      "phase": "linux-lint",
+      "pid": 31127,
+      "pipe_threads_finished": true,
+      "reason": null,
+      "stderr": "/private/tmp/corsa-d1-o1a-namespace-finalize-linux-lint-12b8ba4b02c049d78a5da69a15ca12a1/01-linux-lint.stderr",
+      "stdout": "/private/tmp/corsa-d1-o1a-namespace-finalize-linux-lint-12b8ba4b02c049d78a5da69a15ca12a1/01-linux-lint.stdout"
+    }
+  ],
+  "target": "linux/arm64 CGO0",
+  "unknown": false,
+  "work": "/private/tmp/corsa-d1-o1a-namespace-finalize-linux-lint-12b8ba4b02c049d78a5da69a15ca12a1"
+}

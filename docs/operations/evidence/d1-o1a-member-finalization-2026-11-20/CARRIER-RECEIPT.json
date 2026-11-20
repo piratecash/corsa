@@ -1,0 +1,39 @@
+{
+  "attempt_id": "3946b0d62a9c4221ba4205db21dcb42e",
+  "capture_complete": true,
+  "captures": {
+    "console": {
+      "eof": true,
+      "received": 135531,
+      "retained": 135531,
+      "sha256": "1fc8e495f67eb003e7f998c5985bfd8911e9011fa25437679982023e34e55d5e"
+    },
+    "native": {
+      "eof": true,
+      "received": 450,
+      "retained": 450,
+      "sha256": "d13b9bbd1b5c4af3669fbb64e43e90ff6e255232b8954d73ab062954fcfa0832"
+    },
+    "stderr": {
+      "eof": true,
+      "received": 0,
+      "retained": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  },
+  "controller_stop": false,
+  "handoff_sha256": "c8b338bd68bc16e52ec3768cd59f8401289820072a2ed0f84408ba3a69d17f32",
+  "initrd_sha256": "03df048d008f551b951a3e22b5b72b7cc7a69b9d02becc45910be252609a7df1",
+  "input_recheck": true,
+  "kernel_sha256": "9ffeb24f4131ec4c5177b83c4a74ed8af699553c00a6b0d7f0d0ff4e98970c73",
+  "launcher_sha256": "35a0a654c7e5fe4e51ec4b3495bbe29a3b621f7d54e276dace446c985da41e6d",
+  "outer_kill": false,
+  "owned_group_absent": true,
+  "profile": "d1-o1a-carrier-route-diagnostic-v1",
+  "stop_reason": null,
+  "worker_exit": 0,
+  "worker_pid": 30901,
+  "worker_reaped": true,
+  "worker_reaped_ns": 904081000,
+  "workload": "carrier-kernel-diag"
+}

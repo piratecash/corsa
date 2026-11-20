@@ -1,0 +1,43 @@
+{
+  "OOMKilled": false,
+  "RAW_bytes": 45726,
+  "actual_Docker_policy": {
+    "NNP": true,
+    "capabilities": "ALL_DROPPED",
+    "cpu": 1,
+    "fixed_owned_input_RO_and_output_RW_binds": true,
+    "memory_bytes": 512000000,
+    "memory_swap_bytes": 512000000,
+    "network": "none",
+    "pids": 64,
+    "read_only_root": true,
+    "tmpfs_bytes": 134217728
+  },
+  "actual_result_sha256": "cee464c9a9ccdfea20bfc5dbe238942305d36ddb8d498ca3d75ac7680d92dd6e",
+  "all_steps_exit0_groups_absent_RAW_finished": true,
+  "child_tests_PASS": 74,
+  "fresh_owned_PID_and_PGID_ESRCH": [
+    30875,
+    30876,
+    30877,
+    30878,
+    30879,
+    30880,
+    30881,
+    30882
+  ],
+  "frozen_sha256": "15c37f7ee999630a0d2de10b852e8fd11ee05b080d00ee116b7c50fae5ae6e65",
+  "inputs_verified_before_after_original_and_copy": 2592,
+  "normal_command_count": 8,
+  "outer_tests_PASS": 14,
+  "owned_container_removed": true,
+  "owned_label_empty": true,
+  "resources_or_signals_by_reviewer": false,
+  "role": "REVIEWER",
+  "scope": "Fake fixture setup-finalizer and existing strict multicast+authority tests only. Defensive ordering gap repair; simplified carrier probe did not reproduce original route creation. No main Go/O1a/D1/G2/public activation PASS.",
+  "source_overlay_manifest_sha256": "4de340d3569291039351d8af29c2e9a80219cae8af28ff3c97c8123ceeccf203",
+  "status": "ACCEPTED_SCOPED_FIXTURE_UNIT_DATA",
+  "unexpected_missing_duplicate_FAIL_SKIP_panic": false,
+  "unit_exit": 0,
+  "work": "/private/tmp/corsa-d1-o1a-namespace-finalize-unit-5e3e4c07a6264f49b486f0d59757e673"
+}

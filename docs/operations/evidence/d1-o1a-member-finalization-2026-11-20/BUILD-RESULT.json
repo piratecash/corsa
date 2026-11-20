@@ -1,0 +1,250 @@
+{
+  "artifact": {
+    "bytes": 29588402,
+    "dependencies": [
+      [
+        "github.com/dustin/go-humanize",
+        "v1.1.0",
+        "h1:dbKTrvD0klcbBV/h4AWJdMuZogJACoMlvWIWZ5b2xWg="
+      ],
+      [
+        "github.com/gofiber/fiber/v3",
+        "v3.7.0",
+        "h1:aF+GfB7nP9Dd0wVsv6wmr8675v66OGfjSyoDhPmvKEo="
+      ],
+      [
+        "github.com/gofiber/schema",
+        "v1.9.4",
+        "h1:IVNXN2WyVHmUn/S186e/rdnGlb1LFrhZ1hjndTYvn8w="
+      ],
+      [
+        "github.com/gofiber/utils/v2",
+        "v2.6.5",
+        "h1:rU+8ao6LKi3fKOA3sEjfLv1T+2C2IwomeVmEKaqkr4A="
+      ],
+      [
+        "github.com/google/uuid",
+        "v1.6.0",
+        "h1:NIvaJDMOsjHA8n1jAhLSgzrAzy1Hgr+hNrb57e+94F0="
+      ],
+      [
+        "github.com/klauspost/compress",
+        "v1.20.4",
+        "h1:dD0v/bvxtjCBqQu6sx1TNWkalEY5lNTIe+HY9w8TeNI="
+      ],
+      [
+        "github.com/mattn/go-colorable",
+        "v0.1.16",
+        "h1:+2YjeAe7xP1OQbZW1jERPWWCDLlNqFNCvjiqGiAt84A="
+      ],
+      [
+        "github.com/mattn/go-isatty",
+        "v0.0.24",
+        "h1:tGZZoVgT/KiqK1c8ocVLeDS8BSWMRd47J3Lbz7vsReI="
+      ],
+      [
+        "github.com/molecule-man/go-brrr",
+        "v1.3.1",
+        "h1:EwaJUzRIlp/dFmIpzq4J17CA5Zi5OHo2vOGmu09hF1w="
+      ],
+      [
+        "github.com/philhofer/fwd",
+        "v1.2.1",
+        "h1:UtpS73q8bFgy/yH3gCq8LSNvj5gv/FowNOiWZa7uKwQ="
+      ],
+      [
+        "github.com/remyoudompheng/bigfft",
+        "v0.0.0-20230129092748-24d4a6f8daec",
+        "h1:W09IVJc94icq4NjY3clb7Lk8O1qJ8BdBEF8z0ibU0rE="
+      ],
+      [
+        "github.com/rs/zerolog",
+        "v1.35.1",
+        "h1:m7xQeoiLIiV0BCEY4Hs+j2NG4Gp2o2KPKmhnnLiazKI="
+      ],
+      [
+        "github.com/stretchr/objx",
+        "v0.8.0",
+        "h1:rm9oMkeprG/wHifkZP4EuDww9S0mvEaQ/p9cXTNT4cw="
+      ],
+      [
+        "github.com/stretchr/testify",
+        "v1.12.1",
+        "h1:EuwCh5fleGS7H32xRwO3wRGT7DxrDhLAT6FF8MpWDWE="
+      ],
+      [
+        "github.com/tinylib/msgp",
+        "v1.6.5",
+        "h1:iAH6XTP7BpzErjBZlujJQXxA+GmRi2YWs6M4KdLtNbE="
+      ],
+      [
+        "github.com/valyala/bytebufferpool",
+        "v1.0.0",
+        "h1:GqA5TC/0021Y/b9FG4Oi9Mr3q7XYx6KllzawFIhcdPw="
+      ],
+      [
+        "github.com/valyala/fasthttp",
+        "v1.78.0",
+        "h1:tKfLdx7cD8HZOTP1wc2OpbQMbgO1HP12J0y/XMdyW6Q="
+      ],
+      [
+        "go.yaml.in/yaml/v3",
+        "v3.0.6",
+        "h1:zcDfvjXEqTQmpjniUBLc91xYJMB2c4QOFxEF/LCEckM="
+      ],
+      [
+        "golang.org/x/crypto",
+        "v0.59.0",
+        "h1:xS2jhqYbzNrpvkWP2YTDf4TJwBy3ykR03i8vFDxEc7c="
+      ],
+      [
+        "golang.org/x/net",
+        "v0.62.0",
+        "h1:18ELalfM5+XNRwzM2nYqXsZQ9ByS1uhj2O/U7+5jqRY="
+      ],
+      [
+        "golang.org/x/sys",
+        "v0.50.0",
+        "h1:dkKZEFTEKaLr1sjhs0WiKqoi8Jj5nHbS3Njmx1UoMJs="
+      ],
+      [
+        "golang.org/x/text",
+        "v0.44.0",
+        "h1:YItdp/mQNGnsmrgpcdA5yQ3bnRxCfo/Tj/iByGW9GGo="
+      ],
+      [
+        "modernc.org/libc",
+        "v1.81.0",
+        "h1:Kx11pb+4ETDPgkN9P6nHNTeVfrS+1w46LoIDbYcZEtM="
+      ],
+      [
+        "modernc.org/mathutil",
+        "v1.7.1",
+        "h1:GCZVGXdaN8gTqB1Mf/usp1Y/hSqgI2vAGGP4jZMCxOU="
+      ],
+      [
+        "modernc.org/memory",
+        "v1.12.1",
+        "h1:nFMiWrpStgZczNl6XI9GnIk/rWhYIyHGUaR04pGbp9g="
+      ],
+      [
+        "modernc.org/sqlite",
+        "v1.62.0",
+        "h1:gMaCjSM1qpl+iOjiWhR1LYP3zqrYDI+5GYLGt6veP2g="
+      ]
+    ],
+    "executed": false,
+    "path": "/private/tmp/corsa-d1-o1a-namespace-finalize-test-build-8b4e38674c2f45dda09b79e60790e5a7/artifacts/loadstand.test",
+    "sha256": "a63f22316bd7b01cbd8eb550507a755273e706e7df6a378bc26f5782b9400b5a",
+    "static_linux_arm64": true
+  },
+  "attempt_id": "8b4e38674c2f45dda09b79e60790e5a7",
+  "base_commit": "c8e77b8f6723cf928e2d4465c9a4c17e535846e6",
+  "error": null,
+  "input_manifest_sha256": "03b359e79ab9c7f686503d08e7c9ba894c2a82ceb4b9315d6f252f509eff852e",
+  "lock_retained": false,
+  "raw_bytes": 2671,
+  "source_files": 2591,
+  "status": "FIXTURE_LINUX_TEST_ELF_BUILT",
+  "steps": [
+    {
+      "argv": [
+        "/usr/bin/git",
+        "archive",
+        "--format=tar",
+        "--output=/private/tmp/corsa-d1-o1a-namespace-finalize-test-build-8b4e38674c2f45dda09b79e60790e5a7/base.tar",
+        "c8e77b8f6723cf928e2d4465c9a4c17e535846e6"
+      ],
+      "exit": 0,
+      "owned_group_absent": true,
+      "phase": "archive",
+      "pid": 29879,
+      "pipe_threads_finished": true,
+      "reason": null,
+      "stderr": "/private/tmp/corsa-d1-o1a-namespace-finalize-test-build-8b4e38674c2f45dda09b79e60790e5a7/01-archive.stderr",
+      "stdout": "/private/tmp/corsa-d1-o1a-namespace-finalize-test-build-8b4e38674c2f45dda09b79e60790e5a7/01-archive.stdout"
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1)(allow default)(deny network*)(deny file-write* (subpath \"/private/tmp/corsa-d1-o1a-namespace-finalize-test-build-8b4e38674c2f45dda09b79e60790e5a7/source\"))",
+        "/usr/local/go/bin/go",
+        "version"
+      ],
+      "exit": 0,
+      "owned_group_absent": true,
+      "phase": "go-version",
+      "pid": 29881,
+      "pipe_threads_finished": true,
+      "reason": null,
+      "stderr": "/private/tmp/corsa-d1-o1a-namespace-finalize-test-build-8b4e38674c2f45dda09b79e60790e5a7/02-go-version.stderr",
+      "stdout": "/private/tmp/corsa-d1-o1a-namespace-finalize-test-build-8b4e38674c2f45dda09b79e60790e5a7/02-go-version.stdout"
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1)(allow default)(deny network*)(deny file-write* (subpath \"/private/tmp/corsa-d1-o1a-namespace-finalize-test-build-8b4e38674c2f45dda09b79e60790e5a7/source\"))",
+        "/usr/local/go/bin/go",
+        "mod",
+        "verify"
+      ],
+      "exit": 0,
+      "owned_group_absent": true,
+      "phase": "modules",
+      "pid": 29883,
+      "pipe_threads_finished": true,
+      "reason": null,
+      "stderr": "/private/tmp/corsa-d1-o1a-namespace-finalize-test-build-8b4e38674c2f45dda09b79e60790e5a7/03-modules.stderr",
+      "stdout": "/private/tmp/corsa-d1-o1a-namespace-finalize-test-build-8b4e38674c2f45dda09b79e60790e5a7/03-modules.stdout"
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1)(allow default)(deny network*)(deny file-write* (subpath \"/private/tmp/corsa-d1-o1a-namespace-finalize-test-build-8b4e38674c2f45dda09b79e60790e5a7/source\"))",
+        "/usr/local/go/bin/go",
+        "test",
+        "-mod=readonly",
+        "-buildvcs=false",
+        "-p=1",
+        "-trimpath",
+        "-c",
+        "-o",
+        "/private/tmp/corsa-d1-o1a-namespace-finalize-test-build-8b4e38674c2f45dda09b79e60790e5a7/artifacts/loadstand.test",
+        "./internal/testutil/loadstand"
+      ],
+      "exit": 0,
+      "owned_group_absent": true,
+      "phase": "compile",
+      "pid": 29884,
+      "pipe_threads_finished": true,
+      "reason": null,
+      "stderr": "/private/tmp/corsa-d1-o1a-namespace-finalize-test-build-8b4e38674c2f45dda09b79e60790e5a7/04-compile.stderr",
+      "stdout": "/private/tmp/corsa-d1-o1a-namespace-finalize-test-build-8b4e38674c2f45dda09b79e60790e5a7/04-compile.stdout"
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1)(allow default)(deny network*)(deny file-write* (subpath \"/private/tmp/corsa-d1-o1a-namespace-finalize-test-build-8b4e38674c2f45dda09b79e60790e5a7/source\"))",
+        "/usr/local/go/bin/go",
+        "version",
+        "-m",
+        "/private/tmp/corsa-d1-o1a-namespace-finalize-test-build-8b4e38674c2f45dda09b79e60790e5a7/artifacts/loadstand.test"
+      ],
+      "exit": 0,
+      "owned_group_absent": true,
+      "phase": "metadata",
+      "pid": 30732,
+      "pipe_threads_finished": true,
+      "reason": null,
+      "stderr": "/private/tmp/corsa-d1-o1a-namespace-finalize-test-build-8b4e38674c2f45dda09b79e60790e5a7/05-metadata.stderr",
+      "stdout": "/private/tmp/corsa-d1-o1a-namespace-finalize-test-build-8b4e38674c2f45dda09b79e60790e5a7/05-metadata.stdout"
+    }
+  ],
+  "test_ELF_executed": false,
+  "unknown": false,
+  "work": "/private/tmp/corsa-d1-o1a-namespace-finalize-test-build-8b4e38674c2f45dda09b79e60790e5a7"
+}
