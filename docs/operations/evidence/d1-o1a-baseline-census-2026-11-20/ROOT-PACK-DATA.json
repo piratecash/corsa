@@ -1,0 +1,42 @@
+{
+  "periodic": {
+    "archive_sha256": "57748e7943adbbfd5f6df75e56fb64f6327f4f39378528fa324e72cc8b90c0ab",
+    "changed_members": [
+      "bin/capexec",
+      "bin/loadstand-full",
+      "bin/loadstand-linuxhelper",
+      "bin/loadstand-sdkedge",
+      "bin/node.test",
+      "config/boot.json",
+      "init",
+      "source/internal/testutil/loadstand/linux_runtime_start_linux_test.go",
+      "source/internal/testutil/loadstand/planned_network_backend_linux.go",
+      "source/internal/testutil/loadstand/planned_network_namespace_linux.go"
+    ],
+    "exact_three_fixture_posts_and_actual_helper_bindings": true,
+    "measured_core_sources_unchanged": true,
+    "members": 1435,
+    "payload_bytes": 177138960,
+    "source_files": 1345
+  },
+  "reconnect": {
+    "archive_sha256": "4c1594e7f09991c33d5a29ae1c56b07c93929bba0379b91fdf345bd5b41d95db",
+    "changed_members": [
+      "bin/capexec",
+      "bin/loadstand-full",
+      "bin/loadstand-linuxhelper",
+      "bin/loadstand-sdkedge",
+      "bin/node.test",
+      "config/boot.json",
+      "init",
+      "source/internal/testutil/loadstand/linux_runtime_start_linux_test.go",
+      "source/internal/testutil/loadstand/planned_network_backend_linux.go",
+      "source/internal/testutil/loadstand/planned_network_namespace_linux.go"
+    ],
+    "exact_three_fixture_posts_and_actual_helper_bindings": true,
+    "measured_core_sources_unchanged": true,
+    "members": 1435,
+    "payload_bytes": 177138961,
+    "source_files": 1345
+  }
+}

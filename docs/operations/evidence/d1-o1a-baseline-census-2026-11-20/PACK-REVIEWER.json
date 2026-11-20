@@ -1,0 +1,68 @@
+{
+  "RAW_bytes": 1156,
+  "fresh_owned_PID_and_PGID_ESRCH": 36494,
+  "one_data_pack_command_exit0": true,
+  "outputs": {
+    "periodic": {
+      "archive": {
+        "archive": "/private/tmp/corsa-d1-o1a-initrd-data-assembly-704a45c5651b423fbcd4729d7f3e7657/periodic.cpio.gz",
+        "archive_bytes": 85637871,
+        "archive_sha256": "57748e7943adbbfd5f6df75e56fb64f6327f4f39378528fa324e72cc8b90c0ab",
+        "attempt_id": "5a3698c0ef0e437eeefebfac4d04e933",
+        "config_sha256": "c0407b783d1c50a17b5da66d5b34f7fe157e4199e1f7ba4083b1264b970978ed",
+        "receipt": "/private/tmp/corsa-d1-o1a-initrd-data-assembly-704a45c5651b423fbcd4729d7f3e7657/periodic.assembly.json",
+        "receipt_sha256": "b66ac27041b10befa289dd0a0684f27c9ddb32cf16e4a0d8339a79d8c53efea0"
+      },
+      "boot_semantic_allowed_deltas_only": true,
+      "canonical_groups": "640b70d /70552e346 exact original Go API",
+      "exact_only_changed_members": [
+        "bin/capexec",
+        "bin/loadstand-full",
+        "bin/loadstand-linuxhelper",
+        "bin/loadstand-sdkedge",
+        "bin/node.test",
+        "config/boot.json",
+        "init",
+        "source/internal/testutil/loadstand/linux_runtime_start_linux_test.go",
+        "source/internal/testutil/loadstand/planned_network_backend_linux.go",
+        "source/internal/testutil/loadstand/planned_network_namespace_linux.go"
+      ],
+      "members": 1435,
+      "payload_bytes": 177138960,
+      "source_Go_files": 1345
+    },
+    "reconnect": {
+      "archive": {
+        "archive": "/private/tmp/corsa-d1-o1a-initrd-data-assembly-704a45c5651b423fbcd4729d7f3e7657/reconnect.cpio.gz",
+        "archive_bytes": 85637878,
+        "archive_sha256": "4c1594e7f09991c33d5a29ae1c56b07c93929bba0379b91fdf345bd5b41d95db",
+        "attempt_id": "337bf7374d998451f45271035960a109",
+        "config_sha256": "2f11dd1a618faf6e75596f6407bcfd7a4935ea8ec7f127c39050d3cb1e4f2d1f",
+        "receipt": "/private/tmp/corsa-d1-o1a-initrd-data-assembly-704a45c5651b423fbcd4729d7f3e7657/reconnect.assembly.json",
+        "receipt_sha256": "de90d93001654df9cea59de5a98c8b2621694e3398965d63eda784467e3e6763"
+      },
+      "boot_semantic_allowed_deltas_only": true,
+      "canonical_groups": "640b70d /70552e346 exact original Go API",
+      "exact_only_changed_members": [
+        "bin/capexec",
+        "bin/loadstand-full",
+        "bin/loadstand-linuxhelper",
+        "bin/loadstand-sdkedge",
+        "bin/node.test",
+        "config/boot.json",
+        "init",
+        "source/internal/testutil/loadstand/linux_runtime_start_linux_test.go",
+        "source/internal/testutil/loadstand/planned_network_backend_linux.go",
+        "source/internal/testutil/loadstand/planned_network_namespace_linux.go"
+      ],
+      "members": 1435,
+      "payload_bytes": 177138961,
+      "source_Go_files": 1345
+    }
+  },
+  "result_sha256": "4c0fff11b70d6a7258ab461152f1ce9557ccb573ec7b2b74fd2e2250aed5af51",
+  "role": "REVIEWER",
+  "scope": "Exact baseline4fcc+3fixture source variant and new4ELFs/helpers; no VM/application/O1aPASS, no publishedK11/currentPR6candidate inference",
+  "status": "ACCEPTED_FULLSTREAM_INITRD_DATA_NOT_RUNTIME",
+  "work": "/private/tmp/corsa-d1-o1a-initrd-data-assembly-704a45c5651b423fbcd4729d7f3e7657"
+}

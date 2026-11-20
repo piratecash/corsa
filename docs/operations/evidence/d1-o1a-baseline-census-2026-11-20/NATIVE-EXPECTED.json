@@ -1,0 +1,10 @@
+{
+  "attempt_id": "5a3698c0ef0e437eeefebfac4d04e933",
+  "config_sha256": "c0407b783d1c50a17b5da66d5b34f7fe157e4199e1f7ba4083b1264b970978ed",
+  "handoff_sha256": "1b1e14acb1ff3e0d4dcda8f6f933eda397932e6086b5fa10a43434157415f072",
+  "initrd_sha256": "57748e7943adbbfd5f6df75e56fb64f6327f4f39378528fa324e72cc8b90c0ab",
+  "kernel_sha256": "9ffeb24f4131ec4c5177b83c4a74ed8af699553c00a6b0d7f0d0ff4e98970c73",
+  "launcher_sha256": "7b75f39616b5a77a2127510ecc1c65184f77f0b10e5fc16f3f80abc24449713c",
+  "profile": "d1-o1a-native-v1",
+  "workload": "periodic"
+}

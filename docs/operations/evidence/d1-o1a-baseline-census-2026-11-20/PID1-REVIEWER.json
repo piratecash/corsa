@@ -1,0 +1,52 @@
+{
+  "ELF_or_VM_executed_by_reviewer": false,
+  "FROZEN_sha256": "5ce22c6b2a880679b34a61429d2235ae0c5bc74c0d5b1f6b4d189047dd56265a",
+  "actual_embedded_Go1_27_4_linux_arm64_CGO0_trimpath_static_noexternaldeps": true,
+  "all_helper_source_and_1363_readback_inputs_original_copy_immutable": true,
+  "artifact": {
+    "bytes": 4867158,
+    "executed": false,
+    "path": "/private/tmp/corsa-d1-o1a-baseline-finalizer-pid1-332a774f4ee44e1c976690c85996242b/artifacts/o1a-init",
+    "sha256": "d38fb2a813a0ebf09f48f3fe91aac99861324c6e83419d4255c799425085c3ff",
+    "source_sums_sha256": "f9f10872c96ab564ba0e43d2c528ce346cade98e73cdaf3c992f546ef48509a8",
+    "static_arm64": true
+  },
+  "current_other_job_lock_not_touched": true,
+  "exact_named_host_Go_QA_PASS": 10,
+  "fresh_own_PID_and_PGID_ESRCH": [
+    35694,
+    35696,
+    35887,
+    36041,
+    36240
+  ],
+  "full_RAW_bytes": 13798,
+  "normal_command_count": 5,
+  "original_go_source_API": {
+    "groups": {
+      "measured": {
+        "files": 640,
+        "manifest_bytes_equal": true,
+        "sha256": "b70de373d032b8fed471c6b93bba6d034d932b322495866d40766e7c746fcd9c",
+        "stamp": "b70de373d032b8fe",
+        "verify_tree": "PASS"
+      },
+      "stand": {
+        "files": 705,
+        "manifest_bytes_equal": true,
+        "sha256": "52e346f971a30a1da05570e17b4f6133e913eaaf9ea14f433a03fc7575a77aec",
+        "stamp": "52e346f971a30a1d",
+        "verify_tree": "PASS"
+      }
+    },
+    "service_or_ELF_execution": false,
+    "status": "ORIGINAL_GO_SOURCE_API_MATCH"
+  },
+  "own_result_lock_retained": false,
+  "result_sha256": "5e2e2e95bb855a6f5a13c7e8914d79dcddd5ebbcbbea6b7fb2a752692f8e3102",
+  "role": "REVIEWER",
+  "scope": "Host canonical original Go source API + helper QA/compile only; not guest runtime/O1aPASS/currentD1candidate",
+  "source_sha256": "f9f10872c96ab564ba0e43d2c528ce346cade98e73cdaf3c992f546ef48509a8",
+  "status": "ACCEPTED_PID1_COMPILE_QA_AND_ORIGINAL_GO_SOURCE_API_DATA",
+  "work": "/private/tmp/corsa-d1-o1a-baseline-finalizer-pid1-332a774f4ee44e1c976690c85996242b"
+}

@@ -1,0 +1,717 @@
+{
+  "artifact": {
+    "bytes": 499152,
+    "elf_type": 2,
+    "executed": false,
+    "image_id": "sha256:45ccc728acf675888bde399354b6c8338accfc591e35496f9413a3742f3ae313",
+    "path": "/private/tmp/corsa-d1-o1a-baseline-finalizer-capexec-003831e5e62648edbad712a893b6970c/output/capexec",
+    "sha256": "4c5ca1422d9fe40c097940b167eff6fe704e0dad2f779c8e79b06c7fd177f528",
+    "source_sums_sha256": "f64f1a3716221f5ac7cd3ef082c2a8ab65d827e781f4b9b40ee87894013983b8",
+    "static_arm64": true
+  },
+  "attempt_id": "003831e5e62648edbad712a893b6970c",
+  "capexec_executed": false,
+  "compile_flags": [
+    "-std=c11",
+    "-static",
+    "-no-pie",
+    "-O2",
+    "-Wall",
+    "-Wextra",
+    "-Werror",
+    "-Wl,--build-id=none"
+  ],
+  "container_id": "f6e6b244ce02580635b3bc8b9b22104a45badca8a4553b9fcbf8d408129eec18",
+  "container_name": "d1-o1a-c-build-003831e5e62648edbad712a893b6970c",
+  "create_attempted": true,
+  "error": null,
+  "image_created_or_deleted": false,
+  "lock_retained": false,
+  "owned_container_removed": true,
+  "owned_label": "corsa.o1a.build_attempt=003831e5e62648edbad712a893b6970c",
+  "policy_data": {
+    "control_count": 52,
+    "controls": [
+      {
+        "arch": 3221225655,
+        "args": [],
+        "name": "ordinary-read",
+        "nr": 63,
+        "verdict": 2147418112
+      },
+      {
+        "arch": 3221225655,
+        "args": [],
+        "name": "ordinary-write",
+        "nr": 64,
+        "verdict": 2147418112
+      },
+      {
+        "arch": 3221225655,
+        "args": [],
+        "name": "ordinary-execve",
+        "nr": 221,
+        "verdict": 2147418112
+      },
+      {
+        "arch": 3221225655,
+        "args": [],
+        "name": "ordinary-execveat",
+        "nr": 281,
+        "verdict": 2147418112
+      },
+      {
+        "arch": 3221225534,
+        "args": [],
+        "name": "foreign-architecture",
+        "nr": 63,
+        "verdict": 2147483648
+      },
+      {
+        "arch": 3221225655,
+        "args": [
+          65792
+        ],
+        "name": "ordinary-clone",
+        "nr": 220,
+        "verdict": 2147418112
+      },
+      {
+        "arch": 3221225655,
+        "args": [
+          131072
+        ],
+        "name": "clone-namespace-0x20000",
+        "nr": 220,
+        "verdict": 327681
+      },
+      {
+        "arch": 3221225655,
+        "args": [
+          33554432
+        ],
+        "name": "clone-namespace-0x2000000",
+        "nr": 220,
+        "verdict": 327681
+      },
+      {
+        "arch": 3221225655,
+        "args": [
+          67108864
+        ],
+        "name": "clone-namespace-0x4000000",
+        "nr": 220,
+        "verdict": 327681
+      },
+      {
+        "arch": 3221225655,
+        "args": [
+          134217728
+        ],
+        "name": "clone-namespace-0x8000000",
+        "nr": 220,
+        "verdict": 327681
+      },
+      {
+        "arch": 3221225655,
+        "args": [
+          268435456
+        ],
+        "name": "clone-namespace-0x10000000",
+        "nr": 220,
+        "verdict": 327681
+      },
+      {
+        "arch": 3221225655,
+        "args": [
+          536870912
+        ],
+        "name": "clone-namespace-0x20000000",
+        "nr": 220,
+        "verdict": 327681
+      },
+      {
+        "arch": 3221225655,
+        "args": [
+          1073741824
+        ],
+        "name": "clone-namespace-0x40000000",
+        "nr": 220,
+        "verdict": 327681
+      },
+      {
+        "arch": 3221225655,
+        "args": [
+          4294967296
+        ],
+        "name": "clone-high-bits",
+        "nr": 220,
+        "verdict": 327681
+      },
+      {
+        "arch": 3221225655,
+        "args": [],
+        "name": "clone3-fallback",
+        "nr": 435,
+        "verdict": 327718
+      },
+      {
+        "arch": 3221225655,
+        "args": [
+          1073741824
+        ],
+        "name": "unshare-newnet",
+        "nr": 97,
+        "verdict": 2147418112
+      },
+      {
+        "arch": 3221225655,
+        "args": [
+          0
+        ],
+        "name": "unshare-refuse-0x0",
+        "nr": 97,
+        "verdict": 327681
+      },
+      {
+        "arch": 3221225655,
+        "args": [
+          131072
+        ],
+        "name": "unshare-refuse-0x20000",
+        "nr": 97,
+        "verdict": 327681
+      },
+      {
+        "arch": 3221225655,
+        "args": [
+          1073872896
+        ],
+        "name": "unshare-refuse-0x40020000",
+        "nr": 97,
+        "verdict": 327681
+      },
+      {
+        "arch": 3221225655,
+        "args": [
+          5368709120
+        ],
+        "name": "unshare-refuse-0x140000000",
+        "nr": 97,
+        "verdict": 327681
+      },
+      {
+        "arch": 3221225655,
+        "args": [
+          4294967295,
+          1073741824
+        ],
+        "name": "setns-newnet",
+        "nr": 268,
+        "verdict": 2147418112
+      },
+      {
+        "arch": 3221225655,
+        "args": [
+          4294967295,
+          0
+        ],
+        "name": "setns-refuse-0x0",
+        "nr": 268,
+        "verdict": 327681
+      },
+      {
+        "arch": 3221225655,
+        "args": [
+          4294967295,
+          131072
+        ],
+        "name": "setns-refuse-0x20000",
+        "nr": 268,
+        "verdict": 327681
+      },
+      {
+        "arch": 3221225655,
+        "args": [
+          4294967295,
+          1073872896
+        ],
+        "name": "setns-refuse-0x40020000",
+        "nr": 268,
+        "verdict": 327681
+      },
+      {
+        "arch": 3221225655,
+        "args": [
+          4294967295,
+          5368709120
+        ],
+        "name": "setns-refuse-0x140000000",
+        "nr": 268,
+        "verdict": 327681
+      },
+      {
+        "arch": 3221225655,
+        "args": [
+          1,
+          5,
+          0
+        ],
+        "name": "socket-allow-(1, 5, 0)",
+        "nr": 198,
+        "verdict": 2147418112
+      },
+      {
+        "arch": 3221225655,
+        "args": [
+          16,
+          3,
+          0
+        ],
+        "name": "socket-allow-(16, 3, 0)",
+        "nr": 198,
+        "verdict": 2147418112
+      },
+      {
+        "arch": 3221225655,
+        "args": [
+          16,
+          3,
+          12
+        ],
+        "name": "socket-allow-(16, 3, 12)",
+        "nr": 198,
+        "verdict": 2147418112
+      },
+      {
+        "arch": 3221225655,
+        "args": [
+          2,
+          1,
+          0
+        ],
+        "name": "socket-allow-(2, 1, 0)",
+        "nr": 198,
+        "verdict": 2147418112
+      },
+      {
+        "arch": 3221225655,
+        "args": [
+          2,
+          1,
+          6
+        ],
+        "name": "socket-allow-(2, 1, 6)",
+        "nr": 198,
+        "verdict": 2147418112
+      },
+      {
+        "arch": 3221225655,
+        "args": [
+          2,
+          2,
+          0
+        ],
+        "name": "socket-allow-(2, 2, 0)",
+        "nr": 198,
+        "verdict": 2147418112
+      },
+      {
+        "arch": 3221225655,
+        "args": [
+          2,
+          2,
+          17
+        ],
+        "name": "socket-allow-(2, 2, 17)",
+        "nr": 198,
+        "verdict": 2147418112
+      },
+      {
+        "arch": 3221225655,
+        "args": [
+          10,
+          1,
+          6
+        ],
+        "name": "socket-allow-(10, 1, 6)",
+        "nr": 198,
+        "verdict": 2147418112
+      },
+      {
+        "arch": 3221225655,
+        "args": [
+          10,
+          2,
+          17
+        ],
+        "name": "socket-allow-(10, 2, 17)",
+        "nr": 198,
+        "verdict": 2147418112
+      },
+      {
+        "arch": 3221225655,
+        "args": [
+          17,
+          3,
+          0
+        ],
+        "name": "socket-refuse-(17, 3, 0)",
+        "nr": 198,
+        "verdict": 327681
+      },
+      {
+        "arch": 3221225655,
+        "args": [
+          2,
+          3,
+          0
+        ],
+        "name": "socket-refuse-(2, 3, 0)",
+        "nr": 198,
+        "verdict": 327681
+      },
+      {
+        "arch": 3221225655,
+        "args": [
+          2,
+          1,
+          17
+        ],
+        "name": "socket-refuse-(2, 1, 17)",
+        "nr": 198,
+        "verdict": 327681
+      },
+      {
+        "arch": 3221225655,
+        "args": [
+          2,
+          2,
+          6
+        ],
+        "name": "socket-refuse-(2, 2, 6)",
+        "nr": 198,
+        "verdict": 327681
+      },
+      {
+        "arch": 3221225655,
+        "args": [
+          16,
+          3,
+          9
+        ],
+        "name": "socket-refuse-(16, 3, 9)",
+        "nr": 198,
+        "verdict": 327681
+      },
+      {
+        "arch": 3221225655,
+        "args": [
+          16,
+          3,
+          4294967308
+        ],
+        "name": "socket-refuse-(16, 3, 4294967308)",
+        "nr": 198,
+        "verdict": 327681
+      },
+      {
+        "arch": 3221225655,
+        "args": [
+          4294967298,
+          1,
+          6
+        ],
+        "name": "socket-refuse-(4294967298, 1, 6)",
+        "nr": 198,
+        "verdict": 327681
+      },
+      {
+        "arch": 3221225655,
+        "args": [
+          2,
+          4294967297,
+          6
+        ],
+        "name": "socket-refuse-(2, 4294967297, 6)",
+        "nr": 198,
+        "verdict": 327681
+      },
+      {
+        "arch": 3221225655,
+        "args": [
+          2,
+          1,
+          4294967302
+        ],
+        "name": "socket-refuse-(2, 1, 4294967302)",
+        "nr": 198,
+        "verdict": 327681
+      },
+      {
+        "arch": 3221225655,
+        "args": [],
+        "name": "forbidden-mount",
+        "nr": 40,
+        "verdict": 327681
+      },
+      {
+        "arch": 3221225655,
+        "args": [],
+        "name": "forbidden-umount2",
+        "nr": 39,
+        "verdict": 327681
+      },
+      {
+        "arch": 3221225655,
+        "args": [],
+        "name": "forbidden-reboot",
+        "nr": 142,
+        "verdict": 327681
+      },
+      {
+        "arch": 3221225655,
+        "args": [],
+        "name": "forbidden-bpf",
+        "nr": 280,
+        "verdict": 327681
+      },
+      {
+        "arch": 3221225655,
+        "args": [],
+        "name": "forbidden-ptrace",
+        "nr": 117,
+        "verdict": 327681
+      },
+      {
+        "arch": 3221225655,
+        "args": [],
+        "name": "forbidden-io_uring_setup",
+        "nr": 425,
+        "verdict": 327681
+      },
+      {
+        "arch": 3221225655,
+        "args": [],
+        "name": "forbidden-perf_event_open",
+        "nr": 241,
+        "verdict": 327681
+      },
+      {
+        "arch": 3221225655,
+        "args": [],
+        "name": "forbidden-sethostname",
+        "nr": 161,
+        "verdict": 327681
+      },
+      {
+        "arch": 3221225655,
+        "args": [],
+        "name": "forbidden-keyctl",
+        "nr": 219,
+        "verdict": 327681
+      }
+    ],
+    "dump_sha256": "08ede40f120c35a843f44e21b8c8b0425f5e1f28e9dbb89c2a00b7c35e92da2d",
+    "filter_installed": false,
+    "guest_or_app_executed": false,
+    "instruction_count": 147,
+    "scope": "ACTUAL_C_FACTORY_BYTECODE_DATA_AND_USERSPACE_EVALUATION_ONLY"
+  },
+  "policy_header_sha256": "699c0a05f15cdf93c620326a2bc1112b53932f06dc08bd6a343076b22416162c",
+  "pure_policy_dumper": {
+    "bytes": 146792,
+    "elf_type": 2,
+    "executed": true,
+    "execution_scope": "pure C factory bytecode emission only; no filter install",
+    "path": "/private/tmp/corsa-d1-o1a-baseline-finalizer-capexec-003831e5e62648edbad712a893b6970c/output/policy-dump",
+    "sha256": "99a0e7133251de628a73d4cf098755456c5180ef5f97cb829534fa91dcd0291b",
+    "static_arm64": true
+  },
+  "raw_bytes": 27503,
+  "source_sums_sha256": "f64f1a3716221f5ac7cd3ef082c2a8ab65d827e781f4b9b40ee87894013983b8",
+  "status": "C_STATIC_BUILT",
+  "steps": [
+    {
+      "argv": [
+        "/usr/local/bin/docker",
+        "image",
+        "inspect",
+        "sha256:45ccc728acf675888bde399354b6c8338accfc591e35496f9413a3742f3ae313"
+      ],
+      "exit": 0,
+      "owned_group_absent": true,
+      "phase": "image",
+      "pid": 36319,
+      "pipe_threads_finished": true,
+      "reason": null,
+      "stderr": "/private/tmp/corsa-d1-o1a-baseline-finalizer-capexec-003831e5e62648edbad712a893b6970c/01-image.stderr",
+      "stdout": "/private/tmp/corsa-d1-o1a-baseline-finalizer-capexec-003831e5e62648edbad712a893b6970c/01-image.stdout"
+    },
+    {
+      "argv": [
+        "/usr/local/bin/docker",
+        "create",
+        "--pull",
+        "never",
+        "--name",
+        "d1-o1a-c-build-003831e5e62648edbad712a893b6970c",
+        "--label",
+        "corsa.o1a.build_attempt=003831e5e62648edbad712a893b6970c",
+        "--network",
+        "none",
+        "--cgroupns",
+        "private",
+        "--ipc",
+        "private",
+        "--restart",
+        "no",
+        "--read-only",
+        "--user",
+        "501:20",
+        "--cpus",
+        "1",
+        "--memory",
+        "1024m",
+        "--memory-swap",
+        "1024m",
+        "--pids-limit",
+        "64",
+        "--cap-drop",
+        "ALL",
+        "--security-opt",
+        "no-new-privileges",
+        "--tmpfs",
+        "/tmp:rw,noexec,nosuid,nodev,size=134217728,mode=1777",
+        "--mount",
+        "type=bind,src=/private/tmp/corsa-d1-o1a-baseline-finalizer-capexec-003831e5e62648edbad712a893b6970c/input,dst=/input,readonly",
+        "--mount",
+        "type=bind,src=/private/tmp/corsa-d1-o1a-baseline-finalizer-capexec-003831e5e62648edbad712a893b6970c/output,dst=/output",
+        "--workdir",
+        "/input",
+        "--env",
+        "PATH=/usr/bin:/bin",
+        "--env",
+        "LC_ALL=C",
+        "--env",
+        "HOME=/tmp",
+        "--env",
+        "TMPDIR=/tmp",
+        "--entrypoint",
+        "/bin/sh",
+        "sha256:45ccc728acf675888bde399354b6c8338accfc591e35496f9413a3742f3ae313",
+        "-eu",
+        "/input/build.sh"
+      ],
+      "exit": 0,
+      "owned_group_absent": true,
+      "phase": "create",
+      "pid": 36320,
+      "pipe_threads_finished": true,
+      "reason": null,
+      "stderr": "/private/tmp/corsa-d1-o1a-baseline-finalizer-capexec-003831e5e62648edbad712a893b6970c/02-create.stderr",
+      "stdout": "/private/tmp/corsa-d1-o1a-baseline-finalizer-capexec-003831e5e62648edbad712a893b6970c/02-create.stdout"
+    },
+    {
+      "argv": [
+        "/usr/local/bin/docker",
+        "container",
+        "inspect",
+        "f6e6b244ce02580635b3bc8b9b22104a45badca8a4553b9fcbf8d408129eec18"
+      ],
+      "exit": 0,
+      "owned_group_absent": true,
+      "phase": "owned-inspect",
+      "pid": 36321,
+      "pipe_threads_finished": true,
+      "reason": null,
+      "stderr": "/private/tmp/corsa-d1-o1a-baseline-finalizer-capexec-003831e5e62648edbad712a893b6970c/03-owned-inspect.stderr",
+      "stdout": "/private/tmp/corsa-d1-o1a-baseline-finalizer-capexec-003831e5e62648edbad712a893b6970c/03-owned-inspect.stdout"
+    },
+    {
+      "argv": [
+        "/usr/local/bin/docker",
+        "start",
+        "--attach",
+        "f6e6b244ce02580635b3bc8b9b22104a45badca8a4553b9fcbf8d408129eec18"
+      ],
+      "exit": 0,
+      "owned_group_absent": true,
+      "phase": "compile",
+      "pid": 36322,
+      "pipe_threads_finished": true,
+      "reason": null,
+      "stderr": "/private/tmp/corsa-d1-o1a-baseline-finalizer-capexec-003831e5e62648edbad712a893b6970c/04-compile.stderr",
+      "stdout": "/private/tmp/corsa-d1-o1a-baseline-finalizer-capexec-003831e5e62648edbad712a893b6970c/04-compile.stdout"
+    },
+    {
+      "argv": [
+        "/usr/local/bin/docker",
+        "container",
+        "inspect",
+        "f6e6b244ce02580635b3bc8b9b22104a45badca8a4553b9fcbf8d408129eec18"
+      ],
+      "exit": 0,
+      "owned_group_absent": true,
+      "phase": "owned-inspect",
+      "pid": 36323,
+      "pipe_threads_finished": true,
+      "reason": null,
+      "stderr": "/private/tmp/corsa-d1-o1a-baseline-finalizer-capexec-003831e5e62648edbad712a893b6970c/05-owned-inspect.stderr",
+      "stdout": "/private/tmp/corsa-d1-o1a-baseline-finalizer-capexec-003831e5e62648edbad712a893b6970c/05-owned-inspect.stdout"
+    },
+    {
+      "argv": [
+        "/usr/local/bin/docker",
+        "container",
+        "inspect",
+        "f6e6b244ce02580635b3bc8b9b22104a45badca8a4553b9fcbf8d408129eec18"
+      ],
+      "exit": 0,
+      "owned_group_absent": true,
+      "phase": "owned-inspect",
+      "pid": 36324,
+      "pipe_threads_finished": true,
+      "reason": null,
+      "stderr": "/private/tmp/corsa-d1-o1a-baseline-finalizer-capexec-003831e5e62648edbad712a893b6970c/06-owned-inspect.stderr",
+      "stdout": "/private/tmp/corsa-d1-o1a-baseline-finalizer-capexec-003831e5e62648edbad712a893b6970c/06-owned-inspect.stdout"
+    },
+    {
+      "argv": [
+        "/usr/local/bin/docker",
+        "rm",
+        "f6e6b244ce02580635b3bc8b9b22104a45badca8a4553b9fcbf8d408129eec18"
+      ],
+      "exit": 0,
+      "owned_group_absent": true,
+      "phase": "remove-owned",
+      "pid": 36325,
+      "pipe_threads_finished": true,
+      "reason": null,
+      "stderr": "/private/tmp/corsa-d1-o1a-baseline-finalizer-capexec-003831e5e62648edbad712a893b6970c/07-remove-owned.stderr",
+      "stdout": "/private/tmp/corsa-d1-o1a-baseline-finalizer-capexec-003831e5e62648edbad712a893b6970c/07-remove-owned.stdout"
+    },
+    {
+      "argv": [
+        "/usr/local/bin/docker",
+        "ps",
+        "-a",
+        "--no-trunc",
+        "--filter",
+        "label=corsa.o1a.build_attempt=003831e5e62648edbad712a893b6970c",
+        "--format",
+        "{{.ID}}"
+      ],
+      "exit": 0,
+      "owned_group_absent": true,
+      "phase": "owned-absent",
+      "pid": 36326,
+      "pipe_threads_finished": true,
+      "reason": null,
+      "stderr": "/private/tmp/corsa-d1-o1a-baseline-finalizer-capexec-003831e5e62648edbad712a893b6970c/08-owned-absent.stderr",
+      "stdout": "/private/tmp/corsa-d1-o1a-baseline-finalizer-capexec-003831e5e62648edbad712a893b6970c/08-owned-absent.stdout"
+    }
+  ],
+  "unknown": false,
+  "work": "/private/tmp/corsa-d1-o1a-baseline-finalizer-capexec-003831e5e62648edbad712a893b6970c"
+}

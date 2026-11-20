@@ -1,0 +1,94 @@
+{
+  "VM": "NORMAL_STOPPED_WORKER_EXIT0_REAPED_FULL_RAW",
+  "actual_go_source_API": {
+    "groups": {
+      "measured": {
+        "files": 640,
+        "manifest_bytes_equal": true,
+        "sha256": "b70de373d032b8fed471c6b93bba6d034d932b322495866d40766e7c746fcd9c",
+        "stamp": "b70de373d032b8fe",
+        "verify_tree": "PASS"
+      },
+      "stand": {
+        "files": 705,
+        "manifest_bytes_equal": true,
+        "sha256": "52e346f971a30a1da05570e17b4f6133e913eaaf9ea14f433a03fc7575a77aec",
+        "stamp": "52e346f971a30a1d",
+        "verify_tree": "PASS"
+      }
+    },
+    "service_or_ELF_execution": false,
+    "status": "ORIGINAL_GO_SOURCE_API_MATCH"
+  },
+  "archives": {
+    "RAW.tar.xz": {
+      "members": 99,
+      "payload_bytes": 15300017,
+      "sha256": "0827f96e1cdecb63eaaf39a4dc577b4c40d706ec3981c8170fc9af543418285f"
+    },
+    "SOURCE.tar.xz": {
+      "members": 158,
+      "payload_bytes": 2378434,
+      "sha256": "23fd396ce4d14b9176f34a931203122092c0e0ee36ea861b3510f4a7117f77c8"
+    }
+  },
+  "artifact_subject": {
+    "loadstand-full": {
+      "bytes": 30912672,
+      "sha256": "c46b0812cbc3130e33f885afe14a9e35b7164357646504168189bd6b87b8f1d4"
+    },
+    "loadstand-linuxhelper": {
+      "bytes": 10827902,
+      "sha256": "7ad3b53bc5906c00e6b47d95af4e70ec4b8292ea677c7f9ebc8a88e7a64e764d"
+    },
+    "loadstand-sdkedge": {
+      "bytes": 33514497,
+      "sha256": "18f71d236bea79c20b3f3f7cfa171f64d0fe3a55dafff294961dc50e1d9324c3"
+    },
+    "node.test": {
+      "bytes": 68918916,
+      "sha256": "4722dff4abb832f6d04038022f2a4c56ae06b771bbede8d911300ed61d3b90d1"
+    }
+  },
+  "base_commit": "4fcc2f7245095fc43d2225f0f0065f4ce3b26113",
+  "capsule_non_source_records": 1,
+  "capsule_source_files": 1345,
+  "exact_own_lock_removed": true,
+  "failed_record_body_bytes": 0,
+  "first_error": "final process accounting unavailable",
+  "no_identical_repeat": true,
+  "not_closed": [
+    "O1a",
+    "current PR6 comparison",
+    "D1",
+    "G2",
+    "release"
+  ],
+  "original_go_elapsed_seconds": 480.6,
+  "physical_XPC_resources": "UNKNOWN",
+  "pipeline_only": "No measured Core/SDK source changes. Policy147instructions/52controls byte-identical; same fullNativeworker/kernel/profiles/windows.",
+  "primary_predicate": "UNKNOWN_NOT_RECONSTRUCTIBLE_FROM_RETAINED_RECORD",
+  "rates": "UNKNOWN_NOT_ACCEPTED",
+  "reconnect": "NOT_STARTED",
+  "retained_last_action_seconds": 390,
+  "retained_last_sample_indices": [
+    52,
+    53
+  ],
+  "run_attempt": "5a3698c0ef0e437eeefebfac4d04e933",
+  "source_archive_sha256": "71569cb33f466e7d3a896bcdf6e4fd2463b333db3b45339ae70c0661b20763c9",
+  "source_groups": {
+    "measured": {
+      "files": 640,
+      "sha256": "b70de373d032b8fed471c6b93bba6d034d932b322495866d40766e7c746fcd9c",
+      "stamp": "b70de373d032b8fe"
+    },
+    "stand": {
+      "files": 705,
+      "sha256": "52e346f971a30a1da05570e17b4f6133e913eaaf9ea14f433a03fc7575a77aec",
+      "stamp": "52e346f971a30a1d"
+    }
+  },
+  "status": "ORIGINAL_GO_FAIL_NO_O1A_METRICS_ACCEPTED",
+  "subject": "REBUILT_BASELINE_PLUS_EXACT_THREE_FIXTURE_POSTS_NOT_PUBLISHED_K11"
+}

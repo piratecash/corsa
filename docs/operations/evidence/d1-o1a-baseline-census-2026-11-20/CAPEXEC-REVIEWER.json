@@ -1,0 +1,42 @@
+{
+  "actual_factory_dump_bytes": 1188,
+  "actual_instruction_count": 147,
+  "actual_static_ET_EXEC_AArch64_noINTERP_or_DYNAMIC_verified": true,
+  "all_frozen_source_and_actual_four_C_inputs_and_script_hashes_exact": true,
+  "artifact": {
+    "bytes": 499152,
+    "elf_type": 2,
+    "executed": false,
+    "image_id": "sha256:45ccc728acf675888bde399354b6c8338accfc591e35496f9413a3742f3ae313",
+    "path": "/private/tmp/corsa-d1-o1a-baseline-finalizer-capexec-003831e5e62648edbad712a893b6970c/output/capexec",
+    "sha256": "4c5ca1422d9fe40c097940b167eff6fe704e0dad2f779c8e79b06c7fd177f528",
+    "source_sums_sha256": "f64f1a3716221f5ac7cd3ef082c2a8ab65d827e781f4b9b40ee87894013983b8",
+    "static_arm64": true
+  },
+  "capexec_SHA_consumption": "Header4SHA macros updated; unchanged C consumes only helper/full/target SHA environment pins. NODE_SHA macro unused/elided; PID1 FrozenArtifacts guards actual node.test SHA.",
+  "capexec_executed": false,
+  "factory_dump_sha256": "08ede40f120c35a843f44e21b8c8b0425f5e1f28e9dbb89c2a00b7c35e92da2d",
+  "filter_installed": false,
+  "fresh_own_PID_and_PGID_ESRCH": [
+    36319,
+    36320,
+    36321,
+    36322,
+    36323,
+    36324,
+    36325,
+    36326
+  ],
+  "full_RAW_bytes": 27503,
+  "normal_command_count": 8,
+  "owned_CID_removed_and_label_empty": true,
+  "policy_header_sha256": "699c0a05f15cdf93c620326a2bc1112b53932f06dc08bd6a343076b22416162c",
+  "pure_controls_PASS": 52,
+  "result_sha256": "e8766aeef67ad7fc6dc1cf2760b42a298b6c47da00d97bec7bae56ab205e454a",
+  "role": "REVIEWER",
+  "scope": "Only pure factory dumper executed; capexec header rebinding compiled notrun. Three consumed envSHA pins, node.test SHA guarded by PID1. No VM/app/O1aPASS.",
+  "source_sha256": "f64f1a3716221f5ac7cd3ef082c2a8ab65d827e781f4b9b40ee87894013983b8",
+  "status": "ACCEPTED_CAPEXEC_COMPILE_AND_PURE_FACTORY_DATA_NOT_RUNTIME",
+  "strict_actual_offline_cap0_readonly_1CPU_1GiB_64PID_noSwap_inspect": true,
+  "work": "/private/tmp/corsa-d1-o1a-baseline-finalizer-capexec-003831e5e62648edbad712a893b6970c"
+}

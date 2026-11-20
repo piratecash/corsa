@@ -1,0 +1,337 @@
+{
+  "status": "BUILT_NOT_EXECUTED",
+  "subject": "BASELINE_PLUS_TWO_FIXTURE_PRODUCTION_POSTS_AND_EXISTING_GUARD_MAINTENANCE",
+  "commit": "4fcc2f7245095fc43d2225f0f0065f4ce3b26113",
+  "request": "64c23df1411d6e0900f7056a36d43e71d91c94f4368366cf838f104a4ed68cd4",
+  "artifacts": {
+    "node.test": {
+      "sha256": "4722dff4abb832f6d04038022f2a4c56ae06b771bbede8d911300ed61d3b90d1",
+      "bytes": 68918916
+    },
+    "loadstand-full": {
+      "sha256": "c46b0812cbc3130e33f885afe14a9e35b7164357646504168189bd6b87b8f1d4",
+      "bytes": 30912672
+    },
+    "loadstand-linuxhelper": {
+      "sha256": "7ad3b53bc5906c00e6b47d95af4e70ec4b8292ea677c7f9ebc8a88e7a64e764d",
+      "bytes": 10827902
+    },
+    "loadstand-sdkedge": {
+      "sha256": "18f71d236bea79c20b3f3f7cfa171f64d0fe3a55dafff294961dc50e1d9324c3",
+      "bytes": 33514497
+    }
+  },
+  "prospective_source_groups": {
+    "measured": {
+      "files": 640,
+      "qualification": "CANONICAL_DATA_EXPECTATION_NOT_YET_GO_API_READBACK",
+      "sha256": "b70de373d032b8fed471c6b93bba6d034d932b322495866d40766e7c746fcd9c",
+      "stamp": "b70de373d032b8fe"
+    },
+    "stand": {
+      "files": 705,
+      "qualification": "CANONICAL_DATA_EXPECTATION_NOT_YET_GO_API_READBACK",
+      "sha256": "52e346f971a30a1da05570e17b4f6133e913eaaf9ea14f433a03fc7575a77aec",
+      "stamp": "52e346f971a30a1d"
+    }
+  },
+  "source_before_sha256": "209dc56dfce71ab5bbc26e009aaff1b757bb018e40068d1a259a74801712eb01",
+  "source_after_sha256": "217447d32d8c52b8ee88534c30716c458cd8b842da0ecd3515932a3a36346863",
+  "commands": [
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath \"/private/tmp/corsa-o1a-baseline-finalizer-build-c59004257e11496c84a1ba4a7f37f1e4\") (literal \"/dev/null\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-baseline-finalizer-build-c59004257e11496c84a1ba4a7f37f1e4/source\"))",
+        "/usr/local/go/bin/go",
+        "list",
+        "-mod=readonly",
+        "-trimpath",
+        "-buildvcs=false",
+        "-deps",
+        "-json",
+        "-test",
+        "./internal/core/node"
+      ],
+      "closure": "CONFIRMED_ABSENT",
+      "pgid": 34715,
+      "pid": 34715,
+      "returncode": 0
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath \"/private/tmp/corsa-o1a-baseline-finalizer-build-c59004257e11496c84a1ba4a7f37f1e4\") (literal \"/dev/null\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-baseline-finalizer-build-c59004257e11496c84a1ba4a7f37f1e4/source\"))",
+        "/usr/local/go/bin/go",
+        "list",
+        "-mod=readonly",
+        "-trimpath",
+        "-buildvcs=false",
+        "-deps",
+        "-json",
+        "-test",
+        "./internal/core/node"
+      ],
+      "closure": "CONFIRMED_ABSENT",
+      "pgid": 33796,
+      "pid": 33796,
+      "returncode": 0
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath \"/private/tmp/corsa-o1a-baseline-finalizer-build-c59004257e11496c84a1ba4a7f37f1e4\") (literal \"/dev/null\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-baseline-finalizer-build-c59004257e11496c84a1ba4a7f37f1e4/source\"))",
+        "/usr/local/go/bin/go",
+        "test",
+        "-c",
+        "-p=1",
+        "-mod=readonly",
+        "-trimpath",
+        "-buildvcs=false",
+        "-o",
+        "/private/tmp/corsa-o1a-baseline-finalizer-build-c59004257e11496c84a1ba4a7f37f1e4/node.test",
+        "./internal/core/node"
+      ],
+      "closure": "CONFIRMED_ABSENT",
+      "pgid": 33800,
+      "pid": 33800,
+      "returncode": 0
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath \"/private/tmp/corsa-o1a-baseline-finalizer-build-c59004257e11496c84a1ba4a7f37f1e4\") (literal \"/dev/null\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-baseline-finalizer-build-c59004257e11496c84a1ba4a7f37f1e4/source\"))",
+        "/usr/local/go/bin/go",
+        "version",
+        "-m",
+        "/private/tmp/corsa-o1a-baseline-finalizer-build-c59004257e11496c84a1ba4a7f37f1e4/node.test"
+      ],
+      "closure": "CONFIRMED_ABSENT",
+      "pgid": 34714,
+      "pid": 34714,
+      "returncode": 0
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath \"/private/tmp/corsa-o1a-baseline-finalizer-build-c59004257e11496c84a1ba4a7f37f1e4\") (literal \"/dev/null\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-baseline-finalizer-build-c59004257e11496c84a1ba4a7f37f1e4/source\"))",
+        "/usr/local/go/bin/go",
+        "list",
+        "-mod=readonly",
+        "-trimpath",
+        "-buildvcs=false",
+        "-deps",
+        "-json",
+        "./internal/testutil/loadstand/fullnode"
+      ],
+      "closure": "CONFIRMED_ABSENT",
+      "pgid": 34765,
+      "pid": 34765,
+      "returncode": 0
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath \"/private/tmp/corsa-o1a-baseline-finalizer-build-c59004257e11496c84a1ba4a7f37f1e4\") (literal \"/dev/null\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-baseline-finalizer-build-c59004257e11496c84a1ba4a7f37f1e4/source\"))",
+        "/usr/local/go/bin/go",
+        "list",
+        "-mod=readonly",
+        "-trimpath",
+        "-buildvcs=false",
+        "-deps",
+        "-json",
+        "./internal/testutil/loadstand/fullnode"
+      ],
+      "closure": "CONFIRMED_ABSENT",
+      "pgid": 34719,
+      "pid": 34719,
+      "returncode": 0
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath \"/private/tmp/corsa-o1a-baseline-finalizer-build-c59004257e11496c84a1ba4a7f37f1e4\") (literal \"/dev/null\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-baseline-finalizer-build-c59004257e11496c84a1ba4a7f37f1e4/source\"))",
+        "/usr/local/go/bin/go",
+        "build",
+        "-p=1",
+        "-mod=readonly",
+        "-trimpath",
+        "-buildvcs=false",
+        "-o",
+        "/private/tmp/corsa-o1a-baseline-finalizer-build-c59004257e11496c84a1ba4a7f37f1e4/loadstand-full",
+        "./internal/testutil/loadstand/fullnode"
+      ],
+      "closure": "CONFIRMED_ABSENT",
+      "pgid": 34723,
+      "pid": 34723,
+      "returncode": 0
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath \"/private/tmp/corsa-o1a-baseline-finalizer-build-c59004257e11496c84a1ba4a7f37f1e4\") (literal \"/dev/null\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-baseline-finalizer-build-c59004257e11496c84a1ba4a7f37f1e4/source\"))",
+        "/usr/local/go/bin/go",
+        "version",
+        "-m",
+        "/private/tmp/corsa-o1a-baseline-finalizer-build-c59004257e11496c84a1ba4a7f37f1e4/loadstand-full"
+      ],
+      "closure": "CONFIRMED_ABSENT",
+      "pgid": 34764,
+      "pid": 34764,
+      "returncode": 0
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath \"/private/tmp/corsa-o1a-baseline-finalizer-build-c59004257e11496c84a1ba4a7f37f1e4\") (literal \"/dev/null\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-baseline-finalizer-build-c59004257e11496c84a1ba4a7f37f1e4/source\"))",
+        "/usr/local/go/bin/go",
+        "list",
+        "-mod=readonly",
+        "-trimpath",
+        "-buildvcs=false",
+        "-deps",
+        "-json",
+        "./internal/testutil/loadstand/linuxhelper"
+      ],
+      "closure": "CONFIRMED_ABSENT",
+      "pgid": 34780,
+      "pid": 34780,
+      "returncode": 0
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath \"/private/tmp/corsa-o1a-baseline-finalizer-build-c59004257e11496c84a1ba4a7f37f1e4\") (literal \"/dev/null\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-baseline-finalizer-build-c59004257e11496c84a1ba4a7f37f1e4/source\"))",
+        "/usr/local/go/bin/go",
+        "list",
+        "-mod=readonly",
+        "-trimpath",
+        "-buildvcs=false",
+        "-deps",
+        "-json",
+        "./internal/testutil/loadstand/linuxhelper"
+      ],
+      "closure": "CONFIRMED_ABSENT",
+      "pgid": 34769,
+      "pid": 34769,
+      "returncode": 0
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath \"/private/tmp/corsa-o1a-baseline-finalizer-build-c59004257e11496c84a1ba4a7f37f1e4\") (literal \"/dev/null\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-baseline-finalizer-build-c59004257e11496c84a1ba4a7f37f1e4/source\"))",
+        "/usr/local/go/bin/go",
+        "build",
+        "-p=1",
+        "-mod=readonly",
+        "-trimpath",
+        "-buildvcs=false",
+        "-o",
+        "/private/tmp/corsa-o1a-baseline-finalizer-build-c59004257e11496c84a1ba4a7f37f1e4/loadstand-linuxhelper",
+        "./internal/testutil/loadstand/linuxhelper"
+      ],
+      "closure": "CONFIRMED_ABSENT",
+      "pgid": 34773,
+      "pid": 34773,
+      "returncode": 0
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath \"/private/tmp/corsa-o1a-baseline-finalizer-build-c59004257e11496c84a1ba4a7f37f1e4\") (literal \"/dev/null\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-baseline-finalizer-build-c59004257e11496c84a1ba4a7f37f1e4/source\"))",
+        "/usr/local/go/bin/go",
+        "version",
+        "-m",
+        "/private/tmp/corsa-o1a-baseline-finalizer-build-c59004257e11496c84a1ba4a7f37f1e4/loadstand-linuxhelper"
+      ],
+      "closure": "CONFIRMED_ABSENT",
+      "pgid": 34779,
+      "pid": 34779,
+      "returncode": 0
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath \"/private/tmp/corsa-o1a-baseline-finalizer-build-c59004257e11496c84a1ba4a7f37f1e4\") (literal \"/dev/null\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-baseline-finalizer-build-c59004257e11496c84a1ba4a7f37f1e4/source\"))",
+        "/usr/local/go/bin/go",
+        "list",
+        "-mod=readonly",
+        "-trimpath",
+        "-buildvcs=false",
+        "-deps",
+        "-json",
+        "./internal/testutil/loadstand/sdkedge"
+      ],
+      "closure": "CONFIRMED_ABSENT",
+      "pgid": 34796,
+      "pid": 34796,
+      "returncode": 0
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath \"/private/tmp/corsa-o1a-baseline-finalizer-build-c59004257e11496c84a1ba4a7f37f1e4\") (literal \"/dev/null\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-baseline-finalizer-build-c59004257e11496c84a1ba4a7f37f1e4/source\"))",
+        "/usr/local/go/bin/go",
+        "list",
+        "-mod=readonly",
+        "-trimpath",
+        "-buildvcs=false",
+        "-deps",
+        "-json",
+        "./internal/testutil/loadstand/sdkedge"
+      ],
+      "closure": "CONFIRMED_ABSENT",
+      "pgid": 34784,
+      "pid": 34784,
+      "returncode": 0
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath \"/private/tmp/corsa-o1a-baseline-finalizer-build-c59004257e11496c84a1ba4a7f37f1e4\") (literal \"/dev/null\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-baseline-finalizer-build-c59004257e11496c84a1ba4a7f37f1e4/source\"))",
+        "/usr/local/go/bin/go",
+        "build",
+        "-p=1",
+        "-mod=readonly",
+        "-trimpath",
+        "-buildvcs=false",
+        "-o",
+        "/private/tmp/corsa-o1a-baseline-finalizer-build-c59004257e11496c84a1ba4a7f37f1e4/loadstand-sdkedge",
+        "./internal/testutil/loadstand/sdkedge"
+      ],
+      "closure": "CONFIRMED_ABSENT",
+      "pgid": 34788,
+      "pid": 34788,
+      "returncode": 0
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath \"/private/tmp/corsa-o1a-baseline-finalizer-build-c59004257e11496c84a1ba4a7f37f1e4\") (literal \"/dev/null\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-baseline-finalizer-build-c59004257e11496c84a1ba4a7f37f1e4/source\"))",
+        "/usr/local/go/bin/go",
+        "version",
+        "-m",
+        "/private/tmp/corsa-o1a-baseline-finalizer-build-c59004257e11496c84a1ba4a7f37f1e4/loadstand-sdkedge"
+      ],
+      "closure": "CONFIRMED_ABSENT",
+      "pgid": 34795,
+      "pid": 34795,
+      "returncode": 0
+    }
+  ]
+}

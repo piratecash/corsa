@@ -1,0 +1,230 @@
+{
+  "kernel_or_VM_executed_by_reviewer": false,
+  "original_Go_source_API": "ACTUAL_PASS",
+  "resource_execution_by_reviewer": false,
+  "reviews": {
+    "PID1": {
+      "artifact": {
+        "bytes": 4867158,
+        "executed": false,
+        "path": "/private/tmp/corsa-d1-o1a-baseline-finalizer-pid1-332a774f4ee44e1c976690c85996242b/artifacts/o1a-init",
+        "sha256": "d38fb2a813a0ebf09f48f3fe91aac99861324c6e83419d4255c799425085c3ff",
+        "source_sums_sha256": "f9f10872c96ab564ba0e43d2c528ce346cade98e73cdaf3c992f546ef48509a8",
+        "static_arm64": true
+      },
+      "fresh_process_checks": [
+        {
+          "pid": 35694,
+          "status": "ESRCH_PID_AND_PGID"
+        },
+        {
+          "pid": 35696,
+          "status": "ESRCH_PID_AND_PGID"
+        },
+        {
+          "pid": 35887,
+          "status": "ESRCH_PID_AND_PGID"
+        },
+        {
+          "pid": 36041,
+          "status": "ESRCH_PID_AND_PGID"
+        },
+        {
+          "pid": 36240,
+          "status": "ESRCH_PID_AND_PGID"
+        }
+      ],
+      "normal_closed_steps": 5,
+      "original_Go_API": {
+        "groups": {
+          "measured": {
+            "files": 640,
+            "manifest_bytes_equal": true,
+            "sha256": "b70de373d032b8fed471c6b93bba6d034d932b322495866d40766e7c746fcd9c",
+            "stamp": "b70de373d032b8fe",
+            "verify_tree": "PASS"
+          },
+          "stand": {
+            "files": 705,
+            "manifest_bytes_equal": true,
+            "sha256": "52e346f971a30a1da05570e17b4f6133e913eaaf9ea14f433a03fc7575a77aec",
+            "stamp": "52e346f971a30a1d",
+            "verify_tree": "PASS"
+          }
+        },
+        "service_or_ELF_execution": false,
+        "status": "ORIGINAL_GO_SOURCE_API_MATCH"
+      },
+      "pure_Go_tests": 10,
+      "raw": {
+        "01-go-version.stderr": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "01-go-version.stdout": {
+          "bytes": 33,
+          "sha256": "c6f1c8d54aedc3afa72560d934397ad6c33b28f1b4d3546ec53176439b2397d5"
+        },
+        "02-original-go-source-api.stderr": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "02-original-go-source-api.stdout": {
+          "bytes": 437,
+          "sha256": "0728013e00ec716dfae359380cc25cabcc96d36e2acf0be4ede440c1f6d6dc35"
+        },
+        "03-pure-go-qa.stderr": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "03-pure-go-qa.stdout": {
+          "bytes": 12984,
+          "sha256": "f949016d7489842a11b82e83557a354ba8800d335b9ff446e8c4277f365630a3"
+        },
+        "04-o1a-init-build.stderr": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "04-o1a-init-build.stdout": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "05-o1a-init-metadata.stderr": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "05-o1a-init-metadata.stdout": {
+          "bytes": 344,
+          "sha256": "f51e9eb9c8206756883eba3b900430f63ebfc3a9c93e5d6ca6f7ae9e6df1b839"
+        }
+      },
+      "raw_bytes": 13798,
+      "result_sha256": "5e2e2e95bb855a6f5a13c7e8914d79dcddd5ebbcbbea6b7fb2a752692f8e3102"
+    },
+    "capexec": {
+      "actual_policy_instruction_count": 147,
+      "artifact": {
+        "bytes": 499152,
+        "elf_type": 2,
+        "executed": false,
+        "image_id": "sha256:45ccc728acf675888bde399354b6c8338accfc591e35496f9413a3742f3ae313",
+        "path": "/private/tmp/corsa-d1-o1a-baseline-finalizer-capexec-003831e5e62648edbad712a893b6970c/output/capexec",
+        "sha256": "4c5ca1422d9fe40c097940b167eff6fe704e0dad2f779c8e79b06c7fd177f528",
+        "source_sums_sha256": "f64f1a3716221f5ac7cd3ef082c2a8ab65d827e781f4b9b40ee87894013983b8",
+        "static_arm64": true
+      },
+      "capexec_executed": false,
+      "fresh_process_checks": [
+        {
+          "pid": 36319,
+          "status": "ESRCH_PID_AND_PGID"
+        },
+        {
+          "pid": 36320,
+          "status": "ESRCH_PID_AND_PGID"
+        },
+        {
+          "pid": 36321,
+          "status": "ESRCH_PID_AND_PGID"
+        },
+        {
+          "pid": 36322,
+          "status": "ESRCH_PID_AND_PGID"
+        },
+        {
+          "pid": 36323,
+          "status": "ESRCH_PID_AND_PGID"
+        },
+        {
+          "pid": 36324,
+          "status": "ESRCH_PID_AND_PGID"
+        },
+        {
+          "pid": 36325,
+          "status": "ESRCH_PID_AND_PGID"
+        },
+        {
+          "pid": 36326,
+          "status": "ESRCH_PID_AND_PGID"
+        }
+      ],
+      "node_hash_authority": "PID1 FrozenArtifacts/boot input check; inherited C NODE_SHA macro is not referenced by C code",
+      "normal_closed_steps": 8,
+      "owned_container_removed": true,
+      "policy_dump_sha256": "08ede40f120c35a843f44e21b8c8b0425f5e1f28e9dbb89c2a00b7c35e92da2d",
+      "pure_policy_controls": 52,
+      "raw": {
+        "01-image.stderr": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "01-image.stdout": {
+          "bytes": 2081,
+          "sha256": "195a2963b675dfa41c64c66794644bed954f8028f05a5036282d26c6fe28b43b"
+        },
+        "02-create.stderr": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "02-create.stdout": {
+          "bytes": 65,
+          "sha256": "c4d1515e4f8e25cb539234e36873a1e11f03ad0698bea11ee44f7316b9c7c590"
+        },
+        "03-owned-inspect.stderr": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "03-owned-inspect.stdout": {
+          "bytes": 8176,
+          "sha256": "a6bdb9d426a1771ac72383d47337a7faf7b76420f34775a7e20111f47f095553"
+        },
+        "04-compile.stderr": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "04-compile.stdout": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "05-owned-inspect.stderr": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "05-owned-inspect.stdout": {
+          "bytes": 8558,
+          "sha256": "ab753787f00810e4aa71813bbc238958e532e9c18ac863069dea5a67e2da7676"
+        },
+        "06-owned-inspect.stderr": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "06-owned-inspect.stdout": {
+          "bytes": 8558,
+          "sha256": "ab753787f00810e4aa71813bbc238958e532e9c18ac863069dea5a67e2da7676"
+        },
+        "07-remove-owned.stderr": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "07-remove-owned.stdout": {
+          "bytes": 65,
+          "sha256": "c4d1515e4f8e25cb539234e36873a1e11f03ad0698bea11ee44f7316b9c7c590"
+        },
+        "08-owned-absent.stderr": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "08-owned-absent.stdout": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      },
+      "raw_bytes": 27503,
+      "result_sha256": "e8766aeef67ad7fc6dc1cf2760b42a298b6c47da00d97bec7bae56ab205e454a"
+    }
+  },
+  "role": "TESTER",
+  "runtime_ready": false,
+  "scope": "Pinned helper compilation, static data and pure source readback; no O1a functional claim",
+  "status": "ACCEPTED_HELPER_COMPILATION_AND_ORIGINAL_SOURCE_API_NOT_O1A"
+}

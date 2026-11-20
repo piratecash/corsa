@@ -1,0 +1,52 @@
+{
+  "ELF_or_VM_executed": false,
+  "attempt_id": "704a45c5651b423fbcd4729d7f3e7657",
+  "error": null,
+  "lock_retained": false,
+  "outputs": {
+    "periodic": {
+      "archive": "/private/tmp/corsa-d1-o1a-initrd-data-assembly-704a45c5651b423fbcd4729d7f3e7657/periodic.cpio.gz",
+      "archive_bytes": 85637871,
+      "archive_sha256": "57748e7943adbbfd5f6df75e56fb64f6327f4f39378528fa324e72cc8b90c0ab",
+      "attempt_id": "5a3698c0ef0e437eeefebfac4d04e933",
+      "config_sha256": "c0407b783d1c50a17b5da66d5b34f7fe157e4199e1f7ba4083b1264b970978ed",
+      "receipt": "/private/tmp/corsa-d1-o1a-initrd-data-assembly-704a45c5651b423fbcd4729d7f3e7657/periodic.assembly.json",
+      "receipt_sha256": "b66ac27041b10befa289dd0a0684f27c9ddb32cf16e4a0d8339a79d8c53efea0"
+    },
+    "reconnect": {
+      "archive": "/private/tmp/corsa-d1-o1a-initrd-data-assembly-704a45c5651b423fbcd4729d7f3e7657/reconnect.cpio.gz",
+      "archive_bytes": 85637878,
+      "archive_sha256": "4c1594e7f09991c33d5a29ae1c56b07c93929bba0379b91fdf345bd5b41d95db",
+      "attempt_id": "337bf7374d998451f45271035960a109",
+      "config_sha256": "2f11dd1a618faf6e75596f6407bcfd7a4935ea8ec7f127c39050d3cb1e4f2d1f",
+      "receipt": "/private/tmp/corsa-d1-o1a-initrd-data-assembly-704a45c5651b423fbcd4729d7f3e7657/reconnect.assembly.json",
+      "receipt_sha256": "de90d93001654df9cea59de5a98c8b2621694e3398965d63eda784467e3e6763"
+    }
+  },
+  "raw_bytes": 1156,
+  "status": "TWO_INITRDS_BYTE_VERIFIED",
+  "steps": [
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1)(allow default)(deny network*)",
+        "/Applications/Xcode.app/Contents/Developer/usr/bin/python3",
+        "-B",
+        "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-baseline-finalizer-initrd-v1/pack_job.py",
+        "--child",
+        "/private/tmp/corsa-d1-o1a-initrd-data-assembly-704a45c5651b423fbcd4729d7f3e7657"
+      ],
+      "exit": 0,
+      "owned_group_absent": true,
+      "phase": "assemble-data",
+      "pid": 36494,
+      "pipe_threads_finished": true,
+      "reason": null,
+      "stderr": "/private/tmp/corsa-d1-o1a-initrd-data-assembly-704a45c5651b423fbcd4729d7f3e7657/01-assemble-data.stderr",
+      "stdout": "/private/tmp/corsa-d1-o1a-initrd-data-assembly-704a45c5651b423fbcd4729d7f3e7657/01-assemble-data.stdout"
+    }
+  ],
+  "unknown": false,
+  "work": "/private/tmp/corsa-d1-o1a-initrd-data-assembly-704a45c5651b423fbcd4729d7f3e7657"
+}
