@@ -1,0 +1,43 @@
+{
+  "app_or_test_ELF_executed": false,
+  "attempt_id": "05ae1e457b4f4309bbfb274382c81821",
+  "error": null,
+  "interop_test_manifest_sha256": "f6e1395156ce9b48d33603c4821de98ca4c454eb230235f1d30a639884a1b30a",
+  "lint_tool_host": "darwin/arm64",
+  "lock_retained": false,
+  "previous_own_lint_cache_reused": true,
+  "raw_bytes": 10,
+  "selected_source_files": 2109,
+  "source_manifest_sha256": "2ede9161978aabd3739a8948edf515aeead0754851a48e5350b99552abf78883",
+  "status": "LINUX_FIXTURE_LINT_PASS",
+  "steps": [
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1)(allow default)(deny network*)",
+        "/usr/local/go/bin/go",
+        "run",
+        "-exec=/usr/bin/env GOOS=linux GOARCH=amd64 CGO_ENABLED=0",
+        "github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0",
+        "run",
+        "./internal/core/node",
+        "--build-tags=interop,d1_owned_guest_interop",
+        "--timeout=7m",
+        "--color=never",
+        "--allow-serial-runners"
+      ],
+      "exit": 0,
+      "owned_group_absent": true,
+      "phase": "linux-lint",
+      "pid": 94309,
+      "pipe_threads_finished": true,
+      "reason": null,
+      "stderr": "/private/tmp/corsa-d1-o1a-zero-offer-linux-lint-fixed-05ae1e457b4f4309bbfb274382c81821/01-linux-lint.stderr",
+      "stdout": "/private/tmp/corsa-d1-o1a-zero-offer-linux-lint-fixed-05ae1e457b4f4309bbfb274382c81821/01-linux-lint.stdout"
+    }
+  ],
+  "target": "linux/amd64 CGO0 tags interop,d1_owned_guest_interop",
+  "unknown": false,
+  "work": "/private/tmp/corsa-d1-o1a-zero-offer-linux-lint-fixed-05ae1e457b4f4309bbfb274382c81821"
+}

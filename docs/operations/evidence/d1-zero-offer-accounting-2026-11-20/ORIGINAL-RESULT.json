@@ -1,0 +1,47 @@
+{
+  "app_or_Linux_ELF_executed": false,
+  "attempt_id": "c51403d5f58347e39c104d5851c604f1",
+  "base": "cecc9b709e00fbecbbc91c0920f101f7e3b7729b",
+  "error": null,
+  "lock_retained": false,
+  "manifest_sha256": "ef6328c0dcdd82d9461c8abeb832c99028d43edcef9f4bf522597841f6a3df0b",
+  "overlay_sha256": "f9d1d464d6b7b1561b131d8dcb0fcf2944b1a74fa2aa84af35359451003ebd07",
+  "raw_bytes": 37809,
+  "scope": "UNIT_MECHANISM_ONLY_NOT_NATIVE_CAUSE_PROOF",
+  "status": "FULL_SEND_UNIT_MECHANISM_PASS",
+  "steps": [
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1)(allow default)(deny network*)(deny file-write* (subpath \"/Users/hades/Documents/repos/corsa\"))",
+        "/usr/local/go/bin/go",
+        "test",
+        "-overlay=/private/tmp/corsa-d1-o1a-sender-refusal-unit-c51403d5f58347e39c104d5851c604f1/overlay.json",
+        "-mod=readonly",
+        "-p=1",
+        "-count=1",
+        "-timeout=90s",
+        "-json",
+        "./internal/core/node",
+        "-run",
+        "^(TestLoadStandRouteWireFullSendMatchesOriginalWriter|TestLoadStandRouteWireFullPassRefusesConnectionOrBoundaryChange|TestLoadStandRouteWireSenderRefusalMechanisms)$"
+      ],
+      "exit": 0,
+      "owned_group_absent": true,
+      "phase": "selected-tests",
+      "pid": 87292,
+      "pipe_threads_finished": true,
+      "reason": null,
+      "stderr": "/private/tmp/corsa-d1-o1a-sender-refusal-unit-c51403d5f58347e39c104d5851c604f1/01-selected-tests.stderr",
+      "stdout": "/private/tmp/corsa-d1-o1a-sender-refusal-unit-c51403d5f58347e39c104d5851c604f1/01-selected-tests.stdout"
+    }
+  ],
+  "tests": {
+    "child": 34,
+    "outer": 3
+  },
+  "unknown": false,
+  "virtual_test_path": "internal/core/node/loadstand_route_wire_sender_refusal_test.go",
+  "work": "/private/tmp/corsa-d1-o1a-sender-refusal-unit-c51403d5f58347e39c104d5851c604f1"
+}

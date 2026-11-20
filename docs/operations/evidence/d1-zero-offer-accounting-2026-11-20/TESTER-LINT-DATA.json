@@ -1,0 +1,25 @@
+{
+  "application_or_test_ELF_executed": false,
+  "full_EOF_exit0_group_absent": true,
+  "original_failed_lint": "5fabecfd retained; full global source maps NOT_RECORDED, not retroactively inferred",
+  "result_sha256": "ab40611b066809fc9e922168c87e8a96d3d18acb9330649897cb1d7b5f10ffbc",
+  "role": "TESTER",
+  "scope": "Later two interop test fixes are separate from earlier unit/ELF provenance and historical Hmix functional result.",
+  "source_before_after_equal_records": 2109,
+  "source_delta_vs_earlier_compile_only": {
+    "internal/core/node/find_node_published31_guest_linux_test.go": {
+      "after": "79b4746c915a8b322367eb809604c51b5597d89e9495fc15c52ffc4836af36d6",
+      "before": "82754fad052d9c92a2b8cdc67a93ad8eb259be7844415856ec36d9181c605b86"
+    },
+    "internal/core/node/release_interop_test.go": {
+      "after": "809fbc1ecabb1ec1bfc72dc1dfdad6cf5f777d2b5aa2217414fd6882849feffa",
+      "before": "1a87715ee8423f837ad03e739758bce540373c04719bb661b2a2ab200f5846a5"
+    }
+  },
+  "status": "ACCEPTED_LINUX_LINT_WITH_SEPARATE_INTEROP_TEST_FIX_SUBJECT",
+  "stderr_bytes": 0,
+  "stdout": "0 issues.",
+  "stdout_bytes": 10,
+  "work": "/private/tmp/corsa-d1-o1a-zero-offer-linux-lint-fixed-05ae1e457b4f4309bbfb274382c81821",
+  "zero_offer_three_posts_unchanged": true
+}

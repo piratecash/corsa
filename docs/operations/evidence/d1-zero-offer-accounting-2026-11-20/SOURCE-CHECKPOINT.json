@@ -1,0 +1,38 @@
+{
+  "all_2107_unit_source_module_payloads_also_exact_git_commit": "22aaabc2f8035b8d287ce4181a997d1725efa722",
+  "changed_records": {
+    "internal/core/node/loadstand_route_wire_full_send.go": {
+      "after": "1cb353cc46fabd04243df40b222db144d1a8d3f43c040af861553e5142d43433",
+      "before": "935464cec4c3f3c73f912fd0e177ac7220a3c3505df2f9bb29c29084bff9e816"
+    },
+    "internal/core/node/loadstand_route_wire_sender_refusal_test.go": {
+      "after": "97325309e6305040999ab03d6b2c5cf8d3a055809ee874ac7122b4933375af3d",
+      "before": null
+    },
+    "internal/core/node/loadstand_route_wire_zero_offer_test.go": {
+      "after": "258a5eaea43e0ee9df61d07b8f64642226ab3f21b3b9f041af60e144dbfcdcdc",
+      "before": null
+    }
+  },
+  "compile_source_module_records": 2109,
+  "final_compile_subject": "22aaabc2f8035b8d287ce4181a997d1725efa722 plus exact three posts",
+  "later_lint_delta": {
+    "internal/core/node/find_node_published31_guest_linux_test.go": {
+      "after": "79b4746c915a8b322367eb809604c51b5597d89e9495fc15c52ffc4836af36d6",
+      "before": "82754fad052d9c92a2b8cdc67a93ad8eb259be7844415856ec36d9181c605b86"
+    },
+    "internal/core/node/release_interop_test.go": {
+      "after": "809fbc1ecabb1ec1bfc72dc1dfdad6cf5f777d2b5aa2217414fd6882849feffa",
+      "before": "1a87715ee8423f837ad03e739758bce540373c04719bb661b2a2ab200f5846a5"
+    }
+  },
+  "later_lint_source_records_before_after_equal": 2109,
+  "later_lint_subject": "same compile subject plus two separately reviewed interop-test fixes",
+  "manifest_declared_base": "cecc9b709e00fbecbbc91c0920f101f7e3b7729b",
+  "new_product_state_counters_clocks_schema_or_transport_policy": false,
+  "production_changed_files": [
+    "internal/core/node/loadstand_route_wire_full_send.go"
+  ],
+  "proof": "TESTER-DATA checked every git blob, not inferred from stale controller base label.",
+  "unit_virtual_overlay": "Original one test post; fixed three exact posts, each separately hashed."
+}

@@ -138,7 +138,20 @@ func (p *routeWireFullPass) finish(sentAll bool) {
 	if o.window.outside(p.begin) {
 		return
 	}
-	if p.begin <= o.window.begin || o.window.last >= o.window.windowEnd || !sentAll || p.send == nil || p.next != len(p.entries) {
+	if p.begin <= o.window.begin || o.window.last >= o.window.windowEnd {
+		o.incomplete = true
+		return
+	}
+	if !sentAll {
+		// No frame supplied means no full pass and no wire intent to certify.
+		// Earlier failures remain sticky; any supplied frame still requires
+		// the original complete-pass and actual-writer proof.
+		if p.send != nil || p.next != 0 {
+			o.incomplete = true
+		}
+		return
+	}
+	if p.send == nil || p.next != len(p.entries) {
 		o.incomplete = true
 		return
 	}

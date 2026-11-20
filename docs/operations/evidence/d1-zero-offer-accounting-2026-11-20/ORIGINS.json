@@ -1,0 +1,328 @@
+{
+  "RAW/fixed/01-selected-tests.json": {
+    "bytes": 1262,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-fix-unit-6875c1480f4f4fc6b8fb5937b6494564/01-selected-tests.json",
+    "sha256": "ccb9edd627cbd6c40a727f47eb2a22012c818ea916d8052e9fcbe9a886440819"
+  },
+  "RAW/fixed/01-selected-tests.stderr": {
+    "bytes": 0,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-fix-unit-6875c1480f4f4fc6b8fb5937b6494564/01-selected-tests.stderr",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "RAW/fixed/01-selected-tests.stdout": {
+    "bytes": 71889,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-fix-unit-6875c1480f4f4fc6b8fb5937b6494564/01-selected-tests.stdout",
+    "sha256": "62f90c20a432b7b5374ebbbcdbfbf12817ede9e878d6f07a2c2875f62ac25327"
+  },
+  "RAW/lint-fixed/01-linux-lint.json": {
+    "bytes": 822,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-linux-lint-fixed-05ae1e457b4f4309bbfb274382c81821/01-linux-lint.json",
+    "sha256": "529b3aada81af501bdcd17798a2c2845e4634936d2eb42265d0b324f15730d5b"
+  },
+  "RAW/lint-fixed/01-linux-lint.stderr": {
+    "bytes": 0,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-linux-lint-fixed-05ae1e457b4f4309bbfb274382c81821/01-linux-lint.stderr",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "RAW/lint-fixed/01-linux-lint.stdout": {
+    "bytes": 10,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-linux-lint-fixed-05ae1e457b4f4309bbfb274382c81821/01-linux-lint.stdout",
+    "sha256": "e92606b0bf483111dff0a120c315ea165821348f31365020e2468a0059095c47"
+  },
+  "RAW/lint-original-failed/01-linux-lint.json": {
+    "bytes": 810,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-linux-lint-5fabecfd98794fc7b4d8213b08236e06/01-linux-lint.json",
+    "sha256": "56158d71704f06ac831b93d1a8874abef181ea953dffb2036dabd4d8a5e53855"
+  },
+  "RAW/lint-original-failed/01-linux-lint.stderr": {
+    "bytes": 14,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-linux-lint-5fabecfd98794fc7b4d8213b08236e06/01-linux-lint.stderr",
+    "sha256": "bf05a2ed1e6ff1ca52a9863bab4a8833d5068953dd57362001f6462ff43f7cfc"
+  },
+  "RAW/lint-original-failed/01-linux-lint.stdout": {
+    "bytes": 1347,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-linux-lint-5fabecfd98794fc7b4d8213b08236e06/01-linux-lint.stdout",
+    "sha256": "2462e16fa7d700c528a25f613e2f0d405e8338dce22dbf0cacd9e153f4f4c248"
+  },
+  "RAW/linux-compile/01-compile-arm64.json": {
+    "bytes": 899,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-linux-compile-dc7706294f834840b5d1a43f63d642dc/01-compile-arm64.json",
+    "sha256": "3f0064711127d10a0634d22d7ff326b12bea7309e772942586b80f0328a0d0a6"
+  },
+  "RAW/linux-compile/01-compile-arm64.stderr": {
+    "bytes": 0,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-linux-compile-dc7706294f834840b5d1a43f63d642dc/01-compile-arm64.stderr",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "RAW/linux-compile/01-compile-arm64.stdout": {
+    "bytes": 0,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-linux-compile-dc7706294f834840b5d1a43f63d642dc/01-compile-arm64.stdout",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "RAW/linux-compile/02-metadata-arm64.json": {
+    "bytes": 576,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-linux-compile-dc7706294f834840b5d1a43f63d642dc/02-metadata-arm64.json",
+    "sha256": "0bdcd3560424d4bf3fe1406843bf88d21b52696e78ec51115b232f8a00f5af2a"
+  },
+  "RAW/linux-compile/02-metadata-arm64.stderr": {
+    "bytes": 0,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-linux-compile-dc7706294f834840b5d1a43f63d642dc/02-metadata-arm64.stderr",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "RAW/linux-compile/02-metadata-arm64.stdout": {
+    "bytes": 2641,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-linux-compile-dc7706294f834840b5d1a43f63d642dc/02-metadata-arm64.stdout",
+    "sha256": "0ed07d64623dcdf480707f127b58906103b87cb46f49c63dd13e14bfed66e0fc"
+  },
+  "RAW/linux-compile/03-compile-amd64.json": {
+    "bytes": 906,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-linux-compile-dc7706294f834840b5d1a43f63d642dc/03-compile-amd64.json",
+    "sha256": "e5a465e75531fa81270f1871ac45e30543d7ddc624e316dad1d7ef8e21e7214d"
+  },
+  "RAW/linux-compile/03-compile-amd64.stderr": {
+    "bytes": 0,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-linux-compile-dc7706294f834840b5d1a43f63d642dc/03-compile-amd64.stderr",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "RAW/linux-compile/03-compile-amd64.stdout": {
+    "bytes": 0,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-linux-compile-dc7706294f834840b5d1a43f63d642dc/03-compile-amd64.stdout",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "RAW/linux-compile/04-metadata-amd64.json": {
+    "bytes": 576,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-linux-compile-dc7706294f834840b5d1a43f63d642dc/04-metadata-amd64.json",
+    "sha256": "3c0c908876e6de2c18766a8298b546345f50b5fa497b61c08fa63773de626cc2"
+  },
+  "RAW/linux-compile/04-metadata-amd64.stderr": {
+    "bytes": 0,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-linux-compile-dc7706294f834840b5d1a43f63d642dc/04-metadata-amd64.stderr",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "RAW/linux-compile/04-metadata-amd64.stdout": {
+    "bytes": 2646,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-linux-compile-dc7706294f834840b5d1a43f63d642dc/04-metadata-amd64.stdout",
+    "sha256": "4c8464ae089ef6c57af42bfe6f99f2f112787d41de6f85674468a3a858726083"
+  },
+  "RAW/original/01-selected-tests.json": {
+    "bytes": 994,
+    "path": "/private/tmp/corsa-d1-o1a-sender-refusal-unit-c51403d5f58347e39c104d5851c604f1/01-selected-tests.json",
+    "sha256": "53cd5b551ea5ca3d283cdaf90874f51e4a457da48c2013dd7e7e7f6e8a16576c"
+  },
+  "RAW/original/01-selected-tests.stderr": {
+    "bytes": 0,
+    "path": "/private/tmp/corsa-d1-o1a-sender-refusal-unit-c51403d5f58347e39c104d5851c604f1/01-selected-tests.stderr",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "RAW/original/01-selected-tests.stdout": {
+    "bytes": 37809,
+    "path": "/private/tmp/corsa-d1-o1a-sender-refusal-unit-c51403d5f58347e39c104d5851c604f1/01-selected-tests.stdout",
+    "sha256": "1252a06f66684e9863195d659af3065ce6403f82ea74917933459754328366db"
+  },
+  "SOURCE/before/internal/core/node/loadstand_route_wire_full_send.go": {
+    "bytes": 4918,
+    "git_commit": "22aaabc2f8035b8d287ce4181a997d1725efa722",
+    "git_path": "internal/core/node/loadstand_route_wire_full_send.go",
+    "sha256": "935464cec4c3f3c73f912fd0e177ac7220a3c3505df2f9bb29c29084bff9e816"
+  },
+  "SOURCE/controllers/common.py": {
+    "bytes": 6223,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-capexec-seccomp-build-v1/common.py",
+    "sha256": "5667d2772248c892b31bb4eb321f4ad72507f9f9556a34b562f6708fd496507d"
+  },
+  "SOURCE/controllers/fixed.py": {
+    "bytes": 3450,
+    "path": "/private/tmp/corsa-zero-offer-fix-unit.py",
+    "sha256": "e8ff7ee8781a88ab5396bb164ba167601070f03611ad7f383dfe7f51404a3792"
+  },
+  "SOURCE/controllers/linux-compile.py": {
+    "bytes": 3334,
+    "path": "/private/tmp/corsa-zero-offer-linux-compile.py",
+    "sha256": "e8b94780e841c73cbc5911cbeee080e886b94c545608ee1fbe222ba95c727abe"
+  },
+  "SOURCE/controllers/linux-lint-fixed.py": {
+    "bytes": 2925,
+    "path": "/private/tmp/corsa-zero-offer-linux-lint-fixed.py",
+    "sha256": "a76c4daf68275485ccb714f5145f411e67964d5ac31c69b04062bdf96c1d452b"
+  },
+  "SOURCE/controllers/linux-lint-original.py": {
+    "bytes": 1950,
+    "path": "/private/tmp/corsa-zero-offer-linux-lint.py",
+    "sha256": "884bce3b03a45c9c519be97959025851c830db4e7069573dd25d5785922cd4bf"
+  },
+  "SOURCE/controllers/original.py": {
+    "bytes": 3466,
+    "path": "/private/tmp/corsa-sender-refusal-unit.py",
+    "sha256": "91870152dbd18c6a06cc254f89e1983c5a860fe6300730dfb4e1bc460df92ecd"
+  },
+  "SOURCE/controllers/tester-readback.py": {
+    "bytes": 5691,
+    "path": "/private/tmp/corsa-zero-offer-data-readback.py",
+    "sha256": "660841cf7ae70af5ce8739391e39882a6a8762509394ca000554795b65b56e4f"
+  },
+  "SOURCE/fixed/MANIFEST.json": {
+    "bytes": 1065,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-fix-v1/MANIFEST.json",
+    "sha256": "2ede9161978aabd3739a8948edf515aeead0754851a48e5350b99552abf78883"
+  },
+  "SOURCE/fixed/SOURCE-AFTER.json": {
+    "bytes": 250271,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-fix-unit-6875c1480f4f4fc6b8fb5937b6494564/SOURCE-AFTER.json",
+    "sha256": "3dadb763b998fb074363ed63de3faec4a14c01b07149345b1c7a09d2401c1a17"
+  },
+  "SOURCE/fixed/SOURCE-BEFORE.json": {
+    "bytes": 250271,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-fix-unit-6875c1480f4f4fc6b8fb5937b6494564/SOURCE-BEFORE.json",
+    "sha256": "3dadb763b998fb074363ed63de3faec4a14c01b07149345b1c7a09d2401c1a17"
+  },
+  "SOURCE/fixed/overlay.json": {
+    "bytes": 802,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-fix-unit-6875c1480f4f4fc6b8fb5937b6494564/overlay.json",
+    "sha256": "269a872801817c040068551abbc06ccdda959ff825b5c451820c54713ba7417c"
+  },
+  "SOURCE/fixed/posts/internal/core/node/loadstand_route_wire_full_send.go": {
+    "bytes": 5234,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-fix-v1/posts/internal/core/node/loadstand_route_wire_full_send.go",
+    "sha256": "1cb353cc46fabd04243df40b222db144d1a8d3f43c040af861553e5142d43433"
+  },
+  "SOURCE/fixed/posts/internal/core/node/loadstand_route_wire_sender_refusal_test.go": {
+    "bytes": 3868,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-fix-v1/posts/internal/core/node/loadstand_route_wire_sender_refusal_test.go",
+    "sha256": "97325309e6305040999ab03d6b2c5cf8d3a055809ee874ac7122b4933375af3d"
+  },
+  "SOURCE/fixed/posts/internal/core/node/loadstand_route_wire_zero_offer_test.go": {
+    "bytes": 3151,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-fix-v1/posts/internal/core/node/loadstand_route_wire_zero_offer_test.go",
+    "sha256": "258a5eaea43e0ee9df61d07b8f64642226ab3f21b3b9f041af60e144dbfcdcdc"
+  },
+  "SOURCE/later-interop-lint-fix/BEFORE.json": {
+    "bytes": 307,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-hmix-interop-lint-fix-v1/BEFORE.json",
+    "sha256": "45e8c00e8fb96780bd1b891b1de6543a75e5bf58c6357d81b0d43f514221151d"
+  },
+  "SOURCE/later-interop-lint-fix/MANIFEST.json": {
+    "bytes": 795,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-hmix-interop-lint-fix-v1/MANIFEST.json",
+    "sha256": "f6e1395156ce9b48d33603c4821de98ca4c454eb230235f1d30a639884a1b30a"
+  },
+  "SOURCE/later-interop-lint-fix/REMOVED-UNREFERENCED.txt": {
+    "bytes": 1336,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-hmix-interop-lint-fix-v1/REMOVED-UNREFERENCED.txt",
+    "sha256": "b75ac914845ef9cb157c0f34da229c3e57dc90d75358fac5e050846da4768d80"
+  },
+  "SOURCE/later-interop-lint-fix/posts/internal/core/node/find_node_published31_guest_linux_test.go": {
+    "bytes": 19148,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-hmix-interop-lint-fix-v1/posts/internal/core/node/find_node_published31_guest_linux_test.go",
+    "sha256": "79b4746c915a8b322367eb809604c51b5597d89e9495fc15c52ffc4836af36d6"
+  },
+  "SOURCE/later-interop-lint-fix/posts/internal/core/node/release_interop_test.go": {
+    "bytes": 42168,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-hmix-interop-lint-fix-v1/posts/internal/core/node/release_interop_test.go",
+    "sha256": "809fbc1ecabb1ec1bfc72dc1dfdad6cf5f777d2b5aa2217414fd6882849feffa"
+  },
+  "SOURCE/lint-fixed/SOURCE-AFTER.json": {
+    "bytes": 250539,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-linux-lint-fixed-05ae1e457b4f4309bbfb274382c81821/SOURCE-AFTER.json",
+    "sha256": "00c9f1f94de24420a8238bfb7d5353bcde76a5b661a1bcfe31af95a8404b0089"
+  },
+  "SOURCE/lint-fixed/SOURCE-BEFORE.json": {
+    "bytes": 250539,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-linux-lint-fixed-05ae1e457b4f4309bbfb274382c81821/SOURCE-BEFORE.json",
+    "sha256": "00c9f1f94de24420a8238bfb7d5353bcde76a5b661a1bcfe31af95a8404b0089"
+  },
+  "SOURCE/linux-compile/SOURCE-AFTER.json": {
+    "bytes": 250539,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-linux-compile-dc7706294f834840b5d1a43f63d642dc/SOURCE-AFTER.json",
+    "sha256": "c04df3c890ca8c67ff839e894f07d3409c94e117571fb4d762d352dadb70c7e5"
+  },
+  "SOURCE/linux-compile/SOURCE-BEFORE.json": {
+    "bytes": 250539,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-linux-compile-dc7706294f834840b5d1a43f63d642dc/SOURCE-BEFORE.json",
+    "sha256": "c04df3c890ca8c67ff839e894f07d3409c94e117571fb4d762d352dadb70c7e5"
+  },
+  "SOURCE/original/MANIFEST.json": {
+    "bytes": 1029,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-sender-refusal-unit-v1/MANIFEST.json",
+    "sha256": "ef6328c0dcdd82d9461c8abeb832c99028d43edcef9f4bf522597841f6a3df0b"
+  },
+  "SOURCE/original/SOURCE-AFTER.json": {
+    "bytes": 250271,
+    "path": "/private/tmp/corsa-d1-o1a-sender-refusal-unit-c51403d5f58347e39c104d5851c604f1/SOURCE-AFTER.json",
+    "sha256": "3dadb763b998fb074363ed63de3faec4a14c01b07149345b1c7a09d2401c1a17"
+  },
+  "SOURCE/original/SOURCE-BEFORE.json": {
+    "bytes": 250271,
+    "path": "/private/tmp/corsa-d1-o1a-sender-refusal-unit-c51403d5f58347e39c104d5851c604f1/SOURCE-BEFORE.json",
+    "sha256": "3dadb763b998fb074363ed63de3faec4a14c01b07149345b1c7a09d2401c1a17"
+  },
+  "SOURCE/original/overlay.json": {
+    "bytes": 291,
+    "path": "/private/tmp/corsa-d1-o1a-sender-refusal-unit-c51403d5f58347e39c104d5851c604f1/overlay.json",
+    "sha256": "45fbd158088fd83c65092750b8b19b4501c0353bb0adfb91056adee3f29b1a00"
+  },
+  "SOURCE/original/posts/internal/core/node/loadstand_route_wire_sender_refusal_test.go": {
+    "bytes": 3815,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-sender-refusal-unit-v1/posts/internal/core/node/loadstand_route_wire_sender_refusal_test.go",
+    "sha256": "f9d1d464d6b7b1561b131d8dcb0fcf2944b1a74fa2aa84af35359451003ebd07"
+  },
+  "SOURCE/patches/loadstand_route_wire_full_send.go.diff": {
+    "bytes": 810,
+    "derived_from_before_after": "internal/core/node/loadstand_route_wire_full_send.go",
+    "sha256": "228fc8ae07701b07db670ad8556dfeb78d981f1db127b14f9de9c0135b2ae481"
+  },
+  "SOURCE/patches/loadstand_route_wire_sender_refusal_test.go.diff": {
+    "bytes": 4132,
+    "derived_from_before_after": "internal/core/node/loadstand_route_wire_sender_refusal_test.go",
+    "sha256": "76815d3fed6c24433e4447fefba7291628e6e34f492e674c2c665fc500b25164"
+  },
+  "SOURCE/patches/loadstand_route_wire_zero_offer_test.go.diff": {
+    "bytes": 3388,
+    "derived_from_before_after": "internal/core/node/loadstand_route_wire_zero_offer_test.go",
+    "sha256": "8cf4edba7b6868a6f3a6af293cecd374d4a4f06a5efa777322aeaccdd259b55a"
+  },
+  "SOURCE/unchanged/go.mod": {
+    "bytes": 2026,
+    "path": "/Users/hades/Documents/repos/corsa/go.mod",
+    "sha256": "cfa3ad676f2154d3af35cd66dbfb8d6820d4d82f94a108c2212a9def83d938c0"
+  },
+  "SOURCE/unchanged/go.sum": {
+    "bytes": 12782,
+    "path": "/Users/hades/Documents/repos/corsa/go.sum",
+    "sha256": "0cc8b8551c559e7c8298d73f4e72d96ba3b4decac4c7481f0cc6d3c536e5c5fb"
+  },
+  "SOURCE/unchanged/internal/core/node/loadstand_executor_route_wire_pairs_test.go": {
+    "bytes": 24611,
+    "path": "/Users/hades/Documents/repos/corsa/internal/core/node/loadstand_executor_route_wire_pairs_test.go",
+    "sha256": "dc7a975e898963c8eb8dc93c0ef0e5521d38e12d286e5dfc33bef25394bc5925"
+  },
+  "SOURCE/unchanged/internal/core/node/loadstand_route_wire.go": {
+    "bytes": 12126,
+    "path": "/Users/hades/Documents/repos/corsa/internal/core/node/loadstand_route_wire.go",
+    "sha256": "b42ad805ddf04f8cb8e45e7a12f49413391f68898671cba4a665ed4a50c1c2fd"
+  },
+  "SOURCE/unchanged/internal/core/node/loadstand_route_wire_full_receipt.go": {
+    "bytes": 4156,
+    "path": "/Users/hades/Documents/repos/corsa/internal/core/node/loadstand_route_wire_full_receipt.go",
+    "sha256": "5bdca2caed9753ffb4593605180e534e56d81eb8ed8059853e076df272345cc0"
+  },
+  "SOURCE/unchanged/internal/core/node/loadstand_route_wire_full_send_mechanism_test.go": {
+    "bytes": 5748,
+    "path": "/Users/hades/Documents/repos/corsa/internal/core/node/loadstand_route_wire_full_send_mechanism_test.go",
+    "sha256": "fe1aa5a317538098266ba68cd9694886e7d0ff929f75a45729454010d373775f"
+  },
+  "SOURCE/unchanged/internal/core/node/loadstand_route_wire_full_send_test.go": {
+    "bytes": 4819,
+    "path": "/Users/hades/Documents/repos/corsa/internal/core/node/loadstand_route_wire_full_send_test.go",
+    "sha256": "4989531f0a98ecf6dceff2575f4a0a1e7ba535c306a6bae660590346f2e157dd"
+  },
+  "SOURCE/unchanged/internal/core/node/peer_management.go": {
+    "bytes": 324154,
+    "path": "/Users/hades/Documents/repos/corsa/internal/core/node/peer_management.go",
+    "sha256": "0a51dcad1a8ec6f55e4498f68909a26bc53380cfa5212e731935d8afb8721be2"
+  },
+  "SOURCE/unchanged/internal/core/node/routing_announce.go": {
+    "bytes": 150431,
+    "path": "/Users/hades/Documents/repos/corsa/internal/core/node/routing_announce.go",
+    "sha256": "643acfd64a48fb7af4772f199036ef2ab5537a5d7739bc05c92ff39b61cb7dff"
+  }
+}

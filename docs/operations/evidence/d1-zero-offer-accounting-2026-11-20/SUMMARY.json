@@ -1,0 +1,50 @@
+{
+  "Linux_lint": {
+    "fixed": "PASS: 0 issues, 10 B RAW, one command exit 0",
+    "original": "FAILED: 8 interop-test findings; preserved",
+    "subject": "compile subject plus exact two later interop-test fixes; 2109 maps unchanged"
+  },
+  "O1a_metric_PASS": false,
+  "fixed_unit": {
+    "RAW_bytes": 71889,
+    "child_PASS": 62,
+    "outer_PASS": 8
+  },
+  "genuine_test_scope": "Original sender/chunker/queue and manual clock; writer accounting callbacks, not real network/native I/O.",
+  "later_interop_lint_fix": "Separate two-test-file subject; original failed lint retained, no global source maps recorded for that attempt. Original compile is not relabelled.",
+  "linux_compile": {
+    "ELF_execution": false,
+    "RAW_bytes": 5287,
+    "artifacts": {
+      "amd64": {
+        "bytes": 75353521,
+        "executed": false,
+        "path": "/private/tmp/corsa-d1-o1a-zero-offer-linux-compile-dc7706294f834840b5d1a43f63d642dc/artifacts/node-amd64.test",
+        "sha256": "a3fbe631cf4dff34e58fabc03042bd1e4a3ae611b694e2970eddcfd81e625123",
+        "static": true,
+        "tags": "interop,d1_owned_guest_interop"
+      },
+      "arm64": {
+        "bytes": 69274943,
+        "executed": false,
+        "path": "/private/tmp/corsa-d1-o1a-zero-offer-linux-compile-dc7706294f834840b5d1a43f63d642dc/artifacts/node-arm64.test",
+        "sha256": "cd8a7611af32adfeb84f0c6f3a01e7fff6fde0f15fe5ef161b62fb8f000ec7d0",
+        "static": true,
+        "tags": "d1_o1a_native_responder"
+      }
+    },
+    "commands_exit0": 4
+  },
+  "native_VM_rerun": "NOT_RUN",
+  "negative": "Disconnected/full queue, any supplied or partial frame, prior poison, bounds/clock/bad metadata/frame/empty success remain failures.",
+  "new_D1_gate_or_approval": false,
+  "original_native_97a9_cause": "UNKNOWN_NOT_RETROACTIVELY_FIXED",
+  "original_unit": {
+    "RAW_bytes": 37809,
+    "child_PASS": 34,
+    "outer_PASS": 3
+  },
+  "positive": "Missing session and missing V3 supply no frame, create no full pass, and no longer poison an otherwise valid observation; later real 101-destination/two-frame queued pass retains exact writer proof.",
+  "prior_evidence": "../d1-full-send-sender-2026-11-20/README.md",
+  "scope": "ZERO_SUPPLIED_FRAME_ACCOUNTING_ONLY_NOT_NATIVE_CAUSE_OR_O1A_METRIC_PASS"
+}

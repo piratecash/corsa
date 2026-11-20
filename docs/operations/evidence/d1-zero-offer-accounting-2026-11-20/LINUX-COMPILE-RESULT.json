@@ -1,0 +1,118 @@
+{
+  "ELF_executed": false,
+  "artifacts": {
+    "amd64": {
+      "bytes": 75353521,
+      "executed": false,
+      "path": "/private/tmp/corsa-d1-o1a-zero-offer-linux-compile-dc7706294f834840b5d1a43f63d642dc/artifacts/node-amd64.test",
+      "sha256": "a3fbe631cf4dff34e58fabc03042bd1e4a3ae611b694e2970eddcfd81e625123",
+      "static": true,
+      "tags": "interop,d1_owned_guest_interop"
+    },
+    "arm64": {
+      "bytes": 69274943,
+      "executed": false,
+      "path": "/private/tmp/corsa-d1-o1a-zero-offer-linux-compile-dc7706294f834840b5d1a43f63d642dc/artifacts/node-arm64.test",
+      "sha256": "cd8a7611af32adfeb84f0c6f3a01e7fff6fde0f15fe5ef161b62fb8f000ec7d0",
+      "static": true,
+      "tags": "d1_o1a_native_responder"
+    }
+  },
+  "attempt_id": "dc7706294f834840b5d1a43f63d642dc",
+  "base": "22aaabc2f8035b8d287ce4181a997d1725efa722",
+  "error": null,
+  "lock_retained": false,
+  "raw_bytes": 5287,
+  "source_files": 2109,
+  "status": "LINUX_COMPILE_ONLY_PASS",
+  "steps": [
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1)(allow default)(deny network*)(deny file-write* (subpath \"/Users/hades/Documents/repos/corsa\"))",
+        "/usr/local/go/bin/go",
+        "test",
+        "-c",
+        "-mod=readonly",
+        "-buildvcs=false",
+        "-p=1",
+        "-trimpath",
+        "-ldflags=-buildid=",
+        "-tags=d1_o1a_native_responder",
+        "-o",
+        "/private/tmp/corsa-d1-o1a-zero-offer-linux-compile-dc7706294f834840b5d1a43f63d642dc/artifacts/node-arm64.test",
+        "./internal/core/node"
+      ],
+      "exit": 0,
+      "owned_group_absent": true,
+      "phase": "compile-arm64",
+      "pid": 90072,
+      "pipe_threads_finished": true,
+      "reason": null,
+      "stderr": "/private/tmp/corsa-d1-o1a-zero-offer-linux-compile-dc7706294f834840b5d1a43f63d642dc/01-compile-arm64.stderr",
+      "stdout": "/private/tmp/corsa-d1-o1a-zero-offer-linux-compile-dc7706294f834840b5d1a43f63d642dc/01-compile-arm64.stdout"
+    },
+    {
+      "argv": [
+        "/usr/local/go/bin/go",
+        "version",
+        "-m",
+        "/private/tmp/corsa-d1-o1a-zero-offer-linux-compile-dc7706294f834840b5d1a43f63d642dc/artifacts/node-arm64.test"
+      ],
+      "exit": 0,
+      "owned_group_absent": true,
+      "phase": "metadata-arm64",
+      "pid": 90987,
+      "pipe_threads_finished": true,
+      "reason": null,
+      "stderr": "/private/tmp/corsa-d1-o1a-zero-offer-linux-compile-dc7706294f834840b5d1a43f63d642dc/02-metadata-arm64.stderr",
+      "stdout": "/private/tmp/corsa-d1-o1a-zero-offer-linux-compile-dc7706294f834840b5d1a43f63d642dc/02-metadata-arm64.stdout"
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1)(allow default)(deny network*)(deny file-write* (subpath \"/Users/hades/Documents/repos/corsa\"))",
+        "/usr/local/go/bin/go",
+        "test",
+        "-c",
+        "-mod=readonly",
+        "-buildvcs=false",
+        "-p=1",
+        "-trimpath",
+        "-ldflags=-buildid=",
+        "-tags=interop,d1_owned_guest_interop",
+        "-o",
+        "/private/tmp/corsa-d1-o1a-zero-offer-linux-compile-dc7706294f834840b5d1a43f63d642dc/artifacts/node-amd64.test",
+        "./internal/core/node"
+      ],
+      "exit": 0,
+      "owned_group_absent": true,
+      "phase": "compile-amd64",
+      "pid": 90988,
+      "pipe_threads_finished": true,
+      "reason": null,
+      "stderr": "/private/tmp/corsa-d1-o1a-zero-offer-linux-compile-dc7706294f834840b5d1a43f63d642dc/03-compile-amd64.stderr",
+      "stdout": "/private/tmp/corsa-d1-o1a-zero-offer-linux-compile-dc7706294f834840b5d1a43f63d642dc/03-compile-amd64.stdout"
+    },
+    {
+      "argv": [
+        "/usr/local/go/bin/go",
+        "version",
+        "-m",
+        "/private/tmp/corsa-d1-o1a-zero-offer-linux-compile-dc7706294f834840b5d1a43f63d642dc/artifacts/node-amd64.test"
+      ],
+      "exit": 0,
+      "owned_group_absent": true,
+      "phase": "metadata-amd64",
+      "pid": 91978,
+      "pipe_threads_finished": true,
+      "reason": null,
+      "stderr": "/private/tmp/corsa-d1-o1a-zero-offer-linux-compile-dc7706294f834840b5d1a43f63d642dc/04-metadata-amd64.stderr",
+      "stdout": "/private/tmp/corsa-d1-o1a-zero-offer-linux-compile-dc7706294f834840b5d1a43f63d642dc/04-metadata-amd64.stdout"
+    }
+  ],
+  "unknown": false,
+  "work": "/private/tmp/corsa-d1-o1a-zero-offer-linux-compile-dc7706294f834840b5d1a43f63d642dc"
+}

@@ -1,0 +1,27 @@
+{
+  "base_commit": "cecc9b709e00fbecbbc91c0920f101f7e3b7729b",
+  "full_proof_unchanged": [
+    "fullSendProof still compares all offered full frame hashes/bytes/count to actual writer totals",
+    "parent still requires FullSend for every nonzero sent FullV3 stream plus reciprocal receive identity projection",
+    "required complete 10k/source proof is not created by an exempt refusal",
+    "supplied or partial attempts and uncertain writes remain failures"
+  ],
+  "historical_97a9_inner_refusal": "UNKNOWN_NOT_RETROACTIVELY_RECLASSIFIED",
+  "manifest_sha256": "2ede9161978aabd3739a8948edf515aeead0754851a48e5350b99552abf78883",
+  "posts": {
+    "internal/core/node/loadstand_route_wire_full_send.go": "1cb353cc46fabd04243df40b222db144d1a8d3f43c040af861553e5142d43433",
+    "internal/core/node/loadstand_route_wire_sender_refusal_test.go": "97325309e6305040999ab03d6b2c5cf8d3a055809ee874ac7122b4933375af3d",
+    "internal/core/node/loadstand_route_wire_zero_offer_test.go": "258a5eaea43e0ee9df61d07b8f64642226ab3f21b3b9f041af60e144dbfcdcdc"
+  },
+  "production_delta": "one finish function; no new state/clock/schema/source limits",
+  "resources_executed": false,
+  "status": "SOURCE_CODE_ACCEPTED_FOR_BOUNDED_UNIT_QA_NOT_RUNTIME_PASS",
+  "test_review": "two routine pre-frame refusal classes; original 101-route/two-chunk queued sender plus explicit writer-callback proof and eight sticky/clock/boundary/metadata/frame/partial/empty-success guards",
+  "test_scope_caveat": "writer callback accounting is exercised directly after actual sender queue admission; this is not real socket/native-I/O evidence",
+  "zero_IO_proof": [
+    "original send path calls pass.frame immediately before each inbound write or outbound enqueue",
+    "an unpoisoned in-window pass with send=nil and next=0 supplied no valid frame to those I/O paths",
+    "frame validation failures already set sticky incomplete and are never cleared",
+    "earlier boundary/clock/seal guards still precede exemption"
+  ]
+}

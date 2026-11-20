@@ -1,0 +1,27 @@
+{
+  "status": "ACCEPTED_FAILED_LINT_DATA_ONLY",
+  "reviewer": "critic_s6_dht",
+  "result_sha256": "f1f6b7ba485064eaa7b9f84178430f24030d62631530717a5f0eb58d88c00cca",
+  "lint_pass": false,
+  "issues": {
+    "errcheck": 4,
+    "unused": 4
+  },
+  "scope": "Selected Linux tags expose four unchecked deferred file closes in Hmix guest fixture and four historical Darwin-only interop unused members/types. No finding identifies zero-offer posts. Original failed output retained; no app/test ELF execution.",
+  "raw": [
+    {
+      "name": "01-linux-lint.stdout",
+      "bytes": 1347,
+      "sha256": "2462e16fa7d700c528a25f613e2f0d405e8338dce22dbf0cacd9e153f4f4c248"
+    },
+    {
+      "name": "01-linux-lint.stderr",
+      "bytes": 14,
+      "sha256": "bf05a2ed1e6ff1ca52a9863bab4a8833d5068953dd57362001f6462ff43f7cfc"
+    }
+  ],
+  "command_exit": 1,
+  "EOF": true,
+  "fresh_pid_pgid_absent": 92076,
+  "source_before_after_recorded": false
+}

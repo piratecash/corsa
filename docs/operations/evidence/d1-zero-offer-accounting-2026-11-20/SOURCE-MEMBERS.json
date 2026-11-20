@@ -1,0 +1,166 @@
+{
+  "before/internal/core/node/loadstand_route_wire_full_send.go": {
+    "bytes": 4918,
+    "sha256": "935464cec4c3f3c73f912fd0e177ac7220a3c3505df2f9bb29c29084bff9e816"
+  },
+  "controllers/common.py": {
+    "bytes": 6223,
+    "sha256": "5667d2772248c892b31bb4eb321f4ad72507f9f9556a34b562f6708fd496507d"
+  },
+  "controllers/fixed.py": {
+    "bytes": 3450,
+    "sha256": "e8ff7ee8781a88ab5396bb164ba167601070f03611ad7f383dfe7f51404a3792"
+  },
+  "controllers/linux-compile.py": {
+    "bytes": 3334,
+    "sha256": "e8b94780e841c73cbc5911cbeee080e886b94c545608ee1fbe222ba95c727abe"
+  },
+  "controllers/linux-lint-fixed.py": {
+    "bytes": 2925,
+    "sha256": "a76c4daf68275485ccb714f5145f411e67964d5ac31c69b04062bdf96c1d452b"
+  },
+  "controllers/linux-lint-original.py": {
+    "bytes": 1950,
+    "sha256": "884bce3b03a45c9c519be97959025851c830db4e7069573dd25d5785922cd4bf"
+  },
+  "controllers/original.py": {
+    "bytes": 3466,
+    "sha256": "91870152dbd18c6a06cc254f89e1983c5a860fe6300730dfb4e1bc460df92ecd"
+  },
+  "controllers/tester-readback.py": {
+    "bytes": 5691,
+    "sha256": "660841cf7ae70af5ce8739391e39882a6a8762509394ca000554795b65b56e4f"
+  },
+  "fixed/MANIFEST.json": {
+    "bytes": 1065,
+    "sha256": "2ede9161978aabd3739a8948edf515aeead0754851a48e5350b99552abf78883"
+  },
+  "fixed/SOURCE-AFTER.json": {
+    "bytes": 250271,
+    "sha256": "3dadb763b998fb074363ed63de3faec4a14c01b07149345b1c7a09d2401c1a17"
+  },
+  "fixed/SOURCE-BEFORE.json": {
+    "bytes": 250271,
+    "sha256": "3dadb763b998fb074363ed63de3faec4a14c01b07149345b1c7a09d2401c1a17"
+  },
+  "fixed/overlay.json": {
+    "bytes": 802,
+    "sha256": "269a872801817c040068551abbc06ccdda959ff825b5c451820c54713ba7417c"
+  },
+  "fixed/posts/internal/core/node/loadstand_route_wire_full_send.go": {
+    "bytes": 5234,
+    "sha256": "1cb353cc46fabd04243df40b222db144d1a8d3f43c040af861553e5142d43433"
+  },
+  "fixed/posts/internal/core/node/loadstand_route_wire_sender_refusal_test.go": {
+    "bytes": 3868,
+    "sha256": "97325309e6305040999ab03d6b2c5cf8d3a055809ee874ac7122b4933375af3d"
+  },
+  "fixed/posts/internal/core/node/loadstand_route_wire_zero_offer_test.go": {
+    "bytes": 3151,
+    "sha256": "258a5eaea43e0ee9df61d07b8f64642226ab3f21b3b9f041af60e144dbfcdcdc"
+  },
+  "later-interop-lint-fix/BEFORE.json": {
+    "bytes": 307,
+    "sha256": "45e8c00e8fb96780bd1b891b1de6543a75e5bf58c6357d81b0d43f514221151d"
+  },
+  "later-interop-lint-fix/MANIFEST.json": {
+    "bytes": 795,
+    "sha256": "f6e1395156ce9b48d33603c4821de98ca4c454eb230235f1d30a639884a1b30a"
+  },
+  "later-interop-lint-fix/REMOVED-UNREFERENCED.txt": {
+    "bytes": 1336,
+    "sha256": "b75ac914845ef9cb157c0f34da229c3e57dc90d75358fac5e050846da4768d80"
+  },
+  "later-interop-lint-fix/posts/internal/core/node/find_node_published31_guest_linux_test.go": {
+    "bytes": 19148,
+    "sha256": "79b4746c915a8b322367eb809604c51b5597d89e9495fc15c52ffc4836af36d6"
+  },
+  "later-interop-lint-fix/posts/internal/core/node/release_interop_test.go": {
+    "bytes": 42168,
+    "sha256": "809fbc1ecabb1ec1bfc72dc1dfdad6cf5f777d2b5aa2217414fd6882849feffa"
+  },
+  "lint-fixed/SOURCE-AFTER.json": {
+    "bytes": 250539,
+    "sha256": "00c9f1f94de24420a8238bfb7d5353bcde76a5b661a1bcfe31af95a8404b0089"
+  },
+  "lint-fixed/SOURCE-BEFORE.json": {
+    "bytes": 250539,
+    "sha256": "00c9f1f94de24420a8238bfb7d5353bcde76a5b661a1bcfe31af95a8404b0089"
+  },
+  "linux-compile/SOURCE-AFTER.json": {
+    "bytes": 250539,
+    "sha256": "c04df3c890ca8c67ff839e894f07d3409c94e117571fb4d762d352dadb70c7e5"
+  },
+  "linux-compile/SOURCE-BEFORE.json": {
+    "bytes": 250539,
+    "sha256": "c04df3c890ca8c67ff839e894f07d3409c94e117571fb4d762d352dadb70c7e5"
+  },
+  "original/MANIFEST.json": {
+    "bytes": 1029,
+    "sha256": "ef6328c0dcdd82d9461c8abeb832c99028d43edcef9f4bf522597841f6a3df0b"
+  },
+  "original/SOURCE-AFTER.json": {
+    "bytes": 250271,
+    "sha256": "3dadb763b998fb074363ed63de3faec4a14c01b07149345b1c7a09d2401c1a17"
+  },
+  "original/SOURCE-BEFORE.json": {
+    "bytes": 250271,
+    "sha256": "3dadb763b998fb074363ed63de3faec4a14c01b07149345b1c7a09d2401c1a17"
+  },
+  "original/overlay.json": {
+    "bytes": 291,
+    "sha256": "45fbd158088fd83c65092750b8b19b4501c0353bb0adfb91056adee3f29b1a00"
+  },
+  "original/posts/internal/core/node/loadstand_route_wire_sender_refusal_test.go": {
+    "bytes": 3815,
+    "sha256": "f9d1d464d6b7b1561b131d8dcb0fcf2944b1a74fa2aa84af35359451003ebd07"
+  },
+  "patches/loadstand_route_wire_full_send.go.diff": {
+    "bytes": 810,
+    "sha256": "228fc8ae07701b07db670ad8556dfeb78d981f1db127b14f9de9c0135b2ae481"
+  },
+  "patches/loadstand_route_wire_sender_refusal_test.go.diff": {
+    "bytes": 4132,
+    "sha256": "76815d3fed6c24433e4447fefba7291628e6e34f492e674c2c665fc500b25164"
+  },
+  "patches/loadstand_route_wire_zero_offer_test.go.diff": {
+    "bytes": 3388,
+    "sha256": "8cf4edba7b6868a6f3a6af293cecd374d4a4f06a5efa777322aeaccdd259b55a"
+  },
+  "unchanged/go.mod": {
+    "bytes": 2026,
+    "sha256": "cfa3ad676f2154d3af35cd66dbfb8d6820d4d82f94a108c2212a9def83d938c0"
+  },
+  "unchanged/go.sum": {
+    "bytes": 12782,
+    "sha256": "0cc8b8551c559e7c8298d73f4e72d96ba3b4decac4c7481f0cc6d3c536e5c5fb"
+  },
+  "unchanged/internal/core/node/loadstand_executor_route_wire_pairs_test.go": {
+    "bytes": 24611,
+    "sha256": "dc7a975e898963c8eb8dc93c0ef0e5521d38e12d286e5dfc33bef25394bc5925"
+  },
+  "unchanged/internal/core/node/loadstand_route_wire.go": {
+    "bytes": 12126,
+    "sha256": "b42ad805ddf04f8cb8e45e7a12f49413391f68898671cba4a665ed4a50c1c2fd"
+  },
+  "unchanged/internal/core/node/loadstand_route_wire_full_receipt.go": {
+    "bytes": 4156,
+    "sha256": "5bdca2caed9753ffb4593605180e534e56d81eb8ed8059853e076df272345cc0"
+  },
+  "unchanged/internal/core/node/loadstand_route_wire_full_send_mechanism_test.go": {
+    "bytes": 5748,
+    "sha256": "fe1aa5a317538098266ba68cd9694886e7d0ff929f75a45729454010d373775f"
+  },
+  "unchanged/internal/core/node/loadstand_route_wire_full_send_test.go": {
+    "bytes": 4819,
+    "sha256": "4989531f0a98ecf6dceff2575f4a0a1e7ba535c306a6bae660590346f2e157dd"
+  },
+  "unchanged/internal/core/node/peer_management.go": {
+    "bytes": 324154,
+    "sha256": "0a51dcad1a8ec6f55e4498f68909a26bc53380cfa5212e731935d8afb8721be2"
+  },
+  "unchanged/internal/core/node/routing_announce.go": {
+    "bytes": 150431,
+    "sha256": "643acfd64a48fb7af4772f199036ef2ab5537a5d7739bc05c92ff39b61cb7dff"
+  }
+}

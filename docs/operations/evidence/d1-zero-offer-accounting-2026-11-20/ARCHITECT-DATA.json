@@ -1,0 +1,14 @@
+{
+  "RAW_bytes": 71889,
+  "Root_before_after_equal": true,
+  "all_RUN_PASS_exact": true,
+  "child": 62,
+  "no_actual_application_execution": true,
+  "normal_group_absent_lock_absent": true,
+  "outer": 8,
+  "overlay_post_manifest_exact": true,
+  "result": "/private/tmp/corsa-d1-o1a-zero-offer-fix-unit-6875c1480f4f4fc6b8fb5937b6494564/RESULT.json",
+  "result_sha256": "1ce43c5d7920af757473f748973f82b48bc7e2d2af92ae5683f3e8640a13e4c2",
+  "status": "ACCEPTED_SCOPED_UNIT_DATA_NOT_NATIVE_CAUSE_PROOF",
+  "stderr_bytes": 0
+}

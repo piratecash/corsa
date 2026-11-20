@@ -1,0 +1,46 @@
+{
+  "Root_source_changed": false,
+  "app_or_Linux_ELF_executed": false,
+  "attempt_id": "6875c1480f4f4fc6b8fb5937b6494564",
+  "base": "cecc9b709e00fbecbbc91c0920f101f7e3b7729b",
+  "error": null,
+  "lock_retained": false,
+  "manifest_sha256": "2ede9161978aabd3739a8948edf515aeead0754851a48e5350b99552abf78883",
+  "raw_bytes": 71889,
+  "scope": "ZERO_OFFER_ACCOUNTING_ONLY_NOT_NATIVE_CAUSE_PROOF",
+  "status": "ZERO_OFFER_FIX_UNIT_PASS",
+  "steps": [
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1)(allow default)(deny network*)(deny file-write* (subpath \"/Users/hades/Documents/repos/corsa\"))",
+        "/usr/local/go/bin/go",
+        "test",
+        "-overlay=/private/tmp/corsa-d1-o1a-zero-offer-fix-unit-6875c1480f4f4fc6b8fb5937b6494564/overlay.json",
+        "-mod=readonly",
+        "-p=1",
+        "-count=1",
+        "-timeout=90s",
+        "-json",
+        "./internal/core/node",
+        "-run",
+        "^(TestLoadStandRouteWireFullPassRefusesConnectionOrBoundaryChange|TestLoadStandRouteWireFullSendMatchesOriginalWriter|TestLoadStandRouteWireFullSendPreWindowCrossingMechanism|TestLoadStandRouteWireFullSendProjectionReuseMechanism|TestLoadStandRouteWirePairsRequireReciprocalReports|TestLoadStandRouteWireSenderRefusalMechanisms|TestLoadStandRouteWireZeroOfferKeepsFailureGuards|TestLoadStandRouteWireZeroOfferThenActualCompletePass)$"
+      ],
+      "exit": 0,
+      "owned_group_absent": true,
+      "phase": "selected-tests",
+      "pid": 88754,
+      "pipe_threads_finished": true,
+      "reason": null,
+      "stderr": "/private/tmp/corsa-d1-o1a-zero-offer-fix-unit-6875c1480f4f4fc6b8fb5937b6494564/01-selected-tests.stderr",
+      "stdout": "/private/tmp/corsa-d1-o1a-zero-offer-fix-unit-6875c1480f4f4fc6b8fb5937b6494564/01-selected-tests.stdout"
+    }
+  ],
+  "tests": {
+    "child": 62,
+    "outer": 8
+  },
+  "unknown": false,
+  "work": "/private/tmp/corsa-d1-o1a-zero-offer-fix-unit-6875c1480f4f4fc6b8fb5937b6494564"
+}

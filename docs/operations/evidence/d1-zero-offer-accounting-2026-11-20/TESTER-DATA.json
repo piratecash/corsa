@@ -1,0 +1,112 @@
+{
+  "checks": [
+    "Original 3 outer/34 child and fixed 8 outer/62 child named JSON executions PASS with no FAIL/SKIP.",
+    "All 2107 unit source/module payloads exactly equal committed Hmix checkpoint 22aaabc2, despite older controller base label cecc9b7; virtual overlays are separately bound.",
+    "Final 2109 source/module map differs only by exact three fix posts and equals current Root; both unit and compile before/after maps unchanged.",
+    "Both static Linux ELF file hashes, sizes, machine/ET_EXEC/program headers and actual Go1.27.4/CGO0/26-dependency BuildInfo checked read-only.",
+    "Original refusal and boundary negatives retained; no inference about actual earlier native sender-false cause."
+  ],
+  "historical_native_cause": "UNKNOWN_NOT_RETROACTIVELY_FIXED",
+  "native_or_O1a_metric_PASS": false,
+  "reviewer": "TESTER",
+  "scope": "Not native cause proof, O1a acceptance, D1 activation or release. No artifact was executed in this review.",
+  "source_delta": {
+    "internal/core/node/loadstand_route_wire_full_send.go": {
+      "after": "1cb353cc46fabd04243df40b222db144d1a8d3f43c040af861553e5142d43433",
+      "before": "935464cec4c3f3c73f912fd0e177ac7220a3c3505df2f9bb29c29084bff9e816"
+    },
+    "internal/core/node/loadstand_route_wire_sender_refusal_test.go": {
+      "after": "97325309e6305040999ab03d6b2c5cf8d3a055809ee874ac7122b4933375af3d",
+      "before": null
+    },
+    "internal/core/node/loadstand_route_wire_zero_offer_test.go": {
+      "after": "258a5eaea43e0ee9df61d07b8f64642226ab3f21b3b9f041af60e144dbfcdcdc",
+      "before": null
+    }
+  },
+  "status": "ACCEPTED_ZERO_SUPPLIED_FRAME_ACCOUNTING_UNIT_AND_COMPILE_ONLY",
+  "works": {
+    "before": {
+      "exact_outer_names": [
+        "TestLoadStandRouteWireFullPassRefusesConnectionOrBoundaryChange",
+        "TestLoadStandRouteWireFullSendMatchesOriginalWriter",
+        "TestLoadStandRouteWireSenderRefusalMechanisms"
+      ],
+      "overlay": {
+        "internal/core/node/loadstand_route_wire_sender_refusal_test.go": "f9d1d464d6b7b1561b131d8dcb0fcf2944b1a74fa2aa84af35359451003ebd07"
+      },
+      "raw_bytes": 37809,
+      "result_sha256": "98a94e4d245f90c2c5e038465f9dfde01fbf4746ceacaa5679cd8a320a514888",
+      "source_before_after_equal": true,
+      "source_files": 2107,
+      "status": "FULL_SEND_UNIT_MECHANISM_PASS",
+      "steps_exit0_full_EOF_groups_absent": 1,
+      "tests": {
+        "child": 34,
+        "outer": 3
+      },
+      "work": "/private/tmp/corsa-d1-o1a-sender-refusal-unit-c51403d5f58347e39c104d5851c604f1"
+    },
+    "compile": {
+      "artifacts": {
+        "amd64": {
+          "ELF_machine_checked": true,
+          "bytes": 75353521,
+          "executed": false,
+          "metadata_dep_count": 26,
+          "no_PT_INTERP_or_PT_DYNAMIC": true,
+          "path": "/private/tmp/corsa-d1-o1a-zero-offer-linux-compile-dc7706294f834840b5d1a43f63d642dc/artifacts/node-amd64.test",
+          "sha256": "a3fbe631cf4dff34e58fabc03042bd1e4a3ae611b694e2970eddcfd81e625123",
+          "static": true,
+          "tags": "interop,d1_owned_guest_interop"
+        },
+        "arm64": {
+          "ELF_machine_checked": true,
+          "bytes": 69274943,
+          "executed": false,
+          "metadata_dep_count": 26,
+          "no_PT_INTERP_or_PT_DYNAMIC": true,
+          "path": "/private/tmp/corsa-d1-o1a-zero-offer-linux-compile-dc7706294f834840b5d1a43f63d642dc/artifacts/node-arm64.test",
+          "sha256": "cd8a7611af32adfeb84f0c6f3a01e7fff6fde0f15fe5ef161b62fb8f000ec7d0",
+          "static": true,
+          "tags": "d1_o1a_native_responder"
+        }
+      },
+      "raw_bytes": 5287,
+      "result_sha256": "a9c14235a7c92c16035732e672f8190ad91b365d2a5e8e704c5bbe4cd92b432d",
+      "source_before_after_equal": true,
+      "source_files": 2109,
+      "status": "LINUX_COMPILE_ONLY_PASS",
+      "steps_exit0_full_EOF_groups_absent": 4,
+      "work": "/private/tmp/corsa-d1-o1a-zero-offer-linux-compile-dc7706294f834840b5d1a43f63d642dc"
+    },
+    "fixed": {
+      "exact_outer_names": [
+        "TestLoadStandRouteWireFullPassRefusesConnectionOrBoundaryChange",
+        "TestLoadStandRouteWireFullSendMatchesOriginalWriter",
+        "TestLoadStandRouteWireFullSendPreWindowCrossingMechanism",
+        "TestLoadStandRouteWireFullSendProjectionReuseMechanism",
+        "TestLoadStandRouteWirePairsRequireReciprocalReports",
+        "TestLoadStandRouteWireSenderRefusalMechanisms",
+        "TestLoadStandRouteWireZeroOfferKeepsFailureGuards",
+        "TestLoadStandRouteWireZeroOfferThenActualCompletePass"
+      ],
+      "overlay": {
+        "internal/core/node/loadstand_route_wire_full_send.go": "1cb353cc46fabd04243df40b222db144d1a8d3f43c040af861553e5142d43433",
+        "internal/core/node/loadstand_route_wire_sender_refusal_test.go": "97325309e6305040999ab03d6b2c5cf8d3a055809ee874ac7122b4933375af3d",
+        "internal/core/node/loadstand_route_wire_zero_offer_test.go": "258a5eaea43e0ee9df61d07b8f64642226ab3f21b3b9f041af60e144dbfcdcdc"
+      },
+      "raw_bytes": 71889,
+      "result_sha256": "1ce43c5d7920af757473f748973f82b48bc7e2d2af92ae5683f3e8640a13e4c2",
+      "source_before_after_equal": true,
+      "source_files": 2107,
+      "status": "ZERO_OFFER_FIX_UNIT_PASS",
+      "steps_exit0_full_EOF_groups_absent": 1,
+      "tests": {
+        "child": 62,
+        "outer": 8
+      },
+      "work": "/private/tmp/corsa-d1-o1a-zero-offer-fix-unit-6875c1480f4f4fc6b8fb5937b6494564"
+    }
+  }
+}

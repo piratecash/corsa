@@ -1,0 +1,195 @@
+{
+  "RAW": {
+    "fix": {
+      "01-selected-tests.stderr": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "01-selected-tests.stdout": {
+        "bytes": 71889,
+        "sha256": "62f90c20a432b7b5374ebbbcdbfbf12817ede9e878d6f07a2c2875f62ac25327"
+      }
+    },
+    "original": {
+      "01-selected-tests.stderr": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "01-selected-tests.stdout": {
+        "bytes": 37809,
+        "sha256": "1252a06f66684e9863195d659af3065ce6403f82ea74917933459754328366db"
+      }
+    }
+  },
+  "all_other_current_source_records_rehashed_equal_test_snapshot": true,
+  "current_Root_post_test_applied_exact_reviewed_delta": [
+    "internal/core/node/loadstand_route_wire_full_send.go"
+  ],
+  "fresh_process_checks": [
+    {
+      "id": 87292,
+      "kind": "kill",
+      "label": "original",
+      "result": "ESRCH"
+    },
+    {
+      "id": 87292,
+      "kind": "killpg",
+      "label": "original",
+      "result": "ESRCH"
+    },
+    {
+      "id": 88754,
+      "kind": "kill",
+      "label": "fix",
+      "result": "ESRCH"
+    },
+    {
+      "id": 88754,
+      "kind": "killpg",
+      "label": "fix",
+      "result": "ESRCH"
+    }
+  ],
+  "manifest_sha256": "2ede9161978aabd3739a8948edf515aeead0754851a48e5350b99552abf78883",
+  "original_and_fixed_contrasts_scope": "Original3/34PASS preserved; versionedfix8/62PASS. Only missing-session/v3 zero-offer in-window poison expectation changes; validzero\u2192actual101/twoframes proofcount1, priorpoison/boundary/clock/badmetadata/frame/partial/emptysuccess and originalreciprocal-coverage oracle remain negative.",
+  "production_delta_only": [
+    "internal/core/node/loadstand_route_wire_full_send.go"
+  ],
+  "root_source_records_during_test": 2107,
+  "scope": "Host unit tests only, no VM/app. Historical97a9 and old causesUNKNOWN, no metric/baseline/D1 acceptance.",
+  "source_before_after_equal": true,
+  "status": "ACCEPTED_ZERO_OFFER_UNIT_CHANGE_ONLY",
+  "tests": {
+    "fix": {
+      "PID": 88754,
+      "RAW_bytes": 71889,
+      "child_PASS": [
+        "TestLoadStandRouteWirePairsRequireReciprocalReports/two_directions",
+        "TestLoadStandRouteWirePairsRequireReciprocalReports/nonzero_return_traffic",
+        "TestLoadStandRouteWirePairsRequireReciprocalReports/same_direction_and_identical_counters_in_different_sessions",
+        "TestLoadStandRouteWirePairsRequireReciprocalReports/missing_reciprocal",
+        "TestLoadStandRouteWirePairsRequireReciprocalReports/wrong_session",
+        "TestLoadStandRouteWirePairsRequireReciprocalReports/missing_session",
+        "TestLoadStandRouteWirePairsRequireReciprocalReports/wrong_digest",
+        "TestLoadStandRouteWirePairsRequireReciprocalReports/wrong_bytes",
+        "TestLoadStandRouteWirePairsRequireReciprocalReports/duplicate_session",
+        "TestLoadStandRouteWirePairsRequireReciprocalReports/different_incarnation",
+        "TestLoadStandRouteWirePairsRequireReciprocalReports/wrong_window",
+        "TestLoadStandRouteWirePairsRequireReciprocalReports/unproven_common_interval",
+        "TestLoadStandRouteWirePairsRequireReciprocalReports/frame_locally_registered_but_outside_common_interval",
+        "TestLoadStandRouteWirePairsRequireReciprocalReports/zero_traffic",
+        "TestLoadStandRouteWireFullSendPreWindowCrossingMechanism/wholly-before",
+        "TestLoadStandRouteWireFullSendPreWindowCrossingMechanism/prebegin-to-inside",
+        "TestLoadStandRouteWireFullSendPreWindowCrossingMechanism/wholly-inside",
+        "TestLoadStandRouteWireFullSendProjectionReuseMechanism/same-projection",
+        "TestLoadStandRouteWireFullSendProjectionReuseMechanism/caller-epoch-change",
+        "TestLoadStandRouteWireFullSendProjectionReuseMechanism/destination-set-change",
+        "TestLoadStandRouteWireFullSendMatchesOriginalWriter/two_full_passes",
+        "TestLoadStandRouteWireFullSendMatchesOriginalWriter/connect_and_periodic",
+        "TestLoadStandRouteWireFullSendMatchesOriginalWriter/missing_write",
+        "TestLoadStandRouteWireFullSendMatchesOriginalWriter/different_bytes",
+        "TestLoadStandRouteWireFullPassRefusesConnectionOrBoundaryChange/other_connection",
+        "TestLoadStandRouteWireFullPassRefusesConnectionOrBoundaryChange/past_window_end",
+        "TestLoadStandRouteWireSenderRefusalMechanisms/valid/before",
+        "TestLoadStandRouteWireSenderRefusalMechanisms/valid/inside",
+        "TestLoadStandRouteWireSenderRefusalMechanisms/valid/after",
+        "TestLoadStandRouteWireSenderRefusalMechanisms/valid",
+        "TestLoadStandRouteWireSenderRefusalMechanisms/missing-session/before",
+        "TestLoadStandRouteWireSenderRefusalMechanisms/missing-session/inside",
+        "TestLoadStandRouteWireSenderRefusalMechanisms/missing-session/after",
+        "TestLoadStandRouteWireSenderRefusalMechanisms/missing-session",
+        "TestLoadStandRouteWireSenderRefusalMechanisms/missing-v3/before",
+        "TestLoadStandRouteWireSenderRefusalMechanisms/missing-v3/inside",
+        "TestLoadStandRouteWireSenderRefusalMechanisms/missing-v3/after",
+        "TestLoadStandRouteWireSenderRefusalMechanisms/missing-v3",
+        "TestLoadStandRouteWireSenderRefusalMechanisms/disconnected/before",
+        "TestLoadStandRouteWireSenderRefusalMechanisms/disconnected/inside",
+        "TestLoadStandRouteWireSenderRefusalMechanisms/disconnected/after",
+        "TestLoadStandRouteWireSenderRefusalMechanisms/disconnected",
+        "TestLoadStandRouteWireSenderRefusalMechanisms/full-queue/before",
+        "TestLoadStandRouteWireSenderRefusalMechanisms/full-queue/inside",
+        "TestLoadStandRouteWireSenderRefusalMechanisms/full-queue/after",
+        "TestLoadStandRouteWireSenderRefusalMechanisms/full-queue",
+        "TestLoadStandRouteWireSenderRefusalMechanisms/oversize-last/before",
+        "TestLoadStandRouteWireSenderRefusalMechanisms/oversize-last/inside",
+        "TestLoadStandRouteWireSenderRefusalMechanisms/oversize-last/after",
+        "TestLoadStandRouteWireSenderRefusalMechanisms/oversize-last",
+        "TestLoadStandRouteWireSenderRefusalMechanisms/marshal-last/before",
+        "TestLoadStandRouteWireSenderRefusalMechanisms/marshal-last/inside",
+        "TestLoadStandRouteWireSenderRefusalMechanisms/marshal-last/after",
+        "TestLoadStandRouteWireSenderRefusalMechanisms/marshal-last",
+        "TestLoadStandRouteWireZeroOfferKeepsFailureGuards/prior-poison",
+        "TestLoadStandRouteWireZeroOfferKeepsFailureGuards/clock",
+        "TestLoadStandRouteWireZeroOfferKeepsFailureGuards/prebegin-crossing",
+        "TestLoadStandRouteWireZeroOfferKeepsFailureGuards/end-crossing",
+        "TestLoadStandRouteWireZeroOfferKeepsFailureGuards/bad-metadata",
+        "TestLoadStandRouteWireZeroOfferKeepsFailureGuards/bad-frame",
+        "TestLoadStandRouteWireZeroOfferKeepsFailureGuards/partial-offer",
+        "TestLoadStandRouteWireZeroOfferKeepsFailureGuards/empty-success"
+      ],
+      "outer": [
+        "TestLoadStandRouteWirePairsRequireReciprocalReports",
+        "TestLoadStandRouteWireFullSendPreWindowCrossingMechanism",
+        "TestLoadStandRouteWireFullSendProjectionReuseMechanism",
+        "TestLoadStandRouteWireFullSendMatchesOriginalWriter",
+        "TestLoadStandRouteWireFullPassRefusesConnectionOrBoundaryChange",
+        "TestLoadStandRouteWireSenderRefusalMechanisms",
+        "TestLoadStandRouteWireZeroOfferThenActualCompletePass",
+        "TestLoadStandRouteWireZeroOfferKeepsFailureGuards"
+      ],
+      "result_sha256": "1ce43c5d7920af757473f748973f82b48bc7e2d2af92ae5683f3e8640a13e4c2"
+    },
+    "original": {
+      "PID": 87292,
+      "RAW_bytes": 37809,
+      "child_PASS": [
+        "TestLoadStandRouteWireFullSendMatchesOriginalWriter/two_full_passes",
+        "TestLoadStandRouteWireFullSendMatchesOriginalWriter/connect_and_periodic",
+        "TestLoadStandRouteWireFullSendMatchesOriginalWriter/missing_write",
+        "TestLoadStandRouteWireFullSendMatchesOriginalWriter/different_bytes",
+        "TestLoadStandRouteWireFullPassRefusesConnectionOrBoundaryChange/other_connection",
+        "TestLoadStandRouteWireFullPassRefusesConnectionOrBoundaryChange/past_window_end",
+        "TestLoadStandRouteWireSenderRefusalMechanisms/valid/before",
+        "TestLoadStandRouteWireSenderRefusalMechanisms/valid/inside",
+        "TestLoadStandRouteWireSenderRefusalMechanisms/valid/after",
+        "TestLoadStandRouteWireSenderRefusalMechanisms/valid",
+        "TestLoadStandRouteWireSenderRefusalMechanisms/missing-session/before",
+        "TestLoadStandRouteWireSenderRefusalMechanisms/missing-session/inside",
+        "TestLoadStandRouteWireSenderRefusalMechanisms/missing-session/after",
+        "TestLoadStandRouteWireSenderRefusalMechanisms/missing-session",
+        "TestLoadStandRouteWireSenderRefusalMechanisms/missing-v3/before",
+        "TestLoadStandRouteWireSenderRefusalMechanisms/missing-v3/inside",
+        "TestLoadStandRouteWireSenderRefusalMechanisms/missing-v3/after",
+        "TestLoadStandRouteWireSenderRefusalMechanisms/missing-v3",
+        "TestLoadStandRouteWireSenderRefusalMechanisms/disconnected/before",
+        "TestLoadStandRouteWireSenderRefusalMechanisms/disconnected/inside",
+        "TestLoadStandRouteWireSenderRefusalMechanisms/disconnected/after",
+        "TestLoadStandRouteWireSenderRefusalMechanisms/disconnected",
+        "TestLoadStandRouteWireSenderRefusalMechanisms/full-queue/before",
+        "TestLoadStandRouteWireSenderRefusalMechanisms/full-queue/inside",
+        "TestLoadStandRouteWireSenderRefusalMechanisms/full-queue/after",
+        "TestLoadStandRouteWireSenderRefusalMechanisms/full-queue",
+        "TestLoadStandRouteWireSenderRefusalMechanisms/oversize-last/before",
+        "TestLoadStandRouteWireSenderRefusalMechanisms/oversize-last/inside",
+        "TestLoadStandRouteWireSenderRefusalMechanisms/oversize-last/after",
+        "TestLoadStandRouteWireSenderRefusalMechanisms/oversize-last",
+        "TestLoadStandRouteWireSenderRefusalMechanisms/marshal-last/before",
+        "TestLoadStandRouteWireSenderRefusalMechanisms/marshal-last/inside",
+        "TestLoadStandRouteWireSenderRefusalMechanisms/marshal-last/after",
+        "TestLoadStandRouteWireSenderRefusalMechanisms/marshal-last"
+      ],
+      "outer": [
+        "TestLoadStandRouteWireFullSendMatchesOriginalWriter",
+        "TestLoadStandRouteWireFullPassRefusesConnectionOrBoundaryChange",
+        "TestLoadStandRouteWireSenderRefusalMechanisms"
+      ],
+      "result_sha256": "98a94e4d245f90c2c5e038465f9dfde01fbf4746ceacaa5679cd8a320a514888"
+    }
+  },
+  "three_exact_overlay_paths": [
+    "internal/core/node/loadstand_route_wire_full_send.go",
+    "internal/core/node/loadstand_route_wire_sender_refusal_test.go",
+    "internal/core/node/loadstand_route_wire_zero_offer_test.go"
+  ]
+}

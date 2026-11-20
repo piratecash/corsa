@@ -1,0 +1,12 @@
+{
+  "RAW": {
+    "members": 24,
+    "payload_bytes": 123201,
+    "sha256": "843c98e788c488a2f19629b3807c551878e885ce765439a4e4c7d4c35ddee1a2"
+  },
+  "SOURCE": {
+    "members": 41,
+    "payload_bytes": 2667389,
+    "sha256": "b5dc2da060a00492c16cc841ed9143eaf12342ca1d2687f33b15ad44ba1c528b"
+  }
+}
