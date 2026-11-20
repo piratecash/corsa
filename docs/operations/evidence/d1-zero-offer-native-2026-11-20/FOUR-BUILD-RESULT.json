@@ -1,0 +1,381 @@
+{
+  "status": "BUILT_NOT_EXECUTED",
+  "subject": "DISPOSABLE_PRIVATE_ZERO_OFFER_NOT_BASELINE_NOT_METRIC_NO512",
+  "commit": "4fcc2f7245095fc43d2225f0f0065f4ce3b26113",
+  "request": "3a0e2538beba5a392d34126de5ec50376a72e9d7547df0c5cc48d75ef90702c7",
+  "artifacts": {
+    "node.test": {
+      "sha256": "b117db44d4212365abcb5c418b9896a1ced8896a790435ada5325e7325b35399",
+      "bytes": 68933152
+    },
+    "loadstand-full": {
+      "sha256": "e0bc42145d7d2a3ad8f2ff892f38b69a4f36b35a5d59085142c912754f03372e",
+      "bytes": 30917397
+    },
+    "loadstand-linuxhelper": {
+      "sha256": "4a1bd9c2cefa7b44449399c225d745d0825495a0285cf5b0293046d4c10d2ce3",
+      "bytes": 10832482
+    },
+    "loadstand-sdkedge": {
+      "sha256": "d6b8da29107111e4120ba4fef69eaab12f9af18e403eb2eb022a5c4bf0c0e1cb",
+      "bytes": 33520035
+    }
+  },
+  "source_groups_original_Go_API": {
+    "measured": {
+      "files": 640,
+      "manifest_bytes_equal": true,
+      "sha256": "ae4710dc781e1e921f4c8e43a4c947a502eba8c69446ed532eba0276af1c4341",
+      "stamp": "ae4710dc781e1e92",
+      "verify_tree": "PASS"
+    },
+    "stand": {
+      "files": 708,
+      "manifest_bytes_equal": true,
+      "sha256": "78d671b120e64887b7a7a7c827d3c114a4d03c0fa1f4aee861fbd3fa7ce3185e",
+      "stamp": "78d671b120e64887",
+      "verify_tree": "PASS"
+    }
+  },
+  "fresh_original_Go_API": {
+    "groups": {
+      "measured": {
+        "files": 640,
+        "manifest_bytes_equal": true,
+        "sha256": "ae4710dc781e1e921f4c8e43a4c947a502eba8c69446ed532eba0276af1c4341",
+        "stamp": "ae4710dc781e1e92",
+        "verify_tree": "PASS"
+      },
+      "stand": {
+        "files": 708,
+        "manifest_bytes_equal": true,
+        "sha256": "78d671b120e64887b7a7a7c827d3c114a4d03c0fa1f4aee861fbd3fa7ce3185e",
+        "stamp": "78d671b120e64887",
+        "verify_tree": "PASS"
+      }
+    },
+    "service_or_ELF_execution": false,
+    "status": "ORIGINAL_GO_SOURCE_API_MATCH"
+  },
+  "QA_artifact_manifest_sha256": "29950a43880d803751a6e5fd15b79e4eac785bcce9d08e8935b90d0a1388fb0f",
+  "source_before_sha256": "29950a43880d803751a6e5fd15b79e4eac785bcce9d08e8935b90d0a1388fb0f",
+  "source_after_sha256": "29950a43880d803751a6e5fd15b79e4eac785bcce9d08e8935b90d0a1388fb0f",
+  "commands": [
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath \"/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618\") (literal \"/dev/null\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/source\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/source-api-module\"))",
+        "/usr/local/go/bin/go",
+        "list",
+        "-mod=readonly",
+        "-trimpath",
+        "-buildvcs=false",
+        "-deps",
+        "-json",
+        "-test",
+        "./internal/core/node"
+      ],
+      "closure": "CONFIRMED_ABSENT",
+      "pgid": 97167,
+      "pid": 97167,
+      "returncode": 0
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath \"/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618\") (literal \"/dev/null\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/source\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/source-api-module\"))",
+        "/usr/local/go/bin/go",
+        "list",
+        "-mod=readonly",
+        "-trimpath",
+        "-buildvcs=false",
+        "-deps",
+        "-json",
+        "-test",
+        "./internal/core/node"
+      ],
+      "closure": "CONFIRMED_ABSENT",
+      "pgid": 96276,
+      "pid": 96276,
+      "returncode": 0
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath \"/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618\") (literal \"/dev/null\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/source\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/source-api-module\"))",
+        "/usr/local/go/bin/go",
+        "test",
+        "-c",
+        "-p=1",
+        "-mod=readonly",
+        "-trimpath",
+        "-buildvcs=false",
+        "-o",
+        "/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/node.test",
+        "./internal/core/node"
+      ],
+      "closure": "CONFIRMED_ABSENT",
+      "pgid": 96280,
+      "pid": 96280,
+      "returncode": 0
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath \"/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618\") (literal \"/dev/null\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/source\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/source-api-module\"))",
+        "/usr/local/go/bin/go",
+        "version",
+        "-m",
+        "/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/node.test"
+      ],
+      "closure": "CONFIRMED_ABSENT",
+      "pgid": 97166,
+      "pid": 97166,
+      "returncode": 0
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath \"/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618\") (literal \"/dev/null\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/source\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/source-api-module\"))",
+        "/usr/local/go/bin/go",
+        "list",
+        "-mod=readonly",
+        "-trimpath",
+        "-buildvcs=false",
+        "-deps",
+        "-json",
+        "./internal/testutil/loadstand/fullnode"
+      ],
+      "closure": "CONFIRMED_ABSENT",
+      "pgid": 97187,
+      "pid": 97187,
+      "returncode": 0
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath \"/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618\") (literal \"/dev/null\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/source\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/source-api-module\"))",
+        "/usr/local/go/bin/go",
+        "list",
+        "-mod=readonly",
+        "-trimpath",
+        "-buildvcs=false",
+        "-deps",
+        "-json",
+        "./internal/testutil/loadstand/fullnode"
+      ],
+      "closure": "CONFIRMED_ABSENT",
+      "pgid": 97171,
+      "pid": 97171,
+      "returncode": 0
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath \"/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618\") (literal \"/dev/null\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/source\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/source-api-module\"))",
+        "/usr/local/go/bin/go",
+        "build",
+        "-p=1",
+        "-mod=readonly",
+        "-trimpath",
+        "-buildvcs=false",
+        "-o",
+        "/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/loadstand-full",
+        "./internal/testutil/loadstand/fullnode"
+      ],
+      "closure": "CONFIRMED_ABSENT",
+      "pgid": 97175,
+      "pid": 97175,
+      "returncode": 0
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath \"/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618\") (literal \"/dev/null\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/source\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/source-api-module\"))",
+        "/usr/local/go/bin/go",
+        "version",
+        "-m",
+        "/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/loadstand-full"
+      ],
+      "closure": "CONFIRMED_ABSENT",
+      "pgid": 97186,
+      "pid": 97186,
+      "returncode": 0
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath \"/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618\") (literal \"/dev/null\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/source\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/source-api-module\"))",
+        "/usr/local/go/bin/go",
+        "list",
+        "-mod=readonly",
+        "-trimpath",
+        "-buildvcs=false",
+        "-deps",
+        "-json",
+        "./internal/testutil/loadstand/linuxhelper"
+      ],
+      "closure": "CONFIRMED_ABSENT",
+      "pgid": 97202,
+      "pid": 97202,
+      "returncode": 0
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath \"/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618\") (literal \"/dev/null\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/source\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/source-api-module\"))",
+        "/usr/local/go/bin/go",
+        "list",
+        "-mod=readonly",
+        "-trimpath",
+        "-buildvcs=false",
+        "-deps",
+        "-json",
+        "./internal/testutil/loadstand/linuxhelper"
+      ],
+      "closure": "CONFIRMED_ABSENT",
+      "pgid": 97191,
+      "pid": 97191,
+      "returncode": 0
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath \"/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618\") (literal \"/dev/null\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/source\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/source-api-module\"))",
+        "/usr/local/go/bin/go",
+        "build",
+        "-p=1",
+        "-mod=readonly",
+        "-trimpath",
+        "-buildvcs=false",
+        "-o",
+        "/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/loadstand-linuxhelper",
+        "./internal/testutil/loadstand/linuxhelper"
+      ],
+      "closure": "CONFIRMED_ABSENT",
+      "pgid": 97195,
+      "pid": 97195,
+      "returncode": 0
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath \"/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618\") (literal \"/dev/null\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/source\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/source-api-module\"))",
+        "/usr/local/go/bin/go",
+        "version",
+        "-m",
+        "/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/loadstand-linuxhelper"
+      ],
+      "closure": "CONFIRMED_ABSENT",
+      "pgid": 97201,
+      "pid": 97201,
+      "returncode": 0
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath \"/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618\") (literal \"/dev/null\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/source\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/source-api-module\"))",
+        "/usr/local/go/bin/go",
+        "run",
+        "-mod=readonly",
+        "-buildvcs=false",
+        "-p=1",
+        "./cmd/source-api-readback",
+        "--source-tree",
+        "/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/source",
+        "--manifests",
+        "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-private-elf-build-v1"
+      ],
+      "closure": "CONFIRMED_ABSENT",
+      "pgid": 96090,
+      "pid": 96090,
+      "returncode": 0
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath \"/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618\") (literal \"/dev/null\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/source\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/source-api-module\"))",
+        "/usr/local/go/bin/go",
+        "list",
+        "-mod=readonly",
+        "-trimpath",
+        "-buildvcs=false",
+        "-deps",
+        "-json",
+        "./internal/testutil/loadstand/sdkedge"
+      ],
+      "closure": "CONFIRMED_ABSENT",
+      "pgid": 97218,
+      "pid": 97218,
+      "returncode": 0
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath \"/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618\") (literal \"/dev/null\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/source\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/source-api-module\"))",
+        "/usr/local/go/bin/go",
+        "list",
+        "-mod=readonly",
+        "-trimpath",
+        "-buildvcs=false",
+        "-deps",
+        "-json",
+        "./internal/testutil/loadstand/sdkedge"
+      ],
+      "closure": "CONFIRMED_ABSENT",
+      "pgid": 97206,
+      "pid": 97206,
+      "returncode": 0
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath \"/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618\") (literal \"/dev/null\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/source\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/source-api-module\"))",
+        "/usr/local/go/bin/go",
+        "build",
+        "-p=1",
+        "-mod=readonly",
+        "-trimpath",
+        "-buildvcs=false",
+        "-o",
+        "/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/loadstand-sdkedge",
+        "./internal/testutil/loadstand/sdkedge"
+      ],
+      "closure": "CONFIRMED_ABSENT",
+      "pgid": 97210,
+      "pid": 97210,
+      "returncode": 0
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath \"/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618\") (literal \"/dev/null\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/source\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/source-api-module\"))",
+        "/usr/local/go/bin/go",
+        "version",
+        "-m",
+        "/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/loadstand-sdkedge"
+      ],
+      "closure": "CONFIRMED_ABSENT",
+      "pgid": 97217,
+      "pid": 97217,
+      "returncode": 0
+    }
+  ]
+}

@@ -1,0 +1,162 @@
+{
+  "role": "REVIEWER",
+  "status": "ACCEPTED_VM_STOPPED_ONLY",
+  "work": "/private/tmp/corsa-d1-o1a-native-2c75180d2872646aa2f7201b240cb175",
+  "attempt_id": "2c75180d2872646aa2f7201b240cb175",
+  "handoff_sha256": "bd4922835e6e626106a1c743ac68765d783a0f084dc8b741181191470e0355d2",
+  "RAW": {
+    "console": {
+      "eof": true,
+      "received": 6924471,
+      "retained": 6924471,
+      "sha256": "25894c5b9f6f96abeb2f21ff21eb530843086bc75ffe379c75892386b13b5658"
+    },
+    "native": {
+      "eof": true,
+      "received": 994,
+      "retained": 994,
+      "sha256": "256217a8bffec29922ff6422d4e8571c0264014e354850b3640f6c7604ee57ee"
+    },
+    "stderr": {
+      "eof": true,
+      "received": 0,
+      "retained": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  },
+  "native_events": [
+    {
+      "attempt_id": "2c75180d2872646aa2f7201b240cb175",
+      "config_sha256": "c9d0f742f64e87dd1bee32f3b24ed1b05904c7fbaa0e14c1b036d6bc76397c19",
+      "elapsed_ns": 569217000,
+      "event": "ready",
+      "profile": "d1-o1a-native-v1",
+      "seq": 1,
+      "workload": "reconnect"
+    },
+    {
+      "attempt_id": "2c75180d2872646aa2f7201b240cb175",
+      "config_sha256": "c9d0f742f64e87dd1bee32f3b24ed1b05904c7fbaa0e14c1b036d6bc76397c19",
+      "elapsed_ns": 684555000,
+      "event": "start_ok",
+      "profile": "d1-o1a-native-v1",
+      "seq": 2,
+      "workload": "reconnect"
+    },
+    {
+      "attempt_id": "2c75180d2872646aa2f7201b240cb175",
+      "config_sha256": "c9d0f742f64e87dd1bee32f3b24ed1b05904c7fbaa0e14c1b036d6bc76397c19",
+      "elapsed_ns": 32125723000,
+      "event": "guest_stopped",
+      "guest_error": null,
+      "profile": "d1-o1a-native-v1",
+      "seq": 3,
+      "workload": "reconnect"
+    },
+    {
+      "attempt_id": "2c75180d2872646aa2f7201b240cb175",
+      "config_sha256": "c9d0f742f64e87dd1bee32f3b24ed1b05904c7fbaa0e14c1b036d6bc76397c19",
+      "elapsed_ns": 32125790000,
+      "event": "stop_complete",
+      "final_state": "stopped",
+      "profile": "d1-o1a-native-v1",
+      "seq": 4,
+      "workload": "reconnect"
+    }
+  ],
+  "worker_exit": 0,
+  "worker_reaped_ns": 32152498000,
+  "guest": {
+    "config_sha256": "c9d0f742f64e87dd1bee32f3b24ed1b05904c7fbaa0e14c1b036d6bc76397c19",
+    "profile_sha256": "f84856cfa6f3c3d39f4f5d69487c5d968106aeea77b16f8a3d7bf864266e7369",
+    "source_commit": "4fcc2f7245095fc43d2225f0f0065f4ce3b26113",
+    "input_files": 1366,
+    "inputs_verified": true,
+    "initial_lo_checked": true,
+    "state": "FAIL",
+    "stage": "functional-or-export-failure",
+    "attempt_id": "2c75180d2872646aa2f7201b240cb175",
+    "workload": "reconnect",
+    "test": {
+      "pid": 65,
+      "exit": 1,
+      "reaped": true,
+      "all_children_reaped": true,
+      "term_sent": false,
+      "kill_sent": false,
+      "log_complete": true,
+      "log_overflow": false,
+      "normal": true
+    },
+    "export": {
+      "pid": 118,
+      "exit": 0,
+      "reaped": true,
+      "all_children_reaped": true,
+      "term_sent": false,
+      "kill_sent": false,
+      "log_complete": true,
+      "log_overflow": false,
+      "normal": true
+    },
+    "export_started": true,
+    "all_children_reaped": true,
+    "guest_elapsed_ns": 30984741681,
+    "poweroff_attempt": true
+  },
+  "functional_result": "GoFAIL30.62s; original console stage observer_full_send_finish_sender_false",
+  "leaf_provenance": "Exact first typed stage in original Go failure console; capsule .failed header carries generic failed outcome and zero body, not an independently serialized leaf.",
+  "capsule_files": 1351,
+  "source_files_exact_compiled": 1348,
+  "canonical_manifests_exact": 2,
+  "capsule_inventory_sha256": "5f371dc7b8164382929605cebaf7f131a0b57a5ea65ed51847af859ac9469250",
+  "failed_record": {
+    "path": "loadstand-functional-lifecycle-headless-sdk-0cdd18a536e16e4f.attempt-d5697fffa75b7ab7.failed",
+    "bytes": 2906,
+    "sha256": "854cf047c683e16e30fa7225cf5c464e0c1530064f9aef5f8c2465529c053f18",
+    "checksum_verified": true,
+    "body_bytes": 0,
+    "outcome": "failed"
+  },
+  "original_PIDs_absent": [
+    98693,
+    98694
+  ],
+  "original_PGIDs_absent": [
+    98693,
+    98694
+  ],
+  "input_originals_and_copies_exact": {
+    "initrd": "c969c44aec024099b9bb4f27c9a8be478b41078733d6d7ea8acc6f06da29812d",
+    "kernel": "9ffeb24f4131ec4c5177b83c4a74ed8af699553c00a6b0d7f0d0ff4e98970c73",
+    "launcher": "7b75f39616b5a77a2127510ecc1c65184f77f0b10e5fc16f3f80abc24449713c"
+  },
+  "exact_own_lock_binding": {
+    "directory_stamp": [
+      16777232,
+      285902971,
+      501,
+      0,
+      16832,
+      96,
+      1795183374721782203,
+      1795183374721782203
+    ],
+    "owner_sha256": "527e5978e7774ffc99be9262dcb89836b43495f3778909c40cd378fdabc5f6c2",
+    "owner_stamp": [
+      16777232,
+      285902972,
+      501,
+      0,
+      33152,
+      165,
+      1795183374722675789,
+      1795183374722675789
+    ]
+  },
+  "conditional_ack": "Root may release only this exact owned lock via unchanged three-role ACK after fresh PID/PGID and custody checks; no lock mutation by reviewer.",
+  "physical_XPC_resources": "UNKNOWN",
+  "metric_PASS": false,
+  "historical97a9_and_old30_480_inner_cause": "UNKNOWN_NOT_PROVEN_SAME",
+  "zero_offer_interpretation": "Actual new private source excludes pure zero-supplied refusal from this leaf; label still does not identify inner sender cause or exact frame/I/O disposition."
+}

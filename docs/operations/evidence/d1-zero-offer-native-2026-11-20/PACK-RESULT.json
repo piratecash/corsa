@@ -1,0 +1,43 @@
+{
+  "ELF_or_VM_executed": false,
+  "attempt_id": "a79ac1f8f1e544a1881267ef19562c12",
+  "error": null,
+  "lock_retained": false,
+  "outputs": {
+    "reconnect": {
+      "archive": "/private/tmp/corsa-d1-o1a-initrd-data-assembly-a79ac1f8f1e544a1881267ef19562c12/reconnect.cpio.gz",
+      "archive_bytes": 85694575,
+      "archive_sha256": "c969c44aec024099b9bb4f27c9a8be478b41078733d6d7ea8acc6f06da29812d",
+      "attempt_id": "2c75180d2872646aa2f7201b240cb175",
+      "config_sha256": "c9d0f742f64e87dd1bee32f3b24ed1b05904c7fbaa0e14c1b036d6bc76397c19",
+      "receipt": "/private/tmp/corsa-d1-o1a-initrd-data-assembly-a79ac1f8f1e544a1881267ef19562c12/reconnect.assembly.json",
+      "receipt_sha256": "35526d9c9b9bff27aea06f34f8c394cc10517495f07aba32fa1f24722ddb5e4e"
+    }
+  },
+  "raw_bytes": 580,
+  "status": "OBSERVER_FIRST_FAILURE_INITRD_BYTE_VERIFIED",
+  "steps": [
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1)(allow default)(deny network*)",
+        "/Applications/Xcode.app/Contents/Developer/usr/bin/python3",
+        "-B",
+        "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-initrd-v1/pack_job.py",
+        "--child",
+        "/private/tmp/corsa-d1-o1a-initrd-data-assembly-a79ac1f8f1e544a1881267ef19562c12"
+      ],
+      "exit": 0,
+      "owned_group_absent": true,
+      "phase": "assemble-data",
+      "pid": 98531,
+      "pipe_threads_finished": true,
+      "reason": null,
+      "stderr": "/private/tmp/corsa-d1-o1a-initrd-data-assembly-a79ac1f8f1e544a1881267ef19562c12/01-assemble-data.stderr",
+      "stdout": "/private/tmp/corsa-d1-o1a-initrd-data-assembly-a79ac1f8f1e544a1881267ef19562c12/01-assemble-data.stdout"
+    }
+  ],
+  "unknown": false,
+  "work": "/private/tmp/corsa-d1-o1a-initrd-data-assembly-a79ac1f8f1e544a1881267ef19562c12"
+}

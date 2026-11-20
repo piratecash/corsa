@@ -1,0 +1,36 @@
+{
+  "role": "ROOT",
+  "status": "ACCEPTED_VM_STOPPED_ONLY",
+  "work": "/private/tmp/corsa-d1-o1a-native-2c75180d2872646aa2f7201b240cb175",
+  "guest_state": "FAIL",
+  "guest_stage": "functional-or-export-failure",
+  "original_Go_exit": 1,
+  "functional_result": "PENDING_CAPSULE_REVIEW",
+  "historical480s_inner_cause": "UNKNOWN",
+  "native_events": 4,
+  "native_stop_ns": 32125790000,
+  "original_pids_absent": [
+    98693,
+    98694
+  ],
+  "original_groups_absent": [
+    98693,
+    98694
+  ],
+  "RAW": {
+    "console": {
+      "bytes": 6924471,
+      "sha256": "25894c5b9f6f96abeb2f21ff21eb530843086bc75ffe379c75892386b13b5658"
+    },
+    "native": {
+      "bytes": 994,
+      "sha256": "256217a8bffec29922ff6422d4e8571c0264014e354850b3640f6c7604ee57ee"
+    },
+    "stderr": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  },
+  "physical_XPC_resources": "UNKNOWN",
+  "metric_admission": false
+}

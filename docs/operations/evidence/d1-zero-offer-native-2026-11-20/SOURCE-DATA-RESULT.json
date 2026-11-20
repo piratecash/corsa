@@ -1,0 +1,36 @@
+{
+  "applications_executed": false,
+  "attempt_id": "bc6c4bc531dd43ffaf054a6419b37a6e",
+  "data": {
+    "result": "/private/tmp/corsa-o1a-zero-offer-inputs-58d83a83fb1047ee80b323ca5b4a958f/RESULT.json",
+    "scope": "DISPOSABLE_OBSERVER_FIRST_FAILURE_DIAGNOSTIC",
+    "source_archive_sha256": "23b2818a3677a596683b0ebd819663f639b5e5e84abca10f35d96c6c44c976e7"
+  },
+  "error": null,
+  "lock_retained": false,
+  "raw_bytes": 349,
+  "status": "DISPOSABLE_OBSERVER_SOURCE_DATA_PREPARED",
+  "steps": [
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1)(allow default)(deny network*)",
+        "/usr/bin/python3",
+        "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-input-rebind-v1/prepare.py",
+        "--execute",
+        "cbef7897e5d9bf54f4710a72684e626e5e13191d5175d64ce8c0c5d02e87dae8"
+      ],
+      "exit": 0,
+      "owned_group_absent": true,
+      "phase": "prepare",
+      "pid": 97469,
+      "pipe_threads_finished": true,
+      "reason": null,
+      "stderr": "/private/tmp/corsa-d1-o1a-zero-offer-source-data-bc6c4bc531dd43ffaf054a6419b37a6e/01-prepare.stderr",
+      "stdout": "/private/tmp/corsa-d1-o1a-zero-offer-source-data-bc6c4bc531dd43ffaf054a6419b37a6e/01-prepare.stdout"
+    }
+  ],
+  "unknown": false,
+  "work": "/private/tmp/corsa-d1-o1a-zero-offer-source-data-bc6c4bc531dd43ffaf054a6419b37a6e"
+}

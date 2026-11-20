@@ -1,0 +1,1855 @@
+{
+  "RAW/binding/01-prepare.json": {
+    "bytes": 836,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-runtime-data-f5853c3f826249efaf09e6bd209f7a9d/01-prepare.json",
+    "sha256": "7cf2ab558fe93b722664317d41cb3485aa6d66437a4f3d4528ddac95642bbd55"
+  },
+  "RAW/binding/01-prepare.stderr": {
+    "bytes": 0,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-runtime-data-f5853c3f826249efaf09e6bd209f7a9d/01-prepare.stderr",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "RAW/binding/01-prepare.stdout": {
+    "bytes": 351,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-runtime-data-f5853c3f826249efaf09e6bd209f7a9d/01-prepare.stdout",
+    "sha256": "882267f26b7cb43170624f80d30add50bfaace8d1ff2ca3ccdfaeb9831789e1c"
+  },
+  "RAW/binding/RESULT.json": {
+    "bytes": 1655,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-runtime-data-f5853c3f826249efaf09e6bd209f7a9d/result.json",
+    "sha256": "e0dd21437c45bc6c7956d7556d3003ae1eebeb49a3819597e5cd5006aafb8a41"
+  },
+  "RAW/capexec-build/01-image.json": {
+    "bytes": 503,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-capexec-40bb2671bf2747c7857498a17708597c/01-image.json",
+    "sha256": "82809d978bc830988474537dadfdec83f66af35483b4d381b2e702b0b411fac1"
+  },
+  "RAW/capexec-build/01-image.stderr": {
+    "bytes": 0,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-capexec-40bb2671bf2747c7857498a17708597c/01-image.stderr",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "RAW/capexec-build/01-image.stdout": {
+    "bytes": 2081,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-capexec-40bb2671bf2747c7857498a17708597c/01-image.stdout",
+    "sha256": "195a2963b675dfa41c64c66794644bed954f8028f05a5036282d26c6fe28b43b"
+  },
+  "RAW/capexec-build/02-create.json": {
+    "bytes": 1601,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-capexec-40bb2671bf2747c7857498a17708597c/02-create.json",
+    "sha256": "6cc627abd5b28e37e8dd380d3341247ad8e5effca513c7c26124ab013f1ebd56"
+  },
+  "RAW/capexec-build/02-create.stderr": {
+    "bytes": 0,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-capexec-40bb2671bf2747c7857498a17708597c/02-create.stderr",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "RAW/capexec-build/02-create.stdout": {
+    "bytes": 65,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-capexec-40bb2671bf2747c7857498a17708597c/02-create.stdout",
+    "sha256": "6a423de60dc198e002ecdf6db215c87a2acb6c3714da95716804a62ddaa36446"
+  },
+  "RAW/capexec-build/03-owned-inspect.json": {
+    "bytes": 524,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-capexec-40bb2671bf2747c7857498a17708597c/03-owned-inspect.json",
+    "sha256": "aa551bce344bc65445087315cb237ade22bd598853bdd86cdd7930c96cf126ef"
+  },
+  "RAW/capexec-build/03-owned-inspect.stderr": {
+    "bytes": 0,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-capexec-40bb2671bf2747c7857498a17708597c/03-owned-inspect.stderr",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "RAW/capexec-build/03-owned-inspect.stdout": {
+    "bytes": 8144,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-capexec-40bb2671bf2747c7857498a17708597c/03-owned-inspect.stdout",
+    "sha256": "b7dfb100ae3838e8af297129eb6e7869932d239055de8b12477087dae4b61c3a"
+  },
+  "RAW/capexec-build/04-compile.json": {
+    "bytes": 503,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-capexec-40bb2671bf2747c7857498a17708597c/04-compile.json",
+    "sha256": "41bf8e8b6de31c8016fe7e3ecca2eb00e46d251c3769c079752b3702fe84312f"
+  },
+  "RAW/capexec-build/04-compile.stderr": {
+    "bytes": 0,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-capexec-40bb2671bf2747c7857498a17708597c/04-compile.stderr",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "RAW/capexec-build/04-compile.stdout": {
+    "bytes": 0,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-capexec-40bb2671bf2747c7857498a17708597c/04-compile.stdout",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "RAW/capexec-build/05-owned-inspect.json": {
+    "bytes": 524,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-capexec-40bb2671bf2747c7857498a17708597c/05-owned-inspect.json",
+    "sha256": "be5dfcba3c26f1d93053da57b8ebe65283afa0c15b228e0a2e7ebfd7e6666a7e"
+  },
+  "RAW/capexec-build/05-owned-inspect.stderr": {
+    "bytes": 0,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-capexec-40bb2671bf2747c7857498a17708597c/05-owned-inspect.stderr",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "RAW/capexec-build/05-owned-inspect.stdout": {
+    "bytes": 8526,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-capexec-40bb2671bf2747c7857498a17708597c/05-owned-inspect.stdout",
+    "sha256": "3fbc622a7831f30b669b8ab8a40b63e8cdac701b37e90bfca9362611f61bfbf0"
+  },
+  "RAW/capexec-build/06-owned-inspect.json": {
+    "bytes": 524,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-capexec-40bb2671bf2747c7857498a17708597c/06-owned-inspect.json",
+    "sha256": "977f5e081016d1e6097c5b1b8b628e3ebf8d4913b48dd9e0556b5fbed723f624"
+  },
+  "RAW/capexec-build/06-owned-inspect.stderr": {
+    "bytes": 0,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-capexec-40bb2671bf2747c7857498a17708597c/06-owned-inspect.stderr",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "RAW/capexec-build/06-owned-inspect.stdout": {
+    "bytes": 8526,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-capexec-40bb2671bf2747c7857498a17708597c/06-owned-inspect.stdout",
+    "sha256": "3fbc622a7831f30b669b8ab8a40b63e8cdac701b37e90bfca9362611f61bfbf0"
+  },
+  "RAW/capexec-build/07-remove-owned.json": {
+    "bytes": 499,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-capexec-40bb2671bf2747c7857498a17708597c/07-remove-owned.json",
+    "sha256": "77d21c40960ac82f256e8c264183d3fdd9af39f309d87a36c3f94de22ad650bb"
+  },
+  "RAW/capexec-build/07-remove-owned.stderr": {
+    "bytes": 0,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-capexec-40bb2671bf2747c7857498a17708597c/07-remove-owned.stderr",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "RAW/capexec-build/07-remove-owned.stdout": {
+    "bytes": 65,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-capexec-40bb2671bf2747c7857498a17708597c/07-remove-owned.stdout",
+    "sha256": "6a423de60dc198e002ecdf6db215c87a2acb6c3714da95716804a62ddaa36446"
+  },
+  "RAW/capexec-build/08-owned-absent.json": {
+    "bytes": 572,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-capexec-40bb2671bf2747c7857498a17708597c/08-owned-absent.json",
+    "sha256": "73a6c5be168af78a2e589d6f0fc8c2536b6cce23f92063e0a172dc642fc346ad"
+  },
+  "RAW/capexec-build/08-owned-absent.stderr": {
+    "bytes": 0,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-capexec-40bb2671bf2747c7857498a17708597c/08-owned-absent.stderr",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "RAW/capexec-build/08-owned-absent.stdout": {
+    "bytes": 0,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-capexec-40bb2671bf2747c7857498a17708597c/08-owned-absent.stdout",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "RAW/capexec-build/POLICY-DATA.json": {
+    "bytes": 8802,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-capexec-40bb2671bf2747c7857498a17708597c/POLICY-DATA.json",
+    "sha256": "498913a8e818ccbd8fb505759f4cb3354b97d676df0a10c7038753608080c4ac"
+  },
+  "RAW/capexec-build/RESULT.json": {
+    "bytes": 17628,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-capexec-40bb2671bf2747c7857498a17708597c/result.json",
+    "sha256": "2e9b5deb67513b7902e86f9117b309af5e887e49210f1c974474510f6042429d"
+  },
+  "RAW/capexec-build/REVIEWER-DATA.json": {
+    "bytes": 3965,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-capexec-40bb2671bf2747c7857498a17708597c/REVIEWER-DATA.json",
+    "sha256": "79e27ec9a60e9ad4c034bf62cab985cdc712d991d639e86e9721a15edcabc935"
+  },
+  "RAW/capexec-build/ROOT-DATA.json": {
+    "bytes": 4692,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-capexec-40bb2671bf2747c7857498a17708597c/ROOT-DATA.json",
+    "sha256": "15be5232ca213a7de3df8a83c84a282d0a207a80644e270b0064d6c980766cec"
+  },
+  "RAW/capsule/loadstand-functional-lifecycle-headless-sdk-0cdd18a536e16e4f.attempt-d5697fffa75b7ab7.failed": {
+    "binding": {
+      "attempt_id": "2c75180d2872646aa2f7201b240cb175",
+      "profile_sha256": "f84856cfa6f3c3d39f4f5d69487c5d968106aeea77b16f8a3d7bf864266e7369",
+      "source_commit": "4fcc2f7245095fc43d2225f0f0065f4ce3b26113",
+      "workload": "reconnect"
+    },
+    "bytes": 2906,
+    "decoded_from": "RAW/native/console.raw",
+    "sha256": "854cf047c683e16e30fa7225cf5c464e0c1530064f9aef5f8c2465529c053f18"
+  },
+  "RAW/capsule/sources/measured-ae4710dc781e1e92/MANIFEST.sha256": {
+    "binding": {
+      "attempt_id": "2c75180d2872646aa2f7201b240cb175",
+      "profile_sha256": "f84856cfa6f3c3d39f4f5d69487c5d968106aeea77b16f8a3d7bf864266e7369",
+      "source_commit": "4fcc2f7245095fc43d2225f0f0065f4ce3b26113",
+      "workload": "reconnect"
+    },
+    "bytes": 68696,
+    "decoded_from": "RAW/native/console.raw",
+    "sha256": "ae4710dc781e1e921f4c8e43a4c947a502eba8c69446ed532eba0276af1c4341"
+  },
+  "RAW/capsule/sources/stand-78d671b120e64887/MANIFEST.sha256": {
+    "binding": {
+      "attempt_id": "2c75180d2872646aa2f7201b240cb175",
+      "profile_sha256": "f84856cfa6f3c3d39f4f5d69487c5d968106aeea77b16f8a3d7bf864266e7369",
+      "source_commit": "4fcc2f7245095fc43d2225f0f0065f4ce3b26113",
+      "workload": "reconnect"
+    },
+    "bytes": 82438,
+    "decoded_from": "RAW/native/console.raw",
+    "sha256": "78d671b120e64887b7a7a7c827d3c114a4d03c0fa1f4aee861fbd3fa7ce3185e"
+  },
+  "RAW/four-build/RESULT.json": {
+    "bytes": 17541,
+    "path": "/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/result.json",
+    "sha256": "7938e3a9e0aaf51b35c59400920de5041a6380aac3ebcf18a1415a1ab9c725e7"
+  },
+  "RAW/four-build/REVIEWER-DATA.json": {
+    "bytes": 11765,
+    "path": "/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/REVIEWER-DATA.json",
+    "sha256": "46443f61313a9c826f6f1a608d9b54bc2357df01303241cf7bb6e2ffc97111f1"
+  },
+  "RAW/four-build/ROOT-DATA.json": {
+    "bytes": 1418,
+    "path": "/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/ROOT-DATA.json",
+    "sha256": "6444f05596d793598607a51b46f7271cbf7aa85d442b6cce5477844ffb8351a5"
+  },
+  "RAW/four-build/raw/NODE-after.process.json": {
+    "bytes": 721,
+    "path": "/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/raw/NODE-after.process.json",
+    "sha256": "f222ed8a915823fc1cd3b94221193362ee59df183919ad990dede7136d310cf7"
+  },
+  "RAW/four-build/raw/NODE-after.stderr": {
+    "bytes": 0,
+    "path": "/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/raw/NODE-after.stderr",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "RAW/four-build/raw/NODE-after.stdout": {
+    "bytes": 1336845,
+    "path": "/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/raw/NODE-after.stdout",
+    "sha256": "ac47a0ebe587960d771ad72dd6dbc0369921e0b140e823d1642b163aa143d636"
+  },
+  "RAW/four-build/raw/NODE-before.process.json": {
+    "bytes": 721,
+    "path": "/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/raw/NODE-before.process.json",
+    "sha256": "b6d7921f8450d8ed38ad673220332ffb6d46bf68bc4b811a983f8ed8052468cb"
+  },
+  "RAW/four-build/raw/NODE-before.stderr": {
+    "bytes": 0,
+    "path": "/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/raw/NODE-before.stderr",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "RAW/four-build/raw/NODE-before.stdout": {
+    "bytes": 1362691,
+    "path": "/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/raw/NODE-before.stdout",
+    "sha256": "f03d5f8cabf71f654332e636f53b8f284918aedd58f5cd249e0964ee02247f52"
+  },
+  "RAW/four-build/raw/NODE-compile.process.json": {
+    "bytes": 812,
+    "path": "/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/raw/NODE-compile.process.json",
+    "sha256": "46437b20288467da4e8947d98c511ca495fa4abbde72b19bb01bf174c4246d2b"
+  },
+  "RAW/four-build/raw/NODE-compile.stderr": {
+    "bytes": 0,
+    "path": "/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/raw/NODE-compile.stderr",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "RAW/four-build/raw/NODE-compile.stdout": {
+    "bytes": 0,
+    "path": "/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/raw/NODE-compile.stdout",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "RAW/four-build/raw/NODE-metadata.process.json": {
+    "bytes": 728,
+    "path": "/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/raw/NODE-metadata.process.json",
+    "sha256": "825561813686296f6465962b44116157de1b6b8678b50610df9ab681700aeb0c"
+  },
+  "RAW/four-build/raw/NODE-metadata.stderr": {
+    "bytes": 0,
+    "path": "/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/raw/NODE-metadata.stderr",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "RAW/four-build/raw/NODE-metadata.stdout": {
+    "bytes": 2589,
+    "path": "/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/raw/NODE-metadata.stdout",
+    "sha256": "367bbd8bc50b996267f31fb09a6fa972be94182e5d73399c0715e6fe25523555"
+  },
+  "RAW/four-build/raw/fullnode-after.process.json": {
+    "bytes": 730,
+    "path": "/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/raw/fullnode-after.process.json",
+    "sha256": "61d2d20f2c5445f10595f0eacf99a3903776356e15647077ec7432987be328ce"
+  },
+  "RAW/four-build/raw/fullnode-after.stderr": {
+    "bytes": 0,
+    "path": "/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/raw/fullnode-after.stderr",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "RAW/four-build/raw/fullnode-after.stdout": {
+    "bytes": 1127825,
+    "path": "/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/raw/fullnode-after.stdout",
+    "sha256": "33b0c7ff05304fbe866797f3e087edb3d851aa9977f4007b7fd76048ca6af791"
+  },
+  "RAW/four-build/raw/fullnode-before.process.json": {
+    "bytes": 730,
+    "path": "/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/raw/fullnode-before.process.json",
+    "sha256": "e385477067018cf5bcd0366de1b3d815deb208e957a77afecca4cf16e9411220"
+  },
+  "RAW/four-build/raw/fullnode-before.stderr": {
+    "bytes": 0,
+    "path": "/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/raw/fullnode-before.stderr",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "RAW/four-build/raw/fullnode-before.stdout": {
+    "bytes": 1128253,
+    "path": "/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/raw/fullnode-before.stdout",
+    "sha256": "7ddc175fd55f91eb9bf47308d7be00e66e1a0ac053be34c41604ef404517dc7b"
+  },
+  "RAW/four-build/raw/fullnode-compile.process.json": {
+    "bytes": 830,
+    "path": "/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/raw/fullnode-compile.process.json",
+    "sha256": "ca6d0932bd3b0f3427799a88580ee4a0724cd33ebef08ec9e1916b0b18d66729"
+  },
+  "RAW/four-build/raw/fullnode-compile.stderr": {
+    "bytes": 0,
+    "path": "/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/raw/fullnode-compile.stderr",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "RAW/four-build/raw/fullnode-compile.stdout": {
+    "bytes": 0,
+    "path": "/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/raw/fullnode-compile.stdout",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "RAW/four-build/raw/fullnode-metadata.process.json": {
+    "bytes": 733,
+    "path": "/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/raw/fullnode-metadata.process.json",
+    "sha256": "f7ccb8352e89a174df8dde17431f84115cf08f2f2b6325887b3ae3a2080582b1"
+  },
+  "RAW/four-build/raw/fullnode-metadata.stderr": {
+    "bytes": 0,
+    "path": "/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/raw/fullnode-metadata.stderr",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "RAW/four-build/raw/fullnode-metadata.stdout": {
+    "bytes": 2354,
+    "path": "/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/raw/fullnode-metadata.stdout",
+    "sha256": "bc8563882704b216a32ea871683be0980c180a11a0b222aec462ac8931c93edb"
+  },
+  "RAW/four-build/raw/linuxhelper-after.process.json": {
+    "bytes": 733,
+    "path": "/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/raw/linuxhelper-after.process.json",
+    "sha256": "1e33782f8ea27072fe7430b50e369f067819dbc4b7bbd425351ba41ef50928d5"
+  },
+  "RAW/four-build/raw/linuxhelper-after.stderr": {
+    "bytes": 0,
+    "path": "/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/raw/linuxhelper-after.stderr",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "RAW/four-build/raw/linuxhelper-after.stdout": {
+    "bytes": 549615,
+    "path": "/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/raw/linuxhelper-after.stdout",
+    "sha256": "52ac7c466b0a824a4f81e03b070ba70c4f93ac31e1f9c7f4ad0e78d5ae647342"
+  },
+  "RAW/four-build/raw/linuxhelper-before.process.json": {
+    "bytes": 733,
+    "path": "/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/raw/linuxhelper-before.process.json",
+    "sha256": "56e61d1e79589c20cb09ff2fc94c4ed78f4222a8b3a97f90c71e8e59f72a46b1"
+  },
+  "RAW/four-build/raw/linuxhelper-before.stderr": {
+    "bytes": 0,
+    "path": "/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/raw/linuxhelper-before.stderr",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "RAW/four-build/raw/linuxhelper-before.stdout": {
+    "bytes": 549590,
+    "path": "/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/raw/linuxhelper-before.stdout",
+    "sha256": "bd1e6e9d2eafd26ef99b9254d9b7663415c192221b45ef9ad39c6e3876323b53"
+  },
+  "RAW/four-build/raw/linuxhelper-compile.process.json": {
+    "bytes": 840,
+    "path": "/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/raw/linuxhelper-compile.process.json",
+    "sha256": "c52acb366700f2814af3e6afef64409f5544e40d73a860764b46df1d7f0e24b0"
+  },
+  "RAW/four-build/raw/linuxhelper-compile.stderr": {
+    "bytes": 0,
+    "path": "/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/raw/linuxhelper-compile.stderr",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "RAW/four-build/raw/linuxhelper-compile.stdout": {
+    "bytes": 0,
+    "path": "/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/raw/linuxhelper-compile.stdout",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "RAW/four-build/raw/linuxhelper-metadata.process.json": {
+    "bytes": 740,
+    "path": "/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/raw/linuxhelper-metadata.process.json",
+    "sha256": "f5f27ace4db1828e1f7a05d962bf323c4a4fa055758e3103ab90ebbcfeb027da"
+  },
+  "RAW/four-build/raw/linuxhelper-metadata.stderr": {
+    "bytes": 0,
+    "path": "/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/raw/linuxhelper-metadata.stderr",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "RAW/four-build/raw/linuxhelper-metadata.stdout": {
+    "bytes": 797,
+    "path": "/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/raw/linuxhelper-metadata.stdout",
+    "sha256": "bc899d36b04edd5df6455684ef9665b8a8f27012eed9c2e4d46a7cf6cfd991b5"
+  },
+  "RAW/four-build/raw/original-source-api.process.json": {
+    "bytes": 936,
+    "path": "/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/raw/original-source-api.process.json",
+    "sha256": "b4bca47f53600b3267dd1f19824d53362c47ca37248fafdb26d84be7dc5f7cbe"
+  },
+  "RAW/four-build/raw/original-source-api.stderr": {
+    "bytes": 0,
+    "path": "/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/raw/original-source-api.stderr",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "RAW/four-build/raw/original-source-api.stdout": {
+    "bytes": 437,
+    "path": "/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/raw/original-source-api.stdout",
+    "sha256": "cec183abf2e4d50c4f5c8cf3bd797e14a9a066accea9643cc30218d4c1aade32"
+  },
+  "RAW/four-build/raw/sdkedge-after.process.json": {
+    "bytes": 729,
+    "path": "/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/raw/sdkedge-after.process.json",
+    "sha256": "e25f0f73a52603c1d8705e8cb7565e1ef217aadc3ea5bb83656513e62181540a"
+  },
+  "RAW/four-build/raw/sdkedge-after.stderr": {
+    "bytes": 0,
+    "path": "/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/raw/sdkedge-after.stderr",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "RAW/four-build/raw/sdkedge-after.stdout": {
+    "bytes": 1135075,
+    "path": "/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/raw/sdkedge-after.stdout",
+    "sha256": "ec97bb2db05daecb076f8c3395269a1fa432ac61542837c4e18ab7aa59750bac"
+  },
+  "RAW/four-build/raw/sdkedge-before.process.json": {
+    "bytes": 729,
+    "path": "/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/raw/sdkedge-before.process.json",
+    "sha256": "face896d6baae5914c34aecd95e24ba0154ac1d7691561d8a5aaf8a3321187f9"
+  },
+  "RAW/four-build/raw/sdkedge-before.stderr": {
+    "bytes": 0,
+    "path": "/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/raw/sdkedge-before.stderr",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "RAW/four-build/raw/sdkedge-before.stdout": {
+    "bytes": 1135135,
+    "path": "/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/raw/sdkedge-before.stdout",
+    "sha256": "c60caf99f03a90d6065dc633b5c75409936c9303e1b85f13d67f11b388ac249b"
+  },
+  "RAW/four-build/raw/sdkedge-compile.process.json": {
+    "bytes": 832,
+    "path": "/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/raw/sdkedge-compile.process.json",
+    "sha256": "b86d5d3f95cd1b0c06c94d8534363f5fb22f53b3655303fa7546bc6427f9a4ad"
+  },
+  "RAW/four-build/raw/sdkedge-compile.stderr": {
+    "bytes": 0,
+    "path": "/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/raw/sdkedge-compile.stderr",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "RAW/four-build/raw/sdkedge-compile.stdout": {
+    "bytes": 0,
+    "path": "/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/raw/sdkedge-compile.stdout",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "RAW/four-build/raw/sdkedge-metadata.process.json": {
+    "bytes": 736,
+    "path": "/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/raw/sdkedge-metadata.process.json",
+    "sha256": "7656086148346aeb7217e42b300a71332230975bd9954d313bc7ea8cc411009f"
+  },
+  "RAW/four-build/raw/sdkedge-metadata.stderr": {
+    "bytes": 0,
+    "path": "/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/raw/sdkedge-metadata.stderr",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "RAW/four-build/raw/sdkedge-metadata.stdout": {
+    "bytes": 2356,
+    "path": "/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/raw/sdkedge-metadata.stdout",
+    "sha256": "502b0070117e78c0cb2e1dc990d63a00d616c4ee2db866f56c13743ddaceb37f"
+  },
+  "RAW/native/ACK.json": {
+    "bytes": 1848,
+    "path": "/private/tmp/corsa-d1-o1a-native-2c75180d2872646aa2f7201b240cb175/ACK.json",
+    "sha256": "18a912927ce9ffb1a2ecbb284d2156a21c4b1a5865ac03aa4117dc1e3c69f43a"
+  },
+  "RAW/native/REVIEWER-CAPSULE-INVENTORY.json": {
+    "bytes": 257780,
+    "path": "/private/tmp/corsa-d1-o1a-native-2c75180d2872646aa2f7201b240cb175/REVIEWER-CAPSULE-INVENTORY.json",
+    "sha256": "5f371dc7b8164382929605cebaf7f131a0b57a5ea65ed51847af859ac9469250"
+  },
+  "RAW/native/REVIEWER-DATA.json": {
+    "bytes": 5417,
+    "path": "/private/tmp/corsa-d1-o1a-native-2c75180d2872646aa2f7201b240cb175/REVIEWER-DATA.json",
+    "sha256": "caec35f100b8f36db38e1a0d164e138d8bd075ab5a50722c0f753d56fe3f01b8"
+  },
+  "RAW/native/REVIEWS.json": {
+    "bytes": 1011,
+    "path": "/private/tmp/corsa-d1-o1a-native-2c75180d2872646aa2f7201b240cb175/REVIEWS.json",
+    "sha256": "507d3ebf0b5686ff4d7a9a82b993d1e3b47ec50e006a3f333289952b6d082fcb"
+  },
+  "RAW/native/ROOT-CAPSULE-DATA.json": {
+    "bytes": 671,
+    "path": "/private/tmp/corsa-d1-o1a-native-2c75180d2872646aa2f7201b240cb175/ROOT-CAPSULE-DATA.json",
+    "sha256": "2b21e4a263a1195f73531b391a53b923cfdd4a09fb0e6b47709b387360fd468b"
+  },
+  "RAW/native/ROOT-DATA.json": {
+    "bytes": 960,
+    "path": "/private/tmp/corsa-d1-o1a-native-2c75180d2872646aa2f7201b240cb175/ROOT-DATA.json",
+    "sha256": "c76ef80d36d595fb645abee2fc6546e378c7db4ba9adebe3325637b4668534fc"
+  },
+  "RAW/native/console.raw": {
+    "bytes": 6924471,
+    "path": "/private/tmp/corsa-d1-o1a-native-2c75180d2872646aa2f7201b240cb175/console.raw",
+    "sha256": "25894c5b9f6f96abeb2f21ff21eb530843086bc75ffe379c75892386b13b5658"
+  },
+  "RAW/native/controller-result.json": {
+    "bytes": 923,
+    "path": "/private/tmp/corsa-d1-o1a-native-2c75180d2872646aa2f7201b240cb175/controller-result.json",
+    "sha256": "10e61d3eb017b4f3de956bbaa568462e68e504104b412ea7680d77fd01342a21"
+  },
+  "RAW/native/expected.json": {
+    "bytes": 614,
+    "path": "/private/tmp/corsa-d1-o1a-native-2c75180d2872646aa2f7201b240cb175/expected.json",
+    "sha256": "5e5c9db723b9681c165e6284bc7ec510b5a67c8d8d7136c44ca888f1850c2c76"
+  },
+  "RAW/native/lock-binding.json": {
+    "bytes": 368,
+    "path": "/private/tmp/corsa-d1-o1a-native-2c75180d2872646aa2f7201b240cb175/lock-binding.json",
+    "sha256": "8d19afd92ddaed2e32e8fc02bb688ee86dce976ae799f385e8a99e244111c534"
+  },
+  "RAW/native/native.jsonl": {
+    "bytes": 994,
+    "path": "/private/tmp/corsa-d1-o1a-native-2c75180d2872646aa2f7201b240cb175/native.jsonl",
+    "sha256": "256217a8bffec29922ff6422d4e8571c0264014e354850b3640f6c7604ee57ee"
+  },
+  "RAW/native/receipt.json": {
+    "bytes": 1412,
+    "path": "/private/tmp/corsa-d1-o1a-native-2c75180d2872646aa2f7201b240cb175/receipt.json",
+    "sha256": "92e3c75fe300e9d5d7d88f2af3e385157991afc429474a4dddd2def1aa10f0f0"
+  },
+  "RAW/native/stderr.raw": {
+    "bytes": 0,
+    "path": "/private/tmp/corsa-d1-o1a-native-2c75180d2872646aa2f7201b240cb175/stderr.raw",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "RAW/native/worker-start.json": {
+    "bytes": 221,
+    "path": "/private/tmp/corsa-d1-o1a-native-2c75180d2872646aa2f7201b240cb175/worker-start.json",
+    "sha256": "502e5bdf1281db88edcfaaa11ca85d20f61e8775fea34d1322c8258462302f6d"
+  },
+  "RAW/pack/01-assemble-data.json": {
+    "bytes": 782,
+    "path": "/private/tmp/corsa-d1-o1a-initrd-data-assembly-a79ac1f8f1e544a1881267ef19562c12/01-assemble-data.json",
+    "sha256": "daff20c9f53cfb6c1b2b0def8b966e87613015ad5dbed6dd3dd37f046d43e9e7"
+  },
+  "RAW/pack/01-assemble-data.stderr": {
+    "bytes": 0,
+    "path": "/private/tmp/corsa-d1-o1a-initrd-data-assembly-a79ac1f8f1e544a1881267ef19562c12/01-assemble-data.stderr",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "RAW/pack/01-assemble-data.stdout": {
+    "bytes": 580,
+    "path": "/private/tmp/corsa-d1-o1a-initrd-data-assembly-a79ac1f8f1e544a1881267ef19562c12/01-assemble-data.stdout",
+    "sha256": "e751bfa0dec055c2a32d4490d0b3bd8788e7c430932d974fe8ca4d156e9d9efa"
+  },
+  "RAW/pack/RESULT.json": {
+    "bytes": 1851,
+    "path": "/private/tmp/corsa-d1-o1a-initrd-data-assembly-a79ac1f8f1e544a1881267ef19562c12/result.json",
+    "sha256": "194d35af52eabad273a0d5a67a162b532463f0a61bebeee0513a5c074a3e918f"
+  },
+  "RAW/pack/REVIEWER-PACK-DATA.json": {
+    "bytes": 1974,
+    "path": "/private/tmp/corsa-d1-o1a-initrd-data-assembly-a79ac1f8f1e544a1881267ef19562c12/REVIEWER-PACK-DATA.json",
+    "sha256": "b10c5c0037c31a91653e8cba29b4f1f3d5f2cc5327baee50a12a05e5eced0526"
+  },
+  "RAW/pack/REVIEWER-RUNTIME-DATA.json": {
+    "bytes": 1511,
+    "path": "/private/tmp/corsa-d1-o1a-initrd-data-assembly-a79ac1f8f1e544a1881267ef19562c12/REVIEWER-RUNTIME-DATA.json",
+    "sha256": "48cca1ca6b0d30b448bfcd7a9f0fc3402ad0b9df5cbcf409b790800324c2ea24"
+  },
+  "RAW/pack/ROOT-PACK-DATA.json": {
+    "bytes": 563,
+    "path": "/private/tmp/corsa-d1-o1a-initrd-data-assembly-a79ac1f8f1e544a1881267ef19562c12/ROOT-PACK-DATA.json",
+    "sha256": "dd30e4c8c1a6c800f15393e543741bd9f76dc6cdb66d8074ec63882b4a14c703"
+  },
+  "RAW/pid1-build/01-go-version.json": {
+    "bytes": 621,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-pid1-b36d6869ef424c418ed85bcb3bb26ffa/01-go-version.json",
+    "sha256": "bdd5d631f0a1b0f6689deb960369845cb80e2c0b13d6b93b1aca4336037239a6"
+  },
+  "RAW/pid1-build/01-go-version.stderr": {
+    "bytes": 0,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-pid1-b36d6869ef424c418ed85bcb3bb26ffa/01-go-version.stderr",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "RAW/pid1-build/01-go-version.stdout": {
+    "bytes": 33,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-pid1-b36d6869ef424c418ed85bcb3bb26ffa/01-go-version.stdout",
+    "sha256": "c6f1c8d54aedc3afa72560d934397ad6c33b28f1b4d3546ec53176439b2397d5"
+  },
+  "RAW/pid1-build/02-pure-go-qa.json": {
+    "bytes": 746,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-pid1-b36d6869ef424c418ed85bcb3bb26ffa/02-pure-go-qa.json",
+    "sha256": "873af011079fd75f3aa85983bde44570640d1b6b271d19699c2f7bb0c0871c2a"
+  },
+  "RAW/pid1-build/02-pure-go-qa.stderr": {
+    "bytes": 0,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-pid1-b36d6869ef424c418ed85bcb3bb26ffa/02-pure-go-qa.stderr",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "RAW/pid1-build/02-pure-go-qa.stdout": {
+    "bytes": 12987,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-pid1-b36d6869ef424c418ed85bcb3bb26ffa/02-pure-go-qa.stdout",
+    "sha256": "d3b74dc502cc345ae4dabf59f5490c628834cfa475da4dcc33a819e4777ae59c"
+  },
+  "RAW/pid1-build/03-o1a-init-build.json": {
+    "bytes": 863,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-pid1-b36d6869ef424c418ed85bcb3bb26ffa/03-o1a-init-build.json",
+    "sha256": "16f2119a2b7ee6bcb1d16f3255b43918396b59315c8ef68e2ab5ec461f811a35"
+  },
+  "RAW/pid1-build/03-o1a-init-build.stderr": {
+    "bytes": 0,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-pid1-b36d6869ef424c418ed85bcb3bb26ffa/03-o1a-init-build.stderr",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "RAW/pid1-build/03-o1a-init-build.stdout": {
+    "bytes": 0,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-pid1-b36d6869ef424c418ed85bcb3bb26ffa/03-o1a-init-build.stdout",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "RAW/pid1-build/04-o1a-init-metadata.json": {
+    "bytes": 753,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-pid1-b36d6869ef424c418ed85bcb3bb26ffa/04-o1a-init-metadata.json",
+    "sha256": "88fbd2ad5855f25b7576520c9858d2113bf1fb7db940bc8ab85caa6a9baa6459"
+  },
+  "RAW/pid1-build/04-o1a-init-metadata.stderr": {
+    "bytes": 0,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-pid1-b36d6869ef424c418ed85bcb3bb26ffa/04-o1a-init-metadata.stderr",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "RAW/pid1-build/04-o1a-init-metadata.stdout": {
+    "bytes": 336,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-pid1-b36d6869ef424c418ed85bcb3bb26ffa/04-o1a-init-metadata.stdout",
+    "sha256": "600811dc893205d4166dc61e683b5f1b7429798d75cffea283b3343e31d9df14"
+  },
+  "RAW/pid1-build/RESULT.json": {
+    "bytes": 4499,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-pid1-b36d6869ef424c418ed85bcb3bb26ffa/result.json",
+    "sha256": "6c238aabe75a74ecafd263d9daa56ed5d532cf1e56b6efb9fdd57495d7bb37f9"
+  },
+  "RAW/pid1-build/REVIEWER-DATA.json": {
+    "bytes": 2306,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-pid1-b36d6869ef424c418ed85bcb3bb26ffa/REVIEWER-DATA.json",
+    "sha256": "0a9d0666c8371e5058888de88bf3e681e9b9d6b36573de8a9d0e4c75b1c672da"
+  },
+  "RAW/pid1-build/ROOT-DATA.json": {
+    "bytes": 2698,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-pid1-b36d6869ef424c418ed85bcb3bb26ffa/ROOT-DATA.json",
+    "sha256": "0ceee0e1edfafe2ecd4fed492547aacdba0e0d6d0cbbc13f2961a32fa0153df7"
+  },
+  "RAW/qa/01-version-start.json": {
+    "bytes": 360,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-private-goqa-9a21e3e8c3f84d278810991efd0497e4/01-version-start.json",
+    "sha256": "18063074fd49449ae5fae97a932f052a2c95f79efd9758b8f99ce2b36e55ea04"
+  },
+  "RAW/qa/01-version.json": {
+    "bytes": 703,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-private-goqa-9a21e3e8c3f84d278810991efd0497e4/01-version.json",
+    "sha256": "5895e6d20c06702d6d811bdb7b24f3f76e49b4fa5cd674a63ab7efe15a840a91"
+  },
+  "RAW/qa/01-version.stderr": {
+    "bytes": 0,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-private-goqa-9a21e3e8c3f84d278810991efd0497e4/01-version.stderr",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "RAW/qa/01-version.stdout": {
+    "bytes": 33,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-private-goqa-9a21e3e8c3f84d278810991efd0497e4/01-version.stdout",
+    "sha256": "c6f1c8d54aedc3afa72560d934397ad6c33b28f1b4d3546ec53176439b2397d5"
+  },
+  "RAW/qa/02-module-verify-start.json": {
+    "bytes": 372,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-private-goqa-9a21e3e8c3f84d278810991efd0497e4/02-module-verify-start.json",
+    "sha256": "d273d554fab3a350e397acca7701699a52dc17a2381ff6a64a928deb0d6d7581"
+  },
+  "RAW/qa/02-module-verify.json": {
+    "bytes": 731,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-private-goqa-9a21e3e8c3f84d278810991efd0497e4/02-module-verify.json",
+    "sha256": "14d9eea7ff6e71134ee9db3025331a24472c670b73c9fa7a410a3e3eabad5ce5"
+  },
+  "RAW/qa/02-module-verify.stderr": {
+    "bytes": 0,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-private-goqa-9a21e3e8c3f84d278810991efd0497e4/02-module-verify.stderr",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "RAW/qa/02-module-verify.stdout": {
+    "bytes": 21,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-private-goqa-9a21e3e8c3f84d278810991efd0497e4/02-module-verify.stdout",
+    "sha256": "b4537ed75f533f993f371954de47e42a793b8e5b0587577de7e27fb3e50696bd"
+  },
+  "RAW/qa/03-node-observer-start.json": {
+    "bytes": 1707,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-private-goqa-9a21e3e8c3f84d278810991efd0497e4/03-node-observer-start.json",
+    "sha256": "8309887c22b19d88f0b3bd81e365033f26422c06632668a685cfb105759b6777"
+  },
+  "RAW/qa/03-node-observer.json": {
+    "bytes": 2098,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-private-goqa-9a21e3e8c3f84d278810991efd0497e4/03-node-observer.json",
+    "sha256": "168275d33c61216df5d160d708177eee19d02a2cdd5f00221ea580b5d93feef8"
+  },
+  "RAW/qa/03-node-observer.stderr": {
+    "bytes": 0,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-private-goqa-9a21e3e8c3f84d278810991efd0497e4/03-node-observer.stderr",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "RAW/qa/03-node-observer.stdout": {
+    "bytes": 187031,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-private-goqa-9a21e3e8c3f84d278810991efd0497e4/03-node-observer.stdout",
+    "sha256": "fdf3cd0b3ec49cf3b66848fc68b47eca10f5967ae9d232f789d3e46a64b6825b"
+  },
+  "RAW/qa/04-census-parent-and-original-start.json": {
+    "bytes": 1619,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-private-goqa-9a21e3e8c3f84d278810991efd0497e4/04-census-parent-and-original-start.json",
+    "sha256": "922a1d2c208f065f82b224561c355d52532aff090669de77babe7d8ce1356407"
+  },
+  "RAW/qa/04-census-parent-and-original.json": {
+    "bytes": 2036,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-private-goqa-9a21e3e8c3f84d278810991efd0497e4/04-census-parent-and-original.json",
+    "sha256": "d3f669c0bf9f055eeefbb2ef3b4f48b074cfa473d499e44a3af61fe127fc50ef"
+  },
+  "RAW/qa/04-census-parent-and-original.stderr": {
+    "bytes": 0,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-private-goqa-9a21e3e8c3f84d278810991efd0497e4/04-census-parent-and-original.stderr",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "RAW/qa/04-census-parent-and-original.stdout": {
+    "bytes": 141071,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-private-goqa-9a21e3e8c3f84d278810991efd0497e4/04-census-parent-and-original.stdout",
+    "sha256": "06041035eb58dd7854bec783b34552ebf1196dbbe34ffa7ce36b4cd75a0fa1f2"
+  },
+  "RAW/qa/05-census-server-start.json": {
+    "bytes": 607,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-private-goqa-9a21e3e8c3f84d278810991efd0497e4/05-census-server-start.json",
+    "sha256": "7961573e01faedf10b6e7d85641f48e782b98a4386a75f97e52d3ae630d595c8"
+  },
+  "RAW/qa/05-census-server.json": {
+    "bytes": 998,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-private-goqa-9a21e3e8c3f84d278810991efd0497e4/05-census-server.json",
+    "sha256": "89bbd0c0af1fa49cc21424f000c92a768090fbfb18c8048d8293cc2e8384aa41"
+  },
+  "RAW/qa/05-census-server.stderr": {
+    "bytes": 0,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-private-goqa-9a21e3e8c3f84d278810991efd0497e4/05-census-server.stderr",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "RAW/qa/05-census-server.stdout": {
+    "bytes": 33321,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-private-goqa-9a21e3e8c3f84d278810991efd0497e4/05-census-server.stdout",
+    "sha256": "4812d66e3eb6776c6ebeb1a41efcc7a77d03ba9047aacc247f68a062ff9f9422"
+  },
+  "RAW/qa/RESULT.json": {
+    "bytes": 11133,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-private-goqa-9a21e3e8c3f84d278810991efd0497e4/result.json",
+    "sha256": "f72d7db8eee7b1ca0e6b4f3b7439a58930283c20083131ea6eb012bdf1608ec2"
+  },
+  "RAW/qa/REVIEWER-DATA.json": {
+    "bytes": 2570,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-private-goqa-9a21e3e8c3f84d278810991efd0497e4/REVIEWER-DATA.json",
+    "sha256": "c138bb82cda42e080ee15529de80bb91494500af8baf8251ef53a496d38d38ae"
+  },
+  "RAW/source-data/01-prepare.json": {
+    "bytes": 708,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-source-data-bc6c4bc531dd43ffaf054a6419b37a6e/01-prepare.json",
+    "sha256": "85cb947a99b6975965f6626d231a39adaa22b1dda6de1a0529e4b1f161aaae5c"
+  },
+  "RAW/source-data/01-prepare.stderr": {
+    "bytes": 0,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-source-data-bc6c4bc531dd43ffaf054a6419b37a6e/01-prepare.stderr",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "RAW/source-data/01-prepare.stdout": {
+    "bytes": 349,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-source-data-bc6c4bc531dd43ffaf054a6419b37a6e/01-prepare.stdout",
+    "sha256": "0eaf5db1bb4029c27d0f1f182ef7c9f17bba280eeb47158ecb7738264d367ff1"
+  },
+  "RAW/source-data/RESULT.json": {
+    "bytes": 1402,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-source-data-bc6c4bc531dd43ffaf054a6419b37a6e/result.json",
+    "sha256": "cbbce24d6ddd3a989b4c50db37ac4e0f289f5ce31e89a6f06d1f1f62cb93d3c4"
+  },
+  "SOURCE/accepted-lineage/common.py": {
+    "bytes": 6223,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-helper-build-v1/common.py",
+    "sha256": "5667d2772248c892b31bb4eb321f4ad72507f9f9556a34b562f6708fd496507d"
+  },
+  "SOURCE/accepted-lineage/journal_capsule.py": {
+    "bytes": 14158,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-guest-preparation-v1/journal_capsule.py",
+    "sha256": "bd81ab5fd7ce88db408fbb9f7d3ea8bd59e89c5486081989154dd047499eadf4"
+  },
+  "SOURCE/accepted-lineage/package_initrd.py": {
+    "bytes": 6340,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-full512-devnull-fix-v1/package_initrd.py",
+    "sha256": "a606b85fefbd8feaf2bd4c984c78d139905f4c2daed5fc5ea57d44345fae995e"
+  },
+  "SOURCE/accepted-lineage/prepare_sources.py": {
+    "bytes": 6756,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-18/d1-o1a-guest-source-inputs/prepare_sources.py",
+    "sha256": "ef03517ca302983e39235a56c09baaca3354e7e0bf8791bc9361f71cef43e9ee"
+  },
+  "SOURCE/actual-helper-source/capexec-source/PURE-QA.stderr": {
+    "bytes": 727,
+    "path": "/private/tmp/corsa-o1a-zero-offer-inputs-58d83a83fb1047ee80b323ca5b4a958f/capexec-source/PURE-QA.stderr",
+    "sha256": "8d7f5b0a2161da618f9f68749ffe9864537f130fa0166a4f89b978c332b79391"
+  },
+  "SOURCE/actual-helper-source/capexec-source/PURE-QA.stdout": {
+    "bytes": 0,
+    "path": "/private/tmp/corsa-o1a-zero-offer-inputs-58d83a83fb1047ee80b323ca5b4a958f/capexec-source/PURE-QA.stdout",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "SOURCE/actual-helper-source/capexec-source/README.ru.md": {
+    "bytes": 2412,
+    "path": "/private/tmp/corsa-o1a-zero-offer-inputs-58d83a83fb1047ee80b323ca5b4a958f/capexec-source/README.ru.md",
+    "sha256": "f3e0506eb55420bbd4da6a330d582a79bd5ce5516457e329711a0998557ca9f8"
+  },
+  "SOURCE/actual-helper-source/capexec-source/capexec.c": {
+    "bytes": 8841,
+    "path": "/private/tmp/corsa-o1a-zero-offer-inputs-58d83a83fb1047ee80b323ca5b4a958f/capexec-source/capexec.c",
+    "sha256": "6c14d128c61898fc99daa921a5114154b4224a0e66fa09979d021dec9909a524"
+  },
+  "SOURCE/actual-helper-source/capexec-source/capexec.diff": {
+    "bytes": 8515,
+    "path": "/private/tmp/corsa-o1a-zero-offer-inputs-58d83a83fb1047ee80b323ca5b4a958f/capexec-source/capexec.diff",
+    "sha256": "58f4f83bc9fcd77d7f5db6d19ec97f25118f7d171526b673ca0ae58c4b43d802"
+  },
+  "SOURCE/actual-helper-source/capexec-source/frozen_inputs.h": {
+    "bytes": 2449,
+    "path": "/private/tmp/corsa-o1a-zero-offer-inputs-58d83a83fb1047ee80b323ca5b4a958f/capexec-source/frozen_inputs.h",
+    "sha256": "75580c442b8844dc575b63a1443e870d5284961f377df3815f0c219bf7ad8ac0"
+  },
+  "SOURCE/actual-helper-source/capexec-source/guest_policy.h": {
+    "bytes": 5496,
+    "path": "/private/tmp/corsa-o1a-zero-offer-inputs-58d83a83fb1047ee80b323ca5b4a958f/capexec-source/guest_policy.h",
+    "sha256": "699c0a05f15cdf93c620326a2bc1112b53932f06dc08bd6a343076b22416162c"
+  },
+  "SOURCE/actual-helper-source/capexec-source/policy_data.py": {
+    "bytes": 4331,
+    "path": "/private/tmp/corsa-o1a-zero-offer-inputs-58d83a83fb1047ee80b323ca5b4a958f/capexec-source/policy_data.py",
+    "sha256": "a1183d16fabbd6e1b224fcbd73cb0f0124a1218b3d5bc679ac7e3fb52d75249a"
+  },
+  "SOURCE/actual-helper-source/capexec-source/policy_dump.c": {
+    "bytes": 778,
+    "path": "/private/tmp/corsa-o1a-zero-offer-inputs-58d83a83fb1047ee80b323ca5b4a958f/capexec-source/policy_dump.c",
+    "sha256": "b2e3f24032cfc8a0c1616e0de26df1a82ef2fba7a2549eda082f55692308c276"
+  },
+  "SOURCE/actual-helper-source/capexec-source/test_policy_data.py": {
+    "bytes": 1895,
+    "path": "/private/tmp/corsa-o1a-zero-offer-inputs-58d83a83fb1047ee80b323ca5b4a958f/capexec-source/test_policy_data.py",
+    "sha256": "5da863dc5f79b37896e4d8d30f5d2e2f56dd6750f0926040af244df70d92dead"
+  },
+  "SOURCE/actual-helper-source/capexec-source/test_source_binding.py": {
+    "bytes": 1613,
+    "path": "/private/tmp/corsa-o1a-zero-offer-inputs-58d83a83fb1047ee80b323ca5b4a958f/capexec-source/test_source_binding.py",
+    "sha256": "d74412254169a1fdf6f31aba4eccf77749439bf7687d15bb3d472c337201b4d7"
+  },
+  "SOURCE/actual-helper-source/pid1-source/BOOT-CONFIG.TEMPLATE.json": {
+    "bytes": 249314,
+    "path": "/private/tmp/corsa-o1a-zero-offer-inputs-58d83a83fb1047ee80b323ca5b4a958f/pid1-source/BOOT-CONFIG.TEMPLATE.json",
+    "sha256": "66e9ed74257741fcd0e7b60764aec1c74088816e0b2ab579be8103ce7e1f1922"
+  },
+  "SOURCE/actual-helper-source/pid1-source/PYTHON-QA.stderr": {
+    "bytes": 0,
+    "path": "/private/tmp/corsa-o1a-zero-offer-inputs-58d83a83fb1047ee80b323ca5b4a958f/pid1-source/PYTHON-QA.stderr",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "SOURCE/actual-helper-source/pid1-source/PYTHON-QA.stdout": {
+    "bytes": 168,
+    "path": "/private/tmp/corsa-o1a-zero-offer-inputs-58d83a83fb1047ee80b323ca5b4a958f/pid1-source/PYTHON-QA.stdout",
+    "sha256": "3ca180875c896a27f414b3a461e528ddffd7b1aaa093914d6a45343c323fae9d"
+  },
+  "SOURCE/actual-helper-source/pid1-source/README.ru.md": {
+    "bytes": 12445,
+    "path": "/private/tmp/corsa-o1a-zero-offer-inputs-58d83a83fb1047ee80b323ca5b4a958f/pid1-source/README.ru.md",
+    "sha256": "031c3d3820391d6f77a88de6d9bd8ba6133d388363155c503ee4f0ab8d20bb07"
+  },
+  "SOURCE/actual-helper-source/pid1-source/RESULT.json": {
+    "bytes": 1140,
+    "path": "/private/tmp/corsa-o1a-zero-offer-inputs-58d83a83fb1047ee80b323ca5b4a958f/pid1-source/RESULT.json",
+    "sha256": "403c70390e405b2837e986fc80cbfe9e5ce5a58397b09fe41cfe1709d3165315"
+  },
+  "SOURCE/actual-helper-source/pid1-source/capexec.c": {
+    "bytes": 6188,
+    "path": "/private/tmp/corsa-o1a-zero-offer-inputs-58d83a83fb1047ee80b323ca5b4a958f/pid1-source/capexec.c",
+    "sha256": "478be8f4c191c964c328dd49f0c3bbad70962f223d63435f35f5e384f3e97cc4"
+  },
+  "SOURCE/actual-helper-source/pid1-source/capsule/capsule.go": {
+    "bytes": 8086,
+    "path": "/private/tmp/corsa-o1a-zero-offer-inputs-58d83a83fb1047ee80b323ca5b4a958f/pid1-source/capsule/capsule.go",
+    "sha256": "66497e304b0fbee5dbcc2239f93b21d16fe972cac9c55a2c0c0af61c766c44de"
+  },
+  "SOURCE/actual-helper-source/pid1-source/capsule/capsule_test.go": {
+    "bytes": 4664,
+    "path": "/private/tmp/corsa-o1a-zero-offer-inputs-58d83a83fb1047ee80b323ca5b4a958f/pid1-source/capsule/capsule_test.go",
+    "sha256": "311ad41aa0f4f2d27d371e9405662e66bdb8e49d67132afd6330517750aa6771"
+  },
+  "SOURCE/actual-helper-source/pid1-source/capsule/inventory_linux.go": {
+    "bytes": 2926,
+    "path": "/private/tmp/corsa-o1a-zero-offer-inputs-58d83a83fb1047ee80b323ca5b4a958f/pid1-source/capsule/inventory_linux.go",
+    "sha256": "5ad7ba78def4c29e003d3274f8ff70f02affc278c214588ba7ab45422685b5d4"
+  },
+  "SOURCE/actual-helper-source/pid1-source/capsule/inventory_linux_test.go": {
+    "bytes": 745,
+    "path": "/private/tmp/corsa-o1a-zero-offer-inputs-58d83a83fb1047ee80b323ca5b4a958f/pid1-source/capsule/inventory_linux_test.go",
+    "sha256": "e06f09f8bb316500904bd5eb457522dad01f66c526442024aac8d75e341fe907"
+  },
+  "SOURCE/actual-helper-source/pid1-source/check_cross_language.py": {
+    "bytes": 1403,
+    "path": "/private/tmp/corsa-o1a-zero-offer-inputs-58d83a83fb1047ee80b323ca5b4a958f/pid1-source/check_cross_language.py",
+    "sha256": "406385901d8f0dda7e8d34fe80528b86318254ca78a478516b626d6fcf183038"
+  },
+  "SOURCE/actual-helper-source/pid1-source/cmd/journal-export/main.go": {
+    "bytes": 1624,
+    "path": "/private/tmp/corsa-o1a-zero-offer-inputs-58d83a83fb1047ee80b323ca5b4a958f/pid1-source/cmd/journal-export/main.go",
+    "sha256": "322d33c2cb546746ceac98ea9f8adf4eb98dd3c1a10a60e3d33967cb9fe46a2a"
+  },
+  "SOURCE/actual-helper-source/pid1-source/cmd/o1a-init/children_linux.go": {
+    "bytes": 3395,
+    "path": "/private/tmp/corsa-o1a-zero-offer-inputs-58d83a83fb1047ee80b323ca5b4a958f/pid1-source/cmd/o1a-init/children_linux.go",
+    "sha256": "c45dc25a05d4179a0c0e84293b4429908ef0cd7a1dbda5d27f2f75ae5e9dafc3"
+  },
+  "SOURCE/actual-helper-source/pid1-source/cmd/o1a-init/config.go": {
+    "bytes": 5651,
+    "path": "/private/tmp/corsa-o1a-zero-offer-inputs-58d83a83fb1047ee80b323ca5b4a958f/pid1-source/cmd/o1a-init/config.go",
+    "sha256": "c09321156dc0cdaa2d053e759ad08f64cb23932c28c82909974d0bb30d5f2f92"
+  },
+  "SOURCE/actual-helper-source/pid1-source/cmd/o1a-init/config_test.go": {
+    "bytes": 3078,
+    "path": "/private/tmp/corsa-o1a-zero-offer-inputs-58d83a83fb1047ee80b323ca5b4a958f/pid1-source/cmd/o1a-init/config_test.go",
+    "sha256": "bca311a19b2a8e98a2daa2b2661bd0cd738f3333fe27e79ebfe45094aa68c2da"
+  },
+  "SOURCE/actual-helper-source/pid1-source/cmd/o1a-init/device_modes.go": {
+    "bytes": 817,
+    "path": "/private/tmp/corsa-o1a-zero-offer-inputs-58d83a83fb1047ee80b323ca5b4a958f/pid1-source/cmd/o1a-init/device_modes.go",
+    "sha256": "7b67fd01ab3945d4efcdd552851bcbd493c4dcacd2e860cf7f0b3f562eb1beed"
+  },
+  "SOURCE/actual-helper-source/pid1-source/cmd/o1a-init/device_modes_test.go": {
+    "bytes": 1521,
+    "path": "/private/tmp/corsa-o1a-zero-offer-inputs-58d83a83fb1047ee80b323ca5b4a958f/pid1-source/cmd/o1a-init/device_modes_test.go",
+    "sha256": "307283b365723c349be3baf644a989ba4f69529700ffd85835cf58786a8bec63"
+  },
+  "SOURCE/actual-helper-source/pid1-source/cmd/o1a-init/frozen.go": {
+    "bytes": 2783,
+    "path": "/private/tmp/corsa-o1a-zero-offer-inputs-58d83a83fb1047ee80b323ca5b4a958f/pid1-source/cmd/o1a-init/frozen.go",
+    "sha256": "fe9293310de3161ef8c3892f31c5afa718ece15aacb9cb2d6be13505816acc6b"
+  },
+  "SOURCE/actual-helper-source/pid1-source/cmd/o1a-init/main_linux.go": {
+    "bytes": 12634,
+    "path": "/private/tmp/corsa-o1a-zero-offer-inputs-58d83a83fb1047ee80b323ca5b4a958f/pid1-source/cmd/o1a-init/main_linux.go",
+    "sha256": "11e8b2a1e27b520ee20f8d33449205694aebacb9b983980b2dd914d9adfef708"
+  },
+  "SOURCE/actual-helper-source/pid1-source/cmd/o1a-init/root_mode.go": {
+    "bytes": 526,
+    "path": "/private/tmp/corsa-o1a-zero-offer-inputs-58d83a83fb1047ee80b323ca5b4a958f/pid1-source/cmd/o1a-init/root_mode.go",
+    "sha256": "a401a8c7f345f3f60c5fb6266dd29d933c8a4d9e3c6db376ad7f43d0aadaf22b"
+  },
+  "SOURCE/actual-helper-source/pid1-source/cmd/o1a-init/root_mode_test.go": {
+    "bytes": 1617,
+    "path": "/private/tmp/corsa-o1a-zero-offer-inputs-58d83a83fb1047ee80b323ca5b4a958f/pid1-source/cmd/o1a-init/root_mode_test.go",
+    "sha256": "6c2783000727d74f6a4f961d4ca5afba8ab34670e4023a3a613a344da66ed9fe"
+  },
+  "SOURCE/actual-helper-source/pid1-source/fixtures/canonical.json": {
+    "bytes": 67,
+    "path": "/private/tmp/corsa-o1a-zero-offer-inputs-58d83a83fb1047ee80b323ca5b4a958f/pid1-source/fixtures/canonical.json",
+    "sha256": "a1401a277bff2e7ee9c54c914c05615e8a62ddf2497560c1cf56453125660b97"
+  },
+  "SOURCE/actual-helper-source/pid1-source/fixtures/journal/record.json": {
+    "bytes": 45,
+    "path": "/private/tmp/corsa-o1a-zero-offer-inputs-58d83a83fb1047ee80b323ca5b4a958f/pid1-source/fixtures/journal/record.json",
+    "sha256": "c8af16dfec428cf9fadef68a7bee5311797619561d32356d7846ce05a8f64b0d"
+  },
+  "SOURCE/actual-helper-source/pid1-source/fixtures/journal/sources/measured-b70de373d032b8fe/one.go": {
+    "bytes": 12,
+    "path": "/private/tmp/corsa-o1a-zero-offer-inputs-58d83a83fb1047ee80b323ca5b4a958f/pid1-source/fixtures/journal/sources/measured-b70de373d032b8fe/one.go",
+    "sha256": "185155e8c14b8352dabda728b250bb43695ea0e769986e31eca0ed72e666f451"
+  },
+  "SOURCE/actual-helper-source/pid1-source/fixtures/journal/sources/stand-921f04b57c4f869b/other.go": {
+    "bytes": 14,
+    "path": "/private/tmp/corsa-o1a-zero-offer-inputs-58d83a83fb1047ee80b323ca5b4a958f/pid1-source/fixtures/journal/sources/stand-921f04b57c4f869b/other.go",
+    "sha256": "a8dc1654ea9b95fc9bf25e0b1c8f67f64c0d1d5107df07769be5684bd8db09d4"
+  },
+  "SOURCE/actual-helper-source/pid1-source/fixtures/python.archive.gz": {
+    "bytes": 635,
+    "path": "/private/tmp/corsa-o1a-zero-offer-inputs-58d83a83fb1047ee80b323ca5b4a958f/pid1-source/fixtures/python.archive.gz",
+    "sha256": "06a185f4f7827ae80ffdbd86fdbd0d1e7ab559ae172be8fa1b43810122f325e5"
+  },
+  "SOURCE/actual-helper-source/pid1-source/fixtures/python.console": {
+    "bytes": 1636,
+    "path": "/private/tmp/corsa-o1a-zero-offer-inputs-58d83a83fb1047ee80b323ca5b4a958f/pid1-source/fixtures/python.console",
+    "sha256": "a1635cb58fa980edca5c45fd4ba821cf9df52b442ec24f3a9c35ad9db4eda15b"
+  },
+  "SOURCE/actual-helper-source/pid1-source/fixtures/vector.json": {
+    "bytes": 498,
+    "path": "/private/tmp/corsa-o1a-zero-offer-inputs-58d83a83fb1047ee80b323ca5b4a958f/pid1-source/fixtures/vector.json",
+    "sha256": "5cc6d92af380f86c9e59e4c7d4240dad3a155176b53e12c9d1e129bcecb7a7c9"
+  },
+  "SOURCE/actual-helper-source/pid1-source/frozen_inputs.h": {
+    "bytes": 2438,
+    "path": "/private/tmp/corsa-o1a-zero-offer-inputs-58d83a83fb1047ee80b323ca5b4a958f/pid1-source/frozen_inputs.h",
+    "sha256": "21b65b92d54a4bdb69ebad49efbdeaffb709bd987eda78fcd7325e020c84c90d"
+  },
+  "SOURCE/actual-helper-source/pid1-source/go.mod": {
+    "bytes": 46,
+    "path": "/private/tmp/corsa-o1a-zero-offer-inputs-58d83a83fb1047ee80b323ca5b4a958f/pid1-source/go.mod",
+    "sha256": "218fb01d0d3c71867e025deb9d39007937cb2fb21b24c4ece2170b100a2d55af"
+  },
+  "SOURCE/binding/BINDER-SOURCE.diff": {
+    "bytes": 3023,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-rebind-v1/BINDER-SOURCE.diff",
+    "sha256": "bdeacaa8835dca97da2e57b420a34e22aa91eb1d572d48eaa2b5e869c703d8a3"
+  },
+  "SOURCE/binding/FROZEN.PENDING.json": {
+    "bytes": 4694,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-rebind-v1/FROZEN.PENDING.json",
+    "sha256": "42f04253a34346fdeada52df52ff66059456bad8fc3c081152f5b9680bb17d18"
+  },
+  "SOURCE/binding/FROZEN.UNBOUND.json": {
+    "bytes": 4143,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-rebind-v1/FROZEN.UNBOUND.json",
+    "sha256": "e104e7e887c1384a93674a90a474e468fb450cb63781df7e497879a73c02087e"
+  },
+  "SOURCE/binding/FROZEN.json": {
+    "bytes": 4694,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-rebind-v1/FROZEN.json",
+    "sha256": "42f04253a34346fdeada52df52ff66059456bad8fc3c081152f5b9680bb17d18"
+  },
+  "SOURCE/binding/QA.json": {
+    "bytes": 219,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-rebind-v1/QA.json",
+    "sha256": "60c5e87b2d8b4353de134165281987a25cbe07636e101c61f5058fc198ae5d0d"
+  },
+  "SOURCE/binding/README.ru.md": {
+    "bytes": 1222,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-rebind-v1/README.ru.md",
+    "sha256": "723b07e7722d5d05b8b865279a22d15fda16fc795839e5af1e711e2316ec9a03"
+  },
+  "SOURCE/binding/REBIND-RESULT.json": {
+    "bytes": 574,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-rebind-v1/REBIND-RESULT.json",
+    "sha256": "8e13dffc884f51f6d05cec6a7020593a96e3d5c993fbbbbb26ab6cf97dc9c464"
+  },
+  "SOURCE/binding/SHA256SUMS": {
+    "bytes": 725,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-rebind-v1/SHA256SUMS",
+    "sha256": "27b9631b09c3e11da89e66ea227711b6744ece16be6ec99bd1c560d721977fcb"
+  },
+  "SOURCE/binding/SOURCE.json": {
+    "bytes": 1160,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-rebind-v1/SOURCE.json",
+    "sha256": "596d009330b89efdd88878bb50f6af115d4593a36c440f72bdc74b7877a00ec7"
+  },
+  "SOURCE/binding/prepare.py": {
+    "bytes": 12757,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-rebind-v1/prepare.py",
+    "sha256": "7e7c0fa05ef48663ba20b948c59edadd7dc03835daffb77454ff3ba4bfb69506"
+  },
+  "SOURCE/binding/test_prepare.py": {
+    "bytes": 4807,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-rebind-v1/test_prepare.py",
+    "sha256": "bf4261946fe9bc1f7ca14c1f055d20dbc7160fa834f4447b7665f6cd95b1a099"
+  },
+  "SOURCE/build-architect/REVIEW.json": {
+    "bytes": 9153,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-four-elf-architect-data-v1/REVIEW.json",
+    "sha256": "8d4cb10fed9b3f9c60b67596e3920b489024ccc186abd48363fd6e36fb3e8be0"
+  },
+  "SOURCE/build-architect/review.py": {
+    "bytes": 4161,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-four-elf-architect-data-v1/review.py",
+    "sha256": "0b248f1bf257bd9e4fbe9378092e80bf79fdef929f7d4dc2663e3d051ce2934f"
+  },
+  "SOURCE/capexec-build/CONTROLLER-DELTA.diff": {
+    "bytes": 849,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-capexec-build-v1/CONTROLLER-DELTA.diff",
+    "sha256": "6466ab7c15fbe4d802d3efd502a728c14eeda506d2c9fb6bbb3bc8837e4bb3b7"
+  },
+  "SOURCE/capexec-build/FROZEN.json": {
+    "bytes": 2886,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-capexec-build-v1/FROZEN.json",
+    "sha256": "2eb971273e366d1c549f92a8c6570ca355d29f6f4bc5a319663d651f4e9b94c9"
+  },
+  "SOURCE/capexec-build/QA.json": {
+    "bytes": 199,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-capexec-build-v1/QA.json",
+    "sha256": "a11cd33dab272fb6f6dab4dcb8ad82dea53e1f2c4cdacb2c102d3e731ca8eba3"
+  },
+  "SOURCE/capexec-build/README.ru.md": {
+    "bytes": 608,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-capexec-build-v1/README.ru.md",
+    "sha256": "e92d5b8d00fa300687a7ed064f540a20c6d3fc90146d896cf665af21dfb6a34a"
+  },
+  "SOURCE/capexec-build/SHA256SUMS": {
+    "bytes": 1776,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-capexec-build-v1/SHA256SUMS",
+    "sha256": "8d9f8ee6b58e9c7d1c74f64baa8d128e72ace6c4393e0efc628d64fd4ebc35a5"
+  },
+  "SOURCE/capexec-build/SOURCE.json": {
+    "bytes": 2845,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-capexec-build-v1/SOURCE.json",
+    "sha256": "12198a3c7332aeac868695d9c2e1c1fdf812d155a164f6d6a5a4145ce4de6e40"
+  },
+  "SOURCE/capexec-build/build.sh": {
+    "bytes": 378,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-capexec-build-v1/build.sh",
+    "sha256": "b5cbf9a9fc85bdc727e10cf2cd0c7b7b5d1e8b91e15ab6331826fcc55ab8ca1d"
+  },
+  "SOURCE/capexec-build/c_build.py": {
+    "bytes": 8623,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-capexec-build-v1/c_build.py",
+    "sha256": "95b30074c6bf37b299d66b914c641be5c8c68cb82cfded451f263af3191534f9"
+  },
+  "SOURCE/capexec-build/common.py": {
+    "bytes": 6223,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-capexec-build-v1/common.py",
+    "sha256": "5667d2772248c892b31bb4eb321f4ad72507f9f9556a34b562f6708fd496507d"
+  },
+  "SOURCE/capexec-build/test_c_preparation.py": {
+    "bytes": 4576,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-capexec-build-v1/test_c_preparation.py",
+    "sha256": "b7b15f9ebd98a294225a25a13941926df1a122fc95f300cfe290cd5c60980fa0"
+  },
+  "SOURCE/data-architect/REVIEW.json": {
+    "bytes": 1344,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-inputs-architect-data-v1/REVIEW.json",
+    "sha256": "b61cc2704ea0291f71b545418ddf825a2b0f8775db526b8c0adaa0d5fbdc2640"
+  },
+  "SOURCE/data-architect/review.py": {
+    "bytes": 5283,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-inputs-architect-data-v1/review.py",
+    "sha256": "95cf7c95247234f13df6b61b46c60c529001398209b8d682b4d9a448f526bc80"
+  },
+  "SOURCE/data-tester/REVIEW.json": {
+    "bytes": 1948,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-inputs-actual-tester-v1/REVIEW.json",
+    "sha256": "91c1796c9d9b8945eefe3d9c106be897f20f110783824aa4fd45c613a25fab5b"
+  },
+  "SOURCE/data-tester/WRAPPER-DATA.json": {
+    "bytes": 509,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-inputs-actual-tester-v1/WRAPPER-DATA.json",
+    "sha256": "52ed737b2dea2a1d3388645038d48f6b6f8a51edae46e5eaa66714820c617439"
+  },
+  "SOURCE/four-build/ARTIFACT-SOURCE-MANIFEST.json": {
+    "bytes": 288559,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-private-elf-build-v1/ARTIFACT-SOURCE-MANIFEST.json",
+    "sha256": "29950a43880d803751a6e5fd15b79e4eac785bcce9d08e8935b90d0a1388fb0f"
+  },
+  "SOURCE/four-build/GRAPH-EXPECTATIONS.json": {
+    "bytes": 361751,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-private-elf-build-v1/GRAPH-EXPECTATIONS.json",
+    "sha256": "acb2a8a1a8c580532d7445e37928b1b98c028c16d1afddb1809fb1d76f5be71c"
+  },
+  "SOURCE/four-build/PARENT-SOURCE.diff": {
+    "bytes": 8118,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-private-elf-build-v1/PARENT-SOURCE.diff",
+    "sha256": "5ee21817f8fdb9cb670e04f46627fb9af161c193deb0455b54c3a06f3cae8bf0"
+  },
+  "SOURCE/four-build/PROFILE.ru.md": {
+    "bytes": 1515,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-private-elf-build-v1/PROFILE.ru.md",
+    "sha256": "32e830e098693389eb1e12dc748cc78f7ac9a70c3820afb2a6f66417b770835f"
+  },
+  "SOURCE/four-build/PURE-QA.json": {
+    "bytes": 395,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-private-elf-build-v1/PURE-QA.json",
+    "sha256": "82c4c7fd2589c7608a2379dde82bfd9b9f190f294c2cff0aec1310565088cd3d"
+  },
+  "SOURCE/four-build/QA-BINDING.PENDING.json": {
+    "bytes": 83,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-private-elf-build-v1/QA-BINDING.PENDING.json",
+    "sha256": "412569b5c51db920e9414f52d4b456ec38c086391b8fb6cfba9d87568d11c39e"
+  },
+  "SOURCE/four-build/QA-BINDING.json": {
+    "bytes": 217,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-private-elf-build-v1/QA-BINDING.json",
+    "sha256": "f391dec5b1db8432391cfc7f9d8b7a47e76d604aaba7b9f2729ee614704acc83"
+  },
+  "SOURCE/four-build/REQUEST.PENDING.json": {
+    "bytes": 100,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-private-elf-build-v1/REQUEST.PENDING.json",
+    "sha256": "65d53fb83ff6758ba9b5f5f056f272dd51bc866cfed78a78d70bab03fba7920f"
+  },
+  "SOURCE/four-build/REQUEST.json": {
+    "bytes": 8142,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-private-elf-build-v1/REQUEST.json",
+    "sha256": "3a0e2538beba5a392d34126de5ec50376a72e9d7547df0c5cc48d75ef90702c7"
+  },
+  "SOURCE/four-build/SHA256SUMS": {
+    "bytes": 3237,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-private-elf-build-v1/SHA256SUMS",
+    "sha256": "64d3a3927d9c7c3fc7df20c4f490c492ad920d6dc7df5dc795fb4c1e21cc0fbd"
+  },
+  "SOURCE/four-build/SOURCE-PLAN.json": {
+    "bytes": 1787,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-private-elf-build-v1/SOURCE-PLAN.json",
+    "sha256": "7e2a1b3d4c6ce0951923442283293fe5e1f583de5c166c01381671eb43efb4f9"
+  },
+  "SOURCE/four-build/SOURCE.json": {
+    "bytes": 4911,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-private-elf-build-v1/SOURCE.json",
+    "sha256": "10476b664cbf00cc225e29b03789521276ff57b51de366aee6b2aab08308572d"
+  },
+  "SOURCE/four-build/build.py": {
+    "bytes": 16777,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-private-elf-build-v1/build.py",
+    "sha256": "2a2a16944749813af9525132266ac2fb79f27a200cd3c1295f0824e19fe03b3d"
+  },
+  "SOURCE/four-build/measured.expected.manifest": {
+    "bytes": 68696,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-private-elf-build-v1/measured.expected.manifest",
+    "sha256": "ae4710dc781e1e921f4c8e43a4c947a502eba8c69446ed532eba0276af1c4341"
+  },
+  "SOURCE/four-build/process.py": {
+    "bytes": 3823,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-private-elf-build-v1/process.py",
+    "sha256": "84c3334efa52ba49858e2e7d745c3d47bff8fc000db04bdd4271ff847b24fb73"
+  },
+  "SOURCE/four-build/source-after.json": {
+    "bytes": 288559,
+    "path": "/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/source-after.json",
+    "sha256": "29950a43880d803751a6e5fd15b79e4eac785bcce9d08e8935b90d0a1388fb0f"
+  },
+  "SOURCE/four-build/source-before.json": {
+    "bytes": 288559,
+    "path": "/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/source-before.json",
+    "sha256": "29950a43880d803751a6e5fd15b79e4eac785bcce9d08e8935b90d0a1388fb0f"
+  },
+  "SOURCE/four-build/stand.expected.manifest": {
+    "bytes": 82438,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-private-elf-build-v1/stand.expected.manifest",
+    "sha256": "78d671b120e64887b7a7a7c827d3c114a4d03c0fa1f4aee861fbd3fa7ce3185e"
+  },
+  "SOURCE/four-build/test_build.py": {
+    "bytes": 2590,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-private-elf-build-v1/test_build.py",
+    "sha256": "c027b786909c36eb4d487caa60b1b9b3386b85411a4f0e8a75ef449a581bcf01"
+  },
+  "SOURCE/helpers-architect/REVIEW.json": {
+    "bytes": 1946,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-helper-architect-data-v1/REVIEW.json",
+    "sha256": "8506ec42c6f2842be5f2824a2e191a5f9edd90deadd2d61d1f5a5a88abdbf0f3"
+  },
+  "SOURCE/helpers-architect/review.py": {
+    "bytes": 3086,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-helper-architect-data-v1/review.py",
+    "sha256": "a1aadd814327bc8f9e42e3a848345493a06885d1cd291e3eae13ebd32734264b"
+  },
+  "SOURCE/native-tester/REVIEW.json": {
+    "bytes": 4975,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-native-actual-tester-v1/REVIEW.json",
+    "sha256": "54bbea33b234dc1866b623e7e0a620b87380dc03c1b8ec155873bb200b0d1d40"
+  },
+  "SOURCE/original-Go-API-module/cmd/source-api-readback/main.go": {
+    "bytes": 2938,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-private-elf-build-v1/source-api-module/cmd/source-api-readback/main.go",
+    "sha256": "65057642291f8b00026c2b96d4f396ff4e8feb7079bc845b7be90b7d63b51f08"
+  },
+  "SOURCE/original-Go-API-module/go.mod": {
+    "bytes": 2026,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-private-elf-build-v1/source-api-module/go.mod",
+    "sha256": "cfa3ad676f2154d3af35cd66dbfb8d6820d4d82f94a108c2212a9def83d938c0"
+  },
+  "SOURCE/original-Go-API-module/go.sum": {
+    "bytes": 12782,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-private-elf-build-v1/source-api-module/go.sum",
+    "sha256": "0cc8b8551c559e7c8298d73f4e72d96ba3b4decac4c7481f0cc6d3c536e5c5fb"
+  },
+  "SOURCE/original-Go-API-module/internal/testutil/runjournal/clock.go": {
+    "bytes": 457,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-private-elf-build-v1/source-api-module/internal/testutil/runjournal/clock.go",
+    "sha256": "7e40fb29ad7951f8ac063f1e2f878fde721f4caf9c5d37a99889086b4b1099c1"
+  },
+  "SOURCE/original-Go-API-module/internal/testutil/runjournal/doc.go": {
+    "bytes": 5560,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-private-elf-build-v1/source-api-module/internal/testutil/runjournal/doc.go",
+    "sha256": "72b54da71700ca50b3b39bb1b91eda1ec2aa5ce96373c0a33333df9c5e0cbc40"
+  },
+  "SOURCE/original-Go-API-module/internal/testutil/runjournal/errors.go": {
+    "bytes": 5131,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-private-elf-build-v1/source-api-module/internal/testutil/runjournal/errors.go",
+    "sha256": "7dd32332af77e18375887c3446c466f5a8e24a6ce50f35d27655b56bf80d15f5"
+  },
+  "SOURCE/original-Go-API-module/internal/testutil/runjournal/journal.go": {
+    "bytes": 12055,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-private-elf-build-v1/source-api-module/internal/testutil/runjournal/journal.go",
+    "sha256": "375e7625b045f1ec68eb6c52cc3c3e1d75c3037badca68025ffff53a386ffa4a"
+  },
+  "SOURCE/original-Go-API-module/internal/testutil/runjournal/keep.go": {
+    "bytes": 9804,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-private-elf-build-v1/source-api-module/internal/testutil/runjournal/keep.go",
+    "sha256": "cb2c6debcbca2e44a50a09ed7cca672e92ba973b9f1289d707a3a933a6119741"
+  },
+  "SOURCE/original-Go-API-module/internal/testutil/runjournal/key.go": {
+    "bytes": 8876,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-private-elf-build-v1/source-api-module/internal/testutil/runjournal/key.go",
+    "sha256": "78528436458878874b6c4e5995d8d1d38c63187304b388245eff91f8cdd4beda"
+  },
+  "SOURCE/original-Go-API-module/internal/testutil/runjournal/ledger.go": {
+    "bytes": 4959,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-private-elf-build-v1/source-api-module/internal/testutil/runjournal/ledger.go",
+    "sha256": "57ab4a78e8089134339138e38340043260f217ced6b6bcc4163186f8f2b8b1fc"
+  },
+  "SOURCE/original-Go-API-module/internal/testutil/runjournal/publish.go": {
+    "bytes": 5892,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-private-elf-build-v1/source-api-module/internal/testutil/runjournal/publish.go",
+    "sha256": "143fff2cb8ea536785a4c690390862b607af50be7ac6a99cac369409c1af9e34"
+  },
+  "SOURCE/original-Go-API-module/internal/testutil/runjournal/quarantine.go": {
+    "bytes": 7699,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-private-elf-build-v1/source-api-module/internal/testutil/runjournal/quarantine.go",
+    "sha256": "2c3e80a11524a60d6ba77268eaeae92fa22b50a5147faa7f5ec7de3889f25d1e"
+  },
+  "SOURCE/original-Go-API-module/internal/testutil/runjournal/record.go": {
+    "bytes": 6823,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-private-elf-build-v1/source-api-module/internal/testutil/runjournal/record.go",
+    "sha256": "ebbfc0d67fe584da0b783302806f457ebe4f7833deadeb8bd297733fd3743011"
+  },
+  "SOURCE/original-Go-API-module/internal/testutil/runjournal/sources.go": {
+    "bytes": 13042,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-private-elf-build-v1/source-api-module/internal/testutil/runjournal/sources.go",
+    "sha256": "c081a44a5ef15f0ac0a620062161986a9238868e6d9abf9d1f5aee7e95e1cc4c"
+  },
+  "SOURCE/original-Go-API-module/internal/testutil/runjournal/sweep.go": {
+    "bytes": 8016,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-private-elf-build-v1/source-api-module/internal/testutil/runjournal/sweep.go",
+    "sha256": "4ff39e14e2a58f4c6f23327be2b6bb99a1568c1b4d3f5413af21c705ed8d2977"
+  },
+  "SOURCE/original-Go-API-module/internal/testutil/runjournal/types.go": {
+    "bytes": 8523,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-private-elf-build-v1/source-api-module/internal/testutil/runjournal/types.go",
+    "sha256": "925a92a41caef2eacdde6794c6140ddc0ca7f9947f173bcca3147896da2b0dbe"
+  },
+  "SOURCE/pack-architect/REVIEW.json": {
+    "bytes": 743,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-pack-architect-data-v1/REVIEW.json",
+    "sha256": "4333f0697d607af865f0dbc879e55685a426095fd8b72b32741bceff055136ae"
+  },
+  "SOURCE/pack-architect/review.py": {
+    "bytes": 2472,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-pack-architect-data-v1/review.py",
+    "sha256": "2bd74de474e0355f44174871b0ab9b0baf8757223a964a457133e18519d25071"
+  },
+  "SOURCE/pack-tester/REVIEW.json": {
+    "bytes": 1941,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-initrd-actual-tester-v1/REVIEW.json",
+    "sha256": "9a72cffc1b22693b134d0bbb4e4e8e5f6d8b1d8b5d747833d9a36c6b9c7cb649"
+  },
+  "SOURCE/pack/PACK-FROZEN.PENDING.json": {
+    "bytes": 1800,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-initrd-v1/PACK-FROZEN.PENDING.json",
+    "sha256": "7d98fb3033639f862af8b7c583f68a20bcbc88e416cb7ee7b03cb034ed30cc45"
+  },
+  "SOURCE/pack/PACK-FROZEN.json": {
+    "bytes": 2611,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-initrd-v1/PACK-FROZEN.json",
+    "sha256": "4364d918ed155948d5e23355fd580808c064a0b87963162c6e3b0d40a508a46e"
+  },
+  "SOURCE/pack/PACK-RESULT.json": {
+    "bytes": 1851,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-initrd-v1/PACK-RESULT.json",
+    "sha256": "c9d6c57217366a61bbce44fb9ccb3cede1458db53df975194411296d61a1e30c"
+  },
+  "SOURCE/pack/PURE-QA.json": {
+    "bytes": 233,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-initrd-v1/PURE-QA.json",
+    "sha256": "5dd65ab9c4dd991feeb46a689288c2da6f9f6e3875b93195071885c7d57e476f"
+  },
+  "SOURCE/pack/README.ru.md": {
+    "bytes": 1883,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-initrd-v1/README.ru.md",
+    "sha256": "f8211c3c1fd3fac7fbfe2ce2cf43f7649f7d1d558a7eed3fe9a6b8f9dfb6c752"
+  },
+  "SOURCE/pack/SHA256SUMS": {
+    "bytes": 920,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-initrd-v1/SHA256SUMS",
+    "sha256": "ff33b891f96b7b7da303adba452f7db25fe6da0137690b7bcfa394ecc18f9f04"
+  },
+  "SOURCE/pack/SHA256SUMS.PREPARED": {
+    "bytes": 740,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-initrd-v1/SHA256SUMS.PREPARED",
+    "sha256": "1a1abe992b2603a93c5e96a72722340770ea3201817657e4a9844bbe764ebd62"
+  },
+  "SOURCE/pack/SOURCE-DELTA.diff": {
+    "bytes": 2923,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-initrd-v1/SOURCE-DELTA.diff",
+    "sha256": "d5439862a72e9346ca32b1d29757b9147ffdb5d039224306b0bdf994741dba3e"
+  },
+  "SOURCE/pack/SOURCE-FROZEN.json": {
+    "bytes": 3278,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-initrd-v1/SOURCE-FROZEN.json",
+    "sha256": "f14f558b794ed3cc9dfb13dd61cdcf934d48350848508d2ca6845e8ba02fb1f4"
+  },
+  "SOURCE/pack/SOURCE-FROZEN.json.PREPARED": {
+    "bytes": 1486,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-initrd-v1/SOURCE-FROZEN.json.PREPARED",
+    "sha256": "c4698493127f06d45da5501caf6dad4764919f2170674b04058a5374bd3d3653"
+  },
+  "SOURCE/pack/assemble.py": {
+    "bytes": 8657,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-initrd-v1/assemble.py",
+    "sha256": "ef00df06b4f8334bbe2bd6d9918cff74938324a71eca6ee6a4c2646a4aa2ebd9"
+  },
+  "SOURCE/pack/pack_job.py": {
+    "bytes": 3271,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-initrd-v1/pack_job.py",
+    "sha256": "0b7d4d680b8e71f5b62a7de1c390d12a16e29fd6d76a0c14795c2c43afe56a3b"
+  },
+  "SOURCE/pack/reconnect.assembly.json": {
+    "bytes": 286052,
+    "path": "/private/tmp/corsa-d1-o1a-initrd-data-assembly-a79ac1f8f1e544a1881267ef19562c12/reconnect.assembly.json",
+    "sha256": "35526d9c9b9bff27aea06f34f8c394cc10517495f07aba32fa1f24722ddb5e4e"
+  },
+  "SOURCE/pack/test_assembly.py": {
+    "bytes": 1605,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-initrd-v1/test_assembly.py",
+    "sha256": "a1de35a9e659aa62894d06f831ade6d3ca7d4d335a94c87ae99e7cb8c219c683"
+  },
+  "SOURCE/pid1-build/CONTROLLER-DELTA.diff": {
+    "bytes": 1855,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-pid1-build-v1/CONTROLLER-DELTA.diff",
+    "sha256": "827148df0953d85ded133426f8e2fdc6a5e1ffc89ba038e5568ae96ed6e7ff29"
+  },
+  "SOURCE/pid1-build/FROZEN.json": {
+    "bytes": 6429,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-pid1-build-v1/FROZEN.json",
+    "sha256": "2456baf03034656ea4df28dc0471aea248162430d5c8c68193e10415ffe8b0b4"
+  },
+  "SOURCE/pid1-build/QA.json": {
+    "bytes": 199,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-pid1-build-v1/QA.json",
+    "sha256": "c8861e1d70f49d932864ce976d69d3eafd2ccbe29296400ddab5c190386bc5d0"
+  },
+  "SOURCE/pid1-build/README.ru.md": {
+    "bytes": 608,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-pid1-build-v1/README.ru.md",
+    "sha256": "e92d5b8d00fa300687a7ed064f540a20c6d3fc90146d896cf665af21dfb6a34a"
+  },
+  "SOURCE/pid1-build/SHA256SUMS": {
+    "bytes": 3589,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-pid1-build-v1/SHA256SUMS",
+    "sha256": "9ebc83f9f9d0494c465134229353981b80d2b1eb759add54561c784b4095d241"
+  },
+  "SOURCE/pid1-build/SOURCE.json": {
+    "bytes": 5568,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-pid1-build-v1/SOURCE.json",
+    "sha256": "b59f24b37ca434291f82e6e1f9244928edb5e4c175b7b2693788c0c49ef53277"
+  },
+  "SOURCE/pid1-build/common.py": {
+    "bytes": 6223,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-pid1-build-v1/common.py",
+    "sha256": "5667d2772248c892b31bb4eb321f4ad72507f9f9556a34b562f6708fd496507d"
+  },
+  "SOURCE/pid1-build/rebuild.py": {
+    "bytes": 4760,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-pid1-build-v1/rebuild.py",
+    "sha256": "01e4f9ef943c9885002d6d0bcb65d260f9442030dfdde45dc662bbfa87371a09"
+  },
+  "SOURCE/pid1-build/test_preparation.py": {
+    "bytes": 1700,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-pid1-build-v1/test_preparation.py",
+    "sha256": "391506c1c87986b9b042f3614137421b41b9289c25536b029a34e643b40212ba"
+  },
+  "SOURCE/posts/internal/core/node/loadstand_route_wire_full_send.go": {
+    "bytes": 5969,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-private-source-v2/posts/internal/core/node/loadstand_route_wire_full_send.go",
+    "sha256": "638ba3f314ee362f08c57bf31a428c5b0752fd68870a03344064c86a4caee823"
+  },
+  "SOURCE/prepared-data/EXPORTER-REUSE.json": {
+    "bytes": 3364,
+    "path": "/private/tmp/corsa-o1a-zero-offer-inputs-58d83a83fb1047ee80b323ca5b4a958f/EXPORTER-REUSE.json",
+    "sha256": "fbc16cd4e0a23fdc7fb97cab557c5359065806d93e785f4f0f60b06b65423cde"
+  },
+  "SOURCE/prepared-data/RESULT.json": {
+    "bytes": 13264,
+    "path": "/private/tmp/corsa-o1a-zero-offer-inputs-58d83a83fb1047ee80b323ca5b4a958f/RESULT.json",
+    "sha256": "000ebeb965cb68c87de4daf49627c3c563e45eada971e4d66205cb82bd236514"
+  },
+  "SOURCE/prepared-data/REVIEWER-DATA.json": {
+    "bytes": 1605,
+    "path": "/private/tmp/corsa-o1a-zero-offer-inputs-58d83a83fb1047ee80b323ca5b4a958f/REVIEWER-DATA.json",
+    "sha256": "f2bad6477d51c05f36d4826c825356a11e9bcf07ff5cd3631ff8c9b192e66a26"
+  },
+  "SOURCE/prepared-data/ROOT-DATA.json": {
+    "bytes": 347,
+    "path": "/private/tmp/corsa-o1a-zero-offer-inputs-58d83a83fb1047ee80b323ca5b4a958f/ROOT-DATA.json",
+    "sha256": "f8e62d7fd33204123c9cc23cabafbfb44233f1a267135ef2b7919bbbd31396b4"
+  },
+  "SOURCE/prepared-data/SOURCE-ARCHIVE.json": {
+    "bytes": 225893,
+    "path": "/private/tmp/corsa-o1a-zero-offer-inputs-58d83a83fb1047ee80b323ca5b4a958f/SOURCE-ARCHIVE.json",
+    "sha256": "0b9037a4fe4812abb38787b3c9ad7699dddf94d7d4b14dd0b111dd34c7db7804"
+  },
+  "SOURCE/prepared-data/capexec-source.diff": {
+    "bytes": 3773,
+    "path": "/private/tmp/corsa-o1a-zero-offer-inputs-58d83a83fb1047ee80b323ca5b4a958f/capexec-source.diff",
+    "sha256": "3e0ae7b62336e7d11511a02ea135a04620cf6939820839b33e29e0116241c3c7"
+  },
+  "SOURCE/prepared-data/component.json": {
+    "bytes": 862,
+    "path": "/private/tmp/corsa-o1a-zero-offer-inputs-58d83a83fb1047ee80b323ca5b4a958f/component.json",
+    "sha256": "f84856cfa6f3c3d39f4f5d69487c5d968106aeea77b16f8a3d7bf864266e7369"
+  },
+  "SOURCE/prepared-data/guest-sources.tar.gz": {
+    "bytes": 4922412,
+    "path": "/private/tmp/corsa-o1a-zero-offer-inputs-58d83a83fb1047ee80b323ca5b4a958f/guest-sources.tar.gz",
+    "sha256": "23b2818a3677a596683b0ebd819663f639b5e5e84abca10f35d96c6c44c976e7"
+  },
+  "SOURCE/prepared-data/pid1-source.diff": {
+    "bytes": 4823,
+    "path": "/private/tmp/corsa-o1a-zero-offer-inputs-58d83a83fb1047ee80b323ca5b4a958f/pid1-source.diff",
+    "sha256": "15278ccdc47cb649676986c24e6474694e3be0046ab5072ef5e0764523926185"
+  },
+  "SOURCE/private-subject-v1/ARTIFACT-SOURCE-MANIFEST.json": {
+    "bytes": 288559,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-private-source-v1/ARTIFACT-SOURCE-MANIFEST.json",
+    "sha256": "29950a43880d803751a6e5fd15b79e4eac785bcce9d08e8935b90d0a1388fb0f"
+  },
+  "SOURCE/private-subject-v1/MANIFEST.json": {
+    "bytes": 2928,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-private-source-v1/MANIFEST.json",
+    "sha256": "f009e9a157fc75dee5dec2361882862f96716517e6a5a03e35495fbdf2da54f7"
+  },
+  "SOURCE/private-subject-v1/PRODUCTION.diff": {
+    "bytes": 529,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-private-source-v1/PRODUCTION.diff",
+    "sha256": "82917f7f27d197b73dfd22a6d52adcf756fe3ff5e89f403affce3294095ca5fc"
+  },
+  "SOURCE/private-subject-v1/README.md": {
+    "bytes": 1568,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-private-source-v1/README.md",
+    "sha256": "9028e449cd14fc99e8f2c03539ee644e24a2fd774f46056c702b403df977a270"
+  },
+  "SOURCE/private-subject-v1/SHA256SUMS": {
+    "bytes": 992,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-private-source-v1/SHA256SUMS",
+    "sha256": "ade5aa95474e636555d0ff1e6487184c52e3ba49b843ff3632f6cc3b71f1eeab"
+  },
+  "SOURCE/private-subject-v1/SOURCE.json": {
+    "bytes": 1484,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-private-source-v1/SOURCE.json",
+    "sha256": "4d61d434e4e5c6a8a9e74cb00e9e411992ccb2e63184f5fe1478ff5c56b1d96b"
+  },
+  "SOURCE/private-subject-v1/measured.expected.manifest": {
+    "bytes": 68696,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-private-source-v1/measured.expected.manifest",
+    "sha256": "ae4710dc781e1e921f4c8e43a4c947a502eba8c69446ed532eba0276af1c4341"
+  },
+  "SOURCE/private-subject-v1/stand.expected.manifest": {
+    "bytes": 82438,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-private-source-v1/stand.expected.manifest",
+    "sha256": "78d671b120e64887b7a7a7c827d3c114a4d03c0fa1f4aee861fbd3fa7ce3185e"
+  },
+  "SOURCE/private-subject-v2/ARTIFACT-SOURCE-MANIFEST.json": {
+    "bytes": 288559,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-private-source-v2/ARTIFACT-SOURCE-MANIFEST.json",
+    "sha256": "29950a43880d803751a6e5fd15b79e4eac785bcce9d08e8935b90d0a1388fb0f"
+  },
+  "SOURCE/private-subject-v2/MANIFEST.json": {
+    "bytes": 5367,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-private-source-v2/MANIFEST.json",
+    "sha256": "d1d10a65c5f992aa4d18f3c2a758c8f0e36f7470c63b09c31ba415fdfb91ff7b"
+  },
+  "SOURCE/private-subject-v2/PRODUCTION.diff": {
+    "bytes": 529,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-private-source-v2/PRODUCTION.diff",
+    "sha256": "82917f7f27d197b73dfd22a6d52adcf756fe3ff5e89f403affce3294095ca5fc"
+  },
+  "SOURCE/private-subject-v2/QA-FIXTURE.diff": {
+    "bytes": 2760,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-private-source-v2/QA-FIXTURE.diff",
+    "sha256": "e32df500a0c29689d723a5be734fa384ae2772dadbb5b360b8462cf1cfe824a2"
+  },
+  "SOURCE/private-subject-v2/README.md": {
+    "bytes": 1726,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-private-source-v2/README.md",
+    "sha256": "55fefd13258b039331a5703c9eb78dbd0620e1cd3ff8497ba11e51e485f8a62b"
+  },
+  "SOURCE/private-subject-v2/SHA256SUMS": {
+    "bytes": 1790,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-private-source-v2/SHA256SUMS",
+    "sha256": "63086d6071bdd445143a7daf875f834b94e3bea81d2417ecef30444073a7ece2"
+  },
+  "SOURCE/private-subject-v2/SOURCE.json": {
+    "bytes": 2606,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-private-source-v2/SOURCE.json",
+    "sha256": "2c8e60e5ed86e381fe56e48ef0f448b8f0157d70b6b833fcdb20a03fe6f3ba10"
+  },
+  "SOURCE/private-subject-v2/measured.expected.manifest": {
+    "bytes": 68696,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-private-source-v2/measured.expected.manifest",
+    "sha256": "ae4710dc781e1e921f4c8e43a4c947a502eba8c69446ed532eba0276af1c4341"
+  },
+  "SOURCE/private-subject-v2/stand.expected.manifest": {
+    "bytes": 82438,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-private-source-v2/stand.expected.manifest",
+    "sha256": "78d671b120e64887b7a7a7c827d3c114a4d03c0fa1f4aee861fbd3fa7ce3185e"
+  },
+  "SOURCE/qa-architect/REVIEW.json": {
+    "bytes": 765,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-private-goqa-architect-data-v1/REVIEW.json",
+    "sha256": "cb0a60cd47428568d631c3e8e1ee744591ffe5d893628c00b5c2c30a021b09e4"
+  },
+  "SOURCE/qa-posts/internal/core/node/loadstand_route_wire_first_failure_diagnostic_test.go": {
+    "bytes": 7607,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-private-source-v2/qa-posts/internal/core/node/loadstand_route_wire_first_failure_diagnostic_test.go",
+    "sha256": "df063108dd179304ce6fecac87d9f3d22dcde5c73bfea4c63efcbf368619d7ca"
+  },
+  "SOURCE/qa-posts/internal/core/node/loadstand_route_wire_full_send_leaf_test.go": {
+    "bytes": 8982,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-private-source-v2/qa-posts/internal/core/node/loadstand_route_wire_full_send_leaf_test.go",
+    "sha256": "9160a07a351f8e55df6f36dd38d0a083f627d203fb5f3a3a23b982aeb97c425b"
+  },
+  "SOURCE/qa-posts/internal/core/node/loadstand_route_wire_full_send_mechanism_test.go": {
+    "bytes": 5748,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-private-source-v2/qa-posts/internal/core/node/loadstand_route_wire_full_send_mechanism_test.go",
+    "sha256": "fe1aa5a317538098266ba68cd9694886e7d0ff929f75a45729454010d373775f"
+  },
+  "SOURCE/qa-posts/internal/core/node/loadstand_route_wire_refill_component_test.go": {
+    "bytes": 7162,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-private-source-v2/qa-posts/internal/core/node/loadstand_route_wire_refill_component_test.go",
+    "sha256": "3d619b111bb04a6a8809ae91d8f93c4bb2af8e16730c4522d25b3297eb1ecebd"
+  },
+  "SOURCE/qa-posts/internal/core/node/loadstand_route_wire_sender_refusal_test.go": {
+    "bytes": 3868,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-private-source-v2/qa-posts/internal/core/node/loadstand_route_wire_sender_refusal_test.go",
+    "sha256": "97325309e6305040999ab03d6b2c5cf8d3a055809ee874ac7122b4933375af3d"
+  },
+  "SOURCE/qa-posts/internal/core/node/loadstand_route_wire_zero_offer_test.go": {
+    "bytes": 3151,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-private-source-v2/qa-posts/internal/core/node/loadstand_route_wire_zero_offer_test.go",
+    "sha256": "258a5eaea43e0ee9df61d07b8f64642226ab3f21b3b9f041af60e144dbfcdcdc"
+  },
+  "SOURCE/qa-posts/internal/testutil/loadstand/route_wire_full_send_leaf_transport_test.go": {
+    "bytes": 1945,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-private-source-v2/qa-posts/internal/testutil/loadstand/route_wire_full_send_leaf_transport_test.go",
+    "sha256": "6991b43e828c3d54028c1059ab44ab11c8fd7f6ad44028140943c70b78b7f0fe"
+  },
+  "SOURCE/qa/ARTIFACT-SOURCE-MANIFEST.json": {
+    "bytes": 288559,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-private-goqa-9a21e3e8c3f84d278810991efd0497e4/ARTIFACT-SOURCE-MANIFEST.json",
+    "sha256": "29950a43880d803751a6e5fd15b79e4eac785bcce9d08e8935b90d0a1388fb0f"
+  },
+  "SOURCE/qa/CONTROLLER-DELTA.diff": {
+    "bytes": 3065,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-private-goqa-v1/CONTROLLER-DELTA.diff",
+    "sha256": "b78f62a2e665aae1cb4e504f0dc06bfe4f51db218630bdbf17bd1dd555a5f2cf"
+  },
+  "SOURCE/qa/FROZEN.json": {
+    "bytes": 1746,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-private-goqa-v1/FROZEN.json",
+    "sha256": "80003621ea1e56dc59dbf754abf26188d0b4fed7349f5732d394238727306e87"
+  },
+  "SOURCE/qa/PURE-QA.json": {
+    "bytes": 211,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-private-goqa-v1/PURE-QA.json",
+    "sha256": "dfbc532c649cc759fbb31d06382f759220fbe49708d50e473f8a8be44817ae48"
+  },
+  "SOURCE/qa/QA-SOURCE-MANIFEST.json": {
+    "bytes": 289533,
+    "path": "/private/tmp/corsa-d1-o1a-zero-offer-private-goqa-9a21e3e8c3f84d278810991efd0497e4/QA-SOURCE-MANIFEST.json",
+    "sha256": "be012f3667d9b14dbf3534a402a196af67e21f88b816c21af34b9deda2ddc3b1"
+  },
+  "SOURCE/qa/README.ru.md": {
+    "bytes": 1703,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-private-goqa-v1/README.ru.md",
+    "sha256": "e571c535eb3e674e91838cb5d206f33d5ccbab636601d1b1d955aba7f61bdc9e"
+  },
+  "SOURCE/qa/SHA256SUMS": {
+    "bytes": 713,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-private-goqa-v1/SHA256SUMS",
+    "sha256": "1d169cac067b48be9d111cf3c4433b0cb0363d9692f550082d7e807d919a8a8e"
+  },
+  "SOURCE/qa/SOURCE.json": {
+    "bytes": 1138,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-private-goqa-v1/SOURCE.json",
+    "sha256": "2ae38c3337e7e3380292c7a553445dc3793ab07ea01fd6b3ec4661b37feabd3b"
+  },
+  "SOURCE/qa/TESTS.json": {
+    "bytes": 3184,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-private-goqa-v1/TESTS.json",
+    "sha256": "83e165fb7d175d2d0a0af58c27ff863a9ba9228b8a88970ea9321b113e90ff8e"
+  },
+  "SOURCE/qa/common.py": {
+    "bytes": 6441,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-private-goqa-v1/common.py",
+    "sha256": "89a7fa44931aec725d2dbf274c5f5b27de1b9b3cb2f94445a16996aeb8e0f0fd"
+  },
+  "SOURCE/qa/qa.py": {
+    "bytes": 6344,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-private-goqa-v1/qa.py",
+    "sha256": "d7c00f426d68cd14bf1ed2e3c4388650eb691caf1ee0608adbf347cb6bbfce01"
+  },
+  "SOURCE/qa/test_preparation.py": {
+    "bytes": 2193,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-private-goqa-v1/test_preparation.py",
+    "sha256": "d1b020f998499ca281e135bf94605379985ea894e510c617ed85d576e891d208"
+  },
+  "SOURCE/root-and-tester-readbacks/corsa-root-zero-offer-stop-audit.py": {
+    "bytes": 2859,
+    "path": "/private/tmp/corsa-root-zero-offer-stop-audit.py",
+    "sha256": "5b8f5f1752916e421f1b4af1e52c29fe4bd8bdeb4c8857980169a475bafe5834"
+  },
+  "SOURCE/root-and-tester-readbacks/corsa-zero-offer-cpio-data-review.py": {
+    "bytes": 5625,
+    "path": "/private/tmp/corsa-zero-offer-cpio-data-review.py",
+    "sha256": "d4da4b14aff06bbe2db703b6e6dc40e13d29a8f39f1ef7b4904aa28fd018abc6"
+  },
+  "SOURCE/root-and-tester-readbacks/corsa-zero-offer-input-data-review.py": {
+    "bytes": 5645,
+    "path": "/private/tmp/corsa-zero-offer-input-data-review.py",
+    "sha256": "5e78efe147254c4096337ac97f1013fcb49c8cdd12e53c50dee102a137fccdaf"
+  },
+  "SOURCE/root-and-tester-readbacks/corsa-zero-offer-native-data-review.py": {
+    "bytes": 5173,
+    "path": "/private/tmp/corsa-zero-offer-native-data-review.py",
+    "sha256": "deb00dc53eca00a1bedd14443134c6f41deecbe46d6dad9b3bcc6ffa0b839d0b"
+  },
+  "SOURCE/root-and-tester-readbacks/corsa-zero-offer-runtime-data.py": {
+    "bytes": 1111,
+    "path": "/private/tmp/corsa-zero-offer-runtime-data.py",
+    "sha256": "9819cff92851afe945652cd5a68ca4fc5d9913557e22ffa0852512e8ff39c1d6"
+  },
+  "SOURCE/root-and-tester-readbacks/corsa-zero-offer-source-data.py": {
+    "bytes": 1011,
+    "path": "/private/tmp/corsa-zero-offer-source-data.py",
+    "sha256": "fea442f83662d77f274bb8ea13dcb08f38448bc15acea2431f322da2a9272d5b"
+  },
+  "SOURCE/runtime-architect/REVIEW.json": {
+    "bytes": 1026,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-runtime-architect-data-v1/REVIEW.json",
+    "sha256": "c550008009c0a20a1856e7f1ac79ef438c649df974137f964aa03f7fd7407228"
+  },
+  "SOURCE/runtime-architect/review.py": {
+    "bytes": 5605,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-runtime-architect-data-v1/review.py",
+    "sha256": "ae653f67bfbcb78c4b48ae5104f378b036a247e5b6e70259ef0d2c905755b29f"
+  },
+  "SOURCE/runtime/HANDOFF.PREPARED.json": {
+    "bytes": 1692,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-runtime-v1/HANDOFF.PREPARED.json",
+    "sha256": "88cd235c8f30d0e9a92755c0ede3477d6b16ded6b90ae57e38b62fdfddc51eb8"
+  },
+  "SOURCE/runtime/HANDOFF.json": {
+    "bytes": 1690,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-runtime-v1/HANDOFF.json",
+    "sha256": "bd4922835e6e626106a1c743ac68765d783a0f084dc8b741181191470e0355d2"
+  },
+  "SOURCE/runtime/ROOT-PREFLIGHT.json": {
+    "bytes": 244,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-runtime-v1/ROOT-PREFLIGHT.json",
+    "sha256": "d8d2d80de8f96a20828feb94adc01e3c8422a642f485f57bf2e6add89d09e992"
+  },
+  "SOURCE/runtime/ack.py": {
+    "bytes": 3986,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-runtime-v1/ack.py",
+    "sha256": "663db4bfef0cbe9acc56023a5819063702b5936fbea65c1e44bb9a08adc13114"
+  },
+  "SOURCE/runtime/launch.py": {
+    "bytes": 6686,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-runtime-v1/launch.py",
+    "sha256": "d04377fcbc00d93a6a7556054df41755abf728dee73de1c3b91c18b0bd615d77"
+  },
+  "SOURCE/runtime/support.py": {
+    "bytes": 4037,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-runtime-v1/support.py",
+    "sha256": "c757afad0bae8293e07afb145de6678d5769cf042fb2afa278ceb9d2d61ea4e2"
+  },
+  "SOURCE/runtime/verify.py": {
+    "bytes": 5642,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-runtime-v1/verify.py",
+    "sha256": "f1d281a84395f86abe18ceeb68500b93c8191b939b6785964a29892878055403"
+  },
+  "SOURCE/source-producer/ACTUAL-BINDING.json": {
+    "bytes": 1530,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-input-rebind-v1/ACTUAL-BINDING.json",
+    "sha256": "fe874aff46055f71a2ebac4d77d7e5ac662476bc21d0f1f59a3c07ca3b48f24a"
+  },
+  "SOURCE/source-producer/ARTIFACT-BINDING.json": {
+    "bytes": 886,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-input-rebind-v1/ARTIFACT-BINDING.json",
+    "sha256": "74170364092ae9bd8a4886151cac5911ca43a4ca9e62625b25aa95ea0bc73071"
+  },
+  "SOURCE/source-producer/ARTIFACT-BINDING.json.PENDING": {
+    "bytes": 244,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-input-rebind-v1/ARTIFACT-BINDING.json.PENDING",
+    "sha256": "16e45bf54b4b4030ebff541a057c49875f9472a95765d46b773883c5c21d7512"
+  },
+  "SOURCE/source-producer/INPUTS.json": {
+    "bytes": 15458,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-input-rebind-v1/INPUTS.json",
+    "sha256": "cbef7897e5d9bf54f4710a72684e626e5e13191d5175d64ce8c0c5d02e87dae8"
+  },
+  "SOURCE/source-producer/INPUTS.json.PENDING": {
+    "bytes": 515,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-input-rebind-v1/INPUTS.json.PENDING",
+    "sha256": "abf748fc3335df0d5e0d286eda185be5c8e8718b86928f56a9dda06a29920f99"
+  },
+  "SOURCE/source-producer/KNOWN-INPUTS.json": {
+    "bytes": 15588,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-input-rebind-v1/KNOWN-INPUTS.json",
+    "sha256": "9e971baee2e1b5e905bd33cac9a7385ab8a2a449283dd59956369aa51f03502d"
+  },
+  "SOURCE/source-producer/KNOWN-INPUTS.json.PENDING": {
+    "bytes": 14562,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-input-rebind-v1/KNOWN-INPUTS.json.PENDING",
+    "sha256": "dff6df1adb29c0b7416ad9d5fd1175e49bde4711334b31699f35b2c956a7534a"
+  },
+  "SOURCE/source-producer/PARENT-SOURCE.diff": {
+    "bytes": 12739,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-input-rebind-v1/PARENT-SOURCE.diff",
+    "sha256": "dcb10b3dd7914d77d3cf0f8adeba6ed76877ee4fd7f9eb56c976de656860a3a2"
+  },
+  "SOURCE/source-producer/PURE-QA.json": {
+    "bytes": 238,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-input-rebind-v1/PURE-QA.json",
+    "sha256": "f4c168653106a3a6725a4896f355ee162c0f8948de058b0cd221707f97af823c"
+  },
+  "SOURCE/source-producer/README.ru.md": {
+    "bytes": 2395,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-input-rebind-v1/README.ru.md",
+    "sha256": "ed45b2ca49e18303d36f279ec4fbd3277295aa798484fe9d0362930b676125dd"
+  },
+  "SOURCE/source-producer/SHA256SUMS": {
+    "bytes": 1261,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-input-rebind-v1/SHA256SUMS",
+    "sha256": "2d14ecfee3661ce389f5b9df863b8de4deba29ad9ced3e30622782fb5dff3fef"
+  },
+  "SOURCE/source-producer/SHA256SUMS.PENDING": {
+    "bytes": 730,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-input-rebind-v1/SHA256SUMS.PENDING",
+    "sha256": "486a5c0c7102a7ad6864a2568eddf68a0382470794ffb7d0df5cb670588d97dc"
+  },
+  "SOURCE/source-producer/SOURCE.json": {
+    "bytes": 2283,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-input-rebind-v1/SOURCE.json",
+    "sha256": "d8fa11842c558a19b167b1a063cbaff6d8b89680632646ce50c0cc4ae19148a0"
+  },
+  "SOURCE/source-producer/SOURCE.json.PENDING": {
+    "bytes": 1453,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-input-rebind-v1/SOURCE.json.PENDING",
+    "sha256": "920816f596596d78b1cda35bc25b0e2ee29eadc6e078fae3105c7e4b067f5d46"
+  },
+  "SOURCE/source-producer/prepare.py": {
+    "bytes": 13741,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-input-rebind-v1/prepare.py",
+    "sha256": "62999dcb76232bf24909d07eda01de7086250cdc1cacfa7a07b6f5c41010c0a0"
+  },
+  "SOURCE/source-producer/test_prepare.py": {
+    "bytes": 3137,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-input-rebind-v1/test_prepare.py",
+    "sha256": "bbb858a6167396e3f581daa2308fdf22ca158f742700adde3a023b8751016573"
+  },
+  "SOURCE/unchanged-private-posts/internal/core/node/loadstand_route_wire_full_receipt.go": {
+    "bytes": 8711,
+    "path": "/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/source/internal/core/node/loadstand_route_wire_full_receipt.go",
+    "sha256": "33c5da751ebb06e214d45f6e533b423a72afb94e806806eb023e6a3720665b0c"
+  },
+  "SOURCE/unchanged-private-posts/internal/testutil/loadstand/censusdiag/diagnostic.go": {
+    "bytes": 6610,
+    "path": "/private/tmp/corsa-o1a-zero-offer-private-elf-build-4ffb25a64e9d40fbad9eb0ec77f7e618/source/internal/testutil/loadstand/censusdiag/diagnostic.go",
+    "sha256": "a16c4b2dbe283e4990046d20353b7e9dbcd3cdf4fcfa238fee0ca63d4028c7b3"
+  }
+}

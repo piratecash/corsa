@@ -1,0 +1,59 @@
+{
+  "attempt_id": "2c75180d2872646aa2f7201b240cb175",
+  "go_fail_preserved": true,
+  "guest_result": "FAIL",
+  "guest_stage": "functional-or-export-failure",
+  "lock_binding": {
+    "directory_stamp": [
+      16777232,
+      285902971,
+      501,
+      0,
+      16832,
+      96,
+      1795183374721782203,
+      1795183374721782203
+    ],
+    "owner_sha256": "527e5978e7774ffc99be9262dcb89836b43495f3778909c40cd378fdabc5f6c2",
+    "owner_stamp": [
+      16777232,
+      285902972,
+      501,
+      0,
+      33152,
+      165,
+      1795183374722675789,
+      1795183374722675789
+    ]
+  },
+  "own_original_groups_absent": [
+    98693,
+    98694
+  ],
+  "own_original_pids_absent": [
+    98693,
+    98694
+  ],
+  "physical_XPC_resources": "UNKNOWN",
+  "reviews": {
+    "REVIEWER": {
+      "path": "/private/tmp/corsa-d1-o1a-native-2c75180d2872646aa2f7201b240cb175/REVIEWER-DATA.json",
+      "sha256": "caec35f100b8f36db38e1a0d164e138d8bd075ab5a50722c0f753d56fe3f01b8",
+      "status": "ACCEPTED_VM_STOPPED_ONLY",
+      "work": "/private/tmp/corsa-d1-o1a-native-2c75180d2872646aa2f7201b240cb175"
+    },
+    "ROOT": {
+      "path": "/private/tmp/corsa-d1-o1a-native-2c75180d2872646aa2f7201b240cb175/ROOT-DATA.json",
+      "sha256": "c76ef80d36d595fb645abee2fc6546e378c7db4ba9adebe3325637b4668534fc",
+      "status": "ACCEPTED_VM_STOPPED_ONLY",
+      "work": "/private/tmp/corsa-d1-o1a-native-2c75180d2872646aa2f7201b240cb175"
+    },
+    "TESTER": {
+      "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-zero-offer-native-actual-tester-v1/REVIEW.json",
+      "sha256": "54bbea33b234dc1866b623e7e0a620b87380dc03c1b8ec155873bb200b0d1d40",
+      "status": "ACCEPTED_VM_STOPPED_ONLY",
+      "work": "/private/tmp/corsa-d1-o1a-native-2c75180d2872646aa2f7201b240cb175"
+    }
+  },
+  "scope": "NORMAL_VM_STOP_ACK_ONLY"
+}

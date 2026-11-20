@@ -1,0 +1,160 @@
+{
+  "all_three_RAW_full_retained_SHA_EOF": {
+    "console": {
+      "eof": true,
+      "received": 6924471,
+      "retained": 6924471,
+      "sha256": "25894c5b9f6f96abeb2f21ff21eb530843086bc75ffe379c75892386b13b5658"
+    },
+    "native": {
+      "eof": true,
+      "received": 994,
+      "retained": 994,
+      "sha256": "256217a8bffec29922ff6422d4e8571c0264014e354850b3640f6c7604ee57ee"
+    },
+    "stderr": {
+      "eof": true,
+      "received": 0,
+      "retained": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  },
+  "capsule_files": 1351,
+  "capsule_sources_equal_actual_compiled_tree": 1348,
+  "exact_own_lock_custody_unchanged": true,
+  "failed_record": {
+    "bytes": 2906,
+    "deeper_refusal_detail": "NOT_SERIALIZED_IN_FAILED_RECORD",
+    "detail": "functional member lifecycle or observation invalid",
+    "name": "loadstand-functional-lifecycle-headless-sdk-0cdd18a536e16e4f.attempt-d5697fffa75b7ab7.failed",
+    "outcome": "failed",
+    "sha256": "854cf047c683e16e30fa7225cf5c464e0c1530064f9aef5f8c2465529c053f18",
+    "sources": [
+      {
+        "name": "measured",
+        "stamp": "ae4710dc781e1e92"
+      },
+      {
+        "name": "stand",
+        "stamp": "78d671b120e64887"
+      }
+    ]
+  },
+  "first_leaf": {
+    "console_stage": "observer_full_send_finish_sender_false",
+    "observer_code": 31,
+    "producer_inner_reason": "UNKNOWN",
+    "source_conjunction": "Bound zero-offer finish reports 31 only when sentAll=false and p.send!=nil or p.next!=0; proves supplied-frame observation, not actual queue/writer acceptance.",
+    "transport_code": 95
+  },
+  "fresh_own_process_absence": [
+    {
+      "id": 98693,
+      "kind": "PID",
+      "result": "ESRCH"
+    },
+    {
+      "id": 98694,
+      "kind": "PID",
+      "result": "ESRCH"
+    },
+    {
+      "id": 98693,
+      "kind": "PGID",
+      "result": "ESRCH"
+    },
+    {
+      "id": 98694,
+      "kind": "PGID",
+      "result": "ESRCH"
+    }
+  ],
+  "guest": {
+    "all_children_reaped": true,
+    "attempt_id": "2c75180d2872646aa2f7201b240cb175",
+    "config_sha256": "c9d0f742f64e87dd1bee32f3b24ed1b05904c7fbaa0e14c1b036d6bc76397c19",
+    "export": {
+      "all_children_reaped": true,
+      "exit": 0,
+      "kill_sent": false,
+      "log_complete": true,
+      "log_overflow": false,
+      "normal": true,
+      "pid": 118,
+      "reaped": true,
+      "term_sent": false
+    },
+    "export_started": true,
+    "guest_elapsed_ns": 30984741681,
+    "initial_lo_checked": true,
+    "input_files": 1366,
+    "inputs_verified": true,
+    "poweroff_attempt": true,
+    "profile_sha256": "f84856cfa6f3c3d39f4f5d69487c5d968106aeea77b16f8a3d7bf864266e7369",
+    "source_commit": "4fcc2f7245095fc43d2225f0f0065f4ce3b26113",
+    "stage": "functional-or-export-failure",
+    "state": "FAIL",
+    "test": {
+      "all_children_reaped": true,
+      "exit": 1,
+      "kill_sent": false,
+      "log_complete": true,
+      "log_overflow": false,
+      "normal": true,
+      "pid": 65,
+      "reaped": true,
+      "term_sent": false
+    },
+    "workload": "reconnect"
+  },
+  "handoff_sha256": "bd4922835e6e626106a1c743ac68765d783a0f084dc8b741181191470e0355d2",
+  "input_original_and_owned_copy_hashes_exact": true,
+  "lock_removed_by_this_reviewer": false,
+  "native_events": [
+    {
+      "attempt_id": "2c75180d2872646aa2f7201b240cb175",
+      "config_sha256": "c9d0f742f64e87dd1bee32f3b24ed1b05904c7fbaa0e14c1b036d6bc76397c19",
+      "elapsed_ns": 569217000,
+      "event": "ready",
+      "profile": "d1-o1a-native-v1",
+      "seq": 1,
+      "workload": "reconnect"
+    },
+    {
+      "attempt_id": "2c75180d2872646aa2f7201b240cb175",
+      "config_sha256": "c9d0f742f64e87dd1bee32f3b24ed1b05904c7fbaa0e14c1b036d6bc76397c19",
+      "elapsed_ns": 684555000,
+      "event": "start_ok",
+      "profile": "d1-o1a-native-v1",
+      "seq": 2,
+      "workload": "reconnect"
+    },
+    {
+      "attempt_id": "2c75180d2872646aa2f7201b240cb175",
+      "config_sha256": "c9d0f742f64e87dd1bee32f3b24ed1b05904c7fbaa0e14c1b036d6bc76397c19",
+      "elapsed_ns": 32125723000,
+      "event": "guest_stopped",
+      "guest_error": null,
+      "profile": "d1-o1a-native-v1",
+      "seq": 3,
+      "workload": "reconnect"
+    },
+    {
+      "attempt_id": "2c75180d2872646aa2f7201b240cb175",
+      "config_sha256": "c9d0f742f64e87dd1bee32f3b24ed1b05904c7fbaa0e14c1b036d6bc76397c19",
+      "elapsed_ns": 32125790000,
+      "event": "stop_complete",
+      "final_state": "stopped",
+      "profile": "d1-o1a-native-v1",
+      "seq": 4,
+      "workload": "reconnect"
+    }
+  ],
+  "native_repeated": false,
+  "physical_XPC_resources": "UNKNOWN",
+  "receipt_sha256": "92e3c75fe300e9d5d7d88f2af3e385157991afc429474a4dddd2def1aa10f0f0",
+  "role": "TESTER",
+  "scope": "Stopped-only safety ACK; genuine Go FAIL preserved, not O1a metric PASS or physical XPC release.",
+  "status": "ACCEPTED_VM_STOPPED_ONLY",
+  "work": "/private/tmp/corsa-d1-o1a-native-2c75180d2872646aa2f7201b240cb175"
+}

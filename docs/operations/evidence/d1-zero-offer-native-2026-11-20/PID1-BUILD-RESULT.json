@@ -1,0 +1,114 @@
+{
+  "artifacts": {
+    "o1a-init": {
+      "bytes": 4867158,
+      "executed": false,
+      "path": "/private/tmp/corsa-d1-o1a-zero-offer-pid1-b36d6869ef424c418ed85bcb3bb26ffa/artifacts/o1a-init",
+      "sha256": "6ceba22a32dd698ba18a0cb164894d7657d90a36246958d04da7f1f6575a5c68",
+      "source_sums_sha256": "79b3264c7c593ed0c312e518e53db2b38aa47d89d8655827ddbe0e875026c4cb",
+      "static_arm64": true
+    }
+  },
+  "attempt_id": "b36d6869ef424c418ed85bcb3bb26ffa",
+  "c_capexec_build": "SEPARATE_NOT_RUN",
+  "error": null,
+  "exporter_built_here": false,
+  "exporter_reused_sha256": "7ef3b4a1edce0481408af11ab33d77c50d894215becc0e9142877016583abfb2",
+  "host_pure_tests_expected": 10,
+  "linux_artifacts_executed": false,
+  "linux_inventory_test": "NOT_RUN",
+  "lock_retained": false,
+  "original_go_source_API": "FRESH_ACTUAL_ZERO_OFFER_7938_READBACK_REUSED_BY_EXACT_SOURCE",
+  "raw_bytes": 13356,
+  "source_sums_sha256": "79b3264c7c593ed0c312e518e53db2b38aa47d89d8655827ddbe0e875026c4cb",
+  "status": "DISPOSABLE_OBSERVER_PID1_QA_ELF_BUILT",
+  "steps": [
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1)(allow default)(deny network*)(deny file-write* (subpath \"/private/tmp/corsa-d1-o1a-zero-offer-pid1-b36d6869ef424c418ed85bcb3bb26ffa/source\"))",
+        "/usr/local/go/bin/go",
+        "version"
+      ],
+      "exit": 0,
+      "owned_group_absent": true,
+      "phase": "go-version",
+      "pid": 97865,
+      "pipe_threads_finished": true,
+      "reason": null,
+      "stderr": "/private/tmp/corsa-d1-o1a-zero-offer-pid1-b36d6869ef424c418ed85bcb3bb26ffa/01-go-version.stderr",
+      "stdout": "/private/tmp/corsa-d1-o1a-zero-offer-pid1-b36d6869ef424c418ed85bcb3bb26ffa/01-go-version.stdout"
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1)(allow default)(deny network*)(deny file-write* (subpath \"/private/tmp/corsa-d1-o1a-zero-offer-pid1-b36d6869ef424c418ed85bcb3bb26ffa/source\"))",
+        "/usr/local/go/bin/go",
+        "test",
+        "-mod=readonly",
+        "-buildvcs=false",
+        "-p=1",
+        "-count=1",
+        "-timeout=120s",
+        "-json",
+        "./cmd/o1a-init"
+      ],
+      "exit": 0,
+      "owned_group_absent": true,
+      "phase": "pure-go-qa",
+      "pid": 97867,
+      "pipe_threads_finished": true,
+      "reason": null,
+      "stderr": "/private/tmp/corsa-d1-o1a-zero-offer-pid1-b36d6869ef424c418ed85bcb3bb26ffa/02-pure-go-qa.stderr",
+      "stdout": "/private/tmp/corsa-d1-o1a-zero-offer-pid1-b36d6869ef424c418ed85bcb3bb26ffa/02-pure-go-qa.stdout"
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1)(allow default)(deny network*)(deny file-write* (subpath \"/private/tmp/corsa-d1-o1a-zero-offer-pid1-b36d6869ef424c418ed85bcb3bb26ffa/source\"))",
+        "/usr/local/go/bin/go",
+        "build",
+        "-mod=readonly",
+        "-buildvcs=false",
+        "-p=1",
+        "-trimpath",
+        "-ldflags=-buildid=",
+        "-o",
+        "/private/tmp/corsa-d1-o1a-zero-offer-pid1-b36d6869ef424c418ed85bcb3bb26ffa/artifacts/o1a-init",
+        "./cmd/o1a-init"
+      ],
+      "exit": 0,
+      "owned_group_absent": true,
+      "phase": "o1a-init-build",
+      "pid": 98191,
+      "pipe_threads_finished": true,
+      "reason": null,
+      "stderr": "/private/tmp/corsa-d1-o1a-zero-offer-pid1-b36d6869ef424c418ed85bcb3bb26ffa/03-o1a-init-build.stderr",
+      "stdout": "/private/tmp/corsa-d1-o1a-zero-offer-pid1-b36d6869ef424c418ed85bcb3bb26ffa/03-o1a-init-build.stdout"
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1)(allow default)(deny network*)(deny file-write* (subpath \"/private/tmp/corsa-d1-o1a-zero-offer-pid1-b36d6869ef424c418ed85bcb3bb26ffa/source\"))",
+        "/usr/local/go/bin/go",
+        "version",
+        "-m",
+        "/private/tmp/corsa-d1-o1a-zero-offer-pid1-b36d6869ef424c418ed85bcb3bb26ffa/artifacts/o1a-init"
+      ],
+      "exit": 0,
+      "owned_group_absent": true,
+      "phase": "o1a-init-metadata",
+      "pid": 98387,
+      "pipe_threads_finished": true,
+      "reason": null,
+      "stderr": "/private/tmp/corsa-d1-o1a-zero-offer-pid1-b36d6869ef424c418ed85bcb3bb26ffa/04-o1a-init-metadata.stderr",
+      "stdout": "/private/tmp/corsa-d1-o1a-zero-offer-pid1-b36d6869ef424c418ed85bcb3bb26ffa/04-o1a-init-metadata.stdout"
+    }
+  ],
+  "unknown": false,
+  "work": "/private/tmp/corsa-d1-o1a-zero-offer-pid1-b36d6869ef424c418ed85bcb3bb26ffa"
+}

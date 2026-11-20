@@ -1,0 +1,43 @@
+{
+  "QA_only_files": 7,
+  "QA_only_files_excluded_from_ELF_and_guest_sources": true,
+  "actual_CPIO_changed_members": 7,
+  "actual_artifact_source_manifest_sha256": "29950a43880d803751a6e5fd15b79e4eac785bcce9d08e8935b90d0a1388fb0f",
+  "actual_boot_changed_rows": 5,
+  "anchors": {
+    "earlier_disposable_sender_false": {
+      "commit": "cecc9b709e00fbecbbc91c0920f101f7e3b7729b",
+      "evidence": "../d1-full-send-sender-2026-11-20/README.md"
+    },
+    "ordinary_zero_offer_fix": {
+      "commit": "13e4d4f9195c333ee3307b1d55e387b33aa4c677",
+      "evidence": "../d1-zero-offer-accounting-2026-11-20/README.md"
+    },
+    "separate_interop_test_lint": {
+      "commit": "2c97bf91f1bc1afca14b4a55a00dbd1639aec1b1"
+    }
+  },
+  "disposable_private_finish_post": "638ba3f314ee362f08c57bf31a428c5b0752fd68870a03344064c86a4caee823",
+  "guest_archive": {
+    "bytes": 4922412,
+    "path": "/private/tmp/corsa-o1a-zero-offer-inputs-58d83a83fb1047ee80b323ca5b4a958f/guest-sources.tar.gz",
+    "sha256": "23b2818a3677a596683b0ebd819663f639b5e5e84abca10f35d96c6c44c976e7"
+  },
+  "linuxhelper_payload_unchanged": true,
+  "new_member_paths": false,
+  "ordinary_Root_finish_post": "1cb353cc46fabd04243df40b222db144d1a8d3f43c040af861553e5142d43433",
+  "production_checkout_private_diagnostics_applied": false,
+  "source_groups": {
+    "measured": {
+      "files": 640,
+      "sha256": "ae4710dc781e1e921f4c8e43a4c947a502eba8c69446ed532eba0276af1c4341",
+      "stamp": "ae4710dc781e1e92"
+    },
+    "stand": {
+      "files": 708,
+      "sha256": "78d671b120e64887b7a7a7c827d3c114a4d03c0fa1f4aee861fbd3fa7ce3185e",
+      "stamp": "78d671b120e64887"
+    }
+  },
+  "this_native_subject": "Old actual leaf 2450-file source plus ONE full_send finish post, retaining existing private diagnostics; not current ordinary Root binaries."
+}

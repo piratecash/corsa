@@ -1,0 +1,72 @@
+{
+  "Go": {
+    "failed_journal_record": "Generic failed outcome; no deeper refusal field serialized.",
+    "observer_reason": 31,
+    "outcome": "FAIL",
+    "seconds": 30.62,
+    "source_conjunction": "sentAll=false with p.send!=nil or p.next!=0: some frame was supplied to observation, not proven enqueued or written.",
+    "stage": "observer_full_send_finish_sender_false",
+    "transport_code": 95,
+    "underlying_producer_return_site": "UNKNOWN"
+  },
+  "O1a_metric_or_D1_or_activation_or_release_PASS": false,
+  "anchors": {
+    "earlier_disposable_sender_false": {
+      "commit": "cecc9b709e00fbecbbc91c0920f101f7e3b7729b",
+      "evidence": "../d1-full-send-sender-2026-11-20/README.md"
+    },
+    "ordinary_zero_offer_fix": {
+      "commit": "13e4d4f9195c333ee3307b1d55e387b33aa4c677",
+      "evidence": "../d1-zero-offer-accounting-2026-11-20/README.md"
+    },
+    "separate_interop_test_lint": {
+      "commit": "2c97bf91f1bc1afca14b4a55a00dbd1639aec1b1"
+    }
+  },
+  "attempt": "2c75180d2872646aa2f7201b240cb175",
+  "build_scope": "Four static Linux test/stand ELF artifacts and new PID1/capexec. Exporter reused by exact dependency proof. Builds did not execute these ELF artifacts.",
+  "capsule": {
+    "Go_files": 1348,
+    "failed_records": 1,
+    "files": 1351,
+    "manifests": 2,
+    "selected_source_archive": "SOURCE.tar.xz/prepared-data/guest-sources.tar.gz",
+    "transport": "RAW.tar.xz/native/console.raw"
+  },
+  "capsule_binding": {
+    "attempt_id": "2c75180d2872646aa2f7201b240cb175",
+    "profile_sha256": "f84856cfa6f3c3d39f4f5d69487c5d968106aeea77b16f8a3d7bf864266e7369",
+    "source_commit": "4fcc2f7245095fc43d2225f0f0065f4ce3b26113",
+    "workload": "reconnect"
+  },
+  "historical97a9_and_480s_inner_causes": "UNKNOWN; not retroactively attributed.",
+  "native": {
+    "TERM_or_KILL": false,
+    "all_children_reaped": true,
+    "export_exit": 0,
+    "native_events": 4,
+    "physical_XPC_resources": "UNKNOWN",
+    "stop_complete_ns": 32125790000,
+    "stopped_only_ACK": "COMPLETE",
+    "test_exit": 1,
+    "worker_exit": 0
+  },
+  "ordinary_unit_fix": "Valid, committed 13e4d4f; does not resolve this actual supplied-frame refusal.",
+  "private_QA": {
+    "QA_files": 2457,
+    "artifact_files": 2450,
+    "child_PASS": 311,
+    "outer_PASS": 46
+  },
+  "raw": {
+    "members": 151,
+    "payload_bytes": 16220588,
+    "sha256": "8ad7c0afc338c96bd9a5c21522b3f525ab6386e50a967b51a9cb6014f4198697"
+  },
+  "scope": "DISPOSABLE_ZERO_OFFER_CORRECTED_SHORT_FAILURE_NOT_METRIC_NOT_BASELINE_NO512",
+  "source": {
+    "members": 216,
+    "payload_bytes": 9276421,
+    "sha256": "3f27fbbfac93253155245bd9e5701368e9a6bef162cea20e8c332015f18db759"
+  }
+}
