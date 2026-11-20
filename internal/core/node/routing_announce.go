@@ -1801,8 +1801,13 @@ func (s *Service) dispatchOutboundAnnouncePlaneFrameWithCaps(
 	if target == nil {
 		return false
 	}
+	if !s.enqueueSessionSendItem(target, legacyPeerSendItem(frame)) {
+		return false
+	}
+	// An outbound refusal is before queue admission, so it supplied no
+	// frame to the writer. Inbound sync errors have a different contract.
 	pass.frame(target.connID, frame.RawLine)
-	return s.enqueueSessionSendItem(target, legacyPeerSendItem(frame))
+	return true
 }
 
 // routingCapablePeers returns all peers (outbound sessions AND inbound

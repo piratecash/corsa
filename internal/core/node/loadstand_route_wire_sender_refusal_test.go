@@ -59,7 +59,7 @@ func TestLoadStandRouteWireSenderRefusalMechanisms(t *testing.T) {
 					if sent != (name == "valid") {
 						t.Fatal("original sender result", sent, name)
 					}
-					wantIncomplete := name != "valid" && phase.name == "inside" && name != "missing-session" && name != "missing-v3"
+					wantIncomplete := name != "valid" && phase.name == "inside" && name != "missing-session" && name != "missing-v3" && name != "disconnected" && name != "full-queue"
 					if o.incomplete != wantIncomplete || o.fullPassesPending != 0 {
 						t.Fatal("original observer window/refusal changed", o.incomplete, o.fullPassesPending)
 					}

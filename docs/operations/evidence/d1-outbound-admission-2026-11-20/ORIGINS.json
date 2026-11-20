@@ -1,0 +1,122 @@
+{
+  "RAW/corrected-green-race/01-ordinary.stderr": {
+    "bytes": 0,
+    "path": "/private/tmp/corsa-d1-o1a-outbound-admission-green-race-6830e1fcbb964718b41e8fe2af844864/01-ordinary.stderr",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "RAW/corrected-green-race/01-ordinary.stdout": {
+    "bytes": 77758,
+    "path": "/private/tmp/corsa-d1-o1a-outbound-admission-green-race-6830e1fcbb964718b41e8fe2af844864/01-ordinary.stdout",
+    "sha256": "ed0b79128e027ff66e28f3d0af4fcf9df29f8684f89e75f4f1f6eb9485219db7"
+  },
+  "RAW/corrected-green-race/02-race.stderr": {
+    "bytes": 0,
+    "path": "/private/tmp/corsa-d1-o1a-outbound-admission-green-race-6830e1fcbb964718b41e8fe2af844864/02-race.stderr",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "RAW/corrected-green-race/02-race.stdout": {
+    "bytes": 77817,
+    "path": "/private/tmp/corsa-d1-o1a-outbound-admission-green-race-6830e1fcbb964718b41e8fe2af844864/02-race.stdout",
+    "sha256": "d7f0e8f747db6ed0b4dfc239a213e24f1a3f531d6eecb8b005b9ee848780c7ae"
+  },
+  "RAW/original-red/01-expected-red.stderr": {
+    "bytes": 0,
+    "path": "/private/tmp/corsa-d1-o1a-outbound-admission-unit-2de968d3c4c5429f82895d71ef9a31ec/01-expected-red.stderr",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "RAW/original-red/01-expected-red.stdout": {
+    "bytes": 7941,
+    "path": "/private/tmp/corsa-d1-o1a-outbound-admission-unit-2de968d3c4c5429f82895d71ef9a31ec/01-expected-red.stdout",
+    "sha256": "bf9960eaca4bf5fa8c3a8fed030ca4495142781d58b030d8d8e8d94507ccc079"
+  },
+  "SOURCE/architect/REVIEW.json": {
+    "bytes": 1187,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-outbound-admission-architect-data-v1/REVIEW.json",
+    "sha256": "7db42a8db0195a661fe9ebdd7270320dc351ca729055ad900d86c55760592272"
+  },
+  "SOURCE/controllers/corsa-outbound-admission-green-race.py": {
+    "bytes": 4981,
+    "path": "/private/tmp/corsa-outbound-admission-green-race.py",
+    "sha256": "b9356ba4bfa2288fdaefb9453dc891d8e0e99069111951d85b894a1d5fa8c562"
+  },
+  "SOURCE/controllers/corsa-outbound-admission-unit.py": {
+    "bytes": 4959,
+    "path": "/private/tmp/corsa-outbound-admission-unit.py",
+    "sha256": "a8df1566d36b7e398592469d283d4d766b6f757a26034f5036ff2e83bae5cdd3"
+  },
+  "SOURCE/corrected-green-race/RESULT.json": {
+    "bytes": 4031,
+    "path": "/private/tmp/corsa-d1-o1a-outbound-admission-green-race-6830e1fcbb964718b41e8fe2af844864/RESULT.json",
+    "sha256": "614f9555713f1291b3dda31f2a62266bcb17fb10d5b8ae470d7a03cd4825213a"
+  },
+  "SOURCE/corrected-green-race/REVIEWER-DATA.json": {
+    "bytes": 2426,
+    "path": "/private/tmp/corsa-d1-o1a-outbound-admission-green-race-6830e1fcbb964718b41e8fe2af844864/REVIEWER-DATA.json",
+    "sha256": "2466ebf291fefe1d0024f8e92ba08af28e46ac96bfdd983d9ac744c8e680ac5d"
+  },
+  "SOURCE/corrected-green-race/ROOT-DATA.json": {
+    "bytes": 2007,
+    "path": "/private/tmp/corsa-d1-o1a-outbound-admission-green-race-6830e1fcbb964718b41e8fe2af844864/ROOT-DATA.json",
+    "sha256": "f11c0209a1c7e5dc9df5da4da7879b282636fdffc135ed41343b98bf40321161"
+  },
+  "SOURCE/corrected-green-race/SOURCE-AFTER.json": {
+    "bytes": 250539,
+    "path": "/private/tmp/corsa-d1-o1a-outbound-admission-green-race-6830e1fcbb964718b41e8fe2af844864/SOURCE-AFTER.json",
+    "sha256": "00c9f1f94de24420a8238bfb7d5353bcde76a5b661a1bcfe31af95a8404b0089"
+  },
+  "SOURCE/corrected-green-race/SOURCE-BEFORE.json": {
+    "bytes": 250539,
+    "path": "/private/tmp/corsa-d1-o1a-outbound-admission-green-race-6830e1fcbb964718b41e8fe2af844864/SOURCE-BEFORE.json",
+    "sha256": "00c9f1f94de24420a8238bfb7d5353bcde76a5b661a1bcfe31af95a8404b0089"
+  },
+  "SOURCE/corrected-green-race/overlay.json": {
+    "bytes": 814,
+    "path": "/private/tmp/corsa-d1-o1a-outbound-admission-green-race-6830e1fcbb964718b41e8fe2af844864/overlay.json",
+    "sha256": "3e72882a91f52bcaece436a1094651c4300b7a3e7b0ee534d5bdfb0bdb4a4be7"
+  },
+  "SOURCE/original-red/RESULT.json": {
+    "bytes": 1719,
+    "path": "/private/tmp/corsa-d1-o1a-outbound-admission-unit-2de968d3c4c5429f82895d71ef9a31ec/RESULT.json",
+    "sha256": "96ac3d6a9aaee3ebba60af4ccef2778d59d7e6294688fa54fc8bc77718da95c0"
+  },
+  "SOURCE/original-red/SOURCE-BEFORE.json": {
+    "bytes": 250539,
+    "path": "/private/tmp/corsa-d1-o1a-outbound-admission-unit-2de968d3c4c5429f82895d71ef9a31ec/SOURCE-BEFORE.json",
+    "sha256": "00c9f1f94de24420a8238bfb7d5353bcde76a5b661a1bcfe31af95a8404b0089"
+  },
+  "SOURCE/original-red/overlay.json": {
+    "bytes": 814,
+    "path": "/private/tmp/corsa-d1-o1a-outbound-admission-unit-2de968d3c4c5429f82895d71ef9a31ec/overlay.json",
+    "sha256": "3e72882a91f52bcaece436a1094651c4300b7a3e7b0ee534d5bdfb0bdb4a4be7"
+  },
+  "SOURCE/original-red/red-overlay.json": {
+    "bytes": 302,
+    "path": "/private/tmp/corsa-d1-o1a-outbound-admission-unit-2de968d3c4c5429f82895d71ef9a31ec/red-overlay.json",
+    "sha256": "76b329f52408770f50f3f188b9b07774c21a56b14e0eb63bfc7ada3e7b02012a"
+  },
+  "SOURCE/subject/CHANGE.diff": {
+    "bytes": 5996,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-outbound-admission-fix-v1/CHANGE.diff",
+    "sha256": "ade4131396ad0d3185bc4beb4d4478c05990188eb241c4945294dca5f5206751"
+  },
+  "SOURCE/subject/MANIFEST.json": {
+    "bytes": 856,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-outbound-admission-fix-v1/MANIFEST.json",
+    "sha256": "58f8df45abe9c94acf8be1ae29f2ff2640493855e21913e4b2ae2c2f6e1230b4"
+  },
+  "SOURCE/subject/posts/internal/core/node/loadstand_route_wire_outbound_admission_test.go": {
+    "bytes": 4424,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-outbound-admission-fix-v1/posts/internal/core/node/loadstand_route_wire_outbound_admission_test.go",
+    "sha256": "bf96ec3e114c5ff1dbd49c24fadc19b03406c23ff142116ea439e1da23f65058"
+  },
+  "SOURCE/subject/posts/internal/core/node/loadstand_route_wire_sender_refusal_test.go": {
+    "bytes": 3918,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-outbound-admission-fix-v1/posts/internal/core/node/loadstand_route_wire_sender_refusal_test.go",
+    "sha256": "dd0fdc06587a5340e923c84e27d5925d753cbf67bf7abf945dac53b28558774e"
+  },
+  "SOURCE/subject/posts/internal/core/node/routing_announce.go": {
+    "bytes": 150602,
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-outbound-admission-fix-v1/posts/internal/core/node/routing_announce.go",
+    "sha256": "402162b77f342e38f83179e5b64ea018433bb44f106548b930f0409047fd19d3"
+  }
+}

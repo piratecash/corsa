@@ -1,0 +1,26 @@
+{
+  "corrected-green-race/01-ordinary.stderr": {
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "corrected-green-race/01-ordinary.stdout": {
+    "bytes": 77758,
+    "sha256": "ed0b79128e027ff66e28f3d0af4fcf9df29f8684f89e75f4f1f6eb9485219db7"
+  },
+  "corrected-green-race/02-race.stderr": {
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "corrected-green-race/02-race.stdout": {
+    "bytes": 77817,
+    "sha256": "d7f0e8f747db6ed0b4dfc239a213e24f1a3f531d6eecb8b005b9ee848780c7ae"
+  },
+  "original-red/01-expected-red.stderr": {
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "original-red/01-expected-red.stdout": {
+    "bytes": 7941,
+    "sha256": "bf9960eaca4bf5fa8c3a8fed030ca4495142781d58b030d8d8e8d94507ccc079"
+  }
+}

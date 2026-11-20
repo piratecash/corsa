@@ -1,0 +1,18 @@
+{
+  "Linux_ELF_or_app_executed": false,
+  "guards": "Inbound sync refusal, partial admission, admitted queue drain, clock/window guards, actual byte/digest and reciprocal proof remain strict.",
+  "manifest_sha256": "58f8df45abe9c94acf8be1ae29f2ff2640493855e21913e4b2ae2c2f6e1230b4",
+  "native_2c751_sender_return_site": "UNKNOWN",
+  "ordinary": {
+    "child": 65,
+    "outer": 11
+  },
+  "original_RED": "Five assertion failures on old code; wrapper originally expected four and stopped. Its failure is preserved; only expectation diagnosis changed before two green runs. No identical RED repeat.",
+  "push": false,
+  "race": {
+    "child": 65,
+    "outer": 11
+  },
+  "scope": "OUTBOUND_PRE_ADMISSION_ACCOUNTING_ONLY_NOT_NATIVE_CAUSE_PROOF",
+  "tested_base_commit": "13e4d4f9195c333ee3307b1d55e387b33aa4c677"
+}
