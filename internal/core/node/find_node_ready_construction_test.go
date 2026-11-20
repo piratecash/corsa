@@ -157,7 +157,7 @@ func TestOwnedReadyOriginalStoreAndFinalizationOrderStayExact(t *testing.T) {
 	if err := r.finalize(nil); err == nil {
 		t.Fatal("Ready allowed finalization before Service/store installation")
 	}
-	s := newServiceWithConstruction(cfg, id, nil, nil, productionDatagramConstructor{}, serviceConstruction{bridge: r.bridge, ready: r})
+	s := newServiceWithConstruction(cfg, id, nil, nil, productionDatagramConstructor{}, serviceConstruction{bridge: r.bridge, ready: r, localFindNodeRole: r.localRole})
 	if !r.checked || r.failure != nil || !r.bridge.statisticInstalled {
 		t.Fatal("original preinstall checks missing", r.failure)
 	}

@@ -1,0 +1,95 @@
+{
+  "actual_result_sha256": "380d4339820f9a7e319e3968c11c1b8ad26ca01d74f606b01c2fd088043a6e93",
+  "actual_work": "/private/tmp/corsa-d1-closed-role-release-qa-38bb3119b59b4270a6233e8f9a99623d",
+  "attempt_id": "38bb3119b59b4270a6233e8f9a99623d",
+  "base_commit": "1b97da9a8c581f7a40664aa5b5eb78c59f104f3c",
+  "cleanup": {
+    "confirmed": true,
+    "heavy_lock_absent_at_review": true,
+    "own_processes_absent": true
+  },
+  "commands": {
+    "all_exit_zero": true,
+    "all_original_pid_and_process_groups_absent_at_independent_readback": true,
+    "count": 4,
+    "raw": {
+      "archive.stderr": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "archive.stdout": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "go-version.stderr": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "go-version.stdout": {
+        "bytes": 33,
+        "sha256": "c6f1c8d54aedc3afa72560d934397ad6c33b28f1b4d3546ec53176439b2397d5"
+      },
+      "modules.stderr": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "modules.stdout": {
+        "bytes": 21,
+        "sha256": "b4537ed75f533f993f371954de47e42a793b8e5b0587577de7e27fb3e50696bd"
+      },
+      "release-tests.stderr": {
+        "bytes": 5818,
+        "sha256": "81b0c6e2ecba6e145795e40f72996aac82d46ade14eae19267393d9ac52d2d21"
+      },
+      "release-tests.stdout": {
+        "bytes": 4963,
+        "sha256": "28006f20db71cc510088d8371e0405b29616fbe00cb2220fc19deeb4eab131ec"
+      }
+    },
+    "raw_bytes_total": 10835
+  },
+  "environment": {
+    "CGO_ENABLED": "1",
+    "controller_umask": "077",
+    "hard_network_isolation": false,
+    "hard_source_write_guard": false,
+    "original_inner_SDK_sandbox": "unchanged",
+    "outer_Seatbelt": false,
+    "platform": "darwin/arm64",
+    "release_child_umask": "022, source-bound Popen setting; separate actual environment controls passed",
+    "resource_limits": "soft Go controls only; work1800s+cleanup30s, phasefiles6GiB, RAW8MiB",
+    "source_inventory_checked_after_run": true,
+    "toolchain": "Go1.27.4",
+    "work_directory_mode": "0700"
+  },
+  "limitations": [
+    "Ordinary macOS arm64 release-product suite only, not cross-platform binaries or public activation.",
+    "Overlaysim remains explicitly DEFERRED, not PASS; this is not make test-all PASS.",
+    "No individual-test SKIP verdict can be recovered from nonverbose package output.",
+    "Earlier failed attempts and their environment/fixture diagnoses remain separate preserved evidence.",
+    "No release, G2, full D1 or 512 MB admission is granted by this receipt."
+  ],
+  "package_results": {
+    "deferred_not_pass": [
+      "github.com/piratecash/corsa/internal/overlaysim"
+    ],
+    "exact_selected_inventory": 73,
+    "failed_package_completions": 0,
+    "individual_test_skip_counts": "UNKNOWN: unchanged nonverbose release script does not retain individual SKIP events",
+    "package_passes": 51,
+    "packages_with_no_test_files": 22,
+    "unique_exact_completion_for_each_selected_package": true
+  },
+  "review_date": "2026-11-20",
+  "review_role": "REVIEWER",
+  "role_manifest_sha256": "fdd45820d3af22e46101ba3b7e9212cfdf59cfcaa1232b5169e59aba6a90dd7e",
+  "subject": {
+    "current_tree_34_after_hashes_verified": true,
+    "every_initial_source_hash_and_no_extra_files_verified": true,
+    "release_script_sha256": "914d6206800899cd523781aabf42d39391eabdc3ee7694e19cd50fc0ae354983",
+    "reviewed_role_files": 34,
+    "script_unchanged": true,
+    "source_files": 2498
+  },
+  "verdict": "ACCEPTED_ORDINARY_MACOS_RELEASE_PRODUCT_TESTS_OVERLAYSIM_DEFERRED"
+}

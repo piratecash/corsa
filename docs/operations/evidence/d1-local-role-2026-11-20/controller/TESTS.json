@@ -1,0 +1,209 @@
+{
+  "node-new-default": {
+    "package": "./internal/core/node",
+    "tags": [],
+    "tests": [
+      "TestFindNodeLocalRoleConstructionAndProjection",
+      "TestFindNodeF1OnlyTargetAnswersOwnIdentity",
+      "TestFindNodeF1OnlyTargetCannotForwardOrBorrowPeerR",
+      "TestFindNodeResponderForwardsToF1OnlyTargetInbound",
+      "TestFindNodeResponderToF1OnlyTargetOriginalOutboundCM",
+      "TestFindNodeNoF1AndUnprovenClaimsCannotAdmit",
+      "TestFindNodeLocalRoleBoundToOriginalReadyConstruction",
+      "TestFindNodeRoleDoesNotReviveEndedOriginalF1",
+      "TestFindNodeLocalRoleClosedSource",
+      "TestFindNodeLocalRoleSourceControls"
+    ]
+  },
+  "node-regressions-default": {
+    "package": "./internal/core/node",
+    "tags": [],
+    "tests": [
+      "TestD1FindNodeResourceDiagnosticExistingGuardBoundaries",
+      "TestD1FindNodeResourceDiagnosticOrdinaryFactoriesOff",
+      "TestD1FindNodeResourceDiagnosticSourceClosure",
+      "TestD1OriginalInitiatorReadyRelayReadyTargetChain",
+      "TestDegreeStatisticClosedProducerClockProjectionAndWriter",
+      "TestDegreeStatisticConstructorGraphCannotEscapeBeforeOwner",
+      "TestDegreeStatisticGuardRejectsEarlyOverwriteAndClockEscape",
+      "TestFindNodeActualDefaultCapsWithholdSeed",
+      "TestFindNodeOrdinaryConstructorRemainsInactive",
+      "TestFindNodeOriginalProofCanonicalAcceptedAndCM",
+      "TestOwnDMRuntimeClosedOriginalComposition",
+      "TestOwnDMRuntimeRejectsDefaultActivationAndAlternateMint",
+      "TestOwnedAnswerClosedSource",
+      "TestOwnedAnswerSourceControls",
+      "TestOwnedAutomaticEndpointTraceClosedSource",
+      "TestOwnedAutomaticEndpointTraceSourceControls",
+      "TestOwnedBareV2PilotAdvertisementSourceControls",
+      "TestOwnedBareV2PilotClosedTestOnlyAdvertisement",
+      "TestOwnedBareV2PilotStockAdvertisementUnchanged",
+      "TestOwnedFlowClosedSource",
+      "TestOwnedFlowSourceControls",
+      "TestOwnedLocalNodeClosedSource",
+      "TestOwnedLocalNodeRuntimeConstructionDoesNotEnableReady",
+      "TestOwnedLocalNodeSelfRequestUsesOriginalSignedAnswerWriter",
+      "TestOwnedLocalNodeSourceControls",
+      "TestOwnedNodeCutCancellationAndRealEnd",
+      "TestOwnedNodeCutGenuineListenerAndActualCM",
+      "TestOwnedNodeCutOriginalTupleBeforeBuilderAndRuntimeOff",
+      "TestOwnedNodeObservationClosedSource",
+      "TestOwnedNodeObservationSourceControls",
+      "TestOwnedNodeReceiveClosedSource",
+      "TestOwnedNodeReceiveSourceControls",
+      "TestOwnedReadyCancellationAndPanicJoinOriginalLifecycle",
+      "TestOwnedReadyClosedSource",
+      "TestOwnedReadyContactReconciliationCallbackCleanup",
+      "TestOwnedReadyContactReconciliationLoadedRefusal",
+      "TestOwnedReadyContactReconciliationOptionsAndPublicDefaults",
+      "TestOwnedReadyContactReconciliationOriginalTuple",
+      "TestOwnedReadyDecodedHintPreservesOriginalDateAndNoSecondRead",
+      "TestOwnedReadyLoadedInboundCallbackRefusalJoinsOriginal",
+      "TestOwnedReadyLoadedInboundFinalizationRejectsTupleReplacement",
+      "TestOwnedReadyLoadedInboundRecoveryGuardRefusesBeforeSeal",
+      "TestOwnedReadyOriginalStoreAndFinalizationOrderStayExact",
+      "TestOwnedReadyRuntimeFinalizationAndOriginalGenuineCut",
+      "TestOwnedReadySourceControls",
+      "TestOwnedRoundCandidateRuntimeStillConstructing",
+      "TestOwnedRoundLoopIdleLastRequestReachesOriginalWriter",
+      "TestOwnedRoundLoopRefusedProtectedNewcomerClosesEmptyInterval",
+      "TestOwnedTerminalClosedSourceContract",
+      "TestOwnedTerminalGuardRejectsForeignOriginLateBindingAndClockFallback"
+    ]
+  },
+  "node-selected-tagged": {
+    "package": "./internal/core/node",
+    "tags": [
+      "d1_resource_probe"
+    ],
+    "tests": [
+      "TestD1FindNodeResourceDiagnosticActualConstruction",
+      "TestD1FindNodeResourceDiagnosticExistingGuardBoundaries",
+      "TestD1FindNodeResourceDiagnosticOrdinaryFactoriesOff",
+      "TestD1FindNodeResourceDiagnosticSourceClosure",
+      "TestD1FindNodeResourceDiagnosticWrongOwnerAndClosed",
+      "TestD1OriginalInitiatorReadyRelayReadyTargetChain",
+      "TestDegreeStatisticClosedProducerClockProjectionAndWriter",
+      "TestDegreeStatisticConstructorGraphCannotEscapeBeforeOwner",
+      "TestDegreeStatisticGuardRejectsEarlyOverwriteAndClockEscape",
+      "TestFindNodeActualDefaultCapsWithholdSeed",
+      "TestFindNodeF1OnlyTargetAnswersOwnIdentity",
+      "TestFindNodeF1OnlyTargetCannotForwardOrBorrowPeerR",
+      "TestFindNodeLocalRoleBoundToOriginalReadyConstruction",
+      "TestFindNodeLocalRoleClosedSource",
+      "TestFindNodeLocalRoleConstructionAndProjection",
+      "TestFindNodeLocalRoleSourceControls",
+      "TestFindNodeNoF1AndUnprovenClaimsCannotAdmit",
+      "TestFindNodeOrdinaryConstructorRemainsInactive",
+      "TestFindNodeOriginalProofCanonicalAcceptedAndCM",
+      "TestFindNodeResponderForwardsToF1OnlyTargetInbound",
+      "TestFindNodeResponderToF1OnlyTargetOriginalOutboundCM",
+      "TestFindNodeRoleDoesNotReviveEndedOriginalF1",
+      "TestOwnDMRuntimeClosedOriginalComposition",
+      "TestOwnDMRuntimeRejectsDefaultActivationAndAlternateMint",
+      "TestOwnedAnswerClosedSource",
+      "TestOwnedAnswerSourceControls",
+      "TestOwnedAutomaticEndpointTraceClosedSource",
+      "TestOwnedAutomaticEndpointTraceSourceControls",
+      "TestOwnedBareV2PilotAdvertisementSourceControls",
+      "TestOwnedBareV2PilotClosedTestOnlyAdvertisement",
+      "TestOwnedBareV2PilotStockAdvertisementUnchanged",
+      "TestOwnedFlowClosedSource",
+      "TestOwnedFlowSourceControls",
+      "TestOwnedLocalNodeClosedSource",
+      "TestOwnedLocalNodeRuntimeConstructionDoesNotEnableReady",
+      "TestOwnedLocalNodeSelfRequestUsesOriginalSignedAnswerWriter",
+      "TestOwnedLocalNodeSourceControls",
+      "TestOwnedNodeCutCancellationAndRealEnd",
+      "TestOwnedNodeCutGenuineListenerAndActualCM",
+      "TestOwnedNodeCutOriginalTupleBeforeBuilderAndRuntimeOff",
+      "TestOwnedNodeObservationClosedSource",
+      "TestOwnedNodeObservationSourceControls",
+      "TestOwnedNodeReceiveClosedSource",
+      "TestOwnedNodeReceiveSourceControls",
+      "TestOwnedReadyCancellationAndPanicJoinOriginalLifecycle",
+      "TestOwnedReadyClosedSource",
+      "TestOwnedReadyContactReconciliationCallbackCleanup",
+      "TestOwnedReadyContactReconciliationLoadedRefusal",
+      "TestOwnedReadyContactReconciliationOptionsAndPublicDefaults",
+      "TestOwnedReadyContactReconciliationOriginalTuple",
+      "TestOwnedReadyDecodedHintPreservesOriginalDateAndNoSecondRead",
+      "TestOwnedReadyLoadedInboundCallbackRefusalJoinsOriginal",
+      "TestOwnedReadyLoadedInboundFinalizationRejectsTupleReplacement",
+      "TestOwnedReadyLoadedInboundRecoveryGuardRefusesBeforeSeal",
+      "TestOwnedReadyOriginalStoreAndFinalizationOrderStayExact",
+      "TestOwnedReadyRuntimeFinalizationAndOriginalGenuineCut",
+      "TestOwnedReadySourceControls",
+      "TestOwnedRoundCandidateRuntimeStillConstructing",
+      "TestOwnedRoundLoopIdleLastRequestReachesOriginalWriter",
+      "TestOwnedRoundLoopRefusedProtectedNewcomerClosesEmptyInterval",
+      "TestOwnedTerminalClosedSourceContract",
+      "TestOwnedTerminalGuardRejectsForeignOriginLateBindingAndClockFallback"
+    ]
+  },
+  "findnode-guards": {
+    "package": "./internal/core/findnode",
+    "tags": [],
+    "tests": [
+      "TestCandidateInactiveCallGraphAndInventories",
+      "TestCandidateSourceCompanionClosedRoots",
+      "TestCandidateSourceTypeReferencesAndDeclarations",
+      "TestCandidateCapacityClosedRootsAndLogicalBoundary",
+      "TestCandidateCapacityGuardRejectsActivationAndMissingFinalCheck"
+    ]
+  },
+  "bridge-guards": {
+    "package": "./internal/core/findnodebridge",
+    "tags": [],
+    "tests": [
+      "TestDomainClosedSourceContract",
+      "TestDomainGuardRejectsCriticalOwnershipEscapes",
+      "TestDomainHasNoExistingProductionImporter",
+      "TestDomainGuardRejectsLateCommitLeaseAllocation"
+    ]
+  },
+  "c2driver-guard": {
+    "package": "./internal/testutil/loadstand/c2driver",
+    "tags": [],
+    "tests": [
+      "TestStockSourceClosure"
+    ]
+  },
+  "app-binding-tagged": {
+    "package": "./internal/app/node",
+    "tags": [
+      "d1_resource_probe"
+    ],
+    "tests": [
+      "TestD1FindNodeResourceDiagnosticAppBinding"
+    ]
+  },
+  "node-read-offer-default": {
+    "package": "./internal/core/node",
+    "tags": [],
+    "tests": [
+      "TestOwnedReceiveGenuineOriginalPointAndSingleUse",
+      "TestOwnedReceiveStrictParserReturnsNoPartialIngress",
+      "TestOwnedReceiveForeignOwnerAndEndedOriginalRefuse",
+      "TestOwnedReceiveCancellationRetiresOriginalEnvelope",
+      "TestOwnedInboundReadToOfferRetainsOriginalRow",
+      "TestOwnedOutboundReadToOfferUsesActualCMAcceptedOriginal",
+      "TestOwnedOutboundReceivePointPrecedesOriginalAdmissionMutexWait"
+    ]
+  },
+  "node-read-offer-tagged": {
+    "package": "./internal/core/node",
+    "tags": [
+      "d1_resource_probe"
+    ],
+    "tests": [
+      "TestOwnedReceiveGenuineOriginalPointAndSingleUse",
+      "TestOwnedReceiveStrictParserReturnsNoPartialIngress",
+      "TestOwnedReceiveForeignOwnerAndEndedOriginalRefuse",
+      "TestOwnedReceiveCancellationRetiresOriginalEnvelope",
+      "TestOwnedInboundReadToOfferRetainsOriginalRow",
+      "TestOwnedOutboundReadToOfferUsesActualCMAcceptedOriginal",
+      "TestOwnedOutboundReceivePointPrecedesOriginalAdmissionMutexWait"
+    ]
+  }
+}

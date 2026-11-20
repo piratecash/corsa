@@ -180,7 +180,7 @@ func TestOwnedReadyContactReconciliationOriginalTuple(t *testing.T) {
 	r := readyTestPrepare(t, cfg, id)
 	r.options = findNodeReadyOptions{loadedInbound: true, contactReconciliation: true}
 	r.originalOptions = r.options
-	s := newServiceWithConstruction(cfg, id, nil, nil, productionDatagramConstructor{}, serviceConstruction{record: recordAdmissionConstruction{classes: recordAdmissionImmediateK, kSource: contactRecordReconciliationSource}, bridge: r.bridge, ready: r}, inboundPinClock{elapsed: clock.read})
+	s := newServiceWithConstruction(cfg, id, nil, nil, productionDatagramConstructor{}, serviceConstruction{record: recordAdmissionConstruction{classes: recordAdmissionImmediateK, kSource: contactRecordReconciliationSource}, bridge: r.bridge, ready: r, localFindNodeRole: r.localRole}, inboundPinClock{elapsed: clock.read})
 	if r.failure != nil || !r.checked || !r.bindings(s) || r.finalized {
 		t.Fatal("original pre-finalize K tuple missing", r.failure)
 	}

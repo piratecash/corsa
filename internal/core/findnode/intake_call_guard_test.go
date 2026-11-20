@@ -21,7 +21,7 @@ func candidateDiagnosticImporter(rel string, raw []byte) bool {
 	var want string
 	switch rel {
 	case "internal/core/node/find_node_resource_diagnostic.go":
-		want = "63112a5bba4b8e2832680b47ae904bdf50f64806f5c707628c3a6604f9dfe549"
+		want = "e97c7f60a858b6380569d957646ab4338cc16a1bd638dcb25494924b66e91556"
 	case "internal/core/node/find_node_membership_checkpoint.go":
 		want = "39209defff20031f7f093ec2bd86c2c956e105b3699fa70a8963b522290186d8"
 	default:

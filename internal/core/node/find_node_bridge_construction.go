@@ -13,6 +13,7 @@ import (
 )
 
 type serviceConstruction struct {
+	localFindNodeRole              findNodeLocalRole
 	k3Advertised                   *k3AdvertisedRequest
 	pinMembership                  *pinMembershipRequest
 	k3Registered                   *k3RegisteredRequest
@@ -29,8 +30,9 @@ type serviceConstruction struct {
 }
 
 type findNodeBridgeProfile struct {
-	Capture findNodeOwnedCaptureProfile
-	Intake  findnode.DormantIntakeProfile
+	LocalRole findNodeLocalRole
+	Capture   findNodeOwnedCaptureProfile
+	Intake    findnode.DormantIntakeProfile
 }
 
 // Distinct unused full-cut root. The original tuple precedes FIRST Service;

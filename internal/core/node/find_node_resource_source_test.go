@@ -21,7 +21,7 @@ import (
 )
 
 func qualifiedD1DiagnosticSource(raw []byte) bool {
-	return bytes.HasPrefix(raw, []byte("//go:build d1_resource_probe\n\npackage node\n")) && fmt.Sprintf("%x", sha256.Sum256(raw)) == "63112a5bba4b8e2832680b47ae904bdf50f64806f5c707628c3a6604f9dfe549"
+	return bytes.HasPrefix(raw, []byte("//go:build d1_resource_probe\n\npackage node\n")) && fmt.Sprintf("%x", sha256.Sum256(raw)) == "e97c7f60a858b6380569d957646ab4338cc16a1bd638dcb25494924b66e91556"
 }
 
 // Finite repository Source closure. No claim about arbitrary unsafe/dynamic
@@ -183,7 +183,9 @@ func TestD1FindNodeResourceDiagnosticOrdinaryFactoriesOff(t *testing.T) {
 	stock := NewService(makeConfig(), id, nil)
 	t.Cleanup(func() { stock.runCancel(); stock.closeBackgroundAdmission(); stock.WaitBackground() })
 	cfg := makeConfig()
-	r, err := prepareFindNodeReadyConstruction(cfg, id, ownedCutProfile(), findnode.SigningProfile{NodeSpacing: 250000000, MaxReservations: 4})
+	profile := ownedCutProfile()
+	profile.LocalRole = findNodeRoleOff
+	r, err := prepareFindNodeReadyConstruction(cfg, id, profile, findnode.SigningProfile{NodeSpacing: 250000000, MaxReservations: 4})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -194,8 +196,8 @@ func TestD1FindNodeResourceDiagnosticOrdinaryFactoriesOff(t *testing.T) {
 	}
 	for _, s := range []*Service{stock, ready} {
 		for _, name := range s.nodeHelloFrame().Capabilities {
-			if name == string(domain.CapOverlayFindNodeV1) {
-				t.Fatal("ordinary factory advertised F1")
+			if name == string(domain.CapOverlayFindNodeV1) || name == string(domain.CapOverlayResponderV1) {
+				t.Fatal("ordinary factory advertised F1/R")
 			}
 		}
 	}

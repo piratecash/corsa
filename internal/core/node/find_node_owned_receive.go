@@ -137,6 +137,12 @@ func (s *Service) dispatchOwnedFindNodeReceive(receipt ownedFindNodeReceive) err
 	if err != nil {
 		return err
 	}
+	selfTarget := s.identity != nil && ingress.request.Target == domain.PeerIdentityFromWire(s.identity.Address)
+	// Refuse non-Responder forwarding before the full registry/capture scan.
+	// Peer R is deliberately irrelevant: F1-only clients may ask and answer.
+	if s.localFindNodeRole == findNodeRoleOff || (!selfTarget && s.localFindNodeRole != findNodeRoleResponder) {
+		return findnode.ErrUnauthenticated
+	}
 	observation, err := s.captureOwnedFindNodeObservation(s.runCtx)
 	if err != nil {
 		return err
@@ -144,7 +150,7 @@ func (s *Service) dispatchOwnedFindNodeReceive(receipt ownedFindNodeReceive) err
 	if observation.owner != ingress.capture {
 		return findnode.ErrUnauthenticated
 	}
-	if s.identity != nil && ingress.request.Target == domain.PeerIdentityFromWire(s.identity.Address) {
+	if selfTarget {
 		return s.dispatchOwnedFindNodeLocalTarget(ingress, observation)
 	}
 	target := findnode.Session{}

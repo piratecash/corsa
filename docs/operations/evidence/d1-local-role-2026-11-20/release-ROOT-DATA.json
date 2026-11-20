@@ -1,0 +1,17 @@
+{
+  "status": "ROOT_RELEASE_DATA_ACCEPTED",
+  "result_sha256": "380d4339820f9a7e319e3968c11c1b8ad26ca01d74f606b01c2fd088043a6e93",
+  "selected_packages": 73,
+  "tested_packages": 51,
+  "no_test_packages": 22,
+  "deferred": [
+    "github.com/piratecash/corsa/internal/overlaysim"
+  ],
+  "source_files": 2498,
+  "subject_role_files": 34,
+  "commands": 4,
+  "source_unchanged": true,
+  "cleanup": true,
+  "individual_skip_accounting": "not available from unchanged nonverbose script",
+  "scope": "nativeDarwinarm64 CGO1 ordinary trusted tests; no outer kernel network/source-write sandbox; original inner SDK sandbox unchanged"
+}

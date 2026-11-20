@@ -66,8 +66,9 @@ func NewD1FindNodeResourceDiagnostic(cfg config.Node, id *identity.Identity, bus
 		}
 	}
 	profile := findNodeBridgeProfile{
-		Capture: findNodeOwnedCaptureProfile{Degree: degreeProfile{MaxActive: 2}, Priority: findNodePriorityProfile{MaxMembers: 2, MaxRegistryVisits: 4}},
-		Intake:  findnode.DormantIntakeProfile{Timing: findnode.TimingProfile{Target: 2 * time.Second, Network: 2 * time.Second, Runtime: time.Second}, Round: 100 * time.Millisecond, Slack: 100 * time.Millisecond, InitialTokens: 4},
+		LocalRole: findNodeRoleResponder,
+		Capture:   findNodeOwnedCaptureProfile{Degree: degreeProfile{MaxActive: 2}, Priority: findNodePriorityProfile{MaxMembers: 2, MaxRegistryVisits: 4}},
+		Intake:    findnode.DormantIntakeProfile{Timing: findnode.TimingProfile{Target: 2 * time.Second, Network: 2 * time.Second, Runtime: time.Second}, Round: 100 * time.Millisecond, Slack: 100 * time.Millisecond, InitialTokens: 4},
 	}
 	r, err := prepareFindNodeReadyConstruction(cfg, id, profile,
 		findnode.SigningProfile{NodeSpacing: 250 * time.Millisecond, MaxReservations: 8},
@@ -83,8 +84,6 @@ func NewD1FindNodeResourceDiagnostic(cfg config.Node, id *identity.Identity, bus
 		r.cleanup()
 		return nil, nil, findnode.ErrNotReady
 	}
-	// Selection precedes escape and any handshake; ordinary construction is off.
-	s.ownedFindNodeAdvertiseTest = true
 	c := s.bridgeCapture
 	readout := &D1FindNodeResourceReadout{service: s, capture: c, captureValue: *c, adapter: s.findNode,
 		terminal: c.terminal, publisher: c.terminal.publisher, owner: s.degree, token: s.proofToken,

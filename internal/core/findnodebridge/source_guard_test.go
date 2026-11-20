@@ -494,7 +494,7 @@ func TestDomainHasNoExistingProductionImporter(t *testing.T) {
 					if err != nil {
 						return err
 					}
-					if !bytes.HasPrefix(body, []byte("//go:build d1_resource_probe\n\npackage node\n")) || fmt.Sprintf("%x", sha256.Sum256(body)) != "63112a5bba4b8e2832680b47ae904bdf50f64806f5c707628c3a6604f9dfe549" {
+					if !bytes.HasPrefix(body, []byte("//go:build d1_resource_probe\n\npackage node\n")) || fmt.Sprintf("%x", sha256.Sum256(body)) != "e97c7f60a858b6380569d957646ab4338cc16a1bd638dcb25494924b66e91556" {
 						t.Error("diagnostic importer exact tag/body changed")
 					}
 				}

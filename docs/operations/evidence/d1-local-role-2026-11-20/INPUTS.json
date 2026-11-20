@@ -1,0 +1,378 @@
+{
+  "base_commit": "1b97da9a8c581f7a40664aa5b5eb78c59f104f3c",
+  "base_tar_sha256": "f644f56079f73e4edc06c7187cbfaa87d2370baf32a46e3d3d3054f1ce7fe90a",
+  "role_manifest_sha256": "fdd45820d3af22e46101ba3b7e9212cfdf59cfcaa1232b5169e59aba6a90dd7e",
+  "role": {
+    "base_commit": "1b97da9a8c581f7a40664aa5b5eb78c59f104f3c",
+    "scope": "CLOSED directional role only; ordinary factories Off; 18a section2/G2 public wire semantics explicitly pending",
+    "files": {
+      "internal/core/findnode/intake_call_guard_test.go": {
+        "before_sha256": "8bae6ae82945ed90db800c2ce4b1b5f362961853d0b7d959e7a928de00a268c1",
+        "after_sha256": "273a7e4b0110d7fe3bd74220e15263805eda1e3fbe2193e952f7346cffafe5cd"
+      },
+      "internal/core/findnodebridge/source_guard_test.go": {
+        "before_sha256": "bd67fa7f57435e4a5595277d1db91cf194b6864aa8cb141f45af106ee8f6c3c0",
+        "after_sha256": "058267cc25823598d4b255b2d058c7df91cddc81366b4bd74600486197f744bc"
+      },
+      "internal/core/node/capabilities.go": {
+        "before_sha256": "add8c0b09f9bba087c1d5e99f0d3d7fdcb350407c1be4bb7a1843742c1cee4a3",
+        "after_sha256": "78d8d37d7afa6fb5ca4cc1b77cd45b9ee306d1c1f05991aa1ea3aa152fff8137"
+      },
+      "internal/core/node/find_node_automatic_endpoint_trace_guard_test.go": {
+        "before_sha256": "116e12211797559195e49aea65f98ef7109c88ab62f7119ecdcab59300e0da61",
+        "after_sha256": "ccbf1323397840c304dcc32b562ddbfe581c209389179e9524c313b42c401d35"
+      },
+      "internal/core/node/find_node_bare_v2_pilot_test.go": {
+        "before_sha256": "97f2c98deb6fee957991ed99e9e28dfc782288b10c92e4fb69b0f4e47eb168aa",
+        "after_sha256": "fdea7551b04ea3ce9c730044ffce08bb92f6eee383357b921d26eec7d2e96471"
+      },
+      "internal/core/node/find_node_bridge_capture_guard_test.go": {
+        "before_sha256": "0435a1a2bcc54a0125ce66a23c0ba330cd3f510dd7796b3ae14dfe92df2661dc",
+        "after_sha256": "b5775f4f3b4d40abad52a5f26ce279bec11ae5d57656dceb45d3715b08815a7b"
+      },
+      "internal/core/node/find_node_bridge_construction.go": {
+        "before_sha256": "09d857b53409deb6a9d2be2a2ba6a04c14d212ea0e1d7dec7415646a24e3878e",
+        "after_sha256": "8aea4067463cb259a8829b41d6bd18e58c920927f90f84fb2a0187c5d03762be"
+      },
+      "internal/core/node/find_node_connection_test.go": {
+        "before_sha256": "7fecf26041a69ab6f3d52e25c3a85fb27981a45c926cd8ef30085282b1a1d6a4",
+        "after_sha256": "60bec39ccef2551e770a08668f5ac1411c069468eaeb50a2ed5caadaef7c8b41"
+      },
+      "internal/core/node/find_node_degree_terminal_bridge_guard_test.go": {
+        "before_sha256": "5f49f74024effa3ab5e4ccb19efd2a5ed34b05c75644fb675e8bf6e6cd9316c6",
+        "after_sha256": "b1b8338c45113d19db1df002adcaaa3008166d8bae9d6f75c4e7cd565160b966"
+      },
+      "internal/core/node/find_node_local_role.go": {
+        "before_sha256": null,
+        "after_sha256": "783cd95a4c74a9e0461c5befef72da6b5ed33bc2ace1b9376d3d3df567d4b466"
+      },
+      "internal/core/node/find_node_local_role_guard_test.go": {
+        "before_sha256": null,
+        "after_sha256": "3a060b0088e3d1c40c557051d0fe6fa5a5ad0f23c9e2093f5895351b537a2c3c"
+      },
+      "internal/core/node/find_node_local_role_test.go": {
+        "before_sha256": null,
+        "after_sha256": "0567e7abef10c70ff0b568d86edd123a1d3230a6e46068f4a8e65cbf134cca81"
+      },
+      "internal/core/node/find_node_owned_answer_guard_test.go": {
+        "before_sha256": "68832ad7a5b7921c411141eae45bc81f41189c1c0540536097392fd801f55cf8",
+        "after_sha256": "dd063d7085f95142476ca0caa79b87f721c85dbb369fa6b7c4025e8841286d27"
+      },
+      "internal/core/node/find_node_owned_cut_test.go": {
+        "before_sha256": "3e7aee40b313eb7aeb611c7eaa5080e28fc5aeb30c293d0684cb0e6efd42b47a",
+        "after_sha256": "c6e08de2501f7c58e2de061c8ebfce9c2e2f7ed1644000f044112350f69c865c"
+      },
+      "internal/core/node/find_node_owned_flow_guard_test.go": {
+        "before_sha256": "82f548f5748552b5cbb3e6a07db1d7bceec28e09f101ac1055ca0903d7551f49",
+        "after_sha256": "ef7ea9bf70af5939602b2d1346de0e997bc4b5fd96a6c518b2fe677ceace7325"
+      },
+      "internal/core/node/find_node_owned_local_target_guard_test.go": {
+        "before_sha256": "aa3ee1f7f10ddf486f97bc956fb4b448cd6154bfa14c65fd445f834b0b7614fb",
+        "after_sha256": "29c49e574161b7b367941357ed9268df01908b6b47b488bf03f5149e40b3bb49"
+      },
+      "internal/core/node/find_node_owned_local_target_test.go": {
+        "before_sha256": "140dabedca5bdc705a5108bb8d0874e40265ba33e943a95656f55143fab5cc1e",
+        "after_sha256": "79fea29a9b932505696c47cd423f042efc9a92c5abb17a906bf79ce29419174e"
+      },
+      "internal/core/node/find_node_owned_receive.go": {
+        "before_sha256": "74305a5ace9ed0a3244ea03521ea293372fed406b32b04fabcd55a8bb1353a6f",
+        "after_sha256": "90106224706f71d3a660a2e5d3ef6a77ae5357c1f38e4a110e938cc02b695e51"
+      },
+      "internal/core/node/find_node_owned_receive_guard_test.go": {
+        "before_sha256": "47fb3a028481d0be3ef9f31f3899532c22f13049924308d94c377b3ecfd6e66f",
+        "after_sha256": "c3c85649c46f75a97c1ea7d50c65b24861c6d32dc8c70be6e97390442aa8d4de"
+      },
+      "internal/core/node/find_node_owned_round_loop_test.go": {
+        "before_sha256": "7c2b8cfb464d525819a52de7af16ae9495ad518ec2e77733e7c6899306bed991",
+        "after_sha256": "305cc993e471436a0a587add32bbd7f08f0a6366eaf09cbbaedea8b268b53451"
+      },
+      "internal/core/node/find_node_ready_construction.go": {
+        "before_sha256": "928f01bab660f066126117dee1b756869ad323b493fcdc83a0a53694db53f6c4",
+        "after_sha256": "bddfb4bb52e603d57769e55fa0fc4f86a4dec0ee5175579e56959d19c617c9f8"
+      },
+      "internal/core/node/find_node_ready_construction_guard_test.go": {
+        "before_sha256": "846151104a7118bf5bd7075b2db1447f223e1e8eb34efea5f9950c207bb4baa7",
+        "after_sha256": "9489704e5c8ceca096cd7168e542ea9176a60eb4195c03bcab5c7322d56865dc"
+      },
+      "internal/core/node/find_node_ready_construction_test.go": {
+        "before_sha256": "2bc3e5a0576f41ca2ed327b666610fb264c06e6ae4f93ae50ee705803aaa8f97",
+        "after_sha256": "4774575fdf3e8569ec8a01ff607f699bc0bd73669571e4103b97062465811e81"
+      },
+      "internal/core/node/find_node_ready_contact_reconciliation_test.go": {
+        "before_sha256": "9516e29649f10f65413ddd8af35b4ec906715939254c89a7c64eb0214750a3d8",
+        "after_sha256": "b3821712008843c3fa1b7e5dfd0f51eac306ff76122efe24b8874a7bfaad12bf"
+      },
+      "internal/core/node/find_node_ready_inbound_test.go": {
+        "before_sha256": "463e64b451e27b64516d80008953156887bef0df8425920415900c82264b4dce",
+        "after_sha256": "45585658a2c0e5981e29cb891c637b0aba358d0047448c9ba66b17daf1af3042"
+      },
+      "internal/core/node/find_node_ready_three_node_chain_test.go": {
+        "before_sha256": "b7bace16866c2aba59dd26b4de35bf17ae13483b5f011954f21602f45ad2a839",
+        "after_sha256": "ae8ef4ba9a180fb537e94221c911bb17931a50798b41847988b49f655056c557"
+      },
+      "internal/core/node/find_node_resource_diagnostic.go": {
+        "before_sha256": "63112a5bba4b8e2832680b47ae904bdf50f64806f5c707628c3a6604f9dfe549",
+        "after_sha256": "e97c7f60a858b6380569d957646ab4338cc16a1bd638dcb25494924b66e91556"
+      },
+      "internal/core/node/find_node_resource_source_test.go": {
+        "before_sha256": "30a328111ae34f4ac8cc8482bdf143cc81bbbe0e7eac8af6d63f0f343a9a5270",
+        "after_sha256": "97f046332ed71091e650915fc3a2848091169a98aa235172f6ee0d1b6ab075ca"
+      },
+      "internal/core/node/identity_pin_inbound_producer_guard_test.go": {
+        "before_sha256": "56ea08b1012e622e387d56619eb143aa33a61aa807cf8fabd6f550352a3946ca",
+        "after_sha256": "54ef5d5541c2e52ed5bcefaf1b087680fb0c70d12318871f76875ceabd90bff3"
+      },
+      "internal/core/node/identity_pin_own_dm_runtime_guard_test.go": {
+        "before_sha256": "2be40ac5278722972f15ce5bd05fb7ff943ec75917afed2c422b2b29f0d1026f",
+        "after_sha256": "e1c08f1aa3c48442fc47fdb9119b36f0c87576ac648e6d04530ce7ee1caf1cb2"
+      },
+      "internal/core/node/peer_state_degree_statistic_test.go": {
+        "before_sha256": "e510e707434b95854066b86d91b8183536dcceb41e7c3929f686e96bf4e93556",
+        "after_sha256": "462af6c423d75c6b2a9bcdc5d1aeb9a87b36daa815c81e34938218db631e64b1"
+      },
+      "internal/core/node/service.go": {
+        "before_sha256": "27d9d075252315c93ab2aba1c42609dce41707568305e86436c8fb6adb0f9448",
+        "after_sha256": "db3c6ab49afae46703dae27a18d8f8a3cc960a0405c6c98949dd94b2babf114f"
+      },
+      "internal/testutil/loadstand/c2driver/main_test.go": {
+        "before_sha256": "a9fd5bfa5b0deeebac50d2d426c097374d5f100f5cc35cdf4533b378c9fc99a9",
+        "after_sha256": "5a3fcf9bc438bc652bbbb705d4f70f660d8a53604b61ad66d1f16ab5e5d98a11"
+      },
+      "internal/core/node/find_node_owned_receive_test.go": {
+        "before_sha256": "0fedc1d82bc80dce1cb88312cf14dafdf090896f2273d744f57160ebf9ef6c1f",
+        "after_sha256": "2c2409e55a4f8239f0bb8372b83b8fd013827ff8e32d720f72a61ef892c23c8e"
+      }
+    },
+    "new_tests": [
+      "TestFindNodeLocalRoleConstructionAndProjection",
+      "TestFindNodeF1OnlyTargetAnswersOwnIdentity",
+      "TestFindNodeF1OnlyTargetCannotForwardOrBorrowPeerR",
+      "TestFindNodeResponderForwardsToF1OnlyTargetInbound",
+      "TestFindNodeResponderToF1OnlyTargetOriginalOutboundCM",
+      "TestFindNodeNoF1AndUnprovenClaimsCannotAdmit",
+      "TestFindNodeLocalRoleBoundToOriginalReadyConstruction",
+      "TestFindNodeRoleDoesNotReviveEndedOriginalF1",
+      "TestFindNodeLocalRoleClosedSource",
+      "TestFindNodeLocalRoleSourceControls"
+    ],
+    "QA": "v3 NOT_RUN; v2 selected133 PASS; full release found two additional old fixture failures",
+    "tracked_applied": false,
+    "parent_manifest_sha256": "b64befdcb32d2974066a2e5c41c147af93e4fb30184c91e9773112360b37e607",
+    "parent_QA_failure": "405a30f19c0d4dd9bf68dd5ac33f576c: new10+19childrenPASS; regression48PASS; stockOfffixture/N1countFAIL preserved",
+    "delta_sha256": "f3f612bef14d701d016c44b3a2eb1f6a1bc83484bdbedfae0a045d57454a4677",
+    "parent_diff_sha256": "4501ed2077899939cb2898aa7fc8d15d463c7d9dbc977ac55a811597aa39208d",
+    "parent_release_failure": "v3 release6879a17: ownedReceiveService fixture omitted immutable role, original two forwarding tests ErrUnauthenticated; preserved"
+  },
+  "tests": {
+    "node-new-default": {
+      "package": "./internal/core/node",
+      "tags": [],
+      "tests": [
+        "TestFindNodeLocalRoleConstructionAndProjection",
+        "TestFindNodeF1OnlyTargetAnswersOwnIdentity",
+        "TestFindNodeF1OnlyTargetCannotForwardOrBorrowPeerR",
+        "TestFindNodeResponderForwardsToF1OnlyTargetInbound",
+        "TestFindNodeResponderToF1OnlyTargetOriginalOutboundCM",
+        "TestFindNodeNoF1AndUnprovenClaimsCannotAdmit",
+        "TestFindNodeLocalRoleBoundToOriginalReadyConstruction",
+        "TestFindNodeRoleDoesNotReviveEndedOriginalF1",
+        "TestFindNodeLocalRoleClosedSource",
+        "TestFindNodeLocalRoleSourceControls"
+      ]
+    },
+    "node-regressions-default": {
+      "package": "./internal/core/node",
+      "tags": [],
+      "tests": [
+        "TestD1FindNodeResourceDiagnosticExistingGuardBoundaries",
+        "TestD1FindNodeResourceDiagnosticOrdinaryFactoriesOff",
+        "TestD1FindNodeResourceDiagnosticSourceClosure",
+        "TestD1OriginalInitiatorReadyRelayReadyTargetChain",
+        "TestDegreeStatisticClosedProducerClockProjectionAndWriter",
+        "TestDegreeStatisticConstructorGraphCannotEscapeBeforeOwner",
+        "TestDegreeStatisticGuardRejectsEarlyOverwriteAndClockEscape",
+        "TestFindNodeActualDefaultCapsWithholdSeed",
+        "TestFindNodeOrdinaryConstructorRemainsInactive",
+        "TestFindNodeOriginalProofCanonicalAcceptedAndCM",
+        "TestOwnDMRuntimeClosedOriginalComposition",
+        "TestOwnDMRuntimeRejectsDefaultActivationAndAlternateMint",
+        "TestOwnedAnswerClosedSource",
+        "TestOwnedAnswerSourceControls",
+        "TestOwnedAutomaticEndpointTraceClosedSource",
+        "TestOwnedAutomaticEndpointTraceSourceControls",
+        "TestOwnedBareV2PilotAdvertisementSourceControls",
+        "TestOwnedBareV2PilotClosedTestOnlyAdvertisement",
+        "TestOwnedBareV2PilotStockAdvertisementUnchanged",
+        "TestOwnedFlowClosedSource",
+        "TestOwnedFlowSourceControls",
+        "TestOwnedLocalNodeClosedSource",
+        "TestOwnedLocalNodeRuntimeConstructionDoesNotEnableReady",
+        "TestOwnedLocalNodeSelfRequestUsesOriginalSignedAnswerWriter",
+        "TestOwnedLocalNodeSourceControls",
+        "TestOwnedNodeCutCancellationAndRealEnd",
+        "TestOwnedNodeCutGenuineListenerAndActualCM",
+        "TestOwnedNodeCutOriginalTupleBeforeBuilderAndRuntimeOff",
+        "TestOwnedNodeObservationClosedSource",
+        "TestOwnedNodeObservationSourceControls",
+        "TestOwnedNodeReceiveClosedSource",
+        "TestOwnedNodeReceiveSourceControls",
+        "TestOwnedReadyCancellationAndPanicJoinOriginalLifecycle",
+        "TestOwnedReadyClosedSource",
+        "TestOwnedReadyContactReconciliationCallbackCleanup",
+        "TestOwnedReadyContactReconciliationLoadedRefusal",
+        "TestOwnedReadyContactReconciliationOptionsAndPublicDefaults",
+        "TestOwnedReadyContactReconciliationOriginalTuple",
+        "TestOwnedReadyDecodedHintPreservesOriginalDateAndNoSecondRead",
+        "TestOwnedReadyLoadedInboundCallbackRefusalJoinsOriginal",
+        "TestOwnedReadyLoadedInboundFinalizationRejectsTupleReplacement",
+        "TestOwnedReadyLoadedInboundRecoveryGuardRefusesBeforeSeal",
+        "TestOwnedReadyOriginalStoreAndFinalizationOrderStayExact",
+        "TestOwnedReadyRuntimeFinalizationAndOriginalGenuineCut",
+        "TestOwnedReadySourceControls",
+        "TestOwnedRoundCandidateRuntimeStillConstructing",
+        "TestOwnedRoundLoopIdleLastRequestReachesOriginalWriter",
+        "TestOwnedRoundLoopRefusedProtectedNewcomerClosesEmptyInterval",
+        "TestOwnedTerminalClosedSourceContract",
+        "TestOwnedTerminalGuardRejectsForeignOriginLateBindingAndClockFallback"
+      ]
+    },
+    "node-selected-tagged": {
+      "package": "./internal/core/node",
+      "tags": [
+        "d1_resource_probe"
+      ],
+      "tests": [
+        "TestD1FindNodeResourceDiagnosticActualConstruction",
+        "TestD1FindNodeResourceDiagnosticExistingGuardBoundaries",
+        "TestD1FindNodeResourceDiagnosticOrdinaryFactoriesOff",
+        "TestD1FindNodeResourceDiagnosticSourceClosure",
+        "TestD1FindNodeResourceDiagnosticWrongOwnerAndClosed",
+        "TestD1OriginalInitiatorReadyRelayReadyTargetChain",
+        "TestDegreeStatisticClosedProducerClockProjectionAndWriter",
+        "TestDegreeStatisticConstructorGraphCannotEscapeBeforeOwner",
+        "TestDegreeStatisticGuardRejectsEarlyOverwriteAndClockEscape",
+        "TestFindNodeActualDefaultCapsWithholdSeed",
+        "TestFindNodeF1OnlyTargetAnswersOwnIdentity",
+        "TestFindNodeF1OnlyTargetCannotForwardOrBorrowPeerR",
+        "TestFindNodeLocalRoleBoundToOriginalReadyConstruction",
+        "TestFindNodeLocalRoleClosedSource",
+        "TestFindNodeLocalRoleConstructionAndProjection",
+        "TestFindNodeLocalRoleSourceControls",
+        "TestFindNodeNoF1AndUnprovenClaimsCannotAdmit",
+        "TestFindNodeOrdinaryConstructorRemainsInactive",
+        "TestFindNodeOriginalProofCanonicalAcceptedAndCM",
+        "TestFindNodeResponderForwardsToF1OnlyTargetInbound",
+        "TestFindNodeResponderToF1OnlyTargetOriginalOutboundCM",
+        "TestFindNodeRoleDoesNotReviveEndedOriginalF1",
+        "TestOwnDMRuntimeClosedOriginalComposition",
+        "TestOwnDMRuntimeRejectsDefaultActivationAndAlternateMint",
+        "TestOwnedAnswerClosedSource",
+        "TestOwnedAnswerSourceControls",
+        "TestOwnedAutomaticEndpointTraceClosedSource",
+        "TestOwnedAutomaticEndpointTraceSourceControls",
+        "TestOwnedBareV2PilotAdvertisementSourceControls",
+        "TestOwnedBareV2PilotClosedTestOnlyAdvertisement",
+        "TestOwnedBareV2PilotStockAdvertisementUnchanged",
+        "TestOwnedFlowClosedSource",
+        "TestOwnedFlowSourceControls",
+        "TestOwnedLocalNodeClosedSource",
+        "TestOwnedLocalNodeRuntimeConstructionDoesNotEnableReady",
+        "TestOwnedLocalNodeSelfRequestUsesOriginalSignedAnswerWriter",
+        "TestOwnedLocalNodeSourceControls",
+        "TestOwnedNodeCutCancellationAndRealEnd",
+        "TestOwnedNodeCutGenuineListenerAndActualCM",
+        "TestOwnedNodeCutOriginalTupleBeforeBuilderAndRuntimeOff",
+        "TestOwnedNodeObservationClosedSource",
+        "TestOwnedNodeObservationSourceControls",
+        "TestOwnedNodeReceiveClosedSource",
+        "TestOwnedNodeReceiveSourceControls",
+        "TestOwnedReadyCancellationAndPanicJoinOriginalLifecycle",
+        "TestOwnedReadyClosedSource",
+        "TestOwnedReadyContactReconciliationCallbackCleanup",
+        "TestOwnedReadyContactReconciliationLoadedRefusal",
+        "TestOwnedReadyContactReconciliationOptionsAndPublicDefaults",
+        "TestOwnedReadyContactReconciliationOriginalTuple",
+        "TestOwnedReadyDecodedHintPreservesOriginalDateAndNoSecondRead",
+        "TestOwnedReadyLoadedInboundCallbackRefusalJoinsOriginal",
+        "TestOwnedReadyLoadedInboundFinalizationRejectsTupleReplacement",
+        "TestOwnedReadyLoadedInboundRecoveryGuardRefusesBeforeSeal",
+        "TestOwnedReadyOriginalStoreAndFinalizationOrderStayExact",
+        "TestOwnedReadyRuntimeFinalizationAndOriginalGenuineCut",
+        "TestOwnedReadySourceControls",
+        "TestOwnedRoundCandidateRuntimeStillConstructing",
+        "TestOwnedRoundLoopIdleLastRequestReachesOriginalWriter",
+        "TestOwnedRoundLoopRefusedProtectedNewcomerClosesEmptyInterval",
+        "TestOwnedTerminalClosedSourceContract",
+        "TestOwnedTerminalGuardRejectsForeignOriginLateBindingAndClockFallback"
+      ]
+    },
+    "findnode-guards": {
+      "package": "./internal/core/findnode",
+      "tags": [],
+      "tests": [
+        "TestCandidateInactiveCallGraphAndInventories",
+        "TestCandidateSourceCompanionClosedRoots",
+        "TestCandidateSourceTypeReferencesAndDeclarations",
+        "TestCandidateCapacityClosedRootsAndLogicalBoundary",
+        "TestCandidateCapacityGuardRejectsActivationAndMissingFinalCheck"
+      ]
+    },
+    "bridge-guards": {
+      "package": "./internal/core/findnodebridge",
+      "tags": [],
+      "tests": [
+        "TestDomainClosedSourceContract",
+        "TestDomainGuardRejectsCriticalOwnershipEscapes",
+        "TestDomainHasNoExistingProductionImporter",
+        "TestDomainGuardRejectsLateCommitLeaseAllocation"
+      ]
+    },
+    "c2driver-guard": {
+      "package": "./internal/testutil/loadstand/c2driver",
+      "tags": [],
+      "tests": [
+        "TestStockSourceClosure"
+      ]
+    },
+    "app-binding-tagged": {
+      "package": "./internal/app/node",
+      "tags": [
+        "d1_resource_probe"
+      ],
+      "tests": [
+        "TestD1FindNodeResourceDiagnosticAppBinding"
+      ]
+    },
+    "node-read-offer-default": {
+      "package": "./internal/core/node",
+      "tags": [],
+      "tests": [
+        "TestOwnedReceiveGenuineOriginalPointAndSingleUse",
+        "TestOwnedReceiveStrictParserReturnsNoPartialIngress",
+        "TestOwnedReceiveForeignOwnerAndEndedOriginalRefuse",
+        "TestOwnedReceiveCancellationRetiresOriginalEnvelope",
+        "TestOwnedInboundReadToOfferRetainsOriginalRow",
+        "TestOwnedOutboundReadToOfferUsesActualCMAcceptedOriginal",
+        "TestOwnedOutboundReceivePointPrecedesOriginalAdmissionMutexWait"
+      ]
+    },
+    "node-read-offer-tagged": {
+      "package": "./internal/core/node",
+      "tags": [
+        "d1_resource_probe"
+      ],
+      "tests": [
+        "TestOwnedReceiveGenuineOriginalPointAndSingleUse",
+        "TestOwnedReceiveStrictParserReturnsNoPartialIngress",
+        "TestOwnedReceiveForeignOwnerAndEndedOriginalRefuse",
+        "TestOwnedReceiveCancellationRetiresOriginalEnvelope",
+        "TestOwnedInboundReadToOfferRetainsOriginalRow",
+        "TestOwnedOutboundReadToOfferUsesActualCMAcceptedOriginal",
+        "TestOwnedOutboundReceivePointPrecedesOriginalAdmissionMutexWait"
+      ]
+    }
+  },
+  "helper_sha256": "1e703c9856b281979bb63f12df11a7c5f0d50152001ff8a557f1b44289a669cc",
+  "common_sha256": "2fa268e62081939cd4632b8a8deb59b2fe7d29e859b53769d59f552305a1ef33",
+  "seatbelt": "(version 1)(allow default)(deny network*)(allow network-inbound (local ip \"localhost:*\"))(allow network-outbound (remote ip \"localhost:*\"))(deny file-write* (subpath \"/private/tmp/corsa-d1-closed-role-goqa-603de9b66d0b45e7be054a3e2f8aa56d/source\"))"
+}

@@ -114,7 +114,8 @@ func TestOwnedReceiveCancellationRetiresOriginalEnvelope(t *testing.T) {
 	}
 }
 
-// Tagged FixtureDomain + SAME original roles/intake precede the common builder.
+// Tagged FixtureDomain + SAME original roles/intake and explicit local Responder
+// precede the common builder. The fixture forwards to a different target.
 // No runtime Ready switch, manual positive Session or transport receipt exists.
 func ownedReceiveService(t *testing.T) (*Service, *atomic.Int64) {
 	t.Helper()
@@ -148,7 +149,22 @@ func ownedReceiveService(t *testing.T) (*Service, *atomic.Int64) {
 			service.WaitBackground()
 		}
 	})
-	service = newServiceWithConstruction(cfg, id, nil, nil, productionDatagramConstructor{}, serviceConstruction{bridge: b})
+	service = newServiceWithConstruction(cfg, id, nil, nil, productionDatagramConstructor{}, serviceConstruction{bridge: b, localFindNodeRole: findNodeRoleResponder})
+	if service.localFindNodeRole != findNodeRoleResponder || service.cfg.Type != domain.NodeTypeFull {
+		t.Fatal("closed forwarding fixture lacks its construction-bound Full Responder role")
+	}
+	f1, responder := 0, 0
+	for _, capability := range service.nodeHelloFrame().Capabilities {
+		if capability == string(domain.CapOverlayFindNodeV1) {
+			f1++
+		}
+		if capability == string(domain.CapOverlayResponderV1) {
+			responder++
+		}
+	}
+	if f1 != 1 || responder != 1 {
+		t.Fatal("closed forwarding fixture declaration differs from its original role")
+	}
 	service.routeWithdrawalGracePeriodTest = -1
 	if err := d.Publisher().SealConstruction(); err != nil {
 		t.Fatal(err)

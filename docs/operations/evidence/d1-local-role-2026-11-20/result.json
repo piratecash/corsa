@@ -1,0 +1,757 @@
+{
+  "status": "CLOSED_ROLE_QA_AND_COMPILE_PASS",
+  "error": null,
+  "attempt_id": "603de9b66d0b45e7be054a3e2f8aa56d",
+  "work": "/private/tmp/corsa-d1-closed-role-goqa-603de9b66d0b45e7be054a3e2f8aa56d",
+  "base_commit": "1b97da9a8c581f7a40664aa5b5eb78c59f104f3c",
+  "role_manifest_sha256": "fdd45820d3af22e46101ba3b7e9212cfdf59cfcaa1232b5169e59aba6a90dd7e",
+  "steps": [
+    {
+      "phase": "archive",
+      "argv": [
+        "/usr/bin/git",
+        "archive",
+        "--format=tar",
+        "--output=/private/tmp/corsa-d1-closed-role-goqa-603de9b66d0b45e7be054a3e2f8aa56d/base.tar",
+        "1b97da9a8c581f7a40664aa5b5eb78c59f104f3c"
+      ],
+      "pid": 17561,
+      "exit": 0,
+      "stdout": "/private/tmp/corsa-d1-closed-role-goqa-603de9b66d0b45e7be054a3e2f8aa56d/archive.stdout",
+      "stderr": "/private/tmp/corsa-d1-closed-role-goqa-603de9b66d0b45e7be054a3e2f8aa56d/archive.stderr"
+    },
+    {
+      "phase": "go-version",
+      "argv": [
+        "/usr/local/go/bin/go",
+        "version"
+      ],
+      "pid": 17562,
+      "exit": 0,
+      "stdout": "/private/tmp/corsa-d1-closed-role-goqa-603de9b66d0b45e7be054a3e2f8aa56d/go-version.stdout",
+      "stderr": "/private/tmp/corsa-d1-closed-role-goqa-603de9b66d0b45e7be054a3e2f8aa56d/go-version.stderr"
+    },
+    {
+      "phase": "modules",
+      "argv": [
+        "/usr/local/go/bin/go",
+        "mod",
+        "verify"
+      ],
+      "pid": 17563,
+      "exit": 0,
+      "stdout": "/private/tmp/corsa-d1-closed-role-goqa-603de9b66d0b45e7be054a3e2f8aa56d/modules.stdout",
+      "stderr": "/private/tmp/corsa-d1-closed-role-goqa-603de9b66d0b45e7be054a3e2f8aa56d/modules.stderr"
+    },
+    {
+      "phase": "node-new-default",
+      "argv": [
+        "/usr/local/go/bin/go",
+        "test",
+        "-mod=readonly",
+        "-buildvcs=false",
+        "-p=1",
+        "-parallel=1",
+        "-count=1",
+        "-timeout=300s",
+        "-json",
+        "-run=^(TestFindNodeLocalRoleConstructionAndProjection|TestFindNodeF1OnlyTargetAnswersOwnIdentity|TestFindNodeF1OnlyTargetCannotForwardOrBorrowPeerR|TestFindNodeResponderForwardsToF1OnlyTargetInbound|TestFindNodeResponderToF1OnlyTargetOriginalOutboundCM|TestFindNodeNoF1AndUnprovenClaimsCannotAdmit|TestFindNodeLocalRoleBoundToOriginalReadyConstruction|TestFindNodeRoleDoesNotReviveEndedOriginalF1|TestFindNodeLocalRoleClosedSource|TestFindNodeLocalRoleSourceControls)$",
+        "./internal/core/node"
+      ],
+      "pid": 17564,
+      "exit": 0,
+      "stdout": "/private/tmp/corsa-d1-closed-role-goqa-603de9b66d0b45e7be054a3e2f8aa56d/node-new-default.stdout",
+      "stderr": "/private/tmp/corsa-d1-closed-role-goqa-603de9b66d0b45e7be054a3e2f8aa56d/node-new-default.stderr",
+      "tests": {
+        "passed": [
+          "TestFindNodeLocalRoleClosedSource",
+          "TestFindNodeLocalRoleSourceControls",
+          "TestFindNodeLocalRoleConstructionAndProjection",
+          "TestFindNodeF1OnlyTargetAnswersOwnIdentity",
+          "TestFindNodeF1OnlyTargetCannotForwardOrBorrowPeerR",
+          "TestFindNodeResponderForwardsToF1OnlyTargetInbound",
+          "TestFindNodeResponderToF1OnlyTargetOriginalOutboundCM",
+          "TestFindNodeNoF1AndUnprovenClaimsCannotAdmit",
+          "TestFindNodeLocalRoleBoundToOriginalReadyConstruction",
+          "TestFindNodeRoleDoesNotReviveEndedOriginalF1"
+        ],
+        "child_passes": 19
+      }
+    },
+    {
+      "phase": "node-regressions-default",
+      "argv": [
+        "/usr/local/go/bin/go",
+        "test",
+        "-mod=readonly",
+        "-buildvcs=false",
+        "-p=1",
+        "-parallel=1",
+        "-count=1",
+        "-timeout=300s",
+        "-json",
+        "-run=^(TestD1FindNodeResourceDiagnosticExistingGuardBoundaries|TestD1FindNodeResourceDiagnosticOrdinaryFactoriesOff|TestD1FindNodeResourceDiagnosticSourceClosure|TestD1OriginalInitiatorReadyRelayReadyTargetChain|TestDegreeStatisticClosedProducerClockProjectionAndWriter|TestDegreeStatisticConstructorGraphCannotEscapeBeforeOwner|TestDegreeStatisticGuardRejectsEarlyOverwriteAndClockEscape|TestFindNodeActualDefaultCapsWithholdSeed|TestFindNodeOrdinaryConstructorRemainsInactive|TestFindNodeOriginalProofCanonicalAcceptedAndCM|TestOwnDMRuntimeClosedOriginalComposition|TestOwnDMRuntimeRejectsDefaultActivationAndAlternateMint|TestOwnedAnswerClosedSource|TestOwnedAnswerSourceControls|TestOwnedAutomaticEndpointTraceClosedSource|TestOwnedAutomaticEndpointTraceSourceControls|TestOwnedBareV2PilotAdvertisementSourceControls|TestOwnedBareV2PilotClosedTestOnlyAdvertisement|TestOwnedBareV2PilotStockAdvertisementUnchanged|TestOwnedFlowClosedSource|TestOwnedFlowSourceControls|TestOwnedLocalNodeClosedSource|TestOwnedLocalNodeRuntimeConstructionDoesNotEnableReady|TestOwnedLocalNodeSelfRequestUsesOriginalSignedAnswerWriter|TestOwnedLocalNodeSourceControls|TestOwnedNodeCutCancellationAndRealEnd|TestOwnedNodeCutGenuineListenerAndActualCM|TestOwnedNodeCutOriginalTupleBeforeBuilderAndRuntimeOff|TestOwnedNodeObservationClosedSource|TestOwnedNodeObservationSourceControls|TestOwnedNodeReceiveClosedSource|TestOwnedNodeReceiveSourceControls|TestOwnedReadyCancellationAndPanicJoinOriginalLifecycle|TestOwnedReadyClosedSource|TestOwnedReadyContactReconciliationCallbackCleanup|TestOwnedReadyContactReconciliationLoadedRefusal|TestOwnedReadyContactReconciliationOptionsAndPublicDefaults|TestOwnedReadyContactReconciliationOriginalTuple|TestOwnedReadyDecodedHintPreservesOriginalDateAndNoSecondRead|TestOwnedReadyLoadedInboundCallbackRefusalJoinsOriginal|TestOwnedReadyLoadedInboundFinalizationRejectsTupleReplacement|TestOwnedReadyLoadedInboundRecoveryGuardRefusesBeforeSeal|TestOwnedReadyOriginalStoreAndFinalizationOrderStayExact|TestOwnedReadyRuntimeFinalizationAndOriginalGenuineCut|TestOwnedReadySourceControls|TestOwnedRoundCandidateRuntimeStillConstructing|TestOwnedRoundLoopIdleLastRequestReachesOriginalWriter|TestOwnedRoundLoopRefusedProtectedNewcomerClosesEmptyInterval|TestOwnedTerminalClosedSourceContract|TestOwnedTerminalGuardRejectsForeignOriginLateBindingAndClockFallback)$",
+        "./internal/core/node"
+      ],
+      "pid": 18532,
+      "exit": 0,
+      "stdout": "/private/tmp/corsa-d1-closed-role-goqa-603de9b66d0b45e7be054a3e2f8aa56d/node-regressions-default.stdout",
+      "stderr": "/private/tmp/corsa-d1-closed-role-goqa-603de9b66d0b45e7be054a3e2f8aa56d/node-regressions-default.stderr",
+      "tests": {
+        "passed": [
+          "TestOwnedAutomaticEndpointTraceClosedSource",
+          "TestOwnedAutomaticEndpointTraceSourceControls",
+          "TestOwnedBareV2PilotStockAdvertisementUnchanged",
+          "TestOwnedBareV2PilotClosedTestOnlyAdvertisement",
+          "TestOwnedBareV2PilotAdvertisementSourceControls",
+          "TestOwnedNodeObservationClosedSource",
+          "TestOwnedNodeObservationSourceControls",
+          "TestFindNodeOriginalProofCanonicalAcceptedAndCM",
+          "TestFindNodeActualDefaultCapsWithholdSeed",
+          "TestFindNodeOrdinaryConstructorRemainsInactive",
+          "TestOwnedTerminalClosedSourceContract",
+          "TestOwnedTerminalGuardRejectsForeignOriginLateBindingAndClockFallback",
+          "TestOwnedAnswerClosedSource",
+          "TestOwnedAnswerSourceControls",
+          "TestOwnedNodeCutOriginalTupleBeforeBuilderAndRuntimeOff",
+          "TestOwnedNodeCutGenuineListenerAndActualCM",
+          "TestOwnedNodeCutCancellationAndRealEnd",
+          "TestOwnedFlowClosedSource",
+          "TestOwnedFlowSourceControls",
+          "TestOwnedLocalNodeClosedSource",
+          "TestOwnedLocalNodeSourceControls",
+          "TestOwnedLocalNodeRuntimeConstructionDoesNotEnableReady",
+          "TestOwnedLocalNodeSelfRequestUsesOriginalSignedAnswerWriter",
+          "TestOwnedNodeReceiveClosedSource",
+          "TestOwnedNodeReceiveSourceControls",
+          "TestOwnedRoundLoopIdleLastRequestReachesOriginalWriter",
+          "TestOwnedRoundLoopRefusedProtectedNewcomerClosesEmptyInterval",
+          "TestOwnedRoundCandidateRuntimeStillConstructing",
+          "TestOwnedReadyClosedSource",
+          "TestOwnedReadySourceControls",
+          "TestOwnedReadyRuntimeFinalizationAndOriginalGenuineCut",
+          "TestOwnedReadyCancellationAndPanicJoinOriginalLifecycle",
+          "TestOwnedReadyOriginalStoreAndFinalizationOrderStayExact",
+          "TestOwnedReadyDecodedHintPreservesOriginalDateAndNoSecondRead",
+          "TestOwnedReadyContactReconciliationOriginalTuple",
+          "TestOwnedReadyContactReconciliationCallbackCleanup",
+          "TestOwnedReadyContactReconciliationOptionsAndPublicDefaults",
+          "TestOwnedReadyContactReconciliationLoadedRefusal",
+          "TestOwnedReadyLoadedInboundFinalizationRejectsTupleReplacement",
+          "TestOwnedReadyLoadedInboundCallbackRefusalJoinsOriginal",
+          "TestOwnedReadyLoadedInboundRecoveryGuardRefusesBeforeSeal",
+          "TestD1OriginalInitiatorReadyRelayReadyTargetChain",
+          "TestD1FindNodeResourceDiagnosticSourceClosure",
+          "TestD1FindNodeResourceDiagnosticOrdinaryFactoriesOff",
+          "TestD1FindNodeResourceDiagnosticExistingGuardBoundaries",
+          "TestOwnDMRuntimeClosedOriginalComposition",
+          "TestOwnDMRuntimeRejectsDefaultActivationAndAlternateMint",
+          "TestDegreeStatisticClosedProducerClockProjectionAndWriter",
+          "TestDegreeStatisticConstructorGraphCannotEscapeBeforeOwner",
+          "TestDegreeStatisticGuardRejectsEarlyOverwriteAndClockEscape"
+        ],
+        "child_passes": 130
+      }
+    },
+    {
+      "phase": "node-selected-tagged",
+      "argv": [
+        "/usr/local/go/bin/go",
+        "test",
+        "-mod=readonly",
+        "-buildvcs=false",
+        "-p=1",
+        "-parallel=1",
+        "-count=1",
+        "-timeout=300s",
+        "-json",
+        "-tags=d1_resource_probe",
+        "-run=^(TestD1FindNodeResourceDiagnosticActualConstruction|TestD1FindNodeResourceDiagnosticExistingGuardBoundaries|TestD1FindNodeResourceDiagnosticOrdinaryFactoriesOff|TestD1FindNodeResourceDiagnosticSourceClosure|TestD1FindNodeResourceDiagnosticWrongOwnerAndClosed|TestD1OriginalInitiatorReadyRelayReadyTargetChain|TestDegreeStatisticClosedProducerClockProjectionAndWriter|TestDegreeStatisticConstructorGraphCannotEscapeBeforeOwner|TestDegreeStatisticGuardRejectsEarlyOverwriteAndClockEscape|TestFindNodeActualDefaultCapsWithholdSeed|TestFindNodeF1OnlyTargetAnswersOwnIdentity|TestFindNodeF1OnlyTargetCannotForwardOrBorrowPeerR|TestFindNodeLocalRoleBoundToOriginalReadyConstruction|TestFindNodeLocalRoleClosedSource|TestFindNodeLocalRoleConstructionAndProjection|TestFindNodeLocalRoleSourceControls|TestFindNodeNoF1AndUnprovenClaimsCannotAdmit|TestFindNodeOrdinaryConstructorRemainsInactive|TestFindNodeOriginalProofCanonicalAcceptedAndCM|TestFindNodeResponderForwardsToF1OnlyTargetInbound|TestFindNodeResponderToF1OnlyTargetOriginalOutboundCM|TestFindNodeRoleDoesNotReviveEndedOriginalF1|TestOwnDMRuntimeClosedOriginalComposition|TestOwnDMRuntimeRejectsDefaultActivationAndAlternateMint|TestOwnedAnswerClosedSource|TestOwnedAnswerSourceControls|TestOwnedAutomaticEndpointTraceClosedSource|TestOwnedAutomaticEndpointTraceSourceControls|TestOwnedBareV2PilotAdvertisementSourceControls|TestOwnedBareV2PilotClosedTestOnlyAdvertisement|TestOwnedBareV2PilotStockAdvertisementUnchanged|TestOwnedFlowClosedSource|TestOwnedFlowSourceControls|TestOwnedLocalNodeClosedSource|TestOwnedLocalNodeRuntimeConstructionDoesNotEnableReady|TestOwnedLocalNodeSelfRequestUsesOriginalSignedAnswerWriter|TestOwnedLocalNodeSourceControls|TestOwnedNodeCutCancellationAndRealEnd|TestOwnedNodeCutGenuineListenerAndActualCM|TestOwnedNodeCutOriginalTupleBeforeBuilderAndRuntimeOff|TestOwnedNodeObservationClosedSource|TestOwnedNodeObservationSourceControls|TestOwnedNodeReceiveClosedSource|TestOwnedNodeReceiveSourceControls|TestOwnedReadyCancellationAndPanicJoinOriginalLifecycle|TestOwnedReadyClosedSource|TestOwnedReadyContactReconciliationCallbackCleanup|TestOwnedReadyContactReconciliationLoadedRefusal|TestOwnedReadyContactReconciliationOptionsAndPublicDefaults|TestOwnedReadyContactReconciliationOriginalTuple|TestOwnedReadyDecodedHintPreservesOriginalDateAndNoSecondRead|TestOwnedReadyLoadedInboundCallbackRefusalJoinsOriginal|TestOwnedReadyLoadedInboundFinalizationRejectsTupleReplacement|TestOwnedReadyLoadedInboundRecoveryGuardRefusesBeforeSeal|TestOwnedReadyOriginalStoreAndFinalizationOrderStayExact|TestOwnedReadyRuntimeFinalizationAndOriginalGenuineCut|TestOwnedReadySourceControls|TestOwnedRoundCandidateRuntimeStillConstructing|TestOwnedRoundLoopIdleLastRequestReachesOriginalWriter|TestOwnedRoundLoopRefusedProtectedNewcomerClosesEmptyInterval|TestOwnedTerminalClosedSourceContract|TestOwnedTerminalGuardRejectsForeignOriginLateBindingAndClockFallback)$",
+        "./internal/core/node"
+      ],
+      "pid": 18579,
+      "exit": 0,
+      "stdout": "/private/tmp/corsa-d1-closed-role-goqa-603de9b66d0b45e7be054a3e2f8aa56d/node-selected-tagged.stdout",
+      "stderr": "/private/tmp/corsa-d1-closed-role-goqa-603de9b66d0b45e7be054a3e2f8aa56d/node-selected-tagged.stderr",
+      "tests": {
+        "passed": [
+          "TestOwnedAutomaticEndpointTraceClosedSource",
+          "TestOwnedAutomaticEndpointTraceSourceControls",
+          "TestOwnedBareV2PilotStockAdvertisementUnchanged",
+          "TestOwnedBareV2PilotClosedTestOnlyAdvertisement",
+          "TestOwnedBareV2PilotAdvertisementSourceControls",
+          "TestOwnedNodeObservationClosedSource",
+          "TestOwnedNodeObservationSourceControls",
+          "TestFindNodeOriginalProofCanonicalAcceptedAndCM",
+          "TestFindNodeActualDefaultCapsWithholdSeed",
+          "TestFindNodeOrdinaryConstructorRemainsInactive",
+          "TestOwnedTerminalClosedSourceContract",
+          "TestOwnedTerminalGuardRejectsForeignOriginLateBindingAndClockFallback",
+          "TestFindNodeLocalRoleClosedSource",
+          "TestFindNodeLocalRoleSourceControls",
+          "TestFindNodeLocalRoleConstructionAndProjection",
+          "TestFindNodeF1OnlyTargetAnswersOwnIdentity",
+          "TestFindNodeF1OnlyTargetCannotForwardOrBorrowPeerR",
+          "TestFindNodeResponderForwardsToF1OnlyTargetInbound",
+          "TestFindNodeResponderToF1OnlyTargetOriginalOutboundCM",
+          "TestFindNodeNoF1AndUnprovenClaimsCannotAdmit",
+          "TestFindNodeLocalRoleBoundToOriginalReadyConstruction",
+          "TestFindNodeRoleDoesNotReviveEndedOriginalF1",
+          "TestOwnedAnswerClosedSource",
+          "TestOwnedAnswerSourceControls",
+          "TestOwnedNodeCutOriginalTupleBeforeBuilderAndRuntimeOff",
+          "TestOwnedNodeCutGenuineListenerAndActualCM",
+          "TestOwnedNodeCutCancellationAndRealEnd",
+          "TestOwnedFlowClosedSource",
+          "TestOwnedFlowSourceControls",
+          "TestOwnedLocalNodeClosedSource",
+          "TestOwnedLocalNodeSourceControls",
+          "TestOwnedLocalNodeRuntimeConstructionDoesNotEnableReady",
+          "TestOwnedLocalNodeSelfRequestUsesOriginalSignedAnswerWriter",
+          "TestOwnedNodeReceiveClosedSource",
+          "TestOwnedNodeReceiveSourceControls",
+          "TestOwnedRoundLoopIdleLastRequestReachesOriginalWriter",
+          "TestOwnedRoundLoopRefusedProtectedNewcomerClosesEmptyInterval",
+          "TestOwnedRoundCandidateRuntimeStillConstructing",
+          "TestOwnedReadyClosedSource",
+          "TestOwnedReadySourceControls",
+          "TestOwnedReadyRuntimeFinalizationAndOriginalGenuineCut",
+          "TestOwnedReadyCancellationAndPanicJoinOriginalLifecycle",
+          "TestOwnedReadyOriginalStoreAndFinalizationOrderStayExact",
+          "TestOwnedReadyDecodedHintPreservesOriginalDateAndNoSecondRead",
+          "TestOwnedReadyContactReconciliationOriginalTuple",
+          "TestOwnedReadyContactReconciliationCallbackCleanup",
+          "TestOwnedReadyContactReconciliationOptionsAndPublicDefaults",
+          "TestOwnedReadyContactReconciliationLoadedRefusal",
+          "TestOwnedReadyLoadedInboundFinalizationRejectsTupleReplacement",
+          "TestOwnedReadyLoadedInboundCallbackRefusalJoinsOriginal",
+          "TestOwnedReadyLoadedInboundRecoveryGuardRefusesBeforeSeal",
+          "TestD1OriginalInitiatorReadyRelayReadyTargetChain",
+          "TestD1FindNodeResourceDiagnosticActualConstruction",
+          "TestD1FindNodeResourceDiagnosticWrongOwnerAndClosed",
+          "TestD1FindNodeResourceDiagnosticSourceClosure",
+          "TestD1FindNodeResourceDiagnosticOrdinaryFactoriesOff",
+          "TestD1FindNodeResourceDiagnosticExistingGuardBoundaries",
+          "TestOwnDMRuntimeClosedOriginalComposition",
+          "TestOwnDMRuntimeRejectsDefaultActivationAndAlternateMint",
+          "TestDegreeStatisticClosedProducerClockProjectionAndWriter",
+          "TestDegreeStatisticConstructorGraphCannotEscapeBeforeOwner",
+          "TestDegreeStatisticGuardRejectsEarlyOverwriteAndClockEscape"
+        ],
+        "child_passes": 149
+      }
+    },
+    {
+      "phase": "findnode-guards",
+      "argv": [
+        "/usr/local/go/bin/go",
+        "test",
+        "-mod=readonly",
+        "-buildvcs=false",
+        "-p=1",
+        "-parallel=1",
+        "-count=1",
+        "-timeout=300s",
+        "-json",
+        "-run=^(TestCandidateInactiveCallGraphAndInventories|TestCandidateSourceCompanionClosedRoots|TestCandidateSourceTypeReferencesAndDeclarations|TestCandidateCapacityClosedRootsAndLogicalBoundary|TestCandidateCapacityGuardRejectsActivationAndMissingFinalCheck)$",
+        "./internal/core/findnode"
+      ],
+      "pid": 18623,
+      "exit": 0,
+      "stdout": "/private/tmp/corsa-d1-closed-role-goqa-603de9b66d0b45e7be054a3e2f8aa56d/findnode-guards.stdout",
+      "stderr": "/private/tmp/corsa-d1-closed-role-goqa-603de9b66d0b45e7be054a3e2f8aa56d/findnode-guards.stderr",
+      "tests": {
+        "passed": [
+          "TestCandidateInactiveCallGraphAndInventories",
+          "TestCandidateSourceCompanionClosedRoots",
+          "TestCandidateSourceTypeReferencesAndDeclarations",
+          "TestCandidateCapacityClosedRootsAndLogicalBoundary",
+          "TestCandidateCapacityGuardRejectsActivationAndMissingFinalCheck"
+        ],
+        "child_passes": 2
+      }
+    },
+    {
+      "phase": "bridge-guards",
+      "argv": [
+        "/usr/local/go/bin/go",
+        "test",
+        "-mod=readonly",
+        "-buildvcs=false",
+        "-p=1",
+        "-parallel=1",
+        "-count=1",
+        "-timeout=300s",
+        "-json",
+        "-run=^(TestDomainClosedSourceContract|TestDomainGuardRejectsCriticalOwnershipEscapes|TestDomainHasNoExistingProductionImporter|TestDomainGuardRejectsLateCommitLeaseAllocation)$",
+        "./internal/core/findnodebridge"
+      ],
+      "pid": 18635,
+      "exit": 0,
+      "stdout": "/private/tmp/corsa-d1-closed-role-goqa-603de9b66d0b45e7be054a3e2f8aa56d/bridge-guards.stdout",
+      "stderr": "/private/tmp/corsa-d1-closed-role-goqa-603de9b66d0b45e7be054a3e2f8aa56d/bridge-guards.stderr",
+      "tests": {
+        "passed": [
+          "TestDomainClosedSourceContract",
+          "TestDomainGuardRejectsCriticalOwnershipEscapes",
+          "TestDomainHasNoExistingProductionImporter",
+          "TestDomainGuardRejectsLateCommitLeaseAllocation"
+        ],
+        "child_passes": 11
+      }
+    },
+    {
+      "phase": "c2driver-guard",
+      "argv": [
+        "/usr/local/go/bin/go",
+        "test",
+        "-mod=readonly",
+        "-buildvcs=false",
+        "-p=1",
+        "-parallel=1",
+        "-count=1",
+        "-timeout=300s",
+        "-json",
+        "-run=^(TestStockSourceClosure)$",
+        "./internal/testutil/loadstand/c2driver"
+      ],
+      "pid": 18645,
+      "exit": 0,
+      "stdout": "/private/tmp/corsa-d1-closed-role-goqa-603de9b66d0b45e7be054a3e2f8aa56d/c2driver-guard.stdout",
+      "stderr": "/private/tmp/corsa-d1-closed-role-goqa-603de9b66d0b45e7be054a3e2f8aa56d/c2driver-guard.stderr",
+      "tests": {
+        "passed": [
+          "TestStockSourceClosure"
+        ],
+        "child_passes": 0
+      }
+    },
+    {
+      "phase": "app-binding-tagged",
+      "argv": [
+        "/usr/local/go/bin/go",
+        "test",
+        "-mod=readonly",
+        "-buildvcs=false",
+        "-p=1",
+        "-parallel=1",
+        "-count=1",
+        "-timeout=300s",
+        "-json",
+        "-tags=d1_resource_probe",
+        "-run=^(TestD1FindNodeResourceDiagnosticAppBinding)$",
+        "./internal/app/node"
+      ],
+      "pid": 18656,
+      "exit": 0,
+      "stdout": "/private/tmp/corsa-d1-closed-role-goqa-603de9b66d0b45e7be054a3e2f8aa56d/app-binding-tagged.stdout",
+      "stderr": "/private/tmp/corsa-d1-closed-role-goqa-603de9b66d0b45e7be054a3e2f8aa56d/app-binding-tagged.stderr",
+      "tests": {
+        "passed": [
+          "TestD1FindNodeResourceDiagnosticAppBinding"
+        ],
+        "child_passes": 0
+      }
+    },
+    {
+      "phase": "node-read-offer-default",
+      "argv": [
+        "/usr/local/go/bin/go",
+        "test",
+        "-mod=readonly",
+        "-buildvcs=false",
+        "-p=1",
+        "-parallel=1",
+        "-count=1",
+        "-timeout=300s",
+        "-json",
+        "-run=^(TestOwnedReceiveGenuineOriginalPointAndSingleUse|TestOwnedReceiveStrictParserReturnsNoPartialIngress|TestOwnedReceiveForeignOwnerAndEndedOriginalRefuse|TestOwnedReceiveCancellationRetiresOriginalEnvelope|TestOwnedInboundReadToOfferRetainsOriginalRow|TestOwnedOutboundReadToOfferUsesActualCMAcceptedOriginal|TestOwnedOutboundReceivePointPrecedesOriginalAdmissionMutexWait)$",
+        "./internal/core/node"
+      ],
+      "pid": 18681,
+      "exit": 0,
+      "stdout": "/private/tmp/corsa-d1-closed-role-goqa-603de9b66d0b45e7be054a3e2f8aa56d/node-read-offer-default.stdout",
+      "stderr": "/private/tmp/corsa-d1-closed-role-goqa-603de9b66d0b45e7be054a3e2f8aa56d/node-read-offer-default.stderr",
+      "tests": {
+        "passed": [
+          "TestOwnedReceiveGenuineOriginalPointAndSingleUse",
+          "TestOwnedReceiveStrictParserReturnsNoPartialIngress",
+          "TestOwnedReceiveForeignOwnerAndEndedOriginalRefuse",
+          "TestOwnedReceiveCancellationRetiresOriginalEnvelope",
+          "TestOwnedInboundReadToOfferRetainsOriginalRow",
+          "TestOwnedOutboundReadToOfferUsesActualCMAcceptedOriginal",
+          "TestOwnedOutboundReceivePointPrecedesOriginalAdmissionMutexWait"
+        ],
+        "child_passes": 0
+      }
+    },
+    {
+      "phase": "node-read-offer-tagged",
+      "argv": [
+        "/usr/local/go/bin/go",
+        "test",
+        "-mod=readonly",
+        "-buildvcs=false",
+        "-p=1",
+        "-parallel=1",
+        "-count=1",
+        "-timeout=300s",
+        "-json",
+        "-tags=d1_resource_probe",
+        "-run=^(TestOwnedReceiveGenuineOriginalPointAndSingleUse|TestOwnedReceiveStrictParserReturnsNoPartialIngress|TestOwnedReceiveForeignOwnerAndEndedOriginalRefuse|TestOwnedReceiveCancellationRetiresOriginalEnvelope|TestOwnedInboundReadToOfferRetainsOriginalRow|TestOwnedOutboundReadToOfferUsesActualCMAcceptedOriginal|TestOwnedOutboundReceivePointPrecedesOriginalAdmissionMutexWait)$",
+        "./internal/core/node"
+      ],
+      "pid": 18688,
+      "exit": 0,
+      "stdout": "/private/tmp/corsa-d1-closed-role-goqa-603de9b66d0b45e7be054a3e2f8aa56d/node-read-offer-tagged.stdout",
+      "stderr": "/private/tmp/corsa-d1-closed-role-goqa-603de9b66d0b45e7be054a3e2f8aa56d/node-read-offer-tagged.stderr",
+      "tests": {
+        "passed": [
+          "TestOwnedReceiveGenuineOriginalPointAndSingleUse",
+          "TestOwnedReceiveStrictParserReturnsNoPartialIngress",
+          "TestOwnedReceiveForeignOwnerAndEndedOriginalRefuse",
+          "TestOwnedReceiveCancellationRetiresOriginalEnvelope",
+          "TestOwnedInboundReadToOfferRetainsOriginalRow",
+          "TestOwnedOutboundReadToOfferUsesActualCMAcceptedOriginal",
+          "TestOwnedOutboundReceivePointPrecedesOriginalAdmissionMutexWait"
+        ],
+        "child_passes": 0
+      }
+    },
+    {
+      "phase": "node-linux-compile",
+      "argv": [
+        "/usr/local/go/bin/go",
+        "test",
+        "-mod=readonly",
+        "-buildvcs=false",
+        "-p=1",
+        "-trimpath",
+        "-tags=d1_resource_probe",
+        "-c",
+        "-o",
+        "/private/tmp/corsa-d1-closed-role-goqa-603de9b66d0b45e7be054a3e2f8aa56d/artifacts/node.test",
+        "./internal/core/node"
+      ],
+      "pid": 18695,
+      "exit": 0,
+      "stdout": "/private/tmp/corsa-d1-closed-role-goqa-603de9b66d0b45e7be054a3e2f8aa56d/node-linux-compile.stdout",
+      "stderr": "/private/tmp/corsa-d1-closed-role-goqa-603de9b66d0b45e7be054a3e2f8aa56d/node-linux-compile.stderr"
+    },
+    {
+      "phase": "node-metadata",
+      "argv": [
+        "/usr/local/go/bin/go",
+        "version",
+        "-m",
+        "/private/tmp/corsa-d1-closed-role-goqa-603de9b66d0b45e7be054a3e2f8aa56d/artifacts/node.test"
+      ],
+      "pid": 19582,
+      "exit": 0,
+      "stdout": "/private/tmp/corsa-d1-closed-role-goqa-603de9b66d0b45e7be054a3e2f8aa56d/node-metadata.stdout",
+      "stderr": "/private/tmp/corsa-d1-closed-role-goqa-603de9b66d0b45e7be054a3e2f8aa56d/node-metadata.stderr"
+    },
+    {
+      "phase": "app-linux-compile",
+      "argv": [
+        "/usr/local/go/bin/go",
+        "test",
+        "-mod=readonly",
+        "-buildvcs=false",
+        "-p=1",
+        "-trimpath",
+        "-tags=d1_resource_probe",
+        "-c",
+        "-o",
+        "/private/tmp/corsa-d1-closed-role-goqa-603de9b66d0b45e7be054a3e2f8aa56d/artifacts/app.test",
+        "./internal/app/node"
+      ],
+      "pid": 19583,
+      "exit": 0,
+      "stdout": "/private/tmp/corsa-d1-closed-role-goqa-603de9b66d0b45e7be054a3e2f8aa56d/app-linux-compile.stdout",
+      "stderr": "/private/tmp/corsa-d1-closed-role-goqa-603de9b66d0b45e7be054a3e2f8aa56d/app-linux-compile.stderr"
+    },
+    {
+      "phase": "app-metadata",
+      "argv": [
+        "/usr/local/go/bin/go",
+        "version",
+        "-m",
+        "/private/tmp/corsa-d1-closed-role-goqa-603de9b66d0b45e7be054a3e2f8aa56d/artifacts/app.test"
+      ],
+      "pid": 19606,
+      "exit": 0,
+      "stdout": "/private/tmp/corsa-d1-closed-role-goqa-603de9b66d0b45e7be054a3e2f8aa56d/app-metadata.stdout",
+      "stderr": "/private/tmp/corsa-d1-closed-role-goqa-603de9b66d0b45e7be054a3e2f8aa56d/app-metadata.stderr"
+    }
+  ],
+  "artifacts": {
+    "node": {
+      "path": "/private/tmp/corsa-d1-closed-role-goqa-603de9b66d0b45e7be054a3e2f8aa56d/artifacts/node.test",
+      "sha256": "7be59a4b0346761b75474c58e5a4ccae66c4c0fba2a879dd1b15c0dbfd610f08",
+      "bytes": 69087583,
+      "static_linux_arm64": true,
+      "executed": false,
+      "dependencies": [
+        [
+          "github.com/dustin/go-humanize",
+          "v1.1.0",
+          "h1:dbKTrvD0klcbBV/h4AWJdMuZogJACoMlvWIWZ5b2xWg="
+        ],
+        [
+          "github.com/gofiber/fiber/v3",
+          "v3.7.0",
+          "h1:aF+GfB7nP9Dd0wVsv6wmr8675v66OGfjSyoDhPmvKEo="
+        ],
+        [
+          "github.com/gofiber/schema",
+          "v1.9.4",
+          "h1:IVNXN2WyVHmUn/S186e/rdnGlb1LFrhZ1hjndTYvn8w="
+        ],
+        [
+          "github.com/gofiber/utils/v2",
+          "v2.6.5",
+          "h1:rU+8ao6LKi3fKOA3sEjfLv1T+2C2IwomeVmEKaqkr4A="
+        ],
+        [
+          "github.com/google/uuid",
+          "v1.6.0",
+          "h1:NIvaJDMOsjHA8n1jAhLSgzrAzy1Hgr+hNrb57e+94F0="
+        ],
+        [
+          "github.com/klauspost/compress",
+          "v1.20.4",
+          "h1:dD0v/bvxtjCBqQu6sx1TNWkalEY5lNTIe+HY9w8TeNI="
+        ],
+        [
+          "github.com/mattn/go-colorable",
+          "v0.1.16",
+          "h1:+2YjeAe7xP1OQbZW1jERPWWCDLlNqFNCvjiqGiAt84A="
+        ],
+        [
+          "github.com/mattn/go-isatty",
+          "v0.0.24",
+          "h1:tGZZoVgT/KiqK1c8ocVLeDS8BSWMRd47J3Lbz7vsReI="
+        ],
+        [
+          "github.com/molecule-man/go-brrr",
+          "v1.3.1",
+          "h1:EwaJUzRIlp/dFmIpzq4J17CA5Zi5OHo2vOGmu09hF1w="
+        ],
+        [
+          "github.com/philhofer/fwd",
+          "v1.2.1",
+          "h1:UtpS73q8bFgy/yH3gCq8LSNvj5gv/FowNOiWZa7uKwQ="
+        ],
+        [
+          "github.com/remyoudompheng/bigfft",
+          "v0.0.0-20230129092748-24d4a6f8daec",
+          "h1:W09IVJc94icq4NjY3clb7Lk8O1qJ8BdBEF8z0ibU0rE="
+        ],
+        [
+          "github.com/rs/zerolog",
+          "v1.35.1",
+          "h1:m7xQeoiLIiV0BCEY4Hs+j2NG4Gp2o2KPKmhnnLiazKI="
+        ],
+        [
+          "github.com/stretchr/objx",
+          "v0.8.0",
+          "h1:rm9oMkeprG/wHifkZP4EuDww9S0mvEaQ/p9cXTNT4cw="
+        ],
+        [
+          "github.com/stretchr/testify",
+          "v1.12.1",
+          "h1:EuwCh5fleGS7H32xRwO3wRGT7DxrDhLAT6FF8MpWDWE="
+        ],
+        [
+          "github.com/tinylib/msgp",
+          "v1.6.5",
+          "h1:iAH6XTP7BpzErjBZlujJQXxA+GmRi2YWs6M4KdLtNbE="
+        ],
+        [
+          "github.com/valyala/bytebufferpool",
+          "v1.0.0",
+          "h1:GqA5TC/0021Y/b9FG4Oi9Mr3q7XYx6KllzawFIhcdPw="
+        ],
+        [
+          "github.com/valyala/fasthttp",
+          "v1.78.0",
+          "h1:tKfLdx7cD8HZOTP1wc2OpbQMbgO1HP12J0y/XMdyW6Q="
+        ],
+        [
+          "go.yaml.in/yaml/v3",
+          "v3.0.6",
+          "h1:zcDfvjXEqTQmpjniUBLc91xYJMB2c4QOFxEF/LCEckM="
+        ],
+        [
+          "golang.org/x/crypto",
+          "v0.59.0",
+          "h1:xS2jhqYbzNrpvkWP2YTDf4TJwBy3ykR03i8vFDxEc7c="
+        ],
+        [
+          "golang.org/x/net",
+          "v0.62.0",
+          "h1:18ELalfM5+XNRwzM2nYqXsZQ9ByS1uhj2O/U7+5jqRY="
+        ],
+        [
+          "golang.org/x/sys",
+          "v0.50.0",
+          "h1:dkKZEFTEKaLr1sjhs0WiKqoi8Jj5nHbS3Njmx1UoMJs="
+        ],
+        [
+          "golang.org/x/text",
+          "v0.44.0",
+          "h1:YItdp/mQNGnsmrgpcdA5yQ3bnRxCfo/Tj/iByGW9GGo="
+        ],
+        [
+          "modernc.org/libc",
+          "v1.81.0",
+          "h1:Kx11pb+4ETDPgkN9P6nHNTeVfrS+1w46LoIDbYcZEtM="
+        ],
+        [
+          "modernc.org/mathutil",
+          "v1.7.1",
+          "h1:GCZVGXdaN8gTqB1Mf/usp1Y/hSqgI2vAGGP4jZMCxOU="
+        ],
+        [
+          "modernc.org/memory",
+          "v1.12.1",
+          "h1:nFMiWrpStgZczNl6XI9GnIk/rWhYIyHGUaR04pGbp9g="
+        ],
+        [
+          "modernc.org/sqlite",
+          "v1.62.0",
+          "h1:gMaCjSM1qpl+iOjiWhR1LYP3zqrYDI+5GYLGt6veP2g="
+        ]
+      ]
+    },
+    "app": {
+      "path": "/private/tmp/corsa-d1-closed-role-goqa-603de9b66d0b45e7be054a3e2f8aa56d/artifacts/app.test",
+      "sha256": "beef25f18fe27f2101d5aa2ed26e49f31bb0cc49ef0910b3c23ba22f2c391023",
+      "bytes": 33481698,
+      "static_linux_arm64": true,
+      "executed": false,
+      "dependencies": [
+        [
+          "github.com/dustin/go-humanize",
+          "v1.1.0",
+          "h1:dbKTrvD0klcbBV/h4AWJdMuZogJACoMlvWIWZ5b2xWg="
+        ],
+        [
+          "github.com/gofiber/fiber/v3",
+          "v3.7.0",
+          "h1:aF+GfB7nP9Dd0wVsv6wmr8675v66OGfjSyoDhPmvKEo="
+        ],
+        [
+          "github.com/gofiber/schema",
+          "v1.9.4",
+          "h1:IVNXN2WyVHmUn/S186e/rdnGlb1LFrhZ1hjndTYvn8w="
+        ],
+        [
+          "github.com/gofiber/utils/v2",
+          "v2.6.5",
+          "h1:rU+8ao6LKi3fKOA3sEjfLv1T+2C2IwomeVmEKaqkr4A="
+        ],
+        [
+          "github.com/google/uuid",
+          "v1.6.0",
+          "h1:NIvaJDMOsjHA8n1jAhLSgzrAzy1Hgr+hNrb57e+94F0="
+        ],
+        [
+          "github.com/klauspost/compress",
+          "v1.20.4",
+          "h1:dD0v/bvxtjCBqQu6sx1TNWkalEY5lNTIe+HY9w8TeNI="
+        ],
+        [
+          "github.com/mattn/go-colorable",
+          "v0.1.16",
+          "h1:+2YjeAe7xP1OQbZW1jERPWWCDLlNqFNCvjiqGiAt84A="
+        ],
+        [
+          "github.com/mattn/go-isatty",
+          "v0.0.24",
+          "h1:tGZZoVgT/KiqK1c8ocVLeDS8BSWMRd47J3Lbz7vsReI="
+        ],
+        [
+          "github.com/molecule-man/go-brrr",
+          "v1.3.1",
+          "h1:EwaJUzRIlp/dFmIpzq4J17CA5Zi5OHo2vOGmu09hF1w="
+        ],
+        [
+          "github.com/philhofer/fwd",
+          "v1.2.1",
+          "h1:UtpS73q8bFgy/yH3gCq8LSNvj5gv/FowNOiWZa7uKwQ="
+        ],
+        [
+          "github.com/remyoudompheng/bigfft",
+          "v0.0.0-20230129092748-24d4a6f8daec",
+          "h1:W09IVJc94icq4NjY3clb7Lk8O1qJ8BdBEF8z0ibU0rE="
+        ],
+        [
+          "github.com/rs/zerolog",
+          "v1.35.1",
+          "h1:m7xQeoiLIiV0BCEY4Hs+j2NG4Gp2o2KPKmhnnLiazKI="
+        ],
+        [
+          "github.com/tinylib/msgp",
+          "v1.6.5",
+          "h1:iAH6XTP7BpzErjBZlujJQXxA+GmRi2YWs6M4KdLtNbE="
+        ],
+        [
+          "github.com/valyala/bytebufferpool",
+          "v1.0.0",
+          "h1:GqA5TC/0021Y/b9FG4Oi9Mr3q7XYx6KllzawFIhcdPw="
+        ],
+        [
+          "github.com/valyala/fasthttp",
+          "v1.78.0",
+          "h1:tKfLdx7cD8HZOTP1wc2OpbQMbgO1HP12J0y/XMdyW6Q="
+        ],
+        [
+          "golang.org/x/crypto",
+          "v0.59.0",
+          "h1:xS2jhqYbzNrpvkWP2YTDf4TJwBy3ykR03i8vFDxEc7c="
+        ],
+        [
+          "golang.org/x/net",
+          "v0.62.0",
+          "h1:18ELalfM5+XNRwzM2nYqXsZQ9ByS1uhj2O/U7+5jqRY="
+        ],
+        [
+          "golang.org/x/sys",
+          "v0.50.0",
+          "h1:dkKZEFTEKaLr1sjhs0WiKqoi8Jj5nHbS3Njmx1UoMJs="
+        ],
+        [
+          "golang.org/x/text",
+          "v0.44.0",
+          "h1:YItdp/mQNGnsmrgpcdA5yQ3bnRxCfo/Tj/iByGW9GGo="
+        ],
+        [
+          "modernc.org/libc",
+          "v1.81.0",
+          "h1:Kx11pb+4ETDPgkN9P6nHNTeVfrS+1w46LoIDbYcZEtM="
+        ],
+        [
+          "modernc.org/mathutil",
+          "v1.7.1",
+          "h1:GCZVGXdaN8gTqB1Mf/usp1Y/hSqgI2vAGGP4jZMCxOU="
+        ],
+        [
+          "modernc.org/memory",
+          "v1.12.1",
+          "h1:nFMiWrpStgZczNl6XI9GnIk/rWhYIyHGUaR04pGbp9g="
+        ],
+        [
+          "modernc.org/sqlite",
+          "v1.62.0",
+          "h1:gMaCjSM1qpl+iOjiWhR1LYP3zqrYDI+5GYLGt6veP2g="
+        ]
+      ]
+    }
+  },
+  "cleanup_confirmed": true,
+  "linux_ELF_executed": false,
+  "work_limit_s": 900,
+  "cleanup_end_s": 930
+}

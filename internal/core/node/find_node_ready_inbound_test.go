@@ -232,7 +232,7 @@ func TestOwnedReadyLoadedInboundFinalizationRejectsTupleReplacement(t *testing.T
 	r := readyTestPrepare(t, cfg, id)
 	r.options = findNodeReadyOptions{loadedInbound: true}
 	r.originalOptions = r.options
-	s := newServiceWithConstruction(cfg, id, nil, nil, productionDatagramConstructor{}, serviceConstruction{bridge: r.bridge, ready: r}, inboundPinClock{elapsed: clock.read})
+	s := newServiceWithConstruction(cfg, id, nil, nil, productionDatagramConstructor{}, serviceConstruction{bridge: r.bridge, ready: r, localFindNodeRole: r.localRole}, inboundPinClock{elapsed: clock.read})
 	if r.failure != nil || !r.checked || !r.bindings(s) || r.finalized {
 		t.Fatal("original pre-finalize tuple missing", r.failure)
 	}

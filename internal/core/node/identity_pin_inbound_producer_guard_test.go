@@ -528,7 +528,7 @@ func ninN1SourceErrors(sources map[string][]byte) []string {
 	expected["findnode"]["find_node_owned_receive.go:recordOwnedFindNodeReceive"] = 3
 	expected["findnode"]["find_node_owned_receive.go:takeOwnedFindNodeReceive"] = 5
 	expected["findnode"]["find_node_owned_receive.go:recordOwnedFindNodeLine"] = 2
-	expected["findnode"]["find_node_owned_receive.go:dispatchOwnedFindNodeReceive"] = 5
+	expected["findnode"]["find_node_owned_receive.go:dispatchOwnedFindNodeReceive"] = 6
 	expected["findnode"]["peer_management.go:readPeerSession"] = 1
 	expected["findnode"]["find_node_bridge_capture.go:captureOwnedFindNodeCut"] = 2
 	expected["findnode"]["find_node_bridge_capture.go:sealOwnedFindNodeObservation"] = 9

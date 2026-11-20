@@ -17,7 +17,7 @@ import (
 )
 
 func ownedCutProfile() findNodeBridgeProfile {
-	return findNodeBridgeProfile{Capture: findNodeOwnedCaptureProfile{Degree: degreeProfile{MaxActive: 4}, Priority: findNodePriorityProfile{MaxMembers: 4, MaxRegistryVisits: 8}}, Intake: findnode.DormantIntakeProfile{Timing: findnode.TimingProfile{Target: time.Second, Network: time.Second, Runtime: time.Second}, Round: time.Millisecond, Slack: time.Millisecond, InitialTokens: 4}}
+	return findNodeBridgeProfile{LocalRole: findNodeRoleResponder, Capture: findNodeOwnedCaptureProfile{Degree: degreeProfile{MaxActive: 4}, Priority: findNodePriorityProfile{MaxMembers: 4, MaxRegistryVisits: 8}}, Intake: findnode.DormantIntakeProfile{Timing: findnode.TimingProfile{Target: time.Second, Network: time.Second, Runtime: time.Second}, Round: time.Millisecond, Slack: time.Millisecond, InitialTokens: 4}}
 }
 
 // The original genuine fixture roles and exact constructor tuple exist before
@@ -51,7 +51,7 @@ func ownedCutBuild(t *testing.T, profile findNodeBridgeProfile, constructor data
 		t.Fatal(err)
 	}
 	cfg := configtest.WithTempDataDirs(t, config.Node{ListenAddress: "127.0.0.1:0", EnableDatagramV1: true, AllowPrivatePeers: true, Type: domain.NodeTypeFull})
-	s = newServiceWithConstruction(cfg, id, nil, nil, constructor, serviceConstruction{bridge: b})
+	s = newServiceWithConstruction(cfg, id, nil, nil, constructor, serviceConstruction{bridge: b, localFindNodeRole: profile.LocalRole})
 	// These no-Run fixtures own transport cleanup synchronously; do not
 	// leave route-withdrawal AfterFunc callbacks outside the owned joins.
 	s.routeWithdrawalGracePeriodTest = -1

@@ -15,8 +15,8 @@ func ownDMRuntimeSourceErrors(sources map[string][]byte) []string {
 		"node/runtime_unstarted_cleanup.go":        "94a78eef7dff84b575e0aff3e3790cd773847d7804ef217676d47bab50e38d6b",
 		"node/identity_record_admission_own_dm.go": "8037b80af62d390fef07e9601362c653c7c4bf1e3eed8bffaf801e10fd19805b",
 		"node/identity_pin_own_dm_runtime.go":      "39b178ddcdeb0ee8979a264484dd2f5eea37e3f9a869e9568a768a965a194abb",
-		"node/find_node_ready_construction.go":     "928f01bab660f066126117dee1b756869ad323b493fcdc83a0a53694db53f6c4",
-		"node/service.go":                          "27d9d075252315c93ab2aba1c42609dce41707568305e86436c8fb6adb0f9448",
+		"node/find_node_ready_construction.go":     "bddfb4bb52e603d57769e55fa0fc4f86a4dec0ee5175579e56959d19c617c9f8",
+		"node/service.go":                          "db3c6ab49afae46703dae27a18d8f8a3cc960a0405c6c98949dd94b2babf114f",
 		"service/desktop.go":                       "37c9aee24a9d25282b6a41023ee3bb841577575ce1151727fe0c2ae3739ce565",
 		"sdk/runtime.go":                           "df0829fb9248f843952cda8ce21b9ae42d330d5a8cee4b01da5c5c6123aea5a5",
 	}

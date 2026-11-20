@@ -55,7 +55,7 @@ func ownedExecutingTestServiceWorker(t *testing.T, worker bool) (*Service, *atom
 	dir := t.TempDir()
 	cfg.TrustStorePath = filepath.Join(dir, "trust.json")
 	cfg.SecureSessionStorePath = filepath.Join(dir, "pins.json")
-	service = newServiceWithConstruction(cfg, id, nil, nil, productionDatagramConstructor{}, serviceConstruction{bridge: b})
+	service = newServiceWithConstruction(cfg, id, nil, nil, productionDatagramConstructor{}, serviceConstruction{bridge: b, localFindNodeRole: findNodeRoleResponder})
 	service.routeWithdrawalGracePeriodTest = -1
 	if err := d.Publisher().SealConstruction(); err != nil {
 		t.Fatal(err)

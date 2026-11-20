@@ -1,0 +1,42 @@
+{
+  "verdict": "ACCEPTED_ORDINARY_MACOS_RELEASE_PRODUCT_TESTS_OVERLAYSIM_DEFERRED",
+  "reviewer": "Codex TESTER developer_s6_dht",
+  "result": "/private/tmp/corsa-d1-closed-role-release-qa-38bb3119b59b4270a6233e8f9a99623d/result.json",
+  "result_sha256": "380d4339820f9a7e319e3968c11c1b8ad26ca01d74f606b01c2fd088043a6e93",
+  "inputs_sha256": "049f742cde531601a636ef5d3529ee08ab8a20171e51a264fec34ab0c983cf99",
+  "attempt_id": "38bb3119b59b4270a6233e8f9a99623d",
+  "subject_manifest_sha256": "fdd45820d3af22e46101ba3b7e9212cfdf59cfcaa1232b5169e59aba6a90dd7e",
+  "checks": {
+    "selected_package_completions": 73,
+    "packages_with_tests": 51,
+    "packages_without_test_files": 22,
+    "all_original_outputs_parsed": true,
+    "all4commands_exit0": true,
+    "no_missing_extra_duplicate_or_fail": true,
+    "source_files2498_exact": true,
+    "current34exact": true,
+    "release_script_unchanged_sha256": "914d6206800899cd523781aabf42d39391eabdc3ee7694e19cd50fc0ae354983",
+    "raw_bytes": 10835,
+    "all_own_command_groups_absent": true,
+    "cleanup_confirmed": true,
+    "own_lock_closed_current_scope": "absent"
+  },
+  "scope": {
+    "platform": "macOS arm64",
+    "Go": "1.27.4",
+    "CGO_ENABLED": 1,
+    "release_child_umask": "022",
+    "controller_umask": "077",
+    "outer_kernel_network_sandbox": false,
+    "outer_kernel_source_write_guard": false,
+    "original_inner_SDK_sandbox": "unchanged",
+    "overlaysim": "DEFERRED_NOT_PASS",
+    "individual_test_SKIP_counts": "unknown nonverbose script",
+    "full_repository_suite": false,
+    "linux_ELF_executed": false,
+    "other_platform_matrix": false,
+    "G2": false,
+    "public_activation": false,
+    "release": false
+  }
+}

@@ -1,0 +1,121 @@
+{
+  "actual_result_sha256": "67f099bc65cec3239713aeab2045079fdc00dd8887146f7e0b7bfb9d19eeec7d",
+  "actual_work": "/private/tmp/corsa-d1-closed-role-goqa-603de9b66d0b45e7be054a3e2f8aa56d",
+  "attempt_id": "603de9b66d0b45e7be054a3e2f8aa56d",
+  "base_commit": "1b97da9a8c581f7a40664aa5b5eb78c59f104f3c",
+  "cleanup": {
+    "current_heavy_lock": "Owned by separately running full release QA; untouched.",
+    "known": true,
+    "known_prior_own_lock_released_before_separate_release_QA": true,
+    "mutations_by_reviewer": "This receipt only; no resource jobs, signals, or lock changes."
+  },
+  "commands": {
+    "all_exit_zero": true,
+    "all_original_pids_and_process_groups_absent_at_independent_readback": true,
+    "count": 16,
+    "raw_bytes_total": 450997
+  },
+  "limitations": [
+    "Selected CLOSED-role tests and two Linux compile-only artifacts; full product release suite is separate.",
+    "Repeated named tests across default/tagged configurations are counted as executions.",
+    "Ordinary constructors remain Off; no public activation, G2, release, current-network or 512 MB admission.",
+    "Prior failed targeted/release attempts remain preserved. Latest test-only forwarding fixture correction leaves seven production role sources unchanged."
+  ],
+  "linux_artifacts": {
+    "app": {
+      "ELF": "ELF64LE AArch64 ET_EXEC, no PT_INTERP or PT_DYNAMIC",
+      "bytes": 33481698,
+      "cgo_enabled": false,
+      "dependencies_match_go_sum_and_retained_tool_metadata": true,
+      "dependency_count": 23,
+      "embedded_buildinfo_independently_decoded": true,
+      "executed": false,
+      "go_version": "go1.27.4",
+      "sha256": "beef25f18fe27f2101d5aa2ed26e49f31bb0cc49ef0910b3c23ba22f2c391023",
+      "tag": "d1_resource_probe",
+      "target": "linux/arm64",
+      "trimpath": true
+    },
+    "node": {
+      "ELF": "ELF64LE AArch64 ET_EXEC, no PT_INTERP or PT_DYNAMIC",
+      "bytes": 69087583,
+      "cgo_enabled": false,
+      "dependencies_match_go_sum_and_retained_tool_metadata": true,
+      "dependency_count": 26,
+      "embedded_buildinfo_independently_decoded": true,
+      "executed": false,
+      "go_version": "go1.27.4",
+      "sha256": "7be59a4b0346761b75474c58e5a4ccae66c4c0fba2a879dd1b15c0dbfd610f08",
+      "tag": "d1_resource_probe",
+      "target": "linux/arm64",
+      "trimpath": true
+    }
+  },
+  "modules_verified": true,
+  "review_date": "2026-11-20",
+  "review_role": "REVIEWER",
+  "role_manifest_sha256": "fdd45820d3af22e46101ba3b7e9212cfdf59cfcaa1232b5169e59aba6a90dd7e",
+  "source": {
+    "base_tar_regular_files_independently_compared": 2495,
+    "current_tree_overlay_and_frozen_posts_exact": true,
+    "final_source_files": 2498,
+    "initial_inventory_and_actual_source_exact": true,
+    "no_extra_source_files": true,
+    "reviewed_overlay_files": 34
+  },
+  "tests": {
+    "by_group": {
+      "app-binding-tagged": {
+        "child_passes": 0,
+        "outer_passes": 1,
+        "stdout_sha256": "a41cb8e5d7bf9164eba6afbfc654fa7f8721fb5a8ffde6478810f426681b6408"
+      },
+      "bridge-guards": {
+        "child_passes": 11,
+        "outer_passes": 4,
+        "stdout_sha256": "64252942f418200b8ba4cdf9670a0d762891889754b197637e57d9554057eee3"
+      },
+      "c2driver-guard": {
+        "child_passes": 0,
+        "outer_passes": 1,
+        "stdout_sha256": "e51ae0c31b1e908ed95a6e930e059dbebcfede3801374d6b79b0a0a4d95cd718"
+      },
+      "findnode-guards": {
+        "child_passes": 2,
+        "outer_passes": 5,
+        "stdout_sha256": "a1cefb9d4127045e2f5e88350764471017eee3b95596e2da0bd4fe2308ae0325"
+      },
+      "node-new-default": {
+        "child_passes": 19,
+        "outer_passes": 10,
+        "stdout_sha256": "c487029a189b16ea13fca0ff252b84baddc0d3c7628dfe51f8ea6b2c8dd4c43d"
+      },
+      "node-read-offer-default": {
+        "child_passes": 0,
+        "outer_passes": 7,
+        "stdout_sha256": "003f31afee6d664d0e254b1e39181cff8d489dbc4d242bb4a41187d6d794f25b"
+      },
+      "node-read-offer-tagged": {
+        "child_passes": 0,
+        "outer_passes": 7,
+        "stdout_sha256": "1e4aee993f72ada4b9edc143fdc599a0fbbebeaaba6a9aa4096057698460a947"
+      },
+      "node-regressions-default": {
+        "child_passes": 130,
+        "outer_passes": 50,
+        "stdout_sha256": "ead1cec98c0f45da99bd909dfc1f9051222ec8463ae7754631b1772ca59c71c3"
+      },
+      "node-selected-tagged": {
+        "child_passes": 149,
+        "outer_passes": 62,
+        "stdout_sha256": "212715f3e00845d2ed20c54c6ce7420b9440760fb29dd4fba82d0a84987b9316"
+      }
+    },
+    "child_passes": 311,
+    "exact_named_outer_sets": true,
+    "no_fail_or_skip_events": true,
+    "outer_executions": 147
+  },
+  "toolchain": "go1.27.4 darwin/arm64",
+  "verdict": "ACCEPTED_TARGETED_CLOSED_ROLE_QA_AND_LINUX_COMPILE_ONLY"
+}

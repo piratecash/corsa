@@ -240,8 +240,18 @@ func f1PairOnRaw(t *testing.T, withCaps bool, writeGate *n1HeldWrite, s, d *Serv
 		hello.Capabilities = append(hello.Capabilities, string(capability))
 	}
 	if withCaps {
-		welcome.Capabilities = append(welcome.Capabilities, string(domain.CapOverlayFindNodeV1))
-		hello.Capabilities = append(hello.Capabilities, string(domain.CapOverlayFindNodeV1))
+		// Preserve the already declared immutable role; the legacy fixture opt-in
+		// must not duplicate F1 when a closed Ready role projects it itself.
+		addF1 := func(frame *protocol.Frame) {
+			for _, name := range frame.Capabilities {
+				if name == string(domain.CapOverlayFindNodeV1) {
+					return
+				}
+			}
+			frame.Capabilities = append(frame.Capabilities, string(domain.CapOverlayFindNodeV1))
+		}
+		addF1(&welcome)
+		addF1(&hello)
 	}
 	type accepted struct {
 		proof sessionv2.ProvenSession
@@ -672,7 +682,7 @@ func TestFindNodeOrdinaryConstructorRemainsInactive(t *testing.T) {
 	cfg := configtest.WithTempDataDirs(t, config.Node{ListenAddress: "127.0.0.1:0"})
 	s := NewService(cfg, id, nil)
 	t.Cleanup(func() { s.runCancel(); s.closeBackgroundAdmission(); s.WaitBackground() })
-	if s.findNode != nil || s.inboundPins != nil {
+	if s.findNode != nil || s.inboundPins != nil || s.localFindNodeRole != findNodeRoleOff {
 		t.Fatal("ordinary constructor activated optional transport policy")
 	}
 	for _, intro := range []protocol.Frame{s.nodeHelloFrame(), s.welcomeFrame("", "")} {

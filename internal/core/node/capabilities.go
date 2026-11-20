@@ -144,8 +144,11 @@ func localCapabilities(enableV3 bool, datagrams datagramAdvertise) []domain.Capa
 // authority is created by membership in this local set.
 func (s *Service) localHandshakeCapabilities() []domain.Capability {
 	caps := localCapabilities(s.cfg.EnableMeshRoutingV3, s.localDatagramAdvertise())
-	if s.ownedFindNodeAdvertiseTest {
+	if s.localFindNodeRole == findNodeRoleTarget || s.localFindNodeRole == findNodeRoleResponder || s.ownedFindNodeAdvertiseTest {
 		caps = append(caps, domain.CapOverlayFindNodeV1)
+	}
+	if s.localFindNodeRole == findNodeRoleResponder {
+		caps = append(caps, domain.CapOverlayResponderV1)
 	}
 	if s.directDMV2ListenerEnabled() {
 		caps = append(caps, domain.CapDirectDMV2)

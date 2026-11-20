@@ -350,7 +350,9 @@ func TestOwnedBareV2PilotStockAdvertisementUnchanged(t *testing.T) {
 	ordinary := NewService(cfg, id, nil)
 	t.Cleanup(func() { ordinary.runCancel(); ordinary.closeBackgroundAdmission(); ordinary.WaitBackground() })
 	readyCfg, readyID := readyTestInputs(t)
-	ready, err := newFindNodeReadyCandidateService(readyCfg, readyID, nil, ownedCutProfile(), findnode.SigningProfile{NodeSpacing: 250 * time.Millisecond, MaxReservations: 4})
+	profile := ownedCutProfile()
+	profile.LocalRole = findNodeRoleOff
+	ready, err := newFindNodeReadyCandidateService(readyCfg, readyID, nil, profile, findnode.SigningProfile{NodeSpacing: 250 * time.Millisecond, MaxReservations: 4})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -718,7 +720,7 @@ func bareV2PilotSourceErrors(sources map[string][]byte) []string {
 				if site == "datagram_integration.go:localHandshakeCapabilityNames" && fmt.Sprintf("%x", sha256.Sum256(raw[int(fn.Pos())-1:int(fn.End())-1])) != "af61e48321ba810c4904c8cd4f9f0dd32c84af30cfb0d37828734a6ccb06df54" {
 					failures = append(failures, "pilot advertisement projection changed")
 				}
-				if site == "capabilities.go:localHandshakeCapabilities" && fmt.Sprintf("%x", sha256.Sum256(raw[int(fn.Pos())-1:int(fn.End())-1])) != "ed77ed51ced2fd688200608afbd59e82131a605a75b60dee6a17c8f6315b72cd" {
+				if site == "capabilities.go:localHandshakeCapabilities" && fmt.Sprintf("%x", sha256.Sum256(raw[int(fn.Pos())-1:int(fn.End())-1])) != "f66dde7d08524501a6533894cbc6dc75a6968a0d6f86c98bbec60ebea855aa48" {
 					failures = append(failures, "pilot typed selection changed")
 				}
 				if site == "find_node_capability_selection_test.go:TestOwnedFindNodeHandshakeCapabilitySelection" && fmt.Sprintf("%x", sha256.Sum256(raw[int(fn.Pos())-1:int(fn.End())-1])) != "b176d545f234f948050560c9ed689e83a8671c7410d8d25b52f43a8900683e11" {
@@ -747,7 +749,7 @@ func bareV2PilotSourceErrors(sources map[string][]byte) []string {
 							if len(n.Rhs) == 1 {
 								value, _ = n.Rhs[0].(*ast.Ident)
 							}
-							if (site != "find_node_bare_v2_pilot_test.go:"+factory && site != "find_node_automatic_endpoint_trace_test.go:newOwnedAutomaticTraceService" && site != "find_node_capability_selection_test.go:TestOwnedFindNodeHandshakeCapabilitySelection" && site != "find_node_resource_diagnostic.go:NewD1FindNodeResourceDiagnostic" && site != fullFile+":"+fullFactory) || len(n.Lhs) != 1 || len(n.Rhs) != 1 || value == nil || value.Name != "true" {
+							if (site != "find_node_bare_v2_pilot_test.go:"+factory && site != "find_node_automatic_endpoint_trace_test.go:newOwnedAutomaticTraceService" && site != "find_node_capability_selection_test.go:TestOwnedFindNodeHandshakeCapabilitySelection" && site != fullFile+":"+fullFactory) || len(n.Lhs) != 1 || len(n.Rhs) != 1 || value == nil || value.Name != "true" {
 								failures = append(failures, "pilot unclosed setter")
 							}
 						}
@@ -795,7 +797,7 @@ func bareV2PilotSourceErrors(sources map[string][]byte) []string {
 			})
 		}
 	}
-	if declared != 1 || read != 1 || written != 5 || called != 5 || factories != 1 || fullCalled != 2 || fullFactories != 1 {
+	if declared != 1 || read != 1 || written != 4 || called != 5 || factories != 1 || fullCalled != 2 || fullFactories != 1 {
 		failures = append(failures, "pilot exact declaration/read/write/call inventory")
 	}
 	return failures
@@ -842,7 +844,7 @@ func TestOwnedBareV2PilotAdvertisementSourceControls(t *testing.T) {
 		})
 	}
 	for _, tc := range []struct{ name, before, after string }{
-		{"ungated-advertisement", "if s.ownedFindNodeAdvertiseTest {", "if true {"},
+		{"ungated-advertisement", "if s.localFindNodeRole == findNodeRoleTarget || s.localFindNodeRole == findNodeRoleResponder || s.ownedFindNodeAdvertiseTest {", "if true {"},
 		{"extra-responder", "caps = append(caps, domain.CapOverlayFindNodeV1)", "caps = append(caps, domain.CapOverlayResponderV1)"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

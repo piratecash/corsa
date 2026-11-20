@@ -62,7 +62,7 @@ func ownedLocalNodeService(t *testing.T, limit int) (*Service, *atomic.Int64, fi
 	dir := t.TempDir()
 	cfg.TrustStorePath = filepath.Join(dir, "trust.json")
 	cfg.SecureSessionStorePath = filepath.Join(dir, "pins.json")
-	service = newServiceWithConstruction(cfg, id, nil, nil, productionDatagramConstructor{}, serviceConstruction{bridge: b})
+	service = newServiceWithConstruction(cfg, id, nil, nil, productionDatagramConstructor{}, serviceConstruction{bridge: b, localFindNodeRole: findNodeRoleTarget})
 	service.routeWithdrawalGracePeriodTest = -1
 	if err := d.Publisher().SealConstruction(); err != nil {
 		t.Fatal(err)

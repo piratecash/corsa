@@ -101,6 +101,20 @@ func readyChainStartCM(t *testing.T, chain *readyThreeNodeChain, pair f1ProofFix
 				return
 			}
 			kind, class := classifyFrameLine(line)
+			// The client-outbound role variant accepts this socket at R.
+			// Feed its real owned answer/request receipt to the SAME dispatcher;
+			// the actual client's original readPeerSession handles self-target T.
+			if accepted == chain.relay && claimed {
+				if receiveErr != nil {
+					report(receiveErr)
+					return
+				}
+				if err := accepted.dispatchOwnedFindNodeReceive(receipt); err != nil {
+					report(err)
+					return
+				}
+				continue
+			}
 			if target && claimed {
 				if receiveErr != nil {
 					report(fmt.Errorf("original target receipt: %w", receiveErr))
@@ -184,7 +198,7 @@ func readyChainStartCM(t *testing.T, chain *readyThreeNodeChain, pair f1ProofFix
 	cm.handleDialSucceeded(dialer.runCtx, DialSucceeded{Address: pair.outbound.address, ConnectedAddress: pair.outbound.address, SlotGeneration: generation, Session: pair.outbound})
 }
 
-func readyChainBuild(t *testing.T, own bool) (*findNodeReadyConstruction, *Service, *ninFixtureClock) {
+func readyChainBuild(t *testing.T, own bool, roles ...findNodeLocalRole) (*findNodeReadyConstruction, *Service, *ninFixtureClock) {
 	t.Helper()
 	cfg, id, clock := readyInboundInputs(t)
 	// These are explicit scheduling inputs for this instrumented fixture only.
@@ -192,6 +206,17 @@ func readyChainBuild(t *testing.T, own bool) (*findNodeReadyConstruction, *Servi
 	// tokens and signing profile stay original. This is neither a production
 	// default nor a measured wire/G2 profile; a missed real window still fails.
 	profile := ownedCutProfile()
+	if len(roles) > 1 {
+		t.Fatal("one closed target role at most")
+	}
+	if len(roles) == 1 {
+		profile.LocalRole = roles[0]
+	}
+	if len(roles) == 1 && roles[0] == findNodeRoleTarget {
+		// Closed role coverage: this is a real configured client, not Full
+		// with a capability token removed after its proof.
+		cfg.Type = domain.NodeTypeClient
+	}
 	profile.Intake.Round = 100 * time.Millisecond
 	profile.Intake.Slack = 100 * time.Millisecond
 	r, err := prepareFindNodeReadyConstruction(cfg, id, profile, findnode.SigningProfile{NodeSpacing: 250 * time.Millisecond, MaxReservations: 4})
@@ -228,7 +253,7 @@ func readyChainBuild(t *testing.T, own bool) (*findNodeReadyConstruction, *Servi
 	return r, s, clock
 }
 
-func newReadyThreeNodeChain(t *testing.T, held bool) *readyThreeNodeChain {
+func newReadyThreeNodeChain(t *testing.T, held bool, targetRole ...findNodeLocalRole) *readyThreeNodeChain {
 	t.Helper()
 	x := &readyThreeNodeChain{answers: make(chan string, 4), forwarded: make(chan protocol.FindNodeRequest, 4), errors: make(chan error, 4), clock: new(atomic.Int64)}
 	// A is the existing observation-only test initiator, not a product lookup
@@ -236,7 +261,7 @@ func newReadyThreeNodeChain(t *testing.T, held bool) *readyThreeNodeChain {
 	x.initiator, _, _ = ownedCaptureTestService(t, 8, 8, 16)
 	x.relayReady, x.relay, _ = readyChainBuild(t, true)
 	var ninClock *ninFixtureClock
-	x.targetReady, x.target, ninClock = readyChainBuild(t, false)
+	x.targetReady, x.target, ninClock = readyChainBuild(t, false, targetRole...)
 	if held {
 		x.gate = &readyChainTargetGate{arrived: make(chan struct{}), release: make(chan struct{})}
 		t.Cleanup(x.gate.unblock)
@@ -244,7 +269,14 @@ func newReadyThreeNodeChain(t *testing.T, held bool) *readyThreeNodeChain {
 	// Existing explicit test capabilities enter BOTH original signed TLS
 	// introductions. Public Service capabilities/defaults are unchanged.
 	x.sourceWire = d1InitiatorPair(t, x.initiator, x.relay, true, true)
-	x.targetWire = d1InitiatorPair(t, x.target, x.relay, true, true)
+	clientOutbound := len(targetRole) == 1 && targetRole[0] == findNodeRoleTarget
+	if clientOutbound {
+		// No injected R on the client link: R's constructor declares its own
+		// R; the client declares F1 only and dials R through the original CM.
+		x.targetWire = d1InitiatorPair(t, x.relay, x.target, false, false)
+	} else {
+		x.targetWire = d1InitiatorPair(t, x.target, x.relay, true, true)
+	}
 	// Register whole-chain cleanup before launching any new readers. Both raw
 	// pairs are closed before either original owner's bounded join can wait.
 	t.Cleanup(func() {
@@ -266,16 +298,17 @@ func newReadyThreeNodeChain(t *testing.T, held bool) *readyThreeNodeChain {
 		}
 	})
 	readyChainStartCM(t, x, x.sourceWire, false)
-	readyChainStartCM(t, x, x.targetWire, true)
+	readyChainStartCM(t, x, x.targetWire, !clientOutbound)
 	waitFor(t, 2*time.Second, "two original Ready relay CM publications", func() bool { return len(f1Members(t, x.relay).sessions) == 2 })
 	for _, pair := range []f1ProofFixture{x.sourceWire, x.targetWire} {
-		x.relay.peerMu.RLock()
+		dialer := pair.dialer
+		dialer.peerMu.RLock()
 		p := pair.outbound
 		p.common.mu.Lock()
 		r := p.findNodeReceipt
 		exact := r != nil && r.peer == p && r.common == p.common && r.address == p.address && r.generation == p.selectedGeneration && p.common.findNode != nil && p.common.findNode.published
 		p.common.mu.Unlock()
-		x.relay.peerMu.RUnlock()
+		dialer.peerMu.RUnlock()
 		if !exact {
 			t.Fatal("actual CM did not bind the same original relay neighbour")
 		}
@@ -287,7 +320,13 @@ func newReadyThreeNodeChain(t *testing.T, held bool) *readyThreeNodeChain {
 		t.Fatal(err)
 	}
 	facts, err := x.target.collectOwnedFindNodeRawFacts(t.Context(), x.target.bridgeCapture.priority)
-	if err != nil || len(facts.allOriginal) != 1 || facts.classes[0] != findnode.ClassIncomingPinned || facts.allOriginal[0].Identity() != domain.PeerIdentityFromWire(x.relay.identity.Address) {
+	expectedClass := findnode.ClassIncomingPinned
+	if clientOutbound {
+		// A fresh dialer cannot earn N-in; selected S needs ten minutes on
+		// its independent real clock, which this fixture never advances.
+		expectedClass = findnode.ClassOrdinary
+	}
+	if err != nil || len(facts.allOriginal) != 1 || facts.classes[0] != expectedClass || facts.allOriginal[0].Identity() != domain.PeerIdentityFromWire(x.relay.identity.Address) {
 		t.Fatal("actual relay original did not earn target's strict N-in class", facts, err)
 	}
 	x.targetID = domain.PeerIdentityFromWire(x.target.identity.Address)

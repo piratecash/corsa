@@ -24,6 +24,8 @@ type findNodeReadyOptions struct {
 }
 
 type findNodeReadyConstruction struct {
+	localRole                findNodeLocalRole
+	originalLocalRole        findNodeLocalRole
 	bridge                   *findNodeTerminalConstruction
 	originalContext          context.Context
 	originalCancel           context.CancelFunc
@@ -57,7 +59,7 @@ type findNodeReadyConstruction struct {
 }
 
 func prepareFindNodeReadyConstruction(cfg config.Node, id *identity.Identity, profile findNodeBridgeProfile, signing findnode.SigningProfile, timing ...findnode.OwnedTargetTimingProfile) (*findNodeReadyConstruction, error) {
-	if len(timing) > 1 {
+	if len(timing) > 1 || !profile.LocalRole.validFor(cfg.Type) {
 		return nil, findnode.ErrInvalid
 	}
 	if id == nil {
@@ -78,7 +80,7 @@ func prepareFindNodeReadyConstruction(cfg config.Node, id *identity.Identity, pr
 	if err != nil {
 		return nil, err
 	}
-	r := &findNodeReadyConstruction{bridge: b, peerState: state}
+	r := &findNodeReadyConstruction{bridge: b, peerState: state, localRole: profile.LocalRole, originalLocalRole: profile.LocalRole}
 	prepared := false
 	defer func() {
 		if !prepared {
@@ -158,7 +160,7 @@ func (r *findNodeReadyConstruction) buildWithOwnDM(cfg config.Node, id *identity
 	return r.buildWithOptions(cfg, id, bus, constructor, findNodeReadyOptions{ownDM: own})
 }
 func (r *findNodeReadyConstruction) buildWithOptions(cfg config.Node, id *identity.Identity, bus *ebus.Bus, constructor datagramConstructor, options findNodeReadyOptions, clocks ...inboundPinClock) (*Service, error) {
-	if r == nil || r.bridge == nil || r.originalContext == nil || r.finalized || r.service != nil || r.bridge.used.Load() {
+	if r == nil || r.bridge == nil || r.originalContext == nil || r.finalized || r.service != nil || r.bridge.used.Load() || r.localRole != r.originalLocalRole || !r.localRole.validFor(cfg.Type) {
 		return nil, findnode.ErrNotReady
 	}
 	committed := false
@@ -189,7 +191,7 @@ func (r *findNodeReadyConstruction) buildWithOptions(cfg config.Node, id *identi
 	if options.contactReconciliation {
 		record = recordAdmissionConstruction{classes: recordAdmissionImmediateK, kSource: contactRecordReconciliationSource}
 	}
-	s := newServiceWithConstruction(cfg, id, bus, nil, constructor, serviceConstruction{record: record, bridge: r.bridge, ready: r}, clocks...)
+	s := newServiceWithConstruction(cfg, id, bus, nil, constructor, serviceConstruction{record: record, bridge: r.bridge, ready: r, localFindNodeRole: r.localRole}, clocks...)
 	if r.failure != nil {
 		return nil, r.failure
 	}
@@ -220,7 +222,7 @@ func (r *findNodeReadyConstruction) bindings(s *Service) bool {
 	if r == nil || r.bridge == nil || s == nil {
 		return false
 	}
-	if r.bridge.capture == nil || r.bridge.capture.localLoop == nil || r.options != r.originalOptions || r.ownDMRuntime != r.originalOptions.ownDM || r.bridge.capture.localLoop.signingGate != r.originalOptions.signingGate || (r.originalOptions.signingGate != nil && !r.originalOptions.signingGate.bindings()) {
+	if r.localRole != r.originalLocalRole || !r.localRole.validFor(s.cfg.Type) || s.localFindNodeRole != r.localRole || r.bridge.capture == nil || r.bridge.capture.localLoop == nil || r.options != r.originalOptions || r.ownDMRuntime != r.originalOptions.ownDM || r.bridge.capture.localLoop.signingGate != r.originalOptions.signingGate || (r.originalOptions.signingGate != nil && !r.originalOptions.signingGate.bindings()) {
 		return false
 	}
 	if r.originalOptions.contactReconciliation {

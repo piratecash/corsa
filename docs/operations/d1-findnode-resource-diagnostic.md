@@ -22,7 +22,7 @@ The subject is base `93eb8fe75d2a90710d21409c535276c6c7ed28f2` plus the exact pr
 
 The preserved v6 failed after 512 answers on the 513th new target in one source group. Disconnect does not erase its ten-minute target history. Reversing only the first block's request directions retained 896 operations and 768 participants while limiting distinct targets to 512; policy caps and deadlines were unchanged. The verifier additionally requires that exact target union. A separate Go temporary-file accounting race was fixed in the build wrapper; 19 fixture/build and 61 runtime checks passed.
 
-This qualifies the **selected F1/churn resource workload**. Late keeper tail, shared-page attribution, process RSS and preparer costs remain UNKNOWN. It does not establish mixed1024 memory, every D1 workload, Responder authorization or final PR‑6 readiness. Closed role enforcement, O‑1a, evidence applicability and remaining final-candidate 13b-D1 checks, G2 and public activation decisions remain open. S6 observation runs in parallel for public activation.
+This qualifies the **selected F1/churn resource workload**. Late keeper tail, shared-page attribution, process RSS and preparer costs remain UNKNOWN. It does not establish mixed1024 memory, every D1 workload, Responder authorization or final PR‑6 readiness. [Closed role enforcement now has a separate source/QA result](d1-findnode-local-role.md); it is a newer subject than this resource measurement. O‑1a, evidence applicability and remaining final-candidate 13b-D1 checks, G2 and public activation decisions remain open. S6 observation runs in parallel for public activation.
 
 ## Selection and ownership
 

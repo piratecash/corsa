@@ -103,11 +103,12 @@ type Service struct {
 	loadstandRouteWire      atomic.Pointer[LoadstandRouteWireObservation]
 	r2OwnDMOwner            *ownDMProvenanceOwner // immutable before candidate constructor returns; ordinary nil
 	// Immutable constructor/private-factory composition; no ordinary activation.
-	proofToken     *proofTransportServiceToken
-	findNode       *findNodeAdapter
-	degree         *degreeOwner                  // immutable inactive statistical observer; ordinary nil
-	bridgeTerminal *findNodeBridgeTerminal       // immutable first-literal Constructing candidate
-	bridgeCapture  *findNodeBridgeCaptureContext // immutable original roles, first literal
+	proofToken        *proofTransportServiceToken
+	findNode          *findNodeAdapter
+	localFindNodeRole findNodeLocalRole             // immutable constructor selection, ordinary Off
+	degree            *degreeOwner                  // immutable inactive statistical observer; ordinary nil
+	bridgeTerminal    *findNodeBridgeTerminal       // immutable first-literal Constructing candidate
+	bridgeCapture     *findNodeBridgeCaptureContext // immutable original roles, first literal
 	// Immutable optional statistics producer, assigned only by the unused root.
 	degreeStatisticProducer      *degreeStatisticProducer
 	ownedDegreeStatisticProducer *ownedDegreeStatisticProducer // immutable first-literal binding; start under degree.mu
@@ -2027,6 +2028,9 @@ func newServiceWithConstruction(cfg config.Node, id *identity.Identity, eventBus
 		construction.k3Advertised = &request
 	}
 	admission := construction.record
+	if !construction.localFindNodeRole.validFor(cfg.Type) {
+		panic("unsupported private FIND_NODE role")
+	}
 	bridge := construction.bridge
 	if bridge != nil {
 		bridge.claim()
@@ -2306,6 +2310,7 @@ func newServiceWithConstruction(cfg config.Node, id *identity.Identity, eventBus
 		ownedDegreeStatisticProducer: ownedStatistic,
 		findNode:                     findNode,
 		bridgeCapture:                bridgeCapture,
+		localFindNodeRole:            construction.localFindNodeRole,
 		recordProtection:             recordProtection,
 		runCtx:                       lifecycleCtx,
 		runCancel:                    lifecycleCancel,
