@@ -1,0 +1,68 @@
+{
+  "D1_acceptance": "NOT_ESTABLISHED",
+  "Go": {
+    "first_failure_transport_code": 72,
+    "outcome": "FAIL",
+    "seconds": 30.63,
+    "specific_sender_site_or_compound_predicate": "UNKNOWN",
+    "stage": "observer_full_send"
+  },
+  "attempt": "c01f0e036e3ea01e020dee5d88dd8564",
+  "builds": "17 four-artifact commands; ten PID1 QA outer/five child cases; four Go-helper commands; eight C commands. Pure policy dumper only, not capexec/application execution during builds.",
+  "capsule": {
+    "Go_files": 1348,
+    "complete_transport": "RAW.tar.xz/native/console.raw",
+    "expanded_Go": "Not duplicated; exact member hashes checked against compiled source-after.json.",
+    "failed_body_bytes": 0,
+    "failed_records": 1,
+    "files": 1351,
+    "manifests": 2
+  },
+  "exporter": "Unchanged 7ef3 binary reused by exact compiled closure; not rebuilt.",
+  "native": {
+    "all_guest_children_reaped": true,
+    "export_exit": 0,
+    "intervention": false,
+    "native_events": 4,
+    "physical_XPC": "UNKNOWN",
+    "stopped_only_ACK": "COMPLETE; failed functional outcome retained",
+    "test_exit": 1,
+    "worker_exit": 0
+  },
+  "old_30s_and_480s_inner_cause": "UNKNOWN; code72 does not establish equivalence.",
+  "original_periodic_reconnect_metric_acceptance": "NOT_ESTABLISHED",
+  "prior_committed_reference": {
+    "commit": "f258093a44aa15dd7ce79f6e6a13df9c0aae363c",
+    "evidence": "docs/operations/evidence/d1-observer-first-failure-2026-11-20",
+    "sha256sums": "413f23257c2295c54587e57a3662c436c71e8c5ce04569e64b3db3ad6ff97576",
+    "unchanged_sources": "Original observer instrumentation, three coherent namespace fixture posts, original API/helper/controller lineage; no unchanged base tree or ELF duplicated."
+  },
+  "profile_sha256": "f84856cfa6f3c3d39f4f5d69487c5d968106aeea77b16f8a3d7bf864266e7369",
+  "raw": {
+    "members": 135,
+    "payload_bytes": 15629387,
+    "sha256": "e1661af84e8e54f3329dae58f7393773d7a42e325b23428c189ece06c68a74d3"
+  },
+  "scope": "DISPOSABLE_OBSERVER_FIRST_FAILURE_DIAGNOSTIC_NOT_BASELINE_NOT_METRIC_NO512",
+  "setup": "Advanced beyond the preceding initial multicast guard; this is not a general environment qualification.",
+  "source": {
+    "members": 107,
+    "payload_bytes": 2706622,
+    "sha256": "b0b033b10a76d37b32a54f4f9e000fe1c32ed470a1ac3ecdfd0c7b5ee94c57d2"
+  },
+  "source_groups": {
+    "Core_files": 640,
+    "Core_sha256": "9fb7bba6dd77a128a634f0d6d26e67485b07f1178b9361166a754e0fb7d1268e",
+    "stand_files": 708,
+    "stand_sha256": "5aad60ae1d638ae27ebcafd518a31aab4f8c83bb926284e26a22a5117c0f8267"
+  },
+  "unit_mechanism": {
+    "RAW_bytes": 17207,
+    "child_PASS": 12,
+    "commands_exit0": 1,
+    "outer_PASS": 4,
+    "review_sha256": "45de61a405ff3c5f94f980af119d18b0277ce0f6741857fe662a36f610245fb1",
+    "scope": "Original sender and real queue; controlled pre-window-to-inside crossing and same-connection projection changes. These possible mechanisms do not establish the actual c01 site or condition.",
+    "source_before_after_records": 2105
+  }
+}

@@ -1,0 +1,139 @@
+{
+  "ACK_scope": "Normal-stop exactowned cleanup only; functionalFAIL unchanged; no metric/baseline/512/D1 acceptance",
+  "all_original_and_copied_inputs_and_source_SHA": "MATCH",
+  "all_three_RAW_EOF_hashes": {
+    "console": {
+      "eof": true,
+      "received": 6923371,
+      "retained": 6923371,
+      "sha256": "252a2098b41e1674df665c3ecf0fde5b1a00d75cec76cef9cac3c568c7b64dbf"
+    },
+    "native": {
+      "eof": true,
+      "received": 994,
+      "retained": 994,
+      "sha256": "ed178b48a41078f5181b3e61b35f98b37f9e9785209d9a2ddf209619792cf6cc"
+    },
+    "stderr": {
+      "eof": true,
+      "received": 0,
+      "retained": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  },
+  "attempt_id": "c01f0e036e3ea01e020dee5d88dd8564",
+  "capsule": {
+    "Go_sources_compiled_exact": 1348,
+    "failed_body_bytes": 0,
+    "failed_record_checksum": "PASS",
+    "files": 1351,
+    "nonGo": {
+      "loadstand-functional-lifecycle-headless-sdk-bfe581aa973cd797.attempt-cc3ebdad1a20e7b9.failed": {
+        "bytes": 2906,
+        "sha256": "7dc17150108d21b43c20dcc6a77e1eb9f55a6c25fae2a1cbcfe0586559037ef1"
+      },
+      "sources/measured-9fb7bba6dd77a128/MANIFEST.sha256": {
+        "bytes": 68696,
+        "sha256": "9fb7bba6dd77a128a634f0d6d26e67485b07f1178b9361166a754e0fb7d1268e"
+      },
+      "sources/stand-5aad60ae1d638ae2/MANIFEST.sha256": {
+        "bytes": 82438,
+        "sha256": "5aad60ae1d638ae27ebcafd518a31aab4f8c83bb926284e26a22a5117c0f8267"
+      }
+    }
+  },
+  "exact_owned_lock_stamp_owner_hash": "MATCH",
+  "expected_sha256": "c71812481307e95939b933d9647ed4198147d23b35ca455f7bb8055666a35826",
+  "fresh_PID_PGID_ESRCH": [
+    77954,
+    77956
+  ],
+  "functional_result": "GoFAIL30.63s stage=observer_full_send (new closed first-family72); network setup passed",
+  "guest": {
+    "all_children_reaped": true,
+    "attempt_id": "c01f0e036e3ea01e020dee5d88dd8564",
+    "config_sha256": "ac4ea6d8c95f407699af779db2fd87c539342278b053831aa84f66a83e421693",
+    "export": {
+      "all_children_reaped": true,
+      "exit": 0,
+      "kill_sent": false,
+      "log_complete": true,
+      "log_overflow": false,
+      "normal": true,
+      "pid": 119,
+      "reaped": true,
+      "term_sent": false
+    },
+    "export_started": true,
+    "guest_elapsed_ns": 31001287598,
+    "initial_lo_checked": true,
+    "input_files": 1366,
+    "inputs_verified": true,
+    "poweroff_attempt": true,
+    "profile_sha256": "f84856cfa6f3c3d39f4f5d69487c5d968106aeea77b16f8a3d7bf864266e7369",
+    "source_commit": "4fcc2f7245095fc43d2225f0f0065f4ce3b26113",
+    "stage": "functional-or-export-failure",
+    "state": "FAIL",
+    "test": {
+      "all_children_reaped": true,
+      "exit": 1,
+      "kill_sent": false,
+      "log_complete": true,
+      "log_overflow": false,
+      "normal": true,
+      "pid": 64,
+      "reaped": true,
+      "term_sent": false
+    },
+    "workload": "reconnect"
+  },
+  "handoff_sha256": "d6d796a3e3fa3aa56dad2938446b411070e86bba776a72d2009c0e0027ff3fa1",
+  "inner_condition_or_sender": "UNKNOWN_PENDING_SOURCE_AUDIT",
+  "native_events": [
+    {
+      "attempt_id": "c01f0e036e3ea01e020dee5d88dd8564",
+      "config_sha256": "ac4ea6d8c95f407699af779db2fd87c539342278b053831aa84f66a83e421693",
+      "elapsed_ns": 557673000,
+      "event": "ready",
+      "profile": "d1-o1a-native-v1",
+      "seq": 1,
+      "workload": "reconnect"
+    },
+    {
+      "attempt_id": "c01f0e036e3ea01e020dee5d88dd8564",
+      "config_sha256": "ac4ea6d8c95f407699af779db2fd87c539342278b053831aa84f66a83e421693",
+      "elapsed_ns": 678462000,
+      "event": "start_ok",
+      "profile": "d1-o1a-native-v1",
+      "seq": 2,
+      "workload": "reconnect"
+    },
+    {
+      "attempt_id": "c01f0e036e3ea01e020dee5d88dd8564",
+      "config_sha256": "ac4ea6d8c95f407699af779db2fd87c539342278b053831aa84f66a83e421693",
+      "elapsed_ns": 32159961000,
+      "event": "guest_stopped",
+      "guest_error": null,
+      "profile": "d1-o1a-native-v1",
+      "seq": 3,
+      "workload": "reconnect"
+    },
+    {
+      "attempt_id": "c01f0e036e3ea01e020dee5d88dd8564",
+      "config_sha256": "ac4ea6d8c95f407699af779db2fd87c539342278b053831aa84f66a83e421693",
+      "elapsed_ns": 32160026000,
+      "event": "stop_complete",
+      "final_state": "stopped",
+      "profile": "d1-o1a-native-v1",
+      "seq": 4,
+      "workload": "reconnect"
+    }
+  ],
+  "old30s_or480s_samecause": "UNKNOWN",
+  "physical_XPC": "UNKNOWN",
+  "receipt_sha256": "cd67e76b3dd95e22f80da452db1c6a9745c1b7d6b9963da718d576bd27765983",
+  "reviewer_actions": "Read-only sources/data+this review; no signal/removal/VM/test/resourcejobs",
+  "status": "ACCEPTED_VM_STOPPED_ONLY",
+  "worker_exit": 0,
+  "worker_reaped_ns": 32186708000
+}

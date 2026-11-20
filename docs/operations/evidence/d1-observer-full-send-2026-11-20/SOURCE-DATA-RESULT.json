@@ -1,0 +1,36 @@
+{
+  "applications_executed": false,
+  "attempt_id": "8378df0ad72d45f2ab58afa7911f37d3",
+  "data": {
+    "result": "/private/tmp/corsa-o1a-observer-coherent-inputs-9273f9098aa84d5b8f6002cd68484bb8/RESULT.json",
+    "scope": "DISPOSABLE_OBSERVER_FIRST_FAILURE_DIAGNOSTIC",
+    "source_archive_sha256": "50358b0d7c95a0ea8b40395bae1fbabbcbd2ccd53e113e4d14e06d28819cee9d"
+  },
+  "error": null,
+  "lock_retained": false,
+  "raw_bytes": 363,
+  "status": "DISPOSABLE_OBSERVER_SOURCE_DATA_PREPARED",
+  "steps": [
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1)(allow default)(deny network*)",
+        "/usr/bin/python3",
+        "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-observer-coherent-snapshot-input-rebind-v1/prepare.py",
+        "--execute",
+        "82487ecf373989996b15dab338003e9daa07b9e473e290a42fc8f7f5c1c55c93"
+      ],
+      "exit": 0,
+      "owned_group_absent": true,
+      "phase": "prepare",
+      "pid": 77000,
+      "pipe_threads_finished": true,
+      "reason": null,
+      "stderr": "/private/tmp/corsa-d1-o1a-observer-coherent-source-data-8378df0ad72d45f2ab58afa7911f37d3/01-prepare.stderr",
+      "stdout": "/private/tmp/corsa-d1-o1a-observer-coherent-source-data-8378df0ad72d45f2ab58afa7911f37d3/01-prepare.stdout"
+    }
+  ],
+  "unknown": false,
+  "work": "/private/tmp/corsa-d1-o1a-observer-coherent-source-data-8378df0ad72d45f2ab58afa7911f37d3"
+}
