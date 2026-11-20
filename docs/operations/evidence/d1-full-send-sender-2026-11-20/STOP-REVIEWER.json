@@ -1,0 +1,378 @@
+{
+  "Go_sources_equal_actual_compiled": 1348,
+  "RAW": {
+    "console": {
+      "eof": true,
+      "received": 6924446,
+      "retained": 6924446,
+      "sha256": "a4ec02ab6af6f461b87d7faf571e317ee9e5d19d2c81be17bb2837b849b980eb"
+    },
+    "native": {
+      "eof": true,
+      "received": 994,
+      "retained": 994,
+      "sha256": "d5dfaa9f60e291b8948eecdc49ad7e0fded44f97ce80b92612faa2848a752400"
+    },
+    "stderr": {
+      "eof": true,
+      "received": 0,
+      "retained": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  },
+  "all_source_and_input_original_copy_hashes_verified": true,
+  "attempt": "97a9c06a6fe700ed0cf2c98e8a19f152",
+  "capsule_files": 1351,
+  "exact_lock_custody": {
+    "directory_stamp": [
+      16777232,
+      285808775,
+      501,
+      0,
+      16832,
+      96,
+      1795177676061481779,
+      1795177676061481779
+    ],
+    "owner_sha256": "4683361ba230d2da2eafac431b77a7a18d36a2fd499b16d091024934a2f070f7",
+    "owner_stamp": [
+      16777232,
+      285808776,
+      501,
+      0,
+      33152,
+      165,
+      1795177676062429115,
+      1795177676062429115
+    ]
+  },
+  "exact_semantic_claim": "Original FullSend.finish reached !sentAll after preceding sealed/clock/boundary conditions did not reject; sender returned false. Reason why sender returned false, direction/connection/site inside sender, and relation to old30/480/c01 failures remain UNKNOWN.",
+  "failed_record": {
+    "body_bytes": 0,
+    "bytes": 2906,
+    "header": {
+      "body_bytes": 0,
+      "config_id": "e3bfc8f6b78ac709",
+      "detail": "functional member lifecycle or observation invalid",
+      "label": "headless-sdk",
+      "measurement": "loadstand-functional-lifecycle",
+      "outcome": "failed",
+      "params": [
+        {
+          "name": "acceptance_eligible",
+          "value": "false"
+        },
+        {
+          "name": "action_budget",
+          "value": "8s"
+        },
+        {
+          "name": "allowed_lateness",
+          "value": "8s"
+        },
+        {
+          "name": "churn",
+          "value": "quiet"
+        },
+        {
+          "name": "cleanup_budget",
+          "value": "20s"
+        },
+        {
+          "name": "contacts",
+          "value": "0"
+        },
+        {
+          "name": "dm_mean_interval",
+          "value": "off"
+        },
+        {
+          "name": "duration",
+          "value": "20s"
+        },
+        {
+          "name": "edge_nodes",
+          "value": "0"
+        },
+        {
+          "name": "edge_uplinks",
+          "value": "1"
+        },
+        {
+          "name": "executor_version",
+          "value": "3"
+        },
+        {
+          "name": "full_nodes",
+          "value": "2"
+        },
+        {
+          "name": "gossip_interval",
+          "value": "off"
+        },
+        {
+          "name": "gossip_topic",
+          "value": "global"
+        },
+        {
+          "name": "hubs",
+          "value": "2"
+        },
+        {
+          "name": "max_actions",
+          "value": "128"
+        },
+        {
+          "name": "max_samples",
+          "value": "96"
+        },
+        {
+          "name": "max_trace_bytes",
+          "value": "4194304"
+        },
+        {
+          "name": "plan_digest",
+          "value": "39e2a85269ef749b743643669fb8260121a052d9a92d3ddc1ed27c2a10266210"
+        },
+        {
+          "name": "plan_version",
+          "value": "3"
+        },
+        {
+          "name": "profile",
+          "value": "functional-loopback"
+        },
+        {
+          "name": "readiness_budget",
+          "value": "30s"
+        },
+        {
+          "name": "receipt_drain",
+          "value": "8s"
+        },
+        {
+          "name": "route_ready_budget",
+          "value": "35s"
+        },
+        {
+          "name": "route_wire_begin_ns",
+          "value": "12581121875"
+        },
+        {
+          "name": "route_wire_begin_offset_ns",
+          "value": "2000000000"
+        },
+        {
+          "name": "route_wire_disconnect_at_ns",
+          "value": "16581121875"
+        },
+        {
+          "name": "route_wire_end_ns",
+          "value": "25581121875"
+        },
+        {
+          "name": "route_wire_end_offset_ns",
+          "value": "15000000000"
+        },
+        {
+          "name": "route_wire_full_receipt_policy",
+          "value": "complete_sender_passes_with_source_and_reciprocal_receipt_v2"
+        },
+        {
+          "name": "route_wire_full_receipt_route_budget",
+          "value": "10000"
+        },
+        {
+          "name": "route_wire_initiator",
+          "value": "full-000"
+        },
+        {
+          "name": "route_wire_member_0",
+          "value": "full-000/4"
+        },
+        {
+          "name": "route_wire_member_1",
+          "value": "full-001/4"
+        },
+        {
+          "name": "route_wire_pair_policy",
+          "value": "tls_session_queue_intervals_v1"
+        },
+        {
+          "name": "route_wire_rate_policy",
+          "value": "session_registered_overlap_node_full_window_v1"
+        },
+        {
+          "name": "route_wire_required_full_routes",
+          "value": "10000"
+        },
+        {
+          "name": "route_wire_required_full_source",
+          "value": "connect"
+        },
+        {
+          "name": "route_wire_schedule_origin_ns",
+          "value": "10581121875"
+        },
+        {
+          "name": "route_wire_seed_identity_sha256",
+          "value": "168c3502e786c934c14c464e8ef003d331a273ff9ca636d9109ee516340d42d8"
+        },
+        {
+          "name": "route_wire_seed_sender",
+          "value": "full-000"
+        },
+        {
+          "name": "route_wire_session_policy",
+          "value": "two_sessions_ordered_replacement_v1"
+        },
+        {
+          "name": "route_wire_window",
+          "value": "ef0dc068d3b506c5f2bed60f58debef3b277984330995a4ce3bfcaf7a8bdcc8c"
+        },
+        {
+          "name": "sample_interval",
+          "value": "5s"
+        },
+        {
+          "name": "seed",
+          "value": "13"
+        },
+        {
+          "name": "settle",
+          "value": "0s"
+        },
+        {
+          "name": "traffic_resolution",
+          "value": "100ms"
+        }
+      ],
+      "recorded_at": "2026-11-20T12:28:27.531580306Z",
+      "sources": [
+        {
+          "name": "measured",
+          "stamp": "90f33126457b02a0"
+        },
+        {
+          "name": "stand",
+          "stamp": "78d671b120e64887"
+        }
+      ]
+    },
+    "original_checksum_verified": true,
+    "path": "loadstand-functional-lifecycle-headless-sdk-e3bfc8f6b78ac709.attempt-84e08ca323d5fd75.failed",
+    "sha256": "9636415d81fc4eeaa4966d12cd020b374a7268d0d375879fd74b76a947c10100"
+  },
+  "first_stage": "observer_full_send_finish_sender_false",
+  "fresh_process_checks": [
+    {
+      "id": 86128,
+      "kind": "kill",
+      "result": "ESRCH"
+    },
+    {
+      "id": 86128,
+      "kind": "killpg",
+      "result": "ESRCH"
+    },
+    {
+      "id": 86129,
+      "kind": "kill",
+      "result": "ESRCH"
+    },
+    {
+      "id": 86129,
+      "kind": "killpg",
+      "result": "ESRCH"
+    }
+  ],
+  "functional_outcome": "ORIGINAL_GO_FAIL30.60s",
+  "guest": {
+    "all_children_reaped": true,
+    "attempt_id": "97a9c06a6fe700ed0cf2c98e8a19f152",
+    "config_sha256": "c6812cc3e985663ef2fd83af413b9e868916ffd05d5a577a4a544801d93f375e",
+    "export": {
+      "all_children_reaped": true,
+      "exit": 0,
+      "kill_sent": false,
+      "log_complete": true,
+      "log_overflow": false,
+      "normal": true,
+      "pid": 118,
+      "reaped": true,
+      "term_sent": false
+    },
+    "export_started": true,
+    "guest_elapsed_ns": 30980832431,
+    "initial_lo_checked": true,
+    "input_files": 1366,
+    "inputs_verified": true,
+    "poweroff_attempt": true,
+    "profile_sha256": "f84856cfa6f3c3d39f4f5d69487c5d968106aeea77b16f8a3d7bf864266e7369",
+    "source_commit": "4fcc2f7245095fc43d2225f0f0065f4ce3b26113",
+    "stage": "functional-or-export-failure",
+    "state": "FAIL",
+    "test": {
+      "all_children_reaped": true,
+      "exit": 1,
+      "kill_sent": false,
+      "log_complete": true,
+      "log_overflow": false,
+      "normal": true,
+      "pid": 64,
+      "reaped": true,
+      "term_sent": false
+    },
+    "workload": "reconnect"
+  },
+  "handoff_sha256": "8d46e2d3ce8b82a79d7977f15ff974af51a7b05c1836cfb1e4bc77e8250b458a",
+  "manifests": {
+    "sources/measured-90f33126457b02a0/MANIFEST.sha256": "90f33126457b02a039ccde6751643770ff260d014c280442daa64df7f9cc92cf",
+    "sources/stand-78d671b120e64887/MANIFEST.sha256": "78d671b120e64887b7a7a7c827d3c114a4d03c0fa1f4aee861fbd3fa7ce3185e"
+  },
+  "native_events": [
+    {
+      "attempt_id": "97a9c06a6fe700ed0cf2c98e8a19f152",
+      "config_sha256": "c6812cc3e985663ef2fd83af413b9e868916ffd05d5a577a4a544801d93f375e",
+      "elapsed_ns": 613647000,
+      "event": "ready",
+      "profile": "d1-o1a-native-v1",
+      "seq": 1,
+      "workload": "reconnect"
+    },
+    {
+      "attempt_id": "97a9c06a6fe700ed0cf2c98e8a19f152",
+      "config_sha256": "c6812cc3e985663ef2fd83af413b9e868916ffd05d5a577a4a544801d93f375e",
+      "elapsed_ns": 732292000,
+      "event": "start_ok",
+      "profile": "d1-o1a-native-v1",
+      "seq": 2,
+      "workload": "reconnect"
+    },
+    {
+      "attempt_id": "97a9c06a6fe700ed0cf2c98e8a19f152",
+      "config_sha256": "c6812cc3e985663ef2fd83af413b9e868916ffd05d5a577a4a544801d93f375e",
+      "elapsed_ns": 32184416000,
+      "event": "guest_stopped",
+      "guest_error": null,
+      "profile": "d1-o1a-native-v1",
+      "seq": 3,
+      "workload": "reconnect"
+    },
+    {
+      "attempt_id": "97a9c06a6fe700ed0cf2c98e8a19f152",
+      "config_sha256": "c6812cc3e985663ef2fd83af413b9e868916ffd05d5a577a4a544801d93f375e",
+      "elapsed_ns": 32184489000,
+      "event": "stop_complete",
+      "final_state": "stopped",
+      "profile": "d1-o1a-native-v1",
+      "seq": 4,
+      "workload": "reconnect"
+    }
+  ],
+  "observer_leaf_reason": 31,
+  "scope": "Normal worker0/VMstopped/fullyreaped completeRAW only authorizes later ROOT exact-own-lock cleanup after threeactor ACK; no signals/removal by reviewer. FunctionalFAIL preserved, no app/oraclefix implied. PhysicalXPC UNKNOWN; no baseline/metric/512000000-byte/D1 acceptance.",
+  "status": "ACCEPTED_VM_STOPPED_ONLY",
+  "transport_code": 95,
+  "worker_normal0_reaped_ns": 32211210000
+}

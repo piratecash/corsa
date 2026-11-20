@@ -1,0 +1,195 @@
+{
+  "Linux_or_app_ELF": "NOT_BUILT_NOT_EXECUTED",
+  "QA_snapshot_files": 2455,
+  "QA_source_manifest_sha256": "30a0c4b92b9c1dbc5459edb08f87b46c0744a1ce42fbf09df8cc8a06a8936333",
+  "artifact_snapshot_files": 2450,
+  "artifact_source_manifest_sha256": "73faae47d209407c973ac6b37b8e2cfabf4412b7d1f2f4d8d7db3db230b4fd19",
+  "attempt_id": "cadf786a7245409d9a35e38ffcd775d1",
+  "base_actual_source_manifest_sha256": "eacba467ea5c7a35e9ace514ab64612e9cfe95e749220b48bc704f22c33faef9",
+  "cleanup_seconds": 30,
+  "error": null,
+  "lock_retained": false,
+  "original_Go_source_API": "NOT_RUN_CHANGED_CORE_REQUIRES_FRESH_READBACK_LATER",
+  "raw_bytes": 321980,
+  "scope": "HOST_TESTS_ONLY_CHANGED_CORE_NOT_BASELINE_NOT_METRIC_NO512",
+  "status": "DISPOSABLE_OBSERVER_PURE_GO_QA_PASS",
+  "steps": [
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1)(allow default)(deny network*)(deny file-write* (subpath \"/Users/hades/Documents/repos/corsa\"))(deny file-write* (subpath \"/private/tmp/corsa-d1-o1a-full-send-leaf-goqa-cadf786a7245409d9a35e38ffcd775d1/source\"))",
+        "/usr/local/go/bin/go",
+        "version"
+      ],
+      "exit": 0,
+      "owned_group_absent": true,
+      "phase": "version",
+      "pid": 81953,
+      "pipe_threads_finished": true,
+      "reason": null,
+      "stderr": "/private/tmp/corsa-d1-o1a-full-send-leaf-goqa-cadf786a7245409d9a35e38ffcd775d1/01-version.stderr",
+      "stdout": "/private/tmp/corsa-d1-o1a-full-send-leaf-goqa-cadf786a7245409d9a35e38ffcd775d1/01-version.stdout"
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1)(allow default)(deny network*)(deny file-write* (subpath \"/Users/hades/Documents/repos/corsa\"))(deny file-write* (subpath \"/private/tmp/corsa-d1-o1a-full-send-leaf-goqa-cadf786a7245409d9a35e38ffcd775d1/source\"))",
+        "/usr/local/go/bin/go",
+        "mod",
+        "verify"
+      ],
+      "exit": 0,
+      "owned_group_absent": true,
+      "phase": "module-verify",
+      "pid": 81955,
+      "pipe_threads_finished": true,
+      "reason": null,
+      "stderr": "/private/tmp/corsa-d1-o1a-full-send-leaf-goqa-cadf786a7245409d9a35e38ffcd775d1/02-module-verify.stderr",
+      "stdout": "/private/tmp/corsa-d1-o1a-full-send-leaf-goqa-cadf786a7245409d9a35e38ffcd775d1/02-module-verify.stdout"
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1)(allow default)(deny network*)(deny file-write* (subpath \"/Users/hades/Documents/repos/corsa\"))(deny file-write* (subpath \"/private/tmp/corsa-d1-o1a-full-send-leaf-goqa-cadf786a7245409d9a35e38ffcd775d1/source\"))",
+        "/usr/local/go/bin/go",
+        "test",
+        "-mod=readonly",
+        "-buildvcs=false",
+        "-p=1",
+        "-parallel=1",
+        "-count=1",
+        "-timeout=180s",
+        "-json",
+        "-run=^(TestLoadStandRouteWireLargeProjectionAndReceiverReceipt|TestLoadStandRouteWireFullReceiptRecordsOnlyStableClaimsWithinBudget|TestLoadStandRouteWireReaderFillIntervals|TestLoadStandRouteWireFullReceiptRefillContrast|TestLoadStandRouteWireReaderClosedWithPartialFrame|TestLoadStandRouteWireWindowExcludesOutsideFrames|TestLoadStandRouteWireWindowRefusals|TestLoadStandRouteWireQueueDisposition|TestLoadStandRouteWireUpperQueueHandoff|TestLoadStandRouteWireUpperQueueDrain|TestLoadStandRouteWireFullSendMatchesOriginalWriter|TestLoadStandRouteWireFullPassRefusesConnectionOrBoundaryChange|TestLoadStandRouteWireFirstFailureStickyIdleRead|TestLoadStandRouteWireFirstFailureCaptureAndReceive|TestLoadStandRouteWireFirstFailureClosedTransport|TestLoadStandRouteWireFullSendPreWindowCrossingMechanism|TestLoadStandRouteWireFullSendProjectionReuseMechanism|TestLoadStandFullSendLeafClosedTransportAndStickyReason|TestLoadStandFullSendLeafStateClockShortCircuit|TestLoadStandFullSendLeafFinishOriginalOREquivalence|TestLoadStandFullSendLeafProjectionOriginalOREquivalence)$",
+        "./internal/core/node"
+      ],
+      "exit": 0,
+      "owned_group_absent": true,
+      "phase": "node-observer",
+      "pid": 81956,
+      "pipe_threads_finished": true,
+      "reason": null,
+      "stderr": "/private/tmp/corsa-d1-o1a-full-send-leaf-goqa-cadf786a7245409d9a35e38ffcd775d1/03-node-observer.stderr",
+      "stdout": "/private/tmp/corsa-d1-o1a-full-send-leaf-goqa-cadf786a7245409d9a35e38ffcd775d1/03-node-observer.stdout"
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1)(allow default)(deny network*)(allow network-inbound (local ip \"localhost:*\"))(allow network-outbound (remote ip \"localhost:*\"))(deny file-write* (subpath \"/Users/hades/Documents/repos/corsa\"))(deny file-write* (subpath \"/private/tmp/corsa-d1-o1a-full-send-leaf-goqa-cadf786a7245409d9a35e38ffcd775d1/source\"))",
+        "/usr/local/go/bin/go",
+        "test",
+        "-mod=readonly",
+        "-buildvcs=false",
+        "-p=1",
+        "-parallel=1",
+        "-count=1",
+        "-timeout=180s",
+        "-json",
+        "-run=^(TestRouteWireDiagnosticUnavailableOnlyAndLegacyAbsence|TestRouteWireWitnessPreservesTypedStagesAndDropsRawCause|TestRouteWireDiagnosticParentKeepsPreciseCauseAndErrorIs|TestRouteWireWitnessFiniteFaultStages|TestRouteWireRPCStageMappingOnlyOnOwnCensus503|TestRouteWireCensusWitnessBindsRegistryToLaunch|TestRouteWireCensusWorkReply|TestRouteWireCommitmentFitsControlPacketAndBindsExactCensus|TestHeadlessRouteWireReportBindsBootBounds|TestHeadlessRouteWireFullReceiveReceipt|TestSealedHeadlessRouteWireReportRejectsSubstitutedBytes|TestHeadlessRouteWireReportBindsWindowAndCensus|TestHeadlessRouteWireReportRejectsInvalidEvidence|TestHeadlessRouteWireReportRejectsMissingNullAndDuplicateCounters|TestLinuxRPCActualTransportCarriesFiniteDialBound|TestLinuxRPCDirectParentBoundsAndCancellation|TestLinuxRPCTransportParentCancellationJoinsDial|TestLinuxRPCRequestReturnDoesNotInventHeldDialJoin|TestLinuxRPCAdapterCancelDoesNotCloseTransferredConnection|TestRouteWireFullSendLeavesRemainUnavailableOnly)$",
+        "./internal/testutil/loadstand"
+      ],
+      "exit": 0,
+      "owned_group_absent": true,
+      "phase": "census-parent-and-original",
+      "pid": 82944,
+      "pipe_threads_finished": true,
+      "reason": null,
+      "stderr": "/private/tmp/corsa-d1-o1a-full-send-leaf-goqa-cadf786a7245409d9a35e38ffcd775d1/04-census-parent-and-original.stderr",
+      "stdout": "/private/tmp/corsa-d1-o1a-full-send-leaf-goqa-cadf786a7245409d9a35e38ffcd775d1/04-census-parent-and-original.stdout"
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1)(allow default)(deny network*)(deny file-write* (subpath \"/Users/hades/Documents/repos/corsa\"))(deny file-write* (subpath \"/private/tmp/corsa-d1-o1a-full-send-leaf-goqa-cadf786a7245409d9a35e38ffcd775d1/source\"))",
+        "/usr/local/go/bin/go",
+        "test",
+        "-mod=readonly",
+        "-buildvcs=false",
+        "-p=1",
+        "-parallel=1",
+        "-count=1",
+        "-timeout=180s",
+        "-json",
+        "-run=^(TestCensusDiagnosticClosedStagesAndUnwrap|TestCensusRPCPublishesOnlyTypedClosedDiagnostic)$",
+        "./internal/testutil/loadstand/fullwitness"
+      ],
+      "exit": 0,
+      "owned_group_absent": true,
+      "phase": "census-server",
+      "pid": 82969,
+      "pipe_threads_finished": true,
+      "reason": null,
+      "stderr": "/private/tmp/corsa-d1-o1a-full-send-leaf-goqa-cadf786a7245409d9a35e38ffcd775d1/05-census-server.stderr",
+      "stdout": "/private/tmp/corsa-d1-o1a-full-send-leaf-goqa-cadf786a7245409d9a35e38ffcd775d1/05-census-server.stdout"
+    }
+  ],
+  "subject_manifest_sha256": "96da504ba9c667474d8408ec7ae034fa4a5f4bd9106dc6a6568dead4448d4c3b",
+  "tests": {
+    "census-parent-and-original": {
+      "child_passes": 119,
+      "passed": [
+        "TestRouteWireCommitmentFitsControlPacketAndBindsExactCensus",
+        "TestHeadlessRouteWireReportBindsBootBounds",
+        "TestHeadlessRouteWireFullReceiveReceipt",
+        "TestSealedHeadlessRouteWireReportRejectsSubstitutedBytes",
+        "TestHeadlessRouteWireReportBindsWindowAndCensus",
+        "TestHeadlessRouteWireReportRejectsInvalidEvidence",
+        "TestHeadlessRouteWireReportRejectsMissingNullAndDuplicateCounters",
+        "TestLinuxRPCActualTransportCarriesFiniteDialBound",
+        "TestLinuxRPCDirectParentBoundsAndCancellation",
+        "TestLinuxRPCTransportParentCancellationJoinsDial",
+        "TestLinuxRPCRequestReturnDoesNotInventHeldDialJoin",
+        "TestLinuxRPCAdapterCancelDoesNotCloseTransferredConnection",
+        "TestRouteWireDiagnosticUnavailableOnlyAndLegacyAbsence",
+        "TestRouteWireWitnessPreservesTypedStagesAndDropsRawCause",
+        "TestRouteWireDiagnosticParentKeepsPreciseCauseAndErrorIs",
+        "TestRouteWireWitnessFiniteFaultStages",
+        "TestRouteWireRPCStageMappingOnlyOnOwnCensus503",
+        "TestRouteWireCensusWitnessBindsRegistryToLaunch",
+        "TestRouteWireCensusWorkReply",
+        "TestRouteWireFullSendLeavesRemainUnavailableOnly"
+      ]
+    },
+    "census-server": {
+      "child_passes": 29,
+      "passed": [
+        "TestCensusDiagnosticClosedStagesAndUnwrap",
+        "TestCensusRPCPublishesOnlyTypedClosedDiagnostic"
+      ]
+    },
+    "node-observer": {
+      "child_passes": 126,
+      "passed": [
+        "TestLoadStandRouteWireFirstFailureStickyIdleRead",
+        "TestLoadStandRouteWireFirstFailureCaptureAndReceive",
+        "TestLoadStandRouteWireFirstFailureClosedTransport",
+        "TestLoadStandFullSendLeafClosedTransportAndStickyReason",
+        "TestLoadStandFullSendLeafStateClockShortCircuit",
+        "TestLoadStandFullSendLeafFinishOriginalOREquivalence",
+        "TestLoadStandFullSendLeafProjectionOriginalOREquivalence",
+        "TestLoadStandRouteWireFullSendPreWindowCrossingMechanism",
+        "TestLoadStandRouteWireFullSendProjectionReuseMechanism",
+        "TestLoadStandRouteWireFullSendMatchesOriginalWriter",
+        "TestLoadStandRouteWireFullPassRefusesConnectionOrBoundaryChange",
+        "TestLoadStandRouteWireLargeProjectionAndReceiverReceipt",
+        "TestLoadStandRouteWireFullReceiptRecordsOnlyStableClaimsWithinBudget",
+        "TestLoadStandRouteWireFullReceiptRefillContrast",
+        "TestLoadStandRouteWireUpperQueueHandoff",
+        "TestLoadStandRouteWireUpperQueueDrain",
+        "TestLoadStandRouteWireWindowExcludesOutsideFrames",
+        "TestLoadStandRouteWireWindowRefusals",
+        "TestLoadStandRouteWireReaderFillIntervals",
+        "TestLoadStandRouteWireReaderClosedWithPartialFrame",
+        "TestLoadStandRouteWireQueueDisposition"
+      ]
+    }
+  },
+  "unknown": false,
+  "work": "/private/tmp/corsa-d1-o1a-full-send-leaf-goqa-cadf786a7245409d9a35e38ffcd775d1",
+  "work_seconds": 600
+}

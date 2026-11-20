@@ -1,0 +1,36 @@
+{
+  "applications_executed": false,
+  "attempt_id": "f1c34212489c4619a0215b3ea791a475",
+  "data": {
+    "result": "/private/tmp/corsa-o1a-full-send-leaf-inputs-29a5c76170dd42818facb32d2ec16e93/RESULT.json",
+    "scope": "DISPOSABLE_OBSERVER_FIRST_FAILURE_DIAGNOSTIC",
+    "source_archive_sha256": "aaa268a9e05b73eb0494bde5baf06cf77b8ef7b223062dcda1de04b951f27686"
+  },
+  "error": null,
+  "lock_retained": false,
+  "raw_bytes": 357,
+  "status": "DISPOSABLE_OBSERVER_SOURCE_DATA_PREPARED",
+  "steps": [
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1)(allow default)(deny network*)",
+        "/usr/bin/python3",
+        "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-full-send-leaf-input-rebind-v1/prepare.py",
+        "--execute",
+        "c4ad595fa9d2514e7d833ffce9bf85e4f4bfc848d5aad23c7519b0105fe933bc"
+      ],
+      "exit": 0,
+      "owned_group_absent": true,
+      "phase": "prepare",
+      "pid": 84742,
+      "pipe_threads_finished": true,
+      "reason": null,
+      "stderr": "/private/tmp/corsa-d1-o1a-full-send-leaf-source-data-f1c34212489c4619a0215b3ea791a475/01-prepare.stderr",
+      "stdout": "/private/tmp/corsa-d1-o1a-full-send-leaf-source-data-f1c34212489c4619a0215b3ea791a475/01-prepare.stdout"
+    }
+  ],
+  "unknown": false,
+  "work": "/private/tmp/corsa-d1-o1a-full-send-leaf-source-data-f1c34212489c4619a0215b3ea791a475"
+}

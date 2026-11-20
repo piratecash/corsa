@@ -1,0 +1,39 @@
+{
+  "applications_executed": false,
+  "attempt_id": "fdf5ecea5509467ea2e6fa86278e690a",
+  "data": {
+    "reconnect": {
+      "attempt_id": "97a9c06a6fe700ed0cf2c98e8a19f152",
+      "config_sha256": "c6812cc3e985663ef2fd83af413b9e868916ffd05d5a577a4a544801d93f375e",
+      "handoff_sha256": "6cf99bc040997e95e8aa5202a4560993e59a173fe6022450e29c70028c8b629a",
+      "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-full-send-leaf-runtime-v1"
+    }
+  },
+  "error": null,
+  "lock_retained": false,
+  "raw_bytes": 355,
+  "status": "DISPOSABLE_OBSERVER_RUNTIME_DATA_PREPARED",
+  "steps": [
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1)(allow default)(deny network*)",
+        "/usr/bin/python3",
+        "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-full-send-leaf-rebind-v1/prepare.py",
+        "/private/tmp/corsa-d1-full512-native-image-491774c50f4c4a04b80e10095acfb152/result.json",
+        "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-full-send-leaf-initrd-v1/PACK-RESULT.json"
+      ],
+      "exit": 0,
+      "owned_group_absent": true,
+      "phase": "prepare",
+      "pid": 86069,
+      "pipe_threads_finished": true,
+      "reason": null,
+      "stderr": "/private/tmp/corsa-d1-o1a-full-send-leaf-runtime-data-fdf5ecea5509467ea2e6fa86278e690a/01-prepare.stderr",
+      "stdout": "/private/tmp/corsa-d1-o1a-full-send-leaf-runtime-data-fdf5ecea5509467ea2e6fa86278e690a/01-prepare.stdout"
+    }
+  ],
+  "unknown": false,
+  "work": "/private/tmp/corsa-d1-o1a-full-send-leaf-runtime-data-fdf5ecea5509467ea2e6fa86278e690a"
+}

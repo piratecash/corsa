@@ -1,0 +1,74 @@
+{
+  "D1_acceptance": "NOT_ESTABLISHED",
+  "Go": {
+    "established": "The original sender returned sentAll=false at observer finish.",
+    "observer_reason": 31,
+    "outcome": "FAIL",
+    "seconds": 30.6,
+    "stage": "observer_full_send_finish_sender_false",
+    "transport_code": 95,
+    "underlying_build_dispatch_or_chunker_skip": "UNKNOWN"
+  },
+  "QA": {
+    "QA_files": 2455,
+    "artifact_files": 2450,
+    "child_PASS": 274,
+    "commands_exit0": 5,
+    "outer_PASS": 43
+  },
+  "attempt": "97a9c06a6fe700ed0cf2c98e8a19f152",
+  "builds": "17 commands for four Linux test/stand ELF artifacts, including fresh original Go source API and static/BuildInfo metadata; ten PID1 QA outer/five child and four helper commands; eight C commands including pure policy emission. No test/stand ELF artifact executed by these builds.",
+  "capsule": {
+    "Go_files": 1348,
+    "complete_transport": "RAW.tar.xz/native/console.raw",
+    "expanded_Go": "Not duplicated; every member hash verified against exact compiled source-after.json.",
+    "failed_body_bytes": 0,
+    "failed_records": 1,
+    "files": 1351,
+    "manifests": 2
+  },
+  "exporter": "Same accepted 7ef3 binary reused by exact compiled dependency closure.",
+  "historical_c01_30s_and_480s_cause": "UNKNOWN; new diagnostics do not retroactively identify old conditions.",
+  "native": {
+    "all_guest_children_reaped": true,
+    "export_exit": 0,
+    "intervention": false,
+    "native_events": 4,
+    "physical_XPC": "UNKNOWN",
+    "stopped_only_ACK": "COMPLETE; functional FAIL preserved",
+    "test_exit": 1,
+    "worker_exit": 0
+  },
+  "original_periodic_reconnect_metric_acceptance": "NOT_ESTABLISHED",
+  "prior_committed_reference": {
+    "commit": "ac17ba55c551ed1cb48d4c65482ec6d5175fc04e",
+    "evidence": "docs/operations/evidence/d1-observer-full-send-2026-11-20",
+    "lineage": "Same original 4fcc source, coherent fixture, decoder/library/worker/kernel/profile lineage. Prior c01/raw/mechanism evidence is linked, not duplicated.",
+    "sha256sums": "71b386eafb8148a941aabc8e9a548bb7a8c64c0cf30bbfd83e8b8bcbf888375f"
+  },
+  "private_source": "Exactly three diagnostic posts and five QA-only posts retained; none applied to the product checkout.",
+  "profile_sha256": "f84856cfa6f3c3d39f4f5d69487c5d968106aeea77b16f8a3d7bf864266e7369",
+  "raw": {
+    "members": 152,
+    "payload_bytes": 15954677,
+    "sha256": "7cf88fd2cf0fe64f2226a6193a76e98402b1c8f23657659149ee1957b5db403a"
+  },
+  "scope": "DISPOSABLE_FULL_SEND_SENDER_DIAGNOSTIC_NOT_BASELINE_NOT_METRIC_NO512",
+  "source": {
+    "members": 128,
+    "payload_bytes": 3538660,
+    "sha256": "a0edfd39b6ba42f0fe5b7ad1aa71198ea33dc10f1fd411f0d747e6ecbf27d9b6"
+  },
+  "source_groups": {
+    "measured": {
+      "files": 640,
+      "sha256": "90f33126457b02a039ccde6751643770ff260d014c280442daa64df7f9cc92cf",
+      "stamp": "90f33126457b02a0"
+    },
+    "stand": {
+      "files": 708,
+      "sha256": "78d671b120e64887b7a7a7c827d3c114a4d03c0fa1f4aee861fbd3fa7ce3185e",
+      "stamp": "78d671b120e64887"
+    }
+  }
+}

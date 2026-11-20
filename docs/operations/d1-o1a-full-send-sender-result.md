@@ -1,0 +1,9 @@
+# O1a disposable diagnostic: sender returned false
+
+The short component attempt `97a9c06a6fe700ed0cf2c98e8a19f152` failed the original Go test after **30.60 seconds**. The first observer reason is **31**, transported as **95**: `observer_full_send_finish_sender_false`. This establishes that the original full-route sender returned `sentAll=false` at observer finish. The underlying frame-build, dispatch or chunker-skip condition remains **UNKNOWN**. The earlier c01 and 480-second causes are also UNKNOWN.
+
+Only three private diagnostic source files distinguish seventeen existing full-send refusal leaves; the original predicates, short-circuit order, clocks, locks and sticky failure remain. The disposable source was not applied to the product checkout. **43 outer tests / 274 child cases** passed, including original sender/queue controls and all finish/projection combinations. Four Linux test/stand ELF artifacts were compiled with fresh original Go source-API and static/BuildInfo checks; the existing exporter was reused by its exact dependency closure. Five QA-only files are excluded from those ELF artifacts.
+
+The test exited with code 1 and exporter with code 0 normally; every guest child was reaped. Four native lifecycle events and worker exit 0 supported ROOT/TESTER/REVIEWER stopped-only ACK and exact owned-lock cleanup. Physical XPC resources remain UNKNOWN. Normal shutdown preserves the functional failure.
+
+[Portable evidence](evidence/d1-full-send-sender-2026-11-20/README.md) includes complete new RAW, recoverable source capsule, private source posts, controllers, inventories and reviews. It links the [previous ac17/c01 evidence](d1-o1a-observer-full-send.md) without duplicating old binaries or source trees. This diagnostic does not establish original periodic/reconnect O1a metrics, baseline, 512,000,000-byte resource acceptance or whole D1; it supplies no release or public-activation approval.

@@ -1,0 +1,381 @@
+{
+  "status": "BUILT_NOT_EXECUTED",
+  "subject": "DISPOSABLE_PRIVATE_FULL_SEND_LEAF_NOT_BASELINE_NOT_METRIC_NO512",
+  "commit": "4fcc2f7245095fc43d2225f0f0065f4ce3b26113",
+  "request": "7d5efc79e56b6168cbfe7e993d8d1c42d4792b094f612978d490ee6556240965",
+  "artifacts": {
+    "node.test": {
+      "sha256": "b40969a61fce7a273a0facfaa716ba56b3044494f0c12aee7750cd5e7e0003a7",
+      "bytes": 68933144
+    },
+    "loadstand-full": {
+      "sha256": "a4df3383e76996afba981d1f85367c2c07619c3505cb0c25a1d2138de9802b05",
+      "bytes": 30917141
+    },
+    "loadstand-linuxhelper": {
+      "sha256": "4a1bd9c2cefa7b44449399c225d745d0825495a0285cf5b0293046d4c10d2ce3",
+      "bytes": 10832482
+    },
+    "loadstand-sdkedge": {
+      "sha256": "d3ed59043381a08c60a98e883da38c43fd9525a07a32be07326686d77cb7ea16",
+      "bytes": 33519347
+    }
+  },
+  "source_groups_original_Go_API": {
+    "measured": {
+      "files": 640,
+      "manifest_bytes_equal": true,
+      "sha256": "90f33126457b02a039ccde6751643770ff260d014c280442daa64df7f9cc92cf",
+      "stamp": "90f33126457b02a0",
+      "verify_tree": "PASS"
+    },
+    "stand": {
+      "files": 708,
+      "manifest_bytes_equal": true,
+      "sha256": "78d671b120e64887b7a7a7c827d3c114a4d03c0fa1f4aee861fbd3fa7ce3185e",
+      "stamp": "78d671b120e64887",
+      "verify_tree": "PASS"
+    }
+  },
+  "fresh_original_Go_API": {
+    "groups": {
+      "measured": {
+        "files": 640,
+        "manifest_bytes_equal": true,
+        "sha256": "90f33126457b02a039ccde6751643770ff260d014c280442daa64df7f9cc92cf",
+        "stamp": "90f33126457b02a0",
+        "verify_tree": "PASS"
+      },
+      "stand": {
+        "files": 708,
+        "manifest_bytes_equal": true,
+        "sha256": "78d671b120e64887b7a7a7c827d3c114a4d03c0fa1f4aee861fbd3fa7ce3185e",
+        "stamp": "78d671b120e64887",
+        "verify_tree": "PASS"
+      }
+    },
+    "service_or_ELF_execution": false,
+    "status": "ORIGINAL_GO_SOURCE_API_MATCH"
+  },
+  "QA_artifact_manifest_sha256": "73faae47d209407c973ac6b37b8e2cfabf4412b7d1f2f4d8d7db3db230b4fd19",
+  "source_before_sha256": "73faae47d209407c973ac6b37b8e2cfabf4412b7d1f2f4d8d7db3db230b4fd19",
+  "source_after_sha256": "73faae47d209407c973ac6b37b8e2cfabf4412b7d1f2f4d8d7db3db230b4fd19",
+  "commands": [
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath \"/private/tmp/corsa-o1a-full-send-leaf-elf-build-1f50c1e8b0cb41bb9fec0dd1a81fc4bf\") (literal \"/dev/null\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-full-send-leaf-elf-build-1f50c1e8b0cb41bb9fec0dd1a81fc4bf/source\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-full-send-leaf-elf-build-1f50c1e8b0cb41bb9fec0dd1a81fc4bf/source-api-module\"))",
+        "/usr/local/go/bin/go",
+        "list",
+        "-mod=readonly",
+        "-trimpath",
+        "-buildvcs=false",
+        "-deps",
+        "-json",
+        "-test",
+        "./internal/core/node"
+      ],
+      "closure": "CONFIRMED_ABSENT",
+      "pgid": 84269,
+      "pid": 84269,
+      "returncode": 0
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath \"/private/tmp/corsa-o1a-full-send-leaf-elf-build-1f50c1e8b0cb41bb9fec0dd1a81fc4bf\") (literal \"/dev/null\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-full-send-leaf-elf-build-1f50c1e8b0cb41bb9fec0dd1a81fc4bf/source\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-full-send-leaf-elf-build-1f50c1e8b0cb41bb9fec0dd1a81fc4bf/source-api-module\"))",
+        "/usr/local/go/bin/go",
+        "list",
+        "-mod=readonly",
+        "-trimpath",
+        "-buildvcs=false",
+        "-deps",
+        "-json",
+        "-test",
+        "./internal/core/node"
+      ],
+      "closure": "CONFIRMED_ABSENT",
+      "pgid": 83334,
+      "pid": 83334,
+      "returncode": 0
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath \"/private/tmp/corsa-o1a-full-send-leaf-elf-build-1f50c1e8b0cb41bb9fec0dd1a81fc4bf\") (literal \"/dev/null\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-full-send-leaf-elf-build-1f50c1e8b0cb41bb9fec0dd1a81fc4bf/source\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-full-send-leaf-elf-build-1f50c1e8b0cb41bb9fec0dd1a81fc4bf/source-api-module\"))",
+        "/usr/local/go/bin/go",
+        "test",
+        "-c",
+        "-p=1",
+        "-mod=readonly",
+        "-trimpath",
+        "-buildvcs=false",
+        "-o",
+        "/private/tmp/corsa-o1a-full-send-leaf-elf-build-1f50c1e8b0cb41bb9fec0dd1a81fc4bf/node.test",
+        "./internal/core/node"
+      ],
+      "closure": "CONFIRMED_ABSENT",
+      "pgid": 83340,
+      "pid": 83340,
+      "returncode": 0
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath \"/private/tmp/corsa-o1a-full-send-leaf-elf-build-1f50c1e8b0cb41bb9fec0dd1a81fc4bf\") (literal \"/dev/null\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-full-send-leaf-elf-build-1f50c1e8b0cb41bb9fec0dd1a81fc4bf/source\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-full-send-leaf-elf-build-1f50c1e8b0cb41bb9fec0dd1a81fc4bf/source-api-module\"))",
+        "/usr/local/go/bin/go",
+        "version",
+        "-m",
+        "/private/tmp/corsa-o1a-full-send-leaf-elf-build-1f50c1e8b0cb41bb9fec0dd1a81fc4bf/node.test"
+      ],
+      "closure": "CONFIRMED_ABSENT",
+      "pgid": 84268,
+      "pid": 84268,
+      "returncode": 0
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath \"/private/tmp/corsa-o1a-full-send-leaf-elf-build-1f50c1e8b0cb41bb9fec0dd1a81fc4bf\") (literal \"/dev/null\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-full-send-leaf-elf-build-1f50c1e8b0cb41bb9fec0dd1a81fc4bf/source\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-full-send-leaf-elf-build-1f50c1e8b0cb41bb9fec0dd1a81fc4bf/source-api-module\"))",
+        "/usr/local/go/bin/go",
+        "list",
+        "-mod=readonly",
+        "-trimpath",
+        "-buildvcs=false",
+        "-deps",
+        "-json",
+        "./internal/testutil/loadstand/fullnode"
+      ],
+      "closure": "CONFIRMED_ABSENT",
+      "pgid": 84289,
+      "pid": 84289,
+      "returncode": 0
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath \"/private/tmp/corsa-o1a-full-send-leaf-elf-build-1f50c1e8b0cb41bb9fec0dd1a81fc4bf\") (literal \"/dev/null\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-full-send-leaf-elf-build-1f50c1e8b0cb41bb9fec0dd1a81fc4bf/source\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-full-send-leaf-elf-build-1f50c1e8b0cb41bb9fec0dd1a81fc4bf/source-api-module\"))",
+        "/usr/local/go/bin/go",
+        "list",
+        "-mod=readonly",
+        "-trimpath",
+        "-buildvcs=false",
+        "-deps",
+        "-json",
+        "./internal/testutil/loadstand/fullnode"
+      ],
+      "closure": "CONFIRMED_ABSENT",
+      "pgid": 84273,
+      "pid": 84273,
+      "returncode": 0
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath \"/private/tmp/corsa-o1a-full-send-leaf-elf-build-1f50c1e8b0cb41bb9fec0dd1a81fc4bf\") (literal \"/dev/null\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-full-send-leaf-elf-build-1f50c1e8b0cb41bb9fec0dd1a81fc4bf/source\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-full-send-leaf-elf-build-1f50c1e8b0cb41bb9fec0dd1a81fc4bf/source-api-module\"))",
+        "/usr/local/go/bin/go",
+        "build",
+        "-p=1",
+        "-mod=readonly",
+        "-trimpath",
+        "-buildvcs=false",
+        "-o",
+        "/private/tmp/corsa-o1a-full-send-leaf-elf-build-1f50c1e8b0cb41bb9fec0dd1a81fc4bf/loadstand-full",
+        "./internal/testutil/loadstand/fullnode"
+      ],
+      "closure": "CONFIRMED_ABSENT",
+      "pgid": 84277,
+      "pid": 84277,
+      "returncode": 0
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath \"/private/tmp/corsa-o1a-full-send-leaf-elf-build-1f50c1e8b0cb41bb9fec0dd1a81fc4bf\") (literal \"/dev/null\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-full-send-leaf-elf-build-1f50c1e8b0cb41bb9fec0dd1a81fc4bf/source\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-full-send-leaf-elf-build-1f50c1e8b0cb41bb9fec0dd1a81fc4bf/source-api-module\"))",
+        "/usr/local/go/bin/go",
+        "version",
+        "-m",
+        "/private/tmp/corsa-o1a-full-send-leaf-elf-build-1f50c1e8b0cb41bb9fec0dd1a81fc4bf/loadstand-full"
+      ],
+      "closure": "CONFIRMED_ABSENT",
+      "pgid": 84288,
+      "pid": 84288,
+      "returncode": 0
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath \"/private/tmp/corsa-o1a-full-send-leaf-elf-build-1f50c1e8b0cb41bb9fec0dd1a81fc4bf\") (literal \"/dev/null\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-full-send-leaf-elf-build-1f50c1e8b0cb41bb9fec0dd1a81fc4bf/source\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-full-send-leaf-elf-build-1f50c1e8b0cb41bb9fec0dd1a81fc4bf/source-api-module\"))",
+        "/usr/local/go/bin/go",
+        "list",
+        "-mod=readonly",
+        "-trimpath",
+        "-buildvcs=false",
+        "-deps",
+        "-json",
+        "./internal/testutil/loadstand/linuxhelper"
+      ],
+      "closure": "CONFIRMED_ABSENT",
+      "pgid": 84304,
+      "pid": 84304,
+      "returncode": 0
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath \"/private/tmp/corsa-o1a-full-send-leaf-elf-build-1f50c1e8b0cb41bb9fec0dd1a81fc4bf\") (literal \"/dev/null\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-full-send-leaf-elf-build-1f50c1e8b0cb41bb9fec0dd1a81fc4bf/source\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-full-send-leaf-elf-build-1f50c1e8b0cb41bb9fec0dd1a81fc4bf/source-api-module\"))",
+        "/usr/local/go/bin/go",
+        "list",
+        "-mod=readonly",
+        "-trimpath",
+        "-buildvcs=false",
+        "-deps",
+        "-json",
+        "./internal/testutil/loadstand/linuxhelper"
+      ],
+      "closure": "CONFIRMED_ABSENT",
+      "pgid": 84293,
+      "pid": 84293,
+      "returncode": 0
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath \"/private/tmp/corsa-o1a-full-send-leaf-elf-build-1f50c1e8b0cb41bb9fec0dd1a81fc4bf\") (literal \"/dev/null\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-full-send-leaf-elf-build-1f50c1e8b0cb41bb9fec0dd1a81fc4bf/source\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-full-send-leaf-elf-build-1f50c1e8b0cb41bb9fec0dd1a81fc4bf/source-api-module\"))",
+        "/usr/local/go/bin/go",
+        "build",
+        "-p=1",
+        "-mod=readonly",
+        "-trimpath",
+        "-buildvcs=false",
+        "-o",
+        "/private/tmp/corsa-o1a-full-send-leaf-elf-build-1f50c1e8b0cb41bb9fec0dd1a81fc4bf/loadstand-linuxhelper",
+        "./internal/testutil/loadstand/linuxhelper"
+      ],
+      "closure": "CONFIRMED_ABSENT",
+      "pgid": 84297,
+      "pid": 84297,
+      "returncode": 0
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath \"/private/tmp/corsa-o1a-full-send-leaf-elf-build-1f50c1e8b0cb41bb9fec0dd1a81fc4bf\") (literal \"/dev/null\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-full-send-leaf-elf-build-1f50c1e8b0cb41bb9fec0dd1a81fc4bf/source\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-full-send-leaf-elf-build-1f50c1e8b0cb41bb9fec0dd1a81fc4bf/source-api-module\"))",
+        "/usr/local/go/bin/go",
+        "version",
+        "-m",
+        "/private/tmp/corsa-o1a-full-send-leaf-elf-build-1f50c1e8b0cb41bb9fec0dd1a81fc4bf/loadstand-linuxhelper"
+      ],
+      "closure": "CONFIRMED_ABSENT",
+      "pgid": 84303,
+      "pid": 84303,
+      "returncode": 0
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath \"/private/tmp/corsa-o1a-full-send-leaf-elf-build-1f50c1e8b0cb41bb9fec0dd1a81fc4bf\") (literal \"/dev/null\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-full-send-leaf-elf-build-1f50c1e8b0cb41bb9fec0dd1a81fc4bf/source\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-full-send-leaf-elf-build-1f50c1e8b0cb41bb9fec0dd1a81fc4bf/source-api-module\"))",
+        "/usr/local/go/bin/go",
+        "run",
+        "-mod=readonly",
+        "-buildvcs=false",
+        "-p=1",
+        "./cmd/source-api-readback",
+        "--source-tree",
+        "/private/tmp/corsa-o1a-full-send-leaf-elf-build-1f50c1e8b0cb41bb9fec0dd1a81fc4bf/source",
+        "--manifests",
+        "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-full-send-leaf-elf-build-v1"
+      ],
+      "closure": "CONFIRMED_ABSENT",
+      "pgid": 83143,
+      "pid": 83143,
+      "returncode": 0
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath \"/private/tmp/corsa-o1a-full-send-leaf-elf-build-1f50c1e8b0cb41bb9fec0dd1a81fc4bf\") (literal \"/dev/null\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-full-send-leaf-elf-build-1f50c1e8b0cb41bb9fec0dd1a81fc4bf/source\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-full-send-leaf-elf-build-1f50c1e8b0cb41bb9fec0dd1a81fc4bf/source-api-module\"))",
+        "/usr/local/go/bin/go",
+        "list",
+        "-mod=readonly",
+        "-trimpath",
+        "-buildvcs=false",
+        "-deps",
+        "-json",
+        "./internal/testutil/loadstand/sdkedge"
+      ],
+      "closure": "CONFIRMED_ABSENT",
+      "pgid": 84321,
+      "pid": 84321,
+      "returncode": 0
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath \"/private/tmp/corsa-o1a-full-send-leaf-elf-build-1f50c1e8b0cb41bb9fec0dd1a81fc4bf\") (literal \"/dev/null\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-full-send-leaf-elf-build-1f50c1e8b0cb41bb9fec0dd1a81fc4bf/source\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-full-send-leaf-elf-build-1f50c1e8b0cb41bb9fec0dd1a81fc4bf/source-api-module\"))",
+        "/usr/local/go/bin/go",
+        "list",
+        "-mod=readonly",
+        "-trimpath",
+        "-buildvcs=false",
+        "-deps",
+        "-json",
+        "./internal/testutil/loadstand/sdkedge"
+      ],
+      "closure": "CONFIRMED_ABSENT",
+      "pgid": 84308,
+      "pid": 84308,
+      "returncode": 0
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath \"/private/tmp/corsa-o1a-full-send-leaf-elf-build-1f50c1e8b0cb41bb9fec0dd1a81fc4bf\") (literal \"/dev/null\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-full-send-leaf-elf-build-1f50c1e8b0cb41bb9fec0dd1a81fc4bf/source\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-full-send-leaf-elf-build-1f50c1e8b0cb41bb9fec0dd1a81fc4bf/source-api-module\"))",
+        "/usr/local/go/bin/go",
+        "build",
+        "-p=1",
+        "-mod=readonly",
+        "-trimpath",
+        "-buildvcs=false",
+        "-o",
+        "/private/tmp/corsa-o1a-full-send-leaf-elf-build-1f50c1e8b0cb41bb9fec0dd1a81fc4bf/loadstand-sdkedge",
+        "./internal/testutil/loadstand/sdkedge"
+      ],
+      "closure": "CONFIRMED_ABSENT",
+      "pgid": 84313,
+      "pid": 84313,
+      "returncode": 0
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (subpath \"/private/tmp/corsa-o1a-full-send-leaf-elf-build-1f50c1e8b0cb41bb9fec0dd1a81fc4bf\") (literal \"/dev/null\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-full-send-leaf-elf-build-1f50c1e8b0cb41bb9fec0dd1a81fc4bf/source\")) (deny file-write* (subpath \"/private/tmp/corsa-o1a-full-send-leaf-elf-build-1f50c1e8b0cb41bb9fec0dd1a81fc4bf/source-api-module\"))",
+        "/usr/local/go/bin/go",
+        "version",
+        "-m",
+        "/private/tmp/corsa-o1a-full-send-leaf-elf-build-1f50c1e8b0cb41bb9fec0dd1a81fc4bf/loadstand-sdkedge"
+      ],
+      "closure": "CONFIRMED_ABSENT",
+      "pgid": 84320,
+      "pid": 84320,
+      "returncode": 0
+    }
+  ]
+}
