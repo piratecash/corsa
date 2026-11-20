@@ -1,0 +1,43 @@
+{
+  "scope": "FOLLOWUP_ORIGINAL_GO_PERIODIC_FAIL_NOT_O1A_PASS",
+  "attempt_id": "651767f4ce3f00dc9a5fbfaac6f5b826",
+  "archive": {
+    "bytes": 4016,
+    "sha256": "b15ddbbdaae7d14cbb0a56c51111294295512689d7c0c98462a91ede81d0064c",
+    "members": 11
+  },
+  "receipt_sha256": "318e2e5a5cc4c7ba0cffc6a6c565d30fa595a97054b545f918f3f9a6b0be3e38",
+  "actual_reported_failure": "setup-network/setup-verify/guard4 configure=false rejected_prefix=ff00::/8 selected_prefix=240.0.0.0/4 peer_ifindex=3",
+  "route_table": "UNKNOWN",
+  "route_oif": "UNKNOWN",
+  "kernel_sha256": "9ffeb24f4131ec4c5177b83c4a74ed8af699553c00a6b0d7f0d0ff4e98970c73",
+  "Go_test_normal_exit1_reaped": true,
+  "all_children_reaped": true,
+  "export": "NOT_STARTED_NO_JOURNAL",
+  "measurement": "NONE_PRE_TARGET_NETWORK_FAILURE_NOT_MEMORY",
+  "native_worker_normal0_reaped_stopped": true,
+  "three_actor_ACK_record_sha256": "9f3c98bb0c5627d3c7d403d9d80e140de7334bd32f4a1db3a9e98dc5cf93791a",
+  "raw": {
+    "console": {
+      "eof": true,
+      "received": 1928,
+      "retained": 1928,
+      "sha256": "45cfae60d83ec1e8725cec29ce46b969249f3b49dbed2c5c954f8cd241ba8c02"
+    },
+    "native": {
+      "eof": true,
+      "received": 988,
+      "retained": 988,
+      "sha256": "6946ee8eba7eb95641fa808d3f2cf1f18f1e4f44bc9d1bccea83a389e931beb5"
+    },
+    "stderr": {
+      "eof": true,
+      "received": 0,
+      "retained": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  },
+  "root_C_countercheck": "still complete; unchanged result",
+  "original_first_private_profile_error": "UNKNOWN_NOT_DIRECTLY_INSTRUMENTED",
+  "reconnect": "NOT_STARTED"
+}

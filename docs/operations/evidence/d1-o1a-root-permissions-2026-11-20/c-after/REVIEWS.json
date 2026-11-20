@@ -1,0 +1,143 @@
+{
+  "REVIEWER": {
+    "FS_records": 180,
+    "attempt_id": "890c210e75ad49d08430895404aa2da1",
+    "exact_lock_owner_sha256": "5eb18f9ae0ca30a826a8e570c79f7790b305441bf6f85b5166f9d25da3e00148",
+    "fresh_own_PID_and_PGID_ESRCH": [
+      28523,
+      28524
+    ],
+    "functional_outcome": "MIRROR_PROFILE_COMPLETE_NOT_ORIGINAL_GO_VERDICT",
+    "guest_parent": {
+      "all_children_reaped": "1",
+      "attempt": "890c210e75ad49d08430895404aa2da1",
+      "child_reaped": "1",
+      "exit": "0",
+      "killed": "0",
+      "normal_exit": "1",
+      "scope": "DIAGNOSTIC_ONLY_NOT_O1A_PASS"
+    },
+    "handoff_sha256": "eb334a9c070a49894693ac0a8c15e6b88bbfed58398faff6dcb3eb801c3efe83",
+    "input_original_and_copy_hashes_verified": true,
+    "lock_mutated": false,
+    "manual_controls_nonroot_completion_inner_reap_parent_order": true,
+    "manual_root_mode_proof": [
+      {
+        "attempt": "890c210e75ad49d08430895404aa2da1",
+        "dev": "2",
+        "gid": "0",
+        "ino": "1",
+        "mode": "41777",
+        "stage": "before",
+        "uid": "0"
+      },
+      {
+        "attempt": "890c210e75ad49d08430895404aa2da1",
+        "dev": "2",
+        "gid": "0",
+        "ino": "1",
+        "mode": "40755",
+        "stage": "after",
+        "uid": "0"
+      }
+    ],
+    "manual_root_proof_precedes_child": true,
+    "native_events": [
+      {
+        "attempt_id": "890c210e75ad49d08430895404aa2da1",
+        "elapsed_ns": 274462000,
+        "event": "ready",
+        "seq": 1
+      },
+      {
+        "attempt_id": "890c210e75ad49d08430895404aa2da1",
+        "elapsed_ns": 370072000,
+        "event": "start_ok",
+        "seq": 2
+      },
+      {
+        "attempt_id": "890c210e75ad49d08430895404aa2da1",
+        "elapsed_ns": 462592000,
+        "event": "guest_stopped",
+        "guest_error": null,
+        "seq": 3
+      },
+      {
+        "attempt_id": "890c210e75ad49d08430895404aa2da1",
+        "elapsed_ns": 462652000,
+        "event": "stop_complete",
+        "final_state": "stopped",
+        "seq": 4
+      }
+    ],
+    "physical_XPC_resources": "UNKNOWN",
+    "raw": {
+      "console": {
+        "bytes": 11401,
+        "eof": true,
+        "sha256": "1ccf4148c7b0dd88087e834140569ae84b8a6944d9f07d6151f52c0fa810b29d"
+      },
+      "native": {
+        "bytes": 450,
+        "eof": true,
+        "sha256": "49ea1769353fb33f0c60b548e5a1c7adb171506dce2b86742a7bf8d2694205e4"
+      },
+      "stderr": {
+        "bytes": 0,
+        "eof": true,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    "role": "REVIEWER",
+    "runtime_source_hashes_verified": true,
+    "scope": "C private-profile mirror complete after environment-only root chmod0755; not original Go/O1a PASS. Original Go first failed predicate still unobserved.",
+    "signals_sent": false,
+    "status": "ACCEPTED_VM_STOPPED_ONLY",
+    "work": "/private/tmp/corsa-d1-o1a-profile-fs-native-890c210e75ad49d08430895404aa2da1",
+    "worker_exit": 0,
+    "worker_reaped_ns": 488785000
+  },
+  "ROOT": {
+    "data_sha256": "cc16ecb089939b9669a0d32d022cde8eb45d30bc900baa148f7a05f51445c47d",
+    "mirror_outcome": "MIRROR_PROFILE_COMPLETE_NOT_ORIGINAL_GO_VERDICT",
+    "original_Go_verdict": "NOT_EXECUTED",
+    "physical_XPC_resources": "UNKNOWN",
+    "role": "ROOT",
+    "root_permission_countercheck": {
+      "after": {
+        "attempt": "890c210e75ad49d08430895404aa2da1",
+        "dev": "2",
+        "gid": "0",
+        "ino": "1",
+        "mode": "40755",
+        "stage": "after",
+        "uid": "0"
+      },
+      "before": {
+        "attempt": "890c210e75ad49d08430895404aa2da1",
+        "dev": "2",
+        "gid": "0",
+        "ino": "1",
+        "mode": "41777",
+        "stage": "before",
+        "uid": "0"
+      },
+      "before_child": true
+    },
+    "scope": "NATIVE_STOPPED_REAPED_FULL_RAW_ONLY",
+    "status": "ACCEPTED_VM_STOPPED_ONLY",
+    "work": "/private/tmp/corsa-d1-o1a-profile-fs-native-890c210e75ad49d08430895404aa2da1"
+  },
+  "TESTER": {
+    "countercheck_outcome": "C_FS_MIRROR_COMPLETE_ROOT0755_ENV_COUNTERCHECK_ONLY",
+    "full_review": {
+      "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-profile-fs-v4-actual-tester-v1/REVIEW.json",
+      "sha256": "10a31ada3edb3121eb602a407d2b5c8a1b84e620dddcaac6bb5657436cd51d64"
+    },
+    "original_Go_or_O1a_PASS": false,
+    "role": "TESTER",
+    "scope": "PROTOCOL_ADAPTER_ONLY_UNCHANGED_FULL_REVIEW_VERDICT",
+    "status": "ACCEPTED_VM_STOPPED_ONLY",
+    "work": "/private/tmp/corsa-d1-o1a-profile-fs-native-890c210e75ad49d08430895404aa2da1"
+  }
+}

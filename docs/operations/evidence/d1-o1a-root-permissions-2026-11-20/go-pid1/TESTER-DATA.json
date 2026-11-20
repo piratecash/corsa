@@ -1,0 +1,31 @@
+{
+  "ELF_executed": false,
+  "Go_named_functions_PASS": 10,
+  "all_commands_normal_and_closed": 4,
+  "all_source_files_exact": true,
+  "artifact": {
+    "bytes": 4867158,
+    "executed": false,
+    "path": "/private/tmp/corsa-d1-o1a-helpers-root-mode-fix-acd32e75eafb410bbd9b17b15b78118d/artifacts/o1a-init",
+    "sha256": "8cc74e796559c03cad103cab8ff725c3fb9344c003fdf3e97d62de172790d119",
+    "source_sums_sha256": "8dc2d2feda5406cb31b61734817a5235aef07c70bd1dc1a9c32fb13b2c553fec",
+    "static_arm64": true
+  },
+  "complete_RAW_bytes": 13364,
+  "old_build_lock_ownership_absent": true,
+  "original_unique_first_profile_error": "UNKNOWN",
+  "own_PID_PGID_absent": [
+    27979,
+    27981,
+    28311,
+    28511
+  ],
+  "products_exporter_capexec_oracles_unchanged": true,
+  "result_sha256": "be2a2b9d82c1efd4884d36f90a5b8b420c286ec010caf645c9e755fec114e1e6",
+  "role": "TESTER",
+  "scope": "PURE_QA_AND_STATIC_PID1_BUILD_DATA_ONLY",
+  "source_sums_sha256": "8dc2d2feda5406cb31b61734817a5235aef07c70bd1dc1a9c32fb13b2c553fec",
+  "status": "ACCEPTED_PID1_ROOT_MODE_BUILD_DATA",
+  "unrelated_current_lock_attempt": "890c210e75ad49d08430895404aa2da1",
+  "work": "/private/tmp/corsa-d1-o1a-helpers-root-mode-fix-acd32e75eafb410bbd9b17b15b78118d"
+}

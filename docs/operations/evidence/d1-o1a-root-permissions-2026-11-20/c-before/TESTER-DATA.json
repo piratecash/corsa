@@ -1,0 +1,53 @@
+{
+  "status": "ACCEPTED_VM_STOPPED_ONLY",
+  "reviewer": "Codex TESTER developer_s6_dht",
+  "attempt_id": "0480792f0ace4e8cb0a90d467af55b09",
+  "work": "/private/tmp/corsa-d1-o1a-profile-fs-native-0480792f0ace4e8cb0a90d467af55b09",
+  "receipt_sha256": "448f5aa463b14ab4e4daeeb698a23b5a1ea5e2e53280f8a5a0d899d3ff0c4843",
+  "captures": {
+    "console": {
+      "eof": true,
+      "received": 5968,
+      "retained": 5968,
+      "sha256": "1e9f54b626ec61e1fb2a3572af85a987b640b2754ab5ce67e2c05dac2e8b67b6"
+    },
+    "native": {
+      "eof": true,
+      "received": 450,
+      "retained": 450,
+      "sha256": "01d3734b478d1b05cacdec4c740f29b287d315bf2f7137b4748083d9544617c4"
+    },
+    "stderr": {
+      "eof": true,
+      "received": 0,
+      "retained": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  },
+  "checks": {
+    "all_input_copies_sha_exact": true,
+    "native_stopped_worker_normal0_reaped": true,
+    "all_guest_children_reaped_outer1_mirror125": true,
+    "exact_own_lock_custody_and_grant": true,
+    "fresh_absent_pids_and_groups": [
+      27662,
+      27663
+    ],
+    "lock_not_removed_by_tester": true
+  },
+  "actual_FS_mirror": {
+    "child_UID": 65532,
+    "child_caps_effective0": true,
+    "child_seccomp2": true,
+    "member_and_probe_acl_errno": 61,
+    "all_prior_original_FS_operations_passed": true,
+    "first_false_predicate": "sticky-child-owned for /profiles below world-writable sticky root /",
+    "root_mode": "041777",
+    "profiles_mode": "040755",
+    "source_interpretation": "C mirror predicate diagnosed; original Go first refusal not directly instrumented"
+  },
+  "scope": {
+    "original_Go_or_O1a_PASS": false,
+    "physical_XPC_release": "UNKNOWN"
+  }
+}

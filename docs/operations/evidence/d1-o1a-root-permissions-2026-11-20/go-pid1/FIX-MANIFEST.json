@@ -1,0 +1,15 @@
+{
+  "changed_files": [
+    "cmd/o1a-init/main_linux.go",
+    "cmd/o1a-init/root_mode.go",
+    "cmd/o1a-init/root_mode_test.go"
+  ],
+  "new_Go_pure_tests": 3,
+  "new_PID1_artifact": "NOT_BUILT",
+  "prior_PID1_SHA256": "6f6fc02d443404007deb48ddcc689896151ff949ede573267f9b0de67292190f",
+  "prior_source_sums_sha256": "e625841685df74b934650c6db964ee6a6ba10aafdb1773269e174f1402820b00",
+  "products_or_oracles_changed": false,
+  "scope": "PRIVATE_PID1_ENVIRONMENT_ONLY",
+  "source_sums_sha256": "8dc2d2feda5406cb31b61734817a5235aef07c70bd1dc1a9c32fb13b2c553fec",
+  "total_host_Go_tests": 10
+}

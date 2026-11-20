@@ -1,0 +1,21 @@
+{
+  "functions_passed": [
+    "TestBootConfigExactSourceAndBinding",
+    "TestBootFlagsStrict",
+    "TestDuplicateJSONAndProbeRefusal",
+    "TestOriginalBudgetsRemainNested",
+    "TestDeviceModesRecoverInheritedUmask",
+    "TestDeviceModesRejectWrongTypeAndPermissions",
+    "TestDeviceModesPropagateSetAndReadFailures",
+    "TestRootModeRepairsStickyDefault",
+    "TestRootModeRejectsWrongMetadata",
+    "TestRootModePropagatesSetAndReadFailures"
+  ],
+  "named_pass_count": 10,
+  "no_FAIL_SKIP": true,
+  "commands_exit0": 4,
+  "source_sums_sha256": "8dc2d2feda5406cb31b61734817a5235aef07c70bd1dc1a9c32fb13b2c553fec",
+  "artifact_sha256": "8cc74e796559c03cad103cab8ff725c3fb9344c003fdf3e97d62de172790d119",
+  "artifact_bytes": 4867158,
+  "Linux_ELF_executed": false
+}

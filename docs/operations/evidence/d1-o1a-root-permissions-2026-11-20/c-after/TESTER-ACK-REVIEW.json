@@ -1,0 +1,12 @@
+{
+  "status": "ACCEPTED_VM_STOPPED_ONLY",
+  "work": "/private/tmp/corsa-d1-o1a-profile-fs-native-890c210e75ad49d08430895404aa2da1",
+  "role": "TESTER",
+  "full_review": {
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-o1a-profile-fs-v4-actual-tester-v1/REVIEW.json",
+    "sha256": "10a31ada3edb3121eb602a407d2b5c8a1b84e620dddcaac6bb5657436cd51d64"
+  },
+  "countercheck_outcome": "C_FS_MIRROR_COMPLETE_ROOT0755_ENV_COUNTERCHECK_ONLY",
+  "original_Go_or_O1a_PASS": false,
+  "scope": "PROTOCOL_ADAPTER_ONLY_UNCHANGED_FULL_REVIEW_VERDICT"
+}

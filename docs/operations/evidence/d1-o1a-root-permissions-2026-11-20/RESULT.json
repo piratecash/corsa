@@ -1,0 +1,95 @@
+{
+  "Go_PID1_ELF_compiled_not_executed": false,
+  "Go_PID1_ELF_executed": true,
+  "Go_PID1_followup_execution": "651767f4ce3f00dc9a5fbfaac6f5b826: failed pre-target network setup; no journal/export/measurement",
+  "Go_PID1_hostQA_PASS": 10,
+  "archives": {
+    "RAW.tar.xz": {
+      "bytes": 6788,
+      "members": 62,
+      "sha256": "498f78aced2028259bbcc458c8643d11aad55b3a429cdc4f5e7705063dc43ddc"
+    },
+    "SOURCES.tar.xz": {
+      "bytes": 54108,
+      "members": 65,
+      "sha256": "edcf62fa4666d83574d2fe5cce40e393be8bfb52948be8b9d5cdc289190212f9"
+    }
+  },
+  "attempts": {
+    "c-after": {
+      "attempt_id": "890c210e75ad49d08430895404aa2da1",
+      "countercheck": "C_MIRROR_COMPLETE_AFTER_OWN_GUEST_ROOT0755",
+      "original_Go_or_O1a_PASS": false,
+      "raw": {
+        "console": {
+          "eof": true,
+          "received": 11401,
+          "retained": 11401,
+          "sha256": "1ccf4148c7b0dd88087e834140569ae84b8a6944d9f07d6151f52c0fa810b29d"
+        },
+        "native": {
+          "eof": true,
+          "received": 450,
+          "retained": 450,
+          "sha256": "49ea1769353fb33f0c60b548e5a1c7adb171506dce2b86742a7bf8d2694205e4"
+        },
+        "stderr": {
+          "eof": true,
+          "received": 0,
+          "retained": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      },
+      "receipt_sha256": "515bead7fef82aa5c9334aece0a932099be3f04d7dcee8bb341f634b08d77afd"
+    },
+    "c-before": {
+      "attempt_id": "0480792f0ace4e8cb0a90d467af55b09",
+      "countercheck": "C_MIRROR_FAILED_STICKY_CHILD_NOT_OWNED",
+      "original_Go_or_O1a_PASS": false,
+      "raw": {
+        "console": {
+          "eof": true,
+          "received": 5968,
+          "retained": 5968,
+          "sha256": "1e9f54b626ec61e1fb2a3572af85a987b640b2754ab5ce67e2c05dac2e8b67b6"
+        },
+        "native": {
+          "eof": true,
+          "received": 450,
+          "retained": 450,
+          "sha256": "01d3734b478d1b05cacdec4c740f29b287d315bf2f7137b4748083d9544617c4"
+        },
+        "stderr": {
+          "eof": true,
+          "received": 0,
+          "retained": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      },
+      "receipt_sha256": "448f5aa463b14ab4e4daeeb698a23b5a1ea5e2e53280f8a5a0d899d3ff0c4843"
+    },
+    "main-periodic": {
+      "Go_test_seconds": 0.19,
+      "all_owned_processes_reaped": true,
+      "attempt_id": "651767f4ce3f00dc9a5fbfaac6f5b826",
+      "export_started": false,
+      "guest_stage": "journal-existence",
+      "journal_created": false,
+      "measurements": "UNKNOWN_NOT_STARTED",
+      "normal_native_stop": true,
+      "original_Go_or_O1a_PASS": false,
+      "outcome": "FAIL_GUARD4_CONFIGURE_FALSE_FF00_PREFIX",
+      "reconnect": "NOT_STARTED",
+      "root_permission_initialization_completed": true,
+      "route_table_OIF": "UNKNOWN"
+    }
+  },
+  "followup_snapshot": "MAIN-ATTEMPT.json",
+  "main_O1a": "FAIL_BEFORE_NETWORK_READY_NO_MEASUREMENT",
+  "original_Go_first_failed_predicate": "UNKNOWN_NOT_DIRECTLY_INSTRUMENTED",
+  "original_first_private_profile_error": "UNKNOWN_NOT_DIRECTLY_INSTRUMENTED",
+  "physical_XPC_release": "UNKNOWN",
+  "prior_reviewed_manifest_sha256": "373a653484f6335f3aa05ffc6c01337bcc4623df2fb307dfca0672efb1e17a9e",
+  "scope": "OWN_GUEST_ROOT_PERMISSION_ENVIRONMENT_ONLY_NOT_O1A",
+  "unchanged": "product4GoELFs/secretfileoracle/ACLpolicy/kernel/caps/profiles/workload/windows"
+}

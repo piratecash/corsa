@@ -1,0 +1,146 @@
+{
+  "REVIEWER": {
+    "attempt_id": "0480792f0ace4e8cb0a90d467af55b09",
+    "earlier_member_ACL_and_mode_checks": "passed; access ACL ENODATA errno61 accepted",
+    "exact_lock_owner_sha256": "25bd73436f4c65dd295a951b90e4de975274056935423e33e40380d097da551b",
+    "fresh_own_PID_and_PGID_ESRCH": [
+      27662,
+      27663
+    ],
+    "functional_outcome": "MIRROR_FAILED_DIAGNOSTIC_ONLY",
+    "guest_parent": {
+      "all_children_reaped": "1",
+      "attempt": "0480792f0ace4e8cb0a90d467af55b09",
+      "child_reaped": "1",
+      "exit": "1",
+      "killed": "0",
+      "normal_exit": "1",
+      "scope": "DIAGNOSTIC_ONLY_NOT_O1A_PASS"
+    },
+    "handoff_sha256": "54de774f84c6d5a11842b7cabebe2ac7b3f19f923029d8804549d56bfd128d98",
+    "inner_child_normal_exit": 125,
+    "input_original_and_copy_hashes_verified": true,
+    "lock_mutated": false,
+    "native_events": [
+      {
+        "attempt_id": "0480792f0ace4e8cb0a90d467af55b09",
+        "elapsed_ns": 392749000,
+        "event": "ready",
+        "seq": 1
+      },
+      {
+        "attempt_id": "0480792f0ace4e8cb0a90d467af55b09",
+        "elapsed_ns": 501018000,
+        "event": "start_ok",
+        "seq": 2
+      },
+      {
+        "attempt_id": "0480792f0ace4e8cb0a90d467af55b09",
+        "elapsed_ns": 589412000,
+        "event": "guest_stopped",
+        "guest_error": null,
+        "seq": 3
+      },
+      {
+        "attempt_id": "0480792f0ace4e8cb0a90d467af55b09",
+        "elapsed_ns": 589457000,
+        "event": "stop_complete",
+        "final_state": "stopped",
+        "seq": 4
+      }
+    ],
+    "observed_mirror_predicate": "sticky-child-owned: root1777 -> profiles0755 root UID0 under helper UID65532",
+    "original_Go_first_failed_predicate": "NOT_DIRECTLY_OBSERVED",
+    "original_Go_source_applicability": "4fcc2f7 audit_posix.go resolveRoute/sharedSticky/judgeEntry same root1777/root-owned profiles rule; original Go PID1 has no chmod root. Environment defect is demonstrated by C; original first refusal remains source-inferred until original run.",
+    "physical_XPC_resources": "UNKNOWN",
+    "raw": {
+      "console": {
+        "bytes": 5968,
+        "eof": true,
+        "sha256": "1e9f54b626ec61e1fb2a3572af85a987b640b2754ab5ce67e2c05dac2e8b67b6"
+      },
+      "native": {
+        "bytes": 450,
+        "eof": true,
+        "sha256": "01d3734b478d1b05cacdec4c740f29b287d315bf2f7137b4748083d9544617c4"
+      },
+      "stderr": {
+        "bytes": 0,
+        "eof": true,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    "role": "REVIEWER",
+    "runtime_source_hashes_verified": true,
+    "scope": "C mirror failed; not original Go/O1a PASS",
+    "signals_sent": false,
+    "status": "ACCEPTED_VM_STOPPED_ONLY",
+    "work": "/private/tmp/corsa-d1-o1a-profile-fs-native-0480792f0ace4e8cb0a90d467af55b09",
+    "worker_exit": 0,
+    "worker_reaped_ns": 615497000
+  },
+  "ROOT": {
+    "data_sha256": "1ee586be5793cfcd1359c7d5ccd08125b45e8e9c573aba720327a61a9420d608",
+    "mirror_outcome": "MIRROR_FAILED_DIAGNOSTIC_ONLY",
+    "observed_failure": "rootfs01777 -> root-owned profiles0755 violates sticky-child-owned",
+    "original_Go_errno": "UNKNOWN_NOT_RECONSTRUCTED",
+    "physical_XPC_resources": "UNKNOWN",
+    "role": "ROOT",
+    "scope": "NATIVE_STOPPED_REAPED_FULL_RAW_ONLY",
+    "status": "ACCEPTED_VM_STOPPED_ONLY",
+    "work": "/private/tmp/corsa-d1-o1a-profile-fs-native-0480792f0ace4e8cb0a90d467af55b09"
+  },
+  "TESTER": {
+    "actual_FS_mirror": {
+      "all_prior_original_FS_operations_passed": true,
+      "child_UID": 65532,
+      "child_caps_effective0": true,
+      "child_seccomp2": true,
+      "first_false_predicate": "sticky-child-owned for /profiles below world-writable sticky root /",
+      "member_and_probe_acl_errno": 61,
+      "profiles_mode": "040755",
+      "root_mode": "041777",
+      "source_interpretation": "C mirror predicate diagnosed; original Go first refusal not directly instrumented"
+    },
+    "attempt_id": "0480792f0ace4e8cb0a90d467af55b09",
+    "captures": {
+      "console": {
+        "eof": true,
+        "received": 5968,
+        "retained": 5968,
+        "sha256": "1e9f54b626ec61e1fb2a3572af85a987b640b2754ab5ce67e2c05dac2e8b67b6"
+      },
+      "native": {
+        "eof": true,
+        "received": 450,
+        "retained": 450,
+        "sha256": "01d3734b478d1b05cacdec4c740f29b287d315bf2f7137b4748083d9544617c4"
+      },
+      "stderr": {
+        "eof": true,
+        "received": 0,
+        "retained": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    "checks": {
+      "all_guest_children_reaped_outer1_mirror125": true,
+      "all_input_copies_sha_exact": true,
+      "exact_own_lock_custody_and_grant": true,
+      "fresh_absent_pids_and_groups": [
+        27662,
+        27663
+      ],
+      "lock_not_removed_by_tester": true,
+      "native_stopped_worker_normal0_reaped": true
+    },
+    "receipt_sha256": "448f5aa463b14ab4e4daeeb698a23b5a1ea5e2e53280f8a5a0d899d3ff0c4843",
+    "reviewer": "Codex TESTER developer_s6_dht",
+    "scope": {
+      "original_Go_or_O1a_PASS": false,
+      "physical_XPC_release": "UNKNOWN"
+    },
+    "status": "ACCEPTED_VM_STOPPED_ONLY",
+    "work": "/private/tmp/corsa-d1-o1a-profile-fs-native-0480792f0ace4e8cb0a90d467af55b09"
+  }
+}

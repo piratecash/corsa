@@ -1,0 +1,26 @@
+{
+  "C_attempt": "corsa-d1-o1a-profile-fs-native-0480792f0ace4e8cb0a90d467af55b09",
+  "C_console_sha256": "1e9f54b626ec61e1fb2a3572af85a987b640b2754ab5ce67e2c05dac2e8b67b6",
+  "C_euid": 65532,
+  "C_root_and_profiles_observations": [
+    "O1A_PROFILE_FS pathstat=audit-root uid=0 gid=0 mode=41777 dev=2 ino=1",
+    "O1A_PROFILE_FS pathstat=audit-profiles uid=0 gid=0 mode=40755 dev=25 ino=1",
+    "O1A_PROFILE_FS predicate=sticky-child-owned ok=0"
+  ],
+  "accepted_assembly_receipt_sha256": "17f0df9f1475da9a09b8aa7af723ea3b958b9deb522bc81e745beae75b96a0ed",
+  "common_kernel_sha256": "9ffeb24f4131ec4c5177b83c4a74ed8af699553c00a6b0d7f0d0ff4e98970c73",
+  "new_execution": false,
+  "no_oracle_or_product_ELF_changes": true,
+  "original_archive_members": 1435,
+  "original_archive_sha256": "d2337e06cc4c1c5fe893da71a0f0f0af7e6a631f67cec19e13f8de509915f307",
+  "original_first_private_profile_error": "UNKNOWN; original stat/typed error was not serialized",
+  "original_go_PID1_main_source_sha256": "4c2b7ef82f06ec604af16d410f9b221537a34dcad0bafcc94f791b399310e2d5",
+  "original_go_PID1_no_root_chmod_or_readback": true,
+  "original_go_PID1_sha256": "6f6fc02d443404007deb48ddcc689896151ff949ede573267f9b0de67292190f",
+  "planned_environment_only_correction": "private PID1 chmod(/,0755) then directory040755/UID0/GID0 readback before mounts",
+  "predicate": "entry.parentShared && entry.owner != euid -> ViolationStickyChildNotOwned",
+  "root_archive_entry_absent": true,
+  "scope": "ACTUAL_C_ENVIRONMENT_COUNTEREXAMPLE_PLUS_EXACT_GO_SOURCE_NOT_ORIGINAL_FIRST_ERROR",
+  "source_secretfile_audit_sha256": "4af106d32d6f455cd7a31bf1081cf1006d08b474d25945b42ac51100fd6f1eee",
+  "unsafe_chain": "/ uid0 mode01777 -> /profiles uid0 mode0755; effective uid65532"
+}

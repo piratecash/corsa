@@ -1,0 +1,72 @@
+{
+  "status": "ACCEPTED_VM_STOPPED_ONLY_C_FS_COUNTERCHECK_COMPLETE",
+  "reviewer": "Codex TESTER developer_s6_dht",
+  "work": "/private/tmp/corsa-d1-o1a-profile-fs-native-890c210e75ad49d08430895404aa2da1",
+  "attempt_id": "890c210e75ad49d08430895404aa2da1",
+  "receipt_sha256": "515bead7fef82aa5c9334aece0a932099be3f04d7dcee8bb341f634b08d77afd",
+  "captures": {
+    "console": {
+      "eof": true,
+      "received": 11401,
+      "retained": 11401,
+      "sha256": "1ccf4148c7b0dd88087e834140569ae84b8a6944d9f07d6151f52c0fa810b29d"
+    },
+    "native": {
+      "eof": true,
+      "received": 450,
+      "retained": 450,
+      "sha256": "49ea1769353fb33f0c60b548e5a1c7adb171506dce2b86742a7bf8d2694205e4"
+    },
+    "stderr": {
+      "eof": true,
+      "received": 0,
+      "retained": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  },
+  "checks": {
+    "all_copied_input_SHA_exact": true,
+    "native_normal0_stopped_reaped_all4events": true,
+    "outer_and_mirror_both_normal0_all_guest_children_reaped": true,
+    "exact_own_lock_custody_grant_verified": true,
+    "fresh_PIDs_and_PGIDs_absent": [
+      28523,
+      28524
+    ],
+    "lock_not_removed_by_tester": true
+  },
+  "actual_C_countercheck": {
+    "FS_records": 180,
+    "all_original_mirror_predicates_pass": true,
+    "all4_secret_location_audits_present": true,
+    "ACL_ENODATA61_accepted_missing_files_ENOENT2": true,
+    "nonroot65532_caps0_filter2_NNP1": true,
+    "root_before_after": [
+      {
+        "attempt": "890c210e75ad49d08430895404aa2da1",
+        "stage": "before",
+        "uid": "0",
+        "gid": "0",
+        "mode": "41777",
+        "dev": "2",
+        "ino": "1"
+      },
+      {
+        "attempt": "890c210e75ad49d08430895404aa2da1",
+        "stage": "after",
+        "uid": "0",
+        "gid": "0",
+        "mode": "40755",
+        "dev": "2",
+        "ino": "1"
+      }
+    ],
+    "root_metadata_before_child": true
+  },
+  "scope": {
+    "original_Go_functional_PASS": false,
+    "O1a_PASS": false,
+    "original_first_refusal_predicate": "UNKNOWN_NOT_DIRECTLY_INSTRUMENTED",
+    "physical_XPC_release": "UNKNOWN"
+  }
+}

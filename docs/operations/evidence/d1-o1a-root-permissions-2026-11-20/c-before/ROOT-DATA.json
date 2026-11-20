@@ -1,0 +1,567 @@
+{
+  "diagnostic": {
+    "all_children_reaped": true,
+    "apps_or_Go_executed": false,
+    "cause_interpretation": "C mirror only; observational errno is not automatically original Go failure",
+    "child_status": [
+      {
+        "amb": "0000000000000000",
+        "bnd": "00000000002010c0",
+        "eff": "00000000002010c0",
+        "egid": "0",
+        "euid": "0",
+        "filters": "1",
+        "gid": "0",
+        "inh": "0000000000000000",
+        "nnp": "1",
+        "prm": "00000000002010c0",
+        "seccomp": "2",
+        "threads": "1",
+        "uid": "0"
+      },
+      {
+        "amb": "0000000000000000",
+        "bnd": "00000000002010c0",
+        "eff": "0000000000000000",
+        "egid": "65532",
+        "euid": "65532",
+        "filters": "1",
+        "gid": "65532",
+        "inh": "0000000000000000",
+        "nnp": "1",
+        "prm": "0000000000000000",
+        "seccomp": "2",
+        "threads": "1",
+        "uid": "65532"
+      }
+    ],
+    "fs_records": [
+      {
+        "ok": "1",
+        "predicate": "fixed-no-argument-entry"
+      },
+      {
+        "ok": "1",
+        "predicate": "single-root-start"
+      },
+      {
+        "errno": "0",
+        "op": "root-profiles-open",
+        "rc": "3"
+      },
+      {
+        "errno": "0",
+        "op": "observe-mountpoint-fstat",
+        "rc": "0"
+      },
+      {
+        "dev": "25",
+        "gid": "0",
+        "ino": "1",
+        "mode": "40755",
+        "mountstat": "profiles-filesystem",
+        "uid": "0"
+      },
+      {
+        "errno": "0",
+        "op": "profiles-filesystem",
+        "rc": "0"
+      },
+      {
+        "block_size": "4096",
+        "flags": "102e",
+        "fs": "profiles-filesystem",
+        "type": "1021994"
+      },
+      {
+        "errno": "0",
+        "op": "observe-statvfs",
+        "rc": "0"
+      },
+      {
+        "bytes": "536870912",
+        "capacity": "profiles-filesystem",
+        "flags": "4142"
+      },
+      {
+        "errno": "0",
+        "op": "root-tmp-open",
+        "rc": "4"
+      },
+      {
+        "errno": "0",
+        "op": "observe-mountpoint-fstat",
+        "rc": "0"
+      },
+      {
+        "dev": "24",
+        "gid": "0",
+        "ino": "1",
+        "mode": "41777",
+        "mountstat": "tmp-filesystem",
+        "uid": "0"
+      },
+      {
+        "errno": "0",
+        "op": "tmp-filesystem",
+        "rc": "0"
+      },
+      {
+        "block_size": "4096",
+        "flags": "102e",
+        "fs": "tmp-filesystem",
+        "type": "1021994"
+      },
+      {
+        "errno": "0",
+        "op": "observe-statvfs",
+        "rc": "0"
+      },
+      {
+        "bytes": "134217728",
+        "capacity": "tmp-filesystem",
+        "flags": "4142"
+      },
+      {
+        "errno": "0",
+        "op": "root-tmp-close",
+        "rc": "0"
+      },
+      {
+        "errno": "0",
+        "op": "root-parent-mkdirat",
+        "rc": "0"
+      },
+      {
+        "errno": "0",
+        "op": "root-parent-openat",
+        "rc": "4"
+      },
+      {
+        "errno": "0",
+        "op": "root-parent-fchmod",
+        "rc": "0"
+      },
+      {
+        "errno": "0",
+        "op": "root-parent-fstat",
+        "rc": "0"
+      },
+      {
+        "dev": "25",
+        "gid": "0",
+        "ino": "2",
+        "mode": "41777",
+        "nlink": "2",
+        "stat": "root-parent-fstat",
+        "uid": "0"
+      },
+      {
+        "errno": "0",
+        "op": "root-base-close",
+        "rc": "0"
+      },
+      {
+        "errno": "0",
+        "op": "fork-nonroot",
+        "rc": "61"
+      },
+      {
+        "errno": "0",
+        "op": "fork-nonroot",
+        "rc": "0"
+      },
+      {
+        "errno": "0",
+        "op": "setgroups-empty",
+        "rc": "0"
+      },
+      {
+        "errno": "0",
+        "op": "setresgid",
+        "rc": "0"
+      },
+      {
+        "errno": "0",
+        "op": "setresuid",
+        "rc": "0"
+      },
+      {
+        "errno": "0",
+        "op": "helper-pdeathsig",
+        "rc": "0"
+      },
+      {
+        "errno": "0",
+        "op": "getgroups-count",
+        "rc": "0"
+      },
+      {
+        "ok": "1",
+        "predicate": "same-helper-credentials"
+      },
+      {
+        "ok": "1",
+        "predicate": "same-helper-policy"
+      },
+      {
+        "errno": "0",
+        "op": "getrlimit-core",
+        "rc": "0"
+      },
+      {
+        "ok": "1",
+        "predicate": "same-helper-core-zero"
+      },
+      {
+        "errno": "0",
+        "op": "inherited-parent-fstat",
+        "rc": "0"
+      },
+      {
+        "dev": "25",
+        "gid": "0",
+        "ino": "2",
+        "mode": "41777",
+        "nlink": "2",
+        "stat": "inherited-parent-fstat",
+        "uid": "0"
+      },
+      {
+        "ok": "1",
+        "predicate": "original-parent-binding"
+      },
+      {
+        "errno": "0",
+        "op": "member-mkdirat",
+        "rc": "0"
+      },
+      {
+        "errno": "0",
+        "op": "member-openat",
+        "rc": "3"
+      },
+      {
+        "errno": "0",
+        "op": "member-fstat",
+        "rc": "0"
+      },
+      {
+        "dev": "25",
+        "gid": "65532",
+        "ino": "3",
+        "mode": "40700",
+        "nlink": "2",
+        "stat": "member-fstat",
+        "uid": "65532"
+      },
+      {
+        "ok": "1",
+        "predicate": "final-mode-type-owner"
+      },
+      {
+        "errno": "61",
+        "op": "member-fgetxattr-access-acl",
+        "rc": "-1"
+      },
+      {
+        "ok": "1",
+        "predicate": "original-access-acl-outcome"
+      },
+      {
+        "errno": "0",
+        "op": "observe-mountpoint-fstat",
+        "rc": "0"
+      },
+      {
+        "dev": "25",
+        "gid": "65532",
+        "ino": "3",
+        "mode": "40700",
+        "mountstat": "member-filesystem",
+        "uid": "65532"
+      },
+      {
+        "errno": "0",
+        "op": "member-filesystem",
+        "rc": "0"
+      },
+      {
+        "block_size": "4096",
+        "flags": "102e",
+        "fs": "member-filesystem",
+        "type": "1021994"
+      },
+      {
+        "errno": "0",
+        "op": "observe-statvfs",
+        "rc": "0"
+      },
+      {
+        "bytes": "536870912",
+        "capacity": "member-filesystem",
+        "flags": "4142"
+      },
+      {
+        "errno": "0",
+        "op": "member-samefile-fstat",
+        "rc": "0"
+      },
+      {
+        "dev": "25",
+        "gid": "65532",
+        "ino": "3",
+        "mode": "40700",
+        "nlink": "2",
+        "stat": "member-samefile-fstat",
+        "uid": "65532"
+      },
+      {
+        "errno": "0",
+        "op": "member-lstat",
+        "rc": "0"
+      },
+      {
+        "dev": "25",
+        "gid": "65532",
+        "ino": "3",
+        "mode": "40700",
+        "pathstat": "member-lstat",
+        "uid": "65532"
+      },
+      {
+        "ok": "1",
+        "predicate": "original-samefile-directory"
+      },
+      {
+        "errno": "0",
+        "op": "acl-probe-openat",
+        "rc": "5"
+      },
+      {
+        "errno": "0",
+        "op": "probe-fstat",
+        "rc": "0"
+      },
+      {
+        "dev": "25",
+        "gid": "65532",
+        "ino": "4",
+        "mode": "100600",
+        "nlink": "1",
+        "stat": "probe-fstat",
+        "uid": "65532"
+      },
+      {
+        "ok": "1",
+        "predicate": "final-mode-type-owner"
+      },
+      {
+        "errno": "61",
+        "op": "probe-fgetxattr-access-acl",
+        "rc": "-1"
+      },
+      {
+        "ok": "1",
+        "predicate": "original-access-acl-outcome"
+      },
+      {
+        "errno": "0",
+        "op": "acl-probe-close",
+        "rc": "0"
+      },
+      {
+        "errno": "0",
+        "op": "acl-probe-unlinkat",
+        "rc": "0"
+      },
+      {
+        "errno": "0",
+        "op": "prepare-member-lstat",
+        "rc": "0"
+      },
+      {
+        "dev": "25",
+        "gid": "65532",
+        "ino": "3",
+        "mode": "40700",
+        "pathstat": "prepare-member-lstat",
+        "uid": "65532"
+      },
+      {
+        "ok": "1",
+        "predicate": "prepare-member0700"
+      },
+      {
+        "errno": "0",
+        "op": "prepare-tmp-mkdirat",
+        "rc": "0"
+      },
+      {
+        "errno": "0",
+        "op": "prepare-tmp-lstat",
+        "rc": "0"
+      },
+      {
+        "dev": "25",
+        "gid": "65532",
+        "ino": "5",
+        "mode": "40700",
+        "pathstat": "prepare-tmp-lstat",
+        "uid": "65532"
+      },
+      {
+        "ok": "1",
+        "predicate": "prepare-tmp0700"
+      },
+      {
+        "errno": "0",
+        "op": "audit-root",
+        "rc": "0"
+      },
+      {
+        "dev": "2",
+        "gid": "0",
+        "ino": "1",
+        "mode": "41777",
+        "pathstat": "audit-root",
+        "uid": "0"
+      },
+      {
+        "ok": "1",
+        "predicate": "ancestor-directory"
+      },
+      {
+        "ok": "1",
+        "predicate": "ancestor-owner"
+      },
+      {
+        "ok": "1",
+        "predicate": "sticky-child-owned"
+      },
+      {
+        "ok": "1",
+        "predicate": "writable-directory-sticky"
+      },
+      {
+        "errno": "0",
+        "op": "audit-profiles",
+        "rc": "0"
+      },
+      {
+        "dev": "25",
+        "gid": "0",
+        "ino": "1",
+        "mode": "40755",
+        "pathstat": "audit-profiles",
+        "uid": "0"
+      },
+      {
+        "ok": "1",
+        "predicate": "ancestor-directory"
+      },
+      {
+        "ok": "1",
+        "predicate": "ancestor-owner"
+      },
+      {
+        "ok": "0",
+        "predicate": "sticky-child-owned"
+      },
+      {
+        "errno": "0",
+        "op": "waitpid-nonroot",
+        "rc": "61"
+      },
+      {
+        "errno": "0",
+        "op": "root-parent-close",
+        "rc": "0"
+      },
+      {
+        "child_exit": "125",
+        "child_normal": "1"
+      }
+    ],
+    "negative_operation_or_predicate_observations": [
+      {
+        "line": 47,
+        "record": {
+          "errno": "61",
+          "op": "member-fgetxattr-access-acl",
+          "rc": "-1"
+        }
+      },
+      {
+        "line": 64,
+        "record": {
+          "errno": "61",
+          "op": "probe-fgetxattr-access-acl",
+          "rc": "-1"
+        }
+      },
+      {
+        "line": 85,
+        "record": {
+          "ok": "0",
+          "predicate": "sticky-child-owned"
+        }
+      }
+    ],
+    "outcome": "MIRROR_FAILED_DIAGNOSTIC_ONLY",
+    "outer_exit": 1,
+    "parent_unfiltered_before_after": true,
+    "policy_controls": {
+      "filters": "1",
+      "netns_unchanged": "1",
+      "post_mode": "2",
+      "pre_mode": "0",
+      "setns_post_errno": "1",
+      "setns_pre_errno": "9",
+      "unix_socket_closed": "1",
+      "unshare_post_errno": "1",
+      "unshare_pre": "0"
+    },
+    "scope": "C_PRIVATE_PROFILE_FS_MIRROR_ONLY_NOT_O1A_PASS"
+  },
+  "guest_parent": {
+    "all_children_reaped": "1",
+    "attempt": "0480792f0ace4e8cb0a90d467af55b09",
+    "child_reaped": "1",
+    "exit": "1",
+    "killed": "0",
+    "normal_exit": "1",
+    "scope": "DIAGNOSTIC_ONLY_NOT_O1A_PASS"
+  },
+  "native_events": [
+    {
+      "attempt_id": "0480792f0ace4e8cb0a90d467af55b09",
+      "elapsed_ns": 392749000,
+      "event": "ready",
+      "seq": 1
+    },
+    {
+      "attempt_id": "0480792f0ace4e8cb0a90d467af55b09",
+      "elapsed_ns": 501018000,
+      "event": "start_ok",
+      "seq": 2
+    },
+    {
+      "attempt_id": "0480792f0ace4e8cb0a90d467af55b09",
+      "elapsed_ns": 589412000,
+      "event": "guest_stopped",
+      "guest_error": null,
+      "seq": 3
+    },
+    {
+      "attempt_id": "0480792f0ace4e8cb0a90d467af55b09",
+      "elapsed_ns": 589457000,
+      "event": "stop_complete",
+      "final_state": "stopped",
+      "seq": 4
+    }
+  ],
+  "original_failed_attempt_cause": "UNKNOWN_FIRST_PREDICATE_NOT_RECOVERED",
+  "physical_XPC_resources": "UNKNOWN",
+  "scope": "PRIVATE_PROFILE_FS_MIRROR_NOT_O1A_PASS"
+}

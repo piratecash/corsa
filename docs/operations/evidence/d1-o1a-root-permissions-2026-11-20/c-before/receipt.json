@@ -1,0 +1,39 @@
+{
+  "attempt_id": "0480792f0ace4e8cb0a90d467af55b09",
+  "capture_complete": true,
+  "captures": {
+    "console": {
+      "eof": true,
+      "received": 5968,
+      "retained": 5968,
+      "sha256": "1e9f54b626ec61e1fb2a3572af85a987b640b2754ab5ce67e2c05dac2e8b67b6"
+    },
+    "native": {
+      "eof": true,
+      "received": 450,
+      "retained": 450,
+      "sha256": "01d3734b478d1b05cacdec4c740f29b287d315bf2f7137b4748083d9544617c4"
+    },
+    "stderr": {
+      "eof": true,
+      "received": 0,
+      "retained": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  },
+  "controller_stop": false,
+  "handoff_sha256": "54de774f84c6d5a11842b7cabebe2ac7b3f19f923029d8804549d56bfd128d98",
+  "initrd_sha256": "6f6007bc4f099e4ebc19f569ef73f966e986e61d9ac46002ab8c7b26157e6ad7",
+  "input_recheck": true,
+  "kernel_sha256": "9ffeb24f4131ec4c5177b83c4a74ed8af699553c00a6b0d7f0d0ff4e98970c73",
+  "launcher_sha256": "35a0a654c7e5fe4e51ec4b3495bbe29a3b621f7d54e276dace446c985da41e6d",
+  "outer_kill": false,
+  "owned_group_absent": true,
+  "profile": "d1-o1a-profile-fs-native-v1",
+  "stop_reason": null,
+  "worker_exit": 0,
+  "worker_pid": 27663,
+  "worker_reaped": true,
+  "worker_reaped_ns": 615497000,
+  "workload": "profile-fs-mirror"
+}
