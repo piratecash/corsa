@@ -1,0 +1,75 @@
+{
+  "status": "DRIVER_BUILT",
+  "attempt_id": "492a9ccac5284016a1b650abe7cd5e3b",
+  "work": "/private/tmp/corsa-d1-sg512-target-history-driver-492a9ccac5284016a1b650abe7cd5e3b",
+  "error": null,
+  "cleanup_confirmed": true,
+  "steps": [
+    {
+      "phase": "go-version",
+      "argv": [
+        "/usr/local/go/bin/go",
+        "version"
+      ],
+      "pid": 1702,
+      "exit": 0,
+      "stdout": "/private/tmp/corsa-d1-sg512-target-history-driver-492a9ccac5284016a1b650abe7cd5e3b/go-version.stdout",
+      "stderr": "/private/tmp/corsa-d1-sg512-target-history-driver-492a9ccac5284016a1b650abe7cd5e3b/go-version.stderr"
+    },
+    {
+      "phase": "modules",
+      "argv": [
+        "/usr/local/go/bin/go",
+        "mod",
+        "verify"
+      ],
+      "pid": 1703,
+      "exit": 0,
+      "stdout": "/private/tmp/corsa-d1-sg512-target-history-driver-492a9ccac5284016a1b650abe7cd5e3b/modules.stdout",
+      "stderr": "/private/tmp/corsa-d1-sg512-target-history-driver-492a9ccac5284016a1b650abe7cd5e3b/modules.stderr"
+    },
+    {
+      "phase": "driver-build",
+      "argv": [
+        "/usr/local/go/bin/go",
+        "test",
+        "-mod=readonly",
+        "-buildvcs=false",
+        "-p=1",
+        "-trimpath",
+        "-tags=d1_resource_probe",
+        "-c",
+        "-o",
+        "/private/tmp/corsa-d1-sg512-target-history-driver-492a9ccac5284016a1b650abe7cd5e3b/artifacts/churn512-driver",
+        "./internal/core/node"
+      ],
+      "pid": 1708,
+      "exit": 0,
+      "stdout": "/private/tmp/corsa-d1-sg512-target-history-driver-492a9ccac5284016a1b650abe7cd5e3b/driver-build.stdout",
+      "stderr": "/private/tmp/corsa-d1-sg512-target-history-driver-492a9ccac5284016a1b650abe7cd5e3b/driver-build.stderr"
+    },
+    {
+      "phase": "driver-metadata",
+      "argv": [
+        "/usr/local/go/bin/go",
+        "version",
+        "-m",
+        "/private/tmp/corsa-d1-sg512-target-history-driver-492a9ccac5284016a1b650abe7cd5e3b/artifacts/churn512-driver"
+      ],
+      "pid": 2623,
+      "exit": 0,
+      "stdout": "/private/tmp/corsa-d1-sg512-target-history-driver-492a9ccac5284016a1b650abe7cd5e3b/driver-metadata.stdout",
+      "stderr": "/private/tmp/corsa-d1-sg512-target-history-driver-492a9ccac5284016a1b650abe7cd5e3b/driver-metadata.stderr"
+    }
+  ],
+  "artifact": {
+    "path": "/private/tmp/corsa-d1-sg512-target-history-driver-492a9ccac5284016a1b650abe7cd5e3b/artifacts/churn512-driver",
+    "sha256": "6505bd130485342c572f2bc0890ed5f143cf87ee392c87adf9675d6bc32b305e",
+    "bytes": 69146176,
+    "static_linux_arm64": true,
+    "executed": false
+  },
+  "ELF_executed": false,
+  "work_limit_s": 600,
+  "cleanup_end_s": 630
+}

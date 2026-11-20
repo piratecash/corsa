@@ -1,0 +1,55 @@
+{
+  "status": "ROOT_DATA_ACCEPTED_SCOPED_CHURN512",
+  "nonce": "48b681cbd6e831eb8b5e331d5117d003",
+  "measurement": {
+    "service_peak_bytes": 229769216,
+    "inclusive_group_cpu_usec": 8782556,
+    "keeper_exit_tail": "UNKNOWN",
+    "shared_page_attribution": "UNKNOWN"
+  },
+  "driver_measurement": {
+    "driver_peak_bytes": 94429184,
+    "driver_inclusive_cpu_usec": 1305476,
+    "driver_exit_tail": "UNKNOWN"
+  },
+  "answer_counts": {
+    "initial": 256,
+    "survivors": 128,
+    "replacement": 512,
+    "closed": 0
+  },
+  "identities": 768,
+  "signing_targets": 512,
+  "final_intake": {
+    "Offered": 896,
+    "Refused": 0,
+    "Replaced": 0,
+    "Committed": 896,
+    "Taken": 896,
+    "Answered": 896,
+    "Violations": 0,
+    "Saturated": false
+  },
+  "samples": 201,
+  "maximum_sample_gap_seconds": 0.538626167,
+  "go_pass_line": [
+    "--- PASS: TestD1Churn512ExternalProcess (101.23s)"
+  ],
+  "final_memory_events": {
+    "low": 0,
+    "high": 0,
+    "max": 0,
+    "oom": 0,
+    "oom_kill": 0,
+    "oom_group_kill": 0,
+    "sock_throttled": 0
+  },
+  "final_pids_events": {
+    "max": 0
+  },
+  "final_cgroup_procs": [
+    1
+  ],
+  "no_peak_subtractions": true,
+  "lock_absent": true
+}

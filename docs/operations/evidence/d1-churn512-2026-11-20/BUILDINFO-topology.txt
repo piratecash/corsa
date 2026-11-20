@@ -1,0 +1,10 @@
+/private/tmp/corsa-d1-o1a-sg512-topology-build-de74e20009ac4272944cb7f89b317d8e/artifacts/topology: go1.27.4
+	path	command-line-arguments
+	dep	golang.org/x/sys	v0.50.0	h1:dkKZEFTEKaLr1sjhs0WiKqoi8Jj5nHbS3Njmx1UoMJs=
+	build	-buildmode=exe
+	build	-compiler=gc
+	build	-trimpath=true
+	build	CGO_ENABLED=0
+	build	GOARCH=arm64
+	build	GOOS=linux
+	build	GOARM64=v8.0

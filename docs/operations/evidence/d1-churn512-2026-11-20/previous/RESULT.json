@@ -1,0 +1,40 @@
+{
+  "scope": "FAILED_SCENARIO_POLICY_REFUSAL_NOT_MEMORY_PASS",
+  "run": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-churn512-runtime-inert-v6/runs/churn512-512b50b597d748d1182335463e92d62e",
+  "base_commit": "93eb8fe75d2a90710d21409c535276c6c7ed28f2",
+  "result_status": "INCOMPLETE",
+  "last_complete_intake": {
+    "Offered": 513,
+    "Refused": 1,
+    "Replaced": 0,
+    "Committed": 512,
+    "Taken": 512,
+    "Answered": 512,
+    "Violations": 0,
+    "Saturated": false
+  },
+  "verified_answer_log_count": 512,
+  "distinct_target_log_count": 512,
+  "first_answer_id": 41,
+  "last_answer_id": 552,
+  "failure_lines": [
+    "    find_node_churn512_external_linux_test.go:126: missing forward 553 128 384",
+    "--- FAIL: TestD1Churn512ExternalProcess (63.56s)",
+    "FAIL"
+  ],
+  "source_group": "10.77.0.0/16",
+  "target_history_bound": 512,
+  "history_retention_seconds": 600,
+  "final_qualified_peak": null,
+  "full_896_work_completed": false,
+  "raw_sha256": {
+    "child-25.out": "fa1a817e2201ef36ce13344139d0527d9365715ed7726991325ccc733ae9295d",
+    "child-39.out": "c1407ba3c272d38e92b76e022418faf8156e076818dc56d7f0c4ccc65135ca28",
+    "result.json": "296bbe4e6c86b438f13f0ff0b430ec5d5b9ef3c528b78ba4168f2051ba345e40",
+    "commands.json": "365cf601900d64dbd7abd16e183e274d7253bad446c201b763cd0c7c36bb52c3"
+  },
+  "source_sha256": {
+    "internal/core/findnode/intake_groups.go": "40311189acc0513c1d1486e445629bc312f5f419dc032cd50358c2f408223734",
+    "internal/core/findnode/intake_capacity_epoch.go": "b3b1453ed9a017bbaf1a528e18c55d93bc9c0ac4f1a78428a6b287424ebfb302"
+  }
+}

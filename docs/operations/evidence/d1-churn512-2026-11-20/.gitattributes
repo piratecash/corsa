@@ -1,0 +1,3 @@
+# Preserve all recorded evidence bytes across platforms.
+* -text
+*.xz binary

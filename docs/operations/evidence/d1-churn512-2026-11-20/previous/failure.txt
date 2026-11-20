@@ -1,0 +1,3 @@
+    find_node_churn512_external_linux_test.go:126: missing forward 553 128 384
+--- FAIL: TestD1Churn512ExternalProcess (63.56s)
+FAIL

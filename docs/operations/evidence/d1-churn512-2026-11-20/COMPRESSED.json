@@ -1,0 +1,37 @@
+[
+  {
+    "file": "service.jsonl.xz",
+    "decoded_bytes": 23891768,
+    "decoded_sha256": "985bf7bdb3ca16931e488aceddc90fa3b838a141a849375480d99abd47209823"
+  },
+  {
+    "file": "driver.log.xz",
+    "decoded_bytes": 197384,
+    "decoded_sha256": "7c3d33111310fd961582e2b031775558fe73965b13d0bb2f48e3abbe7764e3a5"
+  },
+  {
+    "file": "commands.json.xz",
+    "decoded_bytes": 94064,
+    "decoded_sha256": "dac5ff713ce3997758f9263b8c83e13a7a7ddc6e3d846af7831db90e845ae86d"
+  },
+  {
+    "file": "SOURCE-MANIFEST.json.xz",
+    "decoded_bytes": 288549,
+    "decoded_sha256": "090b5fce03331d852f6854c95ce8e368abb5f2510adc70b4c665cf84355da4c7"
+  },
+  {
+    "file": "previous/service-partial.jsonl.xz",
+    "decoded_bytes": 14782308,
+    "decoded_sha256": "fa1a817e2201ef36ce13344139d0527d9365715ed7726991325ccc733ae9295d"
+  },
+  {
+    "file": "previous/driver-failed.log.xz",
+    "decoded_bytes": 137477,
+    "decoded_sha256": "c1407ba3c272d38e92b76e022418faf8156e076818dc56d7f0c4ccc65135ca28"
+  },
+  {
+    "file": "diagnostic-sources.tar.xz",
+    "decoded_bytes": 430080,
+    "decoded_sha256": "657ed473315d0e91963de2c947977e6432c8d414e79a455f5595bc22b625beb3"
+  }
+]

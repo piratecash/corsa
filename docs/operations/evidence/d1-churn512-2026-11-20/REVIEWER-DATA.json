@@ -1,0 +1,200 @@
+{
+  "attempt_id": "48b681cbd6e831eb8b5e331d5117d003",
+  "cleanup": {
+    "final_owner_label_and_exact_known_resource_queries_empty": true,
+    "heavy_lock_absent_at_independent_readback": true,
+    "known_owned_container_count": 4,
+    "known_owned_volume_count": 3,
+    "result": "KNOWN",
+    "reviewer_mutation": "this new review receipt only",
+    "reviewer_resource_or_application_execution": false
+  },
+  "date": "2026-11-20",
+  "measurement": {
+    "all_cgroup_file_incarnations_and_owned_process_membership_matched": true,
+    "all_observed_memory_max_oom_oomkill_and_PID_max_events_zero": true,
+    "driver_group": {
+      "CPU": 1,
+      "PID_limit": 32,
+      "inclusive_CPU_usec": 1305476,
+      "memory_limit_bytes": 268435456,
+      "peak_bytes": 94429184,
+      "swap_limit_bytes": 0
+    },
+    "final_peak_after_daemon_and_sampler_reap_and_final_network_state_reads": true,
+    "first_to_last_live_sample_span_ns": 100878128962,
+    "live_samples": 201,
+    "maximum_sample_edge_gap_ns": 538626167,
+    "ordered_completion": [
+      "STOPPING_ACK",
+      "NODE_REAP exit0",
+      "SAMPLER_FINAL exit0",
+      "FINAL keeper-only"
+    ],
+    "sample_ordinals": [
+      0,
+      200
+    ],
+    "service_group": {
+      "CPU": 1,
+      "PID_limit": 64,
+      "final_cgroup_procs": [
+        1
+      ],
+      "final_kernel_charged_peak_bytes": 229769216,
+      "inclusive_CPU_usec": 8782556,
+      "memory_limit_bytes": 512000000,
+      "roles": [
+        "corsad",
+        "keeper",
+        "sampler"
+      ],
+      "swap_limit_bytes": 0
+    },
+    "subtractions": false
+  },
+  "preserved_failures": [
+    "v6 policy refusal on 513th same-group target remains INCOMPLETE, not retroactive PASS",
+    "driver build v1 ephemeral inventory race STOP preserved"
+  ],
+  "provenance": {
+    "commands_sha256": "dac5ff713ce3997758f9263b8c83e13a7a7ddc6e3d846af7831db90e845ae86d",
+    "handoff_sha256": "b1abc1ca112fd200e27c5fedc8a6e1da235405b44473344fd2d09c1562698a99",
+    "host_code": {
+      "canonical/sg32_common.py": "2fa268e62081939cd4632b8a8deb59b2fe7d29e859b53769d59f552305a1ef33",
+      "canonical/sg32_host.py": "184f597b8907a71e110f76c06a94aae06c742129b16913bfa636822de2879481",
+      "host.py": "16f004f26115235bf803e808bf846e2f1352165d57324d9e867e65a067b94010",
+      "verify_churn.py": "bb2b81189e338e663a269082962ee92eac6e65f502f72d8d5f364899a4db29a6"
+    },
+    "input_and_local_code_readback": "all exact after attempt",
+    "inputs": {
+      "c2driver": {
+        "bytes": 69146176,
+        "sha256": "6505bd130485342c572f2bc0890ed5f143cf87ee392c87adf9675d6bc32b305e"
+      },
+      "clockprobe.py": {
+        "bytes": 13982,
+        "sha256": "c58fee4558ba4f4e5952be72ad581d1085382453ab9a914bb7fc5a931295f3f6"
+      },
+      "corsad": {
+        "bytes": 32424135,
+        "sha256": "fc04dcb9c9b4e265cb5bb40f2f9efaa266eb0f8d2291e1520d910b573b4b89ae"
+      },
+      "netprofile.py": {
+        "bytes": 12161,
+        "sha256": "0c53d153475fad6e1b6d1ed6defbe2691ef1bc89032999947b08d0a6d2a1da9e"
+      },
+      "network-profile.json": {
+        "bytes": 46783,
+        "sha256": "b96b63e1ec5ce0a73e71320bf7e37bc458c0ca4407d40b2b81182ee5eb4981f0"
+      },
+      "sg32_common.py": {
+        "bytes": 28607,
+        "sha256": "2fa268e62081939cd4632b8a8deb59b2fe7d29e859b53769d59f552305a1ef33"
+      },
+      "sg32_service.py": {
+        "bytes": 51979,
+        "sha256": "a9ec6bf5a22b0764d3ddaf7866b7eafc893a86c438aba3dbe20a12e9de9d65ab"
+      },
+      "topology": {
+        "bytes": 4824804,
+        "sha256": "873b7fc6411541659c3375ef7572e627f245a918a187fcd0295ee1df59f447d5"
+      },
+      "worker.py": {
+        "bytes": 20099,
+        "sha256": "84b9fcbf63ecc2072c6f1124282fa4d724a060542ad002be40a3dbb0d9dc3a42"
+      }
+    },
+    "result_sha256": "38b7de6cdea7baa7c3a5b691d3cad105bb7550252f7a7f6042c9af1add0ee471",
+    "uploaded_manifest_matches_handoff": true
+  },
+  "raw": {
+    "driver": {
+      "EOF": true,
+      "exit": 0,
+      "stderr_bytes": 0,
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_bytes": 197384,
+      "stdout_sha256": "7c3d33111310fd961582e2b031775558fe73965b13d0bb2f48e3abbe7764e3a5"
+    },
+    "service": {
+      "EOF": true,
+      "exit": 0,
+      "stderr_bytes": 0,
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_bytes": 23891768,
+      "stdout_sha256": "985bf7bdb3ca16931e488aceddc90fa3b838a141a849375480d99abd47209823"
+    }
+  },
+  "replay": {
+    "LOG_frames": 1211,
+    "actual_created_container_metadata_all_four_roles": "PASS",
+    "aggregate_command_stdout_stderr_bytes": 71082,
+    "all_LOG_frame_size_and_SHA256_checks": true,
+    "all_command_RAW_equals_saved_command_records": true,
+    "all_command_exits": 0,
+    "command_count": 66,
+    "driver_and_service_membership_validators": "PASS on actual retained records",
+    "full_host_measurement_validator": "PASS on actual retained records",
+    "keeper_STATE_CHECK_bytes": {
+      "closed": 129372,
+      "initial": 86301,
+      "replacement": 129371,
+      "survivors": 87152
+    }
+  },
+  "role": "REVIEWER",
+  "scope": {
+    "checked": "private diagnostic corsad + keeper + sampler cgroup, external driver, exact frozen SG512 target-history scenario",
+    "full_D1_or_G2_or_release": false,
+    "network_profile": "SG512_INERT_DEFAULT_TUNNELS-v2",
+    "physical_global_512MB_acceptance": false,
+    "production_or_default_HEAD_acceptance": false,
+    "source_commit": "93eb8fe75d2a90710d21409c535276c6c7ed28f2",
+    "strict_S6_lo_only_acceptance": false
+  },
+  "unknown_not_passed": [
+    "keeper exit-tail after final peak read",
+    "shared-page and kernel-page physical attribution",
+    "preparer and topology helper actual costs",
+    "process RSS",
+    "full D1/G2/default-product acceptance",
+    "isolated handshake CPU",
+    "published baseline K11"
+  ],
+  "useful_work": {
+    "all_four_complete_membership_and_zero_tail_checks": true,
+    "distinct_FindNode_answer_signers_claimed": 512,
+    "distinct_TLS_proof_participants": 768,
+    "distinct_query_sources": 768,
+    "distinct_targets": 512,
+    "final_intake": {
+      "Answered": 896,
+      "Committed": 896,
+      "Offered": 896,
+      "Refused": 0,
+      "Replaced": 0,
+      "Saturated": false,
+      "Taken": 896,
+      "Violations": 0
+    },
+    "populations": [
+      512,
+      256,
+      512,
+      0
+    ],
+    "replacement_ConnIDs_fresh": true,
+    "signature_evidence": "unchanged frozen Go driver calls protocol.VerifyFindNodeAnswer after every answer; original selected Go test PASS in 101.23 s; retained logs independently matched IDs/participants/counts",
+    "signed_answers_by_phase": {
+      "closed": 0,
+      "initial": 256,
+      "replacement": 512,
+      "survivors": 128
+    },
+    "signed_answers_total": 896,
+    "survivor_ConnIDs_stable": true
+  },
+  "verdict": "ACCEPTED_SCOPED_DATA",
+  "work": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-churn512-runtime-inert-v7/runs/churn512-48b681cbd6e831eb8b5e331d5117d003"
+}

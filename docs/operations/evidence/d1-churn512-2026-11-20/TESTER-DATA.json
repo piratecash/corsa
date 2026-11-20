@@ -1,0 +1,122 @@
+{
+  "reviewer_role": "TESTER",
+  "verdict": "SCOPED_DATA_PASS",
+  "run": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-churn512-runtime-inert-v7/runs/churn512-48b681cbd6e831eb8b5e331d5117d003",
+  "nonce": "48b681cbd6e831eb8b5e331d5117d003",
+  "result_sha256": "38b7de6cdea7baa7c3a5b691d3cad105bb7550252f7a7f6042c9af1add0ee471",
+  "handoff_sha256": "b1abc1ca112fd200e27c5fedc8a6e1da235405b44473344fd2d09c1562698a99",
+  "commands_sha256": "dac5ff713ce3997758f9263b8c83e13a7a7ddc6e3d846af7831db90e845ae86d",
+  "sources": {
+    "corsad": "fc04dcb9c9b4e265cb5bb40f2f9efaa266eb0f8d2291e1520d910b573b4b89ae",
+    "c2driver": "6505bd130485342c572f2bc0890ed5f143cf87ee392c87adf9675d6bc32b305e",
+    "topology": "873b7fc6411541659c3375ef7572e627f245a918a187fcd0295ee1df59f447d5",
+    "worker.py": "84b9fcbf63ecc2072c6f1124282fa4d724a060542ad002be40a3dbb0d9dc3a42",
+    "sg32_common.py": "2fa268e62081939cd4632b8a8deb59b2fe7d29e859b53769d59f552305a1ef33",
+    "sg32_service.py": "a9ec6bf5a22b0764d3ddaf7866b7eafc893a86c438aba3dbe20a12e9de9d65ab",
+    "clockprobe.py": "c58fee4558ba4f4e5952be72ad581d1085382453ab9a914bb7fc5a931295f3f6",
+    "netprofile.py": "0c53d153475fad6e1b6d1ed6defbe2691ef1bc89032999947b08d0a6d2a1da9e",
+    "network-profile.json": "b96b63e1ec5ce0a73e71320bf7e37bc458c0ca4407d40b2b81182ee5eb4981f0"
+  },
+  "useful_work": {
+    "phase_populations": [
+      512,
+      256,
+      512,
+      0
+    ],
+    "signed_answers": [
+      256,
+      128,
+      512,
+      0
+    ],
+    "total_answers": 896,
+    "distinct_participants": 768,
+    "distinct_signing_targets": 512,
+    "request_ID_range": [
+      41,
+      936
+    ],
+    "original_ConnID_membership_replay": "PASS",
+    "final_intake": {
+      "Offered": 896,
+      "Refused": 0,
+      "Replaced": 0,
+      "Committed": 896,
+      "Taken": 896,
+      "Answered": 896,
+      "Violations": 0,
+      "Saturated": false
+    }
+  },
+  "measurements": {
+    "service_peak_bytes": 229769216,
+    "service_limit_bytes": 512000000,
+    "service_inclusive_group_cpu_usec": 8782556,
+    "driver_peak_bytes": 94429184,
+    "driver_cpu_usec": 1305476,
+    "samples": 201,
+    "sample_max_bracket_gap_ns": 538626167,
+    "initial_to_final_read_s": 101.870879254,
+    "final_kernel_read_after_daemon_and_sampler_reap": true,
+    "subtractions": 0,
+    "oom_or_pid_refusals": 0
+  },
+  "lifecycle": {
+    "created_roles": [
+      "driver",
+      "preparer",
+      "service",
+      "topology"
+    ],
+    "normal0_exited_roles": [
+      "driver",
+      "preparer",
+      "service",
+      "topology"
+    ],
+    "own_container_IDs": [
+      "0ff9b57bf0d4a3897a8a6b32007d01c532525674c1e0690dda680f254fee45c0",
+      "7133bcf916a6c625257dcc75676baa337ed6504a07eda386e3ce3b7250107037",
+      "7b2aaf337a99ae40cb5c64c86142d6d52999fc38e7bef7643a0b3379bbea1985",
+      "b8958c455b983552efcdbca63acdf05ab62ce868cc793ecc85198f75c780cf39"
+    ],
+    "own_resources_absence_commands": true,
+    "SG512_own_lock_closed": true,
+    "later_unrelated_lock_owner": "name=d1-o1a-multicast-diagnostic-v1\npid=3011\npgid=3011\nattempt_id=9c33d2f16fa140db8e0cf138d6d40732\ngrant_sha256=42b74ebe418121b27f18443c0eb9c0d95135b5391b5e8c2b57375a0bc3d38970\n",
+    "full_service_driver_EOF": true,
+    "node_identity": {
+      "pid": 8,
+      "ppid": 1,
+      "start_ticks": 3843350
+    },
+    "physical_closure": "KNOWN"
+  },
+  "raw": {
+    "service": {
+      "eof": true,
+      "exit": 0,
+      "raw_prefix": "child-25",
+      "stdout_retained": 23891768,
+      "stderr_retained": 0,
+      "stdout_sha256": "985bf7bdb3ca16931e488aceddc90fa3b838a141a849375480d99abd47209823",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "driver": {
+      "eof": true,
+      "exit": 0,
+      "raw_prefix": "child-39",
+      "stdout_retained": 197384,
+      "stderr_retained": 0,
+      "stdout_sha256": "7c3d33111310fd961582e2b031775558fe73965b13d0bb2f48e3abbe7764e3a5",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  },
+  "limits": [
+    "closed diagnostic corsad constructor, not stock default daemon",
+    "inert-default-tunnel SG512 profile; does not close S6 strict-lo",
+    "keeper exit-tail, shared-page attribution, preparation costs and RSS remain UNKNOWN",
+    "does not close full D1/G2/public activation/release",
+    "all earlier failures remain FAIL/INCOMPLETE, not overwritten"
+  ]
+}

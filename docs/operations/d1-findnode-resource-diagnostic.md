@@ -12,7 +12,17 @@ Preserved preparation failures identified a missing initramfs `/dev/null` and a 
 
 [Result and scope](evidence/d1-full512-2026-11-20/RESULT.json) · [Active replay](evidence/d1-full512-2026-11-20/active/replay.json) · [Mixed replay](evidence/d1-full512-2026-11-20/mixed/replay.json) · [RAW hashes](evidence/d1-full512-2026-11-20/SHA256SUMS). Historical HANDOFF paths record input provenance, not instructions to rerun.
 
-O‑1a, full useful standalone workload under 512,000,000 bytes, final PR‑6 rechecks and G2/public activation decisions remain open. S6 observation runs in parallel and is required for public activation.
+## Churn512 under a shared 512 MB limit — November 20
+
+A private standalone Linux arm64/CGO0 corsad completed **512→256→512→0** TLSv2/F1 sessions, **768** distinct TLS-proven participants and **896** verified signed answers (256 + 128 + 512). All 768 identities issued requests; 512 distinct targets signed answers about themselves. Surviving ConnIDs stayed unchanged, replacement ConnIDs were fresh, and the final roster was empty. The driver Go test passed in **101.23 seconds**.
+
+Corsad + keeper + sampler shared **1 CPU / 512,000,000 bytes / 64 PID**, with swap disabled. The final kernel-charged peak after daemon and sampler reap was **229,769,216 bytes (219.13 MiB)**; inclusive group CPU was **8,782,556 µs**, without deductions. All 201 samples were retained, maximum gap 0.538626167 seconds. Intake Offered/Committed/Taken/Answered were each 896; Refused/Replaced/Violations, memory max/OOM/OOM-kill and PID-limit events were zero. The separate 1 CPU / 256 MiB / 32 PID driver peaked at **94,429,184 bytes**, CPU 1,305,476 µs. Both streams reached full EOF and normal exit 0. The four own containers and three volumes were removed; the own heavy-lock was released after complete cleanup.
+
+The subject is base `93eb8fe75d2a90710d21409c535276c6c7ed28f2` plus the exact private diagnostic overlay, built with Go 1.27.4. The preparer and topology helper had separate fixed budgets and were removed before useful work; the existing offline 180-second work / 30-second cleanup profile stayed unchanged. Ordinary factories remain off. [Portable evidence](evidence/d1-churn512-2026-11-20/README.md) includes complete compressed RAW, the source patch, BuildInfo and three independent DATA reviews.
+
+The preserved v6 failed after 512 answers on the 513th new target in one source group. Disconnect does not erase its ten-minute target history. Reversing only the first block's request directions retained 896 operations and 768 participants while limiting distinct targets to 512; policy caps and deadlines were unchanged. The verifier additionally requires that exact target union. A separate Go temporary-file accounting race was fixed in the build wrapper; 19 fixture/build and 61 runtime checks passed.
+
+This qualifies the **selected F1/churn resource workload**. Late keeper tail, shared-page attribution, process RSS and preparer costs remain UNKNOWN. It does not establish mixed1024 memory, every D1 workload, Responder authorization or final PR‑6 readiness. Closed role enforcement, O‑1a, evidence applicability and remaining final-candidate 13b-D1 checks, G2 and public activation decisions remain open. S6 observation runs in parallel for public activation.
 
 ## Selection and ownership
 

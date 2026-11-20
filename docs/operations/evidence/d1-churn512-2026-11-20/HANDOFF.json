@@ -1,0 +1,79 @@
+{
+  "profile": "D1_CHURN512-INERT-TUNNELS-v2",
+  "inputs_ready": true,
+  "one_attempt": true,
+  "reviewer_accepted": true,
+  "tester_accepted": true,
+  "source_commit": "93eb8fe75d2a90710d21409c535276c6c7ed28f2",
+  "image": "sha256:45ccc728acf675888bde399354b6c8338accfc591e35496f9413a3742f3ae313",
+  "run_parent": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-churn512-runtime-inert-v7/runs",
+  "files": {
+    "corsad": {
+      "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-churn512-runtime-inert-v7/public-inputs/corsad",
+      "sha256": "fc04dcb9c9b4e265cb5bb40f2f9efaa266eb0f8d2291e1520d910b573b4b89ae",
+      "bytes": 32424135
+    },
+    "c2driver": {
+      "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-churn512-runtime-inert-v7/public-inputs/c2driver",
+      "sha256": "6505bd130485342c572f2bc0890ed5f143cf87ee392c87adf9675d6bc32b305e",
+      "bytes": 69146176
+    },
+    "topology": {
+      "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-churn512-runtime-inert-v7/public-inputs/topology",
+      "sha256": "873b7fc6411541659c3375ef7572e627f245a918a187fcd0295ee1df59f447d5",
+      "bytes": 4824804
+    },
+    "worker.py": {
+      "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-churn512-runtime-inert-v7/public-inputs/worker.py",
+      "sha256": "84b9fcbf63ecc2072c6f1124282fa4d724a060542ad002be40a3dbb0d9dc3a42",
+      "bytes": 20099
+    },
+    "sg32_common.py": {
+      "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-churn512-runtime-inert-v7/public-inputs/sg32_common.py",
+      "sha256": "2fa268e62081939cd4632b8a8deb59b2fe7d29e859b53769d59f552305a1ef33",
+      "bytes": 28607
+    },
+    "sg32_service.py": {
+      "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-churn512-runtime-inert-v7/public-inputs/sg32_service.py",
+      "sha256": "a9ec6bf5a22b0764d3ddaf7866b7eafc893a86c438aba3dbe20a12e9de9d65ab",
+      "bytes": 51979
+    },
+    "clockprobe.py": {
+      "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-churn512-runtime-inert-v7/public-inputs/clockprobe.py",
+      "sha256": "c58fee4558ba4f4e5952be72ad581d1085382453ab9a914bb7fc5a931295f3f6",
+      "bytes": 13982
+    },
+    "netprofile.py": {
+      "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-churn512-runtime-inert-v7/public-inputs/netprofile.py",
+      "sha256": "0c53d153475fad6e1b6d1ed6defbe2691ef1bc89032999947b08d0a6d2a1da9e",
+      "bytes": 12161
+    },
+    "network-profile.json": {
+      "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-churn512-runtime-inert-v7/public-inputs/network-profile.json",
+      "sha256": "b96b63e1ec5ce0a73e71320bf7e37bc458c0ca4407d40b2b81182ee5eb4981f0",
+      "bytes": 46783
+    }
+  },
+  "code": {
+    "host.py": "16f004f26115235bf803e808bf846e2f1352165d57324d9e867e65a067b94010",
+    "verify_churn.py": "bb2b81189e338e663a269082962ee92eac6e65f502f72d8d5f364899a4db29a6",
+    "canonical/sg32_host.py": "184f597b8907a71e110f76c06a94aae06c742129b16913bfa636822de2879481",
+    "canonical/sg32_common.py": "2fa268e62081939cd4632b8a8deb59b2fe7d29e859b53769d59f552305a1ef33"
+  },
+  "build_receipt": {
+    "path": "/private/tmp/corsa-d1-churn512-build-6d73ac4a404e42a78edee0c2c6b9f834/result.json",
+    "sha256": "d7dfa88fd5c7119c0ef627a4e14ee0277bd23780eea795d84f7e433f1db505fc"
+  },
+  "topology_build_receipt": {
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-sg512-topology-build-v2/RESULT.json",
+    "sha256": "f764664105bb8a86bed0dbb0837a95fb23f7968b0987495825cd1c6549e2b096"
+  },
+  "driver_build_receipt": {
+    "path": "/private/tmp/corsa-d1-sg512-target-history-driver-492a9ccac5284016a1b650abe7cd5e3b/result.json",
+    "sha256": "a4d5388da712dc7f3aeba66dc651dd8ba84d5bd50e218377f1825e1a02251bb0"
+  },
+  "fixture_source": {
+    "path": "/Users/hades/Documents/repos/corsa/docs/_internal/d1-artifacts/2026-11-20/d1-sg512-target-history-driver-build-v2/MANIFEST.json",
+    "sha256": "d44991d803db37ef5816557e8416e8730a78d88a2d525f7598d18390b680ed3a"
+  }
+}
