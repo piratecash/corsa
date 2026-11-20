@@ -1,0 +1,30 @@
+{
+  "additional_current_test_not_in_earlier_compile_subject": {
+    "path": "internal/core/node/loadstand_route_wire_full_send_mechanism_test.go",
+    "prior_evidence": "docs/operations/evidence/d1-observer-full-send-2026-11-20/README.md",
+    "scope": "Already committed ac17 mechanism unit; only separate test/helper functions, no product change or Hmix call.",
+    "sha256": "fe1aa5a317538098266ba68cd9694886e7d0ff929f75a45729454010d373775f"
+  },
+  "all_compiled_Go_and_module_files_equal_current_Root": 2106,
+  "compile_base_commit": "f258093a44aa15dd7ce79f6e6a13df9c0aae363c",
+  "only_two_test_posts": {
+    "internal/core/node/find_node_bare_v2_pilot_test.go": {
+      "after_sha256": "e88bc47de8c3ee6734e38f48425c7fd04ddf660f08ace064cc4bbbd744a6c5b4",
+      "before_sha256": "7cf6c0c43ea3f622950b4a1c7929f18e8613ddd806f2d660201a0f3ba221f06b",
+      "bytes": 35039,
+      "new_file": false,
+      "post": "posts/internal/core/node/find_node_bare_v2_pilot_test.go"
+    },
+    "internal/core/node/find_node_published31_guest_linux_test.go": {
+      "after_sha256": "82754fad052d9c92a2b8cdc67a93ad8eb259be7844415856ec36d9181c605b86",
+      "before_sha256": null,
+      "bytes": 18896,
+      "new_file": true,
+      "post": "posts/internal/core/node/find_node_published31_guest_linux_test.go"
+    }
+  },
+  "proc_parser_negative_function": "COMPILED_NOT_SELECTED_NOT_RUN",
+  "production_changes": 0,
+  "root_parent_before_test_apply": "cecc9b709e00fbecbbc91c0920f101f7e3b7729b",
+  "unrelated_untracked_files": "Not included or modified"
+}

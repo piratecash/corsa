@@ -1,0 +1,12 @@
+{
+  "status": "ROOT_TESTER_REVIEWER_STOPPED_PREPARATION_RECOVERY_ACK",
+  "controller_pid": 85581,
+  "controller_exit": 130,
+  "controller_and_group_absent": true,
+  "original_STOP_preserved": true,
+  "own_container_and_obsolete_image_removed": true,
+  "retained_image": "sha256:45009926747bc2be5493d1d28f84f8a40b358f9bb600f5ff9c1724ff201913e1",
+  "fresh_qualification": "NOT_RUN",
+  "VM_or_Corsa_executed": false,
+  "lock_owner_sha256": "a07866e6d69dc0332c69df5e6b8bf6d657e82706f4be1a9d988cd195002c36ea"
+}

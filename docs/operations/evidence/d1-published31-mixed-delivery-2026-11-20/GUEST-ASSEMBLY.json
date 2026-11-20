@@ -1,0 +1,340 @@
+{
+  "ELF_or_VM_executed": false,
+  "archive": "/private/tmp/corsa-d1-o1a-hmix-published31-guest-data-19c63a295cdc4280af8a08d6fbe00cc1/hmix-guest.cpio.gz",
+  "archive_bytes": 48190401,
+  "archive_sha256": "fa517d63ab521537853a292be2e721fc0c3f3e64ea0f249b34832b2651423e00",
+  "members": {
+    "bin": {
+      "bytes": 7,
+      "device": [
+        0,
+        0
+      ],
+      "gid": 0,
+      "mode": "0o120777",
+      "sha256": "51eb85985e2f36e92fb2e18d663412b7bb94839f546901884eda4936683d9481",
+      "uid": 0
+    },
+    "dev": {
+      "bytes": 0,
+      "device": [
+        0,
+        0
+      ],
+      "gid": 0,
+      "mode": "0o40755",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "uid": 0
+    },
+    "dev/console": {
+      "bytes": 0,
+      "device": [
+        5,
+        1
+      ],
+      "gid": 0,
+      "mode": "0o20600",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "uid": 0
+    },
+    "dev/null": {
+      "bytes": 0,
+      "device": [
+        1,
+        3
+      ],
+      "gid": 0,
+      "mode": "0o20666",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "uid": 0
+    },
+    "dev/urandom": {
+      "bytes": 0,
+      "device": [
+        1,
+        9
+      ],
+      "gid": 0,
+      "mode": "0o20666",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "uid": 0
+    },
+    "etc": {
+      "bytes": 0,
+      "device": [
+        0,
+        0
+      ],
+      "gid": 0,
+      "mode": "0o40755",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "uid": 0
+    },
+    "etc/group": {
+      "bytes": 27,
+      "device": [
+        0,
+        0
+      ],
+      "gid": 0,
+      "mode": "0o100644",
+      "sha256": "0b6f0ba2f20387fbf9619cc7ac70bdd582864ce7fa7f7ee97c5786f6f738f698",
+      "uid": 0
+    },
+    "etc/passwd": {
+      "bytes": 69,
+      "device": [
+        0,
+        0
+      ],
+      "gid": 0,
+      "mode": "0o100644",
+      "sha256": "46e3e66d0ec7d7722061c84e455db18be3198af37f1abcb3c5cdf19967b96477",
+      "uid": 0
+    },
+    "init": {
+      "bytes": 1143,
+      "device": [
+        0,
+        0
+      ],
+      "gid": 0,
+      "mode": "0o100755",
+      "sha256": "140ce81b7e978ec27a331eadafb910f99e92f7ed7f6d7b389c2499dd2c8af5e7",
+      "uid": 0
+    },
+    "inputs": {
+      "bytes": 0,
+      "device": [
+        0,
+        0
+      ],
+      "gid": 0,
+      "mode": "0o40755",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "uid": 0
+    },
+    "inputs/corsa-node": {
+      "bytes": 23376135,
+      "device": [
+        0,
+        0
+      ],
+      "gid": 0,
+      "mode": "0o100555",
+      "sha256": "06e26f9b30594d19fb7da9782921f3ef2e7d297da3441d521a8e2c6343d2fade",
+      "uid": 0
+    },
+    "inputs/hmix-guest.json": {
+      "bytes": 272,
+      "device": [
+        0,
+        0
+      ],
+      "gid": 0,
+      "mode": "0o100444",
+      "sha256": "da5bc3ccf8b2fd991e9613876619be1196b5ab728f738d36e1a93c64a9498b6e",
+      "uid": 0
+    },
+    "inputs/node.test": {
+      "bytes": 75315642,
+      "device": [
+        0,
+        0
+      ],
+      "gid": 0,
+      "mode": "0o100555",
+      "sha256": "6b31bbdcab39095727e00389d94b75638433e3e5c1a84e796223f514bf0baf65",
+      "uid": 0
+    },
+    "lib": {
+      "bytes": 7,
+      "device": [
+        0,
+        0
+      ],
+      "gid": 0,
+      "mode": "0o120777",
+      "sha256": "bb40df61b3e0947109adb2e4d4ec41261d2c50580463391f34d67b5f30712176",
+      "uid": 0
+    },
+    "lib64": {
+      "bytes": 9,
+      "device": [
+        0,
+        0
+      ],
+      "gid": 0,
+      "mode": "0o120777",
+      "sha256": "1a8dcebf89cf73748aa1a3c88dd1ecc2a040ffabb45a10d9231a642e1a89913b",
+      "uid": 0
+    },
+    "proc": {
+      "bytes": 0,
+      "device": [
+        0,
+        0
+      ],
+      "gid": 0,
+      "mode": "0o40755",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "uid": 0
+    },
+    "sys": {
+      "bytes": 0,
+      "device": [
+        0,
+        0
+      ],
+      "gid": 0,
+      "mode": "0o40755",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "uid": 0
+    },
+    "tmp": {
+      "bytes": 0,
+      "device": [
+        0,
+        0
+      ],
+      "gid": 0,
+      "mode": "0o41777",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "uid": 0
+    },
+    "usr": {
+      "bytes": 0,
+      "device": [
+        0,
+        0
+      ],
+      "gid": 0,
+      "mode": "0o40755",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "uid": 0
+    },
+    "usr/bin": {
+      "bytes": 0,
+      "device": [
+        0,
+        0
+      ],
+      "gid": 0,
+      "mode": "0o40755",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "uid": 0
+    },
+    "usr/bin/busybox": {
+      "bytes": 2024544,
+      "device": [
+        0,
+        0
+      ],
+      "gid": 0,
+      "mode": "0o100755",
+      "sha256": "7ae95c260622412ceba6eb9f45d68f616cdc091a1d71d6c0a08b5875bb2c31dd",
+      "uid": 0
+    },
+    "usr/bin/sh": {
+      "bytes": 7,
+      "device": [
+        0,
+        0
+      ],
+      "gid": 0,
+      "mode": "0o120777",
+      "sha256": "9d75f0d7c398df565d7ac04c6819b62d6d8f9560f5eb4672596ecd8f7e96ae91",
+      "uid": 0
+    },
+    "usr/lib": {
+      "bytes": 0,
+      "device": [
+        0,
+        0
+      ],
+      "gid": 0,
+      "mode": "0o40755",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "uid": 0
+    },
+    "usr/lib/x86_64-linux-gnu": {
+      "bytes": 0,
+      "device": [
+        0,
+        0
+      ],
+      "gid": 0,
+      "mode": "0o40755",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "uid": 0
+    },
+    "usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2": {
+      "bytes": 215000,
+      "device": [
+        0,
+        0
+      ],
+      "gid": 0,
+      "mode": "0o100755",
+      "sha256": "02bcda52c1a5dfc236f94d9e5255b4a0e26347d8a372a5223b650e31f291ce3c",
+      "uid": 0
+    },
+    "usr/lib/x86_64-linux-gnu/libc.so.6": {
+      "bytes": 1926232,
+      "device": [
+        0,
+        0
+      ],
+      "gid": 0,
+      "mode": "0o100755",
+      "sha256": "6b4a45352fd0c540a9c7c718f35ce8c8e46a4e482f9d3885a910c32d1a0e1421",
+      "uid": 0
+    },
+    "usr/lib64": {
+      "bytes": 0,
+      "device": [
+        0,
+        0
+      ],
+      "gid": 0,
+      "mode": "0o40755",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "uid": 0
+    },
+    "usr/lib64/ld-linux-x86-64.so.2": {
+      "bytes": 42,
+      "device": [
+        0,
+        0
+      ],
+      "gid": 0,
+      "mode": "0o120777",
+      "sha256": "1195439cc03527ea587ac03c5db33a8ed61d81a07be3061aad52ea03b5c7c5d4",
+      "uid": 0
+    },
+    "work": {
+      "bytes": 0,
+      "device": [
+        0,
+        0
+      ],
+      "gid": 20,
+      "mode": "0o40700",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "uid": 501
+    },
+    "work/tmp": {
+      "bytes": 0,
+      "device": [
+        0,
+        0
+      ],
+      "gid": 20,
+      "mode": "0o40700",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "uid": 501
+    }
+  },
+  "nonce": "3abb1637f9541f5751438c0501c9406e",
+  "purpose": "HMIX_PUBLISHED31_FUNCTIONAL"
+}

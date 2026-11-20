@@ -1,0 +1,200 @@
+{
+  "Service_Run_or_Linux_ELF_or_Docker_VM_executed": false,
+  "artifact": {
+    "BuildInfo_verified": true,
+    "bytes": 75315642,
+    "executed": false,
+    "path": "/private/tmp/corsa-d1-o1a-hmix-published31-goqa-2b1dcc00713d42b1bf26d9a9919f73a8/artifacts/node.test",
+    "sha256": "6b31bbdcab39095727e00389d94b75638433e3e5c1a84e796223f514bf0baf65",
+    "static_amd64": true
+  },
+  "attempt_id": "2b1dcc00713d42b1bf26d9a9919f73a8",
+  "base_commit": "f258093a44aa15dd7ce79f6e6a13df9c0aae363c",
+  "checks": {
+    "findnode": {
+      "child": 2,
+      "outer": [
+        "TestCandidateInactiveCallGraphAndInventories",
+        "TestCandidateSourceCompanionClosedRoots",
+        "TestCandidateSourceTypeReferencesAndDeclarations",
+        "TestCandidateCapacityClosedRootsAndLogicalBoundary",
+        "TestCandidateCapacityGuardRejectsActivationAndMissingFinalCheck"
+      ]
+    },
+    "pilot": {
+      "child": 13,
+      "outer": [
+        "TestOwnedBareV2PilotClosedTestOnlyAdvertisement",
+        "TestOwnedBareV2PilotAdvertisementSourceControls"
+      ]
+    }
+  },
+  "error": null,
+  "lock_retained": false,
+  "raw_bytes": 26354,
+  "scope": "SEVEN_GUARDS_AND_COMPILE_METADATA_ONLY_NOT_INTEROP_RUNTIME",
+  "source_files": 2727,
+  "status": "HMIX_SOURCE_GUARDS_AND_AMD64_TEST_COMPILE_PASS",
+  "steps": [
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1)(allow default)(deny network*)(deny file-write* (subpath \"/Users/hades/Documents/repos/corsa\"))",
+        "/usr/bin/git",
+        "-c",
+        "tar.umask=0022",
+        "-C",
+        "/Users/hades/Documents/repos/corsa",
+        "archive",
+        "--format=tar",
+        "--output=/private/tmp/corsa-d1-o1a-hmix-published31-goqa-2b1dcc00713d42b1bf26d9a9919f73a8/source.tar",
+        "f258093a44aa15dd7ce79f6e6a13df9c0aae363c"
+      ],
+      "exit": 0,
+      "owned_group_absent": true,
+      "phase": "git-clean-archive",
+      "pid": 78226,
+      "pipe_threads_finished": true,
+      "reason": null,
+      "stderr": "/private/tmp/corsa-d1-o1a-hmix-published31-goqa-2b1dcc00713d42b1bf26d9a9919f73a8/01-git-clean-archive.stderr",
+      "stdout": "/private/tmp/corsa-d1-o1a-hmix-published31-goqa-2b1dcc00713d42b1bf26d9a9919f73a8/01-git-clean-archive.stdout"
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1)(allow default)(deny network*)(deny file-write* (subpath \"/Users/hades/Documents/repos/corsa\"))(deny file-write* (subpath \"/private/tmp/corsa-d1-o1a-hmix-published31-goqa-2b1dcc00713d42b1bf26d9a9919f73a8/source\"))",
+        "/usr/local/go/bin/go",
+        "version"
+      ],
+      "exit": 0,
+      "owned_group_absent": true,
+      "phase": "go-version",
+      "pid": 78227,
+      "pipe_threads_finished": true,
+      "reason": null,
+      "stderr": "/private/tmp/corsa-d1-o1a-hmix-published31-goqa-2b1dcc00713d42b1bf26d9a9919f73a8/02-go-version.stderr",
+      "stdout": "/private/tmp/corsa-d1-o1a-hmix-published31-goqa-2b1dcc00713d42b1bf26d9a9919f73a8/02-go-version.stdout"
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1)(allow default)(deny network*)(deny file-write* (subpath \"/Users/hades/Documents/repos/corsa\"))(deny file-write* (subpath \"/private/tmp/corsa-d1-o1a-hmix-published31-goqa-2b1dcc00713d42b1bf26d9a9919f73a8/source\"))",
+        "/usr/local/go/bin/go",
+        "mod",
+        "verify"
+      ],
+      "exit": 0,
+      "owned_group_absent": true,
+      "phase": "modules-verify",
+      "pid": 78229,
+      "pipe_threads_finished": true,
+      "reason": null,
+      "stderr": "/private/tmp/corsa-d1-o1a-hmix-published31-goqa-2b1dcc00713d42b1bf26d9a9919f73a8/03-modules-verify.stderr",
+      "stdout": "/private/tmp/corsa-d1-o1a-hmix-published31-goqa-2b1dcc00713d42b1bf26d9a9919f73a8/03-modules-verify.stdout"
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1)(allow default)(deny network*)(deny file-write* (subpath \"/Users/hades/Documents/repos/corsa\"))(deny file-write* (subpath \"/private/tmp/corsa-d1-o1a-hmix-published31-goqa-2b1dcc00713d42b1bf26d9a9919f73a8/source\"))",
+        "/usr/local/go/bin/go",
+        "test",
+        "-mod=readonly",
+        "-buildvcs=false",
+        "-p=1",
+        "-parallel=1",
+        "-count=1",
+        "-timeout=180s",
+        "-json",
+        "-run=^(TestCandidateInactiveCallGraphAndInventories|TestCandidateSourceCompanionClosedRoots|TestCandidateSourceTypeReferencesAndDeclarations|TestCandidateCapacityClosedRootsAndLogicalBoundary|TestCandidateCapacityGuardRejectsActivationAndMissingFinalCheck)$",
+        "./internal/core/findnode"
+      ],
+      "exit": 0,
+      "owned_group_absent": true,
+      "phase": "findnode-guards",
+      "pid": 78230,
+      "pipe_threads_finished": true,
+      "reason": null,
+      "stderr": "/private/tmp/corsa-d1-o1a-hmix-published31-goqa-2b1dcc00713d42b1bf26d9a9919f73a8/04-findnode-guards.stderr",
+      "stdout": "/private/tmp/corsa-d1-o1a-hmix-published31-goqa-2b1dcc00713d42b1bf26d9a9919f73a8/04-findnode-guards.stdout"
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1)(allow default)(deny network*)(deny file-write* (subpath \"/Users/hades/Documents/repos/corsa\"))(deny file-write* (subpath \"/private/tmp/corsa-d1-o1a-hmix-published31-goqa-2b1dcc00713d42b1bf26d9a9919f73a8/source\"))",
+        "/usr/local/go/bin/go",
+        "test",
+        "-mod=readonly",
+        "-buildvcs=false",
+        "-p=1",
+        "-parallel=1",
+        "-count=1",
+        "-timeout=180s",
+        "-json",
+        "-run=^(TestOwnedBareV2PilotClosedTestOnlyAdvertisement|TestOwnedBareV2PilotAdvertisementSourceControls)$",
+        "./internal/core/node"
+      ],
+      "exit": 0,
+      "owned_group_absent": true,
+      "phase": "pilot-guards",
+      "pid": 78767,
+      "pipe_threads_finished": true,
+      "reason": null,
+      "stderr": "/private/tmp/corsa-d1-o1a-hmix-published31-goqa-2b1dcc00713d42b1bf26d9a9919f73a8/05-pilot-guards.stderr",
+      "stdout": "/private/tmp/corsa-d1-o1a-hmix-published31-goqa-2b1dcc00713d42b1bf26d9a9919f73a8/05-pilot-guards.stdout"
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1)(allow default)(deny network*)(deny file-write* (subpath \"/Users/hades/Documents/repos/corsa\"))(deny file-write* (subpath \"/private/tmp/corsa-d1-o1a-hmix-published31-goqa-2b1dcc00713d42b1bf26d9a9919f73a8/source\"))",
+        "/usr/local/go/bin/go",
+        "test",
+        "-mod=readonly",
+        "-buildvcs=false",
+        "-p=1",
+        "-c",
+        "-tags=interop,d1_owned_guest_interop",
+        "-trimpath",
+        "-ldflags=-buildid=",
+        "-o",
+        "/private/tmp/corsa-d1-o1a-hmix-published31-goqa-2b1dcc00713d42b1bf26d9a9919f73a8/artifacts/node.test",
+        "./internal/core/node"
+      ],
+      "exit": 0,
+      "owned_group_absent": true,
+      "phase": "compile-linux-amd64",
+      "pid": 79244,
+      "pipe_threads_finished": true,
+      "reason": null,
+      "stderr": "/private/tmp/corsa-d1-o1a-hmix-published31-goqa-2b1dcc00713d42b1bf26d9a9919f73a8/06-compile-linux-amd64.stderr",
+      "stdout": "/private/tmp/corsa-d1-o1a-hmix-published31-goqa-2b1dcc00713d42b1bf26d9a9919f73a8/06-compile-linux-amd64.stdout"
+    },
+    {
+      "argv": [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        "(version 1)(allow default)(deny network*)(deny file-write* (subpath \"/Users/hades/Documents/repos/corsa\"))(deny file-write* (subpath \"/private/tmp/corsa-d1-o1a-hmix-published31-goqa-2b1dcc00713d42b1bf26d9a9919f73a8/source\"))",
+        "/usr/local/go/bin/go",
+        "version",
+        "-m",
+        "/private/tmp/corsa-d1-o1a-hmix-published31-goqa-2b1dcc00713d42b1bf26d9a9919f73a8/artifacts/node.test"
+      ],
+      "exit": 0,
+      "owned_group_absent": true,
+      "phase": "build-info",
+      "pid": 80209,
+      "pipe_threads_finished": true,
+      "reason": null,
+      "stderr": "/private/tmp/corsa-d1-o1a-hmix-published31-goqa-2b1dcc00713d42b1bf26d9a9919f73a8/07-build-info.stderr",
+      "stdout": "/private/tmp/corsa-d1-o1a-hmix-published31-goqa-2b1dcc00713d42b1bf26d9a9919f73a8/07-build-info.stdout"
+    }
+  ],
+  "subject_manifest_sha256": "e959078b1c21a778ce7cb2abb5c973d26e82357441b51ac9b58b5c933d327f26",
+  "unknown": false,
+  "work": "/private/tmp/corsa-d1-o1a-hmix-published31-goqa-2b1dcc00713d42b1bf26d9a9919f73a8"
+}

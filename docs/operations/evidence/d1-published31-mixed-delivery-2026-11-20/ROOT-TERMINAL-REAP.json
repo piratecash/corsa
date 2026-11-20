@@ -1,0 +1,14 @@
+{
+  "status": "ROOT_TERMINAL_REAP_AND_FRESH_OWN_RESOURCE_CLOSURE_CONFIRMED",
+  "tool": "write_stdin",
+  "session_id": 12790,
+  "terminal_exit_code": 0,
+  "source_wrapper": "scripts/heavy-run.sh",
+  "host_PID_PGID_numbers": "NOT_RECORDED_BY_ORIGINAL_ENGINE",
+  "pinned_wrapper_wait_reap_group_absence_contract": "executed before successful exit and own lock release",
+  "fresh_exact_host_script_processes": [],
+  "fresh_own_container_label_matches": [],
+  "lock_absent": true,
+  "guest_old_PID_start_namespace_exe_and_normal_reap": "enforced in successful Go cases",
+  "no_VM_or_app_rerun": true
+}

@@ -1,0 +1,195 @@
+{
+  "QEMU_normal0_PID0_nonOOM_then_exact_own_removal_absence": "ca2b4c2815b9457db72d8259fcd0df155b5cd7a32a5e1c14529668772cbb3279",
+  "all16Dockercommands_exit0_and_fullRAW_equal_receipt": true,
+  "all6old_log_base64_payloads_decoded_and_hash_verified": {
+    "Off_control/corsa.log": {
+      "bytes": 14110,
+      "sha256": "5750222bf049ad84c2d6663e3390757f1d3de73e3b2a74a120c7187e2b4e4954"
+    },
+    "Off_control/stderr.log": {
+      "bytes": 37,
+      "sha256": "10834b964bed633e9db128cd22f570b7fa75b5b7ac0296d4f71359e950aca40e"
+    },
+    "Off_control/stdout.log": {
+      "bytes": 17893,
+      "sha256": "7f5b981104983bae0a9f6ec9884edfcebf91f8bfcefb994451c5689f979cac6a"
+    },
+    "private_Responder_with_held_F1/corsa.log": {
+      "bytes": 14142,
+      "sha256": "08f409d7e671b7615f0f70413c830454ffbd65e8aaf5a28aa90ee1e8be3bcae8"
+    },
+    "private_Responder_with_held_F1/stderr.log": {
+      "bytes": 37,
+      "sha256": "d1d7651ad6aacded40adf8198869513ca991b84f0f16c0ace0d4133681eeff13"
+    },
+    "private_Responder_with_held_F1/stdout.log": {
+      "bytes": 17951,
+      "sha256": "4482df57d9f1fbe7bac634649a3e12b98ef15ac50a232b1ecfd71acc5f3fe1d3"
+    }
+  },
+  "child_PASS": 2,
+  "console": {
+    "bytes": 88507,
+    "sha256": "95d1217388a46499f343ea130e5eda4008e444d866c1c3476bda9a0b6f700129"
+  },
+  "current_test_ELF": "6b31bbdcab39095727e00389d94b75638433e3e5c1a84e796223f514bf0baf65",
+  "fresh_root_terminal_attestation": "ROOT-TERMINAL-REAP.json",
+  "full_RAW_bytes": 108224,
+  "guest_PID_PGID_checks": "executed inside exact pinned Go test and bound by PASS; no external PID witness exported",
+  "historical_host_PID_PGID": "NOT_RECORDED by reused legacy Engine; source-bound per-command EOF/reap and heavy-run terminal0/group-empty contract support closure",
+  "image_exact_qualified450": true,
+  "old_log_bytes": 64170,
+  "old_published_ELF": "06e26f9b30594d19fb7da9782921f3ef2e7d297da3441d521a8e2c6343d2fade",
+  "old_stderr_markers": {
+    "Off_control": "--- stderr redirected (pid 144) ---",
+    "private_Responder_with_held_F1": "--- stderr redirected (pid 151) ---"
+  },
+  "outer_PASS": 1,
+  "proc_parser_negative_function": "COMPILED_NOT_SELECTED_NOT_RUN",
+  "raw": {
+    "child-0.err": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "child-0.out": {
+      "bytes": 46,
+      "sha256": "ad9757550a43d5a1c7c994652a93996c45c0b570045caf4c293e3bfddfa225de"
+    },
+    "child-1.err": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "child-1.out": {
+      "bytes": 2407,
+      "sha256": "208da235efeb5cd888e5733ccb78be91978e9bb26ab55158405408d4802857cd"
+    },
+    "child-10.err": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "child-10.out": {
+      "bytes": 5828,
+      "sha256": "063424f3c45df36e3ab3dd44004f1d2605649a10415b60098286b53f35c3b090"
+    },
+    "child-11.err": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "child-11.out": {
+      "bytes": 65,
+      "sha256": "1122ad1ec06f3e921d9faca16d294a3395457cf0c66ab7df127ab7534d657cd0"
+    },
+    "child-12.err": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "child-12.out": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "child-13.err": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "child-13.out": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "child-14.err": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "child-14.out": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "child-15.err": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "child-15.out": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "child-2.err": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "child-2.out": {
+      "bytes": 65,
+      "sha256": "1122ad1ec06f3e921d9faca16d294a3395457cf0c66ab7df127ab7534d657cd0"
+    },
+    "child-3.err": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "child-3.out": {
+      "bytes": 5281,
+      "sha256": "f959812a186a073ff9d3227886634aeab44bf0a1b80963271f851dc7a24e4d24"
+    },
+    "child-4.err": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "child-4.out": {
+      "bytes": 65,
+      "sha256": "1122ad1ec06f3e921d9faca16d294a3395457cf0c66ab7df127ab7534d657cd0"
+    },
+    "child-5.err": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "child-5.out": {
+      "bytes": 2,
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    "child-6.err": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "child-6.out": {
+      "bytes": 5828,
+      "sha256": "063424f3c45df36e3ab3dd44004f1d2605649a10415b60098286b53f35c3b090"
+    },
+    "child-7.err": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "child-7.out": {
+      "bytes": 88507,
+      "sha256": "95d1217388a46499f343ea130e5eda4008e444d866c1c3476bda9a0b6f700129"
+    },
+    "child-8.err": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "child-8.out": {
+      "bytes": 65,
+      "sha256": "1122ad1ec06f3e921d9faca16d294a3395457cf0c66ab7df127ab7534d657cd0"
+    },
+    "child-9.err": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "child-9.out": {
+      "bytes": 65,
+      "sha256": "1122ad1ec06f3e921d9faca16d294a3395457cf0c66ab7df127ab7534d657cd0"
+    }
+  },
+  "resource_or_new_execution_by_tester": false,
+  "result_sha256": "d2ad7cef7236a49fd3814ea5efbf2aee29cff2537f2560767acebfa2392c1bde",
+  "role": "TESTER",
+  "runtime_sha256": "e6bd26f8d9aff5d1d23bda0f6270ed02407661395f10806e61d220eae6fb4eed",
+  "scope": "old_to_current_dial/current_to_old_DM, daemon+test_decoder, not old Desktop; functional only, no13b/512/K11/D1/G2/release approval",
+  "seconds": 7.09,
+  "source_bound_assertions": [
+    "ordinary Off versus immutable private Responder; no rate/datagram bypass",
+    "genuine protocol31 ProvenIdentity peer without F1; natural route+exact known BoxKey before held request",
+    "real old daemon inbox RPC storage + test decryptor while Pending1/Taken1/Answered0",
+    "signed FN return; exact opaque F1 Session/ConnID membership preserved",
+    "delivered/seen/seen_ack complete; old own group TERM/normal0/reap/ESRCH before positive case marker"
+  ],
+  "status": "ACCEPTED_PUBLISHED31_OFF_VS_PRIVATE_R_FUNCTIONAL_ONLY",
+  "strict_original_profile_with_exact_one_own_readonly_archive_mount": true,
+  "work": "/private/tmp/d1-hmix-published31-linux-guest-v1-3abb1637f9541f5751438c0501c9406e"
+}

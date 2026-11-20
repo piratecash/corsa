@@ -1,0 +1,97 @@
+{
+  "compile": {
+    "BuildInfo_dependencies": 26,
+    "artifact": "static Linux amd64/CGO0 Node.test",
+    "bytes": 75315642,
+    "child_PASS": 15,
+    "commands_exit0": 7,
+    "sha256": "6b31bbdcab39095727e00389d94b75638433e3e5c1a84e796223f514bf0baf65",
+    "source_files": 2727,
+    "source_guards_outer_PASS": 7,
+    "toolchain": "Go1.27.4"
+  },
+  "environment": {
+    "future_prep_v5": "source-only metadata correction, NOT executed or used to relabel prep4",
+    "needed_image": "450 retained for this evidence/possible further old interop; no foreign image deleted",
+    "package_payloads": "54 actual apk verify records and receipts retained; downloaded .apk/deb bulk not duplicated.",
+    "prep1": "STOP before create/network: unrelated valid UTF8 certificate name",
+    "prep3": "STOP before process: local log-driver compression/max-file1 mismatch",
+    "prep4": "installation normal0; original controller STOP/HOLD preserved on commit banner/inherited Python entrypoint",
+    "qualification": "x86_64/glibc2.36/exact {lo} in boot and distinct fresh netns/normal0",
+    "qualified_image": "sha256:45009926747bc2be5493d1d28f84f8a40b358f9bb600f5ff9c1724ff201913e1",
+    "recovery": "same stopped CID metadata-only commit, no install/start; exact owned CID and obsolete4b60 removed, original controller/lock reconciled after three-role ACK",
+    "signed_indexes_and_key": "Both fresh actual signed Alpine indexes and exact trusted public key retained."
+  },
+  "functional": {
+    "DM_direction": "current_to_old",
+    "F1": "Pending1/Taken1/Answered0 during real inbox fetch/decryption; signed return and same opaque sessions",
+    "child": 2,
+    "current_subject": "genuine Service in static Node.test, ordinary Off and private immutable Responder",
+    "decryption": "real old daemon inbox RPC + current test decoder; NOT old Desktop",
+    "dial_direction": "old_to_current",
+    "old_cleanup": "normal0 and group ESRCH in both exact Go cases",
+    "old_subject": "fixed published v2.5.71/protocol31 ELF 06e26f9b\u2026, not a rebuild",
+    "outer": 1,
+    "receipts": "delivered/seen/seen_ack in both cases, after FN return in R case",
+    "result": "PASS",
+    "seconds": 7.09
+  },
+  "profile": "QEMU group1CPU/1536MiB/64PID/noSwap; guest1CPU/768MiB/noNIC/disks/KVM; host180+30; postsetup120+10; Go90; one own readonly archive mount",
+  "raw": {
+    "members": 461,
+    "payload_bytes": 746225,
+    "sha256": "a61e910211d9a1952e8be627b7eeb7cf2c54c710889d19dea118fd696f1a28d4"
+  },
+  "runtime": {
+    "Docker_commands_exit0": 16,
+    "OOM": false,
+    "QEMU_exit": 0,
+    "complete_RAW_bytes": 108224,
+    "console_bytes": 88507,
+    "guest_old_PID_PGID": "genuine proc/identity/start checks + normal wait/group absence asserted in exact passing Go cases",
+    "historical_host_PID_PGID": "NOT_RECORDED; pinned wrapper terminal0/group-empty contract + fresh Root absence retained",
+    "images_created_or_removed_by_functional_attempt": false,
+    "nonce": "3abb1637f9541f5751438c0501c9406e",
+    "old_log_bytes": 64170,
+    "owned_container_removed": true,
+    "owned_volumes_remaining": false
+  },
+  "scope": "PUBLISHED31_OFF_VS_PRIVATE_R_FUNCTIONAL_ONLY_NOT_13B_512_K11_D1_G2_OR_RELEASE",
+  "separate_512_evidence": "docs/operations/evidence/d1-churn512-current-2026-11-20/README.md; separate frozen subject, not replaced by Hmix",
+  "source": {
+    "members": 132,
+    "payload_bytes": 5173860,
+    "sha256": "2a4374cde9b1257b4cef9c13ce61e43bbca77264b61712b26158069c16c0ed93"
+  },
+  "source_checkpoint": {
+    "additional_current_test_not_in_earlier_compile_subject": {
+      "path": "internal/core/node/loadstand_route_wire_full_send_mechanism_test.go",
+      "prior_evidence": "docs/operations/evidence/d1-observer-full-send-2026-11-20/README.md",
+      "scope": "Already committed ac17 mechanism unit; only separate test/helper functions, no product change or Hmix call.",
+      "sha256": "fe1aa5a317538098266ba68cd9694886e7d0ff929f75a45729454010d373775f"
+    },
+    "all_compiled_Go_and_module_files_equal_current_Root": 2106,
+    "compile_base_commit": "f258093a44aa15dd7ce79f6e6a13df9c0aae363c",
+    "only_two_test_posts": {
+      "internal/core/node/find_node_bare_v2_pilot_test.go": {
+        "after_sha256": "e88bc47de8c3ee6734e38f48425c7fd04ddf660f08ace064cc4bbbd744a6c5b4",
+        "before_sha256": "7cf6c0c43ea3f622950b4a1c7929f18e8613ddd806f2d660201a0f3ba221f06b",
+        "bytes": 35039,
+        "new_file": false,
+        "post": "posts/internal/core/node/find_node_bare_v2_pilot_test.go"
+      },
+      "internal/core/node/find_node_published31_guest_linux_test.go": {
+        "after_sha256": "82754fad052d9c92a2b8cdc67a93ad8eb259be7844415856ec36d9181c605b86",
+        "before_sha256": null,
+        "bytes": 18896,
+        "new_file": true,
+        "post": "posts/internal/core/node/find_node_published31_guest_linux_test.go"
+      }
+    },
+    "proc_parser_negative_function": "COMPILED_NOT_SELECTED_NOT_RUN",
+    "production_changes": 0,
+    "root_parent_before_test_apply": "cecc9b709e00fbecbbc91c0920f101f7e3b7729b",
+    "unrelated_untracked_files": "Not included or modified"
+  },
+  "timing_or_memory_statistics": "NOT_MEASURED"
+}

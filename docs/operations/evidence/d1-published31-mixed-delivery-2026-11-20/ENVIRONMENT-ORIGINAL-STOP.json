@@ -1,0 +1,338 @@
+{
+  "QEMU_VM_Corsa_piratecashd_executed": false,
+  "artifact": null,
+  "attempt_id": "bf7540eee8994db4adbca4c902adf518",
+  "base_image_unchanged": false,
+  "container_id": "96ac487bb96f3e83cf09a6fefdfc5219f5537d7c4be2d8d4e1887a7f59efa463",
+  "error": "ValueError: ambiguous new image ID; commit ambiguous: exact own image label reconciliation required; cleanup: RuntimeError: unknown process/output completion",
+  "failed_own_image_removed": false,
+  "failure_evidence": null,
+  "lock_retained": true,
+  "new_owned_image_id": null,
+  "owned_container_removed": false,
+  "preparation": {
+    "VM_Corsa_piratecashd_executed": false,
+    "fresh_strict_lo_glibc_qualification": "REQUIRED",
+    "kernel": {
+      "kernel.config": {
+        "bytes": 283598,
+        "sha256": "a3d4ca3e2a1b8cd86ed458b9fd8887e0420f58c05f32d4f32197edd82323c037"
+      },
+      "vmlinuz": {
+        "bytes": 12171200,
+        "sha256": "14159c607ad9762133db41e479dafecde1d6a5fe715a8d65d292a3262e4b6bed"
+      }
+    },
+    "kernel_package": {
+      "bytes": 108488460,
+      "sha256": "ca712d36790184f6ac125ce2b20ea4e2202ae6bb7817b7de268f1f0115ccda73",
+      "url": "https://security.debian.org/debian-security/pool/updates/main/l/linux-signed-amd64/linux-image-6.12.117+deb13-amd64_6.12.117-1_amd64.deb"
+    },
+    "probe_initramfs": {
+      "bytes": 2036822,
+      "sha256": "621b6ddc5c5889b7994fd19e40cd7d9cafc0b9d23db2e26df42e0383b874de18"
+    },
+    "qemu": {
+      "bytes": 27019488,
+      "path": "/usr/bin/qemu-system-x86_64",
+      "sha256": "b0345b4593a7468b46af1aca9a2563e4d1fa99ffc1fa33943991c235d388e890"
+    },
+    "status": "ENVIRONMENT_PREPARED_NOT_BOOTED"
+  },
+  "raw_bytes": 24724,
+  "status": "STOP",
+  "steps": [
+    {
+      "argv": [
+        "/usr/local/bin/docker",
+        "--context",
+        "desktop-linux",
+        "context",
+        "inspect",
+        "--format",
+        "{{json .Endpoints.docker.Host}}",
+        "desktop-linux"
+      ],
+      "exit": 0,
+      "owned_group_absent": true,
+      "phase": "endpoint",
+      "pid": 85582,
+      "pipe_threads_finished": true,
+      "reason": null,
+      "stderr": "/private/tmp/corsa-d1-o1a-hmix-qemu-environment-bf7540eee8994db4adbca4c902adf518/01-endpoint.stderr",
+      "stdout": "/private/tmp/corsa-d1-o1a-hmix-qemu-environment-bf7540eee8994db4adbca4c902adf518/01-endpoint.stdout"
+    },
+    {
+      "argv": [
+        "/usr/local/bin/docker",
+        "--context",
+        "desktop-linux",
+        "image",
+        "inspect",
+        "sha256:45ccc728acf675888bde399354b6c8338accfc591e35496f9413a3742f3ae313"
+      ],
+      "exit": 0,
+      "owned_group_absent": true,
+      "phase": "base-image",
+      "pid": 85586,
+      "pipe_threads_finished": true,
+      "reason": null,
+      "stderr": "/private/tmp/corsa-d1-o1a-hmix-qemu-environment-bf7540eee8994db4adbca4c902adf518/02-base-image.stderr",
+      "stdout": "/private/tmp/corsa-d1-o1a-hmix-qemu-environment-bf7540eee8994db4adbca4c902adf518/02-base-image.stdout"
+    },
+    {
+      "argv": [
+        "/usr/local/bin/docker",
+        "--context",
+        "desktop-linux",
+        "container",
+        "create",
+        "--pull",
+        "never",
+        "--platform",
+        "linux/arm64",
+        "--name",
+        "d1-hmix-environment-bf7540eee8994db4adbca4c902adf518",
+        "--label",
+        "corsa.hmix.environment_attempt=bf7540eee8994db4adbca4c902adf518",
+        "--user",
+        "0:0",
+        "--workdir",
+        "/",
+        "--cpus",
+        "1",
+        "--memory",
+        "1024m",
+        "--memory-swap",
+        "1024m",
+        "--pids-limit",
+        "128",
+        "--network",
+        "bridge",
+        "--cgroupns",
+        "private",
+        "--ipc",
+        "private",
+        "--restart",
+        "no",
+        "--cap-drop",
+        "ALL",
+        "--cap-add",
+        "CHOWN",
+        "--cap-add",
+        "DAC_OVERRIDE",
+        "--cap-add",
+        "FOWNER",
+        "--cap-add",
+        "FSETID",
+        "--cap-add",
+        "SETGID",
+        "--cap-add",
+        "SETUID",
+        "--security-opt",
+        "no-new-privileges",
+        "--log-driver",
+        "local",
+        "--log-opt",
+        "max-size=1m",
+        "--log-opt",
+        "max-file=1",
+        "--log-opt",
+        "compress=false",
+        "--env",
+        "PATH=/usr/sbin:/usr/bin:/sbin:/bin",
+        "--env",
+        "LC_ALL=C",
+        "--env",
+        "HOME=/root",
+        "--entrypoint",
+        "/usr/bin/python3",
+        "sha256:45ccc728acf675888bde399354b6c8338accfc591e35496f9413a3742f3ae313",
+        "/tmp/hmix-input/prepare.py"
+      ],
+      "exit": 0,
+      "owned_group_absent": true,
+      "phase": "create",
+      "pid": 85592,
+      "pipe_threads_finished": true,
+      "reason": null,
+      "stderr": "/private/tmp/corsa-d1-o1a-hmix-qemu-environment-bf7540eee8994db4adbca4c902adf518/03-create.stderr",
+      "stdout": "/private/tmp/corsa-d1-o1a-hmix-qemu-environment-bf7540eee8994db4adbca4c902adf518/03-create.stdout"
+    },
+    {
+      "argv": [
+        "/usr/local/bin/docker",
+        "--context",
+        "desktop-linux",
+        "container",
+        "inspect",
+        "96ac487bb96f3e83cf09a6fefdfc5219f5537d7c4be2d8d4e1887a7f59efa463"
+      ],
+      "exit": 0,
+      "owned_group_absent": true,
+      "phase": "owned-inspect",
+      "pid": 85593,
+      "pipe_threads_finished": true,
+      "reason": null,
+      "stderr": "/private/tmp/corsa-d1-o1a-hmix-qemu-environment-bf7540eee8994db4adbca4c902adf518/04-owned-inspect.stderr",
+      "stdout": "/private/tmp/corsa-d1-o1a-hmix-qemu-environment-bf7540eee8994db4adbca4c902adf518/04-owned-inspect.stdout"
+    },
+    {
+      "argv": [
+        "/usr/local/bin/docker",
+        "--context",
+        "desktop-linux",
+        "container",
+        "cp",
+        "/private/tmp/corsa-d1-o1a-hmix-qemu-environment-bf7540eee8994db4adbca4c902adf518/hmix-input",
+        "96ac487bb96f3e83cf09a6fefdfc5219f5537d7c4be2d8d4e1887a7f59efa463:/tmp/"
+      ],
+      "exit": 0,
+      "owned_group_absent": true,
+      "phase": "stage-copy",
+      "pid": 85594,
+      "pipe_threads_finished": true,
+      "reason": null,
+      "stderr": "/private/tmp/corsa-d1-o1a-hmix-qemu-environment-bf7540eee8994db4adbca4c902adf518/05-stage-copy.stderr",
+      "stdout": "/private/tmp/corsa-d1-o1a-hmix-qemu-environment-bf7540eee8994db4adbca4c902adf518/05-stage-copy.stdout"
+    },
+    {
+      "argv": [
+        "/usr/local/bin/docker",
+        "--context",
+        "desktop-linux",
+        "container",
+        "start",
+        "--attach",
+        "96ac487bb96f3e83cf09a6fefdfc5219f5537d7c4be2d8d4e1887a7f59efa463"
+      ],
+      "exit": 0,
+      "owned_group_absent": true,
+      "phase": "prepare-no-VM",
+      "pid": 85595,
+      "pipe_threads_finished": true,
+      "reason": null,
+      "stderr": "/private/tmp/corsa-d1-o1a-hmix-qemu-environment-bf7540eee8994db4adbca4c902adf518/06-prepare-no-VM.stderr",
+      "stdout": "/private/tmp/corsa-d1-o1a-hmix-qemu-environment-bf7540eee8994db4adbca4c902adf518/06-prepare-no-VM.stdout"
+    },
+    {
+      "argv": [
+        "/usr/local/bin/docker",
+        "--context",
+        "desktop-linux",
+        "container",
+        "inspect",
+        "96ac487bb96f3e83cf09a6fefdfc5219f5537d7c4be2d8d4e1887a7f59efa463"
+      ],
+      "exit": 0,
+      "owned_group_absent": true,
+      "phase": "owned-inspect",
+      "pid": 85605,
+      "pipe_threads_finished": true,
+      "reason": null,
+      "stderr": "/private/tmp/corsa-d1-o1a-hmix-qemu-environment-bf7540eee8994db4adbca4c902adf518/07-owned-inspect.stderr",
+      "stdout": "/private/tmp/corsa-d1-o1a-hmix-qemu-environment-bf7540eee8994db4adbca4c902adf518/07-owned-inspect.stdout"
+    },
+    {
+      "argv": [
+        "/usr/local/bin/docker",
+        "--context",
+        "desktop-linux",
+        "inspect",
+        "--size",
+        "--format",
+        "{{json .SizeRw}}",
+        "96ac487bb96f3e83cf09a6fefdfc5219f5537d7c4be2d8d4e1887a7f59efa463"
+      ],
+      "exit": 0,
+      "owned_group_absent": true,
+      "phase": "writable-size",
+      "pid": 85606,
+      "pipe_threads_finished": true,
+      "reason": null,
+      "stderr": "/private/tmp/corsa-d1-o1a-hmix-qemu-environment-bf7540eee8994db4adbca4c902adf518/08-writable-size.stderr",
+      "stdout": "/private/tmp/corsa-d1-o1a-hmix-qemu-environment-bf7540eee8994db4adbca4c902adf518/08-writable-size.stdout"
+    },
+    {
+      "argv": [
+        "/usr/local/bin/docker",
+        "--context",
+        "desktop-linux",
+        "container",
+        "cp",
+        "96ac487bb96f3e83cf09a6fefdfc5219f5537d7c4be2d8d4e1887a7f59efa463:/s6-preparation/evidence",
+        "/private/tmp/corsa-d1-o1a-hmix-qemu-environment-bf7540eee8994db4adbca4c902adf518/evidence"
+      ],
+      "exit": 0,
+      "owned_group_absent": true,
+      "phase": "evidence-copy",
+      "pid": 85607,
+      "pipe_threads_finished": true,
+      "reason": null,
+      "stderr": "/private/tmp/corsa-d1-o1a-hmix-qemu-environment-bf7540eee8994db4adbca4c902adf518/09-evidence-copy.stderr",
+      "stdout": "/private/tmp/corsa-d1-o1a-hmix-qemu-environment-bf7540eee8994db4adbca4c902adf518/09-evidence-copy.stdout"
+    },
+    {
+      "argv": [
+        "/usr/local/bin/docker",
+        "--context",
+        "desktop-linux",
+        "container",
+        "cp",
+        "96ac487bb96f3e83cf09a6fefdfc5219f5537d7c4be2d8d4e1887a7f59efa463:/tmp/hmix-input",
+        "/private/tmp/corsa-d1-o1a-hmix-qemu-environment-bf7540eee8994db4adbca4c902adf518/input-readback"
+      ],
+      "exit": 0,
+      "owned_group_absent": true,
+      "phase": "input-readback",
+      "pid": 85608,
+      "pipe_threads_finished": true,
+      "reason": null,
+      "stderr": "/private/tmp/corsa-d1-o1a-hmix-qemu-environment-bf7540eee8994db4adbca4c902adf518/10-input-readback.stderr",
+      "stdout": "/private/tmp/corsa-d1-o1a-hmix-qemu-environment-bf7540eee8994db4adbca4c902adf518/10-input-readback.stdout"
+    },
+    {
+      "argv": [
+        "/usr/local/bin/docker",
+        "--context",
+        "desktop-linux",
+        "container",
+        "commit",
+        "--pause=false",
+        "--change",
+        "ENTRYPOINT []",
+        "--change",
+        "CMD [\"/bin/sh\"]",
+        "96ac487bb96f3e83cf09a6fefdfc5219f5537d7c4be2d8d4e1887a7f59efa463"
+      ],
+      "exit": 0,
+      "owned_group_absent": true,
+      "phase": "commit-owned-child",
+      "pid": 85609,
+      "pipe_threads_finished": true,
+      "reason": null,
+      "stderr": "/private/tmp/corsa-d1-o1a-hmix-qemu-environment-bf7540eee8994db4adbca4c902adf518/11-commit-owned-child.stderr",
+      "stdout": "/private/tmp/corsa-d1-o1a-hmix-qemu-environment-bf7540eee8994db4adbca4c902adf518/11-commit-owned-child.stdout"
+    },
+    {
+      "argv": [
+        "/usr/local/bin/docker",
+        "--context",
+        "desktop-linux",
+        "container",
+        "inspect",
+        "96ac487bb96f3e83cf09a6fefdfc5219f5537d7c4be2d8d4e1887a7f59efa463"
+      ],
+      "exit": 0,
+      "owned_group_absent": true,
+      "phase": "owned-inspect",
+      "pid": 85610,
+      "pipe_threads_finished": true,
+      "reason": null,
+      "stderr": "/private/tmp/corsa-d1-o1a-hmix-qemu-environment-bf7540eee8994db4adbca4c902adf518/12-owned-inspect.stderr",
+      "stdout": "/private/tmp/corsa-d1-o1a-hmix-qemu-environment-bf7540eee8994db4adbca4c902adf518/12-owned-inspect.stdout"
+    }
+  ],
+  "unknown": true,
+  "work": "/private/tmp/corsa-d1-o1a-hmix-qemu-environment-bf7540eee8994db4adbca4c902adf518"
+}

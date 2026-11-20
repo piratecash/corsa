@@ -1,0 +1,231 @@
+{
+  "RAW": {
+    "child-0.err": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "child-0.out": {
+      "bytes": 46,
+      "sha256": "ad9757550a43d5a1c7c994652a93996c45c0b570045caf4c293e3bfddfa225de"
+    },
+    "child-1.err": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "child-1.out": {
+      "bytes": 2407,
+      "sha256": "208da235efeb5cd888e5733ccb78be91978e9bb26ab55158405408d4802857cd"
+    },
+    "child-10.err": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "child-10.out": {
+      "bytes": 5828,
+      "sha256": "063424f3c45df36e3ab3dd44004f1d2605649a10415b60098286b53f35c3b090"
+    },
+    "child-11.err": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "child-11.out": {
+      "bytes": 65,
+      "sha256": "1122ad1ec06f3e921d9faca16d294a3395457cf0c66ab7df127ab7534d657cd0"
+    },
+    "child-12.err": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "child-12.out": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "child-13.err": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "child-13.out": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "child-14.err": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "child-14.out": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "child-15.err": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "child-15.out": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "child-2.err": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "child-2.out": {
+      "bytes": 65,
+      "sha256": "1122ad1ec06f3e921d9faca16d294a3395457cf0c66ab7df127ab7534d657cd0"
+    },
+    "child-3.err": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "child-3.out": {
+      "bytes": 5281,
+      "sha256": "f959812a186a073ff9d3227886634aeab44bf0a1b80963271f851dc7a24e4d24"
+    },
+    "child-4.err": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "child-4.out": {
+      "bytes": 65,
+      "sha256": "1122ad1ec06f3e921d9faca16d294a3395457cf0c66ab7df127ab7534d657cd0"
+    },
+    "child-5.err": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "child-5.out": {
+      "bytes": 2,
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    "child-6.err": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "child-6.out": {
+      "bytes": 5828,
+      "sha256": "063424f3c45df36e3ab3dd44004f1d2605649a10415b60098286b53f35c3b090"
+    },
+    "child-7.err": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "child-7.out": {
+      "bytes": 88507,
+      "sha256": "95d1217388a46499f343ea130e5eda4008e444d866c1c3476bda9a0b6f700129"
+    },
+    "child-8.err": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "child-8.out": {
+      "bytes": 65,
+      "sha256": "1122ad1ec06f3e921d9faca16d294a3395457cf0c66ab7df127ab7534d657cd0"
+    },
+    "child-9.err": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "child-9.out": {
+      "bytes": 65,
+      "sha256": "1122ad1ec06f3e921d9faca16d294a3395457cf0c66ab7df127ab7534d657cd0"
+    }
+  },
+  "RAW_bytes": 108224,
+  "ROOT_terminal_reap_attestation_sha256": "568eabd2c5ab64dc36b195baa0723613702b97c9530067f11baaddb8177cd342",
+  "actual_guest_QEMU_normal0_noOOM_noKill": true,
+  "actual_old_proc_start_namespace_exe_group_and_normal0_scope": "Enforced by exact pinned Linux test/proc adapter and successful original Go assertions/normal0 markers. Guest PIDs are not host PIDs and were not signalled or checked using host os.kill.",
+  "all_old_log_base64_decoded_SHA_checked": {
+    "Off_control/corsa.log": {
+      "bytes": 14110,
+      "sha256": "5750222bf049ad84c2d6663e3390757f1d3de73e3b2a74a120c7187e2b4e4954"
+    },
+    "Off_control/stderr.log": {
+      "bytes": 37,
+      "sha256": "10834b964bed633e9db128cd22f570b7fa75b5b7ac0296d4f71359e950aca40e"
+    },
+    "Off_control/stdout.log": {
+      "bytes": 17893,
+      "sha256": "7f5b981104983bae0a9f6ec9884edfcebf91f8bfcefb994451c5689f979cac6a"
+    },
+    "private_Responder_with_held_F1/corsa.log": {
+      "bytes": 14142,
+      "sha256": "08f409d7e671b7615f0f70413c830454ffbd65e8aaf5a28aa90ee1e8be3bcae8"
+    },
+    "private_Responder_with_held_F1/stderr.log": {
+      "bytes": 37,
+      "sha256": "d1d7651ad6aacded40adf8198869513ca991b84f0f16c0ace0d4133681eeff13"
+    },
+    "private_Responder_with_held_F1/stdout.log": {
+      "bytes": 17951,
+      "sha256": "4482df57d9f1fbe7bac634649a3e12b98ef15ac50a232b1ecfd71acc5f3fe1d3"
+    }
+  },
+  "archive_SHA256": "fa517d63ab521537853a292be2e721fc0c3f3e64ea0f249b34832b2651423e00",
+  "commands_exit0": 16,
+  "commands_sha256": "5c4456f8ba7bf309bbb06d02d153f54b2bd81f687b808f215ed37c4fc37de3ac",
+  "console_bytes": 88507,
+  "console_sha256": "95d1217388a46499f343ea130e5eda4008e444d866c1c3476bda9a0b6f700129",
+  "decoded": {
+    "DM_direction": "current_to_old",
+    "child": 2,
+    "dial_direction": "old_to_current",
+    "full_old_log_members": {
+      "Off_control/corsa.log": {
+        "bytes": 14110,
+        "sha256": "5750222bf049ad84c2d6663e3390757f1d3de73e3b2a74a120c7187e2b4e4954"
+      },
+      "Off_control/stderr.log": {
+        "bytes": 37,
+        "sha256": "10834b964bed633e9db128cd22f570b7fa75b5b7ac0296d4f71359e950aca40e"
+      },
+      "Off_control/stdout.log": {
+        "bytes": 17893,
+        "sha256": "7f5b981104983bae0a9f6ec9884edfcebf91f8bfcefb994451c5689f979cac6a"
+      },
+      "private_Responder_with_held_F1/corsa.log": {
+        "bytes": 14142,
+        "sha256": "08f409d7e671b7615f0f70413c830454ffbd65e8aaf5a28aa90ee1e8be3bcae8"
+      },
+      "private_Responder_with_held_F1/stderr.log": {
+        "bytes": 37,
+        "sha256": "d1d7651ad6aacded40adf8198869513ca991b84f0f16c0ace0d4133681eeff13"
+      },
+      "private_Responder_with_held_F1/stdout.log": {
+        "bytes": 17951,
+        "sha256": "4482df57d9f1fbe7bac634649a3e12b98ef15ac50a232b1ecfd71acc5f3fe1d3"
+      }
+    },
+    "held_FIND_NODE_delivery_decrypted": true,
+    "old_normal_exit_each_case": 0,
+    "old_published_sha256": "06e26f9b30594d19fb7da9782921f3ef2e7d297da3441d521a8e2c6343d2fade",
+    "outer": 1,
+    "receipt_lifecycle_after_FN_return": true,
+    "same_original_F1_members": true,
+    "scope": "FUNCTIONAL_ONLY_NOT_13B_512MB_K11_D1_G2_OR_RELEASE",
+    "signed_return": true,
+    "status": "PUBLISHED31_OFF_VS_PRIVATE_R_FUNCTIONAL_PASS"
+  },
+  "exact_released_node": "06e26f9b30594d19fb7da9782921f3ef2e7d297da3441d521a8e2c6343d2fade",
+  "exact_test_ELF": "6b31bbdcab39095727e00389d94b75638433e3e5c1a84e796223f514bf0baf65",
+  "guest_pass_cases": {
+    "Off_control_seconds": 2.71,
+    "outer_seconds": 7.09,
+    "private_Responder_with_held_F1_seconds": 2.74
+  },
+  "hidden_opaque_F1_session_and_signature_claim_scope": "Pinned original Go assertions+actualPASS/held marker; not a new externally serialized session-proof schema. Pending1/Taken1/Answered0 during delivery, genuine signedreturn, sameopaqueF1 members checked by test.",
+  "historical_host_PID_PGID": "NOT_RECORDED_BY_ORIGINAL_ENGINE_NOT_INVENTED",
+  "independent_fresh_readonly_ps": {
+    "exact_hostscript_and_own_work_path_matches": [],
+    "historical_host_PID_PGID_not_invented": true
+  },
+  "no_reviewer_resource_or_signal_actions": true,
+  "old_log_bytes": 64170,
+  "only_status_promotion_from_PREPARED_verified": true,
+  "own_CID": "ca2b4c2815b9457db72d8259fcd0df155b5cd7a32a5e1c14529668772cbb3279",
+  "owned_container_and_volumes_absent_after_cleanup": true,
+  "qualified_image": "sha256:45009926747bc2be5493d1d28f84f8a40b358f9bb600f5ff9c1724ff201913e1",
+  "result_sha256": "d2ad7cef7236a49fd3814ea5efbf2aee29cff2537f2560767acebfa2392c1bde",
+  "runtime_READY_sha256": "e6bd26f8d9aff5d1d23bda0f6270ed02407661395f10806e61d220eae6fb4eed",
+  "scope": "Single fixed functional old\u2192currentdial/current\u2192oldDM comparison Off/privateR. Delivered/decrypted whileoriginalF1 Pending1; signedreturn thenreceipt lifecycle. MetricsNOT_MEASURED; no opposite-direction/fullmixedmatrix/13b/resource/512000000-byte/K11/D1/G2/release/publicactivationPASS.",
+  "status": "ACCEPTED_SCOPED_PUBLISHED31_FUNCTIONAL_HMIX_PASS",
+  "strict_profile_one_own_RO_archive_mount": true
+}
